@@ -2053,13 +2053,15 @@ export async function slugAvailable(user: FreshUser, slug: string): Promise<bool
 // --- NEWFRONT-113 (rules): comment server-state helpers. Appended
 // additively; existing helpers above are untouched.
 
-/** Comment fields the rules specs assert on. */
+/** Comment fields the rules specs assert on (plus edited_at for NEWFRONT-122 edit scenarios). */
 export interface RulesServerComment {
   id: string;
   access: string;
   labels: string[];
   comment_html: string;
   is_synced: boolean;
+  /** Null until the comment is edited; asserted by the NEWFRONT-122 edit scenarios. */
+  edited_at: string | null;
 }
 
 function rulesCommentOf(row: unknown): RulesServerComment {
@@ -2071,6 +2073,7 @@ function rulesCommentOf(row: unknown): RulesServerComment {
     labels: Array.isArray(c["labels"]) ? (c["labels"] as string[]) : [],
     comment_html: typeof c["comment_html"] === "string" ? c["comment_html"] : "",
     is_synced: c["is_synced"] === true,
+    edited_at: typeof c["edited_at"] === "string" ? (c["edited_at"] as string) : null,
   };
 }
 
@@ -3614,4 +3617,1373 @@ export async function signInSessionWithRetry(
     }
   }
   throw last instanceof Error ? last : new Error(`[parity] sign-in failed after ${tries} tries.`);
+}
+
+// ---------------------------------------------------------------------------
+// Issue activity, comments and shared property dropdowns (NEWFRONT-122,
+// ISS-194–220). Appended; existing helpers above are untouched per the
+// shared parity contract. Four names differ from the original NEWFRONT-122
+// batches because merged siblings own the plain names: serverCreateIssueFull
+// (returns the created row; the merged serverCreateIssue returns the id),
+// serverCreateProjectWithFlags (takes project flags), and the lenient
+// cleanup deletes serverCleanupIssue/serverCleanupProject (never throw, for
+// `finally` blocks on the shared stack; the merged strict deletes throw).
+/** Archive an issue through the API (its detail sidebar turns read-only). */
+export async function serverArchiveIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/archive/`,
+    sessionCookie
+  );
+  if (!res.ok) throw new Error(`[parity] issue archive failed with HTTP ${res.status}.`);
+}
+/** Link existing issues as sub-issues of a parent through the API. */
+export async function serverAddSubIssues(
+  workspaceSlug: string,
+  projectId: string,
+  parentId: string,
+  subIssueIds: string[],
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${parentId}/sub-issues/`,
+    sessionCookie,
+    { sub_issue_ids: subIssueIds }
+  );
+  if (!res.ok) throw new Error(`[parity] sub-issue link failed with HTTP ${res.status}.`);
+}
+/** Attach a code-review URL through the API (setup for UI scenarios). */
+export async function serverAttachCodeReview(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  url: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerCodeReview> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/code-reviews/`,
+    sessionCookie,
+    { url }
+  );
+  if (!res.ok) throw new Error(`[parity] code review attach failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string" || typeof rec["url"] !== "string")
+    throw new Error("[parity] attached review carried no string id/url.");
+  return {
+    id: rec["id"] as string,
+    url: rec["url"] as string,
+    title: typeof rec["title"] === "string" ? rec["title"] : "",
+  };
+}
+export async function serverCodeReviews(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerCodeReview[]> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/code-reviews/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] code reviews read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    if (typeof rec["id"] !== "string" || typeof rec["url"] !== "string")
+      throw new Error("[parity] code review row carried no string id/url.");
+    return {
+      id: rec["id"] as string,
+      url: rec["url"] as string,
+      title: typeof rec["title"] === "string" ? rec["title"] : "",
+    };
+  });
+}
+/** Reactions on a comment as the server reports them (decimal-string emoji keys). */
+export async function serverCommentReactions(
+  workspaceSlug: string,
+  projectId: string,
+  commentId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ reaction: string; actor: string }[]> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/comments/${commentId}/reactions/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] comment reactions read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    return {
+      reaction: typeof rec["reaction"] === "string" ? rec["reaction"] : "",
+      actor: typeof rec["actor"] === "string" ? rec["actor"] : "",
+    };
+  });
+}
+/**
+ * Create a project cycle through the API. Only the creator's scenarios use
+ * it (unique `NF122` names); delete it after moving every issue out, since
+ * the server refuses to delete cycles that still hold issues.
+ */
+export async function serverCreateCycle(
+  workspaceSlug: string,
+  projectId: string,
+  name: string,
+  startDate: string,
+  endDate: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/`,
+    sessionCookie,
+    { name, description: "", start_date: startDate, end_date: endDate }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle create failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string") throw new Error("[parity] created cycle carried no string id.");
+  return rec["id"] as string;
+}
+/**
+ * Create an estimate system with points through the API. Creation alone
+ * does not enable the system: the project only shows the Estimate row once
+ * its `estimate` field points at the system (see serverSetProjectEstimate).
+ */
+export async function serverCreateEstimate(
+  workspaceSlug: string,
+  projectId: string,
+  name: string,
+  points: string[],
+  sessionCookie: string,
+  system: "points" | "time" = "points",
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; points: ParityServerEstimatePoint[] }> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/estimates/`,
+    sessionCookie,
+    {
+      estimate: { name, type: system, last_used: true },
+      estimate_points: points.map((value) => ({ value })),
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] estimate create failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string") throw new Error("[parity] created estimate carried no string id.");
+  const rows = Array.isArray(rec["points"]) ? rec["points"] : [];
+  return {
+    id: rec["id"],
+    points: rows.map((row) => {
+      const point = row as Record<string, unknown>;
+      if (typeof point["id"] !== "string" || typeof point["value"] !== "string")
+        throw new Error("[parity] estimate point carried no string id/value.");
+      return { id: point["id"], value: point["value"] };
+    }),
+  };
+}
+/** Create an issue through the API (isolated setup for UI scenarios). */
+export async function serverCreateIssueFull(
+  workspaceSlug: string,
+  projectId: string,
+  name: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerIssue> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/`,
+    sessionCookie,
+    { name }
+  );
+  if (!res.ok) throw new Error(`[parity] issue create failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string" || typeof rec["name"] !== "string")
+    throw new Error("[parity] created issue carried no string id/name.");
+  return { id: rec["id"] as string, name: rec["name"] as string };
+}
+/**
+ * Create a project module through the API. Only the creator's scenarios use
+ * it (unique `NF122` names); delete it after removing every issue from it.
+ */
+export async function serverCreateModule(
+  workspaceSlug: string,
+  projectId: string,
+  name: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/`,
+    sessionCookie,
+    { name, description: "" }
+  );
+  if (!res.ok) throw new Error(`[parity] module create failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string") throw new Error("[parity] created module carried no string id.");
+  return rec["id"] as string;
+}
+/**
+ * Create a pod on a project. The name suffix allows letters, digits, dots,
+ * underscores and dashes only (no spaces); the server prefixes it with the
+ * project identifier. Project delete cascades, so specs need no pod
+ * teardown of their own.
+ */
+export async function serverCreatePod(
+  projectId: string,
+  nameSuffix: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerPod> {
+  const res = await mutateJSON("POST", `${apiBase}/api/runners/pods/`, sessionCookie, {
+    project: projectId,
+    name: nameSuffix,
+  });
+  if (!res.ok) throw new Error(`[parity] pod create failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string" || typeof rec["name"] !== "string")
+    throw new Error("[parity] created pod carried no string id/name.");
+  return { id: rec["id"], name: rec["name"], isDefault: rec["is_default"] === true };
+}
+/**
+ * Create a scenario-owned project through the API. Some sidebar rows only
+ * render when the project's view flags are on, and the seed project keeps
+ * them off — so specs that need those rows mint an isolated project with
+ * the flags set, then delete it in a `finally` block. Default states are
+ * created server-side, so issues can be added immediately.
+ */
+export async function serverCreateProjectWithFlags(
+  workspaceSlug: string,
+  name: string,
+  identifier: string,
+  flags: ParityProjectFlags,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await mutateJSON("POST", `${apiBase}/api/workspaces/${workspaceSlug}/projects/`, sessionCookie, {
+    name,
+    identifier,
+    cycle_view: flags.cycleView ?? false,
+    module_view: flags.moduleView ?? false,
+  });
+  if (!res.ok) throw new Error(`[parity] project create failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string") throw new Error("[parity] created project carried no string id.");
+  const createdId = rec["id"] as string;
+  const viewPatch: Record<string, boolean> = {};
+  if (flags.inboxView === true) viewPatch["inbox_view"] = true;
+  if (flags.issueViewsView === true) viewPatch["issue_views_view"] = true;
+  if (Object.keys(viewPatch).length > 0) {
+    // The create endpoint ignores these view flags (verified: inbox_view
+    // reads back false), so enable them explicitly like estimate activation.
+    const patch = await mutateJSON(
+      "PATCH",
+      `${apiBase}/api/workspaces/${workspaceSlug}/projects/${createdId}/`,
+      sessionCookie,
+      viewPatch
+    );
+    if (!patch.ok) throw new Error(`[parity] project view-flags patch failed with HTTP ${patch.status}.`);
+  }
+  return createdId;
+}
+/**
+ * Create a project state through the API. Only the creator's scenarios use
+ * it (unique `NF122` names); delete it after moving every issue back to a
+ * seeded state, since the server refuses to delete in-use states.
+ */
+export async function serverCreateState(
+  workspaceSlug: string,
+  projectId: string,
+  name: string,
+  group: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/states/`,
+    sessionCookie,
+    { name, group, color: "#00aa55", description: "" }
+  );
+  if (!res.ok) throw new Error(`[parity] state create failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string") throw new Error("[parity] created state carried no string id.");
+  return rec["id"] as string;
+}
+/**
+ * Create an inbox (intake) issue through the API. The payload nests the
+ * work item under `issue` with an in-app source; flat name/title payloads
+ * are rejected with "Name is required". Returns both ids: the inbox row id
+ * and the nested issue id — detail/delete endpoints take the issue id.
+ */
+export async function serverCreateInboxIssue(
+  workspaceSlug: string,
+  projectId: string,
+  name: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerInboxIssue> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/`,
+    sessionCookie,
+    { source: "IN_APP", issue: { name } }
+  );
+  if (!res.ok) throw new Error(`[parity] inbox-issue create failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const issue = rec["issue"] as Record<string, unknown> | undefined;
+  if (typeof rec["id"] !== "string" || typeof issue?.["id"] !== "string")
+    throw new Error("[parity] created inbox issue carried no inbox/issue ids.");
+  return {
+    id: rec["id"] as string,
+    issueId: issue["id"] as string,
+    stateId: typeof issue["state_id"] === "string" ? (issue["state_id"] as string) : "",
+  };
+}
+/** Create a saved project view through the API (layout via display_filters). */
+export async function serverCreateView(
+  workspaceSlug: string,
+  projectId: string,
+  name: string,
+  layout: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/`,
+    sessionCookie,
+    { name, display_filters: { layout } }
+  );
+  if (!res.ok) throw new Error(`[parity] view create failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string") throw new Error("[parity] created view carried no string id.");
+  return rec["id"] as string;
+}
+/** Delete a scenario-owned cycle (its issues must be moved out first). */
+export async function serverDeleteCycle(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/`,
+    sessionCookie
+  );
+  if (!res.ok && res.status !== 204) throw new Error(`[parity] cycle delete failed with HTTP ${res.status}.`);
+}
+/** Delete a scenario-owned module (its issues must be removed first). */
+export async function serverDeleteModule(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/`,
+    sessionCookie
+  );
+  if (!res.ok && res.status !== 204) throw new Error(`[parity] module delete failed with HTTP ${res.status}.`);
+}
+export async function serverCleanupProject(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  try {
+    const res = await mutateJSON(
+      "DELETE",
+      `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+      sessionCookie
+    );
+    if (!res.ok && res.status !== 204) throw new Error(`[parity] project delete failed with HTTP ${res.status}.`);
+  } catch (error) {
+    console.log(`[parity] project cleanup skipped: ${error instanceof Error ? error.message : error}`);
+  }
+}
+/** Best-effort inbox-issue cleanup keyed by the nested issue id. */
+export async function serverCleanupInboxIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`,
+    sessionCookie
+  );
+  if (!res.ok) console.log(`[parity] inbox-issue cleanup DELETE returned HTTP ${res.status}; leaving it for reseed.`);
+}
+/** Best-effort saved-view cleanup; logs instead of throwing. */
+export async function serverCleanupView(
+  workspaceSlug: string,
+  projectId: string,
+  viewId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/${viewId}/`,
+    sessionCookie
+  );
+  if (!res.ok) console.log(`[parity] view cleanup DELETE returned HTTP ${res.status}; leaving it for reseed.`);
+}
+/** Delete a project state created for a scenario (issues must be moved off first). */
+export async function serverDeleteState(
+  workspaceSlug: string,
+  projectId: string,
+  stateId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/states/${stateId}/`,
+    sessionCookie
+  );
+  if (!res.ok && res.status !== 204) throw new Error(`[parity] state delete failed with HTTP ${res.status}.`);
+}
+/** Single-issue read through the public REST API. */
+export async function serverIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerIssueDetail> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] issue read failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as Record<string, unknown>;
+  const str = (key: string): string => {
+    const value = row[key];
+    if (typeof value !== "string") throw new Error(`[parity] issue ${issueId} carried no string ${key}.`);
+    return value;
+  };
+  const strOrNull = (key: string): string | null => {
+    const value = row[key];
+    return value === null || value === undefined ? null : String(value);
+  };
+  const strArray = (key: string): string[] => {
+    const value = row[key];
+    return Array.isArray(value) ? value.map(String) : [];
+  };
+  return {
+    id: str("id"),
+    name: str("name"),
+    state_id: str("state_id"),
+    priority: strOrNull("priority"),
+    assignee_ids: strArray("assignee_ids"),
+    start_date: strOrNull("start_date"),
+    target_date: strOrNull("target_date"),
+    estimate_point: strOrNull("estimate_point"),
+    cycle_id: strOrNull("cycle_id"),
+    module_ids: strArray("module_ids"),
+    label_ids: strArray("label_ids"),
+    archived_at: strOrNull("archived_at"),
+    agent_executor: strOrNull("agent_executor"),
+    assigned_pod_id: strOrNull("assigned_pod_id"),
+  };
+}
+/** Reactions on an issue as the server reports them. */
+export async function serverIssueReactions(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ reaction: string; actor: string }[]> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/reactions/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] issue reactions read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    return {
+      reaction: typeof rec["reaction"] === "string" ? rec["reaction"] : "",
+      actor: typeof rec["actor"] === "string" ? rec["actor"] : "",
+    };
+  });
+}
+/**
+ * Project intake states as the server reports them. The endpoint answers a
+ * single state object (fresh projects carry one "Triage" row; POST is 405),
+ * so the helper normalizes to a list for the picker assertions.
+ */
+export async function serverIntakeStates(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerIntakeState[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/intake-state/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] intake-state read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : [payload];
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    if (typeof rec["id"] !== "string" || typeof rec["name"] !== "string")
+      throw new Error("[parity] intake-state row carried no string id/name.");
+    return {
+      id: rec["id"] as string,
+      name: rec["name"] as string,
+      group: typeof rec["group"] === "string" ? (rec["group"] as string) : "",
+      isDefault: rec["default"] === true,
+    };
+  });
+}
+/** One inbox issue as the server reports it, read by the nested issue id. */
+export async function serverInboxIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; stateId: string; name: string }> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] inbox-issue read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const issue = rec["issue"] as Record<string, unknown> | undefined;
+  return {
+    status: typeof rec["status"] === "number" ? (rec["status"] as number) : 0,
+    stateId: typeof issue?.["state_id"] === "string" ? (issue["state_id"] as string) : "",
+    name: typeof issue?.["name"] === "string" ? (issue["name"] as string) : "",
+  };
+}
+/** One saved view as the server reports it (name plus layout filter). */
+export async function serverView(
+  workspaceSlug: string,
+  projectId: string,
+  viewId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ name: string; layout: string }> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/${viewId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] view read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const filters = rec["display_filters"] as Record<string, unknown> | undefined;
+  return {
+    name: typeof rec["name"] === "string" ? (rec["name"] as string) : "",
+    layout: typeof filters?.["layout"] === "string" ? (filters["layout"] as string) : "",
+  };
+}
+/** Inbox issues on a project as the server reports them (issue id plus name). */
+export async function serverInboxIssues(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ issueId: string; name: string }[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] inbox-issues read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    const issue = rec["issue"] as Record<string, unknown> | undefined;
+    return {
+      issueId: typeof issue?.["id"] === "string" ? (issue["id"] as string) : "",
+      name: typeof issue?.["name"] === "string" ? (issue["name"] as string) : "",
+    };
+  });
+}
+/** Saved views on a project as the server reports them (id plus name). */
+export async function serverViews(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; name: string }[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] views read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    return {
+      id: typeof rec["id"] === "string" ? (rec["id"] as string) : "",
+      name: typeof rec["name"] === "string" ? (rec["name"] as string) : "",
+    };
+  });
+}
+/** One cycle as the server reports it (name plus start/end dates). */
+export async function serverCycleDetail(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ name: string; startDate: string | null; endDate: string | null; snapshotEmpty: boolean }> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] cycle read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const snapshot = rec["progress_snapshot"];
+  return {
+    name: typeof rec["name"] === "string" ? (rec["name"] as string) : "",
+    startDate: typeof rec["start_date"] === "string" ? (rec["start_date"] as string) : null,
+    endDate: typeof rec["end_date"] === "string" ? (rec["end_date"] as string) : null,
+    snapshotEmpty: snapshot === null || snapshot === undefined || JSON.stringify(snapshot) === "{}",
+  };
+}
+/** Current user as the server reports them. */
+export async function serverMe(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; displayName: string }> {
+  const res = await fetch(`${apiBase}/api/users/me/`, { headers: { cookie: sessionCookie } });
+  if (!res.ok) throw new Error(`[parity] users/me read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string" || typeof rec["display_name"] !== "string")
+    throw new Error("[parity] users/me carried no string id/display_name.");
+  return { id: rec["id"] as string, displayName: rec["display_name"] as string };
+}
+/** Patch an issue through the public REST API (state moves, priority changes). */
+export async function serverPatchIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  patch: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/`,
+    sessionCookie,
+    patch
+  );
+  if (!res.ok && res.status !== 204) throw new Error(`[parity] issue patch failed with HTTP ${res.status}.`);
+}
+/** Post a comment through the API (setup for UI scenarios, never the assertion). */
+export async function serverPostComment(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  commentHtml: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerComment> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/comments/`,
+    sessionCookie,
+    { comment_html: commentHtml }
+  );
+  if (!res.ok) throw new Error(`[parity] comment create failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  return {
+    id: rec["id"] as string,
+    comment_html: rec["comment_html"] as string,
+    actor: typeof rec["actor"] === "string" ? rec["actor"] : "",
+    access: typeof rec["access"] === "string" ? rec["access"] : "",
+    labels: [],
+    edited_at: null,
+  };
+}
+/** Project cycles as the server reports them, in API order. */
+export async function serverProjectCycles(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerCycle[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] cycles read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    if (typeof rec["id"] !== "string" || typeof rec["name"] !== "string" || typeof rec["status"] !== "string")
+      throw new Error("[parity] cycle row carried no string id/name/status.");
+    return { id: rec["id"] as string, name: rec["name"] as string, status: rec["status"] as string };
+  });
+}
+/**
+ * Project members as the server reports them (user id plus numeric role).
+ * The assignee picker hides role-5 guests, so scenarios filter on `role`.
+ */
+export async function serverProjectMembers(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ userId: string; role: number }[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/members/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project members read failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Record<string, unknown>[];
+  return rows.map((row) => {
+    if (typeof row["member"] !== "string" || typeof row["role"] !== "number")
+      throw new Error("[parity] project member carried no string member/numeric role.");
+    return { userId: row["member"] as string, role: row["role"] as number };
+  });
+}
+/** Project modules as the server reports them, in API order. */
+export async function serverProjectModules(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerModule[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] modules read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    if (typeof rec["id"] !== "string" || typeof rec["name"] !== "string")
+      throw new Error("[parity] module row carried no string id/name.");
+    return { id: rec["id"] as string, name: rec["name"] as string };
+  });
+}
+/** Pods of a project as the server reports them, in API order. */
+export async function serverProjectPods(
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerPod[]> {
+  const res = await fetch(`${apiBase}/api/runners/pods/?project=${projectId}`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] pods read failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Record<string, unknown>[];
+  return rows.map((row) => {
+    const { id, name, is_default } = row;
+    if (typeof id !== "string" || typeof name !== "string" || typeof is_default !== "boolean")
+      throw new Error("[parity] pod row carried no string id/name or boolean is_default.");
+    return { id, name, isDefault: is_default };
+  });
+}
+/** Project states as the server reports them, in API order. */
+export async function serverProjectStates(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerState[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/states/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] states read failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Record<string, unknown>[];
+  return rows.map((row) => {
+    const { id, name, group } = row;
+    if (typeof id !== "string" || typeof name !== "string" || typeof group !== "string")
+      throw new Error("[parity] state row carried no string id/name/group.");
+    return { id, name, group };
+  });
+}
+/**
+ * Publish the project's public board through the API (anchors the project).
+ * `owned` is false when a sibling run published first and this call reused
+ * their board; only the owner must unpublish it again.
+ */
+export async function serverPublishBoard(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ boardId: string; owned: boolean }> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/project-deploy-boards/`,
+    sessionCookie,
+    { is_comments_enabled: true, is_reactions_enabled: true, is_votes_enabled: false }
+  );
+  if (res.ok) {
+    const rec = (await res.json()) as Record<string, unknown>;
+    if (typeof rec["id"] !== "string") throw new Error("[parity] published board carried no string id.");
+    return { boardId: rec["id"] as string, owned: true };
+  }
+  // A sibling run may have published first: reuse the existing board.
+  if (res.status === 409 || res.status === 400) {
+    const existing = await fetch(
+      `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/project-deploy-boards/`,
+      { headers: { cookie: sessionCookie } }
+    );
+    if (existing.ok) {
+      const rec = (await existing.json()) as Record<string, unknown>;
+      if (typeof rec["id"] === "string") return { boardId: rec["id"] as string, owned: false };
+    }
+  }
+  throw new Error(`[parity] board publish failed with HTTP ${res.status}.`);
+}
+/**
+ * Point a project at an estimate system (enables the Estimate sidebar row).
+ * Project delete cascades, so specs need no estimate teardown of their own.
+ */
+export async function serverSetProjectEstimate(
+  workspaceSlug: string,
+  projectId: string,
+  estimateId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    { estimate: estimateId }
+  );
+  if (!res.ok) throw new Error(`[parity] project estimate patch failed with HTTP ${res.status}.`);
+}
+/** Undo an API archive so teardown leaves no archived issue behind. */
+export async function serverUnarchiveIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/archive/`,
+    sessionCookie
+  );
+  if (!res.ok && res.status !== 404) throw new Error(`[parity] issue unarchive failed with HTTP ${res.status}.`);
+}
+/** Best-effort board removal; logs instead of throwing so teardown never fails a scenario. */
+export async function serverUnpublishBoard(
+  workspaceSlug: string,
+  projectId: string,
+  boardId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/project-deploy-boards/${boardId}/`,
+    sessionCookie
+  );
+  if (!res.ok && res.status !== 204 && res.status !== 404)
+    console.log(`[parity] board cleanup DELETE returned HTTP ${res.status}; leaving it for reseed.`);
+}
+/** Workspace members as the server reports them (membership id, user id, display name). */
+export async function serverWorkspaceMembers(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ membershipId: string; userId: string; displayName: string }[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/members/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] workspace members read failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Record<string, unknown>[];
+  return rows.map((row) => {
+    const member = row["member"] as Record<string, unknown>;
+    if (
+      typeof row["id"] !== "string" ||
+      typeof member?.["id"] !== "string" ||
+      typeof member?.["display_name"] !== "string"
+    )
+      throw new Error("[parity] workspace member carried no id/user/display_name.");
+    return {
+      membershipId: row["id"] as string,
+      userId: member["id"] as string,
+      displayName: member["display_name"] as string,
+    };
+  });
+}
+/** Plain text out of stored comment HTML for readable assertions. */
+export function commentText(commentHtml: string): string {
+  return commentHtml
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+/**
+ * A project identifier the server accepts (short uppercase alphanumerics)
+ * that no other scenario run is using. Identifiers must be unique per
+ * workspace, so every scenario-owned project mints its own.
+ */
+export function parityProjectIdentifier(prefix: string): string {
+  const stamp = Date.now().toString(36).slice(-4).toUpperCase();
+  const salt = Math.floor(Math.random() * 1296)
+    .toString(36)
+    .toUpperCase()
+    .padStart(2, "0");
+  return `${prefix}${stamp}${salt}`.replace(/[^A-Z0-9]/g, "").slice(0, 12);
+}
+/** View flags a scenario-owned project needs for its dropdown rows. */
+export interface ParityProjectFlags {
+  cycleView?: boolean;
+  moduleView?: boolean;
+  /** Enable the intake/inbox view (applied via PATCH: create ignores it). */
+  inboxView?: boolean;
+  /** Enable saved project views (applied via PATCH like inbox_view). */
+  issueViewsView?: boolean;
+}
+/** Code-review links on an issue as the server reports them. */
+export interface ParityServerCodeReview {
+  id: string;
+  url: string;
+  title: string;
+}
+/** One issue comment as the server reports it. */
+export interface ParityServerComment {
+  id: string;
+  comment_html: string;
+  actor: string;
+  access: string;
+  labels: string[];
+  edited_at: string | null;
+}
+/** One project cycle as the server reports it (status derives from its dates). */
+export interface ParityServerCycle {
+  id: string;
+  name: string;
+  status: string;
+}
+/**
+ * Delete a scenario-owned project (cascades to its issues, cycles and
+ * modules server-side). Best-effort so teardown never fails a scenario.
+ */
+/** One estimate point as the server reports it. */
+export interface ParityServerEstimatePoint {
+  id: string;
+  value: string;
+}
+/** One issue row as the server reports it (id plus name for drill-down). */
+export interface ParityServerIssue {
+  id: string;
+  name: string;
+}
+/** One issue as the server reports it (common property fields for dropdown assertions). */
+export interface ParityServerIssueDetail {
+  id: string;
+  name: string;
+  state_id: string;
+  priority: string | null;
+  assignee_ids: string[];
+  start_date: string | null;
+  target_date: string | null;
+  estimate_point: string | null;
+  cycle_id: string | null;
+  module_ids: string[];
+  label_ids: string[];
+  archived_at: string | null;
+  agent_executor: string | null;
+  assigned_pod_id: string | null;
+}
+/** One project module as the server reports it. */
+export interface ParityServerModule {
+  id: string;
+  name: string;
+}
+/** One pod as the server reports it. */
+export interface ParityServerPod {
+  id: string;
+  name: string;
+  isDefault: boolean;
+}
+/** One project state as the server reports it. */
+export interface ParityServerState {
+  id: string;
+  name: string;
+  group: string;
+}
+/** One intake state as the server reports it. */
+export interface ParityServerIntakeState {
+  id: string;
+  name: string;
+  group: string;
+  isDefault: boolean;
+}
+/** One inbox issue as the server reports it on create (inbox id + nested issue id). */
+export interface ParityServerInboxIssue {
+  id: string;
+  issueId: string;
+  stateId: string;
+}
+/** CSRF token out of a signed-in cookie jar (empty when the jar has none). */
+function csrfFromCookie(sessionCookie: string): string {
+  for (const pair of sessionCookie.split(";")) {
+    const [key, ...rest] = pair.trim().split("=");
+    if (key === "csrftoken") return rest.join("=");
+  }
+  return "";
+}
+/** POST/DELETE/PATCH JSON with the session jar plus a CSRF header when present. */
+async function mutateJSON(
+  method: "POST" | "PATCH" | "DELETE",
+  url: string,
+  sessionCookie: string,
+  body?: unknown
+): Promise<Response> {
+  const csrf = csrfFromCookie(sessionCookie);
+  return fetch(url, {
+    method,
+    headers: {
+      cookie: sessionCookie,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+      ...(csrf === "" ? {} : { "X-CSRFToken": csrf, referer: url }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+/** A project label row as the issue-labels endpoints return it. */
+export interface ParityServerLabel {
+  id: string;
+  name: string;
+  color: string;
+  parent: string | null;
+  sortOrder: number;
+  projectId: string;
+}
+function labelOf(row: Record<string, unknown>): ParityServerLabel {
+  if (typeof row["id"] !== "string" || typeof row["name"] !== "string")
+    throw new Error("[parity] label row carried no string id/name.");
+  const parent = row["parent"];
+  const sortOrder = row["sort_order"];
+  const projectId = row["project_id"];
+  return {
+    id: row["id"],
+    name: row["name"],
+    color: typeof row["color"] === "string" ? row["color"] : "",
+    parent: typeof parent === "string" ? parent : null,
+    sortOrder: typeof sortOrder === "number" ? sortOrder : 0,
+    projectId: typeof projectId === "string" ? projectId : "",
+  };
+}
+/** All labels on a project, in server order. */
+export async function serverLabels(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerLabel[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issue-labels/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] label list failed with HTTP ${res.status}.`);
+  return ((await res.json()) as Record<string, unknown>[]).map(labelOf);
+}
+/** One label by id; null when the server has no such label (deleted). */
+export async function serverLabelOrNull(
+  workspaceSlug: string,
+  projectId: string,
+  labelId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerLabel | null> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issue-labels/${labelId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`[parity] label read failed with HTTP ${res.status}.`);
+  return labelOf((await res.json()) as Record<string, unknown>);
+}
+/** Create a project label; the server assigns sort_order. */
+export async function serverCreateLabel(
+  workspaceSlug: string,
+  projectId: string,
+  name: string,
+  color: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerLabel> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issue-labels/`,
+    sessionCookie,
+    { name, color }
+  );
+  if (!res.ok) throw new Error(`[parity] label create failed with HTTP ${res.status}.`);
+  return labelOf((await res.json()) as Record<string, unknown>);
+}
+/** Strict label PATCH (rename/recolor/reparent/reorder); throws on failure. */
+export async function serverPatchLabel(
+  workspaceSlug: string,
+  projectId: string,
+  labelId: string,
+  data: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerLabel> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issue-labels/${labelId}/`,
+    sessionCookie,
+    data
+  );
+  if (!res.ok) throw new Error(`[parity] label patch failed with HTTP ${res.status}.`);
+  return labelOf((await res.json()) as Record<string, unknown>);
+}
+/** Best-effort label cleanup; logs instead of throwing. */
+export async function serverCleanupLabel(
+  workspaceSlug: string,
+  projectId: string,
+  labelId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issue-labels/${labelId}/`,
+    sessionCookie
+  );
+  if (!res.ok) console.log(`[parity] label cleanup DELETE returned HTTP ${res.status}; leaving it for reseed.`);
+}
+/** Replace an issue's label set (the attach field is `label_ids`). */
+export async function serverSetIssueLabels(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  labelIds: string[],
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/`,
+    sessionCookie,
+    { label_ids: labelIds }
+  );
+  if (!res.ok) throw new Error(`[parity] issue label attach failed with HTTP ${res.status}.`);
+}
+
+// --- Cross-cutting permission + cycle-transfer helpers (NEWFRONT-122,
+// --- ISS-221–225). Observed on the running old app: project member-add
+// --- takes {"members":[{"member_id","role"}]} (a "member" key 404s);
+// --- guests read issues only when the project sets
+// --- guest_view_all_features; invitation acceptance goes through
+// --- /api/users/me/workspaces/invitations/ (the per-invitation join
+// --- endpoint 200s "not accepted"); cycle transferable counts live
+// --- only on the progress endpoint; transfer moves the issue's cycle.
+// --- Signup, invite-create and member-listing reuse the auth area's
+// --- signUpFreshUser/createInvitation/serverWorkspaceMembers.
+
+/** Id of the user holding `sessionCookie`. */
+export async function serverUserId(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<string> {
+  const res = await fetch(`${apiBase}/api/users/me/`, { headers: { cookie: sessionCookie } });
+  if (!res.ok) throw new Error(`[parity] users/me read failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as Record<string, unknown>;
+  if (typeof row["id"] !== "string") throw new Error("[parity] users/me carried no string id.");
+  return row["id"];
+}
+
+/** Accept workspace invitations as the invitee (204 on success). */
+export async function serverAcceptWorkspaceInvitations(
+  invitationIds: string[],
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON("POST", `${apiBase}/api/users/me/workspaces/invitations/`, sessionCookie, {
+    invitations: invitationIds,
+  });
+  if (!res.ok) throw new Error(`[parity] invitation accept failed with HTTP ${res.status}.`);
+}
+
+/**
+ * Complete onboarding for the session holder (the app's own finish call),
+ * so a provisioned member lands on the workspace instead of the setup
+ * funnel when they sign in through the browser.
+ */
+export async function serverCompleteOnboarding(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON("PATCH", `${apiBase}/api/users/me/onboard/`, sessionCookie, {
+    is_onboarded: true,
+  });
+  if (!res.ok) throw new Error(`[parity] onboard completion failed with HTTP ${res.status}.`);
+}
+
+/** Lenient workspace-membership removal for finally-blocks. */
+export async function serverCleanupWorkspaceMember(
+  workspaceSlug: string,
+  membershipId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/members/${membershipId}/`,
+    sessionCookie
+  );
+  if (!res.ok) console.log(`[parity] workspace member cleanup DELETE returned HTTP ${res.status}; leaving it.`);
+}
+
+/**
+ * Register a fresh member (role 15), invite them to the workspace and
+ * accept as them. Returns credentials plus the signed-in session. The
+ * caller removes the workspace membership in cleanup (server-side via
+ * serverWorkspaceMembers + serverCleanupWorkspaceMember); the user row
+ * itself stays but belongs to nothing.
+ */
+export async function serverProvisionWorkspaceMember(
+  workspaceSlug: string,
+  emailPrefix: string,
+  ownerSession: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ userId: string; session: string; email: string; password: string }> {
+  const fresh = await signUpFreshUser(emailPrefix, apiBase);
+  const invitation = await createInvitation(workspaceSlug, fresh.email, ownerSession, apiBase);
+  await serverAcceptWorkspaceInvitations([invitation.id], fresh.cookie, apiBase);
+  return { userId: fresh.userId, session: fresh.cookie, email: fresh.email, password: fresh.password };
+}
+
+/** Add existing workspace users to a project by user id and numeric role. */
+export async function serverAddProjectMembers(
+  workspaceSlug: string,
+  projectId: string,
+  adds: { memberId: string; role: number }[],
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/members/`,
+    sessionCookie,
+    { members: adds.map((add) => ({ member_id: add.memberId, role: add.role })) }
+  );
+  if (!res.ok) throw new Error(`[parity] project member add failed with HTTP ${res.status}.`);
+}
+
+/** PATCH a cycle (dates drive its computed status). */
+export async function serverPatchCycle(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  data: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/`,
+    sessionCookie,
+    data
+  );
+  if (!res.ok) throw new Error(`[parity] cycle patch failed with HTTP ${res.status}.`);
+}
+
+/** Attach issues to a cycle. */
+export async function serverAttachCycleIssues(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  issueIds: string[],
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/cycle-issues/`,
+    sessionCookie,
+    { issues: issueIds }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle attach failed with HTTP ${res.status}.`);
+}
+
+/** Cycle progress counts (the only source of transferable breakdowns). */
+export async function serverCycleProgress(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ backlog: number; unstarted: number; started: number; total: number }> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/progress/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle progress read failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as Record<string, unknown>;
+  const num = (key: string): number => (typeof row[key] === "number" ? (row[key] as number) : 0);
+  return {
+    backlog: num("backlog_issues"),
+    unstarted: num("unstarted_issues"),
+    started: num("started_issues"),
+    total: num("total_issues"),
+  };
+}
+
+/** API base URL scenarios need when they build request URLs themselves. */
+export function parityApiBase(): string {
+  return apiBaseFromEnv();
+}
+
+/**
+ * Fire one API request without throwing, for refusal-path assertions
+ * (a 403 is the expected behavior, not a helper failure).
+ */
+export async function serverRequestStatus(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  url: string,
+  sessionCookie: string,
+  body?: unknown
+): Promise<{ status: number; bodyText: string }> {
+  const csrf = csrfFromCookie(sessionCookie);
+  const res = await fetch(url, {
+    method,
+    headers: {
+      cookie: sessionCookie,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+      ...(csrf === "" ? {} : { "X-CSRFToken": csrf, referer: url }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return { status: res.status, bodyText: (await res.text()).slice(0, 300) };
+}
+/** Best-effort issue cleanup; logs instead of throwing so teardown never fails a scenario. */
+export async function serverCleanupIssueWithSession(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/`,
+    sessionCookie
+  );
+  if (!res.ok) console.log(`[parity] issue cleanup DELETE returned HTTP ${res.status}; leaving it for reseed.`);
 }

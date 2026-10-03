@@ -837,6 +837,361 @@ export interface ParityDriver {
   activityStoredFilters(): Promise<string | null>;
   /** Click the first link inside the feed; resolves with the resulting URL. */
   activityOpenFirstEntryLink(): Promise<string>;
+
+  // --- Issue activity & comments (NEWFRONT-122, ISS-194–206). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+
+  /** Open one work-item detail page; ends on the canonical browse URL. */
+  openIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void>;
+  /** Visible texts of the comment cards in feed order. */
+  activityCommentTexts(): Promise<string[]>;
+  /** Whether the feed shows the issue-created activity row. */
+  activityHasCreationEntry(): Promise<boolean>;
+  /** Feed filter options in display order with their selected state. */
+  activityFilterOptions(): Promise<{ label: string; selected: boolean }[]>;
+  /** Toggle one feed filter option by label. */
+  activityToggleFilter(label: string): Promise<void>;
+  /** Whether the filter button carries the partial-selection accent dot. */
+  activityFilterDotVisible(): Promise<boolean>;
+  /** Whether the comment composer renders above the feed (true in DESC). */
+  activityComposerIsAboveFeed(): Promise<boolean>;
+  /** Current text of the comment composer, trimmed. */
+  activityComposerText(): Promise<string>;
+  /** Post `bodyText` through the composer; resolves once its card appears. */
+  activityPostComment(bodyText: string): Promise<void>;
+  /** Hover a comment card and open its quick-actions menu. */
+  activityOpenCommentMenu(cardText: string): Promise<void>;
+  /** Titles of the open quick-actions menu items. */
+  activityMenuItems(): Promise<string[]>;
+  /** Click one open quick-actions menu item by title. */
+  activityClickMenuItem(name: string): Promise<void>;
+  /** Rename a comment through its inline editor; resolves on the edited marker. */
+  activityEditComment(oldText: string, newText: string): Promise<void>;
+  /** Whether a toast carrying `text` is currently visible. */
+  sawToast(text: string): Promise<boolean>;
+  /** Cancel the open inline editor; resolves once editing closes. */
+  activityCancelEdit(cardText: string): Promise<void>;
+  /** Whether a comment card carries the deep-link highlight class. */
+  activityCommentHighlighted(cardText: string): Promise<boolean>;
+  /** Hover a comment reaction chip; resolves with the reactor tooltip text. */
+  activityChipTooltipText(cardText: string, emoji: string, expectedName: string): Promise<string>;
+  /** Whether the comment body for `cardText` is currently rendered. */
+  activityCommentBodyVisible(cardText: string): Promise<boolean>;
+  /** Expand a folded comment through its in-card toggle. */
+  activityExpandFoldedComment(cardText: string): Promise<void>;
+  /** Copy a comment link; resolves with the clipboard text. */
+  activityCopyCommentLink(cardText: string): Promise<string>;
+  /**
+   * Add a reaction to a comment through the first emoji-grid entry.
+   * Resolves with the picked emoji character and its decimal code-point key.
+   */
+  activityAddCommentReaction(cardText: string): Promise<{ emoji: string; code: string }>;
+  /** Reaction chips on a comment card: emoji, rendered count, current-user highlight. */
+  activityCommentReactionChips(cardText: string): Promise<{ emoji: string; count: number; reacted: boolean }[]>;
+  /** Toggle one reaction chip on a comment card. */
+  activityClickCommentReactionChip(cardText: string, emoji: string): Promise<void>;
+  /** Add a reaction to the issue itself through the first emoji-grid entry. */
+  issueAddReaction(): Promise<{ emoji: string; code: string }>;
+  /** Reaction chips on the issue: emoji, rendered count, current-user highlight. */
+  issueReactionChips(): Promise<{ emoji: string; count: number; reacted: boolean }[]>;
+  /** Toggle one reaction chip on the issue. */
+  issueClickReactionChip(emoji: string): Promise<void>;
+  /** Whether the "Code reviews" section renders above the activity feed. */
+  codeReviewsVisible(): Promise<boolean>;
+  /** Code-review links in display order: badge, title, href and target. */
+  codeReviewLinks(): Promise<{ badge: string; title: string; href: string | null; target: string | null }[]>;
+  /** Attach a review URL through the section form; resolves once its row appears. */
+  codeReviewAttach(url: string): Promise<void>;
+  /** Fill the attach form and submit without waiting for success (error path). */
+  codeReviewAttemptAttach(url: string): Promise<void>;
+  /** Current value of the attach-form URL input. */
+  codeReviewInputValue(): Promise<string>;
+  /** Detach the review row showing `title`; resolves once its row is gone. */
+  codeReviewDetach(title: string): Promise<void>;
+  /** Whether the worklog create control renders in the activity header. */
+  worklogCreateVisible(): Promise<boolean>;
+  // --- Shared property dropdowns (NEWFRONT-122, ISS-207–220). Observed on
+  // --- the running old app: issue-detail sidebar rows pair a label span with
+  // --- a value container holding the picker trigger; Base UI combobox
+  // --- popups render in a portal with an optional search input and a
+  // --- listbox of options.
+  /** Value text of the sidebar property row `label` ("State", "Priority", ...). */
+  propertyValueText(label: string): Promise<string>;
+  /** Open the sidebar picker popup for row `label`. */
+  propertyOpenPicker(label: string): Promise<void>;
+  /** Focus the row trigger and open the popup with the Enter key. */
+  propertyOpenPickerByKeyboard(label: string): Promise<void>;
+  /** Whether the sidebar picker trigger for row `label` is disabled. */
+  propertyPickerDisabled(label: string): Promise<boolean>;
+  /** Whether the sidebar property row `label` renders a picker trigger at all. */
+  propertyTriggerPresent(label: string): Promise<boolean>;
+  /** Whether any picker popup listbox is currently open. */
+  pickerOpen(): Promise<boolean>;
+  /** Option texts in the open picker popup, in display order. */
+  pickerOptionTexts(): Promise<string[]>;
+  /** Whether the open picker popup carries a search box. */
+  pickerHasSearch(): Promise<boolean>;
+  /** Type into the open picker's search box. */
+  pickerSearch(query: string): Promise<void>;
+  /** Current value of the open picker's search box. */
+  pickerSearchValue(): Promise<string>;
+  /** Whether the open picker's search box currently has DOM focus. */
+  pickerSearchFocused(): Promise<boolean>;
+  /** Click the open-picker option whose text contains `text`. */
+  pickerPick(text: string): Promise<void>;
+  /** Whether the open-picker option containing `text` is disabled. */
+  pickerOptionDisabled(text: string): Promise<boolean>;
+  /** Empty-state message in the open picker, or "" when options render. */
+  pickerEmptyText(): Promise<string>;
+  /** Press Escape with the picker popup open. */
+  pickerPressEscape(): Promise<void>;
+  /** Click neutral sidebar chrome to dismiss the picker popup. */
+  pickerClickOutside(): Promise<void>;
+  /** Open an archived issue's detail page; ends on the archives URL. */
+  openArchivedIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void>;
+  // --- Single-date dropdowns (NEWFRONT-122, ISS-214). Observed on the
+  // --- running old app: the Start/Due sidebar rows open a portal calendar
+  // --- popup (single-select month grid with month/year caption dropdowns)
+  // --- instead of the combobox listbox the other pickers use.
+  /** Open the calendar popup for the date row `label` ("Start date", ...). */
+  datePickerOpen(label: string): Promise<void>;
+  /** Whether the calendar popup is currently open. */
+  datePickerVisible(): Promise<boolean>;
+  /** Month and year the open calendar currently shows (caption dropdowns). */
+  datePickerVisibleMonth(): Promise<{ month: string; year: string }>;
+  /** Pick day-of-month `day` in the open calendar's current month. */
+  datePickerPickDay(day: number): Promise<void>;
+  /** Whether day-of-month `day` is disabled in the open calendar. */
+  datePickerDayDisabled(day: number): Promise<boolean>;
+  /** Whether the open calendar renders outside the sidebar row (portal). */
+  datePickerPortalAttached(label: string): Promise<boolean>;
+  /** Clear the date row `label` through its hover-revealed clear control. */
+  datePickerClear(label: string): Promise<void>;
+  /** Whether the sidebar property row `label` renders at all. */
+  propertyRowPresent(label: string): Promise<boolean>;
+  // --- Create-issue modal project picker (NEWFRONT-122, ISS-211).
+  // --- Observed on the running old app: the modal header carries the
+  // --- project picker (a combobox popup with a search box and a listbox
+  // --- of joined projects the user may create in); the modal title field
+  // --- is a named text input and "Save" submits.
+  /** Open the create-issue modal from a project's issues list. */
+  issueModalOpenCreate(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Project name currently shown on the modal's project picker button. */
+  issueModalProjectValue(): Promise<string>;
+  /** Open the modal's project picker popup. */
+  issueModalProjectOpenPicker(): Promise<void>;
+  /** Project option texts in the open picker, in display order. */
+  issueModalProjectOptionTexts(): Promise<string[]>;
+  /** Type into the open project picker's search box. */
+  issueModalProjectSearch(query: string): Promise<void>;
+  /** Empty-state message in the open project picker, or "" when options render. */
+  issueModalProjectEmptyText(): Promise<string>;
+  /** Click the open-picker option whose text contains `text`. */
+  issueModalProjectPick(text: string): Promise<void>;
+  /** Dismiss the modal's project picker popup with Escape. */
+  issueModalProjectPressEscape(): Promise<void>;
+  /** Fill the modal's title field. */
+  issueModalFillTitle(title: string): Promise<void>;
+  /** Submit the modal; resolves once it closes. */
+  issueModalSubmit(): Promise<void>;
+  // --- Date-range dropdowns (NEWFRONT-122, ISS-215). Observed on the
+  // --- running old app: the issues-list merged-dates cell shows one smart
+  // --- label for the issue's start+due pair with a clear control, while the
+  // --- cycle-create form shows the split from/to pair; both open a range
+  // --- calendar popup where out-of-range days render disabled.
+  /** Smart-label text of the merged-dates cell in the list row `issueName`. */
+  rangeMergedCellText(issueName: string): Promise<string>;
+  /** Open the range calendar from the list row's merged-dates cell. */
+  rangeMergedCellOpen(issueName: string): Promise<void>;
+  /** Clear both dates through the merged cell's clear control. */
+  rangeMergedCellClear(issueName: string): Promise<void>;
+  /** Whether the range calendar popup is currently open. */
+  rangeCalendarVisible(): Promise<boolean>;
+  /** Click day-of-month `day` in the open range calendar (no close wait). */
+  rangeCalendarPickDay(day: number): Promise<void>;
+  /** Whether day-of-month `day` is disabled in the open range calendar. */
+  rangeCalendarDayDisabled(day: number): Promise<boolean>;
+  /** Switch the open range calendar to the captioned month `monthLabel`. */
+  rangeCalendarSelectMonth(monthLabel: string): Promise<void>;
+  /** Switch the open range calendar to the captioned year `yearLabel`. */
+  rangeCalendarSelectYear(yearLabel: string): Promise<void>;
+  /** Open the cycle-create form from a project's cycles list. */
+  cycleCreateOpen(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Placeholder pair the cycle form's split range trigger shows. */
+  cycleFormRangePlaceholders(): Promise<{ from: string; to: string }>;
+  /** Open the range calendar from the cycle form's split trigger. */
+  cycleFormRangeOpen(): Promise<void>;
+  /** Fill the cycle form's name field. */
+  cycleFormFillName(name: string): Promise<void>;
+  /** Submit the cycle form; resolves once it closes. */
+  cycleFormSubmit(): Promise<void>;
+  // --- Intake-state dropdown (NEWFRONT-122, ISS-217). Observed on the
+  // --- running old app: the intake page header offers an "Add work item"
+  // --- button opening the intake-create modal, whose state picker is a
+  // --- searchable single-select over the project's intake states; the
+  // --- triage screen instead renders the state row disabled.
+  /** Open the intake-create modal from a project's intake page. */
+  intakeCreateOpen(workspaceSlug: string, projectId: string): Promise<void>;
+  /** State name currently shown on the intake modal's state picker. */
+  intakeStateValue(): Promise<string>;
+  /** Open the intake modal's state picker popup. */
+  intakeStateOpenPicker(): Promise<void>;
+  /** State option texts in the open picker, in display order. */
+  intakeStateOptionTexts(): Promise<string[]>;
+  /** Type into the open state picker's search box. */
+  intakeStateSearch(query: string): Promise<void>;
+  /** Empty-state message in the open picker, or "" when options render. */
+  intakeStateEmptyText(): Promise<string>;
+  /** Click the open-picker option whose text contains `text`. */
+  intakeStatePick(text: string): Promise<void>;
+  /** Fill the intake modal's title field. */
+  intakeCreateFillTitle(title: string): Promise<void>;
+  /** Submit the intake modal; resolves once it closes. */
+  intakeCreateSubmit(): Promise<void>;
+  /** Whether the triage screen's State row picker is disabled. */
+  intakeTriageStateDisabled(): Promise<boolean>;
+  // --- Layout dropdown (NEWFRONT-122, ISS-219). Observed on the running old
+  // --- app: a fresh project's views page shows a "Create view" empty-state
+  // --- action opening the view form, whose layout picker is a
+  // --- search-disabled dropdown over the five layouts with a checkmark on
+  // --- the selected one; no caller ever excludes a layout.
+  /** Open a project's views list page. */
+  viewsOpenList(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Open the view-create modal from the empty-state action. */
+  viewsOpenCreate(): Promise<void>;
+  /** Layout name currently shown on the form's layout picker. */
+  viewsLayoutValue(): Promise<string>;
+  /** Open the form's layout picker popup. */
+  viewsLayoutOpenPicker(): Promise<void>;
+  /** Layout option texts in the open picker, in display order. */
+  viewsLayoutOptionTexts(): Promise<string[]>;
+  /** Whether the open layout picker carries a search box. */
+  viewsLayoutHasSearch(): Promise<boolean>;
+  /** Whether the option `text` carries the selected checkmark. */
+  viewsLayoutSelectedMarked(text: string): Promise<boolean>;
+  /** Click the open-picker option whose text contains `text`. */
+  viewsLayoutPick(text: string): Promise<void>;
+  /** Fill the view form's name field. */
+  viewsFillName(name: string): Promise<void>;
+  /** Submit the view form; resolves once it closes. */
+  viewsSubmit(): Promise<void>;
+  // --- Edition-only stubs (NEWFRONT-122, ISS-231–237). Observed on the
+  // --- running old app: the OSS ce/ stubs render empty fragments where
+  // --- cloud mounts de-dupe, epics, workflow, team/type filters, issue
+  // --- types, sidebar accents and gantt dependencies. Specs assert the
+  // --- absence on the live surfaces plus the surrounding OSS behavior.
+  /** Open the sub-issues filter dropdown on an issue's detail page. */
+  subIssueFiltersOpen(workspaceSlug: string, projectId: string, parentIssueId: string): Promise<void>;
+  /** Text of the open sub-issues filter dropdown panel. */
+  subIssueFiltersPanelText(): Promise<string>;
+  /** Identifier text shown on the open issue detail (e.g. "PAR-12"). */
+  detailIdentifierText(): Promise<string>;
+  /** Click the detail identifier (copies it when copy is enabled). */
+  detailIdentifierCopy(): Promise<void>;
+  /** Open a saved view's detail page. */
+  viewsOpenDetail(workspaceSlug: string, projectId: string, viewId: string): Promise<void>;
+  /** Whether the open gantt view renders a block for the named issue. */
+  ganttShowsIssue(issueName: string): Promise<boolean>;
+  // --- Label management (NEWFRONT-122, ISS-226–230). Observed on the
+  // --- running old app: project settings carry a Labels page (admin-only
+  // --- "Add label" plus an inline name/color form, a two-level
+  // --- drag-and-drop tree, per-row edit/delete menus, a delete
+  // --- confirmation, and empty/loading states); the issue detail Labels
+  // --- row offers the same labels through a multi-select picker.
+  /** Open a project's settings Labels page; resolves once it settles. */
+  settingsLabelsOpen(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Label names in tree order as the settings list shows them. */
+  settingsLabelsNames(): Promise<string[]>;
+  /** Whether the "Add label" control renders (admin-only). */
+  settingsLabelsAddVisible(): Promise<boolean>;
+  /** Open the inline create form via "Add label". */
+  settingsLabelsOpenCreate(): Promise<void>;
+  /** Whether the inline label form is currently open. */
+  settingsLabelsFormVisible(): Promise<boolean>;
+  /** Fill the inline form's name field. */
+  settingsLabelsFillName(name: string): Promise<void>;
+  /** Inline name-field error text, or "" when the form shows none. */
+  settingsLabelsFormError(): Promise<string>;
+  /** Submit the inline create form ("Add"); resolves once it closes. */
+  settingsLabelsSubmitCreate(): Promise<void>;
+  /** Submit the inline form in update mode ("Update"). */
+  settingsLabelsSubmitUpdate(): Promise<void>;
+  /** Close the inline form without saving ("Cancel"). */
+  settingsLabelsCancelForm(): Promise<void>;
+  /** Background color of the inline form's color dot, as rendered. */
+  settingsLabelsDotColor(): Promise<string>;
+  /** Open the inline form's color picker popup. */
+  settingsLabelsOpenColorPicker(): Promise<void>;
+  /** Pick the swatch for `hex` in the open color picker. */
+  settingsLabelsPickColor(hex: string): Promise<void>;
+  /** Open the row menu for the label `name`. */
+  settingsLabelsOpenRowMenu(name: string): Promise<void>;
+  /** Visible row-menu item texts. */
+  settingsLabelsMenuItems(): Promise<string[]>;
+  /** Click the row-menu item `text`; resolves once the menu closes. */
+  settingsLabelsMenuPick(text: string): Promise<void>;
+  /** Whether the label `name` renders as a group (has child rows). */
+  settingsLabelsIsGroup(name: string): Promise<boolean>;
+  /** Delete the label `name` through its row trash control. */
+  settingsLabelsDeleteViaTrash(name: string): Promise<void>;
+  /** Body text of the open delete-label confirmation, or "" when shut. */
+  settingsLabelsDeleteModalText(): Promise<string>;
+  /** Confirm the delete-label modal; resolves once it closes. */
+  settingsLabelsDeleteConfirm(): Promise<void>;
+  /** Dismiss the delete-label modal without deleting. */
+  settingsLabelsDeleteCancel(): Promise<void>;
+  /** Drag the label `source` onto `target` (nest as its child). */
+  settingsLabelsDragOnto(source: string, target: string): Promise<void>;
+  /** Drag the label `source` above `target` (reorder within the list). */
+  settingsLabelsDragAbove(source: string, target: string): Promise<void>;
+  /** Empty-state title on the labels page, or "" when the list renders. */
+  settingsLabelsEmptyTitle(): Promise<string>;
+  /** Click the empty-state "Create your first label" action. */
+  settingsLabelsEmptyAction(): Promise<void>;
+  /** Whether the labels loading skeleton currently shows. */
+  settingsLabelsSkeletonVisible(): Promise<boolean>;
+  /** Delay label-list API answers by `ms` so the skeleton is observable. */
+  settingsLabelsDelayLoad(ms: number): Promise<void>;
+  /** Open the issue detail Labels picker popup. */
+  issueLabelsOpenPicker(): Promise<void>;
+  /** Label option texts in the open issue picker, in display order. */
+  issueLabelsOptionTexts(): Promise<string[]>;
+  /** Text of the issue detail Labels row (attached label names). */
+  issueLabelsRowText(): Promise<string>;
+  /** Current value of the inline form's name field. */
+  settingsLabelsNameValue(): Promise<string>;
+  /** Click the inline form's Add/Update button without waiting for close. */
+  settingsLabelsAttemptSubmit(): Promise<void>;
+  /** Click the delete modal's Delete button without waiting for close. */
+  settingsLabelsAttemptDeleteConfirm(): Promise<void>;
+
+  // --- Cross-cutting: realtime-absence, permissions, URL params, cycle
+  // --- transfer, optimistic rollback (NEWFRONT-122, ISS-221–225).
+
+  /** Reload the current page and wait for the document to settle. */
+  reloadPage(): Promise<void>;
+  /** Whether the list quick-add ("New work item") trigger renders. */
+  projectQuickAddVisible(): Promise<boolean>;
+  /** Whether the detail title renders as an editable input. */
+  issueTitleInputEnabled(): Promise<boolean>;
+  /** Whether the labels settings page shows the not-authorized view. */
+  settingsLabelsAccessDenied(): Promise<boolean>;
+  /** Whether the main view currently shows an issue named `name`. */
+  globalViewIssueVisible(name: string): Promise<boolean>;
+  /** Open a cycle's issues page. */
+  openCycleIssues(workspaceSlug: string, projectId: string, cycleId: string): Promise<void>;
+  /** Whether the cycle page offers the transfer-issues button. */
+  cycleTransferButtonVisible(): Promise<boolean>;
+  /** Open the transfer-issues modal. */
+  cycleTransferOpen(): Promise<void>;
+  /** Target cycle names listed in the open transfer modal. */
+  cycleTransferOptionNames(): Promise<string[]>;
+  /** Pick the target cycle named `name` in the open transfer modal. */
+  cycleTransferPick(name: string): Promise<void>;
+  /** Fail the next issue PATCH with `status` after `delayMs` (once). */
+  failNextIssuePatch(status: number, delayMs: number): Promise<void>;
+  /** Remove any issue-PATCH failure route. */
+  clearIssuePatchFailure(): Promise<void>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

@@ -2710,7 +2710,24 @@ export class WebDriver implements ParityDriver {
     return (await this.page.getByPlaceholder("name@company.com").count()) === 0;
   }
 
-  async openIssueDetail(workspaceSlug: string, issueSeq: string): Promise<void> {
+  /**
+   * Open one work-item detail page; ends hydrated.
+   *
+   * Two call shapes share this helper: browse by `IDENT-seq` with two
+   * arguments (NEWFRONT-121), or by project/issue ids with three
+   * (NEWFRONT-122). The arity selects the flow; both bodies below are the
+   * owning area's verbatim opener.
+   */
+  async openIssueDetail(workspaceSlug: string, issueSeqOrProjectId: string, issueId?: string): Promise<void> {
+    if (issueId === undefined) {
+      await this.openIssueDetailBySeq(workspaceSlug, issueSeqOrProjectId);
+      return;
+    }
+    await this.openIssueDetailByIds(workspaceSlug, issueSeqOrProjectId, issueId);
+  }
+
+  /** NEWFRONT-121 browse-by-seq opener. */
+  private async openIssueDetailBySeq(workspaceSlug: string, issueSeq: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/browse/${issueSeq}`);
     // Hydration can be slow on the dev-server oracle, but a missing issue
     // or a lost session must fail fast with a diagnosis, not a timeout.
@@ -2733,6 +2750,37 @@ export class WebDriver implements ParityDriver {
       // (stack network flap); reloading usually converges.
       if (loops % 15 === 0) await this.page.reload().catch(() => {});
       else await this.page.waitForTimeout(2000);
+    }
+  }
+
+  /** NEWFRONT-122 project/issue-ids opener. */
+  private async openIssueDetailByIds(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    // Re-opening the same issue must refetch: a same-URL goto is a router
+    // no-op, so reload when already sitting on the browse view.
+    if (this.page.url().includes("/browse/")) await this.page.reload();
+    else {
+      await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues/${issueId}`);
+      await this.page.waitForLoadState("domcontentloaded");
+    }
+    try {
+      await this.page.waitForURL(/\/browse\//, { timeout: 30_000 });
+    } catch {
+      throw new Error(`[parity] detail for ${issueId} never reached the browse view (current: ${this.page.url()}).`);
+    }
+    // The oracle dev server hydrates slowly under shared-stack load. This
+    // budget favors failing fast so a retry reloads cleanly; the
+    // missing-issue empty state fails fast instead of waiting it out.
+    const deadline = Date.now() + 75_000;
+    for (;;) {
+      if ((await this.page.getByText(/does not exist|went wrong/i).count()) > 0)
+        throw new Error(`[parity] detail for ${issueId} rendered an error state (${this.page.url()}).`);
+      try {
+        await this.activityHeading().waitFor({ timeout: Math.max(1_000, deadline - Date.now()) });
+        return;
+      } catch {
+        if (Date.now() >= deadline)
+          throw new Error(`[parity] Activity never rendered for ${issueId} (current: ${this.page.url()}).`);
+      }
     }
   }
 
@@ -4438,5 +4486,1518 @@ export class WebDriver implements ParityDriver {
     await link.waitFor();
     await Promise.all([this.page.waitForURL(/profile/), link.click()]);
     return this.page.url();
+  }
+
+  private patchFailureRoute:
+    | {
+        matches: (url: URL) => boolean;
+        handler: (route: Parameters<Parameters<Page["route"]>[1]>[0]) => Promise<void>;
+      }
+    | undefined;
+
+  // --- Issue activity & comments (NEWFRONT-122, ISS-194–206). Observed on
+  // --- the running old app: the detail route redirects to the canonical
+  // --- browse URL; comment cards carry `comment-<id>` anchors; the composer
+  // --- is a labelled group with a rich-text editor; card menus and emoji
+  // --- pickers are icon-only triggers opened here with force clicks because
+  // --- a decorative access-specifier overlay covers their hit target.
+
+  private activityHeaderRow(): Locator {
+    return this.activityHeading().locator("xpath=ancestor::div[.//button][1]");
+  }
+
+  private composer(): Locator {
+    return this.page.locator('[aria-label="Add comment"]');
+  }
+
+  private async dismissOverlays(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .locator('[role="dialog"]:visible')
+      .first()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .catch(() => {});
+  }
+
+  async openArchivedIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    // Archived issues render on the archives URL itself (no browse redirect)
+    // with an archive banner above the same detail root.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/issues/${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    const deadline = Date.now() + 75_000;
+    for (;;) {
+      if ((await this.page.getByText(/does not exist|went wrong/i).count()) > 0)
+        throw new Error(`[parity] archived detail for ${issueId} rendered an error state (${this.page.url()}).`);
+      try {
+        await this.activityHeading().waitFor({ timeout: Math.max(1_000, deadline - Date.now()) });
+        return;
+      } catch {
+        if (Date.now() >= deadline)
+          throw new Error(`[parity] Activity never rendered for archived ${issueId} (current: ${this.page.url()}).`);
+      }
+    }
+  }
+
+  async activityCommentTexts(): Promise<string[]> {
+    return this.page.locator('[id^="comment-"]').allInnerTexts();
+  }
+
+  async activityHasCreationEntry(): Promise<boolean> {
+    return (
+      (await this.page
+        .getByRole("main")
+        .getByText(/created the work item/i)
+        .count()) > 0
+    );
+  }
+
+  async activityFilterOptions(): Promise<{ label: string; selected: boolean }[]> {
+    await this.dismissOverlays();
+    const headerRow = this.activityHeaderRow();
+    await headerRow.locator("button[data-headlessui-state]").first().click({ force: true, timeout: 15_000 });
+    const panel = this.page.locator('[id^="headlessui-popover-panel"]').first();
+    await panel.waitFor({ timeout: 10_000 });
+    const options = await panel.evaluate((root) => {
+      const rows = Array.from(root.querySelectorAll("div[class*='cursor-pointer']"));
+      return rows.map((row) => ({
+        label: (row as HTMLElement).innerText.trim(),
+        selected: row.querySelector("svg") !== null,
+      }));
+    });
+    await this.dismissOverlays();
+    return options;
+  }
+
+  async activityToggleFilter(label: string): Promise<void> {
+    await this.dismissOverlays();
+    const headerRow = this.activityHeaderRow();
+    await headerRow.locator("button[data-headlessui-state]").first().click({ force: true, timeout: 15_000 });
+    const panel = this.page.locator('[id^="headlessui-popover-panel"]').first();
+    await panel.waitFor({ timeout: 10_000 });
+    await panel
+      .locator("div[class*='cursor-pointer']", { hasText: label })
+      .first()
+      .click({ force: true, timeout: 15_000 });
+    await this.dismissOverlays();
+  }
+
+  async activityFilterDotVisible(): Promise<boolean> {
+    const trigger = this.activityHeaderRow().locator("button[data-headlessui-state]").first();
+    return (
+      (await trigger
+        .evaluate((el) => el.querySelector('span[class*="bg-accent-primary"]') !== null)
+        .catch(() => false)) ?? false
+    );
+  }
+
+  async activityComposerIsAboveFeed(): Promise<boolean> {
+    const composerBox = await this.composer().boundingBox();
+    const firstCardBox = await this.page.locator('[id^="comment-"]').first().boundingBox();
+    if (composerBox === null || firstCardBox === null)
+      throw new Error("[parity] composer or feed card has no layout box.");
+    return composerBox.y < firstCardBox.y;
+  }
+
+  async activityComposerText(): Promise<string> {
+    return (await this.composer().locator('[contenteditable="true"]').first().innerText()).trim();
+  }
+
+  async activityPostComment(bodyText: string): Promise<void> {
+    const editor = this.composer().locator('[contenteditable="true"]').first();
+    await editor.waitFor({ timeout: 30_000 });
+    await editor.click();
+    await editor.fill(bodyText);
+    await editor.press("Enter");
+    await this.commentCard(bodyText).first().waitFor({ timeout: 30_000 });
+  }
+
+  async activityOpenCommentMenu(cardText: string): Promise<void> {
+    await this.dismissOverlays();
+    const card = this.commentCard(cardText).first();
+    await card.waitFor({ timeout: 30_000 });
+    await card.hover({ timeout: 15_000 });
+    await card.locator('button[aria-haspopup="menu"]').first().click({ force: true, timeout: 15_000 });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 10_000 });
+  }
+
+  async activityMenuItems(): Promise<string[]> {
+    return this.page.getByRole("menuitem").allInnerTexts();
+  }
+
+  async activityClickMenuItem(name: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name }).first().click({ timeout: 15_000 });
+  }
+
+  async activityEditComment(oldText: string, newText: string): Promise<void> {
+    await this.activityOpenCommentMenu(oldText);
+    await this.activityClickMenuItem("Edit");
+    // The open editor is unique on the page; scope to it instead of the card
+    // text, which stops matching once the body is replaced below.
+    const editor = this.page.locator('[id^="comment-"] [contenteditable="true"]').first();
+    await editor.waitFor({ timeout: 10_000 });
+    await editor.click();
+    await editor.press("ControlOrMeta+a");
+    await editor.pressSequentially(newText, { timeout: 15_000 });
+    await this.page.waitForFunction(
+      (text) => {
+        const open = document.querySelector('[id^="comment-"] [contenteditable="true"]');
+        return open instanceof HTMLElement && open.innerText.includes(text);
+      },
+      newText,
+      { timeout: 15_000 }
+    );
+    // Save through the confirm affordance: pressing Enter here races the
+    // editor re-render, while the check button is the stable save path.
+    const form = editor.locator("xpath=ancestor::form[1]");
+    await form.locator('button[class*="border-success"]').first().click({ timeout: 15_000 });
+    await this.commentCard(newText).first().getByText("(edited)", { exact: false }).waitFor({ timeout: 30_000 });
+  }
+
+  async sawToast(text: string): Promise<boolean> {
+    return (await this.page.locator("body").innerText()).includes(text);
+  }
+
+  async activityCancelEdit(cardText: string): Promise<void> {
+    const card = this.commentCard(cardText).first();
+    await card.locator('button[class*="border-danger"]').first().click({ timeout: 15_000 });
+    await card.locator('[contenteditable="true"]').first().waitFor({ state: "detached", timeout: 15_000 });
+  }
+
+  async activityCommentHighlighted(cardText: string): Promise<boolean> {
+    const cls = await this.commentCard(cardText)
+      .first()
+      .evaluate((el) => {
+        const editor = el.querySelector("div[class*='border-accent-strong']");
+        return editor instanceof HTMLElement ? editor.className : "";
+      });
+    return cls.includes("border-accent-strong");
+  }
+
+  async activityChipTooltipText(cardText: string, emoji: string, expectedName: string): Promise<string> {
+    await this.commentCard(cardText)
+      .first()
+      .locator("button:not([aria-haspopup])", { hasText: emoji })
+      .first()
+      .hover({ timeout: 15_000 });
+    await this.page.waitForFunction((name) => document.body.innerText.includes(name), expectedName, {
+      timeout: 10_000,
+    });
+    return this.page.evaluate((name) => {
+      const candidates = Array.from(document.querySelectorAll("body *")).filter((el) =>
+        (el as HTMLElement).innerText?.includes(name)
+      );
+      candidates.sort((a, b) => a.innerHTML.length - b.innerHTML.length);
+      return ((candidates[0] as HTMLElement | undefined)?.innerText ?? "").slice(0, 200);
+    }, expectedName);
+  }
+
+  async activityCommentBodyVisible(cardText: string): Promise<boolean> {
+    // A folded card drops the body text, so the card itself stops matching:
+    // no match means hidden, not an error. Callers poll through hydration.
+    const card = this.commentCard(cardText).first();
+    try {
+      await card.waitFor({ timeout: 5_000 });
+    } catch {
+      return false;
+    }
+    return (await card.innerText()).includes(cardText);
+  }
+
+  async activityExpandFoldedComment(_cardText: string): Promise<void> {
+    // The folded card no longer contains its body text; the expand toggle is
+    // unique per feed in these scenarios, so match it directly.
+    await this.page
+      .getByRole("button", { name: /Click to expand/ })
+      .first()
+      .click({ timeout: 15_000 });
+  }
+
+  async activityCopyCommentLink(cardText: string): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.activityOpenCommentMenu(cardText);
+    await this.activityClickMenuItem("Copy link");
+    await this.page.waitForFunction(() => navigator.clipboard.readText().then((t) => t.length > 0), null, {
+      timeout: 10_000,
+    });
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  private static emojiCode(emoji: string): string {
+    return Array.from(emoji)
+      .map((char) => char.codePointAt(0))
+      .join("-");
+  }
+
+  private async pickFirstEmoji(trigger: Locator): Promise<{ emoji: string; code: string }> {
+    await this.dismissOverlays();
+    await trigger.click({ force: true, timeout: 15_000 });
+    // Take the first rendered grid entry straight away: typing in the search
+    // box collapses this popover, so no query is used. A fresh browser
+    // profile opens the same default recents grid on every run.
+    const entry = this.page.locator('button[data-slot="emoji-picker-list-emoji"]:visible').first();
+    await entry.waitFor({ timeout: 10_000 });
+    const emoji = ((await entry.textContent()) ?? "").trim();
+    if (emoji === "") throw new Error("[parity] first grid entry carried no character.");
+    await entry.click({ force: true, timeout: 15_000 });
+    return { emoji, code: WebDriver.emojiCode(emoji) };
+  }
+
+  private static parseChips(entries: { text: string; cls: string; popup: string | null }[]): {
+    emoji: string;
+    count: number;
+    reacted: boolean;
+  }[] {
+    const chips: { emoji: string; count: number; reacted: boolean }[] = [];
+    for (const entry of entries) {
+      // Picker triggers wrap the whole chip group, so their text duplicates
+      // every chip; only the chips themselves carry a highlight state.
+      if (entry.popup === "dialog") continue;
+      const text = entry.text.trim();
+      if (text === "" || /^Folded comment/.test(text)) continue;
+      const match = /^(.*?)(\d+)$/.exec(text.replace(/\s+/g, ""));
+      if (match)
+        chips.push({
+          emoji: match[1] ?? "",
+          count: Number(match[2]),
+          reacted: entry.cls.includes("border-accent-strong"),
+        });
+    }
+    return chips;
+  }
+
+  async activityAddCommentReaction(cardText: string): Promise<{ emoji: string; code: string }> {
+    return this.pickFirstEmoji(this.commentCard(cardText).first().locator('button[aria-haspopup="dialog"]').first());
+  }
+
+  async activityCommentReactionChips(cardText: string): Promise<{ emoji: string; count: number; reacted: boolean }[]> {
+    const entries = await this.commentCard(cardText)
+      .first()
+      .evaluate((root) =>
+        Array.from(root.querySelectorAll("button")).map((b) => ({
+          text: (b as HTMLElement).innerText,
+          cls: (b as HTMLElement).className,
+          popup: (b as HTMLElement).getAttribute("aria-haspopup"),
+        }))
+      );
+    return WebDriver.parseChips(entries);
+  }
+
+  async activityClickCommentReactionChip(cardText: string, emoji: string): Promise<void> {
+    // The picker trigger wraps the chips, so it name-matches too: exclude it.
+    await this.commentCard(cardText)
+      .first()
+      .locator("button:not([aria-haspopup])", { hasText: emoji })
+      .first()
+      .click({ timeout: 15_000 });
+  }
+
+  private async issueReactionTrigger(): Promise<Locator> {
+    const index = await this.page.evaluate(() => {
+      const heading = Array.from(document.querySelectorAll("*")).find(
+        (el) => el.children.length === 0 && el.textContent?.trim() === "Activity"
+      );
+      if (!heading) return -1;
+      const top = (heading as HTMLElement).getBoundingClientRect().top;
+      const triggers = Array.from(document.querySelectorAll('button[aria-haspopup="dialog"]'));
+      return triggers.findIndex((el) => (el as HTMLElement).getBoundingClientRect().top < top);
+    });
+    if (index < 0) throw new Error("[parity] no issue-level reaction trigger above the Activity feed.");
+    return this.page.locator('button[aria-haspopup="dialog"]').nth(index);
+  }
+
+  async issueAddReaction(): Promise<{ emoji: string; code: string }> {
+    return this.pickFirstEmoji(await this.issueReactionTrigger());
+  }
+
+  async issueReactionChips(): Promise<{ emoji: string; count: number; reacted: boolean }[]> {
+    const trigger = await this.issueReactionTrigger();
+    const entries = await trigger.evaluate((root) =>
+      Array.from(root.querySelectorAll("button")).map((b) => ({
+        text: (b as HTMLElement).innerText,
+        cls: (b as HTMLElement).className,
+        popup: (b as HTMLElement).getAttribute("aria-haspopup"),
+      }))
+    );
+    return WebDriver.parseChips(entries);
+  }
+
+  async issueClickReactionChip(emoji: string): Promise<void> {
+    const trigger = await this.issueReactionTrigger();
+    await trigger.getByRole("button", { name: emoji }).first().click({ timeout: 15_000 });
+  }
+
+  private codeReviewsSection(): Locator {
+    return this.page.getByText("Code reviews", { exact: true }).first();
+  }
+
+  async codeReviewsVisible(): Promise<boolean> {
+    return (await this.codeReviewsSection().count()) > 0;
+  }
+
+  async codeReviewLinks(): Promise<{ badge: string; title: string; href: string | null; target: string | null }[]> {
+    return this.page.evaluate(() => {
+      const heading = Array.from(document.querySelectorAll("*")).find(
+        (el) => el.children.length === 0 && el.textContent?.trim() === "Code reviews"
+      );
+      if (!heading) return [];
+      let container: Element | null = heading.parentElement;
+      while (container && container.querySelectorAll('a[target="_blank"]').length === 0)
+        container = container.parentElement;
+      if (!container) return [];
+      return Array.from(container.querySelectorAll('a[target="_blank"]')).map((anchor) => {
+        const row = anchor.closest("div");
+        const badge = row?.firstElementChild?.textContent?.trim() ?? "";
+        return {
+          badge,
+          title: ((anchor as HTMLElement).innerText ?? "").trim(),
+          href: anchor.getAttribute("href"),
+          target: anchor.getAttribute("target"),
+        };
+      });
+    });
+  }
+
+  async codeReviewAttach(url: string): Promise<void> {
+    const input = this.page.getByPlaceholder("Paste a pull request or merge request URL").first();
+    await input.waitFor({ timeout: 15_000 });
+    await input.fill(url);
+    // Scope to the review form: other widgets (attachments) have their own
+    // Attach buttons earlier in the DOM.
+    await input.locator("xpath=ancestor::form[1]").getByRole("button", { name: "Attach" }).click({ timeout: 15_000 });
+    try {
+      await this.page.waitForFunction(
+        () => {
+          const el = document.querySelector("input[placeholder='Paste a pull request or merge request URL']");
+          return el instanceof HTMLInputElement && el.value === "";
+        },
+        null,
+        { timeout: 30_000 }
+      );
+    } catch {
+      const state = await this.page.evaluate(() => {
+        const el = document.querySelector("input[placeholder='Paste a pull request or merge request URL']");
+        return {
+          inputValue: el instanceof HTMLInputElement ? el.value : "<missing>",
+          bodyHasError: document.body.innerText.includes("Code review not attached"),
+        };
+      });
+      throw new Error(`[parity] attach of ${url} never cleared the form (${JSON.stringify(state)}).`);
+    }
+  }
+
+  async codeReviewAttemptAttach(url: string): Promise<void> {
+    const input = this.page.getByPlaceholder("Paste a pull request or merge request URL").first();
+    await input.waitFor({ timeout: 15_000 });
+    await input.fill(url);
+    await input.locator("xpath=ancestor::form[1]").getByRole("button", { name: "Attach" }).click({ timeout: 15_000 });
+  }
+
+  async codeReviewInputValue(): Promise<string> {
+    const input = this.page.getByPlaceholder("Paste a pull request or merge request URL").first();
+    await input.waitFor({ timeout: 15_000 });
+    return input.inputValue();
+  }
+
+  async codeReviewDetach(title: string): Promise<void> {
+    const row = this.page
+      .locator("div", { hasText: title })
+      .filter({ has: this.page.locator('a[target="_blank"]') })
+      .last();
+    await row.hover({ timeout: 15_000 });
+    await row.getByRole("button").first().click({ force: true, timeout: 15_000 });
+    await this.page.waitForFunction((text) => !document.body.innerText.includes(text), title, { timeout: 30_000 });
+  }
+
+  async worklogCreateVisible(): Promise<boolean> {
+    const texts = await this.activityHeaderRow().getByRole("button").allInnerTexts();
+    return texts.some((text) => /log/i.test(text));
+  }
+
+  // --- Shared property dropdowns (NEWFRONT-122, ISS-207–220). Observed on
+  // --- the running old app: each sidebar row is a flex container pairing a
+  // --- label span with a value cell holding the combobox trigger button;
+  // --- the open popup lives in a body-level portal with an optional search
+  // --- input above the option listbox.
+
+  private propertyRowSync(label: string): Locator {
+    return this.page.locator("span", { hasText: new RegExp(`^${label}$`) }).locator("xpath=ancestor::div[2]");
+  }
+
+  private propertyTrigger(label: string): Locator {
+    return this.propertyRowSync(label).locator("div").nth(1).getByRole("button").first();
+  }
+
+  private pickerListbox(): Locator {
+    // Headless UI renders the option list as a zero-size positioned `ul`
+    // wrapper, so callers must wait on attached state or on the options,
+    // never on listbox visibility.
+    return this.page.getByRole("listbox").last();
+  }
+
+  private pickerPopup(): Locator {
+    return this.pickerListbox();
+  }
+
+  private pickerOptions(): Locator {
+    return this.pickerListbox().getByRole("option");
+  }
+
+  async propertyValueText(label: string): Promise<string> {
+    const trigger = this.propertyTrigger(label);
+    await trigger.waitFor({ timeout: 30_000 });
+    return (await trigger.innerText()).trim();
+  }
+
+  async propertyOpenPicker(label: string): Promise<void> {
+    await this.propertyTrigger(label).click({ timeout: 30_000 });
+    await this.pickerListbox().waitFor({ state: "attached", timeout: 15_000 });
+    await this.pickerOptions().first().waitFor({ timeout: 15_000 });
+  }
+
+  async propertyOpenPickerByKeyboard(label: string): Promise<void> {
+    const trigger = this.propertyTrigger(label);
+    await trigger.focus({ timeout: 30_000 });
+    await this.page.keyboard.press("Enter");
+    await this.pickerListbox().waitFor({ state: "attached", timeout: 15_000 });
+    await this.pickerOptions().first().waitFor({ timeout: 15_000 });
+  }
+
+  async propertyPickerDisabled(label: string): Promise<boolean> {
+    const trigger = this.propertyTrigger(label);
+    await trigger.waitFor({ timeout: 30_000 });
+    return trigger.isDisabled();
+  }
+
+  async propertyTriggerPresent(label: string): Promise<boolean> {
+    return (await this.propertyTrigger(label).count()) > 0;
+  }
+
+  async pickerOpen(): Promise<boolean> {
+    return (await this.page.getByRole("listbox").count()) > 0;
+  }
+
+  async pickerOptionTexts(): Promise<string[]> {
+    const texts = await this.pickerListbox().getByRole("option").allInnerTexts();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async pickerHasSearch(): Promise<boolean> {
+    return (await this.pickerPopup().locator("input[type='text']").count()) > 0;
+  }
+
+  async pickerSearch(query: string): Promise<void> {
+    const input = this.pickerPopup().locator("input[type='text']").first();
+    await input.waitFor({ timeout: 15_000 });
+    await input.pressSequentially(query, { timeout: 15_000 });
+  }
+
+  async pickerSearchValue(): Promise<string> {
+    return this.pickerPopup().locator("input[type='text']").first().inputValue();
+  }
+
+  async pickerSearchFocused(): Promise<boolean> {
+    return this.pickerPopup()
+      .locator("input[type='text']")
+      .first()
+      .evaluate((el) => el === document.activeElement);
+  }
+
+  async pickerPick(text: string): Promise<void> {
+    await this.pickerListbox().getByRole("option", { name: text }).first().click({ timeout: 15_000 });
+  }
+
+  async pickerOptionDisabled(text: string): Promise<boolean> {
+    const option = this.pickerListbox().getByRole("option", { name: text }).first();
+    await option.waitFor({ timeout: 15_000 });
+    const aria = await option.getAttribute("aria-disabled");
+    if (aria !== null) return aria === "true";
+    const data = await option.getAttribute("data-disabled");
+    if (data !== null) return data === "" || data === "true";
+    return !(await option.isEnabled());
+  }
+
+  async pickerEmptyText(): Promise<string> {
+    if ((await this.pickerListbox().getByRole("option").count()) > 0) return "";
+    return (await this.pickerPopup().innerText()).trim();
+  }
+
+  async pickerPressEscape(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+  }
+
+  async pickerClickOutside(): Promise<void> {
+    await this.page.getByText("Properties", { exact: true }).first().click({ timeout: 30_000 });
+  }
+
+  // --- Single-date dropdowns (NEWFRONT-122, ISS-214). Observed on the
+  // --- running old app: the calendar popup is a month grid with month/year
+  // --- caption dropdowns; current-month days are plain buttons, out-of-range
+  // --- days render disabled, and picking a day closes the popup.
+
+  private calendar(): Locator {
+    return this.page.locator(".rdp-root").last();
+  }
+
+  private calendarDay(day: number): Locator {
+    // Outside-month spill days carry the same numbers, so scope to the
+    // current month's cells.
+    return this.calendar()
+      .locator("td:not(.rdp-outside) button", { hasText: new RegExp(`^${day}$`) })
+      .first();
+  }
+
+  async datePickerOpen(label: string): Promise<void> {
+    await this.propertyTrigger(label).click({ timeout: 30_000 });
+    await this.calendar().waitFor({ state: "visible", timeout: 15_000 });
+  }
+
+  async datePickerVisible(): Promise<boolean> {
+    return (await this.page.locator(".rdp-root").count()) > 0;
+  }
+
+  async datePickerVisibleMonth(): Promise<{ month: string; year: string }> {
+    const selects = this.calendar().locator("select");
+    await selects.first().waitFor({ timeout: 15_000 });
+    const selected = (select: Locator): Promise<string> => select.locator("option:checked").first().innerText();
+    return { month: (await selected(selects.nth(0))).trim(), year: (await selected(selects.nth(1))).trim() };
+  }
+
+  async datePickerPickDay(day: number): Promise<void> {
+    await this.calendarDay(day).click({ timeout: 15_000 });
+    await this.calendar().waitFor({ state: "detached", timeout: 15_000 });
+  }
+
+  async datePickerDayDisabled(day: number): Promise<boolean> {
+    const button = this.calendarDay(day);
+    await button.waitFor({ timeout: 15_000 });
+    return button.isDisabled();
+  }
+
+  async datePickerPortalAttached(label: string): Promise<boolean> {
+    return this.page.evaluate((rowLabel) => {
+      const spans = Array.from(document.querySelectorAll("span"));
+      const label = spans.find((el) => el.textContent?.trim() === rowLabel);
+      const row = label?.parentElement?.parentElement ?? null;
+      const calendar = document.querySelector(".rdp-root");
+      return row !== null && calendar !== null && !row.contains(calendar);
+    }, label);
+  }
+
+  async datePickerClear(label: string): Promise<void> {
+    const trigger = this.propertyTrigger(label);
+    await trigger.hover({ timeout: 30_000 });
+    await trigger.locator("svg").first().click({ timeout: 15_000 });
+  }
+
+  async propertyRowPresent(label: string): Promise<boolean> {
+    // The detail sidebar must hydrate first: an empty DOM reads the same as
+    // a missing row, so wait for the Properties heading to settle first.
+    await this.page.getByText("Properties", { exact: true }).first().waitFor({ timeout: 60_000 });
+    return (await this.page.locator("span", { hasText: new RegExp(`^${label}$`) }).count()) > 0;
+  }
+
+  // --- Create-issue modal project picker (NEWFRONT-122, ISS-211). Observed
+  // --- on the running old app: the modal form opens under a "Create new
+  // --- work item" heading with the project picker as the first button of
+  // --- the header row; its popup is a listbox with a "Search" input and
+  // --- one option per joined project the user may create in.
+
+  private issueModalForm(): Locator {
+    return this.page.getByRole("heading", { name: "Create new work item" }).locator("xpath=ancestor::form[1]");
+  }
+
+  private issueModalProjectTrigger(): Locator {
+    return this.issueModalForm().locator("h3 + div button").first();
+  }
+
+  private issueModalProjectSearchInput(): Locator {
+    return this.pickerListbox().getByPlaceholder("Search");
+  }
+
+  async issueModalOpenCreate(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.openProjectIssues(workspaceSlug, projectId);
+    await this.page.getByRole("button", { name: "Add work item" }).click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Create new work item" }).waitFor({ timeout: 30_000 });
+    // Hydration gate: the title field autofocuses on mount, so a focused
+    // title proves React attached the trigger handlers; clicks before that
+    // land on dead DOM under dev-server load.
+    await this.page.waitForFunction(
+      () => {
+        const el = document.querySelector('input[name="name"]');
+        return el !== null && document.activeElement === el;
+      },
+      { timeout: 15_000 }
+    );
+  }
+
+  async issueModalProjectValue(): Promise<string> {
+    const trigger = this.issueModalProjectTrigger();
+    await trigger.waitFor({ timeout: 30_000 });
+    return (await trigger.innerText()).trim();
+  }
+
+  async issueModalProjectOpenPicker(): Promise<void> {
+    // Idempotent: Escape-after-search leaves the popup open (it only
+    // clears the query), so a step that follows one must not toggle it
+    // shut with a blind click.
+    if (await this.pickerOpen()) return;
+    // The trigger nests two buttons (an inert positioning wrapper around
+    // the named inner trigger), so read the current value first and click
+    // the inner button by name; the outer wrapper swallows plain clicks.
+    const value = await this.issueModalProjectValue();
+    const trigger = this.issueModalForm().getByRole("button", { name: value }).last();
+    await trigger.click({ timeout: 30_000 });
+    const opened = await this.pickerListbox()
+      .waitFor({ state: "attached", timeout: 5_000 })
+      .then(
+        () => true,
+        () => false
+      );
+    if (!opened) {
+      // Swallowed click or toggle race under dev-server load: the trigger
+      // still has focus, so one more click opens it.
+      await trigger.click({ timeout: 30_000 });
+      await this.pickerListbox().waitFor({ state: "attached", timeout: 15_000 });
+    }
+    await this.pickerOptions().first().waitFor({ timeout: 15_000 });
+  }
+
+  async issueModalProjectOptionTexts(): Promise<string[]> {
+    const texts = await this.pickerOptions().allInnerTexts();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async issueModalProjectSearch(query: string): Promise<void> {
+    const input = this.issueModalProjectSearchInput();
+    await input.waitFor({ timeout: 15_000 });
+    await input.pressSequentially(query, { timeout: 15_000 });
+  }
+
+  async issueModalProjectEmptyText(): Promise<string> {
+    if ((await this.pickerOptions().count()) > 0) return "";
+    const empty = this.pickerListbox().locator("p").first();
+    if ((await empty.count()) === 0) return "";
+    return (await empty.innerText()).trim();
+  }
+
+  async issueModalProjectPick(text: string): Promise<void> {
+    await this.pickerListbox().getByRole("option", { name: text }).first().click({ timeout: 15_000 });
+  }
+
+  async issueModalProjectPressEscape(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    // Escape in a non-empty search box only clears the query (the popup
+    // stays open), so close again when it is still attached after a
+    // bounded wait; never press blindly twice — a stray Escape would
+    // dismiss the whole create modal.
+    const stillOpen = await this.pickerListbox()
+      .waitFor({ state: "detached", timeout: 3_000 })
+      .then(
+        () => false,
+        () => true
+      );
+    if (stillOpen) await this.page.keyboard.press("Escape");
+    await this.pickerListbox().waitFor({ state: "detached", timeout: 15_000 });
+  }
+
+  async issueModalFillTitle(title: string): Promise<void> {
+    await this.issueModalForm().locator('input[name="name"]').fill(title, { timeout: 30_000 });
+  }
+
+  async issueModalSubmit(): Promise<void> {
+    await this.issueModalForm().getByRole("button", { name: "Save" }).click({ timeout: 30_000 });
+    await this.page
+      .getByRole("heading", { name: "Create new work item" })
+      .waitFor({ state: "hidden", timeout: 30_000 });
+  }
+
+  // --- Date-range dropdowns (NEWFRONT-122, ISS-215). Observed on the
+  // --- running old app: the list row's merged-dates trigger is the only
+  // --- button in a single-issue project's list whose text matches the
+  // --- smart label shape; its clear control is the last icon in the
+  // --- button. The range calendar reuses the single-date month grid in
+  // --- range mode: days stay clickable until both ends are picked.
+
+  private rangeMergedCell(issueName: string): Locator {
+    // Two mains render (list + peek shell); the issue's row disambiguates.
+    // The trigger nests two buttons (an outer wrapper around the inner
+    // trigger); the inner one is the leaf, owns the label and bubbles
+    // clicks to the wrapper's handler.
+    const list = this.page.locator("main", { has: this.page.locator("p", { hasText: issueName }) });
+    return list.locator("button:not(:has(button))", { hasText: /\w{3} \d{1,2} - / });
+  }
+
+  async rangeMergedCellText(issueName: string): Promise<string> {
+    const cell = this.rangeMergedCell(issueName);
+    await cell.waitFor({ timeout: 30_000 });
+    return (await cell.innerText()).trim();
+  }
+
+  async rangeMergedCellOpen(issueName: string): Promise<void> {
+    // Click the label span, not the button box: a box click near the end
+    // lands on the clear icon and wipes the dates instead of opening.
+    const cell = this.rangeMergedCell(issueName);
+    await cell.locator("span").first().click({ timeout: 30_000 });
+    await this.calendar().waitFor({ state: "visible", timeout: 15_000 });
+  }
+
+  async rangeMergedCellClear(issueName: string): Promise<void> {
+    const cell = this.rangeMergedCell(issueName);
+    await cell.locator("svg").last().click({ timeout: 30_000 });
+  }
+
+  async rangeCalendarVisible(): Promise<boolean> {
+    return (await this.page.locator(".rdp-root").count()) > 0;
+  }
+
+  async rangeCalendarPickDay(day: number): Promise<void> {
+    await this.calendarDay(day).click({ timeout: 15_000 });
+  }
+
+  async rangeCalendarDayDisabled(day: number): Promise<boolean> {
+    const button = this.calendarDay(day);
+    await button.waitFor({ timeout: 15_000 });
+    return button.isDisabled();
+  }
+
+  async rangeCalendarSelectMonth(monthLabel: string): Promise<void> {
+    await this.calendar().locator("select").nth(0).selectOption({ label: monthLabel }, { timeout: 15_000 });
+  }
+
+  async rangeCalendarSelectYear(yearLabel: string): Promise<void> {
+    await this.calendar().locator("select").nth(1).selectOption({ label: yearLabel }, { timeout: 15_000 });
+  }
+
+  private cycleForm(): Locator {
+    return this.page.getByRole("heading", { name: "Create cycle" }).locator("xpath=ancestor::form[1]");
+  }
+
+  private cycleRangeTrigger(): Locator {
+    return this.cycleForm().locator("button:not(:has(button))", { hasText: /Start date/ });
+  }
+
+  async cycleCreateOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.getByRole("button", { name: "Add cycle" }).click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Create cycle" }).waitFor({ timeout: 30_000 });
+  }
+
+  async cycleFormRangePlaceholders(): Promise<{ from: string; to: string }> {
+    const trigger = this.cycleRangeTrigger();
+    await trigger.waitFor({ timeout: 30_000 });
+    const spans = await trigger.locator("span").allInnerTexts();
+    const texts = spans.map((t) => t.trim()).filter((t) => t.length > 0);
+    return { from: texts[0] ?? "", to: texts[1] ?? "" };
+  }
+
+  async cycleFormRangeOpen(): Promise<void> {
+    await this.cycleRangeTrigger().locator("span").first().click({ timeout: 30_000 });
+    await this.calendar().waitFor({ state: "visible", timeout: 15_000 });
+  }
+
+  async cycleFormFillName(name: string): Promise<void> {
+    await this.cycleForm().locator('input[name="name"]').fill(name, { timeout: 30_000 });
+  }
+
+  async cycleFormSubmit(): Promise<void> {
+    await this.cycleForm().getByRole("button", { name: "Create cycle" }).click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Create cycle" }).waitFor({ state: "hidden", timeout: 30_000 });
+  }
+
+  // --- Intake-state dropdown (NEWFRONT-122, ISS-217). Observed on the
+  // --- running old app: the intake header's "Add work item" button opens
+  // --- the intake-create modal under a "Create intake work item" heading;
+  // --- the state picker trigger shows the current intake state name and
+  // --- its popup is a searchable single-select listbox over state names.
+
+  private intakeForm(): Locator {
+    return this.page.getByRole("heading", { name: "Create intake work item" }).locator("xpath=ancestor::form[1]");
+  }
+
+  async intakeCreateOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.getByRole("button", { name: "Add work item" }).click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Create intake work item" }).waitFor({ timeout: 30_000 });
+  }
+
+  async intakeStateValue(): Promise<string> {
+    // The state picker is the first dropdown trigger in the modal's
+    // properties row; read it by position, then click it by name.
+    const trigger = this.intakeForm().getByRole("button").first();
+    await trigger.waitFor({ timeout: 30_000 });
+    return (await trigger.innerText()).trim();
+  }
+
+  async intakeStateOpenPicker(): Promise<void> {
+    // Idempotent like the project picker: Escape-after-search leaves the
+    // popup open, so never toggle an open popup shut with a blind click.
+    if (await this.pickerOpen()) return;
+    const value = await this.intakeStateValue();
+    const trigger = this.intakeForm().getByRole("button", { name: value }).first();
+    await trigger.click({ timeout: 30_000 });
+    const opened = await this.pickerListbox()
+      .waitFor({ state: "attached", timeout: 5_000 })
+      .then(
+        () => true,
+        () => false
+      );
+    if (!opened) {
+      await trigger.click({ timeout: 30_000 });
+      await this.pickerListbox().waitFor({ state: "attached", timeout: 15_000 });
+    }
+    await this.pickerOptions().first().waitFor({ timeout: 15_000 });
+  }
+
+  async intakeStateOptionTexts(): Promise<string[]> {
+    const texts = await this.pickerOptions().allInnerTexts();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async intakeStateSearch(query: string): Promise<void> {
+    const input = this.pickerListbox().getByPlaceholder("Search");
+    await input.waitFor({ timeout: 15_000 });
+    await input.pressSequentially(query, { timeout: 15_000 });
+  }
+
+  async intakeStateEmptyText(): Promise<string> {
+    if ((await this.pickerOptions().count()) > 0) return "";
+    const empty = this.pickerListbox().locator("p").first();
+    if ((await empty.count()) === 0) return "";
+    return (await empty.innerText()).trim();
+  }
+
+  async intakeStatePick(text: string): Promise<void> {
+    await this.pickerListbox().getByRole("option", { name: text }).first().click({ timeout: 15_000 });
+  }
+
+  async intakeCreateFillTitle(title: string): Promise<void> {
+    await this.intakeForm().locator('input[name="name"]').fill(title, { timeout: 30_000 });
+  }
+
+  async intakeCreateSubmit(): Promise<void> {
+    await this.intakeForm().getByRole("button", { name: "Create work item" }).click({ timeout: 30_000 });
+    await this.page
+      .getByRole("heading", { name: "Create intake work item" })
+      .waitFor({ state: "hidden", timeout: 30_000 });
+  }
+
+  async intakeTriageStateDisabled(): Promise<boolean> {
+    const row = this.page
+      .locator("span", { hasText: new RegExp("^State$") })
+      .first()
+      .locator("xpath=ancestor::div[2]");
+    const trigger = row.getByRole("button").first();
+    await trigger.waitFor({ timeout: 30_000 });
+    return trigger.isDisabled();
+  }
+
+  // --- Layout dropdown (NEWFRONT-122, ISS-219). Observed on the running
+  // --- old app: the views list is empty on a fresh project, offering a
+  // --- "Create view" action that opens the view form; the layout picker
+  // --- trigger shows the current layout label and its popup lists the
+  // --- five layouts with a checkmark on the selected one, no search box.
+
+  private viewsForm(): Locator {
+    return this.page.getByRole("heading", { name: "Create View" }).locator("xpath=ancestor::form[1]");
+  }
+
+  async viewsOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/views`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async viewsOpenCreate(): Promise<void> {
+    await this.page.getByRole("button", { name: "Create view" }).click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Create View" }).waitFor({ timeout: 30_000 });
+  }
+
+  async viewsLayoutValue(): Promise<string> {
+    const value = await this.viewsForm()
+      .getByRole("button", { name: /List|Board|Calendar|Table|Timeline/ })
+      .first()
+      .innerText();
+    return value.trim();
+  }
+
+  async viewsLayoutOpenPicker(): Promise<void> {
+    // Idempotent like the project picker: never toggle an open popup shut.
+    if (await this.pickerOpen()) return;
+    const trigger = this.viewsForm()
+      .getByRole("button", { name: /List|Board|Calendar|Table|Timeline/ })
+      .first();
+    await trigger.click({ timeout: 30_000 });
+    const opened = await this.pickerListbox()
+      .waitFor({ state: "attached", timeout: 5_000 })
+      .then(
+        () => true,
+        () => false
+      );
+    if (!opened) {
+      await trigger.click({ timeout: 30_000 });
+      await this.pickerListbox().waitFor({ state: "attached", timeout: 15_000 });
+    }
+    await this.pickerOptions().first().waitFor({ timeout: 15_000 });
+  }
+
+  async viewsLayoutOptionTexts(): Promise<string[]> {
+    const texts = await this.pickerOptions().allInnerTexts();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async viewsLayoutHasSearch(): Promise<boolean> {
+    return (await this.pickerPopup().locator("input[type='text']").count()) > 0;
+  }
+
+  async viewsLayoutSelectedMarked(text: string): Promise<boolean> {
+    const marked = this.pickerListbox().getByRole("option", { name: text, selected: true });
+    if ((await marked.count()) === 0) return false;
+    await marked.first().waitFor({ timeout: 15_000 });
+    return true;
+  }
+
+  async viewsLayoutPick(text: string): Promise<void> {
+    await this.pickerListbox().getByRole("option", { name: text }).first().click({ timeout: 15_000 });
+  }
+
+  async viewsFillName(name: string): Promise<void> {
+    await this.viewsForm().locator('input[name="name"]').fill(name, { timeout: 30_000 });
+  }
+
+  async viewsSubmit(): Promise<void> {
+    await this.viewsForm().getByRole("button", { name: "Create View" }).click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Create View" }).waitFor({ state: "hidden", timeout: 30_000 });
+  }
+
+  // --- Edition-only stubs (NEWFRONT-122, ISS-231–237). Locators marked
+  // --- UNVERIFIED were written from component structure without a live
+  // --- oracle pass (the shared stack was saturated); the oracle run
+  // --- resolves them — see the edition-stubs spec.
+
+  private subIssueFilterTrigger(): Locator {
+    // The sub-issues widget header holds an icon-only filter trigger whose
+    // icon is the small list-filter glyph; match the direct button > div >
+    // svg chain so wider ancestor buttons carrying the same icon deeper do
+    // not match.
+    return this.page.locator('button:has(> div > svg.lucide-list-filter[class*="h-3.5"])');
+  }
+
+  private subIssueFilterPanel(): Locator {
+    // The FiltersDropdown popover panel wraps its sections in a fixed-width
+    // container; only one such panel opens at a time.
+    return this.page.locator('div[class*="w-[18.75rem]"]');
+  }
+
+  async subIssueFiltersOpen(workspaceSlug: string, projectId: string, parentIssueId: string): Promise<void> {
+    await this.openIssueDetail(workspaceSlug, projectId, parentIssueId);
+    await this.page.locator("button", { hasText: "Sub-work items" }).first().waitFor({ timeout: 30_000 });
+    // Two mains can render the widget; click the first visible trigger.
+    const triggers = this.subIssueFilterTrigger();
+    const count = await triggers.count();
+    for (let i = 0; i < count; i++) {
+      const trigger = triggers.nth(i);
+      if (await trigger.isVisible().catch(() => false)) {
+        await trigger.click({ timeout: 30_000 });
+        await this.subIssueFilterPanel().first().waitFor({ timeout: 15_000 });
+        return;
+      }
+    }
+    throw new Error("[parity] no visible sub-issue filter trigger.");
+  }
+
+  async subIssueFiltersPanelText(): Promise<string> {
+    const panel = this.subIssueFilterPanel().first();
+    await panel.waitFor({ timeout: 15_000 });
+    return ((await panel.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+  }
+
+  private detailIdentifier(): Locator {
+    return this.page.getByRole("button", { name: /^[A-Z0-9]+-\d+$/ }).first();
+  }
+
+  async detailIdentifierText(): Promise<string> {
+    const badge = this.detailIdentifier();
+    await badge.waitFor({ timeout: 30_000 });
+    return (await badge.innerText()).trim();
+  }
+
+  async detailIdentifierCopy(): Promise<void> {
+    await this.detailIdentifier().click({ timeout: 30_000 });
+  }
+
+  async viewsOpenDetail(workspaceSlug: string, projectId: string, viewId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/views/${viewId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async ganttShowsIssue(issueName: string): Promise<boolean> {
+    // UNVERIFIED: gantt blocks print the issue name; settle on it so the
+    // dependency absence below is read on a rendered chart, not a loader.
+    const block = this.page.getByText(issueName, { exact: true }).first();
+    await block.waitFor({ timeout: 60_000 });
+    return block.isVisible();
+  }
+
+  // --- Label management (NEWFRONT-122, ISS-226–230). The settings rows
+  // --- key off the h6 name text: each row's block is the closest
+  // --- div.group above it, holding the drag handle (opacity-0 until
+  // --- hover, so hover it first), the icon-only ellipsis menu button and
+  // --- the trash button (data-ph-element marked). The inline form keys
+  // --- off its #labelName input; its error line is the page's only
+  // --- danger-colored paragraph while a form error shows.
+  private labelHeading(name: string): Locator {
+    return this.page.getByRole("heading", { name, exact: true }).first();
+  }
+
+  private labelRow(name: string): Locator {
+    return this.labelHeading(name).locator("xpath=ancestor::div[contains(@class,'group')][1]");
+  }
+
+  private labelForm(): Locator {
+    return this.page.locator("#labelName").locator("xpath=ancestor::div[contains(@class,'scroll-m-8')][1]");
+  }
+
+  async settingsLabelsOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/labels`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on either the list heading (editors) or the denial view
+    // (guests); callers assert which one they got.
+    const settled = await Promise.race([
+      this.page
+        .getByRole("heading", { name: "Labels", exact: true })
+        .first()
+        .waitFor({ timeout: 60_000 })
+        .then(
+          () => true,
+          () => false
+        ),
+      this.page
+        .getByRole("heading", { name: /not authorized/i })
+        .first()
+        .waitFor({ timeout: 60_000 })
+        .then(
+          () => true,
+          () => false
+        ),
+    ]);
+    if (!settled) throw new Error("[parity] labels settings settled on neither the list nor the denial view.");
+  }
+
+  async settingsLabelsNames(): Promise<string[]> {
+    // Group and item names alike render as h6.text-13; the page heading
+    // is h3 and other settings pages use h6 for their own titles.
+    const heads = this.page.locator("h6.text-13");
+    const total = await heads.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await heads
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
+  async settingsLabelsAddVisible(): Promise<boolean> {
+    return this.page.getByRole("button", { name: "Add label", exact: true }).isVisible();
+  }
+
+  async settingsLabelsOpenCreate(): Promise<void> {
+    await this.page.getByRole("button", { name: "Add label", exact: true }).click({ timeout: 30_000 });
+    await this.page.locator("#labelName").waitFor({ timeout: 30_000 });
+  }
+
+  async settingsLabelsFormVisible(): Promise<boolean> {
+    return (await this.page.locator("#labelName").count()) > 0;
+  }
+
+  async settingsLabelsFillName(name: string): Promise<void> {
+    await this.page.locator("#labelName").fill(name, { timeout: 30_000 });
+  }
+
+  async settingsLabelsFormError(): Promise<string> {
+    const err = this.page.locator('p[class*="text-danger-primary"]').first();
+    if ((await err.count()) === 0) return "";
+    return ((await err.innerText().catch(() => "")) ?? "").trim();
+  }
+
+  async settingsLabelsSubmitCreate(): Promise<void> {
+    await this.labelForm().getByRole("button", { name: "Add", exact: true }).click({ timeout: 30_000 });
+    await this.page.locator("#labelName").waitFor({ state: "detached", timeout: 30_000 });
+  }
+
+  async settingsLabelsSubmitUpdate(): Promise<void> {
+    await this.labelForm().getByRole("button", { name: "Update", exact: true }).click({ timeout: 30_000 });
+    await this.page.locator("#labelName").waitFor({ state: "detached", timeout: 30_000 });
+  }
+
+  async settingsLabelsCancelForm(): Promise<void> {
+    await this.labelForm().getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 30_000 });
+    await this.page.locator("#labelName").waitFor({ state: "detached", timeout: 30_000 });
+  }
+
+  async settingsLabelsDotColor(): Promise<string> {
+    const dot = this.labelForm().locator("span.h-4.w-4").first();
+    await dot.waitFor({ timeout: 30_000 });
+    return ((await dot.evaluate((el) => getComputedStyle(el).backgroundColor).catch(() => "")) ?? "").trim();
+  }
+
+  async settingsLabelsOpenColorPicker(): Promise<void> {
+    await this.labelForm().locator("span.h-4.w-4").first().click({ timeout: 30_000 });
+    await this.page.locator(".twitter-picker").waitFor({ timeout: 30_000 });
+  }
+
+  async settingsLabelsPickColor(hex: string): Promise<void> {
+    const picker = this.page.locator(".twitter-picker");
+    await picker.waitFor({ timeout: 30_000 });
+    const swatches = picker.locator("[title]");
+    const total = await swatches.count();
+    const want = hex.toLowerCase();
+    for (let i = 0; i < total; i++) {
+      const title = ((await swatches.nth(i).getAttribute("title")) ?? "").toLowerCase();
+      if (title === want) {
+        await swatches.nth(i).click({ timeout: 15_000 });
+        return;
+      }
+    }
+    throw new Error(`[parity] no color swatch titled ${hex}.`);
+  }
+
+  async settingsLabelsOpenRowMenu(name: string): Promise<void> {
+    const row = this.labelRow(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    // Lucide 0.469 aliases MoreHorizontal to the ellipsis icon, so the
+    // svg carries the new class; match both across icon versions.
+    await row.locator("button:has(.lucide-ellipsis, .lucide-more-horizontal)").first().click({ timeout: 30_000 });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+  }
+
+  async settingsLabelsMenuItems(): Promise<string[]> {
+    const items = this.page.getByRole("menuitem");
+    const total = await items.count();
+    const texts: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await items
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") texts.push(text);
+    }
+    return texts;
+  }
+
+  async settingsLabelsMenuPick(text: string): Promise<void> {
+    await this.page
+      .getByRole("menuitem", { name: new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) })
+      .first()
+      .click({ timeout: 30_000 });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "detached", timeout: 15_000 });
+  }
+
+  async settingsLabelsIsGroup(name: string): Promise<boolean> {
+    // Only group headers sit under the pointer-cursor Disclosure row;
+    // plain items have no such ancestor within a few levels.
+    return this.labelHeading(name).evaluate((el) => {
+      let parent = el.parentElement;
+      for (let i = 0; i < 6 && parent !== null; i++, parent = parent.parentElement) {
+        if (parent.className.includes("cursor-pointer")) return true;
+      }
+      return false;
+    });
+  }
+
+  async settingsLabelsDeleteViaTrash(name: string): Promise<void> {
+    const row = this.labelRow(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    await row.locator('button[data-ph-element="labels_delete_button"]').first().click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Delete Label" }).waitFor({ timeout: 30_000 });
+  }
+
+  async settingsLabelsDeleteModalText(): Promise<string> {
+    const heading = this.page.getByRole("heading", { name: "Delete Label" });
+    if ((await heading.count()) === 0) return "";
+    const body = heading.first().locator("xpath=following-sibling::div[1]");
+    return ((await body.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async settingsLabelsDeleteConfirm(): Promise<void> {
+    const heading = this.page.getByRole("heading", { name: "Delete Label" });
+    await heading.waitFor({ timeout: 30_000 });
+    const dialog = heading.locator("xpath=ancestor::div[@role='dialog'][1]");
+    const confirm = dialog.getByRole("button", { name: "Delete", exact: true });
+    if ((await confirm.count()) === 0) {
+      await this.page.getByRole("button", { name: "Delete", exact: true }).first().click({ timeout: 30_000 });
+    } else {
+      await confirm.first().click({ timeout: 30_000 });
+    }
+    await heading.waitFor({ state: "detached", timeout: 30_000 });
+  }
+
+  async settingsLabelsDeleteCancel(): Promise<void> {
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).first().click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Delete Label" }).waitFor({ state: "detached", timeout: 15_000 });
+  }
+
+  private async dragLabelHandle(source: string, target: string, edge: "center" | "top"): Promise<void> {
+    const row = this.labelRow(source);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    // Lucide 0.469 aliases MoreVertical to ellipsis-vertical; match both.
+    const handle = row.locator("button:has(.lucide-ellipsis-vertical, .lucide-more-vertical)").first();
+    await handle.waitFor({ timeout: 30_000 });
+    const from = await handle.boundingBox();
+    const targetBox = await this.labelRow(target).boundingBox();
+    if (from === null || targetBox === null) throw new Error("[parity] label drag endpoints have no boxes.");
+    const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 };
+    // Calibrated live: the drop target's top sits ~14px above the row
+    // block's top (indicator + margins + borders) and its top quarter
+    // (~12px) is the reorder-above zone — so the block's own top edge
+    // already falls in the make-child middle. Aim 8px above the block
+    // (zone middle); geometry is stable mid-drag since showing the
+    // indicator only recolors it.
+    const end =
+      edge === "center"
+        ? { x: targetBox.x + targetBox.width / 2, y: targetBox.y + targetBox.height / 2 }
+        : { x: targetBox.x + targetBox.width / 2, y: targetBox.y - 8 };
+    await this.page.mouse.move(start.x, start.y);
+    await this.page.mouse.down();
+    for (let i = 1; i <= 12; i++) {
+      await this.page.mouse.move(start.x + ((end.x - start.x) * i) / 12, start.y + ((end.y - start.y) * i) / 12);
+    }
+    await this.page.waitForTimeout(300);
+    await this.page.mouse.up();
+  }
+
+  async settingsLabelsDragOnto(source: string, target: string): Promise<void> {
+    await this.dragLabelHandle(source, target, "center");
+  }
+
+  async settingsLabelsDragAbove(source: string, target: string): Promise<void> {
+    await this.dragLabelHandle(source, target, "top");
+  }
+
+  async settingsLabelsEmptyTitle(): Promise<string> {
+    const empty = this.page.getByText("No labels yet", { exact: true });
+    if ((await empty.count()) === 0) return "";
+    return (
+      (await empty
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async settingsLabelsEmptyAction(): Promise<void> {
+    await this.page.getByRole("button", { name: "Create your first label", exact: true }).click({ timeout: 30_000 });
+    await this.page.locator("#labelName").waitFor({ timeout: 30_000 });
+  }
+
+  async settingsLabelsSkeletonVisible(): Promise<boolean> {
+    const bones = this.page.locator('[role="status"].animate-pulse > div');
+    if ((await bones.count()) < 4) return false;
+    return bones.first().isVisible();
+  }
+
+  async settingsLabelsDelayLoad(ms: number): Promise<void> {
+    // Hold the label-list answers (project and workspace alike, since
+    // either one lets the store render) so the skeleton stays up long
+    // enough to observe; writes pass through untouched.
+    const hold = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue();
+    };
+    await this.page.route("**/issue-labels/*", hold);
+    await this.page.route("**/api/workspaces/*/labels/", hold);
+  }
+
+  async issueLabelsOpenPicker(): Promise<void> {
+    await this.propertyRowSync("Labels")
+      .getByRole("button", { name: /Add labels/ })
+      .first()
+      .click({ timeout: 30_000 });
+    await this.pickerListbox().waitFor({ state: "attached", timeout: 15_000 });
+    await this.pickerOptions().first().waitFor({ timeout: 15_000 });
+  }
+
+  async issueLabelsOptionTexts(): Promise<string[]> {
+    const options = this.pickerOptions();
+    const total = await options.count();
+    const texts: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await options
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") texts.push(text);
+    }
+    return texts;
+  }
+
+  async issueLabelsRowText(): Promise<string> {
+    const row = this.propertyRowSync("Labels");
+    await row.waitFor({ timeout: 30_000 });
+    return ((await row.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async settingsLabelsNameValue(): Promise<string> {
+    return (await this.page.locator("#labelName").inputValue({ timeout: 30_000 })) ?? "";
+  }
+
+  async settingsLabelsAttemptSubmit(): Promise<void> {
+    // Error paths keep the form open, so this never waits for close.
+    const form = this.labelForm();
+    const update = form.getByRole("button", { name: "Update", exact: true });
+    if ((await update.count()) > 0) {
+      await update.first().click({ timeout: 30_000 });
+      return;
+    }
+    await form.getByRole("button", { name: "Add", exact: true }).click({ timeout: 30_000 });
+  }
+
+  async settingsLabelsAttemptDeleteConfirm(): Promise<void> {
+    // The modal stays open when the delete fails, so this never waits.
+    await this.page.getByRole("button", { name: "Delete", exact: true }).first().click({ timeout: 30_000 });
+  }
+
+  // --- Cross-cutting (NEWFRONT-122, ISS-221–225). Observed on the running
+  // --- old app: the list quick-add trigger is a "New work item" button;
+  // --- the detail title is a #title-input textarea when editable and a
+  // --- plain div when not; unauthorized settings show a not-authorized
+  // --- heading; the cycle page offers "Transfer work items" with a
+  // --- search-box modal listing target cycles as buttons.
+
+  async reloadPage(): Promise<void> {
+    await this.page.reload();
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async projectQuickAddVisible(): Promise<boolean> {
+    // The list trigger is a role-less Row div carrying the label text,
+    // while the sidebar create buttons (same label, main + peek
+    // duplicates) carry a data-ph-element marker: a text match counts
+    // only when neither it nor an ancestor carries that marker.
+    const matches = this.page.getByRole("main").getByText(/new work item/i);
+    const count = await matches.count();
+    for (let i = 0; i < count; i++) {
+      const marked = await matches
+        .nth(i)
+        .evaluate((node) => {
+          const self = node as HTMLElement;
+          if (self.getAttribute("data-ph-element") === "sidebar_create_work_item_button") return true;
+          return self.closest('[data-ph-element="sidebar_create_work_item_button"]') !== null;
+        })
+        .catch(() => true);
+      if (!marked) return true;
+    }
+    return false;
+  }
+
+  async issueTitleInputEnabled(): Promise<boolean> {
+    return (await this.page.locator("#title-input").count()) > 0;
+  }
+
+  async settingsLabelsAccessDenied(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0;
+  }
+
+  async globalViewIssueVisible(name: string): Promise<boolean> {
+    // Layout-agnostic (the global view renders spreadsheet, not list):
+    // an exact-text match anywhere on the page. Scenario issue names
+    // never equal a project name exactly, so sidebar project entries
+    // cannot false-positive this.
+    return (await this.page.getByText(name, { exact: true }).count()) > 0;
+  }
+
+  async openCycleIssues(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`);
+    await this.page.waitForLoadState("domcontentloaded", { timeout: WebDriver.WAIT_MS });
+  }
+
+  async cycleTransferButtonVisible(): Promise<boolean> {
+    return (await this.page.getByRole("button", { name: "Transfer work items", exact: true }).count()) > 0;
+  }
+
+  async cycleTransferOpen(): Promise<void> {
+    // The collapsible cycle-details sidebar overlaps the prompt row at
+    // desktop viewport, so close it first via its header chevron, the
+    // way a user would, before clicking Transfer normally.
+    const sidebar = this.page.locator("div.w-\\[21\\.5rem\\]");
+    if ((await sidebar.count()) > 0) {
+      await sidebar.getByRole("button").first().click({ timeout: 15_000 });
+      await sidebar.waitFor({ state: "detached", timeout: 15_000 }).catch(() => {});
+    }
+    await this.page.getByRole("button", { name: "Transfer work items", exact: true }).click({ timeout: 30_000 });
+    await this.page.getByPlaceholder("Search for a cycle...").waitFor({ timeout: 30_000 });
+  }
+
+  async cycleTransferOptionNames(): Promise<string[]> {
+    const dialog = this.page.getByRole("dialog");
+    const scope = (await dialog.count()) > 0 ? dialog : this.page;
+    const texts = await scope.getByRole("button").allTextContents();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
+  }
+
+  async cycleTransferPick(name: string): Promise<void> {
+    const dialog = this.page.getByRole("dialog");
+    const scope = (await dialog.count()) > 0 ? dialog : this.page;
+    // Option rows append a lowercase status badge to the name
+    // ("<name>current"), so match by escaped substring.
+    const pattern = new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    await scope.getByRole("button", { name: pattern }).first().click({ timeout: 30_000 });
+    // The modal closes synchronously on pick; the transfer itself lands
+    // after. Callers prove the transfer through the toast + server state.
+    await this.page.getByPlaceholder("Search for a cycle...").waitFor({ state: "detached", timeout: 30_000 });
+  }
+
+  async failNextIssuePatch(status: number, delayMs: number): Promise<void> {
+    // Only the next PATCH fails, once: reads and other writes pass
+    // through, and the handler removes itself before answering so a
+    // retried save goes to the real server. The delay keeps the
+    // optimistic value on screen long enough to poll for it. A URL
+    // predicate (not a glob) routes the request: the glob form proved
+    // flaky against the dev proxy's request URLs.
+    const matches = (url: URL): boolean =>
+      url.pathname.includes("/api/workspaces/") &&
+      url.pathname.includes("/projects/") &&
+      url.pathname.includes("/issues/");
+    const handler = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() !== "PATCH") {
+        await route.continue();
+        return;
+      }
+      // Answer first, unroute after: removing the handler from inside
+      // itself finalizes the route and a later fulfill throws
+      // "already handled".
+      try {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await route.fulfill({ status, contentType: "application/json", body: "{}" });
+      } finally {
+        await this.clearIssuePatchFailure();
+      }
+    };
+    this.patchFailureRoute = { matches, handler };
+    await this.page.route(matches, handler);
+  }
+
+  async clearIssuePatchFailure(): Promise<void> {
+    const current = this.patchFailureRoute;
+    this.patchFailureRoute = undefined;
+    if (current) await this.page.unroute(current.matches, current.handler).catch(() => {});
   }
 }

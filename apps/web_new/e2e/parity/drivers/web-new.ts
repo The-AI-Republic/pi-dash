@@ -895,7 +895,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // ---- Issue detail (NEWFRONT-121): stubs until the area lands. ----
-  async openIssueDetail(_workspaceSlug: string, _issueSeq: string): Promise<void> {
+  async openIssueDetail(_workspaceSlug: string, _issueSeqOrProjectId: string, _issueId?: string): Promise<void> {
     return todo("openIssueDetail");
   }
   async openReadOnlyIssueDetail(_workspaceSlug: string, _issueSeq: string): Promise<void> {
@@ -1310,5 +1310,620 @@ export class WebNewDriver implements ParityDriver {
 
   async activityOpenFirstEntryLink(): Promise<string> {
     return todo("activityOpenFirstEntryLink");
+  }
+
+  // --- Issue activity & comments (NEWFRONT-122, ISS-194–206). Stubs until
+  // --- the matching area lands in apps/web_new; the oracle driver above
+  // --- stays untouched.
+
+  async activityCommentTexts(): Promise<string[]> {
+    return todo("activityCommentTexts");
+  }
+
+  async activityHasCreationEntry(): Promise<boolean> {
+    return todo("activityHasCreationEntry");
+  }
+
+  async activityFilterOptions(): Promise<{ label: string; selected: boolean }[]> {
+    return todo("activityFilterOptions");
+  }
+
+  async activityToggleFilter(_label: string): Promise<void> {
+    return todo("activityToggleFilter");
+  }
+
+  async activityFilterDotVisible(): Promise<boolean> {
+    return todo("activityFilterDotVisible");
+  }
+
+  async activityComposerIsAboveFeed(): Promise<boolean> {
+    return todo("activityComposerIsAboveFeed");
+  }
+
+  async activityComposerText(): Promise<string> {
+    return todo("activityComposerText");
+  }
+
+  async activityPostComment(_bodyText: string): Promise<void> {
+    return todo("activityPostComment");
+  }
+
+  async activityOpenCommentMenu(_cardText: string): Promise<void> {
+    return todo("activityOpenCommentMenu");
+  }
+
+  async activityMenuItems(): Promise<string[]> {
+    return todo("activityMenuItems");
+  }
+
+  async activityClickMenuItem(_name: string): Promise<void> {
+    return todo("activityClickMenuItem");
+  }
+
+  async activityEditComment(_oldText: string, _newText: string): Promise<void> {
+    return todo("activityEditComment");
+  }
+
+  async sawToast(_text: string): Promise<boolean> {
+    return todo("sawToast");
+  }
+
+  async activityCancelEdit(_cardText: string): Promise<void> {
+    return todo("activityCancelEdit");
+  }
+
+  async activityCommentHighlighted(_cardText: string): Promise<boolean> {
+    return todo("activityCommentHighlighted");
+  }
+
+  async activityChipTooltipText(_cardText: string, _emoji: string, _expectedName: string): Promise<string> {
+    return todo("activityChipTooltipText");
+  }
+
+  async activityCommentBodyVisible(_cardText: string): Promise<boolean> {
+    return todo("activityCommentBodyVisible");
+  }
+
+  async activityExpandFoldedComment(_cardText: string): Promise<void> {
+    return todo("activityExpandFoldedComment");
+  }
+
+  async activityCopyCommentLink(_cardText: string): Promise<string> {
+    return todo("activityCopyCommentLink");
+  }
+
+  async activityAddCommentReaction(_cardText: string): Promise<{ emoji: string; code: string }> {
+    return todo("activityAddCommentReaction");
+  }
+
+  async activityCommentReactionChips(_cardText: string): Promise<{ emoji: string; count: number; reacted: boolean }[]> {
+    return todo("activityCommentReactionChips");
+  }
+
+  async activityClickCommentReactionChip(_cardText: string, _emoji: string): Promise<void> {
+    return todo("activityClickCommentReactionChip");
+  }
+
+  async issueAddReaction(): Promise<{ emoji: string; code: string }> {
+    return todo("issueAddReaction");
+  }
+
+  async issueReactionChips(): Promise<{ emoji: string; count: number; reacted: boolean }[]> {
+    return todo("issueReactionChips");
+  }
+
+  async issueClickReactionChip(_emoji: string): Promise<void> {
+    return todo("issueClickReactionChip");
+  }
+
+  async codeReviewsVisible(): Promise<boolean> {
+    return todo("codeReviewsVisible");
+  }
+
+  async codeReviewLinks(): Promise<{ badge: string; title: string; href: string | null; target: string | null }[]> {
+    return todo("codeReviewLinks");
+  }
+
+  async codeReviewAttach(_url: string): Promise<void> {
+    return todo("codeReviewAttach");
+  }
+
+  async codeReviewAttemptAttach(_url: string): Promise<void> {
+    return todo("codeReviewAttemptAttach");
+  }
+
+  async codeReviewInputValue(): Promise<string> {
+    return todo("codeReviewInputValue");
+  }
+
+  async codeReviewDetach(_title: string): Promise<void> {
+    return todo("codeReviewDetach");
+  }
+
+  async worklogCreateVisible(): Promise<boolean> {
+    return todo("worklogCreateVisible");
+  }
+
+  // --- Shared property dropdowns (NEWFRONT-122, ISS-207–220). Stubs until
+  // --- the matching area lands in apps/web_new; the oracle driver above
+  // --- stays untouched.
+
+  async propertyValueText(_label: string): Promise<string> {
+    return todo("propertyValueText");
+  }
+
+  async propertyOpenPicker(_label: string): Promise<void> {
+    return todo("propertyOpenPicker");
+  }
+
+  async propertyOpenPickerByKeyboard(_label: string): Promise<void> {
+    return todo("propertyOpenPickerByKeyboard");
+  }
+
+  async propertyPickerDisabled(_label: string): Promise<boolean> {
+    return todo("propertyPickerDisabled");
+  }
+
+  async propertyTriggerPresent(_label: string): Promise<boolean> {
+    return todo("propertyTriggerPresent");
+  }
+
+  async pickerOpen(): Promise<boolean> {
+    return todo("pickerOpen");
+  }
+
+  async pickerOptionTexts(): Promise<string[]> {
+    return todo("pickerOptionTexts");
+  }
+
+  async pickerHasSearch(): Promise<boolean> {
+    return todo("pickerHasSearch");
+  }
+
+  async pickerSearch(_query: string): Promise<void> {
+    return todo("pickerSearch");
+  }
+
+  async pickerSearchValue(): Promise<string> {
+    return todo("pickerSearchValue");
+  }
+
+  async pickerSearchFocused(): Promise<boolean> {
+    return todo("pickerSearchFocused");
+  }
+
+  async pickerPick(_text: string): Promise<void> {
+    return todo("pickerPick");
+  }
+
+  async pickerOptionDisabled(_text: string): Promise<boolean> {
+    return todo("pickerOptionDisabled");
+  }
+
+  async pickerEmptyText(): Promise<string> {
+    return todo("pickerEmptyText");
+  }
+
+  async pickerPressEscape(): Promise<void> {
+    return todo("pickerPressEscape");
+  }
+
+  async pickerClickOutside(): Promise<void> {
+    return todo("pickerClickOutside");
+  }
+
+  async openArchivedIssueDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
+    return todo("openArchivedIssueDetail");
+  }
+
+  async datePickerOpen(_label: string): Promise<void> {
+    return todo("datePickerOpen");
+  }
+
+  async datePickerVisible(): Promise<boolean> {
+    return todo("datePickerVisible");
+  }
+
+  async datePickerVisibleMonth(): Promise<{ month: string; year: string }> {
+    return todo("datePickerVisibleMonth");
+  }
+
+  async datePickerPickDay(_day: number): Promise<void> {
+    return todo("datePickerPickDay");
+  }
+
+  async datePickerDayDisabled(_day: number): Promise<boolean> {
+    return todo("datePickerDayDisabled");
+  }
+
+  async datePickerPortalAttached(_label: string): Promise<boolean> {
+    return todo("datePickerPortalAttached");
+  }
+
+  async datePickerClear(_label: string): Promise<void> {
+    return todo("datePickerClear");
+  }
+
+  async propertyRowPresent(_label: string): Promise<boolean> {
+    return todo("propertyRowPresent");
+  }
+
+  // --- Create-issue modal project picker (NEWFRONT-122, ISS-211). Stubs
+  // --- until the matching area lands in apps/web_new.
+
+  async issueModalOpenCreate(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("issueModalOpenCreate");
+  }
+
+  async issueModalProjectValue(): Promise<string> {
+    return todo("issueModalProjectValue");
+  }
+
+  async issueModalProjectOpenPicker(): Promise<void> {
+    return todo("issueModalProjectOpenPicker");
+  }
+
+  async issueModalProjectOptionTexts(): Promise<string[]> {
+    return todo("issueModalProjectOptionTexts");
+  }
+
+  async issueModalProjectSearch(_query: string): Promise<void> {
+    return todo("issueModalProjectSearch");
+  }
+
+  async issueModalProjectEmptyText(): Promise<string> {
+    return todo("issueModalProjectEmptyText");
+  }
+
+  async issueModalProjectPick(_text: string): Promise<void> {
+    return todo("issueModalProjectPick");
+  }
+
+  async issueModalProjectPressEscape(): Promise<void> {
+    return todo("issueModalProjectPressEscape");
+  }
+
+  async issueModalFillTitle(_title: string): Promise<void> {
+    return todo("issueModalFillTitle");
+  }
+
+  async issueModalSubmit(): Promise<void> {
+    return todo("issueModalSubmit");
+  }
+
+  async rangeMergedCellText(_issueName: string): Promise<string> {
+    return todo("rangeMergedCellText");
+  }
+
+  async rangeMergedCellOpen(_issueName: string): Promise<void> {
+    return todo("rangeMergedCellOpen");
+  }
+
+  async rangeMergedCellClear(_issueName: string): Promise<void> {
+    return todo("rangeMergedCellClear");
+  }
+
+  async rangeCalendarVisible(): Promise<boolean> {
+    return todo("rangeCalendarVisible");
+  }
+
+  async rangeCalendarPickDay(_day: number): Promise<void> {
+    return todo("rangeCalendarPickDay");
+  }
+
+  async rangeCalendarDayDisabled(_day: number): Promise<boolean> {
+    return todo("rangeCalendarDayDisabled");
+  }
+
+  async rangeCalendarSelectMonth(_monthLabel: string): Promise<void> {
+    return todo("rangeCalendarSelectMonth");
+  }
+
+  async rangeCalendarSelectYear(_yearLabel: string): Promise<void> {
+    return todo("rangeCalendarSelectYear");
+  }
+
+  async cycleCreateOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("cycleCreateOpen");
+  }
+
+  async cycleFormRangePlaceholders(): Promise<{ from: string; to: string }> {
+    return todo("cycleFormRangePlaceholders");
+  }
+
+  async cycleFormRangeOpen(): Promise<void> {
+    return todo("cycleFormRangeOpen");
+  }
+
+  async cycleFormFillName(_name: string): Promise<void> {
+    return todo("cycleFormFillName");
+  }
+
+  async cycleFormSubmit(): Promise<void> {
+    return todo("cycleFormSubmit");
+  }
+
+  async intakeCreateOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("intakeCreateOpen");
+  }
+
+  async intakeStateValue(): Promise<string> {
+    return todo("intakeStateValue");
+  }
+
+  async intakeStateOpenPicker(): Promise<void> {
+    return todo("intakeStateOpenPicker");
+  }
+
+  async intakeStateOptionTexts(): Promise<string[]> {
+    return todo("intakeStateOptionTexts");
+  }
+
+  async intakeStateSearch(_query: string): Promise<void> {
+    return todo("intakeStateSearch");
+  }
+
+  async intakeStateEmptyText(): Promise<string> {
+    return todo("intakeStateEmptyText");
+  }
+
+  async intakeStatePick(_text: string): Promise<void> {
+    return todo("intakeStatePick");
+  }
+
+  async intakeCreateFillTitle(_title: string): Promise<void> {
+    return todo("intakeCreateFillTitle");
+  }
+
+  async intakeCreateSubmit(): Promise<void> {
+    return todo("intakeCreateSubmit");
+  }
+
+  async intakeTriageStateDisabled(): Promise<boolean> {
+    return todo("intakeTriageStateDisabled");
+  }
+
+  async viewsOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("viewsOpenList");
+  }
+
+  async viewsOpenCreate(): Promise<void> {
+    return todo("viewsOpenCreate");
+  }
+
+  async viewsLayoutValue(): Promise<string> {
+    return todo("viewsLayoutValue");
+  }
+
+  async viewsLayoutOpenPicker(): Promise<void> {
+    return todo("viewsLayoutOpenPicker");
+  }
+
+  async viewsLayoutOptionTexts(): Promise<string[]> {
+    return todo("viewsLayoutOptionTexts");
+  }
+
+  async viewsLayoutHasSearch(): Promise<boolean> {
+    return todo("viewsLayoutHasSearch");
+  }
+
+  async viewsLayoutSelectedMarked(_text: string): Promise<boolean> {
+    return todo("viewsLayoutSelectedMarked");
+  }
+
+  async viewsLayoutPick(_text: string): Promise<void> {
+    return todo("viewsLayoutPick");
+  }
+
+  async viewsFillName(_name: string): Promise<void> {
+    return todo("viewsFillName");
+  }
+
+  async viewsSubmit(): Promise<void> {
+    return todo("viewsSubmit");
+  }
+
+  async subIssueFiltersOpen(_workspaceSlug: string, _projectId: string, _parentIssueId: string): Promise<void> {
+    return todo("subIssueFiltersOpen");
+  }
+
+  async subIssueFiltersPanelText(): Promise<string> {
+    return todo("subIssueFiltersPanelText");
+  }
+
+  async detailIdentifierText(): Promise<string> {
+    return todo("detailIdentifierText");
+  }
+
+  async detailIdentifierCopy(): Promise<void> {
+    return todo("detailIdentifierCopy");
+  }
+
+  async viewsOpenDetail(_workspaceSlug: string, _projectId: string, _viewId: string): Promise<void> {
+    return todo("viewsOpenDetail");
+  }
+
+  async ganttShowsIssue(_issueName: string): Promise<boolean> {
+    return todo("ganttShowsIssue");
+  }
+
+  async settingsLabelsOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("settingsLabelsOpen");
+  }
+
+  async settingsLabelsNames(): Promise<string[]> {
+    return todo("settingsLabelsNames");
+  }
+
+  async settingsLabelsAddVisible(): Promise<boolean> {
+    return todo("settingsLabelsAddVisible");
+  }
+
+  async settingsLabelsOpenCreate(): Promise<void> {
+    return todo("settingsLabelsOpenCreate");
+  }
+
+  async settingsLabelsFormVisible(): Promise<boolean> {
+    return todo("settingsLabelsFormVisible");
+  }
+
+  async settingsLabelsFillName(_name: string): Promise<void> {
+    return todo("settingsLabelsFillName");
+  }
+
+  async settingsLabelsFormError(): Promise<string> {
+    return todo("settingsLabelsFormError");
+  }
+
+  async settingsLabelsSubmitCreate(): Promise<void> {
+    return todo("settingsLabelsSubmitCreate");
+  }
+
+  async settingsLabelsSubmitUpdate(): Promise<void> {
+    return todo("settingsLabelsSubmitUpdate");
+  }
+
+  async settingsLabelsCancelForm(): Promise<void> {
+    return todo("settingsLabelsCancelForm");
+  }
+
+  async settingsLabelsDotColor(): Promise<string> {
+    return todo("settingsLabelsDotColor");
+  }
+
+  async settingsLabelsOpenColorPicker(): Promise<void> {
+    return todo("settingsLabelsOpenColorPicker");
+  }
+
+  async settingsLabelsPickColor(_hex: string): Promise<void> {
+    return todo("settingsLabelsPickColor");
+  }
+
+  async settingsLabelsOpenRowMenu(_name: string): Promise<void> {
+    return todo("settingsLabelsOpenRowMenu");
+  }
+
+  async settingsLabelsMenuItems(): Promise<string[]> {
+    return todo("settingsLabelsMenuItems");
+  }
+
+  async settingsLabelsMenuPick(_text: string): Promise<void> {
+    return todo("settingsLabelsMenuPick");
+  }
+
+  async settingsLabelsIsGroup(_name: string): Promise<boolean> {
+    return todo("settingsLabelsIsGroup");
+  }
+
+  async settingsLabelsDeleteViaTrash(_name: string): Promise<void> {
+    return todo("settingsLabelsDeleteViaTrash");
+  }
+
+  async settingsLabelsDeleteModalText(): Promise<string> {
+    return todo("settingsLabelsDeleteModalText");
+  }
+
+  async settingsLabelsDeleteConfirm(): Promise<void> {
+    return todo("settingsLabelsDeleteConfirm");
+  }
+
+  async settingsLabelsDeleteCancel(): Promise<void> {
+    return todo("settingsLabelsDeleteCancel");
+  }
+
+  async settingsLabelsDragOnto(_source: string, _target: string): Promise<void> {
+    return todo("settingsLabelsDragOnto");
+  }
+
+  async settingsLabelsDragAbove(_source: string, _target: string): Promise<void> {
+    return todo("settingsLabelsDragAbove");
+  }
+
+  async settingsLabelsEmptyTitle(): Promise<string> {
+    return todo("settingsLabelsEmptyTitle");
+  }
+
+  async settingsLabelsEmptyAction(): Promise<void> {
+    return todo("settingsLabelsEmptyAction");
+  }
+
+  async settingsLabelsSkeletonVisible(): Promise<boolean> {
+    return todo("settingsLabelsSkeletonVisible");
+  }
+
+  async settingsLabelsDelayLoad(_ms: number): Promise<void> {
+    return todo("settingsLabelsDelayLoad");
+  }
+
+  async issueLabelsOpenPicker(): Promise<void> {
+    return todo("issueLabelsOpenPicker");
+  }
+
+  async issueLabelsOptionTexts(): Promise<string[]> {
+    return todo("issueLabelsOptionTexts");
+  }
+
+  async issueLabelsRowText(): Promise<string> {
+    return todo("issueLabelsRowText");
+  }
+
+  async settingsLabelsNameValue(): Promise<string> {
+    return todo("settingsLabelsNameValue");
+  }
+
+  async settingsLabelsAttemptSubmit(): Promise<void> {
+    return todo("settingsLabelsAttemptSubmit");
+  }
+
+  async settingsLabelsAttemptDeleteConfirm(): Promise<void> {
+    return todo("settingsLabelsAttemptDeleteConfirm");
+  }
+
+  async reloadPage(): Promise<void> {
+    return todo("reloadPage");
+  }
+
+  async projectQuickAddVisible(): Promise<boolean> {
+    return todo("projectQuickAddVisible");
+  }
+
+  async issueTitleInputEnabled(): Promise<boolean> {
+    return todo("issueTitleInputEnabled");
+  }
+
+  async settingsLabelsAccessDenied(): Promise<boolean> {
+    return todo("settingsLabelsAccessDenied");
+  }
+
+  async globalViewIssueVisible(_name: string): Promise<boolean> {
+    return todo("globalViewIssueVisible");
+  }
+
+  async openCycleIssues(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
+    return todo("openCycleIssues");
+  }
+
+  async cycleTransferButtonVisible(): Promise<boolean> {
+    return todo("cycleTransferButtonVisible");
+  }
+
+  async cycleTransferOpen(): Promise<void> {
+    return todo("cycleTransferOpen");
+  }
+
+  async cycleTransferOptionNames(): Promise<string[]> {
+    return todo("cycleTransferOptionNames");
+  }
+
+  async cycleTransferPick(_name: string): Promise<void> {
+    return todo("cycleTransferPick");
+  }
+
+  async failNextIssuePatch(_status: number, _delayMs: number): Promise<void> {
+    return todo("failNextIssuePatch");
+  }
+
+  async clearIssuePatchFailure(): Promise<void> {
+    return todo("clearIssuePatchFailure");
   }
 }
