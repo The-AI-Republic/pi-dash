@@ -22,6 +22,7 @@ import {
   approveDeviceCode,
   createAccountSession,
   createWorkspace,
+  inviteWorkspaceMember,
   serverIssueNames,
   sessionValid,
   setOnboarded,
@@ -316,9 +317,13 @@ test(
   },
   async ({ driver, seed }) => {
     const ownerSession = await signInSession(seed.email, seed.password);
-    const foreignSlug = await test.step("a workspace the seed user never joined", async () => {
+    const foreignSlug = await test.step("a workspace the seed user was invited to but never joined", async () => {
       const outsider = await createAccountSession(throwawayEmail("parity-outsider"), THROWAWAY_PASSWORD);
-      return createWorkspace(outsider, "Outsider Workspace", `outsider-ws-${Date.now()}`);
+      const slug = await createWorkspace(outsider, "Outsider Workspace", `outsider-ws-${Date.now()}`);
+      // Invited-but-not-joined visitors see the "not a member" screen;
+      // strangers with no invitation see "Workspace not found" instead.
+      await inviteWorkspaceMember(slug, outsider, seed.email, 15);
+      return slug;
     });
 
     await test.step("sign in as the seed owner and open the foreign workspace", async () => {
@@ -354,6 +359,10 @@ test(
     await test.step("type the secret and submit with Enter only", async () => {
       await driver.typeText(seed.password);
       await driver.pressKey("Enter");
+      // The credential POST is still in flight when Enter lands: wait for
+      // the app to leave the entry before navigating, or the goto cancels
+      // the submit and the session never starts.
+      await expect.poll(() => driver.isSignedOut(), POLL_60).toBe(false);
       await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
     });
 

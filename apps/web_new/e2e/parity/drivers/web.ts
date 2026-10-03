@@ -6139,8 +6139,13 @@ export class WebDriver implements ParityDriver {
   }
 
   async submitDeviceApproval(): Promise<void> {
-    const form = this.page.locator("form", { has: this.deviceCodeField() });
-    await form.getByRole("button", { name: /approve/i }).click();
+    // The approval page carries a single submit button ("Approve",
+    // "Approving…" while the request is in flight). Match it directly: an
+    // earlier `form`-with-`has` composition never resolved, because the
+    // inner selector is evaluated inside each candidate form (i.e. it
+    // looked for a form nested in the form). The exact-name match also
+    // waits out the in-flight "Approving…" state.
+    await this.page.getByRole("button", { name: /^approve$/i }).click();
   }
 
   async typeText(text: string): Promise<void> {
