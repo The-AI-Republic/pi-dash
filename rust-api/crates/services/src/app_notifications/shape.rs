@@ -21,15 +21,17 @@
 //!   `UserNotificationPreference` column (`db/models/notification.py:83-108`
 //!   over `AuditModel`).
 //!
-//! Wire order follows the merged intake precedent
-//! (`space::serializers::intake::IntakeIssueView`): the declared fields
-//! first in declaration order — which is also DRF's real `__all__` order
-//! (`ModelSerializer.get_default_field_names`: `[pk] + declared + concrete
-//! + forward-relations`, verified against DRF 3.15/3.18) — then the
-//! `__all__` model body in definition order with the audit block first.
-//! The contract tests pin the key *sets* (`test_list_item_shape`,
-//! `test_preferences_get_shape`); the `*_WIRE_FIELDS` tests below pin the
-//! order this crate emits (serde struct order, byte-identical under
+//! Wire order is live DRF's real `__all__` order
+//! (`ModelSerializer.get_default_field_names`: `[pk] + declared +
+//! concrete columns + forward relations`, DRF 3.15.2 source, probed
+//! per serializer below — never hand-derived): `id` first, then the
+//! declared fields in declaration order, then every concrete column,
+//! then every FK trailing in definition order (`created_by`,
+//! `updated_by` first — they come from `UserAuditModel`, `db/mixins.py`
+//! — then the model's own FKs). The contract tests pin the key *sets*
+//! (`test_list_item_shape`, `test_preferences_get_shape`); the tests
+//! below pin the probed order literally and assert the serialized key
+//! order off the struct (serde struct order, byte-identical under
 //! `preserve_order`).
 //!
 //! Value rendering is byte-exact passthrough: FK primary keys render as
@@ -61,17 +63,17 @@ use crate::space::serializers::lite::{user_lite_to_representation, UserLiteRow, 
 
 /// The `Notification` `fields = "__all__"` model body
 /// (`db/models/notification.py:14-33` over `AuditModel`,
-/// `db/mixins.py:86-90`): audit block first, then columns in definition
-/// order. (Compare `INTAKE_ISSUE_ALL_FIELDS`, same convention.)
+/// `db/mixins.py:86-90`), in live-DRF order (probed
+/// `NotificationSerializer().fields`): `id`, the concrete columns
+/// (`created_at`, `updated_at`, `deleted_at`, then the model's own
+/// columns in definition order), then the forward relations trailing
+/// (`created_by`, `updated_by`, `workspace`, `project`,
+/// `triggered_by`, `receiver`).
 pub const NOTIFICATION_ALL_FIELDS: [&str; 21] = [
     "id",
     "created_at",
     "updated_at",
-    "created_by",
-    "updated_by",
     "deleted_at",
-    "workspace",
-    "project",
     "data",
     "entity_identifier",
     "entity_name",
@@ -80,11 +82,15 @@ pub const NOTIFICATION_ALL_FIELDS: [&str; 21] = [
     "message_html",
     "message_stripped",
     "sender",
-    "triggered_by",
-    "receiver",
     "read_at",
     "snoozed_till",
     "archived_at",
+    "created_by",
+    "updated_by",
+    "workspace",
+    "project",
+    "triggered_by",
+    "receiver",
 ];
 
 /// The four declared read-only fields of `NotificationSerializer`
@@ -97,21 +103,19 @@ pub const NOTIFICATION_DECLARED_FIELDS: [&str; 4] = [
     "is_mentioned_notification",
 ];
 
-/// Full `NotificationSerializer` wire order: declared fields, then the
-/// `__all__` body. 25 keys, the same set as FX-NOTIF-04 `output_keys`.
+/// Full `NotificationSerializer` wire order, in live-DRF order (probed
+/// `NotificationSerializer().fields`): `id`, the declared fields in
+/// declaration order, then the [`NOTIFICATION_ALL_FIELDS`] body. 25
+/// keys, the same set as FX-NOTIF-04 `output_keys`.
 pub const NOTIFICATION_WIRE_FIELDS: [&str; 25] = [
+    "id",
     "triggered_by_details",
     "is_inbox_issue",
     "is_intake_issue",
     "is_mentioned_notification",
-    "id",
     "created_at",
     "updated_at",
-    "created_by",
-    "updated_by",
     "deleted_at",
-    "workspace",
-    "project",
     "data",
     "entity_identifier",
     "entity_name",
@@ -120,32 +124,40 @@ pub const NOTIFICATION_WIRE_FIELDS: [&str; 25] = [
     "message_html",
     "message_stripped",
     "sender",
-    "triggered_by",
-    "receiver",
     "read_at",
     "snoozed_till",
     "archived_at",
+    "created_by",
+    "updated_by",
+    "workspace",
+    "project",
+    "triggered_by",
+    "receiver",
 ];
 
-/// The `UserNotificationPreference` `fields = "__all__"` key set
-/// (`db/models/notification.py:83-108` over `AuditModel`): audit block
-/// first, then `user`, nullable `workspace` / `project`, then the five
-/// boolean preference columns. 14 keys, the FX-NOTIF-05 `output_keys` set.
+/// The `UserNotificationPreference` `fields = "__all__"` wire keys
+/// (`db/models/notification.py:83-108` over `AuditModel`), in live-DRF
+/// order (probed `UserNotificationPreferenceSerializer().fields`):
+/// `id`, the concrete columns (`created_at`, `updated_at`,
+/// `deleted_at`, then the five boolean preference columns), then the
+/// forward relations trailing (`created_by`, `updated_by`, `user`,
+/// nullable `workspace` / `project`). 14 keys, the FX-NOTIF-05
+/// `output_keys` set.
 pub const PREFERENCE_ALL_FIELDS: [&str; 14] = [
     "id",
     "created_at",
     "updated_at",
-    "created_by",
-    "updated_by",
     "deleted_at",
-    "user",
-    "workspace",
-    "project",
     "property_change",
     "state_change",
     "comment",
     "mention",
     "issue_completed",
+    "created_by",
+    "updated_by",
+    "user",
+    "workspace",
+    "project",
 ];
 
 /// A database row for `Notification` rendering. Datetimes are pre-rendered
@@ -157,13 +169,13 @@ pub const PREFERENCE_ALL_FIELDS: [&str; 14] = [
 #[derive(Debug, Clone, PartialEq)]
 pub struct NotificationRow<'a> {
     pub id: &'a str,
+    pub triggered_by_details: Option<UserLiteRow<'a>>,
+    pub is_inbox_issue: bool,
+    pub is_intake_issue: bool,
+    pub is_mentioned_notification: bool,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub workspace: &'a str,
-    pub project: Option<&'a str>,
     pub data: Option<&'a serde_json::Value>,
     pub entity_identifier: Option<&'a str>,
     pub entity_name: &'a str,
@@ -172,34 +184,31 @@ pub struct NotificationRow<'a> {
     pub message_html: &'a str,
     pub message_stripped: Option<&'a str>,
     pub sender: &'a str,
-    pub triggered_by: Option<&'a str>,
-    pub triggered_by_details: Option<UserLiteRow<'a>>,
-    pub receiver: &'a str,
     pub read_at: Option<&'a str>,
     pub snoozed_till: Option<&'a str>,
     pub archived_at: Option<&'a str>,
-    pub is_inbox_issue: bool,
-    pub is_intake_issue: bool,
-    pub is_mentioned_notification: bool,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub workspace: &'a str,
+    pub project: Option<&'a str>,
+    pub triggered_by: Option<&'a str>,
+    pub receiver: &'a str,
 }
 
 /// `NotificationSerializer.to_representation` output
 /// (`serializers/notification.py:14-22`), in [`NOTIFICATION_WIRE_FIELDS`]
-/// order: declared nests/annotations first, then the `__all__` body.
+/// order: `id`, the declared nests/annotations, the concrete columns,
+/// then the trailing FKs.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NotificationView<'a> {
+    pub id: &'a str,
     pub triggered_by_details: Option<UserLiteView<'a>>,
     pub is_inbox_issue: bool,
     pub is_intake_issue: bool,
     pub is_mentioned_notification: bool,
-    pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub workspace: &'a str,
-    pub project: Option<&'a str>,
     pub data: Option<&'a serde_json::Value>,
     pub entity_identifier: Option<&'a str>,
     pub entity_name: &'a str,
@@ -208,11 +217,15 @@ pub struct NotificationView<'a> {
     pub message_html: &'a str,
     pub message_stripped: Option<&'a str>,
     pub sender: &'a str,
-    pub triggered_by: Option<&'a str>,
-    pub receiver: &'a str,
     pub read_at: Option<&'a str>,
     pub snoozed_till: Option<&'a str>,
     pub archived_at: Option<&'a str>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub workspace: &'a str,
+    pub project: Option<&'a str>,
+    pub triggered_by: Option<&'a str>,
+    pub receiver: &'a str,
 }
 
 /// Port of `NotificationSerializer` (`serializers/notification.py:14-22`).
@@ -220,6 +233,7 @@ pub struct NotificationView<'a> {
 /// `"triggered_by": null` and `"triggered_by_details": null`.
 pub fn notification_to_representation<'a>(row: &'a NotificationRow<'a>) -> NotificationView<'a> {
     NotificationView {
+        id: row.id,
         triggered_by_details: row
             .triggered_by_details
             .as_ref()
@@ -227,14 +241,9 @@ pub fn notification_to_representation<'a>(row: &'a NotificationRow<'a>) -> Notif
         is_inbox_issue: row.is_inbox_issue,
         is_intake_issue: row.is_intake_issue,
         is_mentioned_notification: row.is_mentioned_notification,
-        id: row.id,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        created_by: row.created_by,
-        updated_by: row.updated_by,
         deleted_at: row.deleted_at,
-        workspace: row.workspace,
-        project: row.project,
         data: row.data,
         entity_identifier: row.entity_identifier,
         entity_name: row.entity_name,
@@ -243,11 +252,15 @@ pub fn notification_to_representation<'a>(row: &'a NotificationRow<'a>) -> Notif
         message_html: row.message_html,
         message_stripped: row.message_stripped,
         sender: row.sender,
-        triggered_by: row.triggered_by,
-        receiver: row.receiver,
         read_at: row.read_at,
         snoozed_till: row.snoozed_till,
         archived_at: row.archived_at,
+        created_by: row.created_by,
+        updated_by: row.updated_by,
+        workspace: row.workspace,
+        project: row.project,
+        triggered_by: row.triggered_by,
+        receiver: row.receiver,
     }
 }
 
@@ -259,37 +272,39 @@ pub struct PreferenceRow<'a> {
     pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub user: &'a str,
-    pub workspace: Option<&'a str>,
-    pub project: Option<&'a str>,
     pub property_change: bool,
     pub state_change: bool,
     pub comment: bool,
     pub mention: bool,
     pub issue_completed: bool,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub user: &'a str,
+    pub workspace: Option<&'a str>,
+    pub project: Option<&'a str>,
 }
 
 /// `UserNotificationPreferenceSerializer.to_representation` output
-/// (`serializers/notification.py:25-28`, `fields = "__all__"`).
+/// (`serializers/notification.py:25-28`, `fields = "__all__"`), in
+/// [`PREFERENCE_ALL_FIELDS`] order: `id`, the concrete columns, then
+/// the trailing FKs.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PreferenceView<'a> {
     pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub user: &'a str,
-    pub workspace: Option<&'a str>,
-    pub project: Option<&'a str>,
     pub property_change: bool,
     pub state_change: bool,
     pub comment: bool,
     pub mention: bool,
     pub issue_completed: bool,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub user: &'a str,
+    pub workspace: Option<&'a str>,
+    pub project: Option<&'a str>,
 }
 
 /// Port of `UserNotificationPreferenceSerializer`
@@ -299,17 +314,17 @@ pub fn preference_to_representation<'a>(row: &'a PreferenceRow<'a>) -> Preferenc
         id: row.id,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        created_by: row.created_by,
-        updated_by: row.updated_by,
         deleted_at: row.deleted_at,
-        user: row.user,
-        workspace: row.workspace,
-        project: row.project,
         property_change: row.property_change,
         state_change: row.state_change,
         comment: row.comment,
         mention: row.mention,
         issue_completed: row.issue_completed,
+        created_by: row.created_by,
+        updated_by: row.updated_by,
+        user: row.user,
+        workspace: row.workspace,
+        project: row.project,
     }
 }
 
@@ -326,18 +341,43 @@ mod tests {
     const PREFERENCE_GOLDEN: &str =
         include_str!("../../../../fixtures/app_notifications/serializers/preference.golden.json");
 
-    /// Assert `body` serializes its keys in exactly `expected` order by
-    /// comparing successive key positions in the raw JSON string (struct
-    /// order, no map re-sorting involved).
-    fn assert_key_order(body: &str, expected: &[&str]) {
-        let mut last = 0;
-        for key in expected {
-            let needle = format!("\"{key}\":");
-            let at = body[last..]
-                .find(needle.as_str())
-                .unwrap_or_else(|| panic!("key {key} missing or out of order"));
-            last += at + needle.len();
+    /// Top-level JSON key order of a view's serialization, read off the
+    /// serialized string: struct serialization always emits declaration
+    /// order, while `Value` objects may re-sort keys.
+    fn serialized_keys<T: serde::Serialize>(value: &T) -> Vec<String> {
+        let rendered = serde_json::to_string(value).expect("serializes");
+        let mut keys = Vec::new();
+        let mut depth = 0usize;
+        let mut chars = rendered.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '{' => {
+                    depth += 1;
+                }
+                '}' => {
+                    depth -= 1;
+                }
+                '"' if depth == 1 => {
+                    let mut key = String::new();
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next == '"' {
+                            break;
+                        }
+                        key.push(next);
+                    }
+                    if chars.peek() == Some(&':') {
+                        keys.push(key);
+                    }
+                }
+                _ => {}
+            }
         }
+        keys
+    }
+
+    fn const_keys<const N: usize>(fields: &[&str; N]) -> Vec<String> {
+        fields.iter().map(|key| key.to_string()).collect()
     }
 
     /// A row matching the FX-NOTIF-04 `output_sample` (plus synthetic audit
@@ -387,6 +427,66 @@ mod tests {
         let body: BTreeSet<&str> = NOTIFICATION_ALL_FIELDS.into_iter().collect();
         let declared: BTreeSet<&str> = NOTIFICATION_DECLARED_FIELDS.into_iter().collect();
         assert_eq!(wired, body.union(&declared).copied().collect());
+        // Live-DRF order (probed `NotificationSerializer().fields` on
+        // Django 4.2.30 / DRF 3.15.2): `[pk] + declared + concrete
+        // columns + forward relations`. Pinned literally so a wrong
+        // order fails even when const and struct agree with each other.
+        assert_eq!(
+            NOTIFICATION_WIRE_FIELDS,
+            [
+                "id",
+                "triggered_by_details",
+                "is_inbox_issue",
+                "is_intake_issue",
+                "is_mentioned_notification",
+                "created_at",
+                "updated_at",
+                "deleted_at",
+                "data",
+                "entity_identifier",
+                "entity_name",
+                "title",
+                "message",
+                "message_html",
+                "message_stripped",
+                "sender",
+                "read_at",
+                "snoozed_till",
+                "archived_at",
+                "created_by",
+                "updated_by",
+                "workspace",
+                "project",
+                "triggered_by",
+                "receiver",
+            ]
+        );
+        assert_eq!(
+            NOTIFICATION_ALL_FIELDS,
+            [
+                "id",
+                "created_at",
+                "updated_at",
+                "deleted_at",
+                "data",
+                "entity_identifier",
+                "entity_name",
+                "title",
+                "message",
+                "message_html",
+                "message_stripped",
+                "sender",
+                "read_at",
+                "snoozed_till",
+                "archived_at",
+                "created_by",
+                "updated_by",
+                "workspace",
+                "project",
+                "triggered_by",
+                "receiver",
+            ]
+        );
     }
 
     #[test]
@@ -394,8 +494,13 @@ mod tests {
         let golden: serde_json::Value =
             serde_json::from_str(NOTIFICATION_GOLDEN).expect("fixture parses");
         let sample = &golden["output_sample"];
-        let body = serde_json::to_value(notification_to_representation(&sample_notification_row()))
-            .expect("view serializes");
+        let row = sample_notification_row();
+        let view = notification_to_representation(&row);
+        assert_eq!(
+            serialized_keys(&view),
+            const_keys(&NOTIFICATION_WIRE_FIELDS)
+        );
+        let body = serde_json::to_value(&view).expect("view serializes");
         for (key, value) in sample.as_object().expect("sample is an object") {
             assert_eq!(&body[key], value, "golden sample key {key}");
         }
@@ -403,10 +508,6 @@ mod tests {
         // null object, and the contract test asserts exactly this.
         assert!(body["triggered_by"].is_null());
         assert!(body["triggered_by_details"].is_null());
-        assert_key_order(
-            &serde_json::to_string(&body).expect("body serializes"),
-            &NOTIFICATION_WIRE_FIELDS,
-        );
     }
 
     #[test]
@@ -470,6 +571,30 @@ mod tests {
             .collect();
         let wired: BTreeSet<&str> = PREFERENCE_ALL_FIELDS.into_iter().collect();
         assert_eq!(wired, pinned);
+        // Live-DRF order (probed
+        // `UserNotificationPreferenceSerializer().fields` on Django
+        // 4.2.30 / DRF 3.15.2): `[pk] + concrete columns + forward
+        // relations`. Pinned literally so a wrong order fails even when
+        // const and struct agree with each other.
+        assert_eq!(
+            PREFERENCE_ALL_FIELDS,
+            [
+                "id",
+                "created_at",
+                "updated_at",
+                "deleted_at",
+                "property_change",
+                "state_change",
+                "comment",
+                "mention",
+                "issue_completed",
+                "created_by",
+                "updated_by",
+                "user",
+                "workspace",
+                "project",
+            ]
+        );
     }
 
     #[test]
@@ -490,8 +615,9 @@ mod tests {
             mention: true,
             issue_completed: true,
         };
-        let body =
-            serde_json::to_value(preference_to_representation(&row)).expect("view serializes");
+        let view = preference_to_representation(&row);
+        assert_eq!(serialized_keys(&view), const_keys(&PREFERENCE_ALL_FIELDS));
+        let body = serde_json::to_value(&view).expect("view serializes");
         // FX-NOTIF-05 output_sample excerpt (defaults golden).
         assert_eq!(body["user"], "22222222-2222-2222-2222-222222222222");
         assert!(body["workspace"].is_null());
@@ -516,9 +642,5 @@ mod tests {
         assert_eq!(patched_body["mention"], false);
         assert_eq!(patched_body["comment"], false);
         assert_eq!(patched_body["property_change"], true);
-        assert_key_order(
-            &serde_json::to_string(&body).expect("body serializes"),
-            &PREFERENCE_ALL_FIELDS,
-        );
     }
 }
