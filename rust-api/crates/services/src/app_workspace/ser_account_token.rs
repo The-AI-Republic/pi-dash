@@ -61,8 +61,9 @@
 //!   (`favorite.py:49`), so `entity_data` is ALWAYS `None` for issues
 //!   even when the row exists; `folder` maps to `(None, None)` (`:54`);
 //!   a missing row maps to `None` via `DoesNotExist` (`:87-88`).
-//! * The token value is visible ONLY in the POST-create response
-//!   (`app/views/api.py:37-39`); GET list/detail always use the read
+//! * The token value is returned by the POST-create and PATCH 200
+//!   responses (`app/views/api.py:37-39, :68-71` — both serialize with
+//!   `APITokenSerializer`); GET list/detail always use the read
 //!   serializer, which excludes it. The token key is `read_only`
 //!   (`api.py:15`), so it is model-default-generated, never
 //!   input-writable.
