@@ -270,7 +270,15 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::auth_oauth::oauth_gitlab::routes())
             .merge(crate::auth_oauth::oauth_google::routes())
             .merge(crate::auth_session::routes()),
-        RouteGroup::Runner | RouteGroup::RunnerWeb => Router::new(),
+        // Runner handlers merge their routers here (D-15 L8 run
+        // endpoints + chat web/daemon/SSE, PIDASHCONV-543; sibling
+        // handler issues extend the merge; merges keep both sides).
+        // Registration is the cutover granularity — sibling paths have
+        // no Rust route and keep proxying to Django through the
+        // fallback.
+        RouteGroup::RunnerWeb => crate::runner_runs::chat::web_routes(),
+        RouteGroup::Runner => crate::runner_runs::run_endpoints::routes()
+            .merge(crate::runner_runs::chat::daemon_routes()),
     }
 }
 

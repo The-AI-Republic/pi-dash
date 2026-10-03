@@ -311,10 +311,7 @@ pub fn evaluate_chat_send_throttle(history: &[f64], now: f64) -> ChatSendVerdict
 pub fn throttle_denied(retry_after_secs: &str) -> Response {
     let mut response = Response::builder()
         .status(StatusCode::TOO_MANY_REQUESTS)
-        .header(
-            axum::http::header::CONTENT_TYPE,
-            "application/json",
-        )
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
         .body(axum::body::Body::from(
             crate::assistant::throttles::RATE_LIMIT_BODY,
         ))
@@ -443,10 +440,8 @@ fn session_from_pg(row: &sqlx::postgres::PgRow) -> Result<AgentChatSession, Resp
 }
 
 fn message_from_row(row: MessageRow) -> Result<AgentChatMessage, Response> {
-    let role =
-        AgentChatMessageRole::from_value(&row.2).ok_or_else(server_error)?;
-    let status =
-        AgentChatMessageStatus::from_value(&row.5).ok_or_else(server_error)?;
+    let role = AgentChatMessageRole::from_value(&row.2).ok_or_else(server_error)?;
+    let status = AgentChatMessageStatus::from_value(&row.5).ok_or_else(server_error)?;
     Ok(AgentChatMessage {
         id: row.0,
         session_id: row.1,
@@ -476,8 +471,8 @@ fn event_from_row(row: EventRow) -> Result<AgentChatEvent, Response> {
 }
 
 fn chat_approval_from_row(row: ChatApprovalRow) -> Result<AgentChatApprovalRequest, Response> {
-    let kind = pidash_types::runner_runs::ApprovalKind::from_value(&row.3)
-        .ok_or_else(server_error)?;
+    let kind =
+        pidash_types::runner_runs::ApprovalKind::from_value(&row.3).ok_or_else(server_error)?;
     let status = ApprovalStatus::from_value(&row.6).ok_or_else(server_error)?;
     Ok(AgentChatApprovalRequest {
         id: row.0,
@@ -560,8 +555,8 @@ async fn lock_chat_session(
 }
 
 /// Fetch the session with its runner's guard columns, unlocked (the
-/// GET detail/messages shape).
-async fn fetch_session_with_runner(
+/// GET detail/messages shape). Shared with the SSE stream.
+pub(crate) async fn fetch_session_with_runner(
     pool: &PgPool,
     session_id: Uuid,
 ) -> Result<Option<(AgentChatSession, RunnerGuard)>, Response> {
@@ -659,13 +654,12 @@ pub async fn resolve_chat_session(
     session_id: Uuid,
     runner: Option<&DaemonRunner>,
 ) -> Result<ResolvedChatSession, Response> {
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        r#"SELECT "id", "runner_id" FROM "agent_chat_session" WHERE "id" = $1"#,
-    )
-    .bind(session_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
+    let row: Option<(Uuid, Uuid)> =
+        sqlx::query_as(r#"SELECT "id", "runner_id" FROM "agent_chat_session" WHERE "id" = $1"#)
+            .bind(session_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| server_error())?;
     let Some((id, runner_id)) = row else {
         return Err(json_response(
             StatusCode::NOT_FOUND,
@@ -780,21 +774,20 @@ impl RunnerDetailOwned {
     fn dev_machine_row(
         &self,
     ) -> Option<pidash_services::runner_enroll::serializers::shapes::DevMachineMiniRow<'_>> {
-        self.dev_machine_detail
-            .as_ref()
-            .map(|detail| pidash_services::runner_enroll::serializers::shapes::DevMachineMiniRow {
+        self.dev_machine_detail.as_ref().map(|detail| {
+            pidash_services::runner_enroll::serializers::shapes::DevMachineMiniRow {
                 id: &detail.id,
                 host_label: &detail.host_label,
                 label: &detail.label,
-            })
+            }
+        })
     }
 
     fn live_state_row(
         &self,
     ) -> Option<pidash_services::runner_enroll::serializers::shapes::LiveStateRow<'_>> {
-        self.live_state
-            .as_ref()
-            .map(|live| pidash_services::runner_enroll::serializers::shapes::LiveStateRow {
+        self.live_state.as_ref().map(|live| {
+            pidash_services::runner_enroll::serializers::shapes::LiveStateRow {
                 observed_run_id: live.observed_run_id.as_deref(),
                 last_event_at: live.last_event_at.as_deref(),
                 last_event_kind: live.last_event_kind.as_deref(),
@@ -806,7 +799,8 @@ impl RunnerDetailOwned {
                 llm_model: live.llm_model.as_deref(),
                 turn_count: live.turn_count,
                 updated_at: &live.updated_at,
-            })
+            }
+        })
     }
 
     /// Borrow the D-13 shape input (`PodMiniRow` is `Clone`, so the
@@ -814,7 +808,9 @@ impl RunnerDetailOwned {
     fn row_with_pod<'a>(
         &'a self,
         pod: pidash_services::runner_enroll::serializers::shapes::PodMiniRow<'a>,
-        dev_machine: Option<pidash_services::runner_enroll::serializers::shapes::DevMachineMiniRow<'a>>,
+        dev_machine: Option<
+            pidash_services::runner_enroll::serializers::shapes::DevMachineMiniRow<'a>,
+        >,
         live_state: Option<pidash_services::runner_enroll::serializers::shapes::LiveStateRow<'a>>,
     ) -> pidash_services::runner_enroll::serializers::shapes::RunnerRow<'a> {
         pidash_services::runner_enroll::serializers::shapes::RunnerRow {
@@ -877,7 +873,10 @@ pub async fn fetch_runner_detail(
         return Err(server_error());
     };
     let get_uuid = |idx: usize| row.try_get::<Uuid, usize>(idx).map_err(|_| server_error());
-    let get_string = |idx: usize| row.try_get::<String, usize>(idx).map_err(|_| server_error());
+    let get_string = |idx: usize| {
+        row.try_get::<String, usize>(idx)
+            .map_err(|_| server_error())
+    };
     let get_opt_uuid = |idx: usize| {
         row.try_get::<Option<Uuid>, usize>(idx)
             .map_err(|_| server_error())
@@ -1056,14 +1055,13 @@ async fn next_event_seq(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session_id: Uuid,
 ) -> Result<i32, Response> {
-    let max: Option<i32> = sqlx::query_scalar(
-        r#"SELECT MAX("seq") FROM "agent_chat_event" WHERE "session_id" = $1"#,
-    )
-    .bind(session_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| server_error())?
-    .flatten();
+    let max: Option<i32> =
+        sqlx::query_scalar(r#"SELECT MAX("seq") FROM "agent_chat_event" WHERE "session_id" = $1"#)
+            .bind(session_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|_| server_error())?
+            .flatten();
     Ok(chat_kernel::next_seq_after_max(max))
 }
 
@@ -1186,11 +1184,8 @@ pub async fn create_assistant(
     session_id: Uuid,
     local_turn_id: &str,
 ) -> Result<AgentChatMessage, Response> {
-    let inputs = chat_kernel::create_assistant_inputs(
-        local_turn_id,
-        "",
-        AgentChatMessageStatus::Streaming,
-    );
+    let inputs =
+        chat_kernel::create_assistant_inputs(local_turn_id, "", AgentChatMessageStatus::Streaming);
     let seq = next_message_seq(tx, session_id).await?;
     let id = Uuid::new_v4();
     let created_at = Utc::now();
@@ -1818,9 +1813,7 @@ impl DirectSend {
     fn frame(&self) -> Value {
         match self {
             DirectSend::Cancel {
-                session_id,
-                reason,
-                ..
+                session_id, reason, ..
             } => serde_json::json!({
                 "type": "chat_cancel",
                 "chat_session_id": session_id.to_string(),
@@ -1888,10 +1881,9 @@ async fn web_actor(
 ) -> Result<(PgPool, Uuid), Response> {
     let pool = pool_of(state)?.clone();
     let secret = state.settings().secret_key.clone();
-    let actor =
-        crate::license::resolve_actor(&pool, secret.as_bytes(), extension)
-            .await
-            .map_err(|_| server_error())?;
+    let actor = crate::license::resolve_actor(&pool, secret.as_bytes(), extension)
+        .await
+        .map_err(|_| server_error())?;
     let Some(actor) = actor else {
         return Err(json_response(
             StatusCode::UNAUTHORIZED,
@@ -1967,16 +1959,14 @@ pub async fn chat_sessions_list(
                             force_empty = true;
                         }
                     } else {
-                        let role =
-                            match workspace_role(&pool, runner_workspace, user_id).await {
-                                Ok(role) => role,
-                                Err(response) => return response,
-                            };
+                        let role = match workspace_role(&pool, runner_workspace, user_id).await {
+                            Ok(role) => role,
+                            Err(response) => return response,
+                        };
                         if role.is_none() {
                             return workspace_forbidden();
                         }
-                        if visibility
-                            != pidash_auth::permissions::runner::VISIBILITY_PRIVATE as i16
+                        if visibility != pidash_auth::permissions::runner::VISIBILITY_PRIVATE as i16
                             || owner_id != user_id
                         {
                             force_empty = true;
@@ -2026,11 +2016,15 @@ pub async fn chat_sessions_list(
     sql.push_str(r#" WHERE "runner"."owner_id" = $1 AND "runner"."visibility" = $2"#);
     let mut position = 3;
     if workspace_id.is_some() {
-        sql.push_str(&format!(r#" AND "agent_chat_session"."workspace_id" = ${position}"#));
+        sql.push_str(&format!(
+            r#" AND "agent_chat_session"."workspace_id" = ${position}"#
+        ));
         position += 1;
     }
     if runner_id.is_some() {
-        sql.push_str(&format!(r#" AND "agent_chat_session"."runner_id" = ${position}"#));
+        sql.push_str(&format!(
+            r#" AND "agent_chat_session"."runner_id" = ${position}"#
+        ));
         position += 1;
     }
     if project_id.is_some() {
@@ -2038,7 +2032,9 @@ pub async fn chat_sessions_list(
         position += 1;
     }
     if only_own {
-        sql.push_str(&format!(r#" AND "agent_chat_session"."created_by_id" = ${position}"#));
+        sql.push_str(&format!(
+            r#" AND "agent_chat_session"."created_by_id" = ${position}"#
+        ));
     }
     sql.push_str(
         r#" ORDER BY "agent_chat_session"."last_message_at" DESC,
@@ -2140,7 +2136,12 @@ pub async fn chat_session_create(
         Ok(runner) => runner,
         Err(_) => return server_error(),
     };
-    let not_found = || json_response(StatusCode::NOT_FOUND, r#"{"error":"runner_not_found"}"#.to_owned());
+    let not_found = || {
+        json_response(
+            StatusCode::NOT_FOUND,
+            r#"{"error":"runner_not_found"}"#.to_owned(),
+        )
+    };
     let Some((_, owner_id, visibility, status, pod_id)) = runner else {
         return not_found();
     };
@@ -2292,8 +2293,8 @@ pub async fn chat_session_detail(
 }
 
 /// `can_read_chat` over live reads: owner, member, or admin
-/// (`chat.py:26-29` + `guards.py`).
-async fn can_read_session(
+/// (`chat.py:26-29` + `guards.py`). Shared with the SSE stream.
+pub(crate) async fn can_read_session(
     pool: &PgPool,
     user_id: Uuid,
     session: &AgentChatSession,
@@ -2330,12 +2331,7 @@ async fn can_send_session(
         .unwrap_or(None);
     let member = role.is_some();
     let visible = runner_visible_to_user(runner, user_id);
-    chat_kernel::can_send_chat(
-        user_id,
-        session.created_by_id,
-        || member,
-        || visible,
-    )
+    chat_kernel::can_send_chat(user_id, session.created_by_id, || member, || visible)
 }
 
 /// `POST /api/runners/chat/sessions/<id>/warm/` (`chat.py:252-288`):
@@ -2510,9 +2506,7 @@ pub async fn chat_message_create(
         return server_error();
     };
     let content_raw = obj.get("content").filter(|value| py_truthy(value));
-    let parts_raw = obj
-        .get("content_parts")
-        .filter(|value| py_truthy(value));
+    let parts_raw = obj.get("content_parts").filter(|value| py_truthy(value));
     if content_raw.is_none() && parts_raw.is_none() {
         return json_response(
             StatusCode::BAD_REQUEST,
@@ -3552,12 +3546,11 @@ pub async fn daemon_chat_event(
         };
         if !delta.is_empty() {
             if assistant.is_none() {
-                assistant = match create_assistant(&mut tx, session.id, &session.active_turn_id)
-                    .await
-                {
-                    Ok(assistant) => Some(assistant),
-                    Err(response) => return response,
-                };
+                assistant =
+                    match create_assistant(&mut tx, session.id, &session.active_turn_id).await {
+                        Ok(assistant) => Some(assistant),
+                        Err(response) => return response,
+                    };
             }
             let assistant = assistant.expect("created above");
             let content = format!("{}{delta}", assistant.content);
@@ -4118,10 +4111,11 @@ fn owned(
     router
 }
 
-/// Register the web + daemon chat routes (`runner/web_urls.py` chat
-/// block + `runner/urls.py:204-236`). Sibling handler issues merge
-/// their routers at the F-10 seam; merges keep both sides.
-pub fn routes() -> Router<AppState> {
+/// Register the web chat routes (`runner/web_urls.py` chat block:
+/// sessions, messages, warm, cancel, close, approvals, the SSE
+/// stream). Merged under `RouteGroup::RunnerWeb` at the F-10 seam;
+/// sibling handler issues extend the merge, keeping both sides.
+pub fn web_routes() -> Router<AppState> {
     use axum::routing::{get, post};
     const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
     const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
@@ -4137,10 +4131,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/api/runners/chat/sessions/{session_id}/messages/",
-            owned(
-                get(chat_messages_list).post(chat_message_create),
-                GET_POST,
-            ),
+            owned(get(chat_messages_list).post(chat_message_create), GET_POST),
         )
         .route(
             "/api/runners/chat/sessions/{session_id}/warm/",
@@ -4162,6 +4153,19 @@ pub fn routes() -> Router<AppState> {
             "/api/runners/chat/approvals/{approval_id}/decide/",
             owned(post(chat_approval_decide), POST_ONLY),
         )
+        .route(
+            "/api/runners/chat/sessions/{session_id}/events/",
+            owned(get(super::sse::chat_event_stream), GET_ONLY),
+        )
+}
+
+/// Register the daemon chat routes (`runner/urls.py:204-236`).
+/// Merged under `RouteGroup::Runner` at the F-10 seam; sibling
+/// handler issues extend the merge, keeping both sides.
+pub fn daemon_routes() -> Router<AppState> {
+    use axum::routing::post;
+    const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
+    Router::new()
         .route(
             "/api/v1/runner/chat/sessions/{session_id}/started/",
             owned(post(daemon_chat_started), POST_ONLY),
@@ -4246,7 +4250,10 @@ mod tests {
             ),
             ("failed_dup", json!({"ok": true, "duplicate": true})),
             ("failed_default_code", json!({"ok": true})),
-            ("closed_no_key", json!({"error": "idempotency_key_required"})),
+            (
+                "closed_no_key",
+                json!({"error": "idempotency_key_required"}),
+            ),
             ("closed_dup", json!({"ok": true, "duplicate": true})),
         ] {
             assert_eq!(fx_body(&chat, case), expected, "{case}");
@@ -4291,8 +4298,14 @@ mod tests {
                 "sess_create_runner_unowned",
                 json!({"error": "runner_not_found"}),
             ),
-            ("sess_create_offline", json!({"error": "runner_unavailable"})),
-            ("sess_create_revoked", json!({"error": "runner_unavailable"})),
+            (
+                "sess_create_offline",
+                json!({"error": "runner_unavailable"}),
+            ),
+            (
+                "sess_create_revoked",
+                json!({"error": "runner_unavailable"}),
+            ),
             ("detail_gone", json!({"error": "not found"})),
             ("detail_stranger", json!({"error": "not found"})),
             ("warm_gone", json!({"error": "not found"})),
@@ -4348,10 +4361,7 @@ mod tests {
             assistant_delta_text(&json!({"params": {"delta": 5, "text": "t"}})),
             "t"
         );
-        assert_eq!(
-            assistant_delta_text(&json!({"params": {"text": "t"}})),
-            "t"
-        );
+        assert_eq!(assistant_delta_text(&json!({"params": {"text": "t"}})), "t");
         assert_eq!(assistant_delta_text(&json!({"params": {}})), "");
         assert_eq!(assistant_delta_text(&json!({})), "");
         assert_eq!(assistant_delta_text(&json!("x")), "");
@@ -4363,10 +4373,7 @@ mod tests {
 
     #[test]
     fn daemon_event_kind_defaults_and_truncates() {
-        assert_eq!(
-            daemon_event_kind(&Value::Null).expect("null"),
-            "raw"
-        );
+        assert_eq!(daemon_event_kind(&Value::Null).expect("null"), "raw");
         assert_eq!(daemon_event_kind(&json!("")).expect("empty"), "raw");
         assert_eq!(
             daemon_event_kind(&json!("assistant_delta")).expect("kind"),
@@ -4407,8 +4414,14 @@ mod tests {
     #[test]
     fn complete_final_status_coerces_bogus_to_completed() {
         use pidash_types::runner_runs::AgentChatMessageStatus as Status;
-        assert_eq!(complete_final_status(&json!("completed")), Status::Completed);
-        assert_eq!(complete_final_status(&json!("cancelled")), Status::Cancelled);
+        assert_eq!(
+            complete_final_status(&json!("completed")),
+            Status::Completed
+        );
+        assert_eq!(
+            complete_final_status(&json!("cancelled")),
+            Status::Cancelled
+        );
         assert_eq!(complete_final_status(&json!("failed")), Status::Failed);
         assert_eq!(complete_final_status(&json!("bogus")), Status::Completed);
         assert_eq!(complete_final_status(&json!(5)), Status::Completed);
@@ -4459,7 +4472,9 @@ mod tests {
         assert_eq!(decode_throttle_history(&encoded), vec![1.5, 2.5]);
         assert!(decode_throttle_history("not json").is_empty());
         assert!(decode_throttle_history("gASV").is_empty());
-        let user: Uuid = "0192d3b4-8c1c-7a2e-9f4b-6d5c8b7a6e5d".parse().expect("uuid");
+        let user: Uuid = "0192d3b4-8c1c-7a2e-9f4b-6d5c8b7a6e5d"
+            .parse()
+            .expect("uuid");
         assert_eq!(
             chat_send_throttle_key(&user),
             "throttle_runner_chat_send_0192d3b4-8c1c-7a2e-9f4b-6d5c8b7a6e5d"

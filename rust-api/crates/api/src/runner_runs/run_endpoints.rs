@@ -58,7 +58,9 @@ use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::lifecycle as lifecycle_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, LiveStateUsageFacts};
 use pidash_types::dispatch::AgentExecutorKind;
-use pidash_types::runner_runs::{AgentRunStatus, DevMachineInfo, RunnerInfo, TERMINAL_RUN_STATUSES};
+use pidash_types::runner_runs::{
+    AgentRunStatus, DevMachineInfo, RunnerInfo, TERMINAL_RUN_STATUSES,
+};
 
 use super::{
     authenticate_daemon, frame_model, frame_text, json_response, pool_of, py_truthy,
@@ -175,7 +177,9 @@ pub fn py_str_value(value: &Value) -> String {
             if let Some(u) = n.as_u64() {
                 return u.to_string();
             }
-            n.as_f64().map(py_float_str).unwrap_or_else(|| n.to_string())
+            n.as_f64()
+                .map(py_float_str)
+                .unwrap_or_else(|| n.to_string())
         }
         Value::String(s) => s.clone(),
         Value::Array(items) => {
@@ -204,7 +208,11 @@ fn py_float_str(f: f64) -> String {
         return "nan".to_owned();
     }
     if f.is_infinite() {
-        return if f > 0.0 { "inf".to_owned() } else { "-inf".to_owned() };
+        return if f > 0.0 {
+            "inf".to_owned()
+        } else {
+            "-inf".to_owned()
+        };
     }
     let rust = format!("{f:?}");
     let Some(pos) = rust.find('e') else {
@@ -378,8 +386,8 @@ pub fn ticket_payload(
     runner_id: Option<&Uuid>,
     now: &DateTime<Utc>,
 ) -> String {
-    let expires =
-        (*now + chrono::Duration::seconds(60)).to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
+    let expires = (*now + chrono::Duration::seconds(60))
+        .to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
     serde_json::json!({
         "run_id": run_id.to_string(),
         "stream": stream,
@@ -427,7 +435,11 @@ pub async fn resolve_run(
             r#"{"error":"run_not_owned_by_runner"}"#.to_owned(),
         ));
     }
-    Ok(ResolvedRun { id, runner_id, status })
+    Ok(ResolvedRun {
+        id,
+        runner_id,
+        status,
+    })
 }
 
 type LockedRunRow = (Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>, String);
@@ -727,7 +739,8 @@ pub async fn execute_finalize_terminal(
         live: live.as_ref(),
         runner: Some(&info),
     };
-    let mut values = lifecycle_kernel::plan_terminal_finalize(&inputs).map_err(|_| server_error())?;
+    let mut values =
+        lifecycle_kernel::plan_terminal_finalize(&inputs).map_err(|_| server_error())?;
     // `lock_run_for_finalize_sql(true, false)`: same predicates and
     // lock, targeted columns (id, executor, stored payload).
     let locked: Option<(Uuid, String, Option<Value>)> = sqlx::query_as(
@@ -865,13 +878,12 @@ pub async fn execute_apply_paused(
         .map_err(|_| server_error())?;
     // Phase-2 re-read (`pause_reread_sql`): a missing row returns
     // before the `on_commit` registration — no comment, no drain.
-    let work_item: Option<Option<Uuid>> = sqlx::query_scalar(
-        r#"SELECT "work_item_id" FROM "agent_run" WHERE "agent_run"."id" = $1"#,
-    )
-    .bind(run_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| server_error())?;
+    let work_item: Option<Option<Uuid>> =
+        sqlx::query_scalar(r#"SELECT "work_item_id" FROM "agent_run" WHERE "agent_run"."id" = $1"#)
+            .bind(run_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|_| server_error())?;
     let Some(work_item_id) = work_item else {
         return Ok(Vec::new());
     };
@@ -1026,12 +1038,13 @@ pub async fn execute_terminal_effects(
     let db = |error: sqlx::Error| TerminalEffectsError::Database(error.to_string());
     let mut hooks = pool.begin().await.map_err(db)?;
     // Lock order: issue → run (`finalization.py:115-125`).
-    let work_item_id: Option<Uuid> = sqlx::query_scalar(finalize_kernel::select_run_work_item_id_sql())
-        .bind(run_id)
-        .fetch_optional(&mut *hooks)
-        .await
-        .map_err(db)?
-        .flatten();
+    let work_item_id: Option<Uuid> =
+        sqlx::query_scalar(finalize_kernel::select_run_work_item_id_sql())
+            .bind(run_id)
+            .fetch_optional(&mut *hooks)
+            .await
+            .map_err(db)?
+            .flatten();
     if let Some(issue_id) = work_item_id {
         sqlx::query(
             r#"SELECT 1 AS "a" FROM "issues" WHERE "issues"."id" = $1
@@ -1044,23 +1057,22 @@ pub async fn execute_terminal_effects(
     }
     // `lock_run_for_effects_sql`: same predicates and lock, targeted
     // columns (status, config, error, category, binding, marker).
-    let locked: Option<EffectsLockRow> =
-        sqlx::query_as(
-            r#"SELECT "status", "run_config", "error", "refusal_category",
+    let locked: Option<EffectsLockRow> = sqlx::query_as(
+        r#"SELECT "status", "run_config", "error", "refusal_category",
                   "scheduler_binding_id", "terminal_hooks_applied_at"
                FROM "agent_run"
                WHERE ("agent_run"."id" = $1 AND "agent_run"."status" IN ($2, $3, $4, $5, $6))
                ORDER BY "agent_run"."created_at" DESC LIMIT 1 FOR UPDATE OF "agent_run""#,
-        )
-        .bind(run_id)
-        .bind(TERMINAL_RUN_STATUSES[0].value())
-        .bind(TERMINAL_RUN_STATUSES[1].value())
-        .bind(TERMINAL_RUN_STATUSES[2].value())
-        .bind(TERMINAL_RUN_STATUSES[3].value())
-        .bind(TERMINAL_RUN_STATUSES[4].value())
-        .fetch_optional(&mut *hooks)
-        .await
-        .map_err(db)?;
+    )
+    .bind(run_id)
+    .bind(TERMINAL_RUN_STATUSES[0].value())
+    .bind(TERMINAL_RUN_STATUSES[1].value())
+    .bind(TERMINAL_RUN_STATUSES[2].value())
+    .bind(TERMINAL_RUN_STATUSES[3].value())
+    .bind(TERMINAL_RUN_STATUSES[4].value())
+    .fetch_optional(&mut *hooks)
+    .await
+    .map_err(db)?;
     let Some((status, run_config, error, refusal_category, binding_id, hooks_applied_at)) = locked
     else {
         return Ok(false);
@@ -1119,7 +1131,8 @@ pub async fn execute_terminal_effects(
                 .await
                 .map_err(db)?;
             let hooked =
-                apply_scheduler_hook(&mut hooks, binding_id, status, &refusal_category, &error).await;
+                apply_scheduler_hook(&mut hooks, binding_id, status, &refusal_category, &error)
+                    .await;
             match hooked {
                 Ok(()) => {
                     sqlx::query("RELEASE SAVEPOINT scheduler_hook")
@@ -1176,16 +1189,15 @@ pub async fn execute_terminal_effects(
 
     // Capacity re-read (`select_run_for_capacity_sql`, a `.get()` —
     // a missing row raises, unguarded in the source).
-    let capacity: Option<CapacityRow> =
-        sqlx::query_as(
-            r#"SELECT "terminal_capacity_released_at", "executor_kind",
+    let capacity: Option<CapacityRow> = sqlx::query_as(
+        r#"SELECT "terminal_capacity_released_at", "executor_kind",
                   "runner_id", "pod_id", "workspace_id"
                FROM "agent_run" WHERE "agent_run"."id" = $1"#,
-        )
-        .bind(run_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(db)?;
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db)?;
     let Some((released_at, executor_kind, runner_id, pod_id, workspace_id)) = capacity else {
         return Err(TerminalEffectsError::Database(
             "capacity re-read found no row".to_owned(),
@@ -1308,11 +1320,9 @@ async fn apply_scheduler_hook(
             .await
             .map_err(db)?
             .flatten();
-    let facts = last_error.map(|last_error| {
-        pidash_services::runner_runs::BindingFacts {
-            id: binding_id,
-            last_error,
-        }
+    let facts = last_error.map(|last_error| pidash_services::runner_runs::BindingFacts {
+        id: binding_id,
+        last_error,
     });
     let plan = pidash_services::runner_runs::plan_scheduler_hook(
         facts.as_ref(),
@@ -1672,10 +1682,7 @@ pub async fn run_started(
         "local_session_id".to_owned(),
         Value::String(local_session_id),
     );
-    metadata.insert(
-        "local_thread_id".to_owned(),
-        Value::String(local_thread_id),
-    );
+    metadata.insert("local_thread_id".to_owned(), Value::String(local_thread_id));
     metadata.insert("agent_kind".to_owned(), Value::String(agent_kind));
     let started_at = Utc::now();
     if model.is_empty() {
@@ -1919,16 +1926,15 @@ pub async fn run_approval(
     // `update_or_create(id=...)`: the get, then the update or the
     // create. The update rewrites the defaults wholesale — status
     // back to `pending` included.
-    let existing: Option<Uuid> = match sqlx::query_scalar(
-        r#"SELECT "id" FROM "agent_run_approval" WHERE "id" = $1"#,
-    )
-    .bind(approval_uuid)
-    .fetch_optional(&mut *tx)
-    .await
-    {
-        Ok(existing) => existing,
-        Err(_) => return server_error(),
-    };
+    let existing: Option<Uuid> =
+        match sqlx::query_scalar(r#"SELECT "id" FROM "agent_run_approval" WHERE "id" = $1"#)
+            .bind(approval_uuid)
+            .fetch_optional(&mut *tx)
+            .await
+        {
+            Ok(existing) => existing,
+            Err(_) => return server_error(),
+        };
     match existing {
         Some(id) => {
             if sqlx::query(
@@ -2110,7 +2116,10 @@ pub async fn run_completed(
     }
     if !effects.is_empty() {
         let ports = LivePorts::new(pool.clone(), &state);
-        if drain_lifecycle_effects(&pool, &ports, effects).await.is_err() {
+        if drain_lifecycle_effects(&pool, &ports, effects)
+            .await
+            .is_err()
+        {
             return server_error();
         }
     }
@@ -2183,13 +2192,7 @@ pub async fn run_paused(
     let model = preamble.data.get("model").cloned().unwrap_or(Value::Null);
     let ports = LivePorts::new(pool.clone(), &state);
     let effects = match execute_apply_paused(
-        &mut tx,
-        &ports,
-        runner,
-        run.id,
-        &payload,
-        &tokens,
-        &model,
+        &mut tx, &ports, runner, run.id, &payload, &tokens, &model,
     )
     .await
     {
@@ -2199,7 +2202,11 @@ pub async fn run_paused(
     if commit_tx(tx).await.is_err() {
         return server_error();
     }
-    if !effects.is_empty() && drain_lifecycle_effects(&pool, &ports, effects).await.is_err() {
+    if !effects.is_empty()
+        && drain_lifecycle_effects(&pool, &ports, effects)
+            .await
+            .is_err()
+    {
         return server_error();
     }
     json_response(StatusCode::OK, r#"{"ok":true}"#.to_owned())
@@ -2278,7 +2285,11 @@ pub async fn run_failed(
         if commit_tx(tx).await.is_err() {
             return server_error();
         }
-        if !effects.is_empty() && drain_lifecycle_effects(&pool, &ports, effects).await.is_err() {
+        if !effects.is_empty()
+            && drain_lifecycle_effects(&pool, &ports, effects)
+                .await
+                .is_err()
+        {
             return server_error();
         }
         return json_response(StatusCode::OK, r#"{"ok":true,"refused":true}"#.to_owned());
@@ -2302,7 +2313,11 @@ pub async fn run_failed(
     if commit_tx(tx).await.is_err() {
         return server_error();
     }
-    if !effects.is_empty() && drain_lifecycle_effects(&pool, &ports, effects).await.is_err() {
+    if !effects.is_empty()
+        && drain_lifecycle_effects(&pool, &ports, effects)
+            .await
+            .is_err()
+    {
         return server_error();
     }
     json_response(StatusCode::OK, r#"{"ok":true}"#.to_owned())
@@ -2374,7 +2389,10 @@ async fn run_failed_requeue(
     if !effects.is_empty() && drain_lifecycle_effects(pool, ports, effects).await.is_err() {
         return server_error();
     }
-    json_response(StatusCode::OK, r#"{"ok":true,"rescheduled":true}"#.to_owned())
+    json_response(
+        StatusCode::OK,
+        r#"{"ok":true,"rescheduled":true}"#.to_owned(),
+    )
 }
 
 /// `POST runs/<run_id>/cancelled/` (`run_endpoints.py:425-442`):
@@ -2432,7 +2450,10 @@ pub async fn run_cancelled(
     }
     if !effects.is_empty() {
         let ports = LivePorts::new(pool.clone(), &state);
-        if drain_lifecycle_effects(&pool, &ports, effects).await.is_err() {
+        if drain_lifecycle_effects(&pool, &ports, effects)
+            .await
+            .is_err()
+        {
             return server_error();
         }
     }
@@ -2680,12 +2701,18 @@ mod tests {
             );
         }
         // Dedupe / terminal / cancel-pending / retired-queue answers.
-        assert_eq!(fx_body(&runs, "accept_dup"), json!({"ok": true, "duplicate": true}));
+        assert_eq!(
+            fx_body(&runs, "accept_dup"),
+            json!({"ok": true, "duplicate": true})
+        );
         assert_eq!(
             fx_body(&runs, "events_dup_batch"),
             json!({"ok": true, "duplicate": true})
         );
-        assert_eq!(fx_body(&runs, "approval_dup"), json!({"ok": true, "duplicate": true}));
+        assert_eq!(
+            fx_body(&runs, "approval_dup"),
+            json!({"ok": true, "duplicate": true})
+        );
         assert_eq!(
             fx_body(&runs, "accept_terminal"),
             json!({"ok": true, "terminal": true})
@@ -2698,7 +2725,10 @@ mod tests {
             fx_body(&runs, "accept_cancel_pending"),
             json!({"ok": true, "cancel_requested": true, "ignored": true})
         );
-        assert_eq!(fx_body(&runs, "queued"), json!({"ok": true, "ignored": true}));
+        assert_eq!(
+            fx_body(&runs, "queued"),
+            json!({"ok": true, "ignored": true})
+        );
         // The terminal events batch acknowledges with `accepted: 0`.
         assert_eq!(
             fx_body(&runs, "events_terminal"),
@@ -2726,7 +2756,10 @@ mod tests {
             json!({"ok": true, "refused": true})
         );
         // Stream-upgrade denials.
-        assert_eq!(fx_body(&runs, "stream_bad"), json!({"error": "invalid_stream"}));
+        assert_eq!(
+            fx_body(&runs, "stream_bad"),
+            json!({"error": "invalid_stream"})
+        );
         assert_eq!(
             fx_body(&runs, "stream_no_redis"),
             json!({"error": "redis_unavailable"})
@@ -2818,10 +2851,7 @@ mod tests {
                 "{raw}"
             );
         }
-        assert_eq!(
-            run_approval_kind(&json!({})).expect("missing"),
-            "other"
-        );
+        assert_eq!(run_approval_kind(&json!({})).expect("missing"), "other");
         assert!(run_approval_kind(&json!({"kind": 5})).is_err());
         assert!(run_approval_kind(&json!([1])).is_err());
     }
@@ -2832,7 +2862,10 @@ mod tests {
             &json!({"reason": "resume_unavailable"}),
             "resume_unavailable"
         ));
-        assert!(!reason_is(&json!({"reason": "resume_unavailable"}), "refusal"));
+        assert!(!reason_is(
+            &json!({"reason": "resume_unavailable"}),
+            "refusal"
+        ));
         assert!(!reason_is(&json!({}), "refusal"));
         assert!(!reason_is(&json!({"reason": null}), "refusal"));
         assert!(!reason_is(&json!({"reason": true}), "refusal"));
@@ -2875,8 +2908,12 @@ mod tests {
     #[test]
     fn ticket_key_and_payload_match_source_shape() {
         assert_eq!(ticket_key("abc"), "ws_upgrade_ticket:abc");
-        let run_id: Uuid = "0192d3b4-8c1c-7a2e-9f4b-6d5c8b7a6e5d".parse().expect("uuid");
-        let runner_id: Uuid = "a11f797c-8430-44f9-8ae2-d3aef1c2cffc".parse().expect("uuid");
+        let run_id: Uuid = "0192d3b4-8c1c-7a2e-9f4b-6d5c8b7a6e5d"
+            .parse()
+            .expect("uuid");
+        let runner_id: Uuid = "a11f797c-8430-44f9-8ae2-d3aef1c2cffc"
+            .parse()
+            .expect("uuid");
         let now: DateTime<Utc> = "2026-10-03T12:00:00Z".parse().expect("dt");
         let payload: Value =
             serde_json::from_str(&ticket_payload(&run_id, "log", Some(&runner_id), &now))
@@ -2889,13 +2926,19 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(keys, vec!["run_id", "stream", "runner_id", "expires_at"]);
-        assert_eq!(payload["run_id"], json!("0192d3b4-8c1c-7a2e-9f4b-6d5c8b7a6e5d"));
+        assert_eq!(
+            payload["run_id"],
+            json!("0192d3b4-8c1c-7a2e-9f4b-6d5c8b7a6e5d")
+        );
         assert_eq!(payload["stream"], json!("log"));
         assert_eq!(
             payload["runner_id"],
             json!("a11f797c-8430-44f9-8ae2-d3aef1c2cffc")
         );
-        assert_eq!(payload["expires_at"], json!("2026-10-03T12:01:00.000000+00:00"));
+        assert_eq!(
+            payload["expires_at"],
+            json!("2026-10-03T12:01:00.000000+00:00")
+        );
         // Anonymous minting renders `runner_id` empty (unreachable
         // past `_resolve`, kept for exactness).
         let anon: Value =
@@ -2960,11 +3003,17 @@ mod tests {
         // The helpers the `started` handler truncates through.
         let long = "é".repeat(200);
         assert_eq!(
-            frame_text(&json!(long.clone()), 128).expect("thread").chars().count(),
+            frame_text(&json!(long.clone()), 128)
+                .expect("thread")
+                .chars()
+                .count(),
             128
         );
         assert_eq!(
-            frame_text(&json!(long.clone()), 24).expect("kind").chars().count(),
+            frame_text(&json!(long.clone()), 24)
+                .expect("kind")
+                .chars()
+                .count(),
             24
         );
         assert_eq!(truncate_chars(&long, 128).chars().count(), 128);
@@ -2972,13 +3021,7 @@ mod tests {
 
     #[test]
     fn terminal_matrix_matches_python_membership() {
-        for status in [
-            "completed",
-            "failed",
-            "cancelled",
-            "blocked",
-            "refused",
-        ] {
+        for status in ["completed", "failed", "cancelled", "blocked", "refused"] {
             assert!(is_terminal_status(status), "{status}");
         }
         for status in [
