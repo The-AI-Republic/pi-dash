@@ -22,6 +22,8 @@
 //!
 //! * [`queries_membership`] — workspace member / invite / join-request
 //!   query builders (PIDASHCONV-609).
+//! * [`queries_extras`] — list endpoints, favorites, drafts, quick-links,
+//!   stickies, prefs + visits query builders (PIDASHCONV-611).
 //!
 //! * [`queries_core`] — workspace core querysets: lists, dashboard
 //!   bundle, themes, export-CSV (PIDASHCONV-608).
@@ -51,7 +53,9 @@
 //! `TRACE.md`), F-W24-07 (`models/workspace_prefs.columns.json`, incl. the
 //! `UserFavorite` part), F-W24-08 (`models/user_token.columns.json`),
 //! F-W24-09 (`queries/core.sql` + `queries/core.rows.json`), and
-//! F-W24-10 (`queries/membership.sql` + `.rows.json`), and F-W24-04
+//! F-W24-10 (`queries/membership.sql` + `.rows.json`), F-W24-12
+//! extras part (`queries/extras_user.sql` R1-R12 + `.rows.json` cases
+//! `labels` … `recent_visits`), and F-W24-04
 //! (`rust-api/fixtures/app_workspace/` `serializers/user.golden.json`),
 //! and F-W24-14 (`tasks/enqueue.golden.json`), and F-W24-12, user
 //! part (`queries/extras_user.sql` R13-R14 +
@@ -66,6 +70,7 @@
 pub mod models_prefs;
 pub mod models_user;
 pub mod queries_core;
+pub mod queries_extras;
 pub mod queries_membership;
 pub mod queries_user;
 pub mod ser_account_token;
