@@ -32,6 +32,7 @@
 
 pub mod ordering;
 pub mod params;
+pub mod serializers_assoc;
 pub mod serializers_engage;
 pub mod serializers_links;
 pub mod serializers_refs;
