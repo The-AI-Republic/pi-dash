@@ -22,3 +22,15 @@
 //! [`gate::DISABLED_BODY`).
 
 pub mod gate;
+pub mod handlers_sched;
+
+use axum::Router;
+
+use crate::state::AppState;
+
+/// Scheduler routes: each handler file exposes its own `routes()`
+/// (sibling D-36 handler issues extend this merge; merges keep both
+/// sides), merged here for the F-10 overlay seam.
+pub fn routes() -> Router<AppState> {
+    handlers_sched::routes()
+}
