@@ -1,3 +1,24 @@
+#![forbid(unsafe_code)]
+
+//! Project scheduler API surface (`app/views/scheduler/`, D-36).
+//!
+//! Ports the serializers (`app/serializers/scheduler.py:1-268`): the
+//! scheduler + binding field lists, read-only sets, derived-field rules,
+//! and every pure validator (color, rrule via an injected verdict
+//! closure, rdates/exdates ISO lists, tzid, extra_context, and the
+//! cross-field scheduler/project lock, rrule+dtstart re-check, and
+//! pod-must-belong-to-project check).
+//!
+//! Fixture oracles live under
+//! `rust-api/fixtures/app_scheduler/serializers/` (`TRACE.md` maps every
+//! file to its Python source lines); the shape tests replay F36-01..03
+//! byte-identically.
+//!
+//! The queries layer (`queries.rs`, PIDASHCONV-630) owns every SQL
+//! statement plus the `next_run_at` recompute decisions; the guards
+//! (`gate.rs`, PIDASHCONV-632) and the handlers (PIDASHCONV-633..635)
+//! complete the domain.
+
 //! App scheduler domain surface (D-36, stage 5).
 //!
 //! Ports `apps/api/pi_dash/app/views/scheduler/` for the services layer,
@@ -57,3 +78,16 @@
 
 pub mod occurrences;
 pub mod queries;
+pub mod shape;
+
+pub use shape::{
+    binding_read_only_fields, extra_context_error, field_error_body, iso_item_parse_error,
+    iso_item_type_error, iso_list_too_long, json_type_name, last_run_ended_at, last_run_status,
+    lock_error, nested_field_error_body, normalize_iso_datetime, pod_display_name,
+    resolve_active_binding_count, tzid_unknown_error, validate_color, validate_cross_rrule,
+    validate_extra_context, validate_iso_datetime_list, validate_locked_field,
+    validate_pod_project, validate_rrule, validate_tzid, IsoListError, TzidError,
+    BINDING_DECLARED_READ_ONLY_FIELDS, BINDING_META_READ_ONLY_FIELDS, BINDING_SERIALIZER_FIELDS,
+    COLOR_ERROR, EXTRA_CONTEXT_MAX_LENGTH, ISO_LIST_NOT_ARRAY, POD_PROJECT_ERROR,
+    RDATE_EXDATE_MAX_LENGTH, SCHEDULER_READ_ONLY_FIELDS, SCHEDULER_SERIALIZER_FIELDS,
+};

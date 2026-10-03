@@ -2737,6 +2737,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "chrono-tz",
  "crc32fast",
  "flate2",
  "hmac 0.13.0",

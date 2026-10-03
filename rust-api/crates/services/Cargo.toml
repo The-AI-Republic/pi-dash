@@ -43,6 +43,9 @@ zxcvbn = "3"
 rand = "0.9"
 hmac = "0.13"
 sha2 = "0.11"
+# D-36 scheduler serializers: ZoneInfo-membership check for binding tzid
+# validation (same locked chrono-tz 0.10.x as pidash-api, no lock churn).
+chrono-tz = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
