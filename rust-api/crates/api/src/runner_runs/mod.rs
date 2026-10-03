@@ -153,7 +153,10 @@ pub async fn proxy_with_body(
 /// An owned path: the owned methods serve from Rust, every other method
 /// falls through to Django (its 405-after-auth, metadata, and OPTIONS
 /// responses live there — answering 405 in Rust would mistranslate the
-/// body). The [`crate::app_pages`] precedent.
+/// body). HEAD proxies explicitly: axum would otherwise auto-serve it
+/// from the GET handler with the body stripped, while Django's views
+/// define no `head` and answer 405-after-auth (the `v1_cycles_modules`
+/// precedent). The [`crate::app_pages`] precedent for the rest.
 fn owned(
     handler: axum::routing::MethodRouter<AppState>,
     unowned: &[&str],
@@ -165,6 +168,7 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };
@@ -182,49 +186,49 @@ pub fn routes() -> Router<AppState> {
             "/api/runners/runs/",
             owned(
                 axum::routing::get(runs::list_runs).post(runs::create_run),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/runners/re-tick/",
             owned(
                 axum::routing::post(runs::retick),
-                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/runners/runs/{run_id}/",
             owned(
                 axum::routing::get(runs::run_detail),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/runners/runs/{run_id}/cancel/",
             owned(
                 axum::routing::post(runs::cancel_run),
-                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/runners/runs/{run_id}/release-pin/",
             owned(
                 axum::routing::post(runs::release_pin),
-                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/runners/approvals/",
             owned(
                 axum::routing::get(approvals::list_approvals),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/runners/approvals/{approval_id}/decide/",
             owned(
                 axum::routing::post(approvals::decide_approval),
-                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
 }
@@ -238,7 +242,7 @@ pub fn daemon_routes() -> Router<AppState> {
         "/api/v1/runner/metrics/",
         owned(
             axum::routing::get(metrics::metrics),
-            &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
         ),
     )
 }
@@ -289,6 +293,7 @@ mod tests {
         // (method, path, body) → expected status.
         let cases: &[(&str, String, u16)] = &[
             ("GET", "/api/runners/runs/".to_owned(), 500),
+            ("HEAD", "/api/runners/runs/".to_owned(), 502),
             ("POST", "/api/runners/runs/".to_owned(), 500),
             ("PUT", "/api/runners/runs/".to_owned(), 502),
             ("PATCH", "/api/runners/runs/".to_owned(), 502),
@@ -296,7 +301,9 @@ mod tests {
             ("OPTIONS", "/api/runners/runs/".to_owned(), 502),
             ("POST", "/api/runners/re-tick/".to_owned(), 500),
             ("GET", "/api/runners/re-tick/".to_owned(), 502),
+            ("HEAD", "/api/runners/re-tick/".to_owned(), 502),
             ("GET", format!("/api/runners/runs/{run}/"), 500),
+            ("HEAD", format!("/api/runners/runs/{run}/"), 502),
             ("GET", "/api/runners/runs/nope/".to_owned(), 502),
             (
                 "GET",
@@ -306,19 +313,24 @@ mod tests {
             ("POST", format!("/api/runners/runs/{run}/"), 502),
             ("POST", format!("/api/runners/runs/{run}/cancel/"), 500),
             ("GET", format!("/api/runners/runs/{run}/cancel/"), 502),
+            ("HEAD", format!("/api/runners/runs/{run}/cancel/"), 502),
             ("POST", "/api/runners/runs/nope/cancel/".to_owned(), 502),
             ("POST", format!("/api/runners/runs/{run}/release-pin/"), 500),
             ("GET", format!("/api/runners/runs/{run}/release-pin/"), 502),
+            ("HEAD", format!("/api/runners/runs/{run}/release-pin/"), 502),
             ("GET", "/api/runners/approvals/".to_owned(), 500),
+            ("HEAD", "/api/runners/approvals/".to_owned(), 502),
             ("POST", "/api/runners/approvals/".to_owned(), 502),
             ("POST", format!("/api/runners/approvals/{run}/decide/"), 500),
             ("GET", format!("/api/runners/approvals/{run}/decide/"), 502),
+            ("HEAD", format!("/api/runners/approvals/{run}/decide/"), 502),
             (
                 "POST",
                 "/api/runners/approvals/nope/decide/".to_owned(),
                 502,
             ),
             ("GET", "/api/v1/runner/metrics/".to_owned(), 500),
+            ("HEAD", "/api/v1/runner/metrics/".to_owned(), 502),
             ("POST", "/api/v1/runner/metrics/".to_owned(), 502),
         ];
         for (method, path, want) in cases {
