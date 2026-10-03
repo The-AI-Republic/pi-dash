@@ -3842,7 +3842,12 @@ mod tests {
                     .expect("read back");
             assert_eq!(row.0, "queued");
             // backoff 10 → bounds (5, 15); the sampler took the top.
-            assert_eq!(row.1, Some(now + ChronoDuration::seconds(15)));
+            // Postgres timestamptz keeps microseconds; chrono keeps nanos
+            // (L6 dispatch.rs precedent): compare at micros precision.
+            assert_eq!(
+                row.1.map(|lease| lease.timestamp_micros()),
+                Some((now + ChronoDuration::seconds(15)).timestamp_micros())
+            );
             teardown(&pool, &graph).await;
         }
 
