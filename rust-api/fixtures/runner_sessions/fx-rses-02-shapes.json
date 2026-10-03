@@ -1,0 +1,884 @@
+{
+  "fixture": "FX-RSES-02",
+  "_trace": "views/sessions.py:97-285 open+welcome, :288-312 delete; views/machine_sessions.py:69-131 open, :134-159 delete; views/sessions.py:330-459 bookkeeping, :462-601 async read+poll view; machine_sessions.py:175-345; views/sessions.py:132-141 open auth check (view-level 403); runner/authentication.py:82-126 legacy-JWT branch (auth-level 401 runner_id_mismatch via resolver_match); machine_sessions.py:300-307 poll mismatch; authentication.py:216-227 mt_ invalid -> 401",
+  "_method": "Called the real view methods (APIView.post/delete) via APIRequestFactory requests with D-13 auth stubbed (request.auth_runner / auth_machine_token set directly); real scratch Postgres + real Redis DB 14 behind a logging proxy. Ran the real async poll views via RequestFactory; D-13 auth stubbed except for the 401 cases which run the real auth classes; real scratch Postgres + real Redis DB 14 behind a logging proxy. Real D-13 tokens minted via mint_access_token/mint_machine_token (setup only); every recorded response rendered by the real D-14 views + real DRF dispatch; scratch Postgres + Redis DB 14.",
+  "runner_open_201": {
+    "status": 201,
+    "key_order": [
+      "session_id",
+      "welcome",
+      "resume_ack",
+      "redeliver"
+    ],
+    "welcome_key_order": [
+      "type",
+      "rid",
+      "server_time",
+      "long_poll_interval_secs",
+      "protocol_version"
+    ],
+    "session_id_is_uuid4": "4941e665-a688-4b04-9f61-de965ee5e968",
+    "welcome_sample": {
+      "type": "welcome",
+      "rid": "28a83b35-9dd5-42bc-9d94-d1a4cf880fb1",
+      "server_time": "2026-10-02T22:22:34.118933+00:00",
+      "long_poll_interval_secs": 25,
+      "protocol_version": 4
+    },
+    "resume_ack": null,
+    "redeliver": null,
+    "body_bytes_sample": "{\"session_id\":\"4941e665-a688-4b04-9f61-de965ee5e968\",\"welcome\":{\"type\":\"welcome\",\"rid\":\"28a83b35-9dd5-42bc-9d94-d1a4cf880fb1\",\"server_time\":\"2026-10-02T22:22:34.118933+00:00\",\"long_poll_interval_secs\":25,\"protocol_version\":4},\"resume_ack\":null,\"redeliver\":null}",
+    "sql": [
+      "BEGIN",
+      "SET LOCAL lock_timeout = '5000ms'",
+      "SET LOCAL statement_timeout = '20000ms'",
+      "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid) ORDER BY \"runner_session\".\"created_at\" DESC LIMIT 1 FOR UPDATE",
+      "INSERT INTO \"runner_session\" (\"id\", \"runner_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\") VALUES ('4941e665a6884b049f61de965ee5e968'::uuid, '28a83b359dd542bc9d94d1a4cf880fb1'::uuid, 4, '2026-10-02 22:22:34.055739+00:00'::timestamptz, '2026-10-02 22:22:34.047587+00:00'::timestamptz, NULL, '')",
+      "UPDATE \"runner\" SET \"os\" = '', \"arch\" = '', \"runner_version\" = '', \"dev_metadata\" = '{}'::jsonb, \"last_heartbeat_at\" = '2026-10-02 22:22:34.057584+00:00'::timestamptz WHERE \"runner\".\"id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid",
+      "SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 22:21:34.065541+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" IN ('running', 'awaiting_approval', 'awaiting_reauth') AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"created_at\" DESC",
+      "SELECT \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 22:21:34.065541+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" IN ('running', 'awaiting_approval', 'awaiting_reauth') AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"created_at\" DESC",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 22:21:34.065541+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" IN ('running', 'awaiting_approval', 'awaiting_reauth')) ORDER BY \"agent_run\".\"created_at\" DESC",
+      "SELECT \"agent_chat_session\".\"id\" FROM \"agent_chat_session\" WHERE (\"agent_chat_session\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_chat_session\".\"status\" = 'open' AND (\"agent_chat_session\".\"active_message_id\" IS NOT NULL OR NOT (\"agent_chat_session\".\"active_turn_id\" = ''))) ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC",
+      "COMMIT",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"assigned_at\" ASC, \"agent_run\".\"created_at\" ASC LIMIT 1",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" IN ('assigned', 'waiting_for_worktree')) ORDER BY \"agent_run\".\"assigned_at\" ASC, \"agent_run\".\"created_at\" ASC LIMIT 1"
+    ],
+    "redis": [
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'runner_stream:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'",
+          "groupname": "'runner-group:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "xautoclaim",
+        "args": [],
+        "kwargs": {
+          "name": "'runner_stream:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'",
+          "groupname": "'runner-group:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'",
+          "consumername": "'consumer-4941e665-a688-4b04-9f61-de965ee5e968'",
+          "min_idle_time": "0",
+          "start_id": "'0-0'",
+          "count": "200",
+          "justid": "True"
+        },
+        "result": "[]"
+      },
+      {
+        "cmd": "publish",
+        "args": [
+          "'session_eviction:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'",
+          "'{\"old_sid\": null, \"new_sid\": \"4941e665-a688-4b04-9f61-de965ee5e968\"}'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      },
+      {
+        "cmd": "xrange",
+        "args": [
+          "'runner_offline_stream:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'"
+        ],
+        "kwargs": {},
+        "result": "[]"
+      }
+    ]
+  },
+  "runner_open_201_hello": {
+    "status": 201,
+    "welcome": {
+      "type": "welcome",
+      "rid": "28a83b35-9dd5-42bc-9d94-d1a4cf880fb1",
+      "server_time": "2026-10-02T22:22:34.147425+00:00",
+      "long_poll_interval_secs": 25,
+      "protocol_version": 4
+    },
+    "resume_ack": null,
+    "redeliver": null,
+    "sql": [
+      "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"free_worktrees\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\", \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects\".\"is_time_tracking_enabled\", \"projects\".\"is_issue_type_enabled\", \"projects\".\"is_default\", \"projects\".\"guest_view_all_features\", \"projects\".\"members_can_edit_states\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"estimate_id\", \"projects\".\"archive_in\", \"projects\".\"close_in\", \"projects\".\"logo_props\", \"projects\".\"default_state_id\", \"projects\".\"archived_at\", \"projects\".\"timezone\", \"projects\".\"external_source\", \"projects\".\"external_id\", \"projects\".\"repo_url\", \"projects\".\"base_branch\", \"projects\".\"agent_default_interval_seconds\", \"projects\".\"agent_default_max_ticks\", \"projects\".\"agent_review_default_interval_seconds\", \"projects\".\"agent_test_default_interval_seconds\", \"projects\".\"agent_ticking_enabled\", \"projects\".\"default_agent_executor\" FROM \"runner\" INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\") WHERE \"runner\".\"id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1",
+      "BEGIN",
+      "SET LOCAL lock_timeout = '5000ms'",
+      "SET LOCAL statement_timeout = '20000ms'",
+      "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid) ORDER BY \"runner_session\".\"created_at\" DESC LIMIT 1 FOR UPDATE",
+      "UPDATE \"runner_session\" SET \"revoked_at\" = '2026-10-02 22:22:34.136080+00:00'::timestamptz, \"revoked_reason\" = 'evicted_by_new_session' WHERE \"runner_session\".\"id\" = '4941e665a6884b049f61de965ee5e968'::uuid",
+      "INSERT INTO \"runner_session\" (\"id\", \"runner_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\") VALUES ('1131b9c30ff14af59fea5ce9eacb094c'::uuid, '28a83b359dd542bc9d94d1a4cf880fb1'::uuid, 4, '2026-10-02 22:22:34.136728+00:00'::timestamptz, '2026-10-02 22:22:34.136643+00:00'::timestamptz, NULL, '')",
+      "UPDATE \"runner\" SET \"capabilities\" = '[\"agent:muse_code\"]'::jsonb, \"os\" = 'darwin', \"arch\" = 'arm64', \"runner_version\" = '9.9.9', \"dev_metadata\" = '{\"codex_version\": \"v1.2.3\", \"working_dir\": \"/tmp/wd\"}'::jsonb, \"last_heartbeat_at\" = '2026-10-02 22:22:34.137006+00:00'::timestamptz WHERE \"runner\".\"id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid",
+      "SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 22:21:34.137611+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" IN ('running', 'awaiting_approval', 'awaiting_reauth') AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"created_at\" DESC",
+      "SELECT \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 22:21:34.137611+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" IN ('running', 'awaiting_approval', 'awaiting_reauth') AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"created_at\" DESC",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 22:21:34.137611+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" IN ('running', 'awaiting_approval', 'awaiting_reauth')) ORDER BY \"agent_run\".\"created_at\" DESC",
+      "SELECT \"agent_chat_session\".\"id\" FROM \"agent_chat_session\" WHERE (\"agent_chat_session\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_chat_session\".\"status\" = 'open' AND (\"agent_chat_session\".\"active_message_id\" IS NOT NULL OR NOT (\"agent_chat_session\".\"active_turn_id\" = ''))) ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC",
+      "COMMIT",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"assigned_at\" ASC, \"agent_run\".\"created_at\" ASC LIMIT 1",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" IN ('assigned', 'waiting_for_worktree')) ORDER BY \"agent_run\".\"assigned_at\" ASC, \"agent_run\".\"created_at\" ASC LIMIT 1"
+    ],
+    "redis": [
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'runner_stream:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'",
+          "groupname": "'runner-group:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "delete",
+        "args": [
+          "'session_pel_drained:4941e665-a688-4b04-9f61-de965ee5e968'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      },
+      {
+        "cmd": "xautoclaim",
+        "args": [],
+        "kwargs": {
+          "name": "'runner_stream:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'",
+          "groupname": "'runner-group:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'",
+          "consumername": "'consumer-1131b9c3-0ff1-4af5-9fea-5ce9eacb094c'",
+          "min_idle_time": "0",
+          "start_id": "'0-0'",
+          "count": "200",
+          "justid": "True"
+        },
+        "result": "[]"
+      },
+      {
+        "cmd": "publish",
+        "args": [
+          "'session_eviction:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'",
+          "'{\"old_sid\": \"4941e665-a688-4b04-9f61-de965ee5e968\", \"new_sid\": \"1131b9c3-0ff1-4af5-9fea-5ce9eacb094c\"}'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      },
+      {
+        "cmd": "xrange",
+        "args": [
+          "'runner_offline_stream:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'"
+        ],
+        "kwargs": {},
+        "result": "[]"
+      }
+    ],
+    "prior_session_after": {
+      "revoked": true,
+      "revoked_reason": "evicted_by_new_session"
+    }
+  },
+  "runner_open_201_versions": {
+    "welcome": {
+      "type": "welcome",
+      "rid": "28a83b35-9dd5-42bc-9d94-d1a4cf880fb1",
+      "server_time": "2026-10-02T22:22:34.170518+00:00",
+      "long_poll_interval_secs": 25,
+      "protocol_version": 4,
+      "latest_runner_version": "1.2.3",
+      "min_runner_version": "1.0.0"
+    },
+    "welcome_key_order": [
+      "type",
+      "rid",
+      "server_time",
+      "long_poll_interval_secs",
+      "protocol_version",
+      "latest_runner_version",
+      "min_runner_version"
+    ]
+  },
+  "protocol_header": {
+    "missing": null,
+    "current_4": null,
+    "future_99": null,
+    "old_1": {
+      "status": 426,
+      "body": {
+        "error": "protocol_version_unsupported",
+        "minimum": 4
+      }
+    },
+    "non_numeric": {
+      "status": 426,
+      "body": {
+        "error": "protocol_version_unsupported",
+        "minimum": 4
+      }
+    },
+    "blank": null,
+    "via_open_old": {
+      "status": 426,
+      "body": {
+        "error": "protocol_version_unsupported",
+        "minimum": 4
+      }
+    }
+  },
+  "error_403_runner_id_mismatch": {
+    "status": 403,
+    "body": {
+      "error": "runner_id_mismatch"
+    }
+  },
+  "error_403_no_auth": {
+    "status": 403,
+    "body": {
+      "error": "runner_id_mismatch"
+    }
+  },
+  "error_409_project_mismatch": {
+    "status": 409,
+    "body": {
+      "error": "project_mismatch",
+      "expected": "CT00003"
+    },
+    "sql": [
+      "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"free_worktrees\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\", \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects\".\"is_time_tracking_enabled\", \"projects\".\"is_issue_type_enabled\", \"projects\".\"is_default\", \"projects\".\"guest_view_all_features\", \"projects\".\"members_can_edit_states\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"estimate_id\", \"projects\".\"archive_in\", \"projects\".\"close_in\", \"projects\".\"logo_props\", \"projects\".\"default_state_id\", \"projects\".\"archived_at\", \"projects\".\"timezone\", \"projects\".\"external_source\", \"projects\".\"external_id\", \"projects\".\"repo_url\", \"projects\".\"base_branch\", \"projects\".\"agent_default_interval_seconds\", \"projects\".\"agent_default_max_ticks\", \"projects\".\"agent_review_default_interval_seconds\", \"projects\".\"agent_test_default_interval_seconds\", \"projects\".\"agent_ticking_enabled\", \"projects\".\"default_agent_executor\" FROM \"runner\" INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\") WHERE \"runner\".\"id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1"
+    ],
+    "session_rows_after": 3
+  },
+  "error_503_runner_state_locked": {
+    "status": 503,
+    "body": {
+      "error": "runner_state_locked"
+    },
+    "redis": [
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'runner_stream:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'",
+          "groupname": "'runner-group:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      }
+    ],
+    "note": "OperationalError injected at apply_hello (inside the view's atomic block); body rendered by the view's own except OperationalError clause"
+  },
+  "runner_delete_204": {
+    "status": 204,
+    "body_bytes": "",
+    "sql": [
+      "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"id\" = '45fdf734eba942d480b839a4163ee3bc'::uuid AND \"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid) LIMIT 21",
+      "UPDATE \"runner_session\" SET \"revoked_at\" = '2026-10-02 22:22:34.199374+00:00'::timestamptz, \"revoked_reason\" = 'clean_shutdown' WHERE \"runner_session\".\"id\" = '45fdf734eba942d480b839a4163ee3bc'::uuid",
+      "UPDATE \"runner\" SET \"status\" = 'offline' WHERE (\"runner\".\"id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND NOT (\"runner\".\"status\" = 'revoked'))"
+    ],
+    "redis": [
+      {
+        "cmd": "delete",
+        "args": [
+          "'session_pel_drained:45fdf734-eba9-42d4-80b8-39a4163ee3bc'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      }
+    ],
+    "row_after": {
+      "revoked": true,
+      "reason": "clean_shutdown"
+    },
+    "runner_status_after": "offline"
+  },
+  "runner_delete_204_missing": {
+    "status": 204,
+    "body_bytes": ""
+  },
+  "runner_delete_403_no_auth": {
+    "status": 403,
+    "body": {
+      "error": "runner_id_mismatch"
+    }
+  },
+  "machine_open_201": {
+    "status": 201,
+    "key_order": [
+      "session_id",
+      "welcome"
+    ],
+    "welcome_key_order": [
+      "type",
+      "dev_machine_id",
+      "server_time",
+      "long_poll_interval_secs",
+      "protocol_version"
+    ],
+    "welcome_sample": {
+      "type": "welcome",
+      "dev_machine_id": "e985a543-b79a-48a8-bdfe-7e0aaa937914",
+      "server_time": "2026-10-02T22:22:34.218067+00:00",
+      "long_poll_interval_secs": 25,
+      "protocol_version": 4
+    },
+    "sql": [
+      "SELECT \"dev_machine\".\"id\", \"dev_machine\".\"owner_id\", \"dev_machine\".\"host_label\", \"dev_machine\".\"label\", \"dev_machine\".\"visibility\", \"dev_machine\".\"provisioning\", \"dev_machine\".\"last_seen_at\", \"dev_machine\".\"revoked_at\", \"dev_machine\".\"created_at\", \"dev_machine\".\"updated_at\" FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = 'e985a543b79a48a8bdfe7e0aaa937914'::uuid LIMIT 21",
+      "BEGIN",
+      "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = 'e985a543b79a48a8bdfe7e0aaa937914'::uuid AND \"machine_session\".\"revoked_at\" IS NULL) ORDER BY \"machine_session\".\"created_at\" DESC LIMIT 1 FOR UPDATE",
+      "INSERT INTO \"machine_session\" (\"id\", \"dev_machine_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\") VALUES ('399779fa1d904aa08a64501c6ba7ae0b'::uuid, 'e985a543b79a48a8bdfe7e0aaa937914'::uuid, 4, '2026-10-02 22:22:34.215407+00:00'::timestamptz, '2026-10-02 22:22:34.215224+00:00'::timestamptz, NULL, '')",
+      "UPDATE \"dev_machine\" SET \"last_seen_at\" = '2026-10-02 22:22:34.216532+00:00'::timestamptz WHERE \"dev_machine\".\"id\" = 'e985a543b79a48a8bdfe7e0aaa937914'::uuid",
+      "COMMIT"
+    ],
+    "redis": [
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'machine_stream:e985a543-b79a-48a8-bdfe-7e0aaa937914'",
+          "groupname": "'machine-group:e985a543-b79a-48a8-bdfe-7e0aaa937914'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "publish",
+        "args": [
+          "'machine_session_eviction:e985a543-b79a-48a8-bdfe-7e0aaa937914'",
+          "'{\"old_sid\": null, \"new_sid\": \"399779fa-1d90-4aa0-8a64-501c6ba7ae0b\"}'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      },
+      {
+        "cmd": "xrange",
+        "args": [
+          "'machine_offline_stream:e985a543-b79a-48a8-bdfe-7e0aaa937914'"
+        ],
+        "kwargs": {},
+        "result": "[]"
+      }
+    ]
+  },
+  "machine_open_201_second": {
+    "status": 201,
+    "prior_after": {
+      "revoked": true,
+      "reason": "evicted_by_new_session"
+    },
+    "sql": [
+      "SELECT \"dev_machine\".\"id\", \"dev_machine\".\"owner_id\", \"dev_machine\".\"host_label\", \"dev_machine\".\"label\", \"dev_machine\".\"visibility\", \"dev_machine\".\"provisioning\", \"dev_machine\".\"last_seen_at\", \"dev_machine\".\"revoked_at\", \"dev_machine\".\"created_at\", \"dev_machine\".\"updated_at\" FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = 'e985a543b79a48a8bdfe7e0aaa937914'::uuid LIMIT 21",
+      "BEGIN",
+      "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = 'e985a543b79a48a8bdfe7e0aaa937914'::uuid AND \"machine_session\".\"revoked_at\" IS NULL) ORDER BY \"machine_session\".\"created_at\" DESC LIMIT 1 FOR UPDATE",
+      "UPDATE \"machine_session\" SET \"revoked_at\" = '2026-10-02 22:22:34.220403+00:00'::timestamptz, \"revoked_reason\" = 'evicted_by_new_session' WHERE \"machine_session\".\"id\" = '399779fa1d904aa08a64501c6ba7ae0b'::uuid",
+      "INSERT INTO \"machine_session\" (\"id\", \"dev_machine_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\") VALUES ('2086b8f437e74fe997830dabef282911'::uuid, 'e985a543b79a48a8bdfe7e0aaa937914'::uuid, 4, '2026-10-02 22:22:34.220935+00:00'::timestamptz, '2026-10-02 22:22:34.220868+00:00'::timestamptz, NULL, '')",
+      "UPDATE \"dev_machine\" SET \"last_seen_at\" = '2026-10-02 22:22:34.221157+00:00'::timestamptz WHERE \"dev_machine\".\"id\" = 'e985a543b79a48a8bdfe7e0aaa937914'::uuid",
+      "COMMIT"
+    ]
+  },
+  "machine_open_403_mismatch": {
+    "other_machine": {
+      "status": 403,
+      "body": {
+        "error": "dev_machine_mismatch"
+      }
+    },
+    "no_token": {
+      "status": 403,
+      "body": {
+        "error": "dev_machine_mismatch"
+      }
+    }
+  },
+  "machine_delete_204": {
+    "status": 204,
+    "body_bytes": "",
+    "sql": [
+      "SELECT \"dev_machine\".\"id\", \"dev_machine\".\"owner_id\", \"dev_machine\".\"host_label\", \"dev_machine\".\"label\", \"dev_machine\".\"visibility\", \"dev_machine\".\"provisioning\", \"dev_machine\".\"last_seen_at\", \"dev_machine\".\"revoked_at\", \"dev_machine\".\"created_at\", \"dev_machine\".\"updated_at\" FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = 'e985a543b79a48a8bdfe7e0aaa937914'::uuid LIMIT 21",
+      "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = 'e985a543b79a48a8bdfe7e0aaa937914'::uuid AND \"machine_session\".\"id\" = '2086b8f437e74fe997830dabef282911'::uuid AND \"machine_session\".\"revoked_at\" IS NULL) LIMIT 21",
+      "UPDATE \"machine_session\" SET \"revoked_at\" = '2026-10-02 22:22:34.225445+00:00'::timestamptz, \"revoked_reason\" = 'clean_shutdown' WHERE \"machine_session\".\"id\" = '2086b8f437e74fe997830dabef282911'::uuid"
+    ],
+    "redis": [
+      {
+        "cmd": "delete",
+        "args": [
+          "'machine_session_pel_drained:2086b8f4-37e7-4fe9-9783-0dabef282911'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      }
+    ],
+    "row_after": {
+      "revoked": true,
+      "reason": "clean_shutdown"
+    }
+  },
+  "machine_delete_204_missing": {
+    "status": 204,
+    "body_bytes": ""
+  },
+  "endpoint_classes": {
+    "RunnerSessionOpenEndpoint": {
+      "authentication": [
+        "RunnerAccessTokenAuthentication"
+      ],
+      "permission_classes": [],
+      "throttle_classes": []
+    },
+    "RunnerSessionDeleteEndpoint": {
+      "authentication": [
+        "RunnerAccessTokenAuthentication"
+      ],
+      "permission_classes": [],
+      "throttle_classes": []
+    },
+    "MachineSessionOpenEndpoint": {
+      "authentication": [
+        "MachineTokenAuthentication"
+      ],
+      "permission_classes": [],
+      "throttle_classes": []
+    },
+    "MachineSessionDeleteEndpoint": {
+      "authentication": [
+        "MachineTokenAuthentication"
+      ],
+      "permission_classes": [],
+      "throttle_classes": []
+    }
+  },
+  "bound_txn_waits": {
+    "sql": [
+      "SET LOCAL lock_timeout = '5000ms'",
+      "SET LOCAL statement_timeout = '20000ms'"
+    ],
+    "vendor": "postgresql"
+  },
+  "bookkeeping_missing_session": {
+    "error": {
+      "payload": {
+        "error": "session_evicted"
+      },
+      "status": 409
+    },
+    "plan": null
+  },
+  "bookkeeping_revoked_session": {
+    "error": {
+      "payload": {
+        "error": "session_evicted",
+        "reason": "evicted_by_new_session"
+      },
+      "status": 409
+    },
+    "plan": null
+  },
+  "bookkeeping_happy": {
+    "error": null,
+    "plan": {
+      "block_ms": 0,
+      "use_zero": true
+    },
+    "sql": [
+      "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"id\" = 'e07b372e2d6247e6b3090397b4065c17'::uuid AND \"runner_session\".\"runner_id\" = '88d03d06e974463da76e33b773bb7850'::uuid) LIMIT 21",
+      "UPDATE \"runner_session\" SET \"last_seen_at\" = '2026-10-02 23:58:25.107579+00:00'::timestamptz WHERE \"runner_session\".\"id\" = 'e07b372e2d6247e6b3090397b4065c17'::uuid",
+      "BEGIN",
+      "SET LOCAL lock_timeout = '5000ms'",
+      "SET LOCAL statement_timeout = '20000ms'",
+      "SELECT \"runner\".\"last_heartbeat_at\", \"runner\".\"status\" FROM \"runner\" WHERE \"runner\".\"id\" = '88d03d06e974463da76e33b773bb7850'::uuid LIMIT 21 FOR UPDATE",
+      "UPDATE \"runner\" SET \"last_heartbeat_at\" = '2026-10-02 23:58:25.108975+00:00'::timestamptz, \"status\" = 'online' WHERE \"runner\".\"id\" = '88d03d06e974463da76e33b773bb7850'::uuid",
+      "SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 23:57:25.132133+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '88d03d06e974463da76e33b773bb7850'::uuid AND \"agent_run\".\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"created_at\" DESC",
+      "SELECT \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 23:57:25.132133+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '88d03d06e974463da76e33b773bb7850'::uuid AND \"agent_run\".\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"created_at\" DESC",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 23:57:25.132133+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '88d03d06e974463da76e33b773bb7850'::uuid AND \"agent_run\".\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth')) ORDER BY \"agent_run\".\"created_at\" DESC",
+      "COMMIT",
+      "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"free_worktrees\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\" FROM \"runner\" WHERE \"runner\".\"id\" = '88d03d06e974463da76e33b773bb7850'::uuid ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1",
+      "BEGIN",
+      "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"free_worktrees\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= '2026-10-02 23:56:55.176960+00:00'::timestamptz AND \"runner\".\"id\" = '88d03d06e974463da76e33b773bb7850'::uuid AND \"runner\".\"status\" = 'online' AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED",
+      "SELECT \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\" FROM \"pod\" WHERE \"pod\".\"id\" = '3ec95f3d65294c53bd06b5eb53b65129'::uuid LIMIT 21",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\", EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = '4af18496abd443ddb4ac099c4e141d50'::uuid OR (U2.\"assignee_id\" = '4af18496abd443ddb4ac099c4e141d50'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) AS \"_runner_visible_issue\", EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = '4af18496abd443ddb4ac099c4e141d50'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1) AS \"_runner_visible_scheduler\", CASE WHEN \"agent_run\".\"pinned_runner_id\" = '88d03d06e974463da76e33b773bb7850'::uuid THEN 0 ELSE 1 END AS \"_is_mine\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pod_id\" = '3ec95f3d65294c53bd06b5eb53b65129'::uuid AND \"agent_run\".\"status\" = 'queued' AND (\"agent_run\".\"pinned_runner_id\" = '88d03d06e974463da76e33b773bb7850'::uuid OR \"agent_run\".\"pinned_runner_id\" IS NULL) AND (\"agent_run\".\"created_by_id\" = '4af18496abd443ddb4ac099c4e141d50'::uuid OR \"agent_run\".\"owner_id\" = '4af18496abd443ddb4ac099c4e141d50'::uuid OR EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = '4af18496abd443ddb4ac099c4e141d50'::uuid OR (U2.\"assignee_id\" = '4af18496abd443ddb4ac099c4e141d50'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) OR EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = '4af18496abd443ddb4ac099c4e141d50'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1)) AND \"agent_run\".\"executor_kind\" = 'local_runner') ORDER BY 44 ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+      "COMMIT"
+    ],
+    "redis": [
+      {
+        "cmd": "exists",
+        "args": [
+          "'session_pel_drained:e07b372e-2d62-47e6-b309-0397b4065c17'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      }
+    ],
+    "runner_after": {
+      "status": "online",
+      "heartbeat_set": true
+    }
+  },
+  "bookkeeping_busy": {
+    "error": null,
+    "plan": {
+      "block_ms": 0,
+      "use_zero": true
+    },
+    "sql": [
+      "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"id\" = 'c420dbb325094a969c4dccc6e39ede19'::uuid AND \"runner_session\".\"runner_id\" = '88d03d06e974463da76e33b773bb7850'::uuid) LIMIT 21",
+      "UPDATE \"runner_session\" SET \"last_seen_at\" = '2026-10-02 23:58:25.286215+00:00'::timestamptz WHERE \"runner_session\".\"id\" = 'c420dbb325094a969c4dccc6e39ede19'::uuid",
+      "BEGIN",
+      "SET LOCAL lock_timeout = '5000ms'",
+      "SET LOCAL statement_timeout = '20000ms'",
+      "SELECT \"runner\".\"last_heartbeat_at\", \"runner\".\"status\" FROM \"runner\" WHERE \"runner\".\"id\" = '88d03d06e974463da76e33b773bb7850'::uuid LIMIT 21 FOR UPDATE",
+      "UPDATE \"runner\" SET \"last_heartbeat_at\" = '2026-10-02 23:58:25.289254+00:00'::timestamptz, \"status\" = 'busy' WHERE \"runner\".\"id\" = '88d03d06e974463da76e33b773bb7850'::uuid",
+      "SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 23:57:25.348113+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '88d03d06e974463da76e33b773bb7850'::uuid AND \"agent_run\".\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"created_at\" DESC",
+      "SELECT \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 23:57:25.348113+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '88d03d06e974463da76e33b773bb7850'::uuid AND \"agent_run\".\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"created_at\" DESC",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 23:57:25.348113+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '88d03d06e974463da76e33b773bb7850'::uuid AND \"agent_run\".\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth')) ORDER BY \"agent_run\".\"created_at\" DESC",
+      "COMMIT"
+    ],
+    "redis": [
+      {
+        "cmd": "exists",
+        "args": [
+          "'session_pel_drained:c420dbb3-2509-4a96-9c4d-ccc6e39ede19'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      }
+    ],
+    "runner_status": "busy"
+  },
+  "machine_bookkeeping_happy": {
+    "error": null,
+    "plan": {
+      "block_ms": 0,
+      "use_zero": true
+    },
+    "sql": [
+      "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = 'fc760ff2761d4cbaa5ae2d25e81839f2'::uuid AND \"machine_session\".\"id\" = '3f9f2343c0ad49d399cfd23a7b645487'::uuid) LIMIT 21",
+      "UPDATE \"machine_session\" SET \"last_seen_at\" = '2026-10-02 23:58:25.383635+00:00'::timestamptz WHERE \"machine_session\".\"id\" = '3f9f2343c0ad49d399cfd23a7b645487'::uuid",
+      "UPDATE \"dev_machine\" SET \"last_seen_at\" = '2026-10-02 23:58:25.383635+00:00'::timestamptz WHERE \"dev_machine\".\"id\" = 'fc760ff2761d4cbaa5ae2d25e81839f2'::uuid"
+    ],
+    "redis": [
+      {
+        "cmd": "exists",
+        "args": [
+          "'machine_session_pel_drained:3f9f2343-c0ad-49d3-99cf-d23a7b645487'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      }
+    ]
+  },
+  "machine_bookkeeping_missing": {
+    "error": {
+      "payload": {
+        "error": "session_evicted"
+      },
+      "status": 409
+    }
+  },
+  "poll_405_get": {
+    "status": 405,
+    "body": {
+      "detail": "Method \"GET\" not allowed."
+    }
+  },
+  "machine_poll_405_get": {
+    "status": 405,
+    "body": {
+      "detail": "Method \"GET\" not allowed."
+    }
+  },
+  "poll_400_bad_json": {
+    "status": 400,
+    "body": {
+      "detail": "JSON parse error"
+    }
+  },
+  "machine_poll_400_bad_json": {
+    "status": 400,
+    "body": {
+      "detail": "JSON parse error"
+    }
+  },
+  "poll_403_url_mismatch": {
+    "status": 403,
+    "body": {
+      "error": "runner_id_mismatch"
+    }
+  },
+  "poll_409_evicted": {
+    "status": 409,
+    "body": {
+      "error": "session_evicted",
+      "reason": "evicted_by_new_session"
+    }
+  },
+  "poll_200_first": {
+    "status": 200,
+    "key_order": [
+      "messages",
+      "server_time",
+      "long_poll_interval_secs"
+    ],
+    "messages": [],
+    "long_poll_interval_secs": 25,
+    "server_time_sample": "2026-10-02T23:58:25.738360+00:00",
+    "body_bytes_sample": "{\"messages\": [], \"server_time\": \"2026-10-02T23:58:25.738360+00:00\", \"long_poll_interval_secs\": 25}",
+    "redis": [
+      {
+        "cmd": "exists",
+        "args": [
+          "'session_pel_drained:13fbb116-0adb-4793-8252-cd81f7c9a666'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      },
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'runner_stream:88d03d06-e974-463d-a76e-33b773bb7850'",
+          "groupname": "'runner-group:88d03d06-e974-463d-a76e-33b773bb7850'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "xreadgroup",
+        "args": [],
+        "kwargs": {
+          "groupname": "'runner-group:88d03d06-e974-463d-a76e-33b773bb7850'",
+          "consumername": "'consumer-13fbb116-0adb-4793-8252-cd81f7c9a666'",
+          "streams": "{'runner_stream:88d03d06-e974-463d-a76e-33b773bb7850': '0'}",
+          "count": "100",
+          "block": "0"
+        },
+        "result": "[[b'runner_stream:88d03d06-e974-463d-a76e-33b773bb7850', []]]"
+      },
+      {
+        "cmd": "set",
+        "args": [
+          "'session_pel_drained:13fbb116-0adb-4793-8252-cd81f7c9a666'",
+          "'1'"
+        ],
+        "kwargs": {
+          "ex": "7200"
+        },
+        "result": "True"
+      }
+    ],
+    "pel_marker_set_after": true
+  },
+  "poll_200_blocking_empty": {
+    "status": 200,
+    "messages": [],
+    "long_poll_interval_secs": 2,
+    "elapsed_secs": 2.21,
+    "redis_cmds": [
+      [
+        "exists",
+        null
+      ],
+      [
+        "pubsub",
+        null
+      ],
+      [
+        "xgroup_create",
+        null
+      ],
+      [
+        "xreadgroup",
+        "1000"
+      ],
+      [
+        "xreadgroup",
+        "961"
+      ]
+    ]
+  },
+  "machine_poll_200_first": {
+    "status": 200,
+    "key_order": [
+      "messages",
+      "server_time",
+      "long_poll_interval_secs"
+    ],
+    "messages": [],
+    "long_poll_interval_secs": 25,
+    "redis": [
+      {
+        "cmd": "exists",
+        "args": [
+          "'machine_session_pel_drained:3f9f2343-c0ad-49d3-99cf-d23a7b645487'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      },
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'machine_stream:fc760ff2-761d-4cba-a5ae-2d25e81839f2'",
+          "groupname": "'machine-group:fc760ff2-761d-4cba-a5ae-2d25e81839f2'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "xreadgroup",
+        "args": [],
+        "kwargs": {
+          "groupname": "'machine-group:fc760ff2-761d-4cba-a5ae-2d25e81839f2'",
+          "consumername": "'machine-consumer-3f9f2343-c0ad-49d3-99cf-d23a7b645487'",
+          "streams": "{'machine_stream:fc760ff2-761d-4cba-a5ae-2d25e81839f2': '0'}",
+          "count": "100",
+          "block": "0"
+        },
+        "result": "[[b'machine_stream:fc760ff2-761d-4cba-a5ae-2d25e81839f2', []]]"
+      },
+      {
+        "cmd": "set",
+        "args": [
+          "'machine_session_pel_drained:3f9f2343-c0ad-49d3-99cf-d23a7b645487'",
+          "'1'"
+        ],
+        "kwargs": {
+          "ex": "7200"
+        },
+        "result": "True"
+      }
+    ],
+    "pel_marker_set_after": true
+  },
+  "poll_401_invalid_token": {
+    "status": 401,
+    "body": {
+      "detail": "access_token_malformed"
+    }
+  },
+  "machine_poll_401_invalid_token": {
+    "status": 403,
+    "body": {
+      "error": "dev_machine_mismatch"
+    }
+  },
+  "open_401_dispatch": {
+    "status": 401,
+    "body_bytes": "{\"detail\":\"access_token_malformed\"}"
+  },
+  "open_405_dispatch_get": {
+    "status": 405,
+    "body_bytes": "{\"detail\":\"Method \\\"GET\\\" not allowed.\"}"
+  },
+  "open_get_bad_token": {
+    "status": 401,
+    "body_bytes": "{\"detail\":\"access_token_malformed\"}"
+  },
+  "delete_401_dispatch": {
+    "status": 401,
+    "body_bytes": "{\"detail\":\"access_token_malformed\"}"
+  },
+  "machine_open_401_dispatch": {
+    "status": 403,
+    "body_bytes": "{\"error\":\"dev_machine_mismatch\"}"
+  },
+  "slice_block0_nousezero": {
+    "messages": [],
+    "redis_cmds": []
+  },
+  "slice_expired_deadline": {
+    "messages": [],
+    "redis_cmds": [
+      "pubsub"
+    ],
+    "note": "monotonic jumped past the deadline; only subscribe ran, no xreadgroup BLOCK issued"
+  },
+  "slice_eviction_break": {
+    "raised": true
+  },
+  "poll_409_evicted_during_wait": {
+    "status": 409,
+    "body": {
+      "error": "session_evicted"
+    },
+    "redis_cmds": [
+      "exists",
+      "pubsub",
+      "xgroup_create",
+      "xreadgroup",
+      "xreadgroup"
+    ]
+  },
+  "open_401_cross_runner": {
+    "status": 401,
+    "body_bytes": "{\"detail\":\"runner_id_mismatch\"}"
+  },
+  "open_201_dispatch_wire": {
+    "status": 201,
+    "body_bytes": "{\"session_id\":\"3c493411-a8a6-420b-aaad-69fbd93fc69a\",\"welcome\":{\"type\":\"welcome\",\"rid\":\"da5e0788-02b9-48c3-9f91-87c3d2c3798e\",\"server_time\":\"2026-10-03T00:02:59.399590+00:00\",\"long_poll_interval_secs\":25,\"protocol_version\":4},\"resume_ack\":null,\"redeliver\":null}",
+    "redis_cmds": [
+      "xgroup_create",
+      "xautoclaim",
+      "publish",
+      "xrange"
+    ]
+  },
+  "poll_401_cross_runner": {
+    "status": 401,
+    "body": {
+      "detail": "runner_id_mismatch"
+    }
+  },
+  "machine_poll_401_mt_invalid": {
+    "status": 401,
+    "body": {
+      "detail": "machine_token_invalid"
+    }
+  },
+  "machine_open_401_mt_invalid": {
+    "status": 401,
+    "body_bytes": "{\"detail\":\"machine_token_invalid\"}"
+  },
+  "machine_open_403_non_mt_bearer": {
+    "status": 403,
+    "body_bytes": "{\"error\":\"dev_machine_mismatch\"}"
+  },
+  "poll_two_step_delivery": {
+    "first": {
+      "status": 200,
+      "messages": []
+    },
+    "second": {
+      "status": 200,
+      "messages": [
+        {
+          "stream_id": "1790985779441-0",
+          "mid": "m-b3-1",
+          "type": "config_push",
+          "body": {
+            "type": "config_push",
+            "mid": "m-b3-1"
+          }
+        }
+      ]
+    },
+    "first_xreads": [
+      "{'runner_stream:2ebe18e6-2c80-4144-819c-e3be23ea39c7': '0'}"
+    ],
+    "second_xreads": [
+      "{'runner_stream:2ebe18e6-2c80-4144-819c-e3be23ea39c7': '>'}"
+    ],
+    "note": "entries enqueued before the first poll are NOT in the consumer's PEL, so the use_zero (0) replay misses them; the follow-up (>) poll delivers"
+  },
+  "machine_poll_two_step_delivery": {
+    "first_messages": [],
+    "second_messages": [
+      {
+        "stream_id": "1790985779555-0",
+        "mid": "m-b3-m1",
+        "type": "ping",
+        "body": {
+          "type": "ping",
+          "mid": "m-b3-m1"
+        }
+      }
+    ]
+  }
+}
