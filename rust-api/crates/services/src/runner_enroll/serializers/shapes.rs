@@ -620,21 +620,37 @@ fn py_digit_value(c: char, radix: u32) -> Option<u32> {
 
 /// Port of `int(s, radix)` for radix 10/16 (UUID `hex=` path): strip the
 /// `int()` whitespace set (exactly Rust `char::is_whitespace` — unlike
-/// `str.strip()` it excludes U+001C-U+001F), one optional sign, digits
-/// with single underscores strictly between digits. Returns `(negative,
-/// magnitude)`; `None` on any `ValueError` shape. The magnitude
-/// accumulates in `u128` (checked): overflow exceeds the 32-hex-digit
-/// range, so `None` is the correct outcome.
+/// `str.strip()` it excludes U+001C-U+001F), one optional sign, an
+/// optional radix-16 `0x`/`0X` prefix, digits with single underscores
+/// strictly between digits. Returns `(negative, magnitude)`; `None` on
+/// any `ValueError` shape. The magnitude accumulates in `u128`
+/// (checked): overflow exceeds the 32-hex-digit range, so `None` is the
+/// correct outcome.
 fn py_int_magnitude(s: &str, radix: u32) -> Option<(bool, u128)> {
     let t = s.trim_matches(|c: char| c.is_whitespace());
-    let (negative, digits) = match t.strip_prefix(['+', '-']) {
+    let (negative, mut digits) = match t.strip_prefix(['+', '-']) {
         Some(rest) => (t.starts_with('-'), rest),
         None => (false, t),
     };
+    // Radix 16 only: skip one optional `0x`/`0X` prefix, where the `0` is
+    // any Nd char with decimal value 0 and the `x` is ASCII-only. The
+    // skipped prefix counts as "digit seen", so a leading `_` may follow.
+    let mut allow_leading_underscore = false;
+    if radix == 16 {
+        let mut it = digits.chars();
+        if let (Some(z), Some(x)) = (it.next(), it.next()) {
+            if py_decimal_value(z) == Some(0) && matches!(x, 'x' | 'X') {
+                digits = it.as_str();
+                allow_leading_underscore = true;
+            }
+        }
+    }
     let mut chars = digits.chars().peekable();
-    // At least one leading digit; `_` may neither lead nor trail.
+    // At least one leading digit; `_` may neither lead nor trail (except
+    // directly after a skipped `0x` prefix, which counts as digit-seen).
     match chars.peek() {
         Some(&c) if py_digit_value(c, radix).is_some() => {}
+        Some('_') if allow_leading_underscore => {}
         _ => return None,
     }
     let mut mag: u128 = 0;
@@ -1778,6 +1794,53 @@ mod tests {
                 json!({"dev_machine_id": ["Must be a valid UUID."]})
             );
         }
+        // `int(hex, 16)` skips one optional `0x`/`0X` prefix, so 32-char
+        // prefixed inputs are accepted and normalized (DRF-oracle values).
+        for (raw, want) in [
+            (
+                "0x123456781234567812345678123456".to_owned(),
+                "00123456-7812-3456-7812-345678123456",
+            ),
+            (
+                "0X123456781234567812345678123456".to_owned(),
+                "00123456-7812-3456-7812-345678123456",
+            ),
+            (
+                "\u{0660}x123456781234567812345678123456".to_owned(),
+                "00123456-7812-3456-7812-345678123456",
+            ),
+            (
+                "0x_".to_owned() + &"1".repeat(29),
+                "00011111-1111-1111-1111-111111111111",
+            ),
+        ] {
+            assert_eq!(raw.chars().count(), 32, "{raw}");
+            let body = enroll_body(&[("dev_machine_id", json!(raw))]);
+            assert_eq!(
+                validate_enroll_request(&body)
+                    .unwrap()
+                    .dev_machine_id
+                    .as_deref(),
+                Some(want),
+                "{raw}"
+            );
+        }
+        // Prefix misses (all 32 chars) are rejected.
+        for raw in [
+            "1x".to_owned() + &"1".repeat(30),
+            "00x".to_owned() + &"1".repeat(29),
+            "0xx".to_owned() + &"1".repeat(29),
+            "0x".to_owned() + &"1".repeat(29) + "_",
+            "_0x".to_owned() + &"1".repeat(29),
+        ] {
+            assert_eq!(raw.chars().count(), 32, "{raw}");
+            let body = enroll_body(&[("dev_machine_id", json!(raw))]);
+            assert_eq!(
+                validate_enroll_request(&body).unwrap_err(),
+                json!({"dev_machine_id": ["Must be a valid UUID."]}),
+                "{raw}"
+            );
+        }
         for raw in [json!(-5), json!(1.5), json!([]), json!({})] {
             let body = enroll_body(&[("dev_machine_id", raw)]);
             assert_eq!(
@@ -1856,6 +1919,15 @@ mod tests {
             ("١٢٣", 16, false, 0x123),
             ("0", 10, false, 0),
             ("ffffffffffffffffffffffffffffffff", 16, false, u128::MAX),
+            // Radix-16 optional `0x`/`0X` prefix (after the sign; `0` is any
+            // Nd zero, `x` ASCII-only; a leading `_` is allowed after it).
+            ("0x10", 16, false, 16),
+            ("0X_ABC", 16, false, 2748),
+            ("+0x10", 16, false, 16),
+            ("-0x10", 16, true, 16),
+            ("0x_10", 16, false, 16),
+            ("\u{0660}x10", 16, false, 16),
+            ("0x0", 16, false, 0),
         ];
         for (s, radix, neg, mag) in valid {
             assert_eq!(
@@ -1884,6 +1956,22 @@ mod tests {
             ("12\x1f", 10),
             ("\x1c12", 16),
             ("12\x1f", 16),
+            // Radix-16 prefix misses: non-zero `0`, doubled/misplaced
+            // prefix, bare prefix, bad underscores, intervening chars.
+            ("1x10", 16),
+            ("00x10", 16),
+            ("0xx10", 16),
+            ("0x", 16),
+            ("0x_", 16),
+            ("0x__1", 16),
+            ("0x1__2", 16),
+            ("0x+10", 16),
+            ("0x10_", 16),
+            ("_0x10", 16),
+            ("+_0x1", 16),
+            ("0_x10", 16),
+            ("0Xx10", 16),
+            ("0xX10", 16),
             ("zz", 16),
             (ones40.as_str(), 10), // overflows u128
         ];
