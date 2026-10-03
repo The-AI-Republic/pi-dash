@@ -26,6 +26,7 @@
 //! - [`v1_cycles_modules`]: api-v1 cycles + modules models (D-20).
 //! - [`v1_projects`]: api-v1 projects/members/states/estimates models (D-19).
 //! - [`runner_runs`]: runner run/chat/dedupe/live-state models (D-15).
+//! - [`runner_sessions`]: runner/machine session rows + SQL (D-14).
 //!
 //! Write paths take a [`context::RequestContext`]; there is no unscoped
 //! handle for writes.
@@ -57,6 +58,7 @@ pub mod prompting;
 pub mod redis;
 pub mod runner_enroll;
 pub mod runner_runs;
+pub mod runner_sessions;
 pub mod soft_delete;
 pub mod space;
 pub mod tasks_cleanup;
