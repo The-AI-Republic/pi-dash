@@ -148,8 +148,13 @@
 //! (`sessions.py:172-213`; machine open has neither), and machine
 //! open calls `timezone.now()` twice (session row + `DevMachine`
 //! touch get distinct timestamps, `machine_sessions.py:104-108`).
+//!
+//! [`outbox`] ports the per-runner Redis Streams verbs
+//! (`services/outbox.py:139-737`) on top of these models and the
+//! `types::runner_sessions` shapes (PIDASHCONV-550).
 
 pub mod models;
+pub mod outbox;
 
 pub use models::machine_session::MachineSession;
 pub use models::runner_session::RunnerSession;
