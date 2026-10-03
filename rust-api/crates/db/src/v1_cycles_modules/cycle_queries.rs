@@ -159,10 +159,23 @@ const USER_TABLE: &str = "users";
 const ISSUE_LINK_TABLE: &str = "issue_links";
 /// `file_assets` table behind `attachment_count` (Q4 GET).
 const FILE_ASSET_TABLE: &str = "file_assets";
+/// `labels` table behind bare-M2M `order_by=labels` (Q4 GET,
+/// PIDASHCONV-522).
+const LABEL_TABLE: &str = "labels";
+/// `issue_assignees` through table behind `order_by=assignees`.
+const ISSUE_ASSIGNEE_TABLE: &str = "issue_assignees";
+/// `issue_labels` through table behind `order_by=labels`.
+const ISSUE_LABEL_TABLE: &str = "issue_labels";
+/// `pod` table behind bare-FK `order_by=assigned_pod` (Q4 GET,
+/// PIDASHCONV-522; `runner.Pod`, `db_table = "pod"`, singular).
+const POD_TABLE: &str = "pod";
+/// Alias of the parent self-join (`select_related("parent")`, Q4 GET);
+/// `order_by=parent__<col>` renders onto it (PIDASHCONV-522).
+pub const PARENT_ALIAS: &str = "T7";
 // NOTE: the transfer distributions join `issue_assignees`,
 // `issue_labels` and `labels` too, but those statements are static
 // `pub const` text (below), so the table names live inline there,
-// pinned by the distribution tests — no builder const needed.
+// pinned by the distribution tests.
 
 // ---------------------------------------------------------------------------
 // Shared scope inputs
@@ -181,6 +194,205 @@ pub enum ArchivedFilter {
     Any,
 }
 
+/// Where an [`OrderBy`] renders its term (PIDASHCONV-522: the Q4
+/// GET `?order_by=` resolves Django-side to more than base-table
+/// columns — every shape below was read off live Django 4.2
+/// `str(queryset.query)` output for the Q4 GET chain; the module-port
+/// precedent is PIDASHCONV-510/511).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderTarget {
+    /// `ORDER BY "<base>"."<column>"` — plain columns, FK `<name>_id`
+    /// columns, and unknown text (which fails at the database exactly
+    /// like Django's `FieldError`-at-evaluation). Every pre-522 shape.
+    Base,
+    /// `ORDER BY "<table>"."<column>"` onto an already-joined table or
+    /// alias (see [`issue_traversal_table`]). The tail passes through
+    /// raw, so an unresolvable tail fails at the database exactly like
+    /// Django's `FieldError` — no column allowlist needed.
+    Table(&'static str),
+    /// `ORDER BY "<column>"` — a bare output alias. Django renders the
+    /// early annotations positionally (`ORDER BY 35`); the alias is the
+    /// same semantics without depending on the `issues.*` width. Only
+    /// for annotations that exist at `.order_by()` time
+    /// (`sub_issues_count`, `bridge_id`); `link_count` and
+    /// `attachment_count` are annotated after and stay [`OrderTarget::Base`]
+    /// pass-through 500s, like Django's `FieldError` for them.
+    Alias,
+    /// `ORDER BY RANDOM() ASC` — Django `?` (the compiler yields an
+    /// ascending `Random()`; `-?` is a `FieldError`, never random, so
+    /// only the exact `?` maps here and the flag always renders `ASC`).
+    Random,
+    /// A bare-M2M default ordering: the builder adds the two `LEFT JOIN`s
+    /// and orders by the related model's `Meta.ordering` term.
+    M2M(M2MOrder),
+    /// A bare-FK (or reverse-FK) default ordering: the related model's
+    /// `Meta.ordering` terms, with the extra `LEFT JOIN` when the Q4
+    /// GET does not already join the table ([`RelatedOrder`]).
+    Related(RelatedOrder),
+    /// A single-level FK traversal needing a fresh to-one `LEFT JOIN`
+    /// ([`TraversalOrder`]): the builder adds the join and orders by the
+    /// tail column on the joined table.
+    Traversal(TraversalOrder),
+    /// A single-level M2M traversal (`assignees__<tail>`,
+    /// `labels__<tail>`): the builder adds the through + target `LEFT
+    /// JOIN`s and orders by the tail column on the target table.
+    M2MTraversal(M2MOrder),
+}
+
+/// The bare-M2M names the Q4 GET resolves (`assignees`, `labels`).
+/// Both related models order `('-created_at',)` (`db/models/user.py:137`,
+/// `db/models/label.py:44`), so plain `assignees` renders
+/// `ORDER BY "users"."created_at" DESC` and the `-` prefix inverts it
+/// to `ASC` (verified against live `str(query)` output).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum M2MOrder {
+    /// `LEFT JOIN "issue_assignees"` + `LEFT JOIN "users"`.
+    Assignees,
+    /// `LEFT JOIN "issue_labels"` + `LEFT JOIN "labels"`.
+    Labels,
+}
+
+impl M2MOrder {
+    /// `(through_table, through_issue_fk, through_target_fk, target_table)`.
+    fn tables(self) -> (&'static str, &'static str, &'static str, &'static str) {
+        match self {
+            M2MOrder::Assignees => (ISSUE_ASSIGNEE_TABLE, "issue_id", "assignee_id", USER_TABLE),
+            M2MOrder::Labels => (ISSUE_LABEL_TABLE, "issue_id", "label_id", LABEL_TABLE),
+        }
+    }
+}
+
+/// The bare-FK (and reverse-FK) names the Q4 GET resolves to the
+/// related model's `Meta.ordering` (PIDASHCONV-522): Django orders
+/// `order_by=<fk>` by the related ordering, *not* by `<name>_id` —
+/// every shape below was read off live Django 4.2 `str(queryset.query)`
+/// output for the Q4 GET chain. The request `-` inverts each term.
+/// `type` is deliberately NOT here: `IssueType` has no
+/// `Meta.ordering`, so Django orders `type` by the local
+/// `"issues"."type_id"` with no join at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelatedOrder {
+    /// `ORDER BY "states"."sequence"` (`State.Meta.ordering`,
+    /// `db/models/state.py:129`; no new join — `select_related`).
+    State,
+    /// `ORDER BY "projects"."created_at" DESC` (`Project.Meta.ordering
+    /// = ('-created_at',)`, `db/models/project.py:253`; no new join).
+    Project,
+    /// `ORDER BY "workspaces"."created_at" DESC`
+    /// (`Workspace.Meta.ordering`, `db/models/workspace.py:182`).
+    Workspace,
+    /// `ORDER BY "T7"."created_at" DESC` (`Issue.Meta.ordering`,
+    /// `db/models/issue.py:254`, onto the parent self-join alias).
+    Parent,
+    /// `LEFT JOIN "users"` on `created_by_id` +
+    /// `ORDER BY "users"."created_at" DESC` (`User.Meta.ordering`,
+    /// `db/models/user.py:137`).
+    CreatedBy,
+    /// `LEFT JOIN "users"` on `updated_by_id` + the same term.
+    UpdatedBy,
+    /// `LEFT JOIN "estimate_points"` +
+    /// `ORDER BY "estimate_points"."value" ASC`
+    /// (`EstimatePoint.Meta.ordering`, `db/models/estimate.py:57`;
+    /// `value` is a varchar — string sort, ported as-is).
+    EstimatePoint,
+    /// `LEFT JOIN "pod"` + TWO terms:
+    /// `ORDER BY "pod"."is_default" DESC, "pod"."created_at" ASC`
+    /// (`Pod.Meta.ordering = ('-is_default', 'created_at')`,
+    /// `runner/models.py`; the `-` inverts both).
+    AssignedPod,
+    /// `ORDER BY "cycle_issues"."created_at" DESC` (bare reverse FK
+    /// onto the already-joined bridge table;
+    /// `CycleIssue.Meta.ordering`, `db/models/cycle.py:124`).
+    IssueCycle,
+}
+
+impl RelatedOrder {
+    /// The raw `?order_by=` name.
+    fn name(self) -> &'static str {
+        match self {
+            RelatedOrder::State => "state",
+            RelatedOrder::Project => "project",
+            RelatedOrder::Workspace => "workspace",
+            RelatedOrder::Parent => "parent",
+            RelatedOrder::CreatedBy => "created_by",
+            RelatedOrder::UpdatedBy => "updated_by",
+            RelatedOrder::EstimatePoint => "estimate_point",
+            RelatedOrder::AssignedPod => "assigned_pod",
+            RelatedOrder::IssueCycle => "issue_cycle",
+        }
+    }
+
+    /// The extra `LEFT JOIN` the terms need, as `(table,
+    /// issues_fk_column)` — `None` when the Q4 GET already joins the
+    /// table (`state`/`project`/`workspace`/`parent` via
+    /// `select_related`, `issue_cycle` via the filter traversal).
+    /// Django appends these joins after the parent `T7` join.
+    fn join(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            RelatedOrder::CreatedBy => Some((USER_TABLE, "created_by_id")),
+            RelatedOrder::UpdatedBy => Some((USER_TABLE, "updated_by_id")),
+            RelatedOrder::EstimatePoint => Some((estimate_point::TABLE, "estimate_point_id")),
+            RelatedOrder::AssignedPod => Some((POD_TABLE, "assigned_pod_id")),
+            RelatedOrder::State
+            | RelatedOrder::Project
+            | RelatedOrder::Workspace
+            | RelatedOrder::Parent
+            | RelatedOrder::IssueCycle => None,
+        }
+    }
+
+    /// The related `Meta.ordering` terms as `(table, column,
+    /// model_descending)`; the request `-` XORs each term's direction
+    /// (verified per name against live `str(query)` output).
+    fn terms(self) -> &'static [(&'static str, &'static str, bool)] {
+        match self {
+            RelatedOrder::State => &[(state::TABLE, "sequence", false)],
+            RelatedOrder::Project => &[(project::TABLE, "created_at", true)],
+            RelatedOrder::Workspace => &[(WORKSPACE_TABLE, "created_at", true)],
+            RelatedOrder::Parent => &[(PARENT_ALIAS, "created_at", true)],
+            RelatedOrder::CreatedBy | RelatedOrder::UpdatedBy => {
+                &[(USER_TABLE, "created_at", true)]
+            }
+            RelatedOrder::EstimatePoint => &[(estimate_point::TABLE, "value", false)],
+            RelatedOrder::AssignedPod => &[
+                (POD_TABLE, "is_default", true),
+                (POD_TABLE, "created_at", false),
+            ],
+            RelatedOrder::IssueCycle => &[(cycle_issue::TABLE, "created_at", true)],
+        }
+    }
+}
+
+/// The single-level FK-traversal heads needing a join the Q4 GET lacks
+/// (PIDASHCONV-522): `created_by`, `updated_by`, `estimate_point`,
+/// `assigned_pod`. Each renders one to-one `LEFT JOIN` plus
+/// `ORDER BY "<table>"."<tail>"` (the tail passes through raw — bad
+/// tails 500 at the database like Django's `FieldError`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraversalOrder {
+    /// `LEFT JOIN "users"` on `created_by_id`.
+    CreatedBy,
+    /// `LEFT JOIN "users"` on `updated_by_id`.
+    UpdatedBy,
+    /// `LEFT JOIN "estimate_points"` on `estimate_point_id`.
+    EstimatePoint,
+    /// `LEFT JOIN "pod"` on `assigned_pod_id`.
+    AssignedPod,
+}
+
+impl TraversalOrder {
+    /// The extra `LEFT JOIN` as `(table, issues_fk_column)` (same
+    /// joins as the matching [`RelatedOrder::join`]).
+    fn join(self) -> (&'static str, &'static str) {
+        match self {
+            TraversalOrder::CreatedBy => (USER_TABLE, "created_by_id"),
+            TraversalOrder::UpdatedBy => (USER_TABLE, "updated_by_id"),
+            TraversalOrder::EstimatePoint => (estimate_point::TABLE, "estimate_point_id"),
+            TraversalOrder::AssignedPod => (POD_TABLE, "assigned_pod_id"),
+        }
+    }
+}
+
 /// A parsed `.order_by(...)` argument: the raw column plus direction.
 ///
 /// Django passes `self.kwargs.get("order_by", <default>)` through
@@ -190,14 +402,21 @@ pub enum ArchivedFilter {
 /// leading `-` selects descending; anything else is ascending, including
 /// Django's verbatim behavior for unknown columns (database error at
 /// evaluation, like `FieldError`). Parsing lives in the services layer
-/// (`services::v1_cycles_modules::cycle_queries`, PIDASHCONV-307);
-/// builders quote the column onto their base table.
+/// (`services::v1_cycles_modules::cycle_queries`, PIDASHCONV-307) and,
+/// for the Q4 GET `?order_by=`, in the handler's
+/// `resolve_cycle_issue_order` (PIDASHCONV-362, extended PIDASHCONV-522);
+/// [`OrderTarget::Base`] quotes the column onto the base table while the
+/// other targets render per [`apply_order`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderBy {
-    /// Raw column text (e.g. `created_at`).
+    /// Raw column text (e.g. `created_at`); the raw `?` token for
+    /// [`OrderTarget::Random`], the raw M2M name for
+    /// [`OrderTarget::M2M`], and the raw tail for traversal targets.
     pub column: String,
     /// True when the raw text starts with `-`.
     pub descending: bool,
+    /// Where the term renders (default [`OrderTarget::Base`]).
+    pub target: OrderTarget,
 }
 
 impl OrderBy {
@@ -206,6 +425,75 @@ impl OrderBy {
         Self {
             column: column.into(),
             descending,
+            target: OrderTarget::Base,
+        }
+    }
+
+    /// `OrderBy` for a traversal onto an already-joined table or alias.
+    pub fn table(table: &'static str, column: impl Into<String>, descending: bool) -> Self {
+        Self {
+            column: column.into(),
+            descending,
+            target: OrderTarget::Table(table),
+        }
+    }
+
+    /// `OrderBy` for a bare output alias (early annotations).
+    pub fn alias(column: impl Into<String>, descending: bool) -> Self {
+        Self {
+            column: column.into(),
+            descending,
+            target: OrderTarget::Alias,
+        }
+    }
+
+    /// `OrderBy` for the exact `?` token (random).
+    pub fn random() -> Self {
+        Self {
+            column: "?".to_owned(),
+            descending: false,
+            target: OrderTarget::Random,
+        }
+    }
+
+    /// `OrderBy` for a bare-M2M name.
+    pub fn m2m(which: M2MOrder, descending: bool) -> Self {
+        let column = match which {
+            M2MOrder::Assignees => "assignees",
+            M2MOrder::Labels => "labels",
+        };
+        Self {
+            column: column.to_owned(),
+            descending,
+            target: OrderTarget::M2M(which),
+        }
+    }
+
+    /// `OrderBy` for a bare-FK (or reverse-FK) name: the related
+    /// model's `Meta.ordering` terms (PIDASHCONV-522).
+    pub fn related(which: RelatedOrder, descending: bool) -> Self {
+        Self {
+            column: which.name().to_owned(),
+            descending,
+            target: OrderTarget::Related(which),
+        }
+    }
+
+    /// `OrderBy` for a single-level FK traversal needing a new join.
+    pub fn traversal(which: TraversalOrder, tail: impl Into<String>, descending: bool) -> Self {
+        Self {
+            column: tail.into(),
+            descending,
+            target: OrderTarget::Traversal(which),
+        }
+    }
+
+    /// `OrderBy` for a single-level M2M traversal.
+    pub fn m2m_traversal(which: M2MOrder, tail: impl Into<String>, descending: bool) -> Self {
+        Self {
+            column: tail.into(),
+            descending,
+            target: OrderTarget::M2MTraversal(which),
         }
     }
 
@@ -224,6 +512,143 @@ impl OrderBy {
             Order::Desc
         } else {
             Order::Asc
+        }
+    }
+}
+
+/// Map a single-level `?order_by=` traversal head to its already-joined
+/// table or alias in the Q4 GET builder (`None` = not a supported
+/// head; the caller tries the join-needing heads next, then passes the
+/// name through to 500 like Django's `FieldError`). Deeper paths
+/// (`state__project__name`) render their full tail onto the head's
+/// table and 500 at the database, exactly like Django.
+pub fn issue_traversal_table(head: &str) -> Option<&'static str> {
+    match head {
+        "state" => Some(state::TABLE),
+        "project" => Some(project::TABLE),
+        "workspace" => Some(WORKSPACE_TABLE),
+        "parent" => Some(PARENT_ALIAS),
+        "issue_cycle" => Some(cycle_issue::TABLE),
+        _ => None,
+    }
+}
+
+/// Map a bare-M2M `?order_by=` name (or M2M traversal head) to its
+/// ordering (`None` = not an M2M name).
+pub fn issue_m2m_order(head: &str) -> Option<M2MOrder> {
+    match head {
+        "assignees" => Some(M2MOrder::Assignees),
+        "labels" => Some(M2MOrder::Labels),
+        _ => None,
+    }
+}
+
+/// Map a single-level `?order_by=` traversal head needing a new to-one
+/// join to its ordering (`None` = already-joined head or not a
+/// traversal head; see [`issue_traversal_table`]).
+pub fn issue_join_traversal(head: &str) -> Option<TraversalOrder> {
+    match head {
+        "created_by" => Some(TraversalOrder::CreatedBy),
+        "updated_by" => Some(TraversalOrder::UpdatedBy),
+        "estimate_point" => Some(TraversalOrder::EstimatePoint),
+        "assigned_pod" => Some(TraversalOrder::AssignedPod),
+        _ => None,
+    }
+}
+
+/// Append the `ORDER BY` term for `order` onto `sel`, whose base table
+/// is `base` — the one rendering helper every builder calls, so exotic
+/// targets render identically wherever they appear. Non-`Base` targets
+/// only reach the Q4 GET builder (kwargs chains always carry the
+/// default); rendered elsewhere they fail at the database exactly like
+/// Django's `FieldError` for the same name on those chains.
+fn apply_order(sel: &mut sea_query::SelectStatement, base: &str, order: &OrderBy) {
+    match order.target {
+        OrderTarget::Base => {
+            sel.order_by(
+                (
+                    Alias::new(base.to_owned()),
+                    Alias::new(order.column.clone()),
+                ),
+                order.order(),
+            );
+        }
+        OrderTarget::Table(table) => {
+            sel.order_by(
+                (
+                    Alias::new(table.to_owned()),
+                    Alias::new(order.column.clone()),
+                ),
+                order.order(),
+            );
+        }
+        OrderTarget::Alias => {
+            sel.order_by(Alias::new(order.column.clone()), order.order());
+        }
+        // Django's compiler yields `OrderBy(Random())` ascending — the
+        // `-` flag never survives onto `?` (`-?` is a FieldError).
+        OrderTarget::Random => {
+            sel.order_by_expr(Expr::cust("RANDOM()"), Order::Asc);
+        }
+        // Related `Meta.ordering` is `('-created_at',)`: the request `-`
+        // inverts it, so plain M2M renders `DESC`.
+        OrderTarget::M2M(which) => {
+            let (_, _, _, target) = which.tables();
+            let direction = if order.descending {
+                Order::Asc
+            } else {
+                Order::Desc
+            };
+            sel.order_by(
+                (
+                    Alias::new(target.to_owned()),
+                    Alias::new("created_at".to_owned()),
+                ),
+                direction,
+            );
+        }
+        // Related `Meta.ordering` terms (PIDASHCONV-522): the request
+        // `-` XORs each term's model direction, so a `-created_at`
+        // term renders `DESC` plain / `ASC` inverted while an
+        // ascending term (`sequence`, `value`) renders the opposite.
+        OrderTarget::Related(which) => {
+            for (table, column, model_descending) in which.terms() {
+                let direction = if order.descending != *model_descending {
+                    Order::Desc
+                } else {
+                    Order::Asc
+                };
+                sel.order_by(
+                    (
+                        Alias::new((*table).to_owned()),
+                        Alias::new((*column).to_owned()),
+                    ),
+                    direction,
+                );
+            }
+        }
+        // FK traversal with a fresh join: the tail renders onto the
+        // joined table, request direction as-is.
+        OrderTarget::Traversal(which) => {
+            let (table, _) = which.join();
+            sel.order_by(
+                (
+                    Alias::new(table.to_owned()),
+                    Alias::new(order.column.clone()),
+                ),
+                order.order(),
+            );
+        }
+        // M2M traversal: the tail renders onto the M2M target table.
+        OrderTarget::M2MTraversal(which) => {
+            let (_, _, _, target) = which.tables();
+            sel.order_by(
+                (
+                    Alias::new(target.to_owned()),
+                    Alias::new(order.column.clone()),
+                ),
+                order.order(),
+            );
         }
     }
 }
@@ -321,6 +746,21 @@ fn join_member(sel: &mut sea_query::SelectStatement) {
         Condition::all().add(
             Expr::col((Alias::new(project::TABLE), Alias::new("id")))
                 .equals((Alias::new(project_member::TABLE), Alias::new("project_id"))),
+        ),
+    );
+}
+
+/// `LEFT JOIN "<table>" ON ("issues"."<fk>" = "<table>"."id")` — one
+/// ordering-only to-one join (bare-FK related orderings and FK
+/// traversals, PIDASHCONV-522), appended after the parent `T7` join
+/// like Django.
+fn join_order_fk(sel: &mut sea_query::SelectStatement, table: &str, fk: &str) {
+    sel.join(
+        JoinType::LeftJoin,
+        Alias::new(table.to_owned()),
+        Condition::all().add(
+            Expr::col((Alias::new(ISSUE_TABLE), Alias::new(fk)))
+                .equals((Alias::new(table), Alias::new("id"))),
         ),
     );
 }
@@ -579,13 +1019,7 @@ fn cycle_list_sql_inner(
     }
     sel.cond_where(scope);
     sel.group_by_col((Alias::new(cycle::TABLE), Alias::new("id")));
-    sel.order_by(
-        (
-            Alias::new(cycle::TABLE.to_owned()),
-            Alias::new(order.column.clone()),
-        ),
-        order.order(),
-    );
+    apply_order(&mut sel, cycle::TABLE, order);
     sel.to_string(PostgresQueryBuilder)
 }
 
@@ -612,13 +1046,7 @@ pub fn cycle_detail_sql(order: &OrderBy) -> String {
             .add(Expr::col((Alias::new(cycle::TABLE), Alias::new("id"))).eq(Expr::cust("$3"))),
     );
     sel.group_by_col((Alias::new(cycle::TABLE), Alias::new("id")));
-    sel.order_by(
-        (
-            Alias::new(cycle::TABLE.to_owned()),
-            Alias::new(order.column.clone()),
-        ),
-        order.order(),
-    );
+    apply_order(&mut sel, cycle::TABLE, order);
     sel.to_string(PostgresQueryBuilder)
 }
 
@@ -682,13 +1110,7 @@ pub fn archived_cycle_list_sql(order: &OrderBy) -> String {
             .add(Expr::col((Alias::new(cycle::TABLE), Alias::new("archived_at"))).is_not_null()),
     );
     sel.group_by_col((Alias::new(cycle::TABLE), Alias::new("id")));
-    sel.order_by(
-        (
-            Alias::new(cycle::TABLE.to_owned()),
-            Alias::new(order.column.clone()),
-        ),
-        order.order(),
-    );
+    apply_order(&mut sel, cycle::TABLE, order);
     sel.to_string(PostgresQueryBuilder)
 }
 
@@ -798,13 +1220,7 @@ pub fn cycle_issue_queryset_sql(order: &OrderBy) -> String {
     let scope = add_member_scope(scope);
     let scope = scope.add(Expr::col((bridges, Alias::new("cycle_id"))).eq(Expr::cust("$3")));
     sel.cond_where(scope);
-    sel.order_by(
-        (
-            Alias::new(cycle_issue::TABLE.to_owned()),
-            Alias::new(order.column.clone()),
-        ),
-        order.order(),
-    );
+    apply_order(&mut sel, cycle_issue::TABLE, order);
     sel.to_string(PostgresQueryBuilder)
 }
 
@@ -896,12 +1312,50 @@ pub fn cycle_issue_list_get_sql(order: &OrderBy) -> String {
     // (select_related("parent")).
     sel.join(
         JoinType::LeftJoin,
-        TableRef::Table(Alias::new(ISSUE_TABLE.to_owned()).into_iden()).alias(Alias::new("T7")),
+        TableRef::Table(Alias::new(ISSUE_TABLE.to_owned()).into_iden())
+            .alias(Alias::new(PARENT_ALIAS)),
         Condition::all().add(
             Expr::col((Alias::new(ISSUE_TABLE), Alias::new("parent_id")))
-                .equals((Alias::new("T7"), Alias::new("id"))),
+                .equals((Alias::new(PARENT_ALIAS), Alias::new("id"))),
         ),
     );
+    // Bare-M2M ordering joins (PIDASHCONV-522), after T7 like Django:
+    // `LEFT JOIN "<through>"` + `LEFT JOIN "<target>"`, no DISTINCT —
+    // rows multiply per through-row exactly like the Django queryset.
+    // M2M traversals (`assignees__<tail>`) share the same two joins.
+    if let OrderTarget::M2M(which) | OrderTarget::M2MTraversal(which) = order.target {
+        let (through, issue_fk, target_fk, target) = which.tables();
+        sel.join(
+            JoinType::LeftJoin,
+            Alias::new(through.to_owned()),
+            Condition::all().add(
+                Expr::col((Alias::new(ISSUE_TABLE), Alias::new("id")))
+                    .equals((Alias::new(through), Alias::new(issue_fk))),
+            ),
+        );
+        sel.join(
+            JoinType::LeftJoin,
+            Alias::new(target.to_owned()),
+            Condition::all().add(
+                Expr::col((Alias::new(through), Alias::new(target_fk)))
+                    .equals((Alias::new(target), Alias::new("id"))),
+            ),
+        );
+    }
+    // Bare-FK related-ordering joins (PIDASHCONV-522), after T7 like
+    // Django: one `LEFT JOIN "<table>" ON ("issues"."<fk>" =
+    // "<table>"."id")`. To-one, so rows never multiply (unlike M2M).
+    if let OrderTarget::Related(which) = order.target {
+        if let Some((table, fk)) = which.join() {
+            join_order_fk(&mut sel, table, fk);
+        }
+    }
+    // FK-traversal ordering joins (PIDASHCONV-522): same to-one shape
+    // as the bare-FK joins, for `created_by__<tail>` et al.
+    if let OrderTarget::Traversal(which) = order.target {
+        let (table, fk) = which.join();
+        join_order_fk(&mut sel, table, fk);
+    }
     sel.cond_where(
         Condition::all()
             .add(Expr::cust(ISSUE_MANAGER_OUTER_GUARDS))
@@ -918,13 +1372,7 @@ pub fn cycle_issue_list_get_sql(order: &OrderBy) -> String {
                     .eq(Expr::cust("$1")),
             ),
     );
-    sel.order_by(
-        (
-            Alias::new(ISSUE_TABLE.to_owned()),
-            Alias::new(order.column.clone()),
-        ),
-        order.order(),
-    );
+    apply_order(&mut sel, ISSUE_TABLE, order);
     sel.to_string(PostgresQueryBuilder)
 }
 
@@ -1451,6 +1899,286 @@ mod tests {
     }
 
     #[test]
+    fn q4_get_order_random_renders_random_asc() {
+        // PIDASHCONV-522: `?order_by=?` → Django `ORDER BY RANDOM() ASC`,
+        // no extra joins.
+        let sql = cycle_issue_list_get_sql(&OrderBy::random());
+        assert!(sql.contains("ORDER BY RANDOM() ASC"), "{sql}");
+        assert!(!sql.contains("issue_assignees"), "{sql}");
+        assert!(!sql.contains("issue_labels"), "{sql}");
+    }
+
+    #[test]
+    fn q4_get_order_traversal_renders_qualified() {
+        // PIDASHCONV-522: `state__group` reuses the select_related join.
+        let sql = cycle_issue_list_get_sql(&OrderBy::table("states", "group", false));
+        assert!(sql.contains(r#"ORDER BY "states"."group" ASC"#), "{sql}");
+        let sql = cycle_issue_list_get_sql(&OrderBy::table("states", "group", true));
+        assert!(sql.contains(r#"ORDER BY "states"."group" DESC"#), "{sql}");
+        // Parent traversals render onto the T7 self-join alias.
+        let sql = cycle_issue_list_get_sql(&OrderBy::table(PARENT_ALIAS, "created_at", false));
+        assert!(sql.contains(r#"ORDER BY "T7"."created_at" ASC"#), "{sql}");
+        // Reverse-FK traversals render onto the bridge table.
+        let sql = cycle_issue_list_get_sql(&OrderBy::table(cycle_issue::TABLE, "id", false));
+        assert!(sql.contains(r#"ORDER BY "cycle_issues"."id" ASC"#), "{sql}");
+    }
+
+    #[test]
+    fn q4_get_order_alias_renders_bare() {
+        // PIDASHCONV-522: early annotations order by bare alias (Django
+        // renders the positional `ORDER BY 35` — same semantics, without
+        // depending on the `issues.*` width).
+        let sql = cycle_issue_list_get_sql(&OrderBy::alias("sub_issues_count", false));
+        assert!(sql.contains(r#"ORDER BY "sub_issues_count" ASC"#), "{sql}");
+        assert!(!sql.contains(r#""issues"."sub_issues_count""#), "{sql}");
+    }
+
+    #[test]
+    fn q4_get_order_m2m_joins_and_inverts_direction() {
+        // PIDASHCONV-522: `assignees` — through + target LEFT JOINs after
+        // T7, related Meta.ordering ('-created_at',) as-is → DESC ...
+        let sql = cycle_issue_list_get_sql(&OrderBy::m2m(M2MOrder::Assignees, false));
+        let t7 = sql.find(r#""T7""#).expect("T7 join");
+        let through = sql
+            .find(r#"LEFT JOIN "issue_assignees" ON "issues"."id" = "issue_assignees"."issue_id""#)
+            .expect("through join");
+        assert!(through > t7, "{sql}");
+        assert!(
+            sql.contains(r#"LEFT JOIN "users" ON "issue_assignees"."assignee_id" = "users"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"ORDER BY "users"."created_at" DESC"#),
+            "{sql}"
+        );
+        // ... and the `-` prefix inverts it to ASC.
+        let sql = cycle_issue_list_get_sql(&OrderBy::m2m(M2MOrder::Assignees, true));
+        assert!(
+            sql.contains(r#"ORDER BY "users"."created_at" ASC"#),
+            "{sql}"
+        );
+        // `labels` mirrors via issue_labels/labels.
+        let sql = cycle_issue_list_get_sql(&OrderBy::m2m(M2MOrder::Labels, false));
+        assert!(
+            sql.contains(
+                r#"LEFT JOIN "issue_labels" ON "issues"."id" = "issue_labels"."issue_id""#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"LEFT JOIN "labels" ON "issue_labels"."label_id" = "labels"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"ORDER BY "labels"."created_at" DESC"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn q4_get_order_related_terms_and_joins() {
+        // PIDASHCONV-522: bare FKs order by the related Meta.ordering,
+        // read off live Django 4.2 str(query) output for the Q4 GET.
+        // Already-joined tables add no join: `state` renders the
+        // ascending `sequence` term ...
+        let sql = cycle_issue_list_get_sql(&OrderBy::related(RelatedOrder::State, false));
+        assert!(sql.contains(r#"ORDER BY "states"."sequence" ASC"#), "{sql}");
+        let sql = cycle_issue_list_get_sql(&OrderBy::related(RelatedOrder::State, true));
+        assert!(
+            sql.contains(r#"ORDER BY "states"."sequence" DESC"#),
+            "{sql}"
+        );
+        // ... while `-created_at` orderings render DESC plain / ASC
+        // inverted, reusing the select_related / bridge joins.
+        for (which, term) in [
+            (
+                RelatedOrder::Project,
+                r#"ORDER BY "projects"."created_at" DESC"#,
+            ),
+            (
+                RelatedOrder::Workspace,
+                r#"ORDER BY "workspaces"."created_at" DESC"#,
+            ),
+            (RelatedOrder::Parent, r#"ORDER BY "T7"."created_at" DESC"#),
+            (
+                RelatedOrder::IssueCycle,
+                r#"ORDER BY "cycle_issues"."created_at" DESC"#,
+            ),
+        ] {
+            let sql = cycle_issue_list_get_sql(&OrderBy::related(which, false));
+            assert!(sql.contains(term), "{sql}");
+            let inverted = term.replace("DESC", "ASC");
+            let sql = cycle_issue_list_get_sql(&OrderBy::related(which, true));
+            assert!(sql.contains(&inverted), "{sql}");
+        }
+        // New joins render after T7, like Django: `created_by` and
+        // `updated_by` each LEFT JOIN `users` on their own FK ...
+        for (which, join) in [
+            (
+                RelatedOrder::CreatedBy,
+                r#"LEFT JOIN "users" ON "issues"."created_by_id" = "users"."id""#,
+            ),
+            (
+                RelatedOrder::UpdatedBy,
+                r#"LEFT JOIN "users" ON "issues"."updated_by_id" = "users"."id""#,
+            ),
+        ] {
+            let sql = cycle_issue_list_get_sql(&OrderBy::related(which, false));
+            let t7 = sql.find(r#""T7""#).expect("T7 join");
+            let extra = sql.find(join).expect("ordering join");
+            assert!(extra > t7, "{sql}");
+            assert!(
+                sql.contains(r#"ORDER BY "users"."created_at" DESC"#),
+                "{sql}"
+            );
+            let sql = cycle_issue_list_get_sql(&OrderBy::related(which, true));
+            assert!(
+                sql.contains(r#"ORDER BY "users"."created_at" ASC"#),
+                "{sql}"
+            );
+        }
+        // ... `estimate_point` joins `estimate_points` for the
+        // ascending `value` term ...
+        let sql = cycle_issue_list_get_sql(&OrderBy::related(RelatedOrder::EstimatePoint, false));
+        assert!(
+            sql.contains(
+                r#"LEFT JOIN "estimate_points" ON "issues"."estimate_point_id" = "estimate_points"."id""#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"ORDER BY "estimate_points"."value" ASC"#),
+            "{sql}"
+        );
+        let sql = cycle_issue_list_get_sql(&OrderBy::related(RelatedOrder::EstimatePoint, true));
+        assert!(
+            sql.contains(r#"ORDER BY "estimate_points"."value" DESC"#),
+            "{sql}"
+        );
+        // ... and `assigned_pod` joins `pod` for TWO terms (the `-`
+        // inverts both).
+        let sql = cycle_issue_list_get_sql(&OrderBy::related(RelatedOrder::AssignedPod, false));
+        assert!(
+            sql.contains(r#"LEFT JOIN "pod" ON "issues"."assigned_pod_id" = "pod"."id""#),
+            "{sql}"
+        );
+        let first = sql
+            .find(r#"ORDER BY "pod"."is_default" DESC, "pod"."created_at" ASC"#)
+            .expect("two-term ordering");
+        assert!(first > 0, "{sql}");
+        let sql = cycle_issue_list_get_sql(&OrderBy::related(RelatedOrder::AssignedPod, true));
+        assert!(
+            sql.contains(r#"ORDER BY "pod"."is_default" ASC, "pod"."created_at" DESC"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn q4_get_order_fk_traversal_joins_then_orders_tail() {
+        // PIDASHCONV-522: `created_by__<tail>` et al. — the same to-one
+        // LEFT JOIN as the bare arm, then the tail onto the joined
+        // table, request direction as-is.
+        for (which, join, table, tail) in [
+            (
+                TraversalOrder::CreatedBy,
+                r#"LEFT JOIN "users" ON "issues"."created_by_id" = "users"."id""#,
+                "users",
+                "email",
+            ),
+            (
+                TraversalOrder::UpdatedBy,
+                r#"LEFT JOIN "users" ON "issues"."updated_by_id" = "users"."id""#,
+                "users",
+                "email",
+            ),
+            (
+                TraversalOrder::EstimatePoint,
+                r#"LEFT JOIN "estimate_points" ON "issues"."estimate_point_id" = "estimate_points"."id""#,
+                "estimate_points",
+                "value",
+            ),
+            (
+                TraversalOrder::AssignedPod,
+                r#"LEFT JOIN "pod" ON "issues"."assigned_pod_id" = "pod"."id""#,
+                "pod",
+                "name",
+            ),
+        ] {
+            let term = format!(r#"ORDER BY "{table}"."{tail}" ASC"#);
+            let sql = cycle_issue_list_get_sql(&OrderBy::traversal(which, tail, false));
+            let t7 = sql.find(r#""T7""#).expect("T7 join");
+            let extra = sql.find(join).expect("ordering join");
+            assert!(extra > t7, "{sql}");
+            assert!(sql.contains(&term), "{sql}");
+            let inverted = term.replace("ASC", "DESC");
+            let sql = cycle_issue_list_get_sql(&OrderBy::traversal(which, tail, true));
+            assert!(sql.contains(&inverted), "{sql}");
+        }
+    }
+
+    #[test]
+    fn q4_get_order_m2m_traversal_joins_then_orders_tail() {
+        // PIDASHCONV-522: `assignees__<tail>` shares the bare arm's
+        // through + target joins, then orders the tail on the target.
+        let sql =
+            cycle_issue_list_get_sql(&OrderBy::m2m_traversal(M2MOrder::Assignees, "email", false));
+        assert!(
+            sql.contains(
+                r#"LEFT JOIN "issue_assignees" ON "issues"."id" = "issue_assignees"."issue_id""#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"LEFT JOIN "users" ON "issue_assignees"."assignee_id" = "users"."id""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#"ORDER BY "users"."email" ASC"#), "{sql}");
+        let sql = cycle_issue_list_get_sql(&OrderBy::m2m_traversal(M2MOrder::Labels, "name", true));
+        assert!(
+            sql.contains(r#"LEFT JOIN "labels" ON "issue_labels"."label_id" = "labels"."id""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#"ORDER BY "labels"."name" DESC"#), "{sql}");
+    }
+
+    #[test]
+    fn traversal_head_mapping() {
+        // PIDASHCONV-522: already-joined heads map to their table;
+        // join-needing FK heads map via `issue_join_traversal`; M2M
+        // heads map via `issue_m2m_order`; anything else maps nowhere
+        // (pass-through 500s).
+        assert_eq!(issue_traversal_table("state"), Some("states"));
+        assert_eq!(issue_traversal_table("project"), Some("projects"));
+        assert_eq!(issue_traversal_table("workspace"), Some("workspaces"));
+        assert_eq!(issue_traversal_table("parent"), Some(PARENT_ALIAS));
+        assert_eq!(issue_traversal_table("issue_cycle"), Some("cycle_issues"));
+        assert_eq!(issue_traversal_table("created_by"), None);
+        assert_eq!(issue_traversal_table("assignees"), None);
+        assert_eq!(
+            issue_join_traversal("created_by"),
+            Some(TraversalOrder::CreatedBy)
+        );
+        assert_eq!(
+            issue_join_traversal("updated_by"),
+            Some(TraversalOrder::UpdatedBy)
+        );
+        assert_eq!(
+            issue_join_traversal("estimate_point"),
+            Some(TraversalOrder::EstimatePoint)
+        );
+        assert_eq!(
+            issue_join_traversal("assigned_pod"),
+            Some(TraversalOrder::AssignedPod)
+        );
+        assert_eq!(issue_join_traversal("state"), None);
+        assert_eq!(issue_join_traversal("assignees"), None);
+        assert_eq!(issue_m2m_order("assignees"), Some(M2MOrder::Assignees));
+        assert_eq!(issue_m2m_order("labels"), Some(M2MOrder::Labels));
+        assert_eq!(issue_m2m_order("created_by"), None);
+        assert_eq!(issue_m2m_order("state"), None);
+    }
+
+    #[test]
     fn q5_lookup_scope() {
         // FX-CYCMOD-04 Q5 (`cycle.py:1069-1074` get, `:1092-1097` delete).
         let sql = cycle_issue_detail_lookup_sql();
@@ -1487,6 +2215,11 @@ mod tests {
         assert_eq!(USER_TABLE, "users");
         assert_eq!(ISSUE_LINK_TABLE, "issue_links");
         assert_eq!(FILE_ASSET_TABLE, "file_assets");
+        assert_eq!(LABEL_TABLE, "labels");
+        assert_eq!(ISSUE_ASSIGNEE_TABLE, "issue_assignees");
+        assert_eq!(ISSUE_LABEL_TABLE, "issue_labels");
+        assert_eq!(POD_TABLE, "pod");
+        assert_eq!(PARENT_ALIAS, "T7");
         assert_eq!(project::TABLE, "projects");
         assert_eq!(project_member::TABLE, "project_members");
         assert_eq!(state::TABLE, "states");
