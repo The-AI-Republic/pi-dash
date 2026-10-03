@@ -32,6 +32,12 @@ pub mod celery;
 /// owns, no `mod.rs`.
 #[path = "dispatch/dispatch.rs"]
 pub mod dispatch;
+/// Execution tasks (D-11 L7, PIDASHCONV-488): claim/run/fail, queue
+/// scan, stale sweep, managed wait expiry, and the model runtime.
+/// Same explicit-path form as [`dispatch`] — the single file the issue
+/// owns, no `mod.rs`.
+#[path = "dispatch/execute.rs"]
+pub mod dispatch_execute;
 pub mod integrations;
 /// Iterative compact-JSON encoder (PIDASHCONV-626): stack-safe
 /// `serde_json::to_vec` for the ~9900-deep payloads ports may enqueue.
