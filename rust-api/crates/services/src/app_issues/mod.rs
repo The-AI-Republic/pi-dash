@@ -32,10 +32,20 @@
 
 pub mod ordering;
 pub mod params;
+pub mod serializers_links;
 pub mod shape;
 
 pub use ordering::{order_sql, priority_case_sql, state_case_sql, OrderSpec};
 pub use params::{parse_per_page, raw_group_mismatch, ListParams, ParamError, ParseOptions};
+pub use serializers_links::{
+    git_code_review_link_to_representation, github_pull_request_link_to_representation,
+    issue_attachment_lite_to_representation, issue_link_lite_to_representation,
+    user_lite_to_representation, GitCodeReviewLinkRow, GitCodeReviewLinkView,
+    GithubPullRequestLinkRow, GithubPullRequestLinkView, IssueAttachmentLiteRow,
+    IssueAttachmentLiteView, IssueLinkLiteRow, IssueLinkLiteView, UserLiteRow, UserLiteView,
+    GITHUB_PR_LINK_FIELDS, GIT_CODE_REVIEW_LINK_FIELDS, ISSUE_ATTACHMENT_LITE_FIELDS,
+    ISSUE_LINK_LITE_FIELDS, USER_LITE_FIELDS,
+};
 pub use shape::{
     deleted_ids_body, envelope, group_mismatch_body, issues_required_body, on_results_fields,
     v2_fields, DETAIL_FIELDS, FLAT_LIST_FIELDS, LIST_VALUES_FIELDS, ON_RESULTS_ARRAY_FIELDS,
