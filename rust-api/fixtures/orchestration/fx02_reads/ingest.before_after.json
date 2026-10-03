@@ -1,0 +1,385 @@
+{
+  "_trace": "orchestration/done_signal.py:141-181 (ingest_into_run: parse-ok 164-180 incl. paused no-ended_at 175-179; parse-error 153-162 incl. keep-terminal-status 158-159)",
+  "_method": "live ingest_into_run on pidash_524_scratch with django.utils.timezone.now frozen at T0",
+  "now": "2026-10-03T12:00:00+00:00",
+  "cases": [
+    {
+      "name": "completed",
+      "trace": "done_signal.py:164-174+180 ok-path",
+      "input_text": "some agent chatter\n```pi-dash-done\n{\"status\": \"completed\", \"summary\": \"did the thing\"}\n```\n",
+      "before": {
+        "status": "running",
+        "done_payload": null,
+        "error": "prior error",
+        "ended_at": null
+      },
+      "returned": {
+        "status": "completed",
+        "payload": {
+          "status": "completed",
+          "summary": "did the thing",
+          "state_transition": {
+            "requested_group": null,
+            "reason": null
+          },
+          "changes": {
+            "branch": null,
+            "commits": [],
+            "files_touched": [],
+            "pr_url": null
+          },
+          "validation": {
+            "acceptance_all_met": null,
+            "ran": [],
+            "notes": null
+          },
+          "progress": {
+            "phase": null,
+            "checkpoints": {}
+          },
+          "autonomy": {
+            "score": 0,
+            "type": "none",
+            "reason": "",
+            "question_for_human": null,
+            "safe_to_continue": true
+          },
+          "blockers": []
+        }
+      },
+      "after": {
+        "status": "completed",
+        "done_payload": {
+          "status": "completed",
+          "changes": {
+            "branch": null,
+            "pr_url": null,
+            "commits": [],
+            "files_touched": []
+          },
+          "summary": "did the thing",
+          "autonomy": {
+            "type": "none",
+            "score": 0,
+            "reason": "",
+            "safe_to_continue": true,
+            "question_for_human": null
+          },
+          "blockers": [],
+          "progress": {
+            "phase": null,
+            "checkpoints": {}
+          },
+          "validation": {
+            "ran": [],
+            "notes": null,
+            "acceptance_all_met": null
+          },
+          "state_transition": {
+            "reason": null,
+            "requested_group": null
+          }
+        },
+        "error": "",
+        "ended_at": "2026-10-03T12:00:00+00:00"
+      },
+      "executed_sql": [
+        "UPDATE \"agent_run\" SET \"status\" = 'completed', \"done_payload\" = '{\"status\": \"completed\", \"summary\": \"did the thing\", \"state_transition\": {\"requested_group\": null, \"reason\": null}, \"changes\": {\"branch\": null, \"commits\": [], \"files_touched\": [], \"pr_url\": null}, \"validation\": {\"acceptance_all_met\": null, \"ran\": [], \"notes\": null}, \"progress\": {\"phase\": null, \"checkpoints\": {}}, \"autonomy\": {\"score\": 0, \"type\": \"none\", \"reason\": \"\", \"question_for_human\": null, \"safe_to_continue\": true}, \"blockers\": []}'::jsonb, \"error\" = '', \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004101'::uuid"
+      ]
+    },
+    {
+      "name": "blocked",
+      "trace": "done_signal.py:164-174+180 ok-path",
+      "input_text": "some agent chatter\n```pi-dash-done\n{\"status\": \"blocked\", \"summary\": \"stuck on creds\"}\n```\n",
+      "before": {
+        "status": "running",
+        "done_payload": null,
+        "error": "",
+        "ended_at": null
+      },
+      "returned": {
+        "status": "blocked",
+        "payload": {
+          "status": "blocked",
+          "summary": "stuck on creds",
+          "state_transition": {
+            "requested_group": null,
+            "reason": null
+          },
+          "changes": {
+            "branch": null,
+            "commits": [],
+            "files_touched": [],
+            "pr_url": null
+          },
+          "validation": {
+            "acceptance_all_met": null,
+            "ran": [],
+            "notes": null
+          },
+          "progress": {
+            "phase": null,
+            "checkpoints": {}
+          },
+          "autonomy": {
+            "score": 0,
+            "type": "none",
+            "reason": "",
+            "question_for_human": null,
+            "safe_to_continue": true
+          },
+          "blockers": []
+        }
+      },
+      "after": {
+        "status": "blocked",
+        "done_payload": {
+          "status": "blocked",
+          "changes": {
+            "branch": null,
+            "pr_url": null,
+            "commits": [],
+            "files_touched": []
+          },
+          "summary": "stuck on creds",
+          "autonomy": {
+            "type": "none",
+            "score": 0,
+            "reason": "",
+            "safe_to_continue": true,
+            "question_for_human": null
+          },
+          "blockers": [],
+          "progress": {
+            "phase": null,
+            "checkpoints": {}
+          },
+          "validation": {
+            "ran": [],
+            "notes": null,
+            "acceptance_all_met": null
+          },
+          "state_transition": {
+            "reason": null,
+            "requested_group": null
+          }
+        },
+        "error": "",
+        "ended_at": "2026-10-03T12:00:00+00:00"
+      },
+      "executed_sql": [
+        "UPDATE \"agent_run\" SET \"status\" = 'blocked', \"done_payload\" = '{\"status\": \"blocked\", \"summary\": \"stuck on creds\", \"state_transition\": {\"requested_group\": null, \"reason\": null}, \"changes\": {\"branch\": null, \"commits\": [], \"files_touched\": [], \"pr_url\": null}, \"validation\": {\"acceptance_all_met\": null, \"ran\": [], \"notes\": null}, \"progress\": {\"phase\": null, \"checkpoints\": {}}, \"autonomy\": {\"score\": 0, \"type\": \"none\", \"reason\": \"\", \"question_for_human\": null, \"safe_to_continue\": true}, \"blockers\": []}'::jsonb, \"error\" = '', \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004102'::uuid"
+      ]
+    },
+    {
+      "name": "noop",
+      "trace": "done_signal.py:164-174+180 ok-path",
+      "input_text": "some agent chatter\n```pi-dash-done\n{\"status\": \"noop\"}\n```\n",
+      "before": {
+        "status": "running",
+        "done_payload": null,
+        "error": "",
+        "ended_at": null
+      },
+      "returned": {
+        "status": "noop",
+        "payload": {
+          "status": "noop",
+          "summary": "",
+          "state_transition": {
+            "requested_group": null,
+            "reason": null
+          },
+          "changes": {
+            "branch": null,
+            "commits": [],
+            "files_touched": [],
+            "pr_url": null
+          },
+          "validation": {
+            "acceptance_all_met": null,
+            "ran": [],
+            "notes": null
+          },
+          "progress": {
+            "phase": null,
+            "checkpoints": {}
+          },
+          "autonomy": {
+            "score": 0,
+            "type": "none",
+            "reason": "",
+            "question_for_human": null,
+            "safe_to_continue": true
+          },
+          "blockers": []
+        }
+      },
+      "after": {
+        "status": "completed",
+        "done_payload": {
+          "status": "noop",
+          "changes": {
+            "branch": null,
+            "pr_url": null,
+            "commits": [],
+            "files_touched": []
+          },
+          "summary": "",
+          "autonomy": {
+            "type": "none",
+            "score": 0,
+            "reason": "",
+            "safe_to_continue": true,
+            "question_for_human": null
+          },
+          "blockers": [],
+          "progress": {
+            "phase": null,
+            "checkpoints": {}
+          },
+          "validation": {
+            "ran": [],
+            "notes": null,
+            "acceptance_all_met": null
+          },
+          "state_transition": {
+            "reason": null,
+            "requested_group": null
+          }
+        },
+        "error": "",
+        "ended_at": "2026-10-03T12:00:00+00:00"
+      },
+      "executed_sql": [
+        "UPDATE \"agent_run\" SET \"status\" = 'completed', \"done_payload\" = '{\"status\": \"noop\", \"summary\": \"\", \"state_transition\": {\"requested_group\": null, \"reason\": null}, \"changes\": {\"branch\": null, \"commits\": [], \"files_touched\": [], \"pr_url\": null}, \"validation\": {\"acceptance_all_met\": null, \"ran\": [], \"notes\": null}, \"progress\": {\"phase\": null, \"checkpoints\": {}}, \"autonomy\": {\"score\": 0, \"type\": \"none\", \"reason\": \"\", \"question_for_human\": null, \"safe_to_continue\": true}, \"blockers\": []}'::jsonb, \"error\" = '', \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004103'::uuid"
+      ]
+    },
+    {
+      "name": "paused",
+      "trace": "done_signal.py:164-174+180 ok-path",
+      "input_text": "some agent chatter\n```pi-dash-done\n{\"status\": \"paused\", \"autonomy\": {\"question_for_human\": \"which approach?\"}}\n```\n",
+      "before": {
+        "status": "running",
+        "done_payload": null,
+        "error": "",
+        "ended_at": null
+      },
+      "returned": {
+        "status": "paused",
+        "payload": {
+          "status": "paused",
+          "summary": "",
+          "state_transition": {
+            "requested_group": null,
+            "reason": null
+          },
+          "changes": {
+            "branch": null,
+            "commits": [],
+            "files_touched": [],
+            "pr_url": null
+          },
+          "validation": {
+            "acceptance_all_met": null,
+            "ran": [],
+            "notes": null
+          },
+          "progress": {
+            "phase": null,
+            "checkpoints": {}
+          },
+          "autonomy": {
+            "score": 0,
+            "type": "none",
+            "reason": "",
+            "question_for_human": "which approach?",
+            "safe_to_continue": true
+          },
+          "blockers": []
+        }
+      },
+      "after": {
+        "status": "paused_awaiting_input",
+        "done_payload": {
+          "status": "paused",
+          "changes": {
+            "branch": null,
+            "pr_url": null,
+            "commits": [],
+            "files_touched": []
+          },
+          "summary": "",
+          "autonomy": {
+            "type": "none",
+            "score": 0,
+            "reason": "",
+            "safe_to_continue": true,
+            "question_for_human": "which approach?"
+          },
+          "blockers": [],
+          "progress": {
+            "phase": null,
+            "checkpoints": {}
+          },
+          "validation": {
+            "ran": [],
+            "notes": null,
+            "acceptance_all_met": null
+          },
+          "state_transition": {
+            "reason": null,
+            "requested_group": null
+          }
+        },
+        "error": "",
+        "ended_at": null
+      },
+      "executed_sql": [
+        "UPDATE \"agent_run\" SET \"status\" = 'paused_awaiting_input', \"done_payload\" = '{\"status\": \"paused\", \"summary\": \"\", \"state_transition\": {\"requested_group\": null, \"reason\": null}, \"changes\": {\"branch\": null, \"commits\": [], \"files_touched\": [], \"pr_url\": null}, \"validation\": {\"acceptance_all_met\": null, \"ran\": [], \"notes\": null}, \"progress\": {\"phase\": null, \"checkpoints\": {}}, \"autonomy\": {\"score\": 0, \"type\": \"none\", \"reason\": \"\", \"question_for_human\": \"which approach?\", \"safe_to_continue\": true}, \"blockers\": []}'::jsonb, \"error\" = '', \"ended_at\" = NULL WHERE \"agent_run\".\"id\" = '11111111222233334444000000004104'::uuid"
+      ]
+    },
+    {
+      "name": "parse-error-non-terminal",
+      "trace": "done_signal.py:153-162 parse-error path",
+      "input_text": "no fence here",
+      "before": {
+        "status": "running",
+        "done_payload": null,
+        "error": "",
+        "ended_at": null
+      },
+      "returned": null,
+      "after": {
+        "status": "failed",
+        "done_payload": null,
+        "error": "done-signal parse error: no pi-dash-done fenced block found",
+        "ended_at": "2026-10-03T12:00:00+00:00"
+      },
+      "executed_sql": [
+        "UPDATE \"agent_run\" SET \"status\" = 'failed', \"done_payload\" = NULL, \"error\" = 'done-signal parse error: no pi-dash-done fenced block found', \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004105'::uuid"
+      ]
+    },
+    {
+      "name": "parse-error-terminal-kept",
+      "trace": "done_signal.py:153-162 parse-error path",
+      "input_text": "no fence here",
+      "before": {
+        "status": "completed",
+        "done_payload": null,
+        "error": "",
+        "ended_at": null
+      },
+      "returned": null,
+      "after": {
+        "status": "completed",
+        "done_payload": null,
+        "error": "done-signal parse error: no pi-dash-done fenced block found",
+        "ended_at": "2026-10-03T12:00:00+00:00"
+      },
+      "executed_sql": [
+        "UPDATE \"agent_run\" SET \"status\" = 'completed', \"done_payload\" = NULL, \"error\" = 'done-signal parse error: no pi-dash-done fenced block found', \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004106'::uuid"
+      ]
+    }
+  ]
+}

@@ -76,3 +76,78 @@ Reading material only: `tests/unit/orchestration/`.
   `:742-751` (`WAIT_*` results), `:754` (`WAIT_ACTIVITY_FIELD`),
   `:758-763` (`_WAIT_REARMABLE_DISARMS`), `:254-265`
   (`_TICKER_CLOCK_FIELDS`).
+
+## FX-ORCH-02 reads (DB)
+
+Generator `/tmp/fx_orch_02.py` against scratch database
+`pidash_524_scratch` (fresh `migrate`, clock frozen at
+`2026-10-03T12:00:00Z` where timestamps are recorded, seeded PKs fixed
+for byte-stable SQL). Seed layout: workspace `fx2-workspace`,
+projects `FX0` (sections A–D issues; the queryset user is not a
+member, so they stay out of section E sets), `FX2` (member project),
+`FX2B` (non-member project); all issues in `Todo`/`unstarted` so the
+post_save transition handler takes the no-dispatch path.
+
+- `fx02_reads/active_run.sql` —
+  `orchestration/service.py:84-103` (`_active_run_for`): executed
+  `SELECT` via `CaptureQueriesContext` — `work_item_id = … AND
+  status IN (queued, assigned, waiting_for_worktree, running,
+  cancel_requested, awaiting_approval, awaiting_reauth) ORDER BY
+  created_at DESC LIMIT 1`.
+- `fx02_reads/latest_prior_run.sql` —
+  `orchestration/service.py:106-107` (`_latest_prior_run`): executed
+  `SELECT` — `work_item_id = … ORDER BY created_at DESC LIMIT 1`.
+- `fx02_reads/active_run.rows.json` — one issue per active status
+  (all 7 returned by `_active_run_for`); active+newer-terminal issue
+  (`_active` skips the terminal, `_latest` returns it);
+  paused-only issue (`PAUSED_AWAITING_INPUT` is non-terminal but NOT
+  in the active set → `_active` is `None`); empty issue (both
+  `None`). The DB partial unique index
+  `agent_run_one_active_per_work_item` (`runner/models.py:1085-1100`,
+  context only — D-13…D-15 own that file) forbids two actives on one
+  issue, so multi-row newest-first ordering is unreachable; the
+  `ORDER BY` is recorded in SQL all the same.
+- `fx02_reads/ingest.before_after.json` —
+  `orchestration/done_signal.py:141-181` (`ingest_into_run`): 6 live
+  cases — completed/blocked/noop → terminal + `ended_at` + prior
+  error cleared, `noop` maps to `COMPLETED`; paused →
+  `PAUSED_AWAITING_INPUT` with `ended_at` NULL; parse-error on a
+  non-terminal run → `FAILED`; parse-error on a terminal run keeps
+  its status (error + `ended_at` still stamped). Return value
+  (`DoneSignal` vs `None`) and the single `UPDATE agent_run …`
+  per case recorded.
+- `fx02_reads/workpad.golden.json` —
+  `orchestration/workpad.py:74-76` (`get_workpad`: fresh issue →
+  `""`, `None` attribute → `""`), `:79-84` (`set_workpad`:
+  round-trip, overwrite, clear-with-`""`, `None` → `""`, plus the
+  `UPDATE issues SET updated_at, workpad …` with the frozen clock).
+- `fx02_reads/agent_system_user.golden.json` —
+  `orchestration/workpad.py:29-32` (`AGENT_*` constants), `:35-41`
+  (`AgentUserCollisionError`), `:44-71` (`get_agent_system_user`):
+  created-row shape (`is_bot`, unusable password), exists-path
+  same-PK idempotency, collision message verbatim.
+- `fx02_reads/querysets.sql` —
+  `core/querysets.py:19-30` (`member_project_issues`),
+  `:33-52` (`user_issues_queryset` × `all`/`assigned`/`created`):
+  executed `SELECT DISTINCT …` per scope (incl. the `IssueManager`
+  triage/archived/draft exclusions and the member-project joins).
+- `fx02_reads/querysets.rows.json` — seeds (assigned-only,
+  created-only, subscribed-only, uninvolved, non-member-project)
+  plus the per-scope result sets: member → the 4 `FX2` issues;
+  `all` → assigned+created+subscribed; `assigned`/`created` →
+  their single issue each.
+- `fx02_reads/role_facts.sql` —
+  `core/permissions.py:28-34` (`is_workspace_member`),
+  `:37-45` (`workspace_role`), `:48-58`
+  (`workspace_role_by_slug`), `:61-70` (admin/member decisions via
+  one `workspace_role` `SELECT` each), `:73-119`
+  (`check_project_role`: allowed-role `EXISTS` plus the two bypass
+  `EXISTS` per case): executed `SELECT`s for every matrix cell
+  (9 `check_project_role` cases incl. the 3-statement bypass
+  path). Role-fact SQL only — the F-06 kernel owns the decisions.
+- `fx02_reads/role_facts.golden.json` — `ROLE_*` constants plus the
+  result matrix over admin/member/guest/inactive/outsider/
+  anonymous/`None` (member + guest fail admin; guest fails
+  at-least-member; inactive/outsider/anonymous/`None` are all
+  false/`None`) and the 9 `check_project_role` verdicts (allowed
+  hit, bypass grant/deny, no-membership, anonymous/`None`).
