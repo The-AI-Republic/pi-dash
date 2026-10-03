@@ -49,18 +49,21 @@ pub struct BodySpec {
     pub skip_blank_fields: &'static [&'static str],
 }
 
-/// Cycle write paths: no list fields; the two datetimes and the timezone
-/// choice skip blank form input.
+/// Cycle write paths: no list fields; only the timezone choice skips
+/// blank form input (`ChoiceField`: no `allow_blank`, not required).
+/// The datetimes keep a blank `''` in the map (`Field.get_value` maps
+/// present-`''` + `allow_null` to `None`): the create gate sees `''` as
+/// present, and coercion turns HTML `''` into the null arm.
 pub const CYCLE_BODY_SPEC: BodySpec = BodySpec {
     list_fields: &[],
-    skip_blank_fields: &["start_date", "end_date", "timezone"],
+    skip_blank_fields: &["timezone"],
 };
 
-/// Module write paths: `members` is a `ListField`; the two dates and the
-/// status choice skip blank form input.
+/// Module write paths: `members` is a `ListField`; only the status choice
+/// skips blank form input. The dates keep `''` (same `get_value` rule).
 pub const MODULE_BODY_SPEC: BodySpec = BodySpec {
     list_fields: &["members"],
-    skip_blank_fields: &["start_date", "target_date", "status"],
+    skip_blank_fields: &["status"],
 };
 
 /// One uploaded file part (multipart). Content is carried for the
@@ -74,6 +77,11 @@ pub struct FilePart {
     pub content_type: String,
     /// Raw (transfer-decoded) file bytes.
     pub bytes: Vec<u8>,
+    /// Whether Django held this upload in memory (`InMemoryUploadedFile`)
+    /// rather than spilling to temp storage (`TemporaryUploadedFile`):
+    /// the whole request body fit in `FILE_UPLOAD_MAX_MEMORY_SIZE`
+    /// (2621440). Only the indexed-dict echo renders the class name.
+    pub in_memory: bool,
 }
 
 /// Uploads per key, in arrival order (DRF merges files into
@@ -96,6 +104,12 @@ pub struct FormBody {
     pub texts: BTreeMap<String, Vec<String>>,
     /// File values per key, in arrival order.
     pub files: FilesMap,
+    /// Text keys in first-seen order (QueryDict key order).
+    pub text_order: Vec<String>,
+    /// File keys in first-seen order. The merged `_full_data` key order
+    /// is the text keys followed by the files-only keys (`copy().update`
+    /// keeps data positions and appends new file keys).
+    pub file_order: Vec<String>,
 }
 
 impl FormBody {
@@ -180,7 +194,7 @@ pub fn negotiate_body(
 
 /// Apply the domain spec to a parsed form: list fields become arrays, blank
 /// skips drop keys, every other key keeps its last text value.
-fn build_form_body(form: FormBody, spec: &BodySpec) -> NegotiatedBody {
+fn build_form_body(mut form: FormBody, spec: &BodySpec) -> NegotiatedBody {
     let mut map = Map::new();
     let mut keys: Vec<&String> = form.texts.keys().collect();
     keys.sort();
@@ -207,10 +221,178 @@ fn build_form_body(form: FormBody, spec: &BodySpec) -> NegotiatedBody {
             map.insert((*key).to_owned(), Value::Array(Vec::new()));
         }
     }
+    // Indexed list keys (DRF `parse_html_list`, `utils/html.py`): when the
+    // exact key is absent from both texts and files, `members[N]` /
+    // `members[N]suffix` keys assemble the array instead (exact-key
+    // `getlist` wins when both are present). Plain file values arrive as
+    // JSON nulls (placeholders — form parsing otherwise never emits null)
+    // with the uploads moved under the field name in arrival order; the
+    // caller resolves them positionally. Dict-form values arrive as arrays
+    // of single-key objects (`{suffix: [value]}`, first-seen suffix order)
+    // so the caller can render the `MultiValueDict` echo exactly.
+    for field in spec.list_fields {
+        if map.contains_key(*field) {
+            continue;
+        }
+        if let Some(entries) = scan_indexed_list(&form, field) {
+            let mut items = Vec::with_capacity(entries.len());
+            let mut uploads = Vec::new();
+            for entry in entries {
+                match entry {
+                    IndexedEntry::Text(text) => items.push(Value::String(text)),
+                    IndexedEntry::File(key) => {
+                        if let Some(part) = form.files.get_mut(&key).and_then(Vec::pop) {
+                            uploads.push(part);
+                        }
+                        items.push(Value::Null);
+                    }
+                    IndexedEntry::Dict(pairs) => {
+                        let mut rendered = Vec::with_capacity(pairs.len());
+                        for (suffix, value) in pairs {
+                            let item = match value {
+                                IndexedValue::Text(text) => Value::String(text),
+                                IndexedValue::File(key) => {
+                                    if let Some(part) = form.files.get_mut(&key).and_then(Vec::pop)
+                                    {
+                                        uploads.push(part);
+                                    }
+                                    Value::Null
+                                }
+                            };
+                            let mut pair = Map::new();
+                            pair.insert(suffix, Value::Array(vec![item]));
+                            rendered.push(Value::Object(pair));
+                        }
+                        items.push(Value::Array(rendered));
+                    }
+                }
+            }
+            map.insert((*field).to_owned(), Value::Array(items));
+            if !uploads.is_empty() {
+                form.files.insert((*field).to_owned(), uploads);
+            }
+        }
+    }
     NegotiatedBody::Form {
         map,
         files: form.files,
     }
+}
+
+/// One assembled indexed-list entry, in index order.
+enum IndexedEntry {
+    Text(String),
+    /// Key holding the file (the last upload wins, like `.items()`).
+    File(String),
+    /// Dict-form pairs in first-seen suffix order.
+    Dict(Vec<(String, IndexedValue)>),
+}
+
+/// A scanned indexed value: the last text, or the key of the last file.
+#[derive(Debug, Clone)]
+enum IndexedValue {
+    Text(String),
+    File(String),
+}
+
+/// Scan `_full_data` for `prefix[N]` / `prefix[N]suffix` keys (`re`:
+/// `^prefix\[([0-9]+)\](.*)$` — literal prefix, ASCII digits, any suffix
+/// without a newline). Merged key order is the text keys then the
+/// files-only keys; per key the value is the last file when the key
+/// carries any, else the last text. Plain entries overwrite (even dicts),
+/// dict entries merge by suffix with setitem (last wins) semantics.
+/// Returns the entries sorted by numeric index, or `None` when no key
+/// matched (the field stays missing).
+fn scan_indexed_list(form: &FormBody, field: &str) -> Option<Vec<IndexedEntry>> {
+    // (key, value) in merged `_full_data` order: text keys first (data
+    // positions win for keys carrying both), then files-only keys.
+    let mut merged: Vec<(&str, IndexedValue)> = Vec::new();
+    for key in &form.text_order {
+        if form.files.contains_key(key) {
+            merged.push((key, IndexedValue::File(key.clone())));
+        } else if let Some(last) = form.texts.get(key).and_then(|v| v.last()) {
+            merged.push((key, IndexedValue::Text(last.clone())));
+        }
+    }
+    for key in &form.file_order {
+        if !form.texts.contains_key(key) && form.files.contains_key(key) {
+            merged.push((key, IndexedValue::File(key.clone())));
+        }
+    }
+    let mut hits: Vec<(String, String, IndexedValue)> = Vec::new();
+    for (key, value) in merged {
+        if let Some((index, suffix)) = split_indexed_key(key, field) {
+            // DRF keys `ret` by `int(index)`: `007` and `7` collide.
+            hits.push((normalize_index_text(index), suffix.to_owned(), value));
+        }
+    }
+    if hits.is_empty() {
+        return None;
+    }
+    // Arrival-order overwrite rules, then numeric-index sort.
+    let mut ret: Vec<(String, IndexedEntry)> = Vec::new();
+    for (index, suffix, value) in hits {
+        let slot = ret.iter_mut().find(|(at, _)| *at == index);
+        if suffix.is_empty() {
+            let entry = match value {
+                IndexedValue::Text(text) => IndexedEntry::Text(text),
+                IndexedValue::File(key) => IndexedEntry::File(key),
+            };
+            match slot {
+                Some((_, at)) => *at = entry,
+                None => ret.push((index, entry)),
+            }
+        } else {
+            match slot {
+                Some((_, IndexedEntry::Dict(pairs))) => {
+                    if let Some(at) = pairs.iter_mut().find(|(at, _)| *at == suffix) {
+                        at.1 = value;
+                    } else {
+                        pairs.push((suffix, value));
+                    }
+                }
+                Some((_, at)) => {
+                    *at = IndexedEntry::Dict(vec![(suffix, value)]);
+                }
+                None => ret.push((index, IndexedEntry::Dict(vec![(suffix, value)]))),
+            }
+        }
+    }
+    ret.sort_by(|a, b| cmp_index_text(&a.0, &b.0));
+    Some(ret.into_iter().map(|(_, entry)| entry).collect())
+}
+
+/// Canonical index text for identity + sort (leading zeros dropped).
+fn normalize_index_text(index: &str) -> String {
+    let stripped = index.trim_start_matches('0');
+    if stripped.is_empty() {
+        "0".to_owned()
+    } else {
+        stripped.to_owned()
+    }
+}
+
+/// Split `prefix[N]suffix` (`N` one or more ASCII digits, suffix without
+/// `\n` — Python `.` never matches a newline).
+fn split_indexed_key<'a>(key: &'a str, prefix: &str) -> Option<(&'a str, &'a str)> {
+    let rest = key.strip_prefix(prefix)?.strip_prefix('[')?;
+    let close = rest.find(']')?;
+    let (digits, suffix) = rest.split_at(close);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let suffix = &suffix[1..];
+    if suffix.contains('\n') {
+        return None;
+    }
+    Some((digits, suffix))
+}
+
+/// Numeric index order over digit strings of any length (Python `int`
+/// sort: leading zeros ignored, then length, then lexicographic).
+fn cmp_index_text(a: &str, b: &str) -> std::cmp::Ordering {
+    let (a, b) = (normalize_index_text(a), normalize_index_text(b));
+    (a.len(), a).cmp(&(b.len(), b))
 }
 
 /// Raw header value as sent (`HeaderMap` strips only surrounding whitespace,
@@ -218,12 +400,14 @@ fn build_form_body(form: FormBody, spec: &BodySpec) -> NegotiatedBody {
 /// is what Django sees under prod (uvicorn/ASGI omits the key); runserver's
 /// `text/plain` default for a missing content type is a wsgiref artifact
 /// the port deliberately does not reproduce (same JSON as prod Django).
+/// Bytes decode as latin-1 (total over what hyper delivers): uvicorn and
+/// wsgiref both surface obs-text bytes as latin-1 chars, so Django's 415
+/// echoes them verbatim (live: `text/pl\xe9in` echoes U+00E9).
 fn header_str(headers: &HeaderMap, name: &str) -> String {
     headers
         .get(name)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_owned()
+        .map(|v| v.as_bytes().iter().map(|b| *b as char).collect())
+        .unwrap_or_default()
 }
 
 /// `_load_stream`: empty unless the Content-Length header parses (Python
@@ -461,9 +645,11 @@ fn supported_alias(normalized: &str) -> Option<SupportedCharset> {
 /// case-insensitive on the parameter name via `parse_header_parameters`).
 fn content_type_charset(content_type: &str) -> SupportedCharset {
     let (_, params) = parse_header_parameters(content_type);
+    // Duplicate params: last wins (`parse_header_parameters` returns a
+    // dict in Django, so later pairs overwrite earlier ones).
     params
         .iter()
-        .find(|(name, _)| name == "charset")
+        .rfind(|(name, _)| name == "charset")
         .map(|(_, value)| charset_to_supported(value))
         .unwrap_or(SupportedCharset::Utf8)
 }
@@ -552,8 +738,10 @@ fn decode_stream_utf8(body: &[u8]) -> Result<String, String> {
 
 /// Whether the bytes at `start..` are a strict prefix of a valid sequence
 /// (lead + well-ranged continuations so far, missing at least one byte).
-/// Range-invalid truncations (`\xed\xa0` + EOF) still error — the range
-/// check fires before EOF matters (same rules as `utf8_decode_detail`).
+/// The E0/F0/F4 second-byte ranges fire eagerly (a truncated tail with an
+/// out-of-range second byte still errors), but the ED surrogate range is
+/// only checked at assembly: `\xed\xa0` + EOF is dropped, not an error
+/// (stdlib-probed).
 fn utf8_trailing_valid_prefix(body: &[u8], start: usize) -> bool {
     let lead = body[start];
     let expected: Option<usize> = match lead {
@@ -576,7 +764,6 @@ fn utf8_trailing_valid_prefix(body: &[u8], start: usize) -> bool {
         let second = body[start + 1];
         let in_range = match lead {
             0xE0 => (0xA0..=0xBF).contains(&second),
-            0xED => (0x80..=0x9F).contains(&second),
             0xF0 => (0x90..=0xBF).contains(&second),
             0xF4 => (0x80..=0x8F).contains(&second),
             _ => true,
@@ -599,7 +786,8 @@ fn decode_stream_ascii(body: &[u8]) -> Result<String, String> {
 }
 
 fn decode_stream_utf16(body: &[u8], big_endian: Option<bool>) -> Result<String, String> {
-    let (units, big_endian) = split_utf16_units(body, big_endian)?;
+    let specified = big_endian.is_some();
+    let (units, big_endian, bom_seen) = split_utf16_units(body, big_endian);
     let codec = if big_endian { "utf-16-be" } else { "utf-16-le" };
     let mut out = String::new();
     let mut index = 0;
@@ -631,30 +819,36 @@ fn decode_stream_utf16(body: &[u8], big_endian: Option<bool>) -> Result<String, 
             index += 1;
         }
     }
+    // No-BOM validity rule (stdlib-probed): without a BOM the stream
+    // decodes native-LE and the first codec error wins; only a clean
+    // decode that emitted at least one char is the BOM error (empty
+    // output decodes to `""`).
+    if !specified && !bom_seen && !out.is_empty() {
+        return Err("UTF-16 stream does not start with BOM".to_owned());
+    }
     Ok(out)
 }
 
-/// Split off the BOM (required when `big_endian` is `None`) and pair the
-/// rest into units with byte offsets; a trailing odd byte is dropped.
-fn split_utf16_units(
-    body: &[u8],
-    big_endian: Option<bool>,
-) -> Result<(Vec<(u16, usize)>, bool), String> {
-    // Error positions are absolute in the stream: the consumed BOM still
-    // counts (CPython reports the lone-low after a BOM at 4-5, not 2-3).
-    let base = if big_endian.is_none() { 2 } else { 0 };
-    let (body, big_endian) = match big_endian {
-        Some(big_endian) => (body, big_endian),
+/// Split off an optional BOM (consumed when present, little-endian assumed
+/// when `big_endian` is `None` and no BOM leads) and pair the rest into
+/// units with absolute byte offsets; a trailing odd byte is dropped.
+/// Returns the units, the resolved byte order, and whether a BOM led.
+fn split_utf16_units(body: &[u8], big_endian: Option<bool>) -> (Vec<(u16, usize)>, bool, bool) {
+    // Error positions are absolute in the stream: a consumed BOM still
+    // counts (CPython reports the lone-low after a BOM at 2-3, not 0-1).
+    let (body, big_endian, bom_seen) = match big_endian {
+        Some(big_endian) => (body, big_endian, false),
         None => {
             if let Some(rest) = body.strip_prefix(b"\xFF\xFE") {
-                (rest, false)
+                (rest, false, true)
             } else if let Some(rest) = body.strip_prefix(b"\xFE\xFF") {
-                (rest, true)
+                (rest, true, true)
             } else {
-                return Err("UTF-16 stream does not start with BOM".to_owned());
+                (body, false, false)
             }
         }
     };
+    let base = if bom_seen { 2 } else { 0 };
     let mut units = Vec::with_capacity(body.len() / 2);
     let mut offset = 0;
     while offset + 1 < body.len() {
@@ -667,11 +861,12 @@ fn split_utf16_units(
         units.push((value, base + offset));
         offset += 2;
     }
-    Ok((units, big_endian))
+    (units, big_endian, bom_seen)
 }
 
 fn decode_stream_utf32(body: &[u8], big_endian: Option<bool>) -> Result<String, String> {
-    let (words, big_endian) = split_utf32_units(body, big_endian)?;
+    let specified = big_endian.is_some();
+    let (words, big_endian, bom_seen) = split_utf32_units(body, big_endian);
     let codec = if big_endian { "utf-32-be" } else { "utf-32-le" };
     let mut out = String::new();
     for (value, at) in words {
@@ -689,27 +884,28 @@ fn decode_stream_utf32(body: &[u8], big_endian: Option<bool>) -> Result<String, 
         }
         out.push(char::from_u32(value).expect("valid scalar"));
     }
+    // Same no-BOM validity rule as utf-16 (stdlib-probed).
+    if !specified && !bom_seen && !out.is_empty() {
+        return Err("UTF-32 stream does not start with BOM".to_owned());
+    }
     Ok(out)
 }
 
-fn split_utf32_units(
-    body: &[u8],
-    big_endian: Option<bool>,
-) -> Result<(Vec<(u32, usize)>, bool), String> {
-    // Absolute stream positions: the consumed BOM still counts.
-    let base = if big_endian.is_none() { 4 } else { 0 };
-    let (body, big_endian) = match big_endian {
-        Some(big_endian) => (body, big_endian),
+fn split_utf32_units(body: &[u8], big_endian: Option<bool>) -> (Vec<(u32, usize)>, bool, bool) {
+    // Absolute stream positions: a consumed BOM still counts.
+    let (body, big_endian, bom_seen) = match big_endian {
+        Some(big_endian) => (body, big_endian, false),
         None => {
             if let Some(rest) = body.strip_prefix(b"\xFF\xFE\x00\x00") {
-                (rest, false)
+                (rest, false, true)
             } else if let Some(rest) = body.strip_prefix(b"\x00\x00\xFE\xFF") {
-                (rest, true)
+                (rest, true, true)
             } else {
-                return Err("UTF-32 stream does not start with BOM".to_owned());
+                (body, false, false)
             }
         }
     };
+    let base = if bom_seen { 4 } else { 0 };
     let mut words = Vec::with_capacity(body.len() / 4);
     let mut offset = 0;
     while offset + 3 < body.len() {
@@ -727,25 +923,45 @@ fn split_utf32_units(
         words.push((value, base + offset));
         offset += 4;
     }
-    Ok((words, big_endian))
+    (words, big_endian, bom_seen)
 }
 
 fn decode_oneshot_utf16(body: &[u8], big_endian: Option<bool>) -> Option<String> {
-    // Strict one-shot: the BOM (when required) plus whole units must
-    // consume every byte; odd tails and lone surrogates fail (and the
-    // form layer falls back to latin-1).
-    let bom_len = if big_endian.is_some() { 0 } else { 2 };
-    if body.len() < bom_len || !(body.len() - bom_len).is_multiple_of(2) {
+    // Strict one-shot (`bytes.decode`: no BOM requirement, native-LE
+    // default, BOM consumed when present): whole units must consume every
+    // byte; odd tails and lone surrogates fail (and the form layer falls
+    // back to latin-1).
+    let (body, big_endian) = match big_endian {
+        Some(big_endian) => (body, big_endian),
+        None => {
+            if let Some(rest) = body.strip_prefix(b"\xFF\xFE") {
+                (rest, false)
+            } else if let Some(rest) = body.strip_prefix(b"\xFE\xFF") {
+                (rest, true)
+            } else {
+                (body, false)
+            }
+        }
+    };
+    if !body.len().is_multiple_of(2) {
         return None;
     }
-    let (units, _) = split_utf16_units(body, big_endian).ok()?;
+    let mut units = Vec::with_capacity(body.len() / 2);
+    for pair in body.chunks_exact(2) {
+        let value = if big_endian {
+            u16::from_be_bytes([pair[0], pair[1]])
+        } else {
+            u16::from_le_bytes([pair[0], pair[1]])
+        };
+        units.push(value);
+    }
     let mut out = String::new();
     let mut index = 0;
     while index < units.len() {
-        let (value, _) = units[index];
+        let value = units[index];
         if (0xD800..0xDC00).contains(&value) {
             match units.get(index + 1) {
-                Some((low, _)) if (0xDC00..0xE000).contains(low) => {
+                Some(low) if (0xDC00..0xE000).contains(low) => {
                     let high = (value - 0xD800) as u32;
                     let low = (low - 0xDC00) as u32;
                     out.push(char::from_u32(0x10000 + (high << 10) + low)?);
@@ -764,13 +980,29 @@ fn decode_oneshot_utf16(body: &[u8], big_endian: Option<bool>) -> Option<String>
 }
 
 fn decode_oneshot_utf32(body: &[u8], big_endian: Option<bool>) -> Option<String> {
-    let (words, _) = split_utf32_units(body, big_endian).ok()?;
-    let bom = if big_endian.is_some() { 0 } else { 4 };
-    if bom + words.len() * 4 != body.len() {
+    // Strict one-shot, same BOM rules as utf-16 (native-LE default).
+    let (body, big_endian) = match big_endian {
+        Some(big_endian) => (body, big_endian),
+        None => {
+            if let Some(rest) = body.strip_prefix(b"\xFF\xFE\x00\x00") {
+                (rest, false)
+            } else if let Some(rest) = body.strip_prefix(b"\x00\x00\xFE\xFF") {
+                (rest, true)
+            } else {
+                (body, false)
+            }
+        }
+    };
+    if !body.len().is_multiple_of(4) {
         return None;
     }
     let mut out = String::new();
-    for (value, _) in words {
+    for word in body.chunks_exact(4) {
+        let value = if big_endian {
+            u32::from_be_bytes([word[0], word[1], word[2], word[3]])
+        } else {
+            u32::from_le_bytes([word[0], word[1], word[2], word[3]])
+        };
         // `from_u32` rejects surrogates and out-of-range values alike.
         out.push(char::from_u32(value)?);
     }
@@ -955,7 +1187,11 @@ fn parse_form_body(body: &[u8], content_type: &str) -> Result<FormBody, BodyErro
         };
         let key = percent_decode_str(&name.replace('+', " "), &charset);
         let val = percent_decode_str(&value.replace('+', " "), &charset);
-        form.texts.entry(key).or_default().push(val);
+        let slot = form.texts.entry(key.clone()).or_default();
+        if slot.is_empty() {
+            form.text_order.push(key);
+        }
+        slot.push(val);
     }
     Ok(form)
 }
@@ -969,21 +1205,24 @@ fn parse_multipart_body(
     content_type: &str,
     headers: &HeaderMap,
 ) -> Result<FormBody, BodyError> {
-    if !content_type.is_ascii() {
-        return Err(BodyError::ParseDetail(format!(
-            "Multipart form parse error - Invalid non-ASCII Content-Type in multipart: {content_type}"
-        )));
-    }
+    // Check order mirrors `MultipartParser.__init__` (4.2.30): the
+    // case-sensitive `multipart/` prefix first, then the ASCII check.
     if !content_type.starts_with("multipart/") {
         // Case-sensitive, on the full header (`P19` probe).
         return Err(BodyError::ParseDetail(format!(
             "Multipart form parse error - Invalid Content-Type: {content_type}"
         )));
     }
+    if !content_type.is_ascii() {
+        return Err(BodyError::ParseDetail(format!(
+            "Multipart form parse error - Invalid non-ASCII Content-Type in multipart: {content_type}"
+        )));
+    }
     let (_, params) = parse_header_parameters(content_type);
+    // Duplicate params: last wins (Django's params dict overwrites).
     let boundary = params
         .iter()
-        .find(|(name, _)| name == "boundary")
+        .rfind(|(name, _)| name == "boundary")
         .map(|(_, value)| value.clone())
         .unwrap_or_default();
     if boundary.is_empty() && !params.iter().any(|(name, _)| name == "boundary") {
@@ -1049,6 +1288,13 @@ fn parse_multipart_parts(
             }
         }
     }
+    // `BoundaryIter.__init__` needs one remaining byte per sub-stream: a
+    // body ending exactly at a separator (or an empty body under a lying
+    // Content-Length) yields no trailing item. Leading/middle empties
+    // (preamble, adjacent separators) still count.
+    if chunks.last().is_some_and(|chunk| chunk.is_empty()) {
+        chunks.pop();
+    }
     let mut form = FormBody::default();
     let mut num_post_keys: usize = 0;
     let mut num_files: usize = 0;
@@ -1083,10 +1329,11 @@ fn parse_multipart_parts(
                         value = decoded;
                     }
                 }
-                form.texts
-                    .entry(key)
-                    .or_default()
-                    .push(decode_oneshot_replace(&value, *charset));
+                let slot = form.texts.entry(key.clone()).or_default();
+                if slot.is_empty() {
+                    form.text_order.push(key);
+                }
+                slot.push(decode_oneshot_replace(&value, *charset));
             }
             PartItem::File {
                 name,
@@ -1109,10 +1356,18 @@ fn parse_multipart_parts(
                     })?;
                 }
                 let key = decode_oneshot_replace(&name, *charset);
-                form.files.entry(key).or_default().push(FilePart {
+                // `MemoryFileUploadHandler.activated`: the whole body fits
+                // in `FILE_UPLOAD_MAX_MEMORY_SIZE` (2621440).
+                let in_memory = body.len() <= 2_621_440;
+                let slot = form.files.entry(key.clone()).or_default();
+                if slot.is_empty() {
+                    form.file_order.push(key);
+                }
+                slot.push(FilePart {
                     filename,
                     content_type: String::from_utf8_lossy(&content_type).into_owned(),
                     bytes: value,
+                    in_memory,
                 });
             }
         }
@@ -1258,11 +1513,10 @@ fn parse_header_line(line: &str) -> ParsedHeaderLine {
         .into_iter()
         .map(|(key, value)| (key.into_bytes(), value.into_bytes()))
         .collect();
-    (
-        name.trim().to_owned(),
-        value.trim().as_bytes().to_vec(),
-        params,
-    )
+    // The field name is NOT stripped (4.2 compares it verbatim, so
+    // `Name : v` never matches); the value trims like Django's per-use
+    // `.strip()` calls (N3/N5).
+    (name.to_owned(), value.trim().as_bytes().to_vec(), params)
 }
 
 fn strip_ascii_whitespace(bytes: &[u8]) -> Vec<u8> {
@@ -1364,11 +1618,11 @@ fn binascii_b64decode(data: &[u8]) -> Result<Vec<u8>, ()> {
 /// drop non-printables; empty results mean "no file here" (the part is
 /// skipped). Returns `None` for empty/`.`/`..` names.
 fn sanitize_file_name(name: &str) -> Option<String> {
-    let mut name = name.rsplit(['/', '\\']).next().unwrap_or("").to_owned();
-    if name.is_empty() {
-        return None;
-    }
-    name = html_unescape_practical(&name);
+    // Order mirrors `MultipartParser.sanitize_file_name` (4.2.30):
+    // unescape first (so `..&#x2F;evil` becomes `../evil`), then strip
+    // directories, then drop non-printables.
+    let mut name = html_unescape_practical(name);
+    name = name.rsplit(['/', '\\']).next().unwrap_or("").to_owned();
     name = name
         .chars()
         .filter(|c| is_printable_ascii_plus(*c))
@@ -1394,8 +1648,14 @@ fn html_unescape_practical(text: &str) -> String {
                 }
             }
         }
-        out.push(bytes[index] as char);
-        index += 1;
+        // Push whole chars: byte-at-a-time would shred multi-byte
+        // sequences (`café.txt` → `cafÃ©.txt`).
+        let ch = text[index..]
+            .chars()
+            .next()
+            .expect("byte index on a boundary");
+        out.push(ch);
+        index += ch.len_utf8();
     }
     out
 }
@@ -1608,9 +1868,11 @@ mod codec_tests {
             decode_stream_body(b"abc", SupportedCharset::Utf16).unwrap_err(),
             "UTF-16 stream does not start with BOM"
         );
+        // No-BOM validity rule: the first codec error wins over the BOM
+        // check (`abcd` is a utf-32-LE range error, not a BOM error).
         assert_eq!(
             decode_stream_body(b"abcd", SupportedCharset::Utf32).unwrap_err(),
-            "UTF-32 stream does not start with BOM"
+            "'utf-32-le' codec can't decode bytes in position 0-3: code point not in range(0x110000)"
         );
         assert_eq!(
             decode_stream_body(b"\xff\xfe\x00\x00\x00\xd8\x00\x00", SupportedCharset::Utf32).unwrap_err(),
@@ -1630,15 +1892,152 @@ mod codec_tests {
             decode_stream_body(b"{\"a\":\"\xe9\"}", SupportedCharset::Utf8).unwrap_err(),
             "'utf-8' codec can't decode byte 0xe9 in position 6: invalid continuation byte"
         );
-        // Range-invalid truncations still error (cycle battery note).
+        // The ED surrogate range is assembly-checked: a truncated
+        // ED tail drops (stdlib-probed), unlike E0/F0/F4.
         assert_eq!(
-            decode_stream_body(b"\xed\xa0", SupportedCharset::Utf8).unwrap_err(),
-            "'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"
+            decode_stream_body(b"\xed\xa0", SupportedCharset::Utf8).unwrap(),
+            ""
         );
+        assert_eq!(
+            decode_stream_body(b"a\xed\xa0", SupportedCharset::Utf8).unwrap(),
+            "a"
+        );
+        // E0/F0/F4 second-byte ranges fire eagerly, even truncated.
+        for tail in [b"\xe0\x80".as_slice(), b"\xf0\x80", b"\xf4\x90"] {
+            let detail = decode_stream_body(tail, SupportedCharset::Utf8).unwrap_err();
+            assert!(detail.ends_with("invalid continuation byte"), "{detail:?}");
+        }
+        // Bare leads drop (nothing to range-check yet).
+        for tail in [b"\xe0".as_slice(), b"\xed", b"\xf0", b"\xf4", b"\xc2"] {
+            assert_eq!(
+                decode_stream_body(tail, SupportedCharset::Utf8).unwrap(),
+                ""
+            );
+        }
         // Valid two-byte prefix at EOF drops.
         assert_eq!(
             decode_stream_body(b"\xe4\xb8", SupportedCharset::Utf8).unwrap(),
             ""
+        );
+    }
+
+    #[test]
+    fn utf16_utf32_no_bom_validity() {
+        // Under two bytes without a BOM: dropped, not a BOM error (F7).
+        assert_eq!(
+            decode_stream_body(b"", SupportedCharset::Utf16).unwrap(),
+            ""
+        );
+        assert_eq!(
+            decode_stream_body(b"a", SupportedCharset::Utf16).unwrap(),
+            ""
+        );
+        assert_eq!(
+            decode_stream_body(b"", SupportedCharset::Utf32).unwrap(),
+            ""
+        );
+        assert_eq!(
+            decode_stream_body(b"a", SupportedCharset::Utf32).unwrap(),
+            ""
+        );
+        assert_eq!(
+            decode_stream_body(b"abc", SupportedCharset::Utf32).unwrap(),
+            ""
+        );
+        // Clean decode emitting >= 1 char without a BOM: BOM error (F8).
+        assert_eq!(
+            decode_stream_body(b"ab", SupportedCharset::Utf16).unwrap_err(),
+            "UTF-16 stream does not start with BOM"
+        );
+        assert_eq!(
+            decode_stream_body(b"A\x00\x00\x00", SupportedCharset::Utf32).unwrap_err(),
+            "UTF-32 stream does not start with BOM"
+        );
+        assert_eq!(
+            decode_stream_body(b"A\x00\xd8", SupportedCharset::Utf16).unwrap_err(),
+            "UTF-16 stream does not start with BOM"
+        );
+        // A pending high surrogate drops to zero chars: empty, no BOM error.
+        assert_eq!(
+            decode_stream_body(b"\x00\xd8", SupportedCharset::Utf16).unwrap(),
+            ""
+        );
+        // First codec error wins (utf-16-le names, absolute positions).
+        assert_eq!(
+            decode_stream_body(b"\x00\xdc", SupportedCharset::Utf16).unwrap_err(),
+            "'utf-16-le' codec can't decode bytes in position 0-1: illegal encoding"
+        );
+        assert_eq!(
+            decode_stream_body(b"A\x00\x00\xdc", SupportedCharset::Utf16).unwrap_err(),
+            "'utf-16-le' codec can't decode bytes in position 2-3: illegal encoding"
+        );
+        assert_eq!(
+            decode_stream_body(b"\x00\xd8\x00\xd8", SupportedCharset::Utf16).unwrap_err(),
+            "'utf-16-le' codec can't decode bytes in position 0-1: illegal UTF-16 surrogate"
+        );
+        assert_eq!(
+            decode_stream_body(b"A\x00\x00\x00abcd", SupportedCharset::Utf32).unwrap_err(),
+            "'utf-32-le' codec can't decode bytes in position 4-7: code point not in range(0x110000)"
+        );
+        // Explicit-endian paths are unchanged (no BOM check, odd tails drop).
+        assert_eq!(
+            decode_stream_body(b"abc", SupportedCharset::Utf16Be).unwrap(),
+            "\u{6162}"
+        );
+        assert_eq!(
+            decode_stream_body(b"abc", SupportedCharset::Utf32Le).unwrap(),
+            ""
+        );
+        assert_eq!(
+            decode_stream_body(b"\xdc\x00", SupportedCharset::Utf16Be).unwrap_err(),
+            "'utf-16-be' codec can't decode bytes in position 0-1: illegal encoding"
+        );
+    }
+
+    #[test]
+    fn oneshot_utf16_utf32_no_bom_needed() {
+        // One-shot (`bytes.decode`) has no BOM requirement: native-LE
+        // default, BOM consumed when present (F9).
+        assert_eq!(
+            decode_oneshot_strict(b"abcd", SupportedCharset::Utf16).as_deref(),
+            Some("\u{6261}\u{6463}")
+        );
+        assert_eq!(
+            decode_oneshot_strict(b"", SupportedCharset::Utf16).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            decode_oneshot_strict(b"\xff\xfe", SupportedCharset::Utf16).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            decode_oneshot_strict(b"\xfe\xff\x00A", SupportedCharset::Utf16).as_deref(),
+            Some("A")
+        );
+        // Odd tails and lone surrogates fail (form falls back to latin-1).
+        assert_eq!(decode_oneshot_strict(b"abc", SupportedCharset::Utf16), None);
+        assert_eq!(
+            decode_oneshot_strict(b"\x00\xd8", SupportedCharset::Utf16),
+            None
+        );
+        // utf-32 one-shot: `abcd` is LE 0x64636261, out of range.
+        assert_eq!(
+            decode_oneshot_strict(b"abcd", SupportedCharset::Utf32),
+            None
+        );
+        assert_eq!(decode_oneshot_strict(b"abc", SupportedCharset::Utf32), None);
+        assert_eq!(
+            decode_oneshot_strict(b"", SupportedCharset::Utf32).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            decode_oneshot_strict(b"A\x00\x00\x00", SupportedCharset::Utf32).as_deref(),
+            Some("A")
+        );
+        assert_eq!(
+            decode_oneshot_strict(b"\xff\xfe\x00\x00A\x00\x00\x00", SupportedCharset::Utf32)
+                .as_deref(),
+            Some("A")
         );
     }
 
@@ -1729,12 +2128,13 @@ mod codec_tests {
         // Raw non-UTF-8 bytes fall the whole body back to latin-1 (P10c).
         let map = form(b"name=\xe9");
         assert_eq!(map["name"], Value::String("é".to_owned()));
-        // Blank skips per spec (S6/S7/S8 probes).
+        // Only the choice skips (S6/S7/S8 probes): dates keep `''` so
+        // the gate sees presence and coercion maps HTML `''` to None.
         let map = form(b"name=x&timezone=&start_date=&end_date=");
         assert_eq!(map["name"], Value::String("x".to_owned()));
         assert!(!map.contains_key("timezone"));
-        assert!(!map.contains_key("start_date"));
-        assert!(!map.contains_key("end_date"));
+        assert_eq!(map["start_date"], Value::String(String::new()));
+        assert_eq!(map["end_date"], Value::String(String::new()));
         // Non-skipped blanks flow through as empty strings.
         let map = form(b"name=&description=&owned_by=");
         assert_eq!(map["name"], Value::String(String::new()));
@@ -1801,6 +2201,122 @@ mod codec_tests {
             map["members"],
             Value::Array(vec![Value::String(String::new())])
         );
+    }
+
+    #[test]
+    fn indexed_list_keys() {
+        let form = |body: &[u8]| match negotiate(
+            "application/x-www-form-urlencoded",
+            body,
+            &MODULE_BODY_SPEC,
+        )
+        .unwrap()
+        {
+            NegotiatedBody::Form { map, files } => (map, files),
+            other => panic!("expected form, got {other:?}"),
+        };
+        let strs = |items: &[&str]| {
+            Value::Array(
+                items
+                    .iter()
+                    .map(|v| Value::String((*v).to_owned()))
+                    .collect(),
+            )
+        };
+        // Sparse indexes sort numerically, not lexicographically (F5a).
+        let (map, files) = form(b"name=m&members%5B10%5D=j&members%5B2%5D=b");
+        assert_eq!(map["members"], strs(&["b", "j"]));
+        assert!(files.is_empty());
+        // `007` and `7` are the same index; last in arrival wins.
+        let (map, _) = form(b"members%5B007%5D=a&members%5B7%5D=b");
+        assert_eq!(map["members"], strs(&["b"]));
+        // Exact key wins over indexed keys (F5b).
+        let (map, _) = form(b"members=exact&members%5B0%5D=idx");
+        assert_eq!(map["members"], strs(&["exact"]));
+        // No indexed keys and no exact key: the field stays missing.
+        let (map, _) = form(b"name=m&other%5B0%5D=x");
+        assert!(!map.contains_key("members"));
+        // Non-digit, empty, and unclosed indexes are ignored; a newline
+        // suffix never matches (Python `.`).
+        let (map, _) = form(b"members%5Ba%5D=x&members%5B%5D=y&members%5B0=z");
+        assert!(!map.contains_key("members"));
+        let (map, _) = form(b"members%5B0%5D%0A=x&members%5B1%5D=ok");
+        assert_eq!(map["members"], strs(&["ok"]));
+        // Dict-form arrives as single-key `{suffix: [value]}` pairs in
+        // first-seen suffix order (P5).
+        let (map, _) = form(b"members%5B0%5Dy=2&members%5B0%5Dx=1");
+        let mut first = Map::new();
+        first.insert(
+            "y".to_owned(),
+            Value::Array(vec![Value::String("2".to_owned())]),
+        );
+        let mut second = Map::new();
+        second.insert(
+            "x".to_owned(),
+            Value::Array(vec![Value::String("1".to_owned())]),
+        );
+        assert_eq!(
+            map["members"],
+            Value::Array(vec![Value::Array(vec![
+                Value::Object(first),
+                Value::Object(second)
+            ])])
+        );
+        // Same suffix twice: setitem replaces (last wins).
+        let (map, _) = form(b"members%5B0%5Dx=1&members%5B0%5Dx=2");
+        let mut pair = Map::new();
+        pair.insert(
+            "x".to_owned(),
+            Value::Array(vec![Value::String("2".to_owned())]),
+        );
+        assert_eq!(
+            map["members"],
+            Value::Array(vec![Value::Array(vec![Value::Object(pair)])])
+        );
+        // Plain entries overwrite dicts in arrival order and back (P6).
+        let (map, _) = form(b"members%5B0%5Dx=1&members%5B0%5D=plain");
+        assert_eq!(map["members"], strs(&["plain"]));
+        let (map, _) = form(b"members%5B0%5D=plain&members%5B0%5Dx=1");
+        let mut pair = Map::new();
+        pair.insert(
+            "x".to_owned(),
+            Value::Array(vec![Value::String("1".to_owned())]),
+        );
+        assert_eq!(
+            map["members"],
+            Value::Array(vec![Value::Array(vec![Value::Object(pair)])])
+        );
+        // Dotted suffixes keep the dot (no dot-stripping in DRF 3.15).
+        let (map, _) = form(b"members%5B0%5D.x=1");
+        let mut pair = Map::new();
+        pair.insert(
+            ".x".to_owned(),
+            Value::Array(vec![Value::String("1".to_owned())]),
+        );
+        assert_eq!(
+            map["members"],
+            Value::Array(vec![Value::Array(vec![Value::Object(pair)])])
+        );
+    }
+
+    #[test]
+    fn indexed_file_placeholders() {
+        // A file under an indexed key arrives as a null placeholder with
+        // the upload moved under the field name, in index order (P1/P4).
+        let ct = "multipart/form-data; boundary=----b";
+        let body = b"------b\r\nContent-Disposition: form-data; name=\"members[1]\"\r\n\r\nnot-a-uuid\r\n------b\r\nContent-Disposition: form-data; name=\"members[0]\"; filename=\"i.txt\"\r\nContent-Type: text/plain\r\n\r\nhi\r\n------b--\r\n";
+        match negotiate(ct, body, &MODULE_BODY_SPEC).unwrap() {
+            NegotiatedBody::Form { map, files } => {
+                assert_eq!(
+                    map["members"],
+                    Value::Array(vec![Value::Null, Value::String("not-a-uuid".to_owned())])
+                );
+                assert_eq!(files["members"].len(), 1);
+                assert_eq!(files["members"][0].filename, "i.txt");
+                assert!(files["members"][0].in_memory);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -1900,6 +2416,121 @@ mod codec_tests {
             }
             other => panic!("{other:?}"),
         }
+        // A space before the colon kills the match (4.2 compares the name
+        // verbatim — N3).
+        let body =
+            b"------b\r\nContent-Disposition : form-data; name=\"name\"\r\n\r\nv\r\n------b--\r\n";
+        match mp(body).unwrap() {
+            NegotiatedBody::Form { map, files } => {
+                assert!(map.is_empty());
+                assert!(files.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+        // Duplicate boundary params: last wins (F13).
+        let body =
+            b"------b\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nv\r\n------b--\r\n";
+        match negotiate(
+            "multipart/form-data; boundary=nope; boundary=----b",
+            body,
+            &CYCLE_BODY_SPEC,
+        )
+        .unwrap()
+        {
+            NegotiatedBody::Form { map, .. } => {
+                assert_eq!(map["name"], Value::String("v".to_owned()));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            negotiate(
+                "multipart/form-data; boundary=----b; boundary=",
+                body,
+                &CYCLE_BODY_SPEC
+            )
+            .unwrap_err(),
+            BodyError::ParseDetail(
+                "Multipart form parse error - Invalid boundary in multipart: ".to_owned()
+            )
+        );
+        // Duplicate charset params: last wins (F13). (The bad byte sits
+        // mid-stream: a trailing `\xe9` would drop, not error.)
+        match negotiate(
+            "application/json; charset=utf-8; charset=latin-1",
+            b"{\"a\":\"\xe9\"}",
+            &CYCLE_BODY_SPEC,
+        )
+        .unwrap()
+        {
+            NegotiatedBody::JsonText(text) => assert_eq!(text, "{\"a\":\"é\"}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            negotiate(
+                "application/json; charset=latin-1; charset=utf-8",
+                b"{\"a\":\"\xe9\"}",
+                &CYCLE_BODY_SPEC
+            )
+            .unwrap_err(),
+            BodyError::ParseDetail(_)
+        ));
+        // A body ending exactly at a separator yields no trailing item,
+        // and an empty body under a lying Content-Length yields nothing
+        // at all (F14) — neither trips the field budget.
+        let body = b"------b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nv\r\n------b";
+        match negotiate(ct, body, &CYCLE_BODY_SPEC).unwrap() {
+            NegotiatedBody::Form { map, files } => {
+                assert_eq!(map["a"], Value::String("v".to_owned()));
+                assert!(files.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", ct.parse().unwrap());
+        headers.insert("content-length", "64".parse().unwrap());
+        match negotiate_body(&headers, b"", &CYCLE_BODY_SPEC).unwrap() {
+            NegotiatedBody::Form { map, files } => {
+                assert!(map.is_empty());
+                assert!(files.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn multipart_check_order_and_obs_text() {
+        // `Multipart/...` (capital M) selects the parser (case-insensitive
+        // base match) but fails its case-sensitive prefix check — before
+        // the ASCII check even runs (F12).
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            axum::http::HeaderValue::from_bytes(
+                b"Multipart/Form-Data; boundary=x; note=\"F\xc3\xb6\"",
+            )
+            .unwrap(),
+        );
+        headers.insert("content-length", "1".parse().unwrap());
+        assert_eq!(
+            negotiate_body(&headers, b"x", &CYCLE_BODY_SPEC).unwrap_err(),
+            BodyError::ParseDetail(
+                "Multipart form parse error - Invalid Content-Type: Multipart/Form-Data; boundary=x; note=\"FÃ\u{b6}\""
+                    .to_owned()
+            )
+        );
+        // Obs-text 415 echoes decode latin-1, like uvicorn/wsgiref (F15).
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            axum::http::HeaderValue::from_bytes(b"text/pl\xe9in").unwrap(),
+        );
+        headers.insert("content-length", "3".parse().unwrap());
+        assert_eq!(
+            negotiate_body(&headers, b"xxx", &CYCLE_BODY_SPEC).unwrap_err(),
+            BodyError::UnsupportedMediaType(
+                "Unsupported media type \"text/pl\u{e9}in\" in request.".to_owned()
+            )
+        );
     }
 
     #[test]
@@ -1928,6 +2559,10 @@ mod codec_tests {
         // Controls are dropped; dot-names vanish the part.
         assert_eq!(filename_of(&part(b"a\x01b.txt")), "ab.txt");
         assert_eq!(filename_of(&part(b"..")), "<skipped>");
+        // Unescape runs BEFORE the directory strip (F10).
+        assert_eq!(filename_of(&part(b"..&#x2F;evil")), "evil");
+        // Non-ASCII names survive whole (F11).
+        assert_eq!(filename_of(&part("café.txt".as_bytes())), "café.txt");
     }
 
     #[test]

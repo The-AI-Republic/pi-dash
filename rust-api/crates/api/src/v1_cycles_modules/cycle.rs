@@ -142,7 +142,7 @@ pub enum Denial {
     ProjectNotFound,
     /// 400, `{"detail": ...}` lowercase (DRF `ParseError`: pagination, JSON).
     BadDetail(String),
-    /// 415, `{"Detail": ...}` lowercase (DRF `UnsupportedMediaType`: no
+    /// 415, `{"detail": ...}` lowercase (DRF `UnsupportedMediaType`: no
     /// parser for the request content type — PIDASHCONV-627).
     UnsupportedMediaType(String),
     /// 400, `{"error": ...}` (view-inline).
@@ -2661,16 +2661,20 @@ fn jobject_from_form_map(map: &serde_json::Map<String, Value>) -> JObject {
     for (key, value) in map.iter() {
         let jval = match value {
             Value::String(text) => JVal::Str(JStr::from_clean(text.clone())),
+            // Null placeholders (indexed-file members) never occur for
+            // cycle (no list fields) but map totally anyway.
+            Value::Null => JVal::Null,
             Value::Array(items) => JVal::Array(
                 items
                     .iter()
                     .map(|item| match item {
                         Value::String(text) => JVal::Str(JStr::from_clean(text.clone())),
-                        _ => unreachable!("form lists hold strings"),
+                        Value::Null => JVal::Null,
+                        _ => unreachable!("form lists hold strings and null placeholders"),
                     })
                     .collect(),
             ),
-            _ => unreachable!("form maps hold strings and string arrays"),
+            _ => unreachable!("form maps hold strings, nulls and string arrays"),
         };
         object.insert(JStr::from_clean(key.clone()), jval);
     }
@@ -2684,34 +2688,38 @@ fn jobject_from_form_map(map: &serde_json::Map<String, Value>) -> JObject {
 fn parse_body_value_ct(
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<(JVal, super::body::FilesMap), Denial> {
+) -> Result<(JVal, super::body::FilesMap, bool), Denial> {
     match super::body::negotiate_body(headers, body, &super::body::CYCLE_BODY_SPEC)
         .map_err(map_body_error)?
     {
-        super::body::NegotiatedBody::Empty => Ok((JVal::Object(JObject::new()), BTreeMap::new())),
+        super::body::NegotiatedBody::Empty => {
+            Ok((JVal::Object(JObject::new()), BTreeMap::new(), false))
+        }
         super::body::NegotiatedBody::JsonText(text) => {
-            parse_body_value(text.as_bytes()).map(|value| (value, BTreeMap::new()))
+            parse_body_value(text.as_bytes()).map(|value| (value, BTreeMap::new(), false))
         }
         super::body::NegotiatedBody::Form { map, files } => {
-            Ok((JVal::Object(jobject_from_form_map(&map)), files))
+            Ok((JVal::Object(jobject_from_form_map(&map)), files, true))
         }
     }
 }
 
-/// Content-negotiated `parse_object_or_500` (PIDASHCONV-627).
+/// Content-negotiated `parse_object_or_500` (PIDASHCONV-627). The trailing
+/// flag reports HTML (form/multipart) input for the `get_value` blank
+/// rules in coercion.
 fn parse_object_or_500_ct(
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<(JObject, super::body::FilesMap), Denial> {
+) -> Result<(JObject, super::body::FilesMap, bool), Denial> {
     match super::body::negotiate_body(headers, body, &super::body::CYCLE_BODY_SPEC)
         .map_err(map_body_error)?
     {
-        super::body::NegotiatedBody::Empty => Ok((JObject::new(), BTreeMap::new())),
+        super::body::NegotiatedBody::Empty => Ok((JObject::new(), BTreeMap::new(), false)),
         super::body::NegotiatedBody::JsonText(text) => {
-            parse_object_or_500(text.as_bytes()).map(|object| (object, BTreeMap::new()))
+            parse_object_or_500(text.as_bytes()).map(|object| (object, BTreeMap::new(), false))
         }
         super::body::NegotiatedBody::Form { map, files } => {
-            Ok((jobject_from_form_map(&map), files))
+            Ok((jobject_from_form_map(&map), files, true))
         }
     }
 }
@@ -2925,6 +2933,9 @@ pub fn coerce_pk_shape(
                 // message and crashes the renderer (verified live).
                 return Err(Denial::RendererCrash);
             };
+            // `RelatedField.run_validation` forces `''` to `None` on every
+            // path (verified live: JSON `{"owned_by": ""}` 201s like the
+            // form blank) — so the empty arm is shared, not HTML-only.
             if clean.is_empty() {
                 if allow_null {
                     return Ok(Ok(PkValue::Null));
@@ -4180,6 +4191,7 @@ pub async fn coerce_write(
     partial: bool,
     user_timezone: &Tz,
     files: &super::body::FilesMap,
+    html: bool,
 ) -> Result<CycleWrite, Denial> {
     let mut errors: Vec<(String, String)> = Vec::new();
     let mut write = CycleWrite::default();
@@ -4267,6 +4279,19 @@ pub async fn coerce_write(
                     write.end_date = Some(None);
                 }
             }
+            // HTML blank dates are `None` (`Field.get_value`: present-`''`
+            // + `allow_null`, no `allow_blank` — verified live: PATCH
+            // clears, create treats `''` as present-None). JSON `''`
+            // stays the invalid message.
+            Some(JVal::Str(raw))
+                if html && raw.to_clean_string().is_some_and(|text| text.is_empty()) =>
+            {
+                if key == "start_date" {
+                    write.start_date = Some(None);
+                } else {
+                    write.end_date = Some(None);
+                }
+            }
             // Dirty strings never parse (the invalid message has no echo,
             // so they share the garbage-string arm — verified live).
             Some(JVal::Str(raw)) => match raw
@@ -4305,7 +4330,8 @@ pub async fn coerce_write(
         }
     }
     // owned_by: user PK (required=False, allow_null=True); missing absent;
-    // "" -> None (then defaulted to the requester by `validate()`).
+    // "" -> None on every path (`RelatedField.run_validation` forces empty
+    // strings to `None`), then defaulted to the requester by `validate()`.
     // The UUID parse chokes on the object itself (`AttributeError` on
     // `.replace`), so a file never validates here — even when its
     // filename is uuid-shaped. The echo renders `str(file)`.
@@ -5138,7 +5164,7 @@ pub async fn create_cycle_inner(
     // The both-or-neither gate runs on `request.data` BEFORE any
     // serializer (`views/cycle.py:305`), so a non-object body 500s on
     // `.get` instead of answering serializer errors.
-    let (raw, files) = parse_object_or_500_ct(headers, body)?;
+    let (raw, files, html) = parse_object_or_500_ct(headers, body)?;
     // Both-or-neither shape gate on the RAW body (`views/cycle.py:305-356`):
     // present means the key exists with a non-null value; uploaded files
     // are present too (a file is never null — PIDASHCONV-627).
@@ -5155,7 +5181,7 @@ pub async fn create_cycle_inner(
             shapes::CREATE_DATES_SHAPE_MESSAGE.to_owned(),
         ));
     }
-    let write = coerce_write(&pre.pool, &raw, false, &pre.actor.timezone, &files).await?;
+    let write = coerce_write(&pre.pool, &raw, false, &pre.actor.timezone, &files, html).await?;
     // `validate()` (`serializers/cycle.py:61-106`): the project row comes
     // from `filter().first()` (missing → the 400 arm, unreachable past the
     // gate but ported), the legacy body id from the raw `project_id` key.
@@ -5414,7 +5440,7 @@ pub async fn patch_cycle_inner(
             "Archived cycle cannot be edited".to_owned(),
         ));
     }
-    let (value, files) = parse_body_value_ct(headers, body)?;
+    let (value, files, html) = parse_body_value_ct(headers, body)?;
     // Completed gate (`views/cycle.py:512-520`) on the RAW value, before
     // the serializer: without `sort_order` in it the edit is rejected;
     // with it the (dead) narrowing runs and the FULL body proceeds below.
@@ -5425,7 +5451,7 @@ pub async fn patch_cycle_inner(
         }
     }
     let raw = coerce_body_object(value)?;
-    let write = coerce_write(&pre.pool, &raw, true, &pre.actor.timezone, &files).await?;
+    let write = coerce_write(&pre.pool, &raw, true, &pre.actor.timezone, &files, html).await?;
     // `validate()`: the project row comes from `filter().first()`; the
     // instance arm carries the cycle's own project id (same value here).
     let project: Option<ProjectRow> = sqlx::query(
@@ -6045,7 +6071,7 @@ pub async fn add_cycle_issues_inner(
     .await?;
     // Raw `request.data` (no serializer): empty is `{}`, unparseable is the
     // DRF `ParseError`, a non-object 500s on `.get`.
-    let (raw, files) = parse_object_or_500_ct(headers, body)?;
+    let (raw, files, _) = parse_object_or_500_ct(headers, body)?;
     // An upload in `issues` is truthy, so it passes the falsy gate and
     // dies in the UUID filter below (`D11` probe). Uploads in other keys
     // never reach a serializer here and are ignored.
@@ -6922,7 +6948,7 @@ pub async fn transfer_cycle_issues_inner(
     .await?;
     // Raw `request.data` (no serializer): `.get("new_cycle_id", False)`
     // 500s on a non-object body; falsy answers the 400.
-    let (raw, files) = parse_object_or_500_ct(headers, body)?;
+    let (raw, files, _) = parse_object_or_500_ct(headers, body)?;
     // An upload here is truthy and dies in the target `pk` filter
     // (`ValidationError` → the valid-detail 400, `P3`/`V14` probes).
     let target_file = files.contains_key("new_cycle_id");

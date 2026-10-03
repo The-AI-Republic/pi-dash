@@ -10,6 +10,8 @@ type as ``text/plain`` while prod Django (uvicorn/ASGI) and Rust render
 ``""`` — that test asserts the status plus the message prefix/suffix.
 """
 
+import socket
+import urllib.parse
 import uuid
 
 from _harness import api, db
@@ -71,6 +73,33 @@ def _name(prefix):
 def _delete_module_members(db_conn, module_id):
     with db_conn.cursor() as cur:
         cur.execute("DELETE FROM module_members WHERE module_id = %s", [module_id])
+
+
+def _raw_post(admin_client, path, content_type_bytes, body):
+    """POST with a verbatim Content-Type header (httpx cannot emit obs-text)."""
+    parts = urllib.parse.urlparse(str(admin_client.base_url))
+    sock = socket.create_connection((parts.hostname, parts.port or 80))
+    try:
+        request = (
+            b"POST " + path.encode() + b" HTTP/1.1\r\n"
+            b"Host: contract\r\n"
+            b"X-Api-Key: " + db.ADMIN_TOKEN.encode() + b"\r\n"
+            b"Content-Type: " + content_type_bytes + b"\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+            b"Connection: close\r\n\r\n" + body
+        )
+        sock.sendall(request)
+        response = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            response += chunk
+    finally:
+        sock.close()
+    head, _, response_body = response.partition(b"\r\n\r\n")
+    status = int(head.split(b"\r\n", 1)[0].split(b" ")[1])
+    return status, response_body
 
 
 class TestUnsupportedMediaType:
@@ -151,6 +180,15 @@ class TestUnsupportedMediaType:
             assert r.status_code == 201, ct
             assert CREATE_KEYS <= set(r.json().keys())
 
+    def test_obs_text_content_type_415_echo(self, admin_client):
+        # Obs-text bytes surface as latin-1 chars and echo verbatim (the
+        # body carries U+00E9 as UTF-8 on both backends).
+        status, body = _raw_post(admin_client, CYCLES, b"text/pl\xe9in", b'{"name": "x"}')
+        assert status == 415
+        assert body == (
+            b'{"detail":"Unsupported media type \\"text/pl\xc3\xa9in\\" in request."}'
+        )
+
 
 class TestFormBodies:
     def test_form_create_cycle_201(self, admin_client):
@@ -185,7 +223,7 @@ class TestFormBodies:
         assert r.status_code == 201
         assert r.json()["name"] == name
 
-    def test_form_cycle_dates_and_timezone_blank_skipped(self, admin_client):
+    def test_form_cycle_dates_blank_none_timezone_skipped(self, admin_client):
         r = admin_client.post(
             CYCLES,
             data={"name": _name("CT"), "start_date": "", "end_date": "", "timezone": ""},
@@ -195,7 +233,7 @@ class TestFormBodies:
         assert body["start_date"] is None and body["end_date"] is None
         assert body["timezone"] == "UTC"
 
-    def test_form_module_dates_and_status_blank_skipped(self, admin_client):
+    def test_form_module_dates_blank_none_status_skipped(self, admin_client):
         r = admin_client.post(
             MODULES,
             data={"name": _name("CT"), "start_date": "", "target_date": "", "status": ""},
@@ -238,6 +276,167 @@ class TestFormBodies:
         r = admin_client.post(CYCLES, data={})
         assert r.status_code == 400
         assert "name" in r.json()
+
+
+class TestFormBlankDates:
+    # `Field.get_value`: a present form `''` on an `allow_null` date field is
+    # None — but the both-or-neither create gate still sees `''` as present.
+    GATE_400 = {"error": "Both start date and end date are either required or are to be null"}
+
+    def test_form_create_blank_plus_missing_gate_400(self, admin_client):
+        r = admin_client.post(CYCLES, data={"name": _name("CT"), "start_date": ""})
+        assert r.status_code == 400
+        assert r.json() == self.GATE_400
+        r = admin_client.post(CYCLES, data={"name": _name("CT"), "end_date": ""})
+        assert r.status_code == 400
+        assert r.json() == self.GATE_400
+
+    def test_form_create_blank_plus_value_201_null(self, admin_client):
+        r = admin_client.post(
+            CYCLES,
+            data={"name": _name("CT"), "start_date": "", "end_date": "2027-02-01T00:00:00Z"},
+        )
+        assert r.status_code == 201
+        body = r.json()
+        assert body["start_date"] is None and body["end_date"] is not None
+        r = admin_client.post(
+            CYCLES,
+            data={"name": _name("CT"), "start_date": "2027-01-01T00:00:00Z", "end_date": ""},
+        )
+        assert r.status_code == 201
+        body = r.json()
+        assert body["start_date"] is not None and body["end_date"] is None
+
+    def test_form_patch_blank_date_clears_cycle(self, admin_client):
+        detail = api.cycle_detail_url(SLUG, PROJ, db.CYCLE_DRAFT_ID)
+        r = admin_client.patch(
+            detail,
+            json={"start_date": "2027-01-01T00:00:00Z", "end_date": "2027-02-01T00:00:00Z"},
+        )
+        assert r.status_code == 200
+        r = admin_client.patch(detail, data={"start_date": ""})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["start_date"] is None
+        assert body["end_date"] is not None
+
+    def test_form_patch_blank_date_clears_module(self, admin_client):
+        detail = api.module_detail_url(SLUG, PROJ, db.MODULE_ACTIVE_ID)
+        r = admin_client.patch(detail, json={"start_date": "2027-01-01", "target_date": "2027-02-01"})
+        assert r.status_code == 200
+        r = admin_client.patch(detail, data={"target_date": ""})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["target_date"] is None
+        assert body["start_date"] == "2027-01-01"
+
+
+class TestBlankRelational:
+    # `RelatedField.run_validation` forces `''` to None on every path, so
+    # form and JSON blanks behave alike: `owned_by`/`lead` default (cycle)
+    # or null out, and `members` items fail the null check per index.
+    NULL_ITEM = {"members": {"0": ["This field may not be null."]}}
+
+    def test_form_blank_pk_becomes_none(self, admin_client):
+        r = admin_client.post(MODULES, data={"name": _name("CT"), "lead": ""})
+        assert r.status_code == 201
+        assert r.json()["lead"] is None
+        r = admin_client.post(CYCLES, data={"name": _name("CT"), "owned_by": ""})
+        assert r.status_code == 201
+        assert r.json()["owned_by"] == db.ADMIN_ID
+
+    def test_json_blank_pk_same_as_form(self, admin_client):
+        r = admin_client.post(CYCLES, json={"name": _name("CT"), "owned_by": ""})
+        assert r.status_code == 201
+        assert r.json()["owned_by"] == db.ADMIN_ID
+        r = admin_client.post(MODULES, json={"name": _name("CT"), "lead": ""})
+        assert r.status_code == 201
+        assert r.json()["lead"] is None
+
+    def test_members_empty_item_null_error_both_paths(self, admin_client):
+        r = admin_client.post(MODULES, data={"name": _name("CT"), "members": ""})
+        assert r.status_code == 400
+        assert r.json() == self.NULL_ITEM
+        r = admin_client.post(MODULES, json={"name": _name("CT"), "members": [""]})
+        assert r.status_code == 400
+        assert r.json() == self.NULL_ITEM
+
+
+class TestIndexedMembers:
+    # DRF `parse_html_list`: `members[N]` assembles the array when the exact
+    # key is absent (exact-key `getlist` wins); error indexes are list
+    # positions; dict-form renders the `MultiValueDict` echo.
+
+    def test_form_indexed_members_sparse_201(self, admin_client, db_conn):
+        r = admin_client.post(
+            MODULES,
+            content=f"name={_name('CT')}&members%5B0%5D={db.MEMBER_ID}&members%5B2%5D={db.MEMBER_ID}".encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert r.status_code == 201
+        module_id = r.json()["id"]
+        try:
+            assert r.json()["members"] == [db.MEMBER_ID]
+        finally:
+            _delete_module_members(db_conn, module_id)
+
+    def test_form_indexed_exact_wins(self, admin_client, db_conn):
+        r = admin_client.post(
+            MODULES,
+            content=f"name={_name('CT')}&members={db.MEMBER_ID}&members%5B0%5D=not-a-uuid".encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert r.status_code == 201
+        module_id = r.json()["id"]
+        try:
+            assert r.json()["members"] == [db.MEMBER_ID]
+        finally:
+            _delete_module_members(db_conn, module_id)
+
+    def test_form_indexed_bad_uuid_position_zero(self, admin_client):
+        r = admin_client.post(
+            MODULES,
+            content=b"name=idxbad&members%5B1%5D=not-a-uuid",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert r.status_code == 400
+        assert r.json() == {"members": {"0": ["\u201cnot-a-uuid\u201d is not a valid UUID."]}}
+
+    def test_form_indexed_dict_form_mvd_echo(self, admin_client):
+        r = admin_client.post(
+            MODULES,
+            content=b"name=idxdict&members%5B0%5Dx=1&members%5B0%5Dy=2",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert r.status_code == 400
+        assert r.json() == {
+            "members": {
+                "0": ["\u201c<MultiValueDict: {'x': ['1'], 'y': ['2']}>\u201d is not a valid UUID."]
+            }
+        }
+
+    def test_multipart_indexed_file_members(self, admin_client):
+        # File under `members[0]` echoes its filename at list position 0;
+        # mixed text/file indexes keep index order (not texts-then-files).
+        r = admin_client.post(
+            MODULES,
+            data={"name": _name("CT")},
+            files={"members[0]": ("f.txt", b"hi", "text/plain")},
+        )
+        assert r.status_code == 400
+        assert r.json() == {"members": {"0": ["\u201cf.txt\u201d is not a valid UUID."]}}
+        r = admin_client.post(
+            MODULES,
+            data={"name": _name("CT"), "members[1]": "not-a-uuid"},
+            files={"members[0]": ("i.txt", b"hi", "text/plain")},
+        )
+        assert r.status_code == 400
+        assert r.json() == {
+            "members": {
+                "0": ["\u201ci.txt\u201d is not a valid UUID."],
+                "1": ["\u201cnot-a-uuid\u201d is not a valid UUID."],
+            }
+        }
 
 
 class TestMultipart:
@@ -328,6 +527,28 @@ class TestMultipart:
         )
         assert r.status_code == 400
         assert r.json() == {"detail": "Multipart form parse error - Invalid boundary in multipart: None"}
+
+    def test_multipart_non_ascii_filename_echo(self, admin_client):
+        r = admin_client.post(
+            MODULES,
+            data={"name": _name("CT")},
+            files={"lead": ("café.txt", b"hi", "text/plain")},
+        )
+        assert r.status_code == 400
+        assert r.json() == {"lead": ["\u201ccaf\u00e9.txt\u201d is not a valid UUID."]}
+
+    def test_multipart_space_before_colon_ignored(self, admin_client):
+        # Django 4.2 compares the part header name verbatim, so a space
+        # before the colon kills the match (the part is nameless data).
+        r = admin_client.post(
+            CYCLES,
+            content=(
+                b"--b\r\nContent-Disposition : form-data; name=\"name\"\r\n\r\nv\r\n--b--\r\n"
+            ),
+            headers={"Content-Type": "multipart/form-data; boundary=b"},
+        )
+        assert r.status_code == 400
+        assert "name" in r.json()
 
 
 class TestCharset:
