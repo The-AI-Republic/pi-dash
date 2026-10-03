@@ -11,6 +11,9 @@
 //! each owns one `handlers_*.rs` module exposing `routes()`, merged
 //! below (sibling issues extend the merge; merges keep both sides).
 //!
+//! [`handlers_invites`] ports the invitations + join + join-request
+//! endpoints (PIDASHCONV-617, F-W24-15 legs W04-W11).
+//!
 //! [`handlers_profile`] ports the user-profile handler family —
 //! profile, user issues, stats, user activity, me activities
 //! (PIDASHCONV-618); [`routes`] merges its routes — sibling handler
@@ -26,6 +29,7 @@
 //! last-visited — PIDASHCONV-616).
 
 pub mod gates;
+pub mod handlers_invites;
 pub mod handlers_lists;
 pub mod handlers_members;
 pub mod handlers_prefs;
@@ -43,7 +47,8 @@ use crate::state::AppState;
 /// (sibling D-24 handler issues extend this merge; merges keep both
 /// sides), merged here for the F-10 overlay seam.
 pub fn routes() -> Router<AppState> {
-    handlers_lists::routes()
+    handlers_invites::routes()
+        .merge(handlers_lists::routes())
         .merge(handlers_members::routes())
         .merge(handlers_prefs::routes())
         .merge(handlers_profile::routes())
