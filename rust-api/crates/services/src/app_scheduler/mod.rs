@@ -1,8 +1,11 @@
 //! App scheduler domain surface (D-36, stage 5).
 //!
-//! Ports `apps/api/pi_dash/app/views/scheduler/views.py` for the services
-//! layer, bottom-up:
+//! Ports `apps/api/pi_dash/app/views/scheduler/` for the services layer,
+//! bottom-up:
 //!
+//! * [`occurrences`] — the occurrences calendar query units: window
+//!   parsing/validation, future-bindings filter + RRULE-expansion
+//!   orchestration, past-runs query, merge/sort/cap (PIDASHCONV-631).
 //! * [`queries`] — scheduler + binding SQL (list/detail reads with the
 //!   `_active_binding_count` annotation and `select_related` JOINs,
 //!   create/update/delete writes, install/patch/uninstall, and the
@@ -10,9 +13,22 @@
 //!   as a closure).
 //!
 //! Wiring note: the crate root declares `pub mod app_scheduler;` (seam
-//! for this issue's new files); every file under this module is new.
+//! for this module's new files); every file under this module is new.
 //! Sibling layer issues extend this module (on rebase, keep both sides'
-//! `pub mod` lines).
+//! `pub mod` lines): `shape` (scheduler + binding serializers,
+//! PIDASHCONV-629) lands its line here too. The guards live in the api
+//! crate (`api/src/app_scheduler/gate.rs`, PIDASHCONV-632), the endpoint
+//! handlers in `api/src/app_scheduler/handlers_*.rs` (PIDASHCONV-633…
+//! 635).
+//!
+//! Fixture input for [`occurrences`]: F36-07
+//! (`rust-api/fixtures/app_scheduler/queries/occurrences_window.golden.json`)
+//! and F36-08
+//! (`rust-api/fixtures/app_scheduler/queries/occurrences_merge.golden.json`)
+//! plus the joined-column lists in F36-06
+//! (`rust-api/fixtures/app_scheduler/queries/pod_lastrun_columns.json`);
+//! the goldens are the Done-when oracles. Trace lines live in
+//! `rust-api/fixtures/app_scheduler/TRACE.md`.
 //!
 //! Fixture input for [`queries`]: F36-04, F36-05, F36-06
 //! (`rust-api/fixtures/app_scheduler/queries/scheduler_sql.sql` +
@@ -21,7 +37,8 @@
 //!
 //! Pages read: Porting guide `4496e321-dd24-40f7-bfdf-f771e45fac0c`
 //! (updated_at 2026-09-28T03:51:35.921141Z); PIDASHCONV-1 rulebook
-//! (updated_at 2026-10-02T23:02:53.761015Z, binding).
+//! (updated_at 2026-10-02T23:02:53.761015Z, binding; PIDASHCONV-631 read
+//! 2026-10-02T20:58:50.659133Z).
 //!
 //! Existing quirks ported as-is (translation, don't redesign; also
 //! listed in the PR):
@@ -38,4 +55,5 @@
 //!    to stored, patch does not) with patch recomputing on key
 //!    presence.
 
+pub mod occurrences;
 pub mod queries;
