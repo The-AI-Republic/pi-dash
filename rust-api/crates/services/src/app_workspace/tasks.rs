@@ -112,7 +112,7 @@
 //!
 //! * QUIRK-none-project-id (`draft.py:255`): the cycle branch passes
 //!   `project_id=str(self.kwargs.get("project_id", None))`, but the route
-//!   (`urls/workspace.py:239`: `draft-to-issue/<draft_id>/`) carries only
+//!   (`app/urls/workspace.py:239`: `draft-to-issue/<draft_id>/`) carries only
 //!   `slug` + `draft_id`, so the lookup always misses and the wire value
 //!   is always the string `"None"`. [`draft_cycle_created_activity`] takes
 //!   the kwarg as `Option<&str>` and renders `None` as `"None"`.
