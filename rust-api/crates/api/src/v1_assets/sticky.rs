@@ -185,9 +185,6 @@ pub const WORKSPACE_MISSING_BODY: &str = r#"{"error":"The required object does n
 pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
 /// `handle_exception`'s generic 500 branch.
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
-/// DRF `JSONParser` on an empty body under a JSON content type.
-pub const EMPTY_JSON_BODY: &str =
-    r#"{"detail":"JSON parse error - Expecting value: line 1 column 1 (char 0)"}"#;
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
@@ -345,6 +342,19 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, 
 const MACHINE_MEMBER_SQL: &str = r#"SELECT EXISTS(SELECT 1 FROM workspace_members
            WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL)"#;
 
+/// One `machine_token` + `dev_machine` lookup row: token id, user id,
+/// workspace id, token revocation, dev-machine id, dev-machine
+/// revocation, dev-machine id again (the join-hit proof).
+type MachineTokenRow = (
+    Uuid,
+    Uuid,
+    Uuid,
+    Option<DateTime<Utc>>,
+    Option<Uuid>,
+    Option<DateTime<Utc>>,
+    Option<Uuid>,
+);
+
 /// `validate_machine_token` (`api_authentication.py:45-63`): match on
 /// `token_hash`, unrevoked, dev-machine unrevoked, workspace member (a
 /// non-member's token is revoked, then rejected) — then stamp
@@ -356,15 +366,7 @@ async fn authenticate_machine(
 ) -> Result<Uuid, Denial> {
     let now = Utc::now();
     let token_hash = token_kernel::hash_token(presented, secret_key);
-    let row: Option<(
-        Uuid,
-        Uuid,
-        Uuid,
-        Option<DateTime<Utc>>,
-        Option<Uuid>,
-        Option<DateTime<Utc>>,
-        Option<Uuid>,
-    )> = sqlx::query_as(
+    let row: Option<MachineTokenRow> = sqlx::query_as(
         r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at,
                   mt.dev_machine_id, dm.revoked_at, dm.id
            FROM machine_token mt
@@ -554,9 +556,12 @@ fn render_datetime(dt: &DateTime<Utc>, timezone: &Tz) -> String {
 }
 
 /// `StickySerializer` read shape (`serializers/sticky.py:13-17`,
-/// `fields = "__all__"`): the 17 keys in Django `_meta` field order
-/// (base audit columns, then declaration order with FK names). `None`
-/// renders `null`; datetimes render in the request's zone;
+/// `fields = "__all__"`): the 17 keys in DRF serializer field order —
+/// the pk first, then the plain fields in `_meta` order, then the
+/// forward relations in `_meta` order (`get_default_field_names`,
+/// DRF 3.15.2 `serializers.py`; pinned against the live field list, not
+/// raw `_meta` order, which interleaves the audit FKs). `None` renders
+/// `null`; datetimes render in the request's zone;
 /// `description_binary` has no DRF JSON mapping — a set value fails
 /// rendering in Django too, so it is the same 500 here (always null on
 /// the wire: the key is read-only-dead on write).
@@ -575,8 +580,6 @@ fn render_sticky_row(row: &StickyRow, timezone: &Tz) -> Result<String, Denial> {
         "updated_at".to_owned(),
         Value::String(render_datetime(&row.updated_at, timezone)),
     );
-    map.insert("created_by".to_owned(), opt_uuid(&row.created_by_id));
-    map.insert("updated_by".to_owned(), opt_uuid(&row.updated_by_id));
     map.insert(
         "deleted_at".to_owned(),
         row.deleted_at.map_or(Value::Null, |dt| {
@@ -600,12 +603,14 @@ fn render_sticky_row(row: &StickyRow, timezone: &Tz) -> Result<String, Denial> {
         "background_color".to_owned(),
         opt_string(&row.background_color),
     );
+    map.insert("sort_order".to_owned(), Value::Number(sort_order));
+    map.insert("created_by".to_owned(), opt_uuid(&row.created_by_id));
+    map.insert("updated_by".to_owned(), opt_uuid(&row.updated_by_id));
     map.insert(
         "workspace".to_owned(),
         Value::String(row.workspace_id.to_string()),
     );
     map.insert("owner".to_owned(), Value::String(row.owner_id.to_string()));
-    map.insert("sort_order".to_owned(), Value::Number(sort_order));
     Ok(serde_json::to_string(&Value::Object(map)).expect("sticky row serializes"))
 }
 
@@ -630,11 +635,14 @@ fn drf_type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "NoneType",
         Value::Bool(_) => "bool",
+        // `arbitrary_precision`: only true floats `is_f64` — oversized
+        // integer literals are still Python `int` (same shape as the
+        // `v1_cycles_modules` precedent).
         Value::Number(number) => {
-            if number.is_i64() || number.is_u64() {
-                "int"
-            } else {
+            if number.is_f64() {
                 "float"
+            } else {
+                "int"
             }
         }
         Value::String(_) => "str",
@@ -1031,10 +1039,10 @@ fn parse_deleted_at(text: &str, timezone: &Tz) -> Result<DateTime<Utc>, String> 
     }
 }
 
-/// The pure field-validation pass: per-field results in `_meta` order
-/// plus the users lookups still to run. Callers run
-/// [`resolve_pk_lookups`], prepend those errors (both audit FKs sort
-/// before every other writable key), and only then run the `validate()`
+/// The pure field-validation pass: per-field results in DRF serializer
+/// field order plus the users lookups still to run. Callers run
+/// [`resolve_pk_lookups`], append those errors (both audit FKs sort
+/// after every other writable key), and only then run the `validate()`
 /// step — field errors short-circuit `validate()`, exactly like DRF's
 /// `run_validation`.
 struct FieldValidation {
@@ -1046,10 +1054,10 @@ struct FieldValidation {
 
 /// Run the `StickySerializer` field path over an already-parsed JSON body:
 /// silently drop read-only + unknown keys (live `to_internal_value`),
-/// then per-field validate the survivors in `_meta` field order
-/// (`created_by`, `updated_by`, `deleted_at`, `name`, `description`,
-/// `description_html`, `description_stripped`, `logo_props`, `color`,
-/// `background_color`, `sort_order`).
+/// then per-field validate the survivors in DRF serializer field order
+/// (`deleted_at`, `name`, `description`, `description_html`,
+/// `description_stripped`, `logo_props`, `color`, `background_color`,
+/// `sort_order`, `created_by`, `updated_by`).
 fn validate_sticky_input(body: &Value, timezone: &Tz) -> FieldValidation {
     // Live projection: read-only keys (`id`, `created_at`, `updated_at`,
     // `description_binary`, `workspace`, `owner`) and unknown keys are
@@ -1059,7 +1067,14 @@ fn validate_sticky_input(body: &Value, timezone: &Tz) -> FieldValidation {
     let empty = Map::new();
     let input = body.as_object().unwrap_or(&empty);
     if !body.is_object() {
-        let message = INVALID_DATA_MESSAGE.replace("{what}", drf_type_name(body));
+        // A JSON null never reaches `to_internal_value`: the serializer's
+        // `errors` property rewrites the lone `null`-code failure to the
+        // friendlier message (`serializers.py`, DRF 3.15.2).
+        let message = if body.is_null() {
+            "No data provided".to_owned()
+        } else {
+            INVALID_DATA_MESSAGE.replace("{what}", drf_type_name(body))
+        };
         return FieldValidation {
             errors: vec![("non_field_errors".to_owned(), vec![message])],
             write: StickyWrite::default(),
@@ -1071,23 +1086,6 @@ fn validate_sticky_input(body: &Value, timezone: &Tz) -> FieldValidation {
     let mut errors: Vec<(String, Vec<String>)> = Vec::new();
     let mut write = StickyWrite::default();
     let mut pending = Vec::new();
-    for field in ["created_by", "updated_by"] {
-        if let Some(value) = writable.get(field) {
-            match check_audit_pk(value) {
-                Ok(None) => {
-                    if field == "created_by" {
-                        write.created_by = Some(None);
-                    }
-                }
-                Ok(Some((uuid, display))) => pending.push(PendingPk {
-                    field,
-                    uuid,
-                    display,
-                }),
-                Err(message) => errors.push((field.to_owned(), vec![message])),
-            }
-        }
-    }
     if let Some(value) = writable.get("deleted_at") {
         match check_deleted_at(value, timezone) {
             Ok(stamp) => write.deleted_at = Some(stamp),
@@ -1154,6 +1152,25 @@ fn validate_sticky_input(body: &Value, timezone: &Tz) -> FieldValidation {
             Err(message) => errors.push(("sort_order".to_owned(), vec![message])),
         }
     }
+    // The audit FKs validate last: in DRF's serializer field order the
+    // forward relations trail every plain field.
+    for field in ["created_by", "updated_by"] {
+        if let Some(value) = writable.get(field) {
+            match check_audit_pk(value) {
+                Ok(None) => {
+                    if field == "created_by" {
+                        write.created_by = Some(None);
+                    }
+                }
+                Ok(Some((uuid, display))) => pending.push(PendingPk {
+                    field,
+                    uuid,
+                    display,
+                }),
+                Err(message) => errors.push((field.to_owned(), vec![message])),
+            }
+        }
+    }
     FieldValidation {
         errors,
         write,
@@ -1162,8 +1179,8 @@ fn validate_sticky_input(body: &Value, timezone: &Tz) -> FieldValidation {
     }
 }
 
-/// Field errors in `_meta` order as the exact 400 body (insertion-ordered:
-/// `preserve_order` is on for this crate).
+/// Field errors in DRF serializer field order as the exact 400 body
+/// (insertion-ordered: `preserve_order` is on for this crate).
 fn errors_value(errors: Vec<(String, Vec<String>)>) -> Value {
     let mut map = Map::with_capacity(errors.len());
     for (field, messages) in errors {
@@ -1201,8 +1218,8 @@ fn apply_validate_step(
 /// soft-delete filter). A hit on `created_by` fills the write slot (the
 /// caller decides whether the action honors it); `updated_by` hits are
 /// discarded (`save()` overwrites). Misses become `does_not_exist`
-/// errors, returned in `pending` (`_meta`) order so the caller can
-/// prepend them ahead of the pure-phase errors.
+/// errors, returned in `pending` order so the caller can append them
+/// after the pure-phase errors.
 async fn resolve_pk_lookups(
     pool: &sqlx::PgPool,
     write: &mut StickyWrite,
@@ -1337,26 +1354,22 @@ fn sticky_count_sql(list_sql: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Parse the request body (JSON only — the contract suite sends `json=`
-/// throughout): empty body is `{}`; malformed JSON is DRF's `ParseError`;
-/// a non-empty non-JSON body is 415.
+/// throughout): an empty body is `{}` whatever the content type claims;
+/// malformed JSON is DRF's `ParseError`; a non-empty non-JSON body is 415.
 fn parse_json_body(body: &[u8], headers: &HeaderMap) -> Result<Value, Denial> {
+    // DRF's `_load_stream` leaves the stream `None` at content-length
+    // zero and `_parse` returns the empty mapping without touching a
+    // parser (`request.py`, DRF 3.15.2; same shape as the merged
+    // precedents) — so emptiness is checked before the media type.
+    if body.is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     let media = content_type.split(';').next().unwrap_or("").trim();
     let is_json = media.eq_ignore_ascii_case("application/json");
-    if body.is_empty() {
-        if is_json {
-            // `json.load` on an empty stream: "Expecting value: line 1
-            // column 1 (char 0)" — pinned here since serde's own message
-            // differs and this path is exact in Python.
-            return Err(Denial::BadDetail(
-                "JSON parse error - Expecting value: line 1 column 1 (char 0)".to_owned(),
-            ));
-        }
-        return Ok(Value::Object(Map::new()));
-    }
     if !is_json {
         let raw = if content_type.is_empty() {
             "text/plain"
@@ -1421,9 +1434,10 @@ async fn get_sticky_by_pk(pool: &sqlx::PgPool, pk: &Uuid) -> Result<StickyRow, D
 }
 
 /// Run the full serializer write path: pure field validation, the users
-/// existence lookups for the audit FKs (errors prepended in `_meta`
-/// order), then the `validate()` step. Returns the write plus the final
-/// `description_html` for `description_stripped` recomputation.
+/// existence lookups for the audit FKs (errors appended: the audit FKs
+/// are the last writable keys), then the `validate()` step. Returns the
+/// write plus the final `description_html` for `description_stripped`
+/// recomputation.
 async fn validated_write(
     pool: &sqlx::PgPool,
     timezone: &Tz,
@@ -1433,8 +1447,7 @@ async fn validated_write(
     if !validation.pending.is_empty() {
         let mut pk_errors =
             resolve_pk_lookups(pool, &mut validation.write, &validation.pending).await?;
-        pk_errors.append(&mut validation.errors);
-        validation.errors = pk_errors;
+        validation.errors.append(&mut pk_errors);
     }
     if !validation.errors.is_empty() {
         return Err(Denial::FieldErrors(errors_value(validation.errors)));
@@ -2193,14 +2206,14 @@ mod tests {
     }
 
     #[test]
-    fn color_over_255_collects_both_validator_messages_in_meta_order() {
+    fn color_over_255_collects_both_validator_messages_in_serializer_order() {
         let body = json_map(&[
             ("sort_order", serde_json::json!("oops")),
             ("color", serde_json::json!("x".repeat(256))),
         ]);
         let errors = field_errors(&body);
         let keys: Vec<&str> = errors.iter().map(|(field, _)| field.as_str()).collect();
-        // `_meta` field order: color before sort_order.
+        // Serializer field order: color before sort_order.
         assert_eq!(keys, vec!["color", "sort_order"]);
         assert_eq!(
             errors[0].1,
@@ -2230,9 +2243,9 @@ mod tests {
     }
 
     #[test]
-    fn audit_fields_sort_first_in_meta_order() {
-        // `created_by`/`updated_by`/`deleted_at` precede every content
-        // field in `_meta` order.
+    fn audit_fields_sort_last_in_serializer_order() {
+        // DRF serializer field order: the plain `deleted_at` leads, the
+        // audit FKs trail every content field.
         let body = json_map(&[
             ("name", serde_json::json!([1])),
             ("created_by", serde_json::json!(true)),
@@ -2240,9 +2253,9 @@ mod tests {
         ]);
         let errors = field_errors(&body);
         let keys: Vec<&str> = errors.iter().map(|(field, _)| field.as_str()).collect();
-        assert_eq!(keys, vec!["created_by", "deleted_at", "name"]);
+        assert_eq!(keys, vec!["deleted_at", "name", "created_by"]);
         assert_eq!(
-            errors[0].1,
+            errors[2].1,
             vec!["Incorrect type. Expected pk value, received bool.".to_owned()]
         );
     }
@@ -2295,12 +2308,13 @@ mod tests {
 
     #[test]
     fn non_dict_body_is_a_non_field_error() {
+        let over_u64: Value = serde_json::from_str("18446744073709551616").expect("bignum");
         for (raw, what) in [
             (serde_json::json!([1, 2]), "list"),
             (serde_json::json!(1.5), "float"),
             (serde_json::json!(7), "int"),
+            (over_u64, "int"),
             (serde_json::json!(true), "bool"),
-            (Value::Null, "NoneType"),
         ] {
             let errors = field_errors(&raw);
             assert_eq!(errors.len(), 1, "{raw}");
@@ -2312,6 +2326,57 @@ mod tests {
                 )]
             );
         }
+        // A JSON null never reaches `to_internal_value`: the serializer
+        // reports the friendlier message instead of the `NoneType` shape.
+        let errors = field_errors(&Value::Null);
+        assert_eq!(
+            errors,
+            vec![(
+                "non_field_errors".to_owned(),
+                vec!["No data provided".to_owned()]
+            )]
+        );
+    }
+
+    #[test]
+    fn empty_body_is_an_empty_object_whatever_the_content_type() {
+        // DRF returns the empty mapping for a zero-length body without
+        // touching a parser — even under a JSON content type.
+        let mut json_headers = HeaderMap::new();
+        json_headers.insert(
+            header::CONTENT_TYPE,
+            "application/json".parse().expect("content type"),
+        );
+        for headers in [HeaderMap::new(), json_headers] {
+            let parsed = parse_json_body(b"", &headers).expect("empty body");
+            assert_eq!(parsed, Value::Object(Map::new()));
+        }
+        // A non-empty non-JSON body is 415 with the content type echoed.
+        let mut text_headers = HeaderMap::new();
+        text_headers.insert(
+            header::CONTENT_TYPE,
+            "text/plain".parse().expect("content type"),
+        );
+        let denial = parse_json_body(b"hello", &text_headers).expect_err("415");
+        let (status, body) = denial.status_and_body();
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            body,
+            r#"{"detail":"Unsupported media type \"text/plain\" in request."}"#
+        );
+        // Malformed JSON is DRF's `ParseError`.
+        let mut json_headers = HeaderMap::new();
+        json_headers.insert(
+            header::CONTENT_TYPE,
+            "application/json".parse().expect("content type"),
+        );
+        let denial = parse_json_body(b"{oops", &json_headers).expect_err("parse error");
+        let (status, body) = denial.status_and_body();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body.starts_with(r#"{"detail":"JSON parse error - "#),
+            "{body}"
+        );
     }
 
     #[test]
@@ -2635,7 +2700,7 @@ mod tests {
     }
 
     #[test]
-    fn render_carries_all_17_keys_in_meta_order_with_zulu_datetimes() {
+    fn render_carries_all_17_keys_in_serializer_order_with_zulu_datetimes() {
         let timezone: Tz = "UTC".parse().expect("tz");
         let rendered = render_sticky_row(&sample_row(), &timezone).expect("renders");
         let value: Value = serde_json::from_str(&rendered).expect("json");
@@ -2650,8 +2715,6 @@ mod tests {
                 "id",
                 "created_at",
                 "updated_at",
-                "created_by",
-                "updated_by",
                 "deleted_at",
                 "name",
                 "description",
@@ -2661,9 +2724,11 @@ mod tests {
                 "logo_props",
                 "color",
                 "background_color",
+                "sort_order",
+                "created_by",
+                "updated_by",
                 "workspace",
                 "owner",
-                "sort_order",
             ]
         );
         assert_eq!(
