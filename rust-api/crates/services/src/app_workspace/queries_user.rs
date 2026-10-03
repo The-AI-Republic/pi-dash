@@ -75,6 +75,14 @@
 //!     is ABSENT (`:22`) — an explicit empty label is stored empty.
 //! 11. `Session.user_id` is a `CharField` (`session.py:21`) — the UUID
 //!     binds as text.
+//! 12. Token PATCH accepts `deleted_at` / `created_by` / `updated_by`
+//!     (none is in `read_only_fields` — probed live on DRF 3.15.2:
+//!     all three validate); only `updated_by` is then overwritten by
+//!     `BaseModel.save` with the request actor.
+//! 13. The logo-asset follow (`user.py:116`) runs through the PLAIN
+//!     `_base_manager`, not the soft-delete default manager
+//!     (`related_descriptors.py`), so a soft-deleted asset is still
+//!     followed and its URL served (probed live on Django 4.2).
 //!
 //! Out of scope (owned by sibling issues): response envelopes and error
 //! bodies (handlers E/F/J, PIDASHCONV-619/620/624); serializer shapes
@@ -112,7 +120,7 @@ pub fn invite_count_sql() -> String {
 ///
 /// `profiles` carries no `deleted_at` (`TimeAuditModel` only,
 /// `mixins.py:16-24`), so the lookup is unscoped. `.get()` fetches
-/// with a `LIMIT 2` clone guard (unobservable in SQL semantics —
+/// with a `LIMIT 21` clone guard (unobservable in SQL semantics —
 /// `MultipleObjectsReturned` is impossible on the `OneToOne`).
 pub fn profile_by_user_sql() -> String {
     "SELECT profiles.* FROM profiles WHERE profiles.user_id = :user".to_owned()
@@ -175,14 +183,15 @@ pub fn fallback_workspace_sql() -> String {
 /// Logo-asset lazy follow (`user.py:116`):
 /// `workspace.logo_asset.asset_url if workspace.logo_asset is not None`.
 ///
-/// Forward-FK access through the default manager, so the soft-delete
-/// scope applies (`FileAsset` extends `BaseModel`,
-/// `db/models/asset.py:28`). One extra round-trip when
-/// `logo_asset_id` is set and uncached; `asset_url` itself
-/// (`asset.py:80-91`) is pure string formatting for workspace logos
-/// (no further SQL).
+/// Ported bug 13: forward-FK access runs through the PLAIN
+/// `_base_manager`, NOT the soft-delete default manager
+/// (`related_descriptors.py`), so there is NO `deleted_at` scope —
+/// a soft-deleted asset is still followed (probed live on Django
+/// 4.2). One extra round-trip when `logo_asset_id` is set and
+/// uncached; `asset_url` itself (`asset.py:80-91`) is pure string
+/// formatting for workspace logos (no further SQL).
 pub fn logo_asset_lookup_sql() -> String {
-    "SELECT file_assets.* FROM file_assets WHERE file_assets.id = :asset_id AND file_assets.deleted_at IS NULL".to_owned()
+    "SELECT file_assets.* FROM file_assets WHERE file_assets.id = :asset_id".to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -690,7 +699,7 @@ pub fn api_token_delete_lookup_sql() -> String {
 /// Token delete write (`:53`): instance `.delete()` on a soft-delete
 /// model — `deleted_at` is stamped and the instance is SAVED, so
 /// `updated_at` moves too (same full-row-save shape as the sibling
-/// `my_invite_soft_delete_sql`). The write also enqueues
+/// `invite_soft_delete_sql`). The write also enqueues
 /// `soft_delete_related_objects` (tasks-owned, PIDASHCONV-614).
 pub fn api_token_soft_delete_sql() -> String {
     "UPDATE api_tokens SET deleted_at = :now, updated_at = :now WHERE id = :pk".to_owned()
@@ -707,22 +716,34 @@ pub fn api_token_patch_lookup_sql() -> String {
     "SELECT api_tokens.* FROM api_tokens WHERE api_tokens.user_id = :user AND api_tokens.id = :pk AND api_tokens.is_service = FALSE AND api_tokens.deleted_at IS NULL ORDER BY api_tokens.created_at DESC LIMIT 1".to_owned()
 }
 
-/// Token PATCH writable fields (probed live by PIDASHCONV-604 against
-/// `APITokenSerializer`, `api.py:11-24`): everything else in
-/// `fields = "__all__"` is `read_only` (plus DRF-default `id`) and
-/// silently ignored on input.
+/// Token PATCH client-effective writable fields (probed live against
+/// `APITokenSerializer`, `api.py:11-24`, on DRF 3.15.2): `label`,
+/// `description`, `is_service`, `allowed_rate_limit` — plus, ported
+/// bug 12, `deleted_at` and `created_by`, which are NOT in
+/// `read_only_fields` and validate. (`updated_by` validates too but
+/// `BaseModel.save` overwrites it with the request actor on update,
+/// `db/models/base.py:23-44` — handler sequencing, like the sibling
+/// `updated_by` notes — so no client value persists.) Everything
+/// else in `fields = "__all__"` is `read_only` (plus DRF-default
+/// `id`) and silently ignored on input.
 ///
 /// Ported bug 9: `is_service` is writable — a PATCH can flip a
 /// token's own service flag.
-pub const API_TOKEN_PATCH_WRITABLE: &[&str] =
-    &["label", "description", "is_service", "allowed_rate_limit"];
+pub const API_TOKEN_PATCH_WRITABLE: &[&str] = &[
+    "label",
+    "description",
+    "is_service",
+    "allowed_rate_limit",
+    "deleted_at",
+    "created_by",
+];
 
 /// Token PATCH save (`:68-71`): `serializer.save()` on the partial
 /// serializer issues a full-row `UPDATE`; per convention the builder
 /// lists the writable columns ([`API_TOKEN_PATCH_WRITABLE`]) plus the
 /// `auto_now` stamp.
 pub fn api_token_patch_save_sql() -> String {
-    "UPDATE api_tokens SET label = :label, description = :description, is_service = :is_service, allowed_rate_limit = :rate, updated_at = :now WHERE id = :pk".to_owned()
+    "UPDATE api_tokens SET label = :label, description = :description, is_service = :is_service, allowed_rate_limit = :rate, deleted_at = :deleted_at, created_by_id = :created_by, updated_at = :now WHERE id = :pk".to_owned()
 }
 
 #[cfg(test)]
@@ -763,7 +784,6 @@ mod tests {
         // BaseModels); every other read does.
         for sql in [
             invite_count_sql(),
-            logo_asset_lookup_sql(),
             instance_first_sql(),
             instance_admin_exists_sql(),
             deactivate_instance_admin_guard_sql(),
@@ -795,6 +815,13 @@ mod tests {
                 "joined member table must stay unscoped: {sql}"
             );
         }
+        // The logo-asset follow is deliberately UNSCOPED even though
+        // the table has the column: forward-FK access uses the plain
+        // `_base_manager` (ported bug 13).
+        assert!(
+            !logo_asset_lookup_sql().contains("deleted_at"),
+            "FK follow must stay unscoped"
+        );
         // Writes: the invite purge preserves the manager scope in its
         // WHERE; bulk deactivations are pk-direct (ported bug 5);
         // session/account deletes are hard (no soft-delete mixin).
@@ -1031,10 +1058,19 @@ mod tests {
         assert!(lookup.ends_with("ORDER BY api_tokens.created_at DESC LIMIT 1"));
         assert_eq!(
             API_TOKEN_PATCH_WRITABLE,
-            &["label", "description", "is_service", "allowed_rate_limit"]
+            &[
+                "label",
+                "description",
+                "is_service",
+                "allowed_rate_limit",
+                "deleted_at",
+                "created_by"
+            ]
         );
         let save = api_token_patch_save_sql();
         assert!(save.contains("is_service = :is_service"));
+        assert!(save.contains("deleted_at = :deleted_at"));
+        assert!(save.contains("created_by_id = :created_by"));
         assert!(!save.contains("expired_at"));
         assert!(!save.contains("user_type"));
     }
