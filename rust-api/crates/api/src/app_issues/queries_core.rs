@@ -100,7 +100,7 @@ pub const ISSUE_COLUMNS: &str = "issue.created_at, issue.updated_at, issue.creat
     issue.type_id, issue.git_work_branch, issue.workpad, issue.created_via, \
     issue.assigned_pod_id, issue.agent_executor";
 
-/// All 19 concrete `states` columns (`select_related("state")` order).
+/// All 18 concrete `states` columns (`select_related("state")` order).
 /// `group`/`default` stay quoted: reserved words.
 pub const STATE_COLUMNS: &str = "state.created_at, state.updated_at, state.created_by_id, \
     state.updated_by_id, state.deleted_at, state.id, state.project_id, state.workspace_id, \
@@ -119,7 +119,7 @@ pub const ISSUE_LINK_COLUMNS: &str = "issue_links.created_at, issue_links.update
     issue_links.id, issue_links.project_id, issue_links.workspace_id, issue_links.title, \
     issue_links.url, issue_links.issue_id, issue_links.metadata";
 
-/// All 50 concrete `users` columns (`select_related("actor")` /
+/// All 40 concrete `users` columns (`select_related("actor")` /
 /// `select_related("created_by")` order). The auth user has no `deleted_at`.
 pub const USER_COLUMNS: &str = "users.password, users.last_login, users.id, users.username, \
     users.mobile_number, users.email, users.display_name, users.first_name, users.last_name, \
@@ -167,8 +167,12 @@ pub const PREFETCH_ISSUE_COLUMNS: &str = "issues.created_at, issues.updated_at, 
 
 /// `cycle_id` (`base.py:496`, `sub_issue.py:40-44`, `archive.py:63-67`).
 /// Same text as pilot-2's: Django's `ORDER BY created_at DESC` (model
-/// ordering) is dropped — the partial unique constraint leaves one live row,
-/// so the order cannot change the result.
+/// ordering) is dropped. The cycle write paths move links instead of stacking
+/// them (`app/views/cycle/issue.py` and `api/views/cycle.py` re-point existing
+/// links; drafts link brand-new issues), so at most one live row per issue
+/// exists and the order cannot change the result. (The partial unique covers
+/// `(cycle, issue)`, not `(issue)` alone — the single-row property comes from
+/// the move semantics, shared with pilot-2's merged list paths.)
 pub const CYCLE_ID_SELECT: &str = "(SELECT ci.cycle_id FROM cycle_issues ci \
     WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL LIMIT 1) AS cycle_id";
 
@@ -345,8 +349,8 @@ pub fn link_prefetch_sql(binder: &mut Binder, issue_ids: &[uuid::Uuid]) -> Strin
 
 /// `Project.objects.get(pk, workspace__slug)` (`base.py:487`). A pk lookup is
 /// unique, so the handler's single-row fetch matches Django's `.get()`
-/// (which over-fetches one row to detect multiples — unobservable here).
-/// Binds: project id, workspace slug.
+/// (which reads up to `LIMIT 21` to detect multiples — unobservable on a
+/// unique pk). Binds: project id, workspace slug.
 pub fn project_get_sql(binder: &mut Binder, slug: &str, project_id: uuid::Uuid) -> String {
     let project = binder.bind_uuid(project_id);
     let slug_holder = binder.bind_string(slug.to_owned());
@@ -384,9 +388,11 @@ pub fn guest_view_exists_sql(
 // Sub-issues (sub_issue.py:37-201)
 // ---------------------------------------------------------------------------
 
-/// The 26 `.values()` keys in CALL order (`sub_issue.py:141-167`) — the wire
-/// key order handlers render. `estimate_point` / `created_by` / `updated_by`
-/// select the `*_id` columns (see [`sub_issues_selects`]).
+/// The 26 `.values()` keys in RENDER order (`sub_issue.py:141-167`) — the wire
+/// key order handlers render. Django's `.values()` dicts follow the SELECT
+/// order, not the call order: concrete columns in call order, then annotations
+/// in `annotate()` order (see [`sub_issues_selects`]). `estimate_point` /
+/// `created_by` / `updated_by` select the `*_id` columns.
 pub const SUB_ISSUES_KEYS: &[&str] = &[
     "id",
     "name",
@@ -400,19 +406,19 @@ pub const SUB_ISSUES_KEYS: &[&str] = &[
     "sequence_id",
     "project_id",
     "parent_id",
-    "cycle_id",
-    "module_ids",
-    "label_ids",
-    "assignee_ids",
-    "sub_issues_count",
     "created_at",
     "updated_at",
     "created_by",
     "updated_by",
-    "attachment_count",
-    "link_count",
     "is_draft",
     "archived_at",
+    "cycle_id",
+    "link_count",
+    "attachment_count",
+    "sub_issues_count",
+    "label_ids",
+    "assignee_ids",
+    "module_ids",
     "state_group",
 ];
 
@@ -614,7 +620,8 @@ pub fn relation_ids_sql(
 
 /// The 14 bucket `.values()` keys in RENDER order (`relation.py:157-172`):
 /// concrete columns in call order, the two direct-`ArrayAgg` annotations in
-/// `annotate()` order, then the `relation_type` literal.
+/// `annotate()` order, then the `relation_type` literal. `.values()` dicts —
+/// and the wire JSON — follow this order, not the call order.
 pub const RELATION_ROW_FIELDS: &[&str] = &[
     "id",
     "name",
@@ -623,12 +630,12 @@ pub const RELATION_ROW_FIELDS: &[&str] = &[
     "priority",
     "sequence_id",
     "project_id",
-    "label_ids",
-    "assignee_ids",
     "created_at",
     "updated_at",
     "created_by",
     "updated_by",
+    "label_ids",
+    "assignee_ids",
     "relation_type",
 ];
 
@@ -999,6 +1006,19 @@ mod tests {
         for key in ["estimate_point", "created_by", "updated_by", "state_group"] {
             assert!(SUB_ISSUES_KEYS.contains(&key), "missing {key}");
         }
+        // Wire order is RENDER order, not call order: Django's `.values()`
+        // dicts follow the SELECT list (concrete columns first, then
+        // annotations in `annotate()` order).
+        let pos = |key: &str| SUB_ISSUES_KEYS.iter().position(|k| *k == key).unwrap();
+        assert!(pos("parent_id") < pos("created_at"));
+        assert!(pos("archived_at") < pos("cycle_id"));
+        assert!(pos("cycle_id") < pos("link_count"));
+        assert!(pos("link_count") < pos("attachment_count"));
+        assert!(pos("attachment_count") < pos("sub_issues_count"));
+        assert!(pos("sub_issues_count") < pos("label_ids"));
+        assert!(pos("label_ids") < pos("assignee_ids"));
+        assert!(pos("assignee_ids") < pos("module_ids"));
+        assert!(pos("module_ids") < pos("state_group"));
     }
 
     #[test]
@@ -1067,6 +1087,13 @@ mod tests {
         let total: usize = RELATION_BUCKETS.iter().map(|bucket| bucket.ids.len()).sum();
         assert_eq!(total, 10);
         assert_eq!(RELATION_ROW_FIELDS.len(), 14);
+        // RELATION_ROW_FIELDS is RENDER (wire) order: concrete columns, then
+        // the label/assignee annotations, then the relation_type literal.
+        let pos = |key: &str| RELATION_ROW_FIELDS.iter().position(|k| *k == key).unwrap();
+        assert!(pos("project_id") < pos("created_at"));
+        assert!(pos("updated_by") < pos("label_ids"));
+        assert!(pos("label_ids") < pos("assignee_ids"));
+        assert!(pos("assignee_ids") < pos("relation_type"));
     }
 
     #[test]
