@@ -73,11 +73,6 @@
 //!   (`user.py:281,397,524,541` — any authenticated caller; siblings are
 //!   gated). Handler-layer; the contract suite pins it
 //!   (`test_user_stats_non_member_open`, `test_dashboard_unknown_slug_*`).
-//! - Q1/Q2/Q4-Q6 assignee scope is TWO joins (`assignees__in` via the M2M
-//!   field plus the explicit `issue_assignee__deleted_at` reverse-FK hop;
-//!   `Join.identity` differs by `join_field`, so Django never reuses one
-//!   for the other): a uid matches through a live OR deleted link as long
-//!   as ANY live assignee link exists. [`stats_assignee_scope_sql`].
 //! - R3 project counts are ONE query with four `FILTER` aggregates over a
 //!   shared multi-valued join (Django never splits annotations):
 //!   `created_issues` overcounts by assignee-link fanout, deleted and
@@ -85,9 +80,6 @@
 //!   links double-count. [`profile_projects_sql`].
 //! - Q2 `HAVING COUNT(*) >= 1` (`:427`) is always true (grouped counts are
 //!   `>= 1` by construction) — emitted verbatim.
-//! - Count subqueries render NULL when empty (Django's grouped
-//!   `Subquery(...Count...)` has no `COALESCE`): `NULLIF(COUNT(*), 0)`
-//!   everywhere, matching pilot-2.
 //! - R5 cycle queries take NO legacy filters and NO requester scope
 //!   (`:496-507`); Q9's variable is singular `present_cycle` while the
 //!   response key is plural `present_cycles` (`:502` vs `:518`).
@@ -117,6 +109,11 @@
 //!   and the live contract test `test_user_profile_non_member_404` proves
 //!   the `DoesNotExist` → 404 path on this same endpoint. The module
 //!   encodes [`USER_GET_MISS_STATUS`] = 404.
+//! - F-W24-11's "counts NULL when zero" row is likewise wrong: the R1
+//!   `Func(..., function="Count")` annotations are scalar aggregates with
+//!   no `GROUP BY`, so they yield 0 when empty (plain `COUNT` in
+//!   [`profile_issues_annotations_sql`]). Fixture correction tracked by
+//!   PIDASHCONV-700.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 //!
@@ -250,28 +247,21 @@ pub const CLOSED_STATE_GROUPS: &[&str] = &["completed", "cancelled"];
 /// Q1/Q2/Q4-Q6 assignee scope, `user.py:403`:
 /// `(Q(assignees__in=[user_id]) & Q(issue_assignee__deleted_at__isnull=True))`.
 ///
-/// TWO joins to `issue_assignees` (ported bug): the M2M hop (`assignees`,
-/// join field = the `ManyToManyField`) and the explicit reverse-FK hop
-/// (`issue_assignee`, join field = the `ManyToOneRel`) have different
-/// `Join.identity` values (`django/db/models/sql/datastructures.py`), so
-/// Django never reuses one for the other. A uid matches through a live OR
-/// deleted link (`assignee_link`), as long as ANY live link exists
-/// (`live_link`). The M2M target (`users`) hop is folded into
-/// `assignee_link.assignee_id = $uid`: `assignee_id` is a non-null
-/// `CASCADE` FK, so the extra join filters nothing. Returns the
-/// `(joins_sql, predicates_sql)` pair; the caller supplies short aliases
-/// and the `$uid` holder.
-pub fn stats_assignee_scope_sql(
-    assignee_link: &str,
-    live_link: &str,
-    uid: &str,
-) -> (String, String) {
+/// ONE join to `issue_assignees`: `assignees` is
+/// `through="IssueAssignee"` (`db/models/issue.py:161-166`), so the M2M hop
+/// and the explicit reverse-FK hop are the same table + same ON and Django
+/// reuses the join (verified with `str(qs.query)` on the pinned Django
+/// 4.2.30 — a single `INNER JOIN "issue_assignees"` carrying both
+/// `"assignee_id" IN (...)` and `"deleted_at" IS NULL`). One row must
+/// satisfy BOTH conditions. The M2M target (`users`) hop is folded into
+/// `link.assignee_id = $uid` (Django never emits it — the `__in` lookup
+/// targets the through FK directly). Returns the `(joins_sql,
+/// predicates_sql)` pair; the caller supplies the alias and the `$uid`
+/// holder.
+pub fn stats_assignee_scope_sql(link: &str, uid: &str) -> (String, String) {
     (
-        format!(
-            "JOIN {ISSUE_ASSIGNEES} {assignee_link} ON {assignee_link}.issue_id = i.id \
-             JOIN {ISSUE_ASSIGNEES} {live_link} ON {live_link}.issue_id = i.id"
-        ),
-        format!("{assignee_link}.assignee_id = {uid} AND {live_link}.deleted_at IS NULL"),
+        format!("JOIN {ISSUE_ASSIGNEES} {link} ON {link}.issue_id = i.id"),
+        format!("{link}.assignee_id = {uid} AND {link}.deleted_at IS NULL"),
     )
 }
 
@@ -310,7 +300,7 @@ fn stats_issue_preamble(extra_joins: &str, extra_where: &str, legacy_sql: Option
 /// `ASC` default, NULLS LAST — same default Django gets).
 /// Params: `$1` uid, `$2` slug, `$3` viewer.
 pub fn stats_state_distribution_sql(legacy_sql: Option<&str>) -> String {
-    let (joins, predicates) = stats_assignee_scope_sql("ia1", "ia2", "$1");
+    let (joins, predicates) = stats_assignee_scope_sql("ia", "$1");
     format!(
         "SELECT s.\"group\" AS state_group, COUNT(s.\"group\") AS state_count \
          {preamble} \
@@ -337,7 +327,7 @@ pub fn priority_order_case_sql(column: &str) -> String {
 /// construction; ported verbatim), priority-`CASE` order.
 /// Params: `$1` uid, `$2` slug, `$3` viewer.
 pub fn stats_priority_distribution_sql(legacy_sql: Option<&str>) -> String {
-    let (joins, predicates) = stats_assignee_scope_sql("ia1", "ia2", "$1");
+    let (joins, predicates) = stats_assignee_scope_sql("ia", "$1");
     format!(
         "SELECT i.priority AS priority, COUNT(i.priority) AS priority_count, \
          {case} AS priority_order \
@@ -358,11 +348,11 @@ pub fn stats_created_count_sql(legacy_sql: Option<&str>) -> String {
     )
 }
 
-/// Q4 assigned count (`user.py:449-458`): the two-join assignee scope;
+/// Q4 assigned count (`user.py:449-458`): the single-join assignee scope;
 /// fanout overcounts exactly like Django (no `DISTINCT`).
 /// Params: `$1` uid, `$2` slug, `$3` viewer.
 pub fn stats_assigned_count_sql(legacy_sql: Option<&str>) -> String {
-    let (joins, predicates) = stats_assignee_scope_sql("ia1", "ia2", "$1");
+    let (joins, predicates) = stats_assignee_scope_sql("ia", "$1");
     format!(
         "SELECT COUNT(*) {}",
         stats_issue_preamble(&joins, &predicates, legacy_sql)
@@ -374,7 +364,7 @@ pub fn stats_assigned_count_sql(legacy_sql: Option<&str>) -> String {
 /// `split_exclude` shape as the triage exclusion).
 /// Params: `$1` uid, `$2` slug, `$3` viewer.
 pub fn stats_pending_count_sql(legacy_sql: Option<&str>) -> String {
-    let (joins, predicates) = stats_assignee_scope_sql("ia1", "ia2", "$1");
+    let (joins, predicates) = stats_assignee_scope_sql("ia", "$1");
     let pending = format!(
         "({predicates}) AND (s.\"group\" IS NULL OR NOT (s.\"group\" IN ('completed', 'cancelled')))"
     );
@@ -388,7 +378,7 @@ pub fn stats_pending_count_sql(legacy_sql: Option<&str>) -> String {
 /// (not the `CLOSED` pair — `cancelled` rows are excluded).
 /// Params: `$1` uid, `$2` slug, `$3` viewer.
 pub fn stats_completed_count_sql(legacy_sql: Option<&str>) -> String {
-    let (joins, predicates) = stats_assignee_scope_sql("ia1", "ia2", "$1");
+    let (joins, predicates) = stats_assignee_scope_sql("ia", "$1");
     let completed = format!("({predicates}) AND s.\"group\" = 'completed'");
     format!(
         "SELECT COUNT(*) {}",
@@ -498,9 +488,8 @@ pub fn profile_issues_from_where() -> String {
            JOIN {PROJECTS} p2 ON p2.id = i2.project_id \
            LEFT JOIN {STATES} s2 ON s2.id = i2.state_id \
            LEFT JOIN {ISSUE_ASSIGNEES} ia ON ia.issue_id = i2.id \
-           LEFT JOIN {USERS} u ON u.id = ia.assignee_id \
            LEFT JOIN {ISSUE_SUBSCRIBERS} sub ON sub.issue_id = i2.id \
-           WHERE (u.id = $1 OR i2.created_by_id = $1 OR sub.subscriber_id = $1) \
+           WHERE (ia.assignee_id = $1 OR i2.created_by_id = $1 OR sub.subscriber_id = $1) \
            AND w2.slug = $2 AND {inner_scope} \
          ) \
          AND w.slug = $2 AND {membership} AND {outer_scope}",
@@ -517,20 +506,26 @@ pub fn profile_issues_from_where() -> String {
 /// `annotation_selects` (no array selects here — those belong to the
 /// grouper's `on_results`, api crate): every annotation queries its
 /// model's manager directly, so the subqueries DO carry the
-/// `deleted_at IS NULL` guard (unlike filter joins), and counts render
-/// NULL when empty (`NULLIF(COUNT(*), 0)` — no `COALESCE` in Django).
+/// `deleted_at IS NULL` guard (unlike filter joins). The three counts are
+/// scalar aggregates (`Func(F("id"), function="Count")` is not an
+/// Aggregate, so Django emits NO `GROUP BY`): they return 0 when empty,
+/// never NULL (plain `COUNT` — verified with `str(qs.query)` on the
+/// pinned Django 4.2.30). The `cycle_id` subquery keeps Django's inner
+/// `ORDER BY ci.created_at DESC` (`CycleIssue.Meta.ordering`); without it
+/// the `LIMIT 1` pick is nondeterministic over several live links.
 /// `prefetch_related("assignees", "labels", "issue_module__module")`
 /// (`:133`) is serializer-layer and emits no SQL here.
 pub fn profile_issues_annotations_sql() -> String {
     format!(
         "(SELECT ci.cycle_id FROM {CYCLE_ISSUES} ci \
-          WHERE ci.issue_id = i.id AND ci.deleted_at IS NULL LIMIT 1) AS cycle_id, \
-         (SELECT NULLIF(COUNT(*), 0) FROM {ISSUE_LINKS} il \
+          WHERE ci.issue_id = i.id AND ci.deleted_at IS NULL \
+          ORDER BY ci.created_at DESC LIMIT 1) AS cycle_id, \
+         (SELECT COUNT(*) FROM {ISSUE_LINKS} il \
           WHERE il.issue_id = i.id AND il.deleted_at IS NULL) AS link_count, \
-         (SELECT NULLIF(COUNT(*), 0) FROM {FILE_ASSETS} fa \
+         (SELECT COUNT(*) FROM {FILE_ASSETS} fa \
           WHERE fa.issue_id = i.id AND fa.entity_type = 'ISSUE_ATTACHMENT' \
             AND fa.deleted_at IS NULL) AS attachment_count, \
-         (SELECT NULLIF(COUNT(*), 0) FROM {ISSUES} c \
+         (SELECT COUNT(*) FROM {ISSUES} c \
            LEFT JOIN {STATES} cs ON cs.id = c.state_id \
            JOIN {PROJECTS} cp ON cp.id = c.project_id \
           WHERE c.parent_id = i.id AND {sub_scope}) AS sub_issues_count",
@@ -621,7 +616,9 @@ pub fn group_values_appends_none(field: &str) -> bool {
 }
 
 /// `issue_group_values(field, slug, filters, queryset)` for the profile
-/// path (`grouper.py:146-224`, no `project_id`).
+/// path (`grouper.py:146-224`, no `project_id`). `state_id` carries BOTH
+/// the explicit `is_triage = FALSE` AND `StateManager`'s
+/// `NOT ("group" = 'triage')` (`db/models/state.py:79-83`).
 /// `assignees__id` reads ACTIVE `workspace_members` (`:173-176` — the
 /// no-project branch, unlike pilot-2's project-scoped member list).
 /// `priority`/`state__group` reuse the merged
@@ -633,7 +630,8 @@ pub fn profile_group_values(field: &str) -> Option<GroupValuesSource> {
     let source = match field {
         "state_id" => GroupValuesSource::Sql(format!(
             "SELECT s.id FROM {STATES} s JOIN {WORKSPACES} w ON w.id = s.workspace_id \
-             WHERE s.is_triage = FALSE AND w.slug = $1 AND s.deleted_at IS NULL \
+             WHERE s.is_triage = FALSE AND NOT (s.\"group\" = 'triage') \
+             AND w.slug = $1 AND s.deleted_at IS NULL \
              ORDER BY s.sequence"
         )),
         "labels__id" => GroupValuesSource::Sql(format!(
@@ -801,11 +799,15 @@ pub fn me_activities_from_where() -> String {
 pub const ACTIVITY_GRAPH_MONTHS: u32 = 6;
 
 /// R6 activity graph (`user.py:524-538`): per-day activity counts for the
-/// caller. `created_at__date__gte` and the `Cast("created_at", DateField())`
-/// annotation are the SAME `CAST(created_at AS DATE)` expression; the
-/// cutoff is server-local `date.today() - 6 months` (NOT UTC — Django's
-/// `date.today()` uses the system zone; the handler computes it via
-/// [`months_ago`] from the local date and binds it).
+/// caller. Port the `__date` asymmetry EXACTLY (verified with
+/// `str(qs.query)` on the pinned Django 4.2.30, `USE_TZ=True`,
+/// `TIME_ZONE="UTC"`): the FILTER converts —
+/// `("issue_activities"."created_at" AT TIME ZONE UTC)::date >= ...` —
+/// while the `Cast("created_at", DateField())` annotation does NOT
+/// (`("issue_activities"."created_at")::date`). The cutoff is server-local
+/// `date.today() - 6 months` (NOT UTC — Django's `date.today()` uses the
+/// system zone; the handler computes it via [`months_ago`] from the local
+/// date and binds it).
 /// Params: `$1` user, `$2` slug, `$3` cutoff `DATE`.
 pub fn activity_graph_sql() -> String {
     format!(
@@ -814,7 +816,7 @@ pub fn activity_graph_sql() -> String {
          FROM {ISSUE_ACTIVITIES} a \
          JOIN {WORKSPACES} w ON w.id = a.workspace_id \
          WHERE a.actor_id = $1 AND w.slug = $2 \
-         AND CAST(a.created_at AS DATE) >= $3 AND a.deleted_at IS NULL \
+         AND (a.created_at AT TIME ZONE UTC)::date >= $3 AND a.deleted_at IS NULL \
          GROUP BY CAST(a.created_at AS DATE) ORDER BY created_date"
     )
 }
@@ -826,26 +828,29 @@ pub fn activity_graph_sql() -> String {
 /// `ExtractWeek` declares `IntegerField` output, so Django converts each
 /// `week` to int server-side; the `::INT` cast reproduces that in SQL
 /// (bare `EXTRACT` yields `NUMERIC`, which would serialize as `1.0`).
-/// `COUNT(completed_week)` counts non-null weeks = rows (`completed_at IS
-/// NOT NULL` is explicit). Root `issue_objects` scope applies; the
-/// single `assignees__in` M2M hop carries NO deleted condition
+/// Every `EXTRACT` converts `AT TIME ZONE UTC` (`USE_TZ=True`,
+/// `TIME_ZONE="UTC"` — verified with `str(qs.query)` on the pinned Django
+/// 4.2.30; bare `EXTRACT` follows the session TimeZone and misbuckets
+/// boundary rows). `COUNT(completed_week)` counts non-null weeks = rows
+/// (`completed_at IS NOT NULL` is explicit). Root `issue_objects` scope
+/// applies; the single `assignees__in` M2M hop carries NO deleted condition
 /// (live-or-deleted links match), with the `users` target hop folded into
-/// `ia.assignee_id` (non-null `CASCADE` FK — filters nothing).
-/// No project/requester scope.
+/// `ia.assignee_id` (Django never emits it — the `__in` lookup targets the
+/// through FK directly). No project/requester scope.
 /// Params: `$1` user, `$2` slug, `$3` month (see [`parse_month_param`]).
 pub fn completed_graph_sql() -> String {
     format!(
-        "SELECT (EXTRACT(WEEK FROM i.completed_at)::INT % 4) AS week, \
-         COUNT(EXTRACT(WEEK FROM i.completed_at)) AS completed_count \
+        "SELECT (EXTRACT(WEEK FROM i.completed_at AT TIME ZONE UTC)::INT % 4) AS week, \
+         COUNT(EXTRACT(WEEK FROM i.completed_at AT TIME ZONE UTC)) AS completed_count \
          FROM {ISSUES} i \
          JOIN {ISSUE_ASSIGNEES} ia ON ia.issue_id = i.id \
          JOIN {WORKSPACES} w ON w.id = i.workspace_id \
          JOIN {PROJECTS} p ON p.id = i.project_id \
          LEFT JOIN {STATES} s ON s.id = i.state_id \
          WHERE ia.assignee_id = $1 AND w.slug = $2 \
-         AND EXTRACT(MONTH FROM i.completed_at) = $3 AND i.completed_at IS NOT NULL \
+         AND EXTRACT(MONTH FROM i.completed_at AT TIME ZONE UTC) = $3 AND i.completed_at IS NOT NULL \
          AND {scope} \
-         GROUP BY (EXTRACT(WEEK FROM i.completed_at)::INT % 4) ORDER BY week",
+         GROUP BY (EXTRACT(WEEK FROM i.completed_at AT TIME ZONE UTC)::INT % 4) ORDER BY week",
         scope = issue_manager_scope("i", "s", "p"),
     )
 }
@@ -890,8 +895,9 @@ pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try
 /// parity). `None` → [`MONTH_DEFAULT`]. Out-of-range months (0, 13, ...)
 /// parse fine and match no rows; unparseable input → [`MonthError`]
 /// (handlers answer [`MONTH_INVALID_STATUS`] / [`SERVER_ERROR_BODY`]).
-/// Values beyond `i64` also error (Django's unbounded `int` would return
-/// `[]`; no real client sends a 19-digit month).
+/// Values beyond `i64` SATURATE (`parse_per_page` precedent: parse via
+/// `i128`, clamp to `i64`) — Python's unbounded `int` would return `[]`,
+/// and a saturated out-of-range month matches no rows either.
 pub fn parse_month_param(raw: Option<&str>) -> Result<i64, MonthError> {
     let Some(text) = raw else {
         return Ok(MONTH_DEFAULT);
@@ -930,10 +936,12 @@ pub fn parse_month_param(raw: Option<&str>) -> Result<i64, MonthError> {
             value: text.to_owned(),
         });
     }
-    let magnitude: i64 = canonical.parse().map_err(|_| MonthError {
-        value: text.to_owned(),
-    })?;
-    Ok(if sign { -magnitude } else { magnitude })
+    // `canonical` is validated all-digits here, so a parse failure is
+    // magnitude overflow (40+ digits): saturate by sign, like Python's
+    // unbounded int matching no rows.
+    let magnitude: i128 = canonical.parse().unwrap_or(i128::MAX);
+    let value = if sign { -magnitude } else { magnitude };
+    Ok(value.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
 }
 
 /// A `?month=` value Python's `int()` rejects.
@@ -1210,20 +1218,18 @@ mod tests {
     }
 
     #[test]
-    fn assignee_scope_is_two_joins() {
-        // Ported bug: M2M hop + explicit reverse-FK hop never reuse.
-        let (joins, predicates) = stats_assignee_scope_sql("ia1", "ia2", "$1");
+    fn assignee_scope_is_one_join() {
+        // through="IssueAssignee": the M2M hop and the explicit reverse-FK
+        // hop collapse onto one join; one row satisfies both conditions
+        // (verified with str(qs.query) on Django 4.2.30).
+        let (joins, predicates) = stats_assignee_scope_sql("ia", "$1");
+        assert_eq!(joins.matches("issue_assignees").count(), 1, "{joins}");
         assert!(
-            joins.contains("issue_assignees ia1 ON ia1.issue_id = i.id"),
+            joins.contains("issue_assignees ia ON ia.issue_id = i.id"),
             "{joins}"
         );
         assert!(
-            joins.contains("issue_assignees ia2 ON ia2.issue_id = i.id"),
-            "{joins}"
-        );
-        assert!(predicates.contains("ia1.assignee_id = $1"), "{predicates}");
-        assert!(
-            predicates.contains("ia2.deleted_at IS NULL"),
+            predicates.contains("ia.assignee_id = $1 AND ia.deleted_at IS NULL"),
             "{predicates}"
         );
     }
@@ -1342,9 +1348,14 @@ mod tests {
         assert!(sql.contains("i2.deleted_at IS NULL"), "{sql}");
         assert!(sql.contains("i.deleted_at IS NULL"), "{sql}");
         assert!(
-            sql.contains("(u.id = $1 OR i2.created_by_id = $1 OR sub.subscriber_id = $1)"),
+            sql.contains(
+                "(ia.assignee_id = $1 OR i2.created_by_id = $1 OR sub.subscriber_id = $1)"
+            ),
             "{sql}"
         );
+        // Django never joins `users` here (the __in lookup targets the
+        // through FK directly).
+        assert!(!sql.contains("JOIN users"), "{sql}");
         // Requester's OWN memberships — :146-147, ported as-is.
         assert!(
             sql.contains("rpm.member_id = $3 AND rpm.is_active = TRUE"),
@@ -1362,11 +1373,17 @@ mod tests {
     }
 
     #[test]
-    fn annotations_count_null_when_empty() {
+    fn annotations_count_zero_when_empty() {
+        // Func(Count) is not an Aggregate: no GROUP BY, scalar aggregate
+        // yields 0 when empty — never NULL (str(qs.query), Django 4.2.30).
         let sql = profile_issues_annotations_sql();
         assert!(sql.contains("AS cycle_id"), "{sql}");
-        assert!(sql.contains("LIMIT 1) AS cycle_id"), "{sql}");
-        assert!(sql.contains("NULLIF(COUNT(*), 0)"), "{sql}");
+        assert!(
+            sql.contains("ORDER BY ci.created_at DESC LIMIT 1) AS cycle_id"),
+            "{sql}"
+        );
+        assert!(!sql.contains("NULLIF"), "{sql}");
+        assert_eq!(sql.matches("SELECT COUNT(*)").count(), 3, "{sql}");
         assert!(sql.contains("fa.entity_type = 'ISSUE_ATTACHMENT'"), "{sql}");
         assert!(sql.contains("AS link_count"), "{sql}");
         assert!(sql.contains("AS attachment_count"), "{sql}");
@@ -1460,6 +1477,8 @@ mod tests {
             panic!("state_id must be Sql");
         };
         assert!(state.contains("s.is_triage = FALSE"), "{state}");
+        // StateManager excludes group='triage' on top (db/models/state.py).
+        assert!(state.contains("NOT (s.\"group\" = 'triage')"), "{state}");
         assert!(state.contains("ORDER BY s.sequence"), "{state}");
         // assignees__id reads workspace members (no-project branch).
         let GroupValuesSource::Sql(members) =
@@ -1605,7 +1624,11 @@ mod tests {
             sql.contains("COUNT(CAST(a.created_at AS DATE)) AS activity_count"),
             "{sql}"
         );
-        assert!(sql.contains("CAST(a.created_at AS DATE) >= $3"), "{sql}");
+        // __date asymmetry: the filter converts, the Cast does not.
+        assert!(
+            sql.contains("(a.created_at AT TIME ZONE UTC)::date >= $3"),
+            "{sql}"
+        );
         assert!(
             sql.contains("GROUP BY CAST(a.created_at AS DATE) ORDER BY created_date"),
             "{sql}"
@@ -1615,16 +1638,19 @@ mod tests {
     #[test]
     fn completed_graph_buckets_mod_four() {
         let sql = completed_graph_sql();
+        // All three EXTRACTs convert AT TIME ZONE UTC (USE_TZ, TIME_ZONE=UTC).
         assert!(
-            sql.contains("(EXTRACT(WEEK FROM i.completed_at)::INT % 4) AS week"),
+            sql.contains("(EXTRACT(WEEK FROM i.completed_at AT TIME ZONE UTC)::INT % 4) AS week"),
             "{sql}"
         );
         assert!(
-            sql.contains("COUNT(EXTRACT(WEEK FROM i.completed_at)) AS completed_count"),
+            sql.contains(
+                "COUNT(EXTRACT(WEEK FROM i.completed_at AT TIME ZONE UTC)) AS completed_count"
+            ),
             "{sql}"
         );
         assert!(
-            sql.contains("EXTRACT(MONTH FROM i.completed_at) = $3"),
+            sql.contains("EXTRACT(MONTH FROM i.completed_at AT TIME ZONE UTC) = $3"),
             "{sql}"
         );
         assert!(sql.contains("i.completed_at IS NOT NULL"), "{sql}");
@@ -1653,6 +1679,20 @@ mod tests {
         assert_eq!(parse_month_param(Some("0")), Ok(0));
         assert_eq!(parse_month_param(Some("13")), Ok(13));
         assert_eq!(parse_month_param(Some("1_2")), Ok(12));
+        // Overflow saturates (parse_per_page precedent), matching no rows
+        // like Python's unbounded int — never a 500.
+        assert_eq!(
+            parse_month_param(Some("99999999999999999999999")),
+            Ok(i64::MAX)
+        );
+        assert_eq!(
+            parse_month_param(Some("-99999999999999999999999")),
+            Ok(i64::MIN)
+        );
+        assert_eq!(
+            parse_month_param(Some("99999999999999999999999999999999999999999999")),
+            Ok(i64::MAX)
+        );
         for bad in ["", "abc", "3.0", "1__2", "_1", "1_", "-", "+", "3 months"] {
             assert!(parse_month_param(Some(bad)).is_err(), "{bad:?} must 500");
         }
