@@ -143,11 +143,22 @@ downgraded pass.
 
 The test pass concludes with the next-state decision from "Task
 lifecycle" (match the target `group` first in "Available states", then the
-name), then the outcome report from "Ending the run":
+name), then the outcome report from "Ending the run". The outcome
+describes this run — `done` means "this run's turn is done" — and only an
+explicit `--stop-ticking` stops the issue's clock:
 
-- **pass** — every acceptance criterion is met. Post your results comment
-  and **leave the issue In Test**. Never move it to `completed`/Done — a
-  human closes it once they've seen the results. Yield `done`.
+- **pass, human gate** — every acceptance criterion is met, and merging
+  and closing are a human's call. This is the default everywhere the
+  project has not explicitly said otherwise. Post your results comment,
+  **leave the issue In Test**, and yield `done --stop-ticking`: the
+  stage is satisfied, so no further test run has anything to add until
+  a human acts.
+- **pass, agent close** — every criterion is met **and the project
+  explicitly lets agents merge and close** (the issue, a project page,
+  or the project's own instructions say so — never assume it). Merge
+  the PR, post the results comment, and move the issue to the
+  `completed` state ("Done"). Yield `done` — the move itself takes the
+  issue out of the ticking states, so no flag is needed.
 - **defects** — real defects that need fixing. Record per-criterion
   verdicts and list the defects as open items in the workpad `### Path to
   done` block, post the results comment, and move the issue **back to In
@@ -155,11 +166,19 @@ name), then the outcome report from "Ending the run":
   Blocked for a bug. Yield `done`.
 - **cannot run** — the test could not be run (missing env / creds /
   tooling — e.g. no browser for a UI kind). Follow "Blocking the run" and
-  say exactly what was missing. Yield `blocked`.
+  say exactly what was missing. Yield `blocked --stop-ticking` — a human
+  has to supply what is missing before another test run is useful.
 - **clarification** — the acceptance criteria are ambiguous or absent and
   the deliverable is high-stakes. Follow "Blocking the run". Yield
-  `waiting_on_human`.
-- **nothing changed** since your last pass — leave the issue In Test and
-  yield `done`. Do **not** post a bare "test tick (N/M) — noop, nothing
+  `waiting_on_human --stop-ticking`.
+- **nothing changed, waiting on CI or a dependency** — since your last
+  pass the issue has only been waiting on something no human needs to
+  touch (CI, a merge, a dependency issue). Leave it In Test and yield
+  `waiting_on_external` — **keep the clock ticking** so a later run
+  re-checks. Do **not** post a bare "test tick (N/M) — noop, nothing
   changed" comment; silence is the correct signal for "nothing changed,"
   and such comments only bury the ones a human actually needs.
+- **nothing changed, waiting on a human** — your previous pass already
+  reported its verdict and a human is the only way forward. Leave the
+  issue In Test and yield `waiting_on_human --stop-ticking`; their
+  action re-arms the clock. Same comment discipline.

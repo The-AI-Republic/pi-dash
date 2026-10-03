@@ -124,6 +124,49 @@ def test_yield_writes_the_outcome_on_the_run(api_key_client, workspace, issue, a
 
 
 @pytest.mark.unit
+def test_yield_stores_stop_ticking(api_key_client, workspace, issue, active_run):
+    resp = api_key_client.post(
+        _yield_url(workspace, active_run.id),
+        {"outcome": "done", "stop_ticking": True},
+        format="json",
+        HTTP_X_PI_DASH_RUN_ID=str(active_run.id),
+    )
+    assert resp.status_code == http_status.HTTP_200_OK, resp.data
+    assert resp.data["stop_ticking"] is True
+    active_run.refresh_from_db()
+    assert active_run.done_payload["status"] == "done"
+    assert active_run.done_payload["stop_ticking"] is True
+
+
+@pytest.mark.unit
+def test_yield_without_stop_ticking_stores_no_flag(api_key_client, workspace, issue, active_run):
+    resp = api_key_client.post(_yield_url(workspace, active_run.id), {"outcome": "done"}, format="json")
+    assert resp.status_code == http_status.HTTP_200_OK, resp.data
+    assert resp.data["stop_ticking"] is False
+    active_run.refresh_from_db()
+    assert "stop_ticking" not in active_run.done_payload
+
+
+@pytest.mark.unit
+def test_yield_rejects_a_non_boolean_stop_ticking(api_key_client, workspace, issue, active_run):
+    resp = api_key_client.post(
+        _yield_url(workspace, active_run.id),
+        {"outcome": "done", "stop_ticking": "yes"},
+        format="json",
+    )
+    assert resp.status_code == http_status.HTTP_400_BAD_REQUEST
+    active_run.refresh_from_db()
+    assert not (active_run.done_payload or {})
+
+
+@pytest.mark.unit
+def test_yield_still_requires_an_outcome_with_stop_ticking(api_key_client, workspace, issue, active_run):
+    resp = api_key_client.post(_yield_url(workspace, active_run.id), {"stop_ticking": True}, format="json")
+    assert resp.status_code == http_status.HTTP_400_BAD_REQUEST
+    assert "outcome" in resp.data["error"]
+
+
+@pytest.mark.unit
 def test_yield_accepts_every_vocabulary_word(api_key_client, workspace, issue, active_run):
     for outcome in ("progressed", "waiting_on_human", "waiting_on_external", "done", "blocked"):
         resp = api_key_client.post(_yield_url(workspace, active_run.id), {"outcome": outcome}, format="json")

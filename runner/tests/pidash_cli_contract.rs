@@ -679,6 +679,7 @@ async fn run_yield_posts_outcome_to_the_run_yield_route() {
             outcome: pidash::cli::run_cmd::Outcome::Done,
             note: Some("  approved  ".into()),
             run_id: None,
+            stop_ticking: false,
         },
     )
     .await
@@ -694,6 +695,67 @@ async fn run_yield_posts_outcome_to_the_run_yield_route() {
     let body: serde_json::Value = serde_json::from_str(&recorded[0].body).unwrap();
     assert_eq!(body["outcome"], "done");
     assert_eq!(body["note"], "approved");
+    assert!(
+        body.get("stop_ticking").is_none(),
+        "without --stop-ticking no key may reach the server"
+    );
+}
+
+#[tokio::test]
+async fn run_yield_stop_ticking_puts_the_signal_in_the_body() {
+    let fake = start_fake(Box::new(|req| {
+        assert_eq!(req.method, "POST");
+        CannedResponse::ok(r#"{"ok":true,"outcome":"done","stop_ticking":true}"#)
+    }))
+    .await;
+    let run_id = "123e4567-e89b-12d3-a456-426614174000";
+    let client = client_for_run(&fake, run_id);
+    pidash::cli::run_cmd::cmd_yield(
+        &client,
+        pidash::cli::run_cmd::YieldArgs {
+            outcome: pidash::cli::run_cmd::Outcome::Done,
+            note: None,
+            run_id: None,
+            stop_ticking: true,
+        },
+    )
+    .await
+    .expect("yield");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    let body: serde_json::Value = serde_json::from_str(&recorded[0].body).unwrap();
+    assert_eq!(body["outcome"], "done");
+    assert_eq!(body["stop_ticking"], true);
+}
+
+#[tokio::test]
+async fn run_yield_stop_ticking_succeeds_against_an_older_server_that_ignores_it() {
+    // An older server does not know `stop_ticking`: it accepts the POST,
+    // rejects nothing, and answers without echoing the unknown key.
+    let fake = start_fake(Box::new(|req| {
+        assert_eq!(req.method, "POST");
+        CannedResponse::ok(r#"{"ok":true,"outcome":"progressed"}"#)
+    }))
+    .await;
+    let run_id = "123e4567-e89b-12d3-a456-426614174000";
+    let client = client_for_run(&fake, run_id);
+    pidash::cli::run_cmd::cmd_yield(
+        &client,
+        pidash::cli::run_cmd::YieldArgs {
+            outcome: pidash::cli::run_cmd::Outcome::Progressed,
+            note: None,
+            run_id: None,
+            stop_ticking: true,
+        },
+    )
+    .await
+    .expect("yield must succeed against a server that ignores the key");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    let body: serde_json::Value = serde_json::from_str(&recorded[0].body).unwrap();
+    assert_eq!(body["stop_ticking"], true);
 }
 
 #[tokio::test]
@@ -706,6 +768,7 @@ async fn run_yield_without_a_run_id_fails_before_any_request() {
             outcome: pidash::cli::run_cmd::Outcome::Progressed,
             note: None,
             run_id: None,
+            stop_ticking: false,
         },
     )
     .await

@@ -112,7 +112,7 @@ def _apply_post_run_orchestration(run: AgentRun) -> None:
     be applied before the deferred pause so that hook sees the latest
     disarm reason. Both are idempotent: ``reconcile`` ignores a run whose
     stage the issue has already left (design §7 guard), and the CAP_HIT
-    gate inside ``maybe_apply_deferred_pause`` skips terminal-signal stops.
+    gate inside ``maybe_apply_deferred_pause`` skips stop-signal stops.
 
     Each side-effect is wrapped in its own try/except so a failure in one
     does not block the other or the surrounding drain.
