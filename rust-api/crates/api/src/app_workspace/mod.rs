@@ -12,3 +12,4 @@
 //! stub — sibling issues extend it; merges keep both sides.
 
 pub mod gates;
+pub mod handlers_prefs;
