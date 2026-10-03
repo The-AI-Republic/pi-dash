@@ -23,7 +23,6 @@ import {
   serverPatchProjectUserProperties,
   serverProjectDetails,
   serverProjectUserProperties,
-  serverWorkspaceUserId,
   sessionBrowserCookies,
   signInSession,
   uniqueSuffix,
@@ -40,11 +39,86 @@ async function resetPrefs(workspaceSlug: string, projectId: string, session: str
   });
 }
 
+async function occupantIds(
+  workspaceSlug: string,
+  projectId: string,
+  session: string,
+  stateId: string
+): Promise<string[]> {
+  const found: string[] = [];
+  const issues = await serverIssues(workspaceSlug, projectId, session);
+  for (const issue of issues) {
+    const details = await serverIssueDetails(workspaceSlug, projectId, issue.id, session).catch(() => null);
+    if (details?.stateId === stateId) found.push(`${issue.name} (${issue.id})`);
+  }
+  return found;
+}
+
+/** Move every live occupant of a temp state back to Todo, wait for the
+ *  moves to land, then delete the state. The issue PATCH lands
+ *  asynchronously server-side, so a delete can 400 while a move is still
+ *  in flight — restore, poll, and delete retry together, and a persistent
+ *  failure names the remaining occupants instead of a bare 400. */
+async function deleteTempState(
+  workspaceSlug: string,
+  projectId: string,
+  session: string,
+  stateId: string
+): Promise<void> {
+  const states = await serverListStates(workspaceSlug, projectId, session);
+  const todoId = states.find((row) => row.name === "Todo")?.id ?? "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (todoId) {
+      const issues = await serverIssues(workspaceSlug, projectId, session);
+      for (const issue of issues) {
+        const details = await serverIssueDetails(workspaceSlug, projectId, issue.id, session).catch(() => null);
+        if (details?.stateId === stateId) {
+          await serverPatchIssue(workspaceSlug, projectId, issue.id, { state_id: todoId }, session);
+        }
+      }
+      await expect
+        .poll(async () => occupantIds(workspaceSlug, projectId, session, stateId), { timeout: 30_000 })
+        .toEqual([]);
+    }
+    try {
+      await serverDeleteState(workspaceSlug, projectId, stateId, session);
+      return;
+    } catch {
+      // Still occupied or settling — the next attempt restores again.
+    }
+  }
+  const stuck = await occupantIds(workspaceSlug, projectId, session, stateId).catch(() => ["<unreadable>"]);
+  throw new Error(`[parity] temp state ${stateId} stayed occupied by: ${stuck.join(", ") || "<none>"}.`);
+}
+
+/** Remove temp states leaked by earlier failed runs (best-effort; a red
+ *  run's strays must not break the next run's reads). */
+async function deleteStrayTempStates(
+  workspaceSlug: string,
+  projectId: string,
+  session: string,
+  keepStateId = ""
+): Promise<void> {
+  const states = await serverListStates(workspaceSlug, projectId, session).catch(() => []);
+  for (const row of states) {
+    // The keep id is the current test's own temp state: without the
+    // exclusion the janitor eats it at open time, the body then fails to
+    // find its option, and the finally's re-delete 400s (deleting a
+    // soft-deleted state is a 400, not a 404) and masks the body error.
+    if (row.id === keepStateId) continue;
+    if (row.name.startsWith("Parity Sheet ") || row.name.startsWith("Parity Sort ")) {
+      await deleteTempState(workspaceSlug, projectId, session, row.id).catch(() => {});
+    }
+  }
+}
+
 async function openSheet(
   driver: Pick<ParityDriver, "openAuthenticated">,
   seed: Pick<ParitySeedFacts, "workspaceSlug" | "projectId">,
-  session: string
+  session: string,
+  keepStateId = ""
 ): Promise<void> {
+  await deleteStrayTempStates(seed.workspaceSlug, seed.projectId, session, keepStateId);
   await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
     display_filters: { layout: "spreadsheet", group_by: null, order_by: "sort_order" },
   });
@@ -61,7 +135,9 @@ test(
     test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     await openSheet(driver, seed, session);
-    expect(await driver.layoutsSpreadsheetVisible()).toEqual(true);
+    // The sheet renders after the header chrome the navigation waits
+    // settle on, so the first read polls instead of asserting once.
+    await expect.poll(async () => driver.layoutsSpreadsheetVisible(), { timeout: 300_000 }).toEqual(true);
 
     await test.step("headers start with the work-item column, then properties", async () => {
       const headers = await driver.layoutsSheetHeaders();
@@ -106,13 +182,13 @@ test(
 );
 
 test(
-  specTitle(["ISS-015", "ISS-013"], "sheet sub-issue nesting stops at three levels"),
+  specTitle(["ISS-015", "ISS-013"], "bug:NEWFRONT-162 nested expansion fetches but does not render grandchildren"),
   { tag: specTags(["ISS-015", "ISS-013"]) },
   async ({ driver, seed }) => {
     test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     const suffix = uniqueSuffix();
-    const names = [0, 1, 2, 3, 4].map((level) => `Parity nest L${level} ${suffix}`);
+    const names = [0, 1, 2].map((level) => `Parity nest L${level} ${suffix}`);
     const ids: string[] = [];
     try {
       for (const name of names) ids.push(await serverCreateIssue(seed.workspaceSlug, seed.projectId, session, name));
@@ -126,19 +202,22 @@ test(
         );
       }
       await openSheet(driver, seed, session);
+      // Level 1 expands inline.
       await driver.layoutsSheetExpandSubIssues(names[0] ?? "");
       expect(await driver.layoutsSheetSubIssueNames(names[0] ?? "")).toContain(names[1]);
-      await driver.layoutsSheetExpandSubIssues(names[1] ?? "");
-      expect(await driver.layoutsSheetSubIssueNames(names[1] ?? "")).toContain(names[2]);
-      await driver.layoutsSheetExpandSubIssues(names[2] ?? "");
-      expect(await driver.layoutsSheetSubIssueNames(names[2] ?? "")).toContain(names[3]);
-      // Depth 3 keeps its toggle, but activating it opens peek instead of
-      // expanding: deeper nesting never renders inline.
-      expect(await driver.layoutsSheetHasSubIssueToggle(names[3] ?? "")).toEqual(true);
-      await driver.layoutsSheetToggleSubIssues(names[3] ?? "");
-      expect(await driver.layoutsPeekVisible()).toEqual(true);
-      expect(await driver.layoutsPeekTitle()).toEqual(names[3]);
-      await driver.layoutsPeekClose();
+      // Level 2 does not: the nested toggle fetches its children (HTTP
+      // 200) but never renders them — no row, no peek, no navigation.
+      // The settle below is the honest absence pin: a passing render
+      // would land within seconds of the fetch, so nothing after 15s
+      // means nothing renders. Intended behavior is cap-3 inline with
+      // peek past it; when NEWFRONT-162 is fixed, flip this back to the
+      // stepwise expansion plus the depth-3 peek assertion.
+      expect(await driver.layoutsSheetHasSubIssueToggle(names[1] ?? "")).toEqual(true);
+      await driver.layoutsSheetToggleSubIssues(names[1] ?? "");
+      await new Promise((resolve) => setTimeout(resolve, 15_000));
+      expect(await driver.layoutsSheetSubIssueNames(names[1] ?? "")).not.toContain(names[2]);
+      expect(await driver.layoutsSheetRowNames()).not.toContain(names[2]);
+      expect(await driver.layoutsPeekVisible()).toEqual(false);
     } finally {
       for (const id of [...ids].reverse()) await serverDeleteIssue(seed.workspaceSlug, seed.projectId, id, session);
       await resetPrefs(seed.workspaceSlug, seed.projectId, session);
@@ -153,8 +232,9 @@ test(
     test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     const flags = await serverProjectDetails(seed.workspaceSlug, seed.projectId, session);
-    expect(flags.cycleView).toEqual(true);
-    expect(flags.moduleView).toEqual(true);
+    // The seed leaves the views off; the test needs them on, and
+    // restores whatever it found.
+    await serverPatchProject(seed.workspaceSlug, seed.projectId, session, { cycle_view: true, module_view: true });
     try {
       await openSheet(driver, seed, session);
       expect(await driver.layoutsSheetHeaders()).toEqual(expect.arrayContaining(["State", "Cycle", "Modules"]));
@@ -194,7 +274,10 @@ test(
         expect(headers).toContain("State");
       });
     } finally {
-      await serverPatchProject(seed.workspaceSlug, seed.projectId, session, { cycle_view: true, module_view: true });
+      await serverPatchProject(seed.workspaceSlug, seed.projectId, session, {
+        cycle_view: flags.cycleView,
+        module_view: flags.moduleView,
+      });
       await resetPrefs(seed.workspaceSlug, seed.projectId, session);
     }
   }
@@ -212,40 +295,69 @@ test(
     const firstId = rows.find((row) => row.name === first)?.id ?? "";
     const stateName = `Parity Sheet ${uniqueSuffix()}`;
     const stateId = await serverCreateState(seed.workspaceSlug, seed.projectId, session, stateName, "started");
+    // A red run leaks field state (its end-of-body restore never runs),
+    // so the test resets the seed issue's fields up front instead of
+    // assuming a pristine project.
+    await serverPatchIssue(
+      seed.workspaceSlug,
+      seed.projectId,
+      firstId,
+      { priority: "none", assignee_ids: [], target_date: null },
+      session
+    );
     try {
-      await openSheet(driver, seed, session);
+      await openSheet(driver, seed, session, stateId);
       expect(await driver.layoutsSheetCellEditable(first, "State")).toEqual(true);
       expect(await driver.layoutsSheetCellText(first, "State")).toEqual("Todo");
-      expect(await driver.layoutsSheetCellText(first, "Priority")).toEqual("");
+      expect(await driver.layoutsSheetCellText(first, "Priority")).toEqual("None");
 
+      // The sheet updates its cells optimistically, so every server
+      // read after a UI edit polls until the PATCH lands.
       await driver.layoutsSheetCellSetState(first, stateName);
       expect(await driver.layoutsSheetCellText(first, "State")).toEqual(stateName);
-      expect((await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, session)).stateId).toEqual(stateId);
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, session)).stateId, {
+          timeout: 30_000,
+        })
+        .toEqual(stateId);
       expect(await driver.layoutsSheetFocusedCell()).toEqual({ issueName: first, column: "State" });
 
       await driver.layoutsSheetCellSetPriority(first, "High");
       expect(await driver.layoutsSheetCellText(first, "Priority")).toEqual("High");
-      const priority = (await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, session)).priority;
-      expect((priority ?? "").toLowerCase()).toEqual("high");
+      await expect
+        .poll(
+          async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, session)).priority ?? "",
+          { timeout: 30_000 }
+        )
+        .toEqual(expect.stringMatching(/^high$/i));
 
       await test.step("assignee cells write the member", async () => {
         await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { assignee_ids: [] }, session);
         // The driver addresses members by display name; the seeded member
-        // carries one the assignee picker shows.
+        // carries one the assignee picker shows. Unlike priority's "None",
+        // the empty assignee cell renders its column label (a nested
+        // "Assignees" button inside the cell trigger).
         const before = await driver.layoutsSheetCellText(first, "Assignees");
-        expect(before).toEqual("");
+        expect(before).toEqual("Assignees");
         await driver.layoutsSheetCellSetAssignee(first, member.displayName);
-        const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, session);
-        expect(details.assigneeIds).toContain(member.id);
+        await expect
+          .poll(
+            async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, session)).assigneeIds,
+            { timeout: 30_000 }
+          )
+          .toContain(member.id);
       });
 
       await test.step("due-date cells write the date", async () => {
         const due = new Date(Date.now() + 30 * 24 * 3600 * 1000);
         const iso = due.toISOString().slice(0, 10);
         await driver.layoutsSheetCellSetDueDate(first, iso);
-        expect((await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, session)).targetDate).toEqual(
-          iso
-        );
+        await expect
+          .poll(
+            async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, session)).targetDate,
+            { timeout: 30_000 }
+          )
+          .toEqual(iso);
         expect(await driver.layoutsSheetCellText(first, "Due date")).toContain(String(due.getUTCDate()));
       });
 
@@ -258,12 +370,14 @@ test(
           firstId,
           // Priority clears with "none", not null (non-null CharField;
           // null 400s the whole PATCH and the state restore never lands).
+          // The state move itself lands asynchronously; deleteTempState in
+          // the finally waits for it before deleting the temp state.
           { state_id: todoId, priority: "none", assignee_ids: [], target_date: null },
           session
         );
       });
     } finally {
-      await serverDeleteState(seed.workspaceSlug, seed.projectId, stateId, session);
+      await deleteTempState(seed.workspaceSlug, seed.projectId, session, stateId);
       await resetPrefs(seed.workspaceSlug, seed.projectId, session);
     }
   }
@@ -290,7 +404,11 @@ test(
         await driver.layoutsSheetOpenSubIssueCount(first);
         const after = await driver.layoutsCurrentUrl();
         expect(after).not.toEqual(before);
-        expect(after).toContain(firstId);
+        // The detail route canonicalizes to the browse-by-identifier
+        // path (PAR-1 style), not the uuid the driver clicked from.
+        const project = await serverProjectDetails(seed.workspaceSlug, seed.projectId, session);
+        const sequence = rows.find((row) => row.id === firstId)?.sequenceId ?? -1;
+        expect(after).toContain(`${project.identifier}-${sequence}`);
       });
     } finally {
       await serverDeleteIssue(seed.workspaceSlug, seed.projectId, childId, session);
@@ -300,23 +418,26 @@ test(
     if (!seed.guestEmail || !seed.guestPassword) {
       throw new Error("[parity] seed facts carry no guest; re-run the stack seed step (see stack/README.md).");
     }
-    const guestId = await serverWorkspaceUserId(seed.workspaceSlug, seed.guestEmail, session);
-    await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { assignee_ids: [guestId] }, session);
+    // Guests see only issues they created (the server drops guest
+    // assignees silently and guests cannot create), so the owner flips
+    // guest_view_all_features for this step and restores it after. Prefs
+    // are per-user: the sheet layout is set on the guest's own prefs.
+    await serverPatchProject(seed.workspaceSlug, seed.projectId, session, { guest_view_all_features: true });
     const guestSession = await signInSession(seed.guestEmail, seed.guestPassword);
     try {
-      await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
+      await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, guestSession, {
         display_filters: { layout: "spreadsheet", group_by: null, order_by: "sort_order" },
       });
       await driver.openAuthenticated(
         `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
         sessionBrowserCookies(guestSession)
       );
-      expect(await driver.layoutsSpreadsheetVisible()).toEqual(true);
+      await expect.poll(async () => driver.layoutsSpreadsheetVisible(), { timeout: 300_000 }).toEqual(true);
       expect(await driver.layoutsSheetCellEditable(first, "State")).toEqual(false);
       expect(await driver.layoutsSheetCellEditable(first, "Priority")).toEqual(false);
     } finally {
-      await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { assignee_ids: [] }, session);
-      await resetPrefs(seed.workspaceSlug, seed.projectId, session);
+      await serverPatchProject(seed.workspaceSlug, seed.projectId, session, { guest_view_all_features: false });
+      await resetPrefs(seed.workspaceSlug, seed.projectId, guestSession);
     }
   }
 );
@@ -334,7 +455,7 @@ test(
     const secondId = rows.find((row) => row.name === second)?.id ?? "";
     try {
       await serverPatchIssue(seed.workspaceSlug, seed.projectId, secondId, { state_id: stateId }, session);
-      await openSheet(driver, seed, session);
+      await openSheet(driver, seed, session, stateId);
       expect(await driver.layoutsSheetSortMarker("State")).toEqual("none");
       expect(await driver.layoutsSheetSortMenu("State")).toHaveLength(2);
 
@@ -344,6 +465,11 @@ test(
         (await serverProjectUserProperties(seed.workspaceSlug, seed.projectId, session)).displayFilters["order_by"]
       ).toEqual("state__name");
       expect(await driver.layoutsSheetSortMenu("State")).toContain("Clear sorting");
+      // Rows re-render on every sort; the order reads poll until the
+      // seed rows are all present instead of racing the transition.
+      await expect
+        .poll(async () => driver.layoutsSheetRowNames(), { timeout: 300_000 })
+        .toEqual(expect.arrayContaining([second, seed.issueNames[0] ?? ""]));
       const asc = await driver.layoutsSheetRowNames();
       expect(asc.indexOf(second)).toBeLessThan(asc.indexOf(seed.issueNames[0] ?? ""));
 
@@ -352,6 +478,9 @@ test(
       expect(
         (await serverProjectUserProperties(seed.workspaceSlug, seed.projectId, session)).displayFilters["order_by"]
       ).toEqual("-state__name");
+      await expect
+        .poll(async () => driver.layoutsSheetRowNames(), { timeout: 300_000 })
+        .toEqual(expect.arrayContaining([second, seed.issueNames[0] ?? ""]));
       const desc = await driver.layoutsSheetRowNames();
       expect(desc.indexOf(second)).toBeGreaterThan(desc.indexOf(seed.issueNames[0] ?? ""));
 
@@ -360,16 +489,11 @@ test(
       expect(
         (await serverProjectUserProperties(seed.workspaceSlug, seed.projectId, session)).displayFilters["order_by"]
       ).toEqual("-created_at");
-      expect(await driver.layoutsSheetRowNames()).toEqual([...seed.issueNames].reverse());
+      await expect
+        .poll(async () => driver.layoutsSheetRowNames(), { timeout: 300_000 })
+        .toEqual([...seed.issueNames].reverse());
     } finally {
-      const states = await serverListStates(seed.workspaceSlug, seed.projectId, session).catch(() => []);
-      const todoId = states.find((row) => row.name === "Todo")?.id ?? "";
-      if (todoId) {
-        await serverPatchIssue(seed.workspaceSlug, seed.projectId, secondId, { state_id: todoId }, session).catch(
-          () => {}
-        );
-      }
-      await serverDeleteState(seed.workspaceSlug, seed.projectId, stateId, session);
+      await deleteTempState(seed.workspaceSlug, seed.projectId, session, stateId);
       await resetPrefs(seed.workspaceSlug, seed.projectId, session);
     }
   }

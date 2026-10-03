@@ -2029,6 +2029,7 @@ export interface LayoutsProjectDetails {
   name: string;
   cycleView: boolean;
   moduleView: boolean;
+  identifier: string;
 }
 
 /** One project's detail row: flags the column specs toggle and restore. */
@@ -2042,7 +2043,13 @@ export async function serverProjectDetails(
     headers: { cookie: sessionCookie },
   });
   if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
-  const record = (await res.json()) as { id?: unknown; name?: unknown; cycle_view?: unknown; module_view?: unknown };
+  const record = (await res.json()) as {
+    id?: unknown;
+    name?: unknown;
+    cycle_view?: unknown;
+    module_view?: unknown;
+    identifier?: unknown;
+  };
   if (typeof record.id !== "string" || typeof record.name !== "string") {
     throw new Error("[parity] project row missed id or name.");
   }
@@ -2051,6 +2058,7 @@ export async function serverProjectDetails(
     name: record.name,
     cycleView: record.cycle_view === true,
     moduleView: record.module_view === true,
+    identifier: typeof record.identifier === "string" ? record.identifier : "",
   };
 }
 

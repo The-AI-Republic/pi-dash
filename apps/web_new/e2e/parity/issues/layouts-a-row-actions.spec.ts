@@ -29,9 +29,9 @@ import {
   serverListStates,
   serverModuleIssueIds,
   serverPatchIssue,
+  serverPatchProject,
   serverPatchProjectUserProperties,
   serverRestoreIssue,
-  serverWorkspaceUserId,
   sessionBrowserCookies,
   signInSession,
   uniqueSuffix,
@@ -97,19 +97,19 @@ test(
     if (!seed.guestEmail || !seed.guestPassword) {
       throw new Error("[parity] seed facts carry no guest; re-run the stack seed step (see stack/README.md).");
     }
+    // Guests see only issues they created (the server drops guest
+    // assignees silently and guests cannot create), so the owner flips
+    // guest_view_all_features for this test and restores it after.
     const ownerSession = await signInSession(seed.email, seed.password);
-    const guestId = await serverWorkspaceUserId(seed.workspaceSlug, seed.guestEmail, ownerSession);
-    const rows = await serverIssues(seed.workspaceSlug, seed.projectId, ownerSession);
     const first = seed.issueNames[0] ?? "";
-    const firstId = rows.find((row) => row.name === first)?.id ?? "";
-    await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { assignee_ids: [guestId] }, ownerSession);
+    await serverPatchProject(seed.workspaceSlug, seed.projectId, ownerSession, { guest_view_all_features: true });
     const guestSession = await signInSession(seed.guestEmail, seed.guestPassword);
     try {
       await resetPrefs(seed.workspaceSlug, seed.projectId, ownerSession);
       await openPath(driver, projectIssuesPath(seed), guestSession);
       expect(await driver.layoutsRowMenuItems(first)).toEqual(["Open in new tab", "Copy link"]);
     } finally {
-      await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { assignee_ids: [] }, ownerSession);
+      await serverPatchProject(seed.workspaceSlug, seed.projectId, ownerSession, { guest_view_all_features: false });
     }
   }
 );
