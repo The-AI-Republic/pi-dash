@@ -75,8 +75,7 @@
 //!   follows serde, not CPython.
 //! * A non-`"already exists"` IntegrityError inside create answers the
 //!   computed JSON 500 (Django's dispatch bug discards it for an HTML 500).
-//! * `str.strip()` parity excludes `\x1c-\x1f`/`\x85` (stripped by Python,
-//!   kept here) and Python-`repr` float edges in error strings.
+//! * Python-`repr` float edges in error strings.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
@@ -100,7 +99,7 @@ use pidash_types::license::serializers_workspace::RESTRICTED_WORKSPACE_SLUGS;
 use pidash_types::WorkspaceId;
 
 use super::gates;
-use crate::app_issues::{query_last, query_values, Denial, QueryMap};
+use crate::app_issues::{query_last, Denial, QueryMap};
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::v1_projects::tz_zones::PYTZ_COMMON_TIMEZONES;
@@ -127,7 +126,7 @@ pub const EXPORT_PATH: &str = "/api/workspaces/{slug}/user-activity/{user_id}/ex
 fn method_not_allowed_response(method: &str) -> Response {
     json_response(
         StatusCode::METHOD_NOT_ALLOWED,
-        format!("{{\"detail\":\"Method \\\"{method}\\\" not allowed.\"}}"),
+        format!("{{\"Detail\":\"Method \\\"{method}\\\" not allowed.\"}}"),
     )
 }
 
@@ -559,6 +558,10 @@ pub(crate) struct InputBody {
     /// Multipart keys carrying uploads (last filename wins): presence
     /// plus the name (some messages render it).
     pub files: BTreeMap<String, String>,
+    /// The whole non-object JSON value (`null`, list, scalar) for the
+    /// top-level arms. Stored separately (never as a map entry) so a
+    /// genuine object containing an `""` key still validates as one.
+    pub scalar: Option<Value>,
 }
 
 impl InputBody {
@@ -568,15 +571,13 @@ impl InputBody {
                 is_html: false,
                 map,
                 files: BTreeMap::new(),
+                scalar: None,
             },
             other => Self {
                 is_html: false,
-                map: {
-                    let mut map = Map::new();
-                    map.insert(String::new(), other);
-                    map
-                },
+                map: Map::new(),
                 files: BTreeMap::new(),
+                scalar: Some(other),
             },
         }
     }
@@ -584,13 +585,13 @@ impl InputBody {
     /// Whether the JSON body decoded to an object (non-objects take the
     /// `non_field_errors` / manual-`.get` arms, never field validation).
     fn json_is_object(&self) -> bool {
-        !self.is_html && !self.map.contains_key("")
+        !self.is_html && self.scalar.is_none()
     }
 
     /// The whole non-object JSON value (`null`, list, scalar) for the
     /// top-level arms. Only called when `json_is_object` is false.
     fn json_scalar(&self) -> &Value {
-        self.map.get("").expect("non-object body")
+        self.scalar.as_ref().expect("non-object body")
     }
 
     /// DRF `request.data.get(key)`: the file wins when the key carries
@@ -632,6 +633,7 @@ pub(crate) fn negotiate_body(
             is_html: false,
             map: Map::new(),
             files: BTreeMap::new(),
+            scalar: None,
         });
     }
     let content_type: String = headers
@@ -655,6 +657,7 @@ pub(crate) fn negotiate_body(
             is_html: true,
             map,
             files: BTreeMap::new(),
+            scalar: None,
         });
     }
     if base == "multipart/form-data" {
@@ -668,15 +671,22 @@ pub(crate) fn negotiate_body(
             is_html: true,
             map,
             files,
+            scalar: None,
         });
     }
     Err(unsupported_media_type(&content_type))
 }
 
 fn unsupported_media_type(content_type: &str) -> Response {
+    // The content type is attacker-controlled: serde-escape it like the
+    // parse-error arm (DRF's `JSONRenderer` escapes the same way).
+    let message = format!("Unsupported media type \"{content_type}\" in request.");
     json_response(
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        format!("{{\"detail\":\"Unsupported media type \\\"{content_type}\\\" in request.\"}}"),
+        format!(
+            "{{\"Detail\":{}}}",
+            serde_json::to_string(&message).expect("415 string")
+        ),
     )
 }
 
@@ -684,7 +694,7 @@ fn parse_error_response(detail: String) -> Response {
     json_response(
         StatusCode::BAD_REQUEST,
         format!(
-            "{{\"detail\":{}}}",
+            "{{\"Detail\":{}}}",
             serde_json::to_string(&detail).expect("detail string")
         ),
     )
@@ -1408,10 +1418,10 @@ fn parse_hms_basic(text: &str) -> Option<(u32, u32, u32, u32)> {
     if head.len() != 4 && head.len() != 6 {
         return None;
     }
-    let hour: u32 = head[0..2].parse().ok()?;
-    let minute: u32 = head[2..4].parse().ok()?;
+    let hour: u32 = head.get(0..2)?.parse().ok()?;
+    let minute: u32 = head.get(2..4)?.parse().ok()?;
     let second: u32 = if head.len() == 6 {
-        head[4..6].parse().ok()?
+        head.get(4..6)?.parse().ok()?
     } else {
         0
     };
@@ -1452,8 +1462,8 @@ fn parse_week_datetime(text: &str) -> Option<ParsedDateTime> {
     let (day_text, time_text) = match day_text.len() {
         1 => (day_text, None),
         len if len > 2 => {
-            let (day, time) = day_text.split_at(1);
-            let time = time.strip_prefix(['T', ' '])?;
+            let day = day_text.get(0..1)?;
+            let time = day_text.get(1..)?.strip_prefix(['T', ' '])?;
             (day, Some(time))
         }
         _ => return None,
@@ -1620,10 +1630,13 @@ pub(crate) async fn validate_pk_field(
     }
 }
 
-/// The `pk_value` rendering in `does_not_exist`: ints echo, UUIDs echo.
+/// The `pk_value` rendering in `does_not_exist`: ints echo via `py_str`,
+/// strings echo the pre-prep input verbatim (DRF fails with `data`, so
+/// uppercase/URN spellings are never normalized).
 fn py_pk_display(value: &Value, candidate: &uuid::Uuid) -> String {
     match value {
         Value::Number(_) => py_str(value),
+        Value::String(text) => text.clone(),
         _ => candidate.to_string(),
     }
 }
@@ -1705,22 +1718,14 @@ pub(crate) struct ListFilters {
 
 /// Parse `?owner=` (ModelChoice: unknown users 400 with `invalid_choice`,
 /// malformed UUIDs 400 with the UUID message, empties ignored, repeats
-/// 400) and `?search=` (smart-split terms, ANDed).
+/// last-win like `QueryDict.get`) and `?search=` (smart-split terms, ANDed).
 #[allow(clippy::result_large_err)]
 pub(crate) async fn parse_list_filters(
     pool: &sqlx::PgPool,
     query: &QueryMap,
 ) -> Result<ListFilters, Response> {
     let mut owner_id: Option<uuid::Uuid> = None;
-    if let Some(values) = query_values(query, "owner") {
-        if values.len() != 1 {
-            return Err(single_field_error(
-                "owner",
-                "Select a valid choice. That choice is not one of the available choices."
-                    .to_owned(),
-            ));
-        }
-        let raw = &values[0];
+    if let Some(raw) = query_last(query, "owner") {
         if !raw.is_empty() {
             match raw.parse::<uuid::Uuid>() {
                 Ok(parsed) => {
@@ -1740,7 +1745,7 @@ pub(crate) async fn parse_list_filters(
                     owner_id = Some(parsed);
                 }
                 Err(_) => {
-                    return Err(single_field_error("owner", invalid_uuid_message(raw)));
+                    return Err(single_field_error("owner", invalid_uuid_message(&raw)));
                 }
             }
         }
@@ -2110,19 +2115,22 @@ type AssetScopeRow = (
     Option<uuid::Uuid>,
 );
 
-/// `logo_url`: explicit `logo` wins, else the asset URL of
-/// `logo_asset_id` (forward FK derefs use the unfiltered base manager —
-/// soft-deleted assets still resolve), else null.
+/// `logo_url`: the asset URL of `logo_asset_id` wins when set, else
+/// the truthy explicit `logo`, else null (forward FK derefs use the
+/// unfiltered base manager — soft-deleted assets still resolve).
 async fn resolve_logo_url(
     pool: &sqlx::PgPool,
     logo: Option<&str>,
     logo_asset_id: Option<uuid::Uuid>,
 ) -> Result<Option<String>, Denial> {
-    if let Some(logo) = logo {
-        return Ok(Some(logo.to_owned()));
-    }
+    // `logo_url` (`db/models/workspace.py:146-154`): the asset wins when
+    // set, else the truthy explicit logo, else `None` (an explicit `""`
+    // is falsy, not a URL).
     let Some(asset_id) = logo_asset_id else {
-        return Ok(None);
+        return match logo {
+            Some(text) if !text.is_empty() => Ok(Some(text.to_owned())),
+            _ => Ok(None),
+        };
     };
     let asset: Option<AssetScopeRow> = sqlx::query_as(
         r#"SELECT fa.entity_type, fa.workspace_id, fa.project_id, fa.issue_id
@@ -2147,8 +2155,12 @@ async fn resolve_logo_url(
         let slug = asset_workspace_slug(pool, workspace_id).await?;
         return Ok(Some(format!(
             "/api/assets/v2/workspaces/{slug}/projects/{}/issues/{}/attachments/{asset_id}/",
-            project_id.map(|id| id.to_string()).unwrap_or_default(),
-            issue_id.map(|id| id.to_string()).unwrap_or_default(),
+            project_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "None".to_owned()),
+            issue_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "None".to_owned()),
         )));
     }
     if matches!(
@@ -2161,7 +2173,9 @@ async fn resolve_logo_url(
         let slug = asset_workspace_slug(pool, workspace_id).await?;
         return Ok(Some(format!(
             "/api/assets/v2/workspaces/{slug}/projects/{}/{asset_id}/",
-            project_id.map(|id| id.to_string()).unwrap_or_default(),
+            project_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "None".to_owned()),
         )));
     }
     Ok(None)
@@ -2809,26 +2823,27 @@ pub(crate) fn sanitize_csv_value(value: &str) -> String {
     }
 }
 
-/// Python `str()` over an aware datetime in the active zone:
-/// `YYYY-MM-DD HH:MM:SS[.ffffff]+HH:MM` (micros iff nonzero, numeric
-/// offset always — never `Z`).
-pub(crate) fn format_csv_datetime(instant: &chrono::DateTime<chrono::Utc>, zone: &Tz) -> String {
+/// Python `str()` over the UTC-aware export instant: `csv.writer`
+/// stringifies the datetime object as the ORM returned it (UTC, so the
+/// offset is always `+00:00`) — `TimezoneMixin.activate` never affects
+/// `str()`. Micros iff nonzero. The zone rides along for the call
+/// shape; only the `AT TIME ZONE` *filter* is zoned.
+pub(crate) fn format_csv_datetime(instant: &chrono::DateTime<chrono::Utc>, _zone: &Tz) -> String {
     use chrono::{Datelike, Timelike};
-    let local = instant.with_timezone(zone);
     let mut text = format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        local.year(),
-        local.month(),
-        local.day(),
-        local.hour(),
-        local.minute(),
-        local.second()
+        instant.year(),
+        instant.month(),
+        instant.day(),
+        instant.hour(),
+        instant.minute(),
+        instant.second()
     );
-    let micros = local.nanosecond() / 1000;
+    let micros = instant.nanosecond() / 1000;
     if micros != 0 {
         text.push_str(&format!(".{micros:06}"));
     }
-    text.push_str(&local.format("%:z").to_string());
+    text.push_str("+00:00");
     text
 }
 
@@ -2861,11 +2876,11 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 
 /// Stock `get_object` miss: `get_object_or_404` raises `Http404("No <Model>
 /// matches the given query.")`, rewrapped by DRF as `NotFound` — 404
-/// `{"detail":"No <Model> matches the given query."}` (live-probed).
+/// `{"Detail":"No <Model> matches the given query."}` (DRF `NotFound`).
 fn detail_not_found_response(model: &str) -> Response {
     json_response(
         StatusCode::NOT_FOUND,
-        format!("{{\"detail\":\"No {model} matches the given query.\"}}"),
+        format!("{{\"Detail\":\"No {model} matches the given query.\"}}"),
     )
 }
 /// One `soft_delete_related_objects.delay(app_label, model_name, pk,
@@ -2935,6 +2950,14 @@ pub async fn create_workspace(
     if let Err(response) = check_class_base(&pool, None, &user_id, "POST").await {
         return Ok(response);
     }
+    // `DISABLE_WORKSPACE_CREATION` gates before `request.data` is touched
+    // (`base.py:85-100`): disabled+malformed still 403s.
+    if workspace_creation_disabled(&state, &pool).await? {
+        return Ok(json_response(
+            StatusCode::FORBIDDEN,
+            "{\"error\":\"Workspace creation is not allowed\"}".to_owned(),
+        ));
+    }
     let input = match negotiate_body(&headers, &body, WORKSPACE_SKIP_BLANK) {
         Ok(input) => input,
         Err(response) => return Ok(response),
@@ -2943,12 +2966,6 @@ pub async fn create_workspace(
     // `AttributeError` 500 arm (the manual reads run before validation).
     if !input.json_is_object() && !input.is_html {
         return Err(Denial::ServerError);
-    }
-    if workspace_creation_disabled(&state, &pool).await? {
-        return Ok(json_response(
-            StatusCode::FORBIDDEN,
-            "{\"error\":\"Workspace creation is not allowed\"}".to_owned(),
-        ));
     }
     let name_value = match input.get("name") {
         InputValue::Missing => None,
@@ -3959,6 +3976,7 @@ mod tests {
             is_html: false,
             map,
             files: BTreeMap::new(),
+            scalar: None,
         }
     }
 
@@ -4272,6 +4290,16 @@ mod tests {
     }
 
     #[test]
+    fn empty_key_objects_stay_objects() {
+        // A genuine object containing an "" key is still an object (the
+        // non-object sentinel must not collide with it).
+        let input = negotiate_body(&json_headers(), br#"{"":1,"name":"X"}"#, NO_SKIP_BLANK)
+            .expect("object");
+        assert!(input.json_is_object());
+        assert_eq!(input.map.len(), 2);
+    }
+
+    #[test]
     fn urlencoded_parses_last_wins_with_skip_blank() {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -4559,6 +4587,37 @@ mod tests {
     }
 
     #[test]
+    fn datetime_multibyte_inputs_reject_without_panic() {
+        // Multibyte chars at slicing positions reject (Django 400s), never panic.
+        assert!(parse_drf_datetime("20260101Taéa").is_none());
+        assert!(parse_drf_datetime("2026-W05-éa").is_none());
+        assert!(parse_hms_basic("aéa").is_none());
+        assert!(parse_week_datetime("2026-W05-éa").is_none());
+    }
+
+    #[test]
+    fn pk_miss_echoes_original_string() {
+        // UUID misses echo the pre-prep input verbatim (DRF `does_not_exist`
+        // renders `pk_value=data`), never normalized lowercase.
+        let upper = "AAAAAAAA-1111-1111-1111-111111111111";
+        let candidate: uuid::Uuid = upper.parse().expect("uuid");
+        assert_eq!(
+            py_pk_display(&Value::String(upper.to_owned()), &candidate),
+            upper
+        );
+        let urn = "urn:uuid:aaaaaaaa-1111-1111-1111-111111111111";
+        let candidate: uuid::Uuid = urn.parse().expect("urn uuid");
+        assert_eq!(
+            py_pk_display(&Value::String(urn.to_owned()), &candidate),
+            urn
+        );
+        assert_eq!(
+            py_pk_display(&serde_json::json!(7), &uuid::Uuid::nil()),
+            "7"
+        );
+    }
+
+    #[test]
     fn theme_validation_matches_contract_bodies() {
         let zone = utc_zone();
         // `{}`: `deleted_at` first, then `name` (field order).
@@ -4639,6 +4698,7 @@ mod tests {
             is_html: true,
             map,
             files: BTreeMap::new(),
+            scalar: None,
         };
         let valid = validate_theme_input(&body, &zone, false)
             .expect("no transport")
@@ -4696,13 +4756,20 @@ mod tests {
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(
             response_text(response).await,
-            "{\"detail\":\"Method \\\"GET\\\" not allowed.\"}"
+            "{\"Detail\":\"Method \\\"GET\\\" not allowed.\"}"
         );
         let response = unsupported_media_type("text/csv");
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert_eq!(
             response_text(response).await,
-            "{\"detail\":\"Unsupported media type \\\"text/csv\\\" in request.\"}"
+            "{\"Detail\":\"Unsupported media type \\\"text/csv\\\" in request.\"}"
+        );
+        // Attacker-controlled content types escape like the renderer.
+        let response = unsupported_media_type("a\"b\\c");
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            response_text(response).await,
+            "{\"Detail\":\"Unsupported media type \\\"a\\\"b\\\\c\\\" in request.\"}"
         );
         for (model, want) in [
             ("Workspace", "No Workspace matches the given query."),
@@ -4715,7 +4782,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
             assert_eq!(
                 response_text(response).await,
-                format!("{{{:?}:{:?}}}", "detail", want)
+                format!("{{{:?}:{:?}}}", "Detail", want)
             );
         }
         let response = class_denied_response();
@@ -4782,14 +4849,14 @@ mod tests {
     }
 
     #[test]
-    fn csv_datetimes_use_str_format_in_actor_zone() {
+    fn csv_datetimes_render_utc_regardless_of_zone() {
         let zone: Tz = "America/New_York".parse().expect("zone");
         let instant = chrono::DateTime::parse_from_rfc3339("2026-01-01T05:00:00+00:00")
             .expect("instant")
             .with_timezone(&chrono::Utc);
         assert_eq!(
             format_csv_datetime(&instant, &zone),
-            "2026-01-01 00:00:00-05:00"
+            "2026-01-01 05:00:00+00:00"
         );
         assert_eq!(sanitize_csv_value("+1"), "'+1");
         assert_eq!(sanitize_csv_value("ok"), "ok");
