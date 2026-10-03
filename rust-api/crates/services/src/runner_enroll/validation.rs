@@ -84,9 +84,9 @@ use uuid::Uuid;
 
 /// `workspace_role` read (`core/permissions.py:37-45`) feeding the
 /// membership kernel: newest active row's role. `$1` is the user id, `$2`
-/// the workspace id. Same text as the D-12 `WORKSPACE_ROLE_SQL` twin —
-/// copied (not imported) per this issue's own-SQL sanction, so no
-/// cross-domain code dependency enters.
+/// the workspace id. Same statement as the D-12 `WORKSPACE_ROLE_SQL` twin
+/// (Django-quoted here) — copied (not imported) per this issue's
+/// own-SQL sanction, so no cross-domain code dependency enters.
 pub const WORKSPACE_ROLE_SQL: &str = "SELECT \"workspace_members\".\"role\" FROM \"workspace_members\" WHERE (\"workspace_members\".\"deleted_at\" IS NULL AND \"workspace_members\".\"is_active\" AND \"workspace_members\".\"member_id\" = $1 AND \"workspace_members\".\"workspace_id\" = $2) ORDER BY \"workspace_members\".\"created_at\" DESC LIMIT 1";
 
 /// Work-item consistency probe (`validation.py:80-84`):
