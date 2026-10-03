@@ -71,7 +71,6 @@ export interface ParityDriver {
   openProjectIssues(workspaceSlug: string, projectId: string): Promise<void>;
   /** Names of the issues currently rendered in the list, in display order. */
   visibleIssueNames(): Promise<string[]>;
-
   // --- Mention flows (NEWFRONT-115, CMT-019/020/021). Appended; existing
   // --- methods above are untouched per the shared driver contract.
 
@@ -1366,6 +1365,46 @@ export interface ParityDriver {
   activeCyclesHeaderVisible(): Promise<boolean>;
   /** True while the generic error notice shows (bare-address flows). */
   errorNoticeVisible(): Promise<boolean>;
+
+  // --- Invitation inbox + onboarding start (NEWFRONT-110, AUTH-026/033).
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract.
+  /** Open the invitation inbox; requires an authenticated session. */
+  openInvitations(): Promise<void>;
+  /** Workspace names of the pending-invitation cards currently shown. */
+  invitationWorkspaceNames(): Promise<string[]>;
+  /** Toggle the invitation card for a workspace (select / deselect). */
+  toggleInvitation(workspaceName: string): Promise<void>;
+  /** Accept and join every selected invitation. */
+  acceptSelectedInvitations(): Promise<void>;
+  /** True once the inbox empty state (no pending invites) is visible. */
+  invitationsEmptyStateVisible(): Promise<boolean>;
+  /** Open an emailed single-invitation link; works signed in or out. */
+  openInvitationLink(workspaceSlug: string, invitationId: string, token: string): Promise<void>;
+  /** User-visible text of the current page (headings, card titles, states). */
+  pageText(): Promise<string>;
+  /** Accept the pending single invitation on screen. */
+  acceptSingleInvitation(): Promise<void>;
+  /** Decline (ignore) the pending single invitation on screen. */
+  declineSingleInvitation(): Promise<void>;
+  /** Open the onboarding flow; requires an authenticated session. */
+  openOnboarding(): Promise<void>;
+  /** Advance past the CLI-install step via the primary continue action. */
+  advanceCliInstall(): Promise<void>;
+  /** Advance past the CLI-install step via the skip action. */
+  skipCliInstall(): Promise<void>;
+  /** Fill the profile step name field and submit. */
+  submitProfileStep(displayName: string): Promise<void>;
+  /** Choose a role and submit the role step. */
+  submitRoleStep(roleLabel: string): Promise<void>;
+  /** Skip the role step without choosing. */
+  skipRoleStep(): Promise<void>;
+  /** Choose use cases and submit the use-case step. */
+  submitUseCaseStep(useCaseLabels: string[]): Promise<void>;
+  /** Skip the use-case step without choosing. */
+  skipUseCaseStep(): Promise<void>;
+  /** Move one step back via the onboarding header back control. */
+  goBackOnboardingStep(): Promise<void>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */
