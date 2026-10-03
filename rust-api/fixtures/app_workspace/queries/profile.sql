@@ -77,7 +77,7 @@
 --   THREE months — PORT); Cast+GROUP+COUNT+ORDER same shape as dashboard Q1.
 --   TZ asymmetry (USE_TZ, TIME_ZONE="UTC", settings/common.py:361-362 —
 --   PORT): created_at__date__gte compiles to (created_at AT TIME ZONE
---   UTC)::date, but the Cast annotation stays a plain cast
+--   'UTC')::date, but the Cast annotation stays a plain cast
 --   (created_at)::date.
 -- R7 completed graph (:541-559): month default 1 (:543: same January-default
 --   quirk as dashboard Q2 — PORT); ExtractWeek(completed_at) AS
@@ -86,7 +86,7 @@
 --   COUNT(completed_week) (:555: counts non-null weeks ~= rows — PORT);
 --   ORDER BY week.
 --   TZ (USE_TZ, TIME_ZONE="UTC" — PORT): all three EXTRACTs convert —
---   EXTRACT(WEEK|MONTH FROM completed_at AT TIME ZONE UTC) in the select
+--   EXTRACT(WEEK|MONTH FROM completed_at AT TIME ZONE 'UTC') in the select
 --   week, the COUNT(week) and the month filter.
 -- R8 dashboard-graph cross-ref (base.py:257-290): WeekInMonth custom Func
 --   (:257-259: FLOOR(((day-1)/7)+1)::INT); dashboard completed (:278-290)
@@ -126,8 +126,8 @@ SELECT priority, COUNT(*) AS priority_count,
   WHEN 'low' THEN 3 WHEN 'none' THEN 4 ELSE 5 END AS priority_order
 FROM issues WHERE ... GROUP BY priority HAVING COUNT(*) >= 1 ORDER BY priority_order;
 -- R7 completed graph (mod-4 buckets 0-3):
-SELECT (EXTRACT(WEEK FROM completed_at AT TIME ZONE UTC)::INT % 4) AS week, COUNT(*) AS completed_count
+SELECT (EXTRACT(WEEK FROM completed_at AT TIME ZONE 'UTC')::INT % 4) AS week, COUNT(*) AS completed_count
 FROM issues WHERE workspace_id = (SELECT id FROM workspaces WHERE slug = :slug)
   AND :user IN (SELECT user_id FROM issue_assignees WHERE issue_id = issues.id)
-  AND EXTRACT(MONTH FROM completed_at AT TIME ZONE UTC) = :month AND completed_at IS NOT NULL
+  AND EXTRACT(MONTH FROM completed_at AT TIME ZONE 'UTC') = :month AND completed_at IS NOT NULL
 GROUP BY 1 ORDER BY 1;
