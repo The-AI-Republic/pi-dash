@@ -1,5 +1,24 @@
 #![forbid(unsafe_code)]
 
+//! Project scheduler API surface (`app/views/scheduler/`, D-36).
+//!
+//! Ports the serializers (`app/serializers/scheduler.py:1-268`): the
+//! scheduler + binding field lists, read-only sets, derived-field rules,
+//! and every pure validator (color, rrule via an injected verdict
+//! closure, rdates/exdates ISO lists, tzid, extra_context, and the
+//! cross-field scheduler/project lock, rrule+dtstart re-check, and
+//! pod-must-belong-to-project check).
+//!
+//! Fixture oracles live under
+//! `rust-api/fixtures/app_scheduler/serializers/` (`TRACE.md` maps every
+//! file to its Python source lines); the shape tests replay F36-01..03
+//! byte-identically.
+//!
+//! The queries layer (`queries.rs`, PIDASHCONV-630) owns every SQL
+//! statement plus the `next_run_at` recompute decisions; the guards
+//! (`gate.rs`, PIDASHCONV-632) and the handlers (PIDASHCONV-633..635)
+//! complete the domain.
+
 //! App scheduler domain surface (D-36, stage 5).
 //!
 //! Ports `apps/api/pi_dash/app/views/scheduler/` for the services layer,
@@ -56,25 +75,6 @@
 //! 6. Install-vs-patch `next_run_at` write asymmetry (install compares
 //!    to stored, patch does not) with patch recomputing on key
 //!    presence.
-
-//! Project scheduler API surface (`app/views/scheduler/`, D-36).
-//!
-//! Ports the serializers (`app/serializers/scheduler.py:1-268`): the
-//! scheduler + binding field lists, read-only sets, derived-field rules,
-//! and every pure validator (color, rrule via an injected verdict
-//! closure, rdates/exdates ISO lists, tzid, extra_context, and the
-//! cross-field scheduler/project lock, rrule+dtstart re-check, and
-//! pod-must-belong-to-project check).
-//!
-//! Fixture oracles live under
-//! `rust-api/fixtures/app_scheduler/serializers/` (`TRACE.md` maps every
-//! file to its Python source lines); the shape tests replay F36-01..03
-//! byte-identically.
-//!
-//! The queries layer (`queries.rs`, PIDASHCONV-630) owns every SQL
-//! statement plus the `next_run_at` recompute decisions; the guards
-//! (`gate.rs`, PIDASHCONV-632) and the handlers (PIDASHCONV-633..635)
-//! complete the domain.
 
 pub mod occurrences;
 pub mod queries;
