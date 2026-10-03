@@ -221,8 +221,9 @@ pub enum RunOutcome {
     Disabled,
     /// Creator no longer authorized (`tasks.py:92-115`).
     Unauthorized,
-    /// Creator has no LLM config (`tasks.py:116-123`) or it vanished
-    /// mid-flight (`tasks.py:186-189`).
+    /// Creator has no LLM config at the guard pre-check
+    /// (`tasks.py:116-123`). Mid-flight loss (`tasks.py:186-189`) falls
+    /// through to [`RunOutcome::Failed`]; only the row keeps the code.
     LlmConfigMissing,
     /// Prompt over the byte cap (`tasks.py:124-127`).
     PromptTooLarge,
