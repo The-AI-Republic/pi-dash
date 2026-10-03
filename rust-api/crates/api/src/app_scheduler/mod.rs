@@ -73,12 +73,13 @@ pub fn pool_of(state: &AppState) -> Result<&PgPool, Response> {
 }
 
 /// `_rewrite_project_kwarg` + `Project.resolve` (`app/views/base.py:48-81`,
-/// `db/models/project.py:192-220`): UUIDs pass through when the row exists
-/// in this workspace; other identifiers match `UPPER(identifier)` after
-/// trimming; misses answer 404 [`PROJECT_NOT_FOUND_BODY`]. Callers run
-/// this for authenticated requests only (anonymous callers 401 inside
-/// [`gate::resolve_gate`], never 404 here) — see
-/// [`session_authenticated`].
+/// `db/models/project.py:192-220`): UUIDs pass through unchecked (the
+/// gate 403s unknown ones — the row check happens in the view body, the
+/// `app_issues`/`app_cycles` precedent); other identifiers match
+/// `UPPER(identifier)` after trimming; misses answer 404
+/// [`PROJECT_NOT_FOUND_BODY`]. Callers run this for authenticated
+/// requests only (anonymous callers 401 inside [`gate::resolve_gate`],
+/// never 404 here) — see [`session_authenticated`].
 #[allow(clippy::result_large_err)]
 pub async fn resolve_project_id(
     pool: &PgPool,
@@ -86,19 +87,7 @@ pub async fn resolve_project_id(
     raw: &str,
 ) -> Result<uuid::Uuid, Response> {
     if let Ok(id) = raw.parse::<uuid::Uuid>() {
-        let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-            r#"SELECT p.id FROM projects p
-               JOIN workspaces w ON w.id = p.workspace_id
-               WHERE p.id = $1 AND w.slug = $2 AND p.deleted_at IS NULL"#,
-        )
-        .bind(id)
-        .bind(slug)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| json_body(StatusCode::INTERNAL_SERVER_ERROR, gate::SERVER_ERROR_BODY))?;
-        return row
-            .map(|row| row.0)
-            .ok_or_else(|| json_body(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY));
+        return Ok(id);
     }
     let upper = raw.trim().to_uppercase();
     let row: Option<(uuid::Uuid,)> = sqlx::query_as(

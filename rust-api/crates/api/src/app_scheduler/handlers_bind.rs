@@ -45,9 +45,11 @@
 //!   must exist (field validation) but `save()` pins the URL project; a
 //!   mismatched body project that passes the unique check `IntegrityError`s
 //!   at save → 400 `{"error":"The payload is not valid"}`.
-//! * QUIRK-project-required (DRF `UniqueTogetherValidator`): the body must
-//!   carry `project` even though save pins the URL one — except explicit
-//!   null passes (the unique check skips `None` values).
+//! * QUIRK-project-required (DRF `get_uniqueness_extra_kwargs` forces
+//!   `required=True` on the unique pair's fields): the body must carry
+//!   `project` even though save pins the URL one — except explicit null
+//!   passes (the unique check skips `None` values). The missing-key error
+//!   is field-level, collected with every other field error.
 //! * QUIRK-patch-unique-before-lock (DRF `run_validation`): the unique
 //!   check runs before `validate()`, so a conflicting repoint 400s with
 //!   the unique-set message instead of the scheduler/project lock message.
@@ -295,7 +297,8 @@ pub async fn binding_install(
         Ok(attrs) => attrs,
         Err(denial) => return denial.into_response(),
     };
-    if let Err(denial) = enforce_unique_install(pool, &scheduler_id, attrs.project).await {
+    if let Err(denial) = enforce_unique_install(pool, &scheduler_id, attrs.project.flatten()).await
+    {
         return denial.into_response();
     }
     let install = InstallAttrs {
@@ -1460,10 +1463,18 @@ async fn validate_binding_fields(
         },
     }
 
-    // project: required=False + allow_null (null model FK); the install
-    // "required" quirk comes from the unique validator, not here.
+    // project: allow_null (null model FK) but `required=True` — DRF's
+    // `get_uniqueness_extra_kwargs` forces `required` on the unique pair's
+    // fields (QUIRK-project-required), so a missing key 400s here,
+    // collected with every other field error (the unique validator's own
+    // `enforce_required_fields` never fires: `to_internal_value` raises
+    // first). Explicit null passes (the unique check skips `None`).
     match body.get("project") {
-        None => {}
+        None if partial => {}
+        None => errors.push((
+            "project",
+            FieldError::List(vec!["This field is required.".to_owned()]),
+        )),
         Some(Value::Null) => attrs.project = Some(None),
         Some(value) => match parse_pk_value(value) {
             Err(message) => errors.push(("project", FieldError::List(vec![message]))),
@@ -1673,28 +1684,19 @@ fn pk_echo(value: &Value) -> String {
 // ---------------------------------------------------------------------------
 
 /// Install unique validation (DRF `UniqueTogetherValidator.__call__`):
-/// missing keys fail `required` first (QUIRK-project-required — the
-/// scheduler key is always present post-guard, so only `project` can hit
-/// this), then the EXISTS check over the body (scheduler, project) pair —
-/// skipped when any checked value is `None` (explicit-null project).
+/// the EXISTS check over the body (scheduler, project) pair — skipped
+/// when any checked value is `None` (explicit-null project). Missing keys
+/// never reach here: `project` is field-level `required`
+/// (QUIRK-project-required), and the install guard 404s a missing
+/// `scheduler` before validation runs.
 async fn enforce_unique_install(
     pool: &PgPool,
     scheduler_id: &Uuid,
-    body_project: Option<Option<Uuid>>,
+    body_project: Option<Uuid>,
 ) -> Result<(), Denial> {
-    let Some(maybe_project) = body_project else {
-        // Missing key: `enforce_required_fields` 400s (the validator
-        // forces an implied `required` on its fields at create).
-        let mut body = Map::with_capacity(1);
-        body.insert(
-            "project".to_owned(),
-            Value::Array(vec![Value::String("This field is required.".to_owned())]),
-        );
-        return Err(Denial::BadJson(Value::Object(body)));
-    };
     // Explicit null skips the check ("ignore validation if any field is
     // `None`"); `save()` pins the URL project instead.
-    let Some(project_id) = maybe_project else {
+    let Some(project_id) = body_project else {
         return Ok(());
     };
     if unique_binding_exists(pool, &project_id, scheduler_id, None).await? {
@@ -3512,6 +3514,55 @@ mod tests {
                 ..BindingAttrs::default()
             },
         }
+    }
+
+    // -- Review pins (PIDASHCONV-634 review): unpinned edges proved against
+    // DRF 3.15.2 + Django 4.2.30 source. Both use a lazy pool and issue no
+    // query, so they run offline.
+
+    #[tokio::test]
+    async fn install_missing_project_collects_with_other_field_errors() {
+        // `{}` on install: scheduler + project + dtstart are all
+        // field-level `required` (project via the uniqueness extra
+        // kwargs), collected in writable-field order — not just the
+        // non-project errors.
+        let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/unused").unwrap();
+        let utc_tz: Tz = chrono_tz::UTC;
+        let body = Map::new();
+        let Err(Denial::BadJson(errors)) =
+            validate_binding_fields(&pool, &body, None, &utc_tz).await
+        else {
+            panic!("empty install body must 400");
+        };
+        assert_eq!(
+            errors,
+            serde_json::json!({
+                "scheduler": ["This field is required."],
+                "project": ["This field is required."],
+                "dtstart": ["This field is required."],
+            })
+        );
+        // Key order follows `_writable_fields`, not the JSON object.
+        let keys: Vec<&str> = errors
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, vec!["scheduler", "project", "dtstart"]);
+    }
+
+    #[tokio::test]
+    async fn rewrite_passes_uuid_through_unchecked() {
+        // `_rewrite_project_kwarg` returns UUIDs untouched (no existence
+        // check — the gate 403s unknown ones); only non-UUID identifiers
+        // hit the database. A lazy pool proves no query runs.
+        let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/unused").unwrap();
+        let id = Uuid::parse_str("68ad4deb-fc7c-4531-b5ce-376263af21e3").unwrap();
+        let resolved = super::super::resolve_project_id(&pool, "ws", &id.to_string())
+            .await
+            .expect("uuid passes through");
+        assert_eq!(resolved, id);
     }
 
     #[test]
