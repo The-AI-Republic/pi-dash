@@ -186,9 +186,9 @@ pub const PUBLIC_NETWORK: i32 = 2;
 /// The workspace-role probe each scoping branch runs first
 /// (`base.py:104-109`, `:115-120`, `:199-204`, `:210-215`): an active
 /// membership of the caller in this workspace with the given role.
-/// Django renders the reverse-FK scoping filter as an `INNER JOIN`; with
-/// `DISTINCT` already on the queryset that is exactly the `EXISTS` below,
-/// which is the shape handlers splice (same D-27 convention).
+/// Django renders the `.exists()` call as `SELECT EXISTS(SELECT 1 ...
+/// INNER JOIN workspaces ...)`; the `EXISTS (...)` below is that inner
+/// query, which handlers run standalone or splice (same D-27 convention).
 pub fn workspace_role_probe_sql(role: i32) -> String {
     format!(
         "EXISTS (SELECT 1 FROM workspace_members wm JOIN workspaces w ON (wm.workspace_id = w.id) WHERE wm.member_id = :user AND w.slug = :slug AND wm.is_active AND wm.role = {role})"
@@ -196,7 +196,9 @@ pub fn workspace_role_probe_sql(role: i32) -> String {
 }
 
 /// Guest branch (`base.py:110-113`, `:205-208`): only projects where the
-/// caller is an active member.
+/// caller is an active member. Django renders the reverse-FK filter as an
+/// `INNER JOIN`; with `DISTINCT` already on the queryset that is exactly
+/// the `EXISTS` below (same D-27 convention).
 pub fn guest_scope_where() -> String {
     "EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = projects.id AND pm.member_id = :user AND pm.is_active AND pm.deleted_at IS NULL)".to_owned()
 }
