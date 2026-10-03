@@ -29,7 +29,8 @@
 --   grouped counts filtered intake (status 1|-1|2 OR NULL) + unarchived +
 --   not draft (:207-214 / :234-241).
 -- R3 profile read, WorkspaceUserProfileEndpoint.get (:281-368):
---   user = User.objects.get(pk=:uid) (:283: missing ->500, no 404 — PORT);
+--   user = User.objects.get(pk=:uid) (:283: missing -> 404 {"error": "The
+--   required object does not exist."} via BaseAPIView.handle_exception — PORT);
 --   requester .get(slug, active) (:285-287); role>=15 LITERAL (:289: MEMBER
 --   value but literal — PORT; guests keep project_data=[] :288).
 --   projects (:291-296): slug + requester's active memberships + unarchived,

@@ -9,8 +9,9 @@
 --   select_related(member, member__avatar_asset); NO is_active filter —
 --   inactive rows ARE listed — PORT.
 -- R2 list (:45-55): requester = .get(member=:user, slug, active) (:47:
---   DoesNotExist -> 500 if non-member — PORT); role>5 LITERAL (:51) ->
---   Admin serializer else member serializer; fields (id,member,role).
+--   DoesNotExist -> 404 {"error": "The required object does not exist."} if
+--   non-member — PORT); role>5 LITERAL (:51) -> Admin serializer else member
+--   serializer; fields (id,member,role).
 -- R3 retrieve (:57-74): same requester .get (:59); target .get(pk) (:63)
 --   with DoesNotExist->404 (:64-68); branch role > ROLE.GUEST.value (:70:
 --   same threshold as R2 but enum spelling — PORT both spellings).
@@ -47,8 +48,9 @@
 -- R9 invite list get_queryset (invite.py:45-51): slug filter;
 --   select_related(workspace, workspace__owner, created_by).
 -- R10 invite create (:53-142): emails required (:56-57); requesting_user .get
---   (:60, 500 if non-member); role cap (:63: int(role default 5) >
---   requester.role ->400 — equal OK — PORT); workspace .get (:70);
+--   (:60, 404 {"error": "The required object does not exist."} if non-member);
+--   role cap (:63: int(role default 5) > requester.role ->400 — equal OK —
+--   PORT); workspace .get (:70);
 --   already-member check (:73-77) + `if queryset:` (:79: truthiness fetches
 --   ALL rows, not exists() — PORT); per-email validate_email (:91),
 --   email.strip().lower() (:94), jwt token (:96-100:
@@ -58,7 +60,8 @@
 --   (email,workspace) rows SILENTLY skipped yet success returned — PORT).
 -- R11 invite destroy (:144-147): .get(pk, slug) + delete, no responded check.
 -- R12 join post (:163-236, AllowAny :151): invite .get (:164, plain .get ->
---   500 on missing — PORT); token equality, empty->403 (:166-173);
+--   404 {"error": "The required object does not exist."} on missing — PORT);
+--   token equality, empty->403 (:166-173);
 --   responded_at None guard (:176, else "already responded" 400 :233-236);
 --   save accepted+responded_at (:177-179); if accepted: user lookup by email
 --   (:183); reactivate (:188-194: is_active, role=invite.role) OR create
