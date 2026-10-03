@@ -4228,6 +4228,8 @@ pub async fn coerce_write(
     }
     match body.get("name") {
         None if partial => {}
+        // Filed keys were shadowed above and their error is already pushed.
+        None if files.contains_key("name") => {}
         value => match coerce_char(value, false, false, Some(255)) {
             Ok(Some(name)) => write.name = Some(name),
             Ok(None) => {}
@@ -4317,10 +4319,7 @@ pub async fn coerce_write(
     // filename is uuid-shaped. The echo renders `str(file)`.
     if let Some(parts) = files.get("owned_by") {
         if let Some(last) = parts.last() {
-            errors.push((
-                "owned_by".to_owned(),
-                invalid_uuid_message(&last.filename),
-            ));
+            errors.push(("owned_by".to_owned(), invalid_uuid_message(&last.filename)));
         }
     }
     match body.get("owned_by") {

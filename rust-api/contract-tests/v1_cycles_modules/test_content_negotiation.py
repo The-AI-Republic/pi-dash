@@ -268,6 +268,13 @@ class TestMultipart:
         assert r.status_code == 400
         assert r.json() == {"name": ["Not a valid string."]}
 
+    def test_multipart_module_char_file_400(self, admin_client):
+        r = admin_client.post(
+            MODULES, files={"name": ("n.txt", b"x")}, data={"description": "d"}
+        )
+        assert r.status_code == 400
+        assert r.json() == {"name": ["Not a valid string."]}
+
     def test_multipart_lead_file_400_echoes_filename(self, admin_client):
         r = admin_client.post(
             MODULES,

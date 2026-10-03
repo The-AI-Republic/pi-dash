@@ -2258,9 +2258,7 @@ fn parse_body_ct(
     match super::body::negotiate_body(headers, body, &super::body::MODULE_BODY_SPEC)
         .map_err(map_body_error)?
     {
-        super::body::NegotiatedBody::Empty => {
-            Ok((serde_json::Map::new(), BTreeMap::new()))
-        }
+        super::body::NegotiatedBody::Empty => Ok((serde_json::Map::new(), BTreeMap::new())),
         super::body::NegotiatedBody::JsonText(text) => {
             Ok((parse_json_map(text.as_bytes())?, BTreeMap::new()))
         }
@@ -2315,9 +2313,7 @@ fn parse_object_or_500_ct(
     match super::body::negotiate_body(headers, body, &super::body::MODULE_BODY_SPEC)
         .map_err(map_body_error)?
     {
-        super::body::NegotiatedBody::Empty => {
-            Ok((serde_json::Map::new(), BTreeMap::new()))
-        }
+        super::body::NegotiatedBody::Empty => Ok((serde_json::Map::new(), BTreeMap::new())),
         super::body::NegotiatedBody::JsonText(text) => {
             let bytes = text.as_bytes();
             let value: Value = serde_json::from_slice(bytes)
@@ -2793,10 +2789,7 @@ pub async fn coerce_write(
     }
     if let Some(parts) = files.get("status") {
         if let Some(last) = parts.last() {
-            effective.insert(
-                "status".to_owned(),
-                Value::String(last.filename.clone()),
-            );
+            effective.insert("status".to_owned(), Value::String(last.filename.clone()));
         }
     }
     let body = &effective;
@@ -2812,6 +2805,8 @@ pub async fn coerce_write(
     }
     match body.get("name") {
         None if partial => {}
+        // Filed keys were shadowed above and their error is already pushed.
+        None if files.contains_key("name") => {}
         value => match coerce_char(value, false, false, Some(255)) {
             Ok(Some(name)) => write.name = Some(name),
             Ok(None) => {}
@@ -2927,8 +2922,7 @@ pub async fn coerce_write(
     match coerce_members_shape(body.get("members")) {
         Ok(maybe_items) => {
             let texts: &[Value] = maybe_items.as_deref().unwrap_or(&[]);
-            let uploads: &[super::body::FilePart] =
-                member_files.map(Vec::as_slice).unwrap_or(&[]);
+            let uploads: &[super::body::FilePart] = member_files.map(Vec::as_slice).unwrap_or(&[]);
             if maybe_items.is_none() && uploads.is_empty() {
                 // missing absent
             } else {
@@ -2936,10 +2930,8 @@ pub async fn coerce_write(
                 let mut child_errors: Vec<(usize, String)> = Vec::new();
                 for (index, item) in texts.iter().enumerate() {
                     match coerce_pk_value(item, false) {
-                        Ok(PkValue::Null) => child_errors.push((
-                            index,
-                            r#"["This field may not be null."]"#.to_owned(),
-                        )),
+                        Ok(PkValue::Null) => child_errors
+                            .push((index, r#"["This field may not be null."]"#.to_owned())),
                         Ok(PkValue::Id(id)) => {
                             let echo = match item {
                                 Value::Number(_) => py_repr(item),
@@ -2960,10 +2952,7 @@ pub async fn coerce_write(
                     }
                 }
                 for (offset, part) in uploads.iter().enumerate() {
-                    child_errors.push((
-                        texts.len() + offset,
-                        invalid_uuid_message(&part.filename),
-                    ));
+                    child_errors.push((texts.len() + offset, invalid_uuid_message(&part.filename)));
                 }
                 if child_errors.is_empty() {
                     write.members = Some(ids);

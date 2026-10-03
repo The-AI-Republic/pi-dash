@@ -256,7 +256,11 @@ enum Parser {
 fn select_parser(content_type: &str) -> Parser {
     let (base, _) = parse_header_parameters(content_type);
     let (main, sub) = split_media_type(&base);
-    for parser in ["application/json", "application/x-www-form-urlencoded", "multipart/form-data"] {
+    for parser in [
+        "application/json",
+        "application/x-www-form-urlencoded",
+        "multipart/form-data",
+    ] {
         let (pmain, psub) = split_media_type(parser);
         if media_type_matches((pmain, psub), (main.clone(), sub.clone())) {
             return match parser {
@@ -316,7 +320,9 @@ fn parse_header_parameters(line: &str) -> (String, Vec<(String, String)>) {
         }
         if encoded {
             let mut pieces = value.splitn(3, '\'');
-            if let (Some(charset), Some(_lang), Some(raw)) = (pieces.next(), pieces.next(), pieces.next()) {
+            if let (Some(charset), Some(_lang), Some(raw)) =
+                (pieces.next(), pieces.next(), pieces.next())
+            {
                 value = percent_decode_str(raw, &charset_to_supported(charset));
             }
         }
@@ -356,7 +362,11 @@ fn split_header_params(line: &str) -> impl Iterator<Item = String> + '_ {
             }
         }
         let piece = rest[..end].trim().to_owned();
-        rest = if end < bytes.len() { &rest[end + 1..] } else { "" };
+        rest = if end < bytes.len() {
+            &rest[end + 1..]
+        } else {
+            ""
+        };
         if rest.is_empty() && end >= bytes.len() {
             done = true;
         }
@@ -423,7 +433,9 @@ fn supported_alias(normalized: &str) -> Option<SupportedCharset> {
             SupportedCharset::Utf8
         }
         "ascii" | "646" | "ansi_x3_4_1968" | "ansi_x3_4_1986" | "cp367" | "csascii" | "ibm367"
-        | "iso646_us" | "iso_646_irv_1991" | "iso_ir_6" | "us" | "us_ascii" => SupportedCharset::Ascii,
+        | "iso646_us" | "iso_646_irv_1991" | "iso_ir_6" | "us" | "us_ascii" => {
+            SupportedCharset::Ascii
+        }
         "latin_1" | "8859" | "cp819" | "csisolatin1" | "ibm819" | "iso8859" | "iso8859_1"
         | "iso_8859_1" | "iso_8859_1_1987" | "iso_ir_100" | "l1" | "latin" | "latin1" => {
             SupportedCharset::Latin1
@@ -617,7 +629,10 @@ fn decode_stream_utf16(body: &[u8], big_endian: Option<bool>) -> Result<String, 
 
 /// Split off the BOM (required when `big_endian` is `None`) and pair the
 /// rest into units with byte offsets; a trailing odd byte is dropped.
-fn split_utf16_units(body: &[u8], big_endian: Option<bool>) -> Result<(Vec<(u16, usize)>, bool), String> {
+fn split_utf16_units(
+    body: &[u8],
+    big_endian: Option<bool>,
+) -> Result<(Vec<(u16, usize)>, bool), String> {
     // Error positions are absolute in the stream: the consumed BOM still
     // counts (CPython reports the lone-low after a BOM at 4-5, not 2-3).
     let base = if big_endian.is_none() { 2 } else { 0 };
@@ -670,7 +685,10 @@ fn decode_stream_utf32(body: &[u8], big_endian: Option<bool>) -> Result<String, 
     Ok(out)
 }
 
-fn split_utf32_units(body: &[u8], big_endian: Option<bool>) -> Result<(Vec<(u32, usize)>, bool), String> {
+fn split_utf32_units(
+    body: &[u8],
+    big_endian: Option<bool>,
+) -> Result<(Vec<(u32, usize)>, bool), String> {
     // Absolute stream positions: the consumed BOM still counts.
     let base = if big_endian.is_none() { 4 } else { 0 };
     let (body, big_endian) = match big_endian {
@@ -688,7 +706,12 @@ fn split_utf32_units(body: &[u8], big_endian: Option<bool>) -> Result<(Vec<(u32,
     let mut words = Vec::with_capacity(body.len() / 4);
     let mut offset = 0;
     while offset + 3 < body.len() {
-        let word = [body[offset], body[offset + 1], body[offset + 2], body[offset + 3]];
+        let word = [
+            body[offset],
+            body[offset + 1],
+            body[offset + 2],
+            body[offset + 3],
+        ];
         let value = if big_endian {
             u32::from_be_bytes(word)
         } else {
@@ -822,7 +845,12 @@ fn decode_replace_utf32(bytes: &[u8], big_endian: Option<bool>) -> String {
             out.push('\u{FFFD}');
             break;
         }
-        let word = [body[offset], body[offset + 1], body[offset + 2], body[offset + 3]];
+        let word = [
+            body[offset],
+            body[offset + 1],
+            body[offset + 2],
+            body[offset + 3],
+        ];
         let value = if big_endian {
             u32::from_be_bytes(word)
         } else {
@@ -1113,7 +1141,10 @@ enum PartItem {
     /// Disposition without a name: skipped, but still counted as a FIELD
     /// item (the increment precedes the name check in the Python loop).
     Nameless,
-    Field { name: Vec<u8>, data: Vec<u8> },
+    Field {
+        name: Vec<u8>,
+        data: Vec<u8>,
+    },
     File {
         name: Vec<u8>,
         filename: Vec<u8>,
@@ -1329,7 +1360,10 @@ fn sanitize_file_name(name: &str) -> Option<String> {
         return None;
     }
     name = html_unescape_practical(&name);
-    name = name.chars().filter(|c| is_printable_ascii_plus(*c)).collect();
+    name = name
+        .chars()
+        .filter(|c| is_printable_ascii_plus(*c))
+        .collect();
     if name.is_empty() || name == "." || name == ".." {
         return None;
     }
@@ -1412,7 +1446,11 @@ fn is_printable_ascii_plus(c: char) -> bool {
         return false;
     }
     // Space/line/paragraph separators (Zs/Zl/Zp) except ASCII space.
-    if matches!(c, '\u{00A0}' | '\u{1680}' | '\u{2000}'..='\u{200A}' | '\u{2028}' | '\u{2029}' | '\u{202F}' | '\u{205F}' | '\u{3000}') {
+    if matches!(
+        c,
+        '\u{00A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}' | '\u{2028}' | '\u{2029}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+    ) {
         return false;
     }
     // Non-characters U+FDD0..U+FDEF + U+xxFFFE/F.
@@ -1439,31 +1477,81 @@ mod codec_tests {
             assert_eq!(charset_to_supported(name), SupportedCharset::Utf8, "{name}");
         }
         for name in ["ascii", "us-ascii", "646", "ANSI_X3.4-1968"] {
-            assert_eq!(charset_to_supported(name), SupportedCharset::Ascii, "{name}");
+            assert_eq!(
+                charset_to_supported(name),
+                SupportedCharset::Ascii,
+                "{name}"
+            );
         }
-        for name in ["latin-1", "LATIN-1", "latin1", "latin", "l1", "iso-8859-1", "iso8859-1", "8859", "cp819"] {
-            assert_eq!(charset_to_supported(name), SupportedCharset::Latin1, "{name}");
+        for name in [
+            "latin-1",
+            "LATIN-1",
+            "latin1",
+            "latin",
+            "l1",
+            "iso-8859-1",
+            "iso8859-1",
+            "8859",
+            "cp819",
+        ] {
+            assert_eq!(
+                charset_to_supported(name),
+                SupportedCharset::Latin1,
+                "{name}"
+            );
         }
         for name in ["utf-16", "UTF-16", "utf16", "u16"] {
-            assert_eq!(charset_to_supported(name), SupportedCharset::Utf16, "{name}");
+            assert_eq!(
+                charset_to_supported(name),
+                SupportedCharset::Utf16,
+                "{name}"
+            );
         }
         for name in ["utf-16-le", "utf_16le", "unicodelittleunmarked"] {
-            assert_eq!(charset_to_supported(name), SupportedCharset::Utf16Le, "{name}");
+            assert_eq!(
+                charset_to_supported(name),
+                SupportedCharset::Utf16Le,
+                "{name}"
+            );
         }
         for name in ["utf-16-be", "utf_16be"] {
-            assert_eq!(charset_to_supported(name), SupportedCharset::Utf16Be, "{name}");
+            assert_eq!(
+                charset_to_supported(name),
+                SupportedCharset::Utf16Be,
+                "{name}"
+            );
         }
         for name in ["utf-32", "utf32"] {
-            assert_eq!(charset_to_supported(name), SupportedCharset::Utf32, "{name}");
+            assert_eq!(
+                charset_to_supported(name),
+                SupportedCharset::Utf32,
+                "{name}"
+            );
         }
         for name in ["utf-32-le", "utf_32le"] {
-            assert_eq!(charset_to_supported(name), SupportedCharset::Utf32Le, "{name}");
+            assert_eq!(
+                charset_to_supported(name),
+                SupportedCharset::Utf32Le,
+                "{name}"
+            );
         }
         for name in ["utf-32-be"] {
-            assert_eq!(charset_to_supported(name), SupportedCharset::Utf32Be, "{name}");
+            assert_eq!(
+                charset_to_supported(name),
+                SupportedCharset::Utf32Be,
+                "{name}"
+            );
         }
         // Bogus, empty, exotic, and punctuation-only degrade to utf-8.
-        for name in ["bogus", "", "cp1252", "windows-1252", "iso-8859-2", "---", "utf 8x"] {
+        for name in [
+            "bogus",
+            "",
+            "cp1252",
+            "windows-1252",
+            "iso-8859-2",
+            "---",
+            "utf 8x",
+        ] {
             assert_eq!(charset_to_supported(name), SupportedCharset::Utf8, "{name}");
         }
         // Interior space collapses to `_`, like CPython (`utf 8` is utf-8).
@@ -1555,7 +1643,9 @@ mod codec_tests {
         );
         // Params and case ride along verbatim in the echo (A09 probe).
         let err = negotiate("text/plain; charset=utf-8", b"x", &CYCLE_BODY_SPEC).unwrap_err();
-        assert!(matches!(err, BodyError::UnsupportedMediaType(detail) if detail == "Unsupported media type \"text/plain; charset=utf-8\" in request."));
+        assert!(
+            matches!(err, BodyError::UnsupportedMediaType(detail) if detail == "Unsupported media type \"text/plain; charset=utf-8\" in request.")
+        );
         // Missing content type renders the empty Django value (uvicorn).
         let mut headers = HeaderMap::new();
         headers.insert("content-length", "3".parse().unwrap());
@@ -1579,7 +1669,10 @@ mod codec_tests {
             headers.insert("content-type", ct.parse().unwrap());
             headers.insert("content-length", "0".parse().unwrap());
             assert!(
-                matches!(negotiate_body(&headers, b"", &CYCLE_BODY_SPEC), Ok(NegotiatedBody::Empty)),
+                matches!(
+                    negotiate_body(&headers, b"", &CYCLE_BODY_SPEC),
+                    Ok(NegotiatedBody::Empty)
+                ),
                 "{ct}"
             );
         }
@@ -1908,8 +2001,6 @@ mod codec_tests {
 #[cfg(test)]
 mod header_tests {
 
-
-
     use super::*;
 
     #[test]
@@ -1940,8 +2031,14 @@ mod header_tests {
     fn parser_selection() {
         assert_eq!(select_parser("application/json"), Parser::Json);
         assert_eq!(select_parser("Application/JSON"), Parser::Json);
-        assert_eq!(select_parser("application/json; charset=utf-8"), Parser::Json);
-        assert_eq!(select_parser("application/x-www-form-urlencoded"), Parser::Form);
+        assert_eq!(
+            select_parser("application/json; charset=utf-8"),
+            Parser::Json
+        );
+        assert_eq!(
+            select_parser("application/x-www-form-urlencoded"),
+            Parser::Form
+        );
         assert_eq!(
             select_parser("multipart/form-data; boundary=x"),
             Parser::Multipart
