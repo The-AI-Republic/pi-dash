@@ -24,13 +24,11 @@
 //! through by reference.
 //!
 //! `input_tokens` / `output_tokens` / `total_tokens` are model `@property`
-//! projections over the `usage` blob
-//! (`runner/services/usage.py:165-172` `flat_token_fields`, `:71-82`
-//! `coerce_token`), computed here at render time exactly as DRF renders the
-//! properties via `ReadOnlyField`. Expected canonical home of the usage
-//! kernels is D-15 (PIDASHCONV-527, unmerged); the projection is defined
-//! here from `usage.py` so the live-state shape renders without
-//! re-deriving it, and the canonical port absorbs (never forks) it.
+//! projections over the `usage` blob, computed at render time exactly as
+//! DRF renders the properties via `ReadOnlyField`, through the canonical
+//! D-15 usage kernel (`pidash_types::runner_runs::flat_token_fields`,
+//! `runner/services/usage.py:165-173` — never forked here). Inherited
+//! limit: usage-counter strings parse ASCII-only (no provider emits `Nd`).
 //!
 //! Request validation ([`validate_enroll_request`]) ports DRF 3.15.2 field
 //! mechanics (`CharField.run_validation` / `to_internal_value`,
@@ -59,12 +57,13 @@
 //! * QUIRK-coerce-inf: `coerce_token(float('inf'))` raises an uncaught
 //!   `OverflowError` in Python (only `TypeError`/`ValueError` are caught).
 //!   `jsonb` cannot store non-finite numbers, so the input is unreachable
-//!   from the database; the kernel maps it to `None` like `NaN`.
+//!   from the database; the canonical kernel maps it to `None` like `NaN`.
 //!
 //! `read_only_fields` (`serializers.py:57-68, 129, 199-220`) constrain
 //! writes, of which this port has none; the enroll request serializer is
 //! the only write shape here.
 
+use pidash_types::runner_runs::flat_token_fields;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -558,7 +557,7 @@ pub fn runner_name_is_valid(name: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Python scalar semantics (DRF validators + usage projection)
+// Python scalar semantics (DRF validators + UUID/int parsing)
 // ---------------------------------------------------------------------------
 
 /// `str.strip()` parity: Python strips `str.isspace()` characters, which is
@@ -619,14 +618,15 @@ fn py_digit_value(c: char, radix: u32) -> Option<u32> {
     }
 }
 
-/// Port of `int(s, radix)` for radix 10/16: strip Python whitespace, one
-/// optional sign, digits with single underscores strictly between digits.
-/// Returns `(negative, magnitude)`; `None` on any `ValueError` shape.
-/// The magnitude accumulates in `u128` (checked): overflow means the value
-/// exceeds every caller's range, so `None` is the correct outcome for
-/// both (`coerce_token` caps at `i64::MAX`, UUID hex at 32 digits).
+/// Port of `int(s, radix)` for radix 10/16 (UUID `hex=` path): strip the
+/// `int()` whitespace set (exactly Rust `char::is_whitespace` — unlike
+/// `str.strip()` it excludes U+001C-U+001F), one optional sign, digits
+/// with single underscores strictly between digits. Returns `(negative,
+/// magnitude)`; `None` on any `ValueError` shape. The magnitude
+/// accumulates in `u128` (checked): overflow exceeds the 32-hex-digit
+/// range, so `None` is the correct outcome.
 fn py_int_magnitude(s: &str, radix: u32) -> Option<(bool, u128)> {
-    let t = py_trim(s);
+    let t = s.trim_matches(|c: char| c.is_whitespace());
     let (negative, digits) = match t.strip_prefix(['+', '-']) {
         Some(rest) => (t.starts_with('-'), rest),
         None => (false, t),
@@ -664,11 +664,10 @@ fn py_int_magnitude(s: &str, radix: u32) -> Option<(bool, u128)> {
 /// Port of `str(float)` (CPython short-repr, `float_repr_style short`):
 /// shortest round-trip digits, fixed notation for `10^-4 <= |v| < 10^16`,
 /// scientific with a signed ≥2-digit exponent otherwise, `.0` on integral
-/// fixed values. The input is `serde_json`'s rendering (shortest
-/// round-trip, same digit string CPython's `repr` starts from); this only
-/// re-applies CPython's notation thresholds (`1e20` -> `1e+20`,
-/// `1e-5` -> `1e-05`), verified by a 20k-vector differential against
-/// `repr()`.
+/// fixed values. The input is value-normalized shortest digits (the same
+/// digit string CPython's `repr` starts from); this only re-applies
+/// CPython's notation thresholds (`1e20` -> `1e+20`, `1e-5` -> `1e-05`),
+/// verified by a 20k-vector differential against `repr()`.
 fn py_float_str(ryu: &str) -> String {
     // Split sign / mantissa / exponent of the shortest-digit rendering.
     let (negative, body) = match ryu.strip_prefix('-') {
@@ -732,9 +731,28 @@ fn py_float_str(ryu: &str) -> String {
     out
 }
 
+/// `str()` of an `f64` the way DRF's `CharField` sees it: finite values
+/// via [`py_float_str`] over value-normalized shortest digits (immune to
+/// `arbitrary_precision` literal preservation: `100.00` -> `"100.0"`);
+/// non-finite per Python (`inf` / `-inf` / `nan`).
+fn py_float_value_str(f: f64) -> String {
+    if f.is_finite() {
+        let short = serde_json::Number::from_f64(f).expect("finite").to_string();
+        py_float_str(&short)
+    } else if f.is_nan() {
+        "nan".to_owned()
+    } else if f.is_sign_negative() {
+        "-inf".to_owned()
+    } else {
+        "inf".to_owned()
+    }
+}
+
 /// `str()` of a JSON number the way DRF's `CharField` sees it
 /// (`str(data)` after the `isinstance(data, (str, int, float))` gate):
-/// integers render exactly, floats via [`py_float_str`].
+/// integers render exactly, floats via [`py_float_value_str`]. The
+/// `>u64`-integer residue (`2**100` renders lossy here, exact in Django)
+/// is an envelope-layer precision divergence (cf. D-20), not this kernel's.
 fn py_json_number_str(n: &serde_json::Number) -> String {
     if let Some(i) = n.as_i64() {
         return i.to_string();
@@ -742,9 +760,13 @@ fn py_json_number_str(n: &serde_json::Number) -> String {
     if let Some(u) = n.as_u64() {
         return u.to_string();
     }
-    n.as_f64()
-        .map(|_| py_float_str(&n.to_string()))
-        .unwrap_or_else(|| n.to_string())
+    match n.as_f64() {
+        Some(f) => py_float_value_str(f),
+        // `arbitrary_precision` only: the literal is unrepresentable as
+        // f64 (huge int, `1e999`). Parse it as f64: infinite -> `inf` /
+        // `-inf`, finite -> shortest (lossy for `>u64` ints, see above).
+        None => py_float_value_str(n.to_string().parse().unwrap_or(f64::NAN)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1095,87 +1117,6 @@ pub fn validate_enroll_request(body: &Value) -> Result<EnrollValidated, Value> {
         }),
         _ => Err(Value::Object(errors)),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Usage projection (`runner/services/usage.py`, serializer-local)
-// ---------------------------------------------------------------------------
-
-/// The legacy flat token view of a usage blob
-/// (`usage.py:165-172` `flat_token_fields`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlatTokens {
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub total_tokens: Option<i64>,
-}
-
-/// Port of `flat_token_fields` (`usage.py:165-172`): the `input` /
-/// `output` / `total` keys coerced via [`coerce_token`]; a non-mapping
-/// blob reads as `{}` (all `None`).
-pub fn flat_token_fields(usage: &Value) -> FlatTokens {
-    let get = |key: &str| -> Option<i64> {
-        let obj = usage.as_object()?;
-        coerce_token(obj.get(key)?)
-    };
-    FlatTokens {
-        input_tokens: get("input"),
-        output_tokens: get("output"),
-        total_tokens: get("total"),
-    }
-}
-
-/// Port of `coerce_token` (`usage.py:71-82`): a non-negative bigint
-/// (`0..=i64::MAX`), or `None` for anything else. `None` / `""` / bools
-/// -> `None`; ints range-check; floats truncate toward zero
-/// (`int(12.7)` -> `12`); strings parse as `int(s, 10)`
-/// ([`py_int_magnitude`]); lists / dicts -> `None`. Non-finite floats
-/// map to `None` (QUIRK-coerce-inf: Python raises `OverflowError` on
-/// `inf`, unreachable via `jsonb`).
-pub fn coerce_token(raw: &Value) -> Option<i64> {
-    match raw {
-        Value::Null => None,
-        Value::Bool(_) => None,
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                return (i >= 0).then_some(i);
-            }
-            if let Some(u) = n.as_u64() {
-                return u64_to_non_negative_i64(u);
-            }
-            let f = n.as_f64()?;
-            if !f.is_finite() {
-                return None;
-            }
-            let t = f.trunc();
-            // Bound literal rounds to 2^63; no f64 sits between it and the
-            // largest exactly-castable value (2^63 - 1024), so the `as`
-            // cast below never saturates.
-            if !(-9_223_372_036_854_776_000.0..9_223_372_036_854_776_000.0).contains(&t) {
-                return None;
-            }
-            let v = t as i64;
-            (v >= 0).then_some(v)
-        }
-        Value::String(s) => {
-            let (negative, mag) = py_int_magnitude(s, 10)?;
-            if negative {
-                return (mag == 0).then_some(0);
-            }
-            u128_to_non_negative_i64(mag)
-        }
-        Value::Array(_) | Value::Object(_) => None,
-    }
-}
-
-/// `u64` -> `Some` iff it fits a non-negative `i64`.
-fn u64_to_non_negative_i64(u: u64) -> Option<i64> {
-    (u <= i64::MAX as u64).then_some(u as i64)
-}
-
-/// `u128` -> `Some` iff it fits a non-negative `i64`.
-fn u128_to_non_negative_i64(mag: u128) -> Option<i64> {
-    (mag <= i64::MAX as u128).then_some(mag as i64)
 }
 
 #[cfg(test)]
@@ -1826,6 +1767,17 @@ mod tests {
                 "{raw}"
             );
         }
+        // U+001C is not stripped by `int()`: an FS-padded 32-char input
+        // is rejected even though the remaining 31 chars are valid hex.
+        {
+            let raw = "\u{1c}".to_owned() + &"1".repeat(31);
+            assert_eq!(raw.chars().count(), 32);
+            let body = enroll_body(&[("dev_machine_id", json!(raw))]);
+            assert_eq!(
+                validate_enroll_request(&body).unwrap_err(),
+                json!({"dev_machine_id": ["Must be a valid UUID."]})
+            );
+        }
         for raw in [json!(-5), json!(1.5), json!([]), json!({})] {
             let body = enroll_body(&[("dev_machine_id", raw)]);
             assert_eq!(
@@ -1928,6 +1880,10 @@ mod tests {
             ("ＡＢ", 16),
             ("\x0012", 10),
             ("12\x00", 10),
+            ("\x1c12", 10),
+            ("12\x1f", 10),
+            ("\x1c12", 16),
+            ("12\x1f", 16),
             ("zz", 16),
             (ones40.as_str(), 10), // overflows u128
         ];
@@ -1978,61 +1934,18 @@ mod tests {
     }
 
     #[test]
-    fn coerce_token_vectors() {
-        let some: &[(Value, i64)] = &[
-            (json!(0), 0),
-            (json!(5), 5),
-            (json!(12.7), 12),
-            (json!("123"), 123),
-            (json!("  12 "), 12),
-            (json!("1_000"), 1000),
-            (json!("+42"), 42),
-            (json!("١٢٣"), 123),
-            (
-                json!(9_223_372_036_854_775_807i64),
-                9_223_372_036_854_775_807,
-            ),
-        ];
-        for (raw, want) in some {
-            assert_eq!(coerce_token(raw), Some(*want), "{raw}");
+    fn py_float_value_str_pins_mapping() {
+        // Value-normalized mapping, pinned directly (a services-graph
+        // unit test cannot construct a literal-preserving `Number`).
+        for (f, want) in [
+            (100.0, "100.0"),
+            (12.5, "12.5"),
+            (1e20, "1e+20"),
+            (-0.0, "-0.0"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+        ] {
+            assert_eq!(&py_float_value_str(f), want, "{f}");
         }
-        let none: &[Value] = &[
-            Value::Null,
-            json!(""),
-            json!(" "),
-            json!(-3),
-            json!(true),
-            json!(false),
-            json!(-12.7),
-            json!(1e20),
-            json!("12.5"),
-            json!("0x10"),
-            json!("-42"),
-            json!("1".repeat(30)),
-            json!([]),
-            json!({}),
-            json!({"a": 1}),
-            json!(9_223_372_036_854_775_808u64),
-        ];
-        for raw in none {
-            assert_eq!(coerce_token(raw), None, "{raw}");
-        }
-        // Non-mapping usage reads as empty.
-        assert_eq!(
-            flat_token_fields(&json!([1, 2])),
-            FlatTokens {
-                input_tokens: None,
-                output_tokens: None,
-                total_tokens: None
-            }
-        );
-        assert_eq!(
-            flat_token_fields(&json!({"input": "7", "output": 3.9})),
-            FlatTokens {
-                input_tokens: Some(7),
-                output_tokens: Some(3),
-                total_tokens: None
-            }
-        );
     }
 }
