@@ -86,7 +86,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, SubsecRound, Utc};
 use chrono_tz::Tz;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -1819,7 +1819,7 @@ async fn patch_profile(
     if let Some(patch) = &settings_patch {
         profile.settings = merge_settings(&profile.settings, patch)?;
     }
-    profile.updated_at = Utc::now();
+    profile.updated_at = patch_now();
     let save = number_placeholders(&user_q::profile_full_save_sql(), &profile_save_order());
     bind_profile_save(sqlx::query(&save), &profile)
         .execute(&mut *tx)
@@ -1830,6 +1830,14 @@ async fn patch_profile(
         StatusCode::OK,
         render_profile(&profile, &actor.timezone).to_string(),
     ))
+}
+
+/// `auto_now` for the profile save: Django's clock resolves
+/// microseconds, so the value bound (and echoed) here does too — a
+/// raw `Utc::now()` carries sub-microsecond digits that render as 9
+/// fraction digits where DRF renders 6.
+fn patch_now() -> DateTime<Utc> {
+    Utc::now().round_subsecs(6)
 }
 
 /// Placeholder order for [`user_q::profile_full_save_sql`]: the save
@@ -3182,6 +3190,28 @@ mod tests {
             object["user"],
             json(format!("\"{}\"", Uuid::from_u128(2)).as_str())
         );
+    }
+
+    #[test]
+    fn patch_now_resolves_microseconds_like_django() {
+        // `auto_now` binds (and echoes) microsecond clock values: a raw
+        // `Utc::now()` would render 9 fraction digits where DRF renders 6.
+        for _ in 0..100 {
+            let now = patch_now();
+            assert_eq!(now.timestamp_subsec_nanos() % 1000, 0, "{now:?}");
+            let rendered = render_datetime_in(&now, &chrono_tz::UTC);
+            let fraction = rendered
+                .split(['T'])
+                .nth(1)
+                .expect("time part")
+                .split(['Z', '+', '-'])
+                .next()
+                .expect("fraction part");
+            match fraction.split_once('.') {
+                None => {}
+                Some((_, digits)) => assert_eq!(digits.len(), 6, "{rendered}"),
+            }
+        }
     }
 
     #[test]
