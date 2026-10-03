@@ -97,6 +97,8 @@
 // intake `parse_body` precedent, which carries the same allow).
 #![allow(clippy::result_large_err)]
 
+pub mod run_endpoints;
+
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
