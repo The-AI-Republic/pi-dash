@@ -91,7 +91,7 @@ use pidash_db::tasks_ticker::{
     models::issue_agent_ticker::{
         IssueAgentTicker, COLUMNS as TICKER_COLUMNS, TABLE as TICKER_TABLE,
     },
-    TickerDisarmReason, DEFAULT_MAX_TICKS, INFINITE_MAX_TICKS,
+    pool_size_or_default, TickerDisarmReason, INFINITE_MAX_TICKS,
 };
 use pidash_types::orchestration::{
     cadence_fields_for, default_outcome_for_kind, is_ticking_state, outcome_for_run,
@@ -136,19 +136,39 @@ pub fn lock_ticker_sql() -> String {
     )
 }
 
-/// Bind order for [`create_ticker_sql`] (first appearance in [`TICKER_COLUMNS`] order).
-pub const CREATE_TICKER_PARAMS: &[&str] = &["now", "created_by_id", "id", "issue_id"];
+/// Bind order for [`create_ticker_sql`] (first appearance).
+pub const CREATE_TICKER_PARAMS: &[&str] = &[
+    "now",
+    "created_by_id",
+    "id",
+    "issue_id",
+    "next_run_at",
+    "enabled",
+    "disarm_reason",
+    "pending_entry",
+    "pending_entry_free",
+    "pending_entry_actor_id",
+    "pending_entry_trigger",
+    "resume_parent_run_id",
+];
 
-/// `_lock_ticker` create half (`scheduling.py:238-246`): the disabled,
-/// unarmed, zero-budget shape, as the handler-executed INSERT. Fixed values
-/// are literals (Django binds them; the row is identical either way); `:now`
-/// stamps both `created_at` and `updated_at` (Django calls `now()` twice —
-/// unobservable, the L4 quirk-6 precedent); `:created_by_id` is the crum user
-/// or NULL on system paths, while `updated_by_id` is always NULL on create
-/// (`BaseModel.save`, `db/models/base.py:25-44`).
+/// `_lock_ticker` create half (`scheduling.py:238-246`) as the
+/// handler-executed INSERT — of the *final* row, not the create shape.
+/// Python INSERTs the disabled / unarmed / zero-budget shape and then UPDATEs
+/// it in the same transaction; the port INSERTs once, binding the post-handler
+/// clock values (`:enabled`, `:disarm_reason`, `:next_run_at`, the pending
+/// entry, `:resume_parent_run_id`) from the mutated row. Literals remain only
+/// where no create-path handler can change the value: `used` / `granted` /
+/// `waited` stay 0 (only `RETICK` touches `granted`, and it never creates;
+/// `fire_tick` owns `used`), `user_disabled` stays `FALSE`, and the untouched
+/// audit stamps stay NULL. `:now` stamps both `created_at` and `updated_at`
+/// (Django calls `now()` twice across the two statements — unobservable
+/// within one transaction, the L4 quirk-6 precedent); `:created_by_id` is the
+/// crum user or NULL on system paths, while `updated_by_id` is always NULL on
+/// create (`BaseModel.save`, `db/models/base.py:25-44`).
 pub fn create_ticker_sql() -> String {
     format!(
-        "INSERT INTO {TICKER_TABLE} ({}) VALUES (:now, :now, :created_by_id, NULL, NULL, :id, :issue_id, 0, 0, 0, FALSE, NULL, NULL, FALSE, '', FALSE, FALSE, NULL, '', NULL)",
+        "INSERT INTO {TICKER_TABLE} ({}) VALUES (:now, :now, :created_by_id, NULL, NULL, :id, :issue_id, 0, 0, 0, FALSE, :next_run_at, NULL, :enabled, :disarm_reason, :pending_entry, :pending_entry_free, :pending_entry_actor_id, :pending_entry_trigger, :resume_parent_run_id)",
         TICKER_COLUMNS.join(", "),
     )
 }
@@ -239,9 +259,10 @@ pub fn project_ticking_enabled(policy: &ProjectClockPolicy) -> bool {
 }
 
 /// `pool_size` (`db/models/issue_agent_ticker.py:200-203`): the project's
-/// per-issue pool, `-1` infinite, defaulting to 10.
+/// per-issue pool, `-1` infinite, defaulting to 10 — via the merged
+/// [`pool_size_or_default`](pidash_db::tasks_ticker::pool_size_or_default).
 pub fn pool_size(policy: &ProjectClockPolicy) -> i32 {
-    policy.agent_default_max_ticks.unwrap_or(DEFAULT_MAX_TICKS)
+    pool_size_or_default(policy.agent_default_max_ticks)
 }
 
 /// `effective_interval_seconds` (`db/models/issue_agent_ticker.py:185-198`):
@@ -756,8 +777,9 @@ pub fn creates_ticker(kind: &str) -> bool {
 /// `pidash_db::tasks_ticker::jitter_seconds`, then inside ONE transaction — lock
 /// the ticker row ([`lock_ticker_sql`]), call this with the row in `ticker`
 /// (`None` when the lock missed), execute the returned [`ClockWrite`]
-/// ([`create_ticker_sql`] on `Insert`, [`SAVE_CLOCK_SQL`] on `Update`), commit —
-/// and after commit log [`reconcile_log_line`].
+/// ([`create_ticker_sql`] on `Insert`, binding the row's post-handler clock
+/// values, [`SAVE_CLOCK_SQL`] on `Update`), commit — and after commit log
+/// [`reconcile_log_line`].
 ///
 /// For create-kinds ([`creates_ticker`]) a missed lock builds the zero-budget
 /// create-shape row in `ticker` (the `:238-246` INSERT half of `_lock_ticker`,
@@ -851,21 +873,33 @@ fn py_bool(value: bool) -> &'static str {
 
 /// `arm_ticker` (`scheduling.py:598-606`): human re-engagement without a run —
 /// re-time the clock for the current stage if the pool allows, never zeroing
-/// `used`. `ticker` is the post-lock row; the write is always
-/// [`ClockWrite::Update`] (the caller upgrades to `Insert` when it created the
-/// row, as in [`reconcile`]). Python's `dispatch_immediate` kwarg is a
-/// caller-only signal the function ignores (`noqa: ARG001`) — there is no such
-/// parameter here.
+/// `used`. Exactly Python's body — [`reconcile`] of
+/// `human_run_requested(want_run=False)` — so a missing row is created, and the
+/// write is [`ClockWrite::Insert`] then, [`ClockWrite::Update`] otherwise.
+/// Python's `dispatch_immediate` kwarg is a caller-only signal the function
+/// ignores (`noqa: ARG001`) — there is no such parameter here.
 pub fn arm_ticker(
-    ticker: &mut IssueAgentTicker,
+    ticker: &mut Option<IssueAgentTicker>,
     issue: &ClockIssue<'_>,
     now: DateTime<Utc>,
     jitter_secs: f64,
+    created_by: Option<Uuid>,
 ) -> ClockOutcome {
     let event = TickerEvent::human_run_requested(false, None, "");
     // `has_active_run` is unread: `want_run = false` short-circuits the busy
-    // check (`:525`), as in Python.
-    on_human_run_requested(ticker, issue, &event, false, now, jitter_secs)
+    // check (`:525`), as in Python. Infallible: the kind is known and
+    // `HUMAN_RUN_REQUESTED` needs no run row.
+    reconcile(
+        ticker,
+        issue,
+        &event,
+        None,
+        false,
+        now,
+        jitter_secs,
+        created_by,
+    )
+    .expect("arm_ticker reconciles")
 }
 
 /// `disarm_ticker` (`scheduling.py:609-629`): stop the clock with `reason`
@@ -929,15 +963,27 @@ pub fn maybe_disarm_on_terminal_signal(
 /// `reset_ticker_after_comment_and_run` (`scheduling.py:640-647`): Comment & Run /
 /// Run AI where the caller dispatches the run itself. Historical name — nothing
 /// is *reset* any more (human-started runs are free); re-times the clock if the
-/// pool has budget. Same event as [`arm_ticker`] under its historical name.
+/// pool has budget. Same [`reconcile`] event as [`arm_ticker`] under its
+/// historical name, so a missing row is created here too.
 pub fn reset_ticker_after_comment_and_run(
-    ticker: &mut IssueAgentTicker,
+    ticker: &mut Option<IssueAgentTicker>,
     issue: &ClockIssue<'_>,
     now: DateTime<Utc>,
     jitter_secs: f64,
+    created_by: Option<Uuid>,
 ) -> ClockOutcome {
     let event = TickerEvent::human_run_requested(false, None, "");
-    on_human_run_requested(ticker, issue, &event, false, now, jitter_secs)
+    reconcile(
+        ticker,
+        issue,
+        &event,
+        None,
+        false,
+        now,
+        jitter_secs,
+        created_by,
+    )
+    .expect("reset_ticker_after_comment_and_run reconciles")
 }
 
 #[cfg(test)]
@@ -1241,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    fn create_sql_pins_disabled_unarmed_zero_budget_shape() {
+    fn create_sql_pins_final_row_placeholders() {
         let sql = create_ticker_sql();
         let columns = sql
             .strip_prefix("INSERT INTO issue_agent_ticker (")
@@ -1251,9 +1297,11 @@ mod tests {
         assert_eq!(listed, TICKER_COLUMNS);
         let values = &columns[end + ") VALUES (".len()..columns.len() - 1];
         let bound: Vec<&str> = values.split(", ").collect();
-        // Fixed create shape per column (COLUMNS order): the two `:now` stamps,
-        // the crum-or-NULL creator, NULL audit/future stamps, handler ids, the
-        // zero budget, unarmed + disabled with the empty reason, no pending entry.
+        // One value per column (COLUMNS order): the two `:now` stamps, the
+        // crum-or-NULL creator, NULL audit/future stamps, handler ids, the
+        // zero budget no create-path handler can change, `FALSE` for the
+        // never-mutated user switch — and placeholders for every clock value
+        // the handler may have mutated (the INSERT persists the final row).
         assert_eq!(
             bound,
             [
@@ -1268,21 +1316,169 @@ mod tests {
                 "0",
                 "0",
                 "FALSE",
+                ":next_run_at",
                 "NULL",
-                "NULL",
-                "FALSE",
-                "''",
-                "FALSE",
-                "FALSE",
-                "NULL",
-                "''",
-                "NULL"
+                ":enabled",
+                ":disarm_reason",
+                ":pending_entry",
+                ":pending_entry_free",
+                ":pending_entry_actor_id",
+                ":pending_entry_trigger",
+                ":resume_parent_run_id"
             ]
         );
         assert_eq!(
             CREATE_TICKER_PARAMS,
-            &["now", "created_by_id", "id", "issue_id"]
+            &[
+                "now",
+                "created_by_id",
+                "id",
+                "issue_id",
+                "next_run_at",
+                "enabled",
+                "disarm_reason",
+                "pending_entry",
+                "pending_entry_free",
+                "pending_entry_actor_id",
+                "pending_entry_trigger",
+                "resume_parent_run_id"
+            ]
         );
+    }
+
+    fn sql_bool(value: bool) -> String {
+        if value {
+            "TRUE".to_string()
+        } else {
+            "FALSE".to_string()
+        }
+    }
+
+    /// Bind a post-handler row to the INSERT's VALUES list the way the handler
+    /// binds it: placeholders resolve from the row, literals stay as written.
+    /// Timestamps render as `ts:<rfc3339>` (or `NULL`) so presence is pinned
+    /// without pinning CPython's RNG-drawn stamp.
+    fn bind_create_row(row: &IssueAgentTicker) -> Vec<String> {
+        let sql = create_ticker_sql();
+        let start = sql.find(") VALUES (").expect("values sep") + ") VALUES (".len();
+        let bound: Vec<&str> = sql[start..sql.len() - 1].split(", ").collect();
+        assert_eq!(bound.len(), TICKER_COLUMNS.len(), "one value per column");
+        bound
+            .iter()
+            .map(|value| match *value {
+                ":now" => "now".to_string(),
+                ":created_by_id" => row
+                    .created_by_id
+                    .map(|id| id.to_string())
+                    .unwrap_or("NULL".to_string()),
+                ":id" => row.id.to_string(),
+                ":issue_id" => row.issue_id.to_string(),
+                ":next_run_at" => row
+                    .next_run_at
+                    .map(|ts| format!("ts:{}", ts.to_rfc3339()))
+                    .unwrap_or("NULL".to_string()),
+                ":enabled" => sql_bool(row.enabled),
+                ":disarm_reason" => format!("'{}'", row.disarm_reason),
+                ":pending_entry" => sql_bool(row.pending_entry),
+                ":pending_entry_free" => sql_bool(row.pending_entry_free),
+                ":pending_entry_actor_id" => row
+                    .pending_entry_actor_id
+                    .map(|id| id.to_string())
+                    .unwrap_or("NULL".to_string()),
+                ":pending_entry_trigger" => format!("'{}'", row.pending_entry_trigger),
+                ":resume_parent_run_id" => row
+                    .resume_parent_run_id
+                    .map(|id| id.to_string())
+                    .unwrap_or("NULL".to_string()),
+                literal => literal.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn created_row_insert_persists_final_shape() {
+        // Every created E-case, bound to the INSERT as the handler binds it:
+        // the persisted row must equal the fixture after-row. A clock value
+        // left as a create-shape literal here would strand the clock (disabled
+        // / unarmed) while the decision says dispatch-now / queued.
+        let golden = fx("reconcile.enter_move.before_after.json");
+        let cases = [
+            (
+                "E1_human_enter_no_ticker",
+                TickerEvent::entered_bucket(None, None, true, None),
+                in_progress(),
+                fx5_policy(),
+                false,
+            ),
+            (
+                "E2_human_enter_busy",
+                TickerEvent::entered_bucket(None, None, true, Some(ACTOR_ID)),
+                in_progress(),
+                fx5_policy(),
+                true,
+            ),
+            (
+                "E6_human_move_project_disabled",
+                TickerEvent::entered_bucket(None, None, true, None),
+                in_progress(),
+                ProjectClockPolicy {
+                    agent_ticking_enabled: Some(false),
+                    ..fx5_policy()
+                },
+                false,
+            ),
+            (
+                "E10_move_remembers_resume_parent",
+                TickerEvent::moved_stage(None, Some(RUN_ID), true, None),
+                in_review(),
+                fx5_policy(),
+                false,
+            ),
+        ];
+        for (name, event, state, policy, busy) in cases {
+            let case = &golden["cases"][name];
+            assert!(case["before"].is_null(), "{name}: created case");
+            let issue = clock_issue(Some(state), policy);
+            let mut slot: Option<IssueAgentTicker> = None;
+            let outcome = reconcile(&mut slot, &issue, &event, None, busy, now(), JITTER, None)
+                .expect("known kind reconciles");
+            assert_eq!(outcome.write, ClockWrite::Insert, "{name}: write");
+            let row = slot.as_ref().expect("created row survives");
+            let after = &case["after"];
+            let bound = bind_create_row(row);
+            let expected = vec![
+                "now".to_string(),
+                "now".to_string(),
+                "NULL".to_string(),
+                "NULL".to_string(),
+                "NULL".to_string(),
+                row.id.to_string(),
+                row.issue_id.to_string(),
+                after["used"].to_string(),
+                after["granted"].to_string(),
+                after["waited"].to_string(),
+                sql_bool(after["user_disabled"].as_bool().expect("user_disabled")),
+                row.next_run_at
+                    .map(|ts| format!("ts:{}", ts.to_rfc3339()))
+                    .unwrap_or("NULL".to_string()),
+                "NULL".to_string(),
+                sql_bool(after["enabled"].as_bool().expect("enabled")),
+                format!("'{}'", after["disarm_reason"].as_str().expect("reason")),
+                sql_bool(after["pending_entry"].as_bool().expect("pending")),
+                sql_bool(after["pending_entry_free"].as_bool().expect("free")),
+                row.pending_entry_actor_id
+                    .map(|id| id.to_string())
+                    .unwrap_or("NULL".to_string()),
+                format!(
+                    "'{}'",
+                    after["pending_entry_trigger"].as_str().expect("trigger")
+                ),
+                row.resume_parent_run_id
+                    .map(|id| id.to_string())
+                    .unwrap_or("NULL".to_string()),
+            ];
+            assert_eq!(bound, expected, "{name}: INSERT persists the final row");
+        }
     }
 
     #[test]
@@ -2199,12 +2395,22 @@ mod tests {
         let retimed = Some(compute_next_run_at(10800, now(), JITTER));
         // S1: arm re-times, `used` untouched.
         let case = &golden["cases"]["S1_arm"];
-        let mut row = ticker_from(&case["before"]);
-        let outcome = arm_ticker(&mut row, &issue, now(), JITTER);
+        let mut slot = Some(ticker_from(&case["before"]));
+        let outcome = arm_ticker(&mut slot, &issue, now(), JITTER, None);
         assert_eq!(outcome.write, ClockWrite::Update, "S1: write");
         assert_eq!(outcome.decision.ticker, Some(TICKER_ID), "S1: ticker");
-        assert_row(&row, &case["after"], retimed, "S1");
+        let row = slot.as_ref().expect("S1 row");
+        assert_row(row, &case["after"], retimed, "S1");
         assert_retimed(fixture_ts(&case["after"]), 10800, retimed, "S1");
+        // S1b (beyond the fixtures): arm creates a missing row, like Python's
+        // `reconcile(create=True)` path.
+        let mut slot: Option<IssueAgentTicker> = None;
+        let outcome = arm_ticker(&mut slot, &issue, now(), JITTER, None);
+        assert_eq!(outcome.write, ClockWrite::Insert, "S1b: write");
+        let row = slot.as_ref().expect("S1b row");
+        assert!(row.enabled, "S1b: armed");
+        assert_eq!(row.next_run_at, retimed, "S1b: retimed");
+        assert_eq!(row.used, 0, "S1b: used untouched");
         // S2a: default disarm stamps LEFT_TICKING_STATE and clears next_run_at.
         let case = &golden["cases"]["S2a_disarm_default"];
         let mut row = ticker_from(&case["before"]);
@@ -2301,16 +2507,28 @@ mod tests {
         assert!(outcome.is_none(), "S3c: no event sent");
         // S4a: reset re-times like arm.
         let case = &golden["cases"]["S4a_reset"];
-        let mut row = ticker_from(&case["before"]);
-        let outcome = reset_ticker_after_comment_and_run(&mut row, &issue, now(), JITTER);
+        let mut slot = Some(ticker_from(&case["before"]));
+        let outcome = reset_ticker_after_comment_and_run(&mut slot, &issue, now(), JITTER, None);
         assert_eq!(outcome.write, ClockWrite::Update, "S4a: write");
-        assert_row(&row, &case["after"], retimed, "S4a");
+        assert_row(
+            slot.as_ref().expect("S4a row"),
+            &case["after"],
+            retimed,
+            "S4a",
+        );
         // S4b: reset on a spent pool parks with POOL_SPENT.
         let case = &golden["cases"]["S4b_reset_spent_pool"];
-        let mut row = ticker_from(&case["before"]);
-        let outcome = reset_ticker_after_comment_and_run(&mut row, &issue, now(), JITTER);
+        let mut slot = Some(ticker_from(&case["before"]));
+        let outcome = reset_ticker_after_comment_and_run(&mut slot, &issue, now(), JITTER, None);
         assert_eq!(outcome.write, ClockWrite::Update, "S4b: write");
-        assert_row(&row, &case["after"], None, "S4b");
+        assert_row(slot.as_ref().expect("S4b row"), &case["after"], None, "S4b");
+        // S4c (beyond the fixtures): reset creates a missing row too.
+        let mut slot: Option<IssueAgentTicker> = None;
+        let outcome = reset_ticker_after_comment_and_run(&mut slot, &issue, now(), JITTER, None);
+        assert_eq!(outcome.write, ClockWrite::Insert, "S4c: write");
+        let row = slot.as_ref().expect("S4c row");
+        assert!(row.enabled, "S4c: armed");
+        assert_eq!(row.next_run_at, retimed, "S4c: retimed");
         assert_eq!(
             golden["cases"].as_object().expect("cases").len(),
             10,
