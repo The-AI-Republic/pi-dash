@@ -1449,6 +1449,11 @@ fn parse_drf_datetime(text: &str) -> Option<ParsedDateTime> {
     let day = take_digits(head, &mut cursor, 2)?;
     let day_len = cursor - day_start;
     let year: i32 = head[0..4].parse().ok()?;
+    // `datetime` caps years at 1-9999 (the constructor rejects 0);
+    // chrono would accept it.
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
     let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
     let padded = month_len == 2 && day_len == 2;
     if cursor == head.len() {
@@ -1523,11 +1528,14 @@ fn parse_basic_datetime(head: &str, offset_secs: Option<i32>) -> Option<ParsedDa
     if head.len() < 8 || !head.bytes().take(8).all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    let date = chrono::NaiveDate::from_ymd_opt(
-        head[0..4].parse().ok()?,
-        head[4..6].parse().ok()?,
-        head[6..8].parse().ok()?,
-    )?;
+    let year: i32 = head[0..4].parse().ok()?;
+    // `datetime` caps years at 1-9999 (the constructor rejects 0);
+    // chrono would accept it.
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
+    let date =
+        chrono::NaiveDate::from_ymd_opt(year, head[4..6].parse().ok()?, head[6..8].parse().ok()?)?;
     let rest = &head[8..];
     if rest.is_empty() {
         // Date-only: never with a zone (`Z`-after-date 400s).
@@ -5287,6 +5295,14 @@ mod tests {
             // Week backtracking still rejects garbage.
             "2026-W01-010:00",
             "2026-W01-50:00",
+            // Year 0: `datetime` rejects it (DRF `invalid` arm, probed);
+            // chrono would accept it.
+            "0000-01-01T10:00",
+            "0000-01-01",
+            "0000-01-01T10:00Z",
+            "0000-01-01T10:00+05:00",
+            "00000101T10:00",
+            "00000101",
         ] {
             assert!(parse_drf_datetime(text).is_none(), "{text} rejects");
         }
