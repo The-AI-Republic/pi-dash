@@ -1498,7 +1498,7 @@ pub async fn execute_close_session(
     effects: &mut Vec<ChatEffect>,
 ) -> Result<(), Response> {
     // `was_active = bool(active_message_id or active_turn_id)`
-    // (`chat.py:761`): either half finalizes and drains.
+    // (`chat.py:763`): either half finalizes and drains.
     let was_active = chat_kernel::turn_was_active(session);
     if was_active {
         finalize_active(tx, session, AgentChatMessageStatus::Cancelled).await?;
@@ -4070,7 +4070,7 @@ pub async fn daemon_chat_failed(
 }
 
 /// `POST /api/v1/runner/chat/sessions/<id>/closed/`
-/// (`chat.py:753-780`): idempotency first (400 without a key), then
+/// (`chat.py:751-779`): idempotency first (400 without a key), then
 /// lock, dedupe, and the close flow.
 pub async fn daemon_chat_closed(
     State(state): State<AppState>,
