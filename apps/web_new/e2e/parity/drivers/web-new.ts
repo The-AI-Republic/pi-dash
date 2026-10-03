@@ -1926,4 +1926,68 @@ export class WebNewDriver implements ParityDriver {
   async clearIssuePatchFailure(): Promise<void> {
     return todo("clearIssuePatchFailure");
   }
+
+  async signOutViaAccountMenu(): Promise<void> {
+    return todo("signOutViaAccountMenu");
+  }
+
+  async signOutViaCommandPalette(): Promise<void> {
+    return todo("signOutViaCommandPalette");
+  }
+
+  async isSignedOut(): Promise<boolean> {
+    return todo("isSignedOut");
+  }
+
+  async openSwitchAccount(): Promise<void> {
+    return todo("openSwitchAccount");
+  }
+
+  async switchAccountEmail(): Promise<string> {
+    return todo("switchAccountEmail");
+  }
+
+  async confirmSwitchAccount(): Promise<void> {
+    return todo("confirmSwitchAccount");
+  }
+
+  async openDeactivateAccount(): Promise<void> {
+    return todo("openDeactivateAccount");
+  }
+
+  async confirmDeactivation(): Promise<void> {
+    return todo("confirmDeactivation");
+  }
+
+  async dropSession(): Promise<void> {
+    return todo("dropSession");
+  }
+
+  async visit(_path: string): Promise<void> {
+    return todo("visit");
+  }
+
+  async showsText(_text: string): Promise<boolean> {
+    return todo("showsText");
+  }
+
+  async typeDeviceCode(_code: string): Promise<void> {
+    return todo("typeDeviceCode");
+  }
+
+  async deviceCodeFieldValue(): Promise<string> {
+    return todo("deviceCodeFieldValue");
+  }
+
+  async submitDeviceApproval(): Promise<void> {
+    return todo("submitDeviceApproval");
+  }
+
+  async typeText(_text: string): Promise<void> {
+    return todo("typeText");
+  }
+
+  async focusedControlName(): Promise<null> {
+    return todo("focusedControlName");
+  }
 }

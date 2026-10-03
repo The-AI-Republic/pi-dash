@@ -1351,6 +1351,114 @@ export async function descriptionVersionDetail(
   return (await res.json()) as Record<string, unknown>;
 }
 
+/**
+ * POST a native credential form without a CSRF token; resolves true when the
+ * server issues a session anyway. The endpoint answers 200 either way — the
+ * session cookie is the success signal, exactly like signInSession reads it.
+ */
+export async function signInIssuesSessionWithoutCsrf(
+  email: string,
+  password: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const res = await fetch(`${apiBase}/auth/sign-in/`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ email, password }),
+    redirect: "manual",
+  });
+  await res.arrayBuffer().catch(() => null);
+  return cookieHeader(setCookieHeaders(res)).includes("session-id=");
+}
+
+/**
+ * Create a throwaway account through the same native sign-up POST the
+ * sign-up card submits. Used where the seed owner must stay untouched
+ * (deactivation, account switching). Resolves with a session cookie header.
+ */
+export async function createAccountSession(
+  email: string,
+  password: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const csrf = await fetchCsrf(apiBase);
+  const preCookies = cookieHeader(csrf.setCookies);
+  // The sign-up card's native form submits both password fields.
+  const body = new URLSearchParams({ email, password, confirm_password: password, csrfmiddlewaretoken: csrf.token });
+  const res = await fetch(`${apiBase}/auth/sign-up/`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", cookie: preCookies },
+    body,
+    redirect: "manual",
+  });
+  if (res.status !== 200 && res.status !== 302) {
+    throw new Error(`[parity] sign-up failed with HTTP ${res.status} for ${email}.`);
+  }
+  const header = cookieHeader([...preCookies.split("; ").filter((p) => p), ...setCookieHeaders(res)]);
+  if (!header.includes("session-id=")) throw new Error("[parity] sign-up response carried no session cookie.");
+  return header;
+}
+
+/** Whether the session still identifies a user (false after sign-out/expiry/deactivation). */
+export async function sessionValid(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<boolean> {
+  const res = await fetch(`${apiBase}/api/users/me/`, { headers: { cookie: sessionCookie } });
+  return res.ok;
+}
+
+/** Start a CLI device flow; resolves with the user code to approve. */
+export async function startDeviceFlow(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<string> {
+  const res = await fetch(`${apiBase}/api/v1/auth/device/start/`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: sessionCookie },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) throw new Error(`[parity] device start failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { user_code?: unknown };
+  if (typeof payload.user_code !== "string" || payload.user_code === "")
+    throw new Error("[parity] device start response carried no user code.");
+  return payload.user_code;
+}
+
+/** Approve a CLI device code (same call the device-approval page makes). */
+export async function approveDeviceCode(
+  sessionCookie: string,
+  code: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ email: string; workspace: string | null }> {
+  const res = await fetch(`${apiBase}/api/v1/auth/device/approve/`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: sessionCookie },
+    body: JSON.stringify({ user_code: code }),
+  });
+  if (!res.ok) throw new Error(`[parity] device approve failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { user_email?: unknown; workspace_slug?: unknown };
+  if (typeof payload.user_email !== "string")
+    throw new Error("[parity] device approve response carried no user email.");
+  return {
+    email: payload.user_email,
+    workspace: typeof payload.workspace_slug === "string" ? payload.workspace_slug : null,
+  };
+}
+
+/** Create a workspace as the session's user; resolves with its slug. */
+export async function createWorkspace(
+  sessionCookie: string,
+  name: string,
+  slug: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await fetch(`${apiBase}/api/workspaces/`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: sessionCookie },
+    body: JSON.stringify({ name, slug }),
+  });
+  if (!res.ok) throw new Error(`[parity] workspace create failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { slug?: unknown };
+  if (typeof payload.slug !== "string" || payload.slug === "")
+    throw new Error("[parity] workspace create response carried no slug.");
+  return payload.slug;
+}
+
 /** Names of the project's issues as the server reports them, in API order. */
 /** Paginated-or-array list readback shared by the widget collections. */
 async function collectionRows(res: Response, what: string): Promise<Record<string, unknown>[]> {

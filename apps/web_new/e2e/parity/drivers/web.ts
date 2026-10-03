@@ -305,8 +305,10 @@ export class WebDriver implements ParityDriver {
     await passwordField.fill(password);
     const passwordForm = page.locator("form", { has: passwordField });
     // The old app posts the native form, so this ends in a full page load.
+    // Wait for the navigation itself: a URL regex also matches the bare
+    // origin ("//host/"), which would return before the sign-in POST lands.
     await Promise.all([
-      page.waitForURL(/\/[^/]+\//, { timeout: WebDriver.WAIT_MS }),
+      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: WebDriver.WAIT_MS }),
       this.submitOf(passwordForm).click(),
     ]);
   }
@@ -5999,5 +6001,171 @@ export class WebDriver implements ParityDriver {
     const current = this.patchFailureRoute;
     this.patchFailureRoute = undefined;
     if (current) await this.page.unroute(current.matches, current.handler).catch(() => {});
+  }
+
+  private async waitForSignedOut(): Promise<void> {
+    // Every sign-out path lands back on the signed-out entry (sign-in card).
+    await this.page.getByPlaceholder("name@company.com").first().waitFor({ timeout: 60_000 });
+  }
+
+  private async openAccountMenu(): Promise<void> {
+    // The sidebar user menu trigger is the avatar button at the foot of the
+    // sidebar. It can sit outside the test viewport, so open it with a click
+    // dispatched on the element itself rather than a viewport-gated click.
+    const trigger = this.page.locator("aside").getByRole("button").last();
+    await trigger.waitFor();
+    await trigger.evaluate((el) => (el as HTMLElement).click());
+  }
+
+  private async clickAccountMenuItem(name: string): Promise<void> {
+    // The floating menu can render where the test viewport cannot reach it
+    // (the trigger itself lives outside the viewport), so activate the item
+    // on the element itself rather than with a viewport-gated click. The
+    // action handler lives on the inner button, not the menuitem wrapper.
+    const action = this.page.getByRole("menuitem", { name }).getByRole("button");
+    await action.waitFor();
+    await action.evaluate((el) => (el as HTMLElement).click());
+  }
+
+  async signOutViaAccountMenu(): Promise<void> {
+    await this.openAccountMenu();
+    await this.clickAccountMenuItem("Sign out");
+    await this.waitForSignedOut();
+  }
+
+  async signOutViaCommandPalette(): Promise<void> {
+    const page = this.page;
+    // The palette is a custom power-k panel (not a cmdk dialog): typing
+    // happens in the always-rendered top-nav search box, which opens the
+    // panel on focus. Click it directly instead of relying on the global
+    // shortcut handler, and wait attached (not visible): under a loaded
+    // dev server the visibility poll can stall while the node is present.
+    const search = page.getByPlaceholder("Search commands...");
+    await search.waitFor({ state: "attached", timeout: 120_000 });
+    await search.scrollIntoViewIfNeeded();
+    // Focus on the element itself and type with the keyboard: click/fill
+    // gate on the same visibility poll that stalls under a loaded dev
+    // server, while typing reaches the focused input regardless.
+    await search.evaluate((el) => (el as HTMLInputElement).focus());
+    await page.keyboard.type("Sign out", { delay: 20 });
+    const signOut = page
+      .locator("[cmdk-item]")
+      .filter({ hasText: /sign out/i })
+      .first();
+    await signOut.waitFor({ state: "attached", timeout: 120_000 });
+    await signOut.evaluate((el) => (el as HTMLElement).click());
+    await this.waitForSignedOut();
+  }
+
+  async isSignedOut(): Promise<boolean> {
+    return this.page.getByPlaceholder("name@company.com").first().isVisible();
+  }
+
+  async openSwitchAccount(): Promise<void> {
+    const page = this.page;
+    // The onboarding header names the signed-in account in a dropdown
+    // trigger (avatar + display name — the display name, not the email, so
+    // "@" matching fails on fresh accounts). The menu items mount only once
+    // the trigger opens the menu, so wait for the trigger — never the item
+    // — then open it. The trigger is the page's menu button (the header is
+    // a plain div with no landmark, and its back button carries no
+    // accessible name, so text matching is unreliable here).
+    const trigger = page.locator('button[aria-haspopup="menu"]').first();
+    await trigger.waitFor();
+    await trigger.click();
+    await page.getByText("Wrong e-mail address?", { exact: true }).click();
+    await page.getByRole("heading", { name: "Switch account" }).waitFor();
+  }
+
+  async switchAccountEmail(): Promise<string> {
+    // The dialog names the active account in its explanatory copy.
+    const dialog = this.page.getByRole("dialog");
+    const body = (await dialog.innerText()).trim();
+    const match = /[\w.+-]+@[\w-]+\.[\w.]+/.exec(body);
+    if (!match) throw new Error("[parity] switch-account dialog names no email.");
+    return match[0];
+  }
+
+  async confirmSwitchAccount(): Promise<void> {
+    await this.page.getByRole("dialog").getByRole("button", { name: "Switch account" }).click();
+    await this.waitForSignedOut();
+  }
+
+  async openDeactivateAccount(): Promise<void> {
+    const page = this.page;
+    await this.openAccountMenu();
+    await this.clickAccountMenuItem("Settings");
+    const deactivate = page.getByRole("button", { name: "Deactivate account" });
+    await deactivate.scrollIntoViewIfNeeded();
+    await deactivate.click();
+    await page.getByRole("heading", { name: "Deactivate your account" }).waitFor();
+  }
+
+  async confirmDeactivation(): Promise<void> {
+    await this.page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
+    await this.waitForSignedOut();
+  }
+
+  async dropSession(): Promise<void> {
+    // Clear every cookie in the browser context: the next authenticated
+    // request behaves like an expired session.
+    await this.page.context().clearCookies();
+  }
+
+  async visit(path: string): Promise<void> {
+    await this.page.goto(path);
+  }
+
+  async showsText(text: string): Promise<boolean> {
+    return this.page.getByText(text, { exact: false }).first().isVisible();
+  }
+
+  private deviceCodeField(): Locator {
+    // The approval form carries a single code input; it auto-formats XXXX-YYYY.
+    return this.page.locator('form input[type="text"]').first();
+  }
+
+  async typeDeviceCode(code: string): Promise<void> {
+    const field = this.deviceCodeField();
+    await field.waitFor();
+    await field.fill("");
+    await field.pressSequentially(code, { delay: 20 });
+  }
+
+  async deviceCodeFieldValue(): Promise<string> {
+    const field = this.deviceCodeField();
+    await field.waitFor();
+    return field.inputValue();
+  }
+
+  async submitDeviceApproval(): Promise<void> {
+    // The approval page carries a single submit button ("Approve",
+    // "Approving…" while the request is in flight). Match it directly: an
+    // earlier `form`-with-`has` composition never resolved, because the
+    // inner selector is evaluated inside each candidate form (i.e. it
+    // looked for a form nested in the form). The exact-name match also
+    // waits out the in-flight "Approving…" state.
+    await this.page.getByRole("button", { name: /^approve$/i }).click();
+  }
+
+  async typeText(text: string): Promise<void> {
+    await this.page.keyboard.type(text);
+  }
+
+  async focusedControlName(): Promise<string | null> {
+    return this.page.evaluate(() => {
+      const active = document.activeElement as HTMLElement | null;
+      if (!active) return null;
+      const labelled = active.getAttribute("aria-label") ?? active.getAttribute("placeholder");
+      if (labelled && labelled.trim()) return labelled.trim();
+      const labelledBy = active.getAttribute("aria-labelledby");
+      if (labelledBy) {
+        const label = document.getElementById(labelledBy)?.textContent?.trim();
+        if (label) return label;
+      }
+      if (active.tagName === "BUTTON") return active.textContent?.trim() || "button";
+      if (active.tagName === "BODY") return null;
+      return active.tagName.toLowerCase();
+    });
   }
 }
