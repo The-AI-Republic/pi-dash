@@ -705,20 +705,35 @@ pub const PROJECT_UUID_ERROR_STATUS: u16 = 400;
 /// Validate the raw `?project=` values (`user.py:375,386-387` —
 /// `request.query_params.getlist("project", [])`, filtered RAW with no
 /// UUID check in the view). Django validates at lookup-prep time
-/// (`UUIDField` → `uuid.UUID(value)`), accepting hyphenated, simple-hex,
-/// braced and lowercase-`urn:uuid:` forms ONLY — surrounding whitespace
-/// and `URN:UUID:` are rejected (verified against CPython's `uuid`
-/// module); anything else raises `ValidationError` → handlers answer
-/// [`PROJECT_UUID_ERROR_BODY`] / [`PROJECT_UUID_ERROR_STATUS`].
+/// (`UUIDField` → `uuid.UUID(value)`), so this mirrors CPython's
+/// `uuid.UUID.__init__` preprocessing verbatim (`Lib/uuid.py`):
+/// global `replace('urn:', '')` + `replace('uuid:', '')` (bare `uuid:`
+/// prefix accepted, `URN:UUID:` rejected — case-sensitive), `strip('{}')`
+/// (multi/mismatched braces accepted), drop ALL `-` (free-placed
+/// hyphens, only the 32-hex count matters), length `== 32`, then
+/// hex-parse. Surrounding whitespace is rejected via the length check
+/// (all verified against CPython's `uuid` module); anything else raises
+/// `ValidationError` → handlers answer [`PROJECT_UUID_ERROR_BODY`] /
+/// [`PROJECT_UUID_ERROR_STATUS`]. Recorded residual edge (NOT ported —
+/// pathological, beyond review scope): CPython's final `int(hex, 16)`
+/// would also accept a leading sign, inter-digit underscores, or padding
+/// whitespace that still totals 32 chars; the hex-parse below rejects
+/// those (400 where Django 200s).
 pub fn validate_project_uuids(raw: &[&str]) -> Result<Vec<uuid::Uuid>, ProjectFilterError> {
     raw.iter()
         .map(|value| {
-            let hex = value.strip_prefix("urn:uuid:").unwrap_or(value);
-            let hex = hex
-                .strip_prefix('{')
-                .and_then(|inner| inner.strip_suffix('}'))
-                .unwrap_or(hex);
-            uuid::Uuid::parse_str(hex).map_err(|_| ProjectFilterError {
+            // CPython Lib/uuid.py, verbatim:
+            //   hex = hex.replace('urn:', '').replace('uuid:', '')
+            //   hex = hex.strip('{}').replace('-', '')
+            //   if len(hex) != 32: raise ValueError(...)
+            let hex = value.replace("urn:", "").replace("uuid:", "");
+            let hex = hex.trim_matches(['{', '}']).replace('-', "");
+            if hex.len() != 32 {
+                return Err(ProjectFilterError {
+                    value: (*value).to_owned(),
+                });
+            }
+            uuid::Uuid::parse_str(&hex).map_err(|_| ProjectFilterError {
                 value: (*value).to_owned(),
             })
         })
@@ -747,10 +762,15 @@ impl std::error::Error for ProjectFilterError {}
 /// and `actor = uid` (`:383` spells `actor=`, not `actor_id=` — same column).
 /// Root `IssueActivity.objects` guard applies (`a.deleted_at IS NULL`).
 /// `select_related("actor", "workspace", "issue", "project")` (`:384`)
-/// reuses the `w`/`p` joins and adds `actor_u` (LEFT — nullable FK) and
-/// `i` (LEFT — nullable FK). `~Q(field__in)` compiles to `NOT IN`, so
-/// NULL-`field` rows are EXCLUDED (three-valued logic — ported, not
-/// `IS DISTINCT FROM`). Ordering (`-created_at` default, `:390`) is the
+/// reuses the `w`/`p` joins and adds `actor_u` (INNER — Django
+/// promotes the `select_related("actor")` LEFT join under the
+/// `actor_id =` equality, verified with `str(qs.query)` on the pinned
+/// Django 4.2.30; result-neutral here since the baked-in
+/// `a.actor_id = $1` excludes NULL actors either way) and `i` (LEFT —
+/// nullable FK, no equality). `~Q(field__in)` compiles to
+/// `NOT (field IN (...) AND field IS NOT NULL)`, so NULL-`field` rows
+/// are INCLUDED (`field` is `null=True` — ported exactly, not bare
+/// `NOT IN`). Ordering (`-created_at` default, `:390`) is the
 /// paginator's (api crate).
 /// Params: `$1` target uid, `$2` slug, `$3` viewer.
 /// `projects_in_sql` is the optional `project__in` fragment
@@ -762,9 +782,10 @@ pub fn user_activity_from_where(projects_in_sql: Option<&str>) -> String {
          JOIN {WORKSPACES} w ON w.id = a.workspace_id \
          JOIN {PROJECTS} p ON p.id = a.project_id \
          JOIN {PROJECT_MEMBERS} rpm ON rpm.project_id = p.id \
-         LEFT JOIN {USERS} actor_u ON actor_u.id = a.actor_id \
+         JOIN {USERS} actor_u ON actor_u.id = a.actor_id \
          LEFT JOIN {ISSUES} i ON i.id = a.issue_id \
-         WHERE a.field NOT IN ('comment', 'vote', 'reaction', 'draft') \
+         WHERE NOT (a.field IN ('comment', 'vote', 'reaction', 'draft') \
+           AND a.field IS NOT NULL) \
          AND w.slug = $2 AND {membership} \
          AND p.archived_at IS NULL AND a.actor_id = $1 AND a.deleted_at IS NULL{projects}",
         membership = requester_membership_predicate("rpm", "$3"),
@@ -778,13 +799,15 @@ pub fn user_activity_from_where(projects_in_sql: Option<&str>) -> String {
 /// Me-activities FROM/WHERE (`app/views/user/base.py:392-404`): same
 /// `select_related` four, but scoped ONLY by `actor = request.user` — no
 /// slug, no project scope, no field exclusion (ported as-is).
+/// `actor_u` is INNER for the same promotion reason as
+/// [`user_activity_from_where`] (the `a.actor_id = $1` equality).
 /// Params: `$1` viewer.
 pub fn me_activities_from_where() -> String {
     format!(
         "FROM {ISSUE_ACTIVITIES} a \
          JOIN {WORKSPACES} w ON w.id = a.workspace_id \
          JOIN {PROJECTS} p ON p.id = a.project_id \
-         LEFT JOIN {USERS} actor_u ON actor_u.id = a.actor_id \
+         JOIN {USERS} actor_u ON actor_u.id = a.actor_id \
          LEFT JOIN {ISSUES} i ON i.id = a.issue_id \
          WHERE a.actor_id = $1 AND a.deleted_at IS NULL"
     )
@@ -1093,8 +1116,13 @@ pub fn requester_sees_projects(role: i32) -> bool {
 /// `project_data`: slug + requester's active memberships + unarchived
 /// projects (`user.py:291-296`), annotated with 4 `Count(..., filter=...)`
 /// aggregates (`:297-342`) and `.values("id", "logo_props", ...)`
-/// (`:343-351`). Default ordering applies (`Project.Meta.ordering =
-/// ("-created_at",)`, `db/models/project.py`).
+/// (`:343-351`). NO `ORDER BY` (verified with `str(qs.query)` on the
+/// pinned Django 4.2.30): grouped queries without an explicit
+/// `.order_by()` drop `Meta.ordering` (`Project.Meta.ordering =
+/// ("-created_at",)` — `django/db/models/sql/compiler.py`,
+/// `if self._meta_ordering: order_by = None`). `GROUP BY p.id,
+/// p.logo_props` vs Django's `GROUP BY p.id` keeps the same groups
+/// (`logo_props` is functionally dependent on the PK — ported as-is).
 ///
 /// ONE query (ported fanout bug): Django chains the four annotations on a
 /// single queryset and never splits multi-valued aggregates, so all four
@@ -1129,7 +1157,7 @@ pub fn profile_projects_sql() -> String {
          LEFT JOIN {STATES} s ON s.id = pi.state_id \
          WHERE w.slug = $2 AND {membership} \
          AND p.archived_at IS NULL AND p.deleted_at IS NULL \
-         GROUP BY p.id, p.logo_props ORDER BY p.created_at DESC",
+         GROUP BY p.id, p.logo_props",
         membership = requester_membership_predicate("rpm", "$3"),
     )
 }
@@ -1545,19 +1573,25 @@ mod tests {
             &["comment", "vote", "reaction", "draft"]
         );
         let sql = user_activity_from_where(None);
+        // ~Q(field__in) is NULL-inclusive: Django's exact form.
         assert!(
-            sql.contains("a.field NOT IN ('comment', 'vote', 'reaction', 'draft')"),
+            sql.contains(
+                "NOT (a.field IN ('comment', 'vote', 'reaction', 'draft') \
+                 AND a.field IS NOT NULL)"
+            ),
             "{sql}"
         );
         // :382 adds the archived filter the export-CSV twin lacks.
         assert!(sql.contains("p.archived_at IS NULL"), "{sql}");
         assert!(sql.contains("a.actor_id = $1"), "{sql}");
         assert!(sql.contains("a.deleted_at IS NULL"), "{sql}");
-        // select_related four: actor LEFT, issue LEFT, workspace/project reused.
+        // select_related four: actor INNER (promoted under actor_id=),
+        // issue LEFT, workspace/project reused.
         assert!(
-            sql.contains("LEFT JOIN users actor_u ON actor_u.id = a.actor_id"),
+            sql.contains("JOIN users actor_u ON actor_u.id = a.actor_id"),
             "{sql}"
         );
+        assert!(!sql.contains("LEFT JOIN users actor_u"), "{sql}");
         assert!(
             sql.contains("LEFT JOIN issues i ON i.id = a.issue_id"),
             "{sql}"
@@ -1578,6 +1612,12 @@ mod tests {
         assert!(!sql.contains("slug"), "{sql}");
         assert!(!sql.contains("project_members"), "{sql}");
         assert!(!sql.contains("NOT IN"), "{sql}");
+        // Same INNER promotion as the workspace route (actor_id= equality).
+        assert!(
+            sql.contains("JOIN users actor_u ON actor_u.id = a.actor_id"),
+            "{sql}"
+        );
+        assert!(!sql.contains("LEFT JOIN users actor_u"), "{sql}");
     }
 
     #[test]
@@ -1586,18 +1626,30 @@ mod tests {
         let simple = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let out = validate_project_uuids(&[hyphenated, simple]).expect("valid");
         assert_eq!(out[0], out[1]);
-        let braced =
-            validate_project_uuids(&["{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa}"]).expect("braced");
-        assert_eq!(braced[0], out[0]);
-        let urn = validate_project_uuids(&["urn:uuid:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"])
-            .expect("urn");
-        assert_eq!(urn[0], out[0]);
-        // CPython rejects these (verified): whitespace and URN:UUID:.
+        // CPython accepts these (verified against Lib/uuid.py): braced,
+        // bare uuid: prefix, urn:uuid: prefix, multi/mismatched braces,
+        // free-placed hyphens (only the 32-hex count matters).
+        for good in [
+            "{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa}",
+            "uuid:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "urn:uuid:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "{{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa}}",
+            "{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa}",
+            "aaaa--aaaaaaaa--aaaaaaaa--aaaaaaaa--aaaa",
+            "-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-",
+        ] {
+            let parsed = validate_project_uuids(&[good]).expect(good);
+            assert_eq!(parsed[0], out[0], "{good}");
+        }
+        // CPython rejects these (verified): non-hex, whitespace padding
+        // (length check), and URN:UUID: (case-sensitive replace).
         for bad in [
             "not-a-uuid",
             " aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ",
             "URN:UUID:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            "{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa",
         ] {
             validate_project_uuids(&[bad]).expect_err(bad);
         }
@@ -1828,9 +1880,8 @@ mod tests {
         );
         assert!(!sql.contains("pi.deleted_at"), "{sql}");
         assert!(!sql.contains("ia.deleted_at"), "{sql}");
-        assert!(
-            sql.contains("GROUP BY p.id, p.logo_props ORDER BY p.created_at DESC"),
-            "{sql}"
-        );
+        // Grouped queries drop Meta ordering: GROUP BY but NO ORDER BY.
+        assert!(sql.contains("GROUP BY p.id, p.logo_props"), "{sql}");
+        assert!(!sql.contains("ORDER BY"), "{sql}");
     }
 }
