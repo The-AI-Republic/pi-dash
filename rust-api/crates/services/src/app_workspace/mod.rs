@@ -31,6 +31,9 @@
 //! * [`queries_core`] — workspace core querysets: lists, dashboard
 //!   bundle, themes, export-CSV (PIDASHCONV-608).
 //!
+//! * [`queries_profile`] — profile/issues/stats/activity/graph query
+//!   builders (PIDASHCONV-610).
+//!
 //! * [`queries_user`] — user / account / profile / API-token query
 //!   builders: settings + session reads, email-change + cache,
 //!   deactivate bundle, account/profile/token CRUD (PIDASHCONV-612).
@@ -55,8 +58,9 @@
 //! (`rust-api/fixtures/app_workspace/` `serializers/extras.golden.json` +
 //! `TRACE.md`), F-W24-07 (`models/workspace_prefs.columns.json`, incl. the
 //! `UserFavorite` part), F-W24-08 (`models/user_token.columns.json`),
-//! F-W24-09 (`queries/core.sql` + `queries/core.rows.json`), and
-//! F-W24-10 (`queries/membership.sql` + `.rows.json`), F-W24-12
+//! F-W24-09 (`queries/core.sql` + `queries/core.rows.json`),
+//! F-W24-10 (`queries/membership.sql` + `.rows.json`), F-W24-11
+//! (`queries/profile.sql` + `queries/profile.rows.json`), F-W24-12
 //! extras part (`queries/extras_user.sql` R1-R12 + `.rows.json` cases
 //! `labels` … `recent_visits`), and F-W24-04
 //! (`rust-api/fixtures/app_workspace/` `serializers/user.golden.json`),
@@ -77,6 +81,7 @@ pub mod models_workspace;
 pub mod queries_core;
 pub mod queries_extras;
 pub mod queries_membership;
+pub mod queries_profile;
 pub mod queries_user;
 pub mod ser_account_token;
 pub mod ser_extras;
