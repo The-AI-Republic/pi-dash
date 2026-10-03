@@ -27,7 +27,9 @@
 //!   `NaN`/`Infinity`, lone surrogates, >128-deep nesting) have no
 //!   CPython message: top-level scalars flow into the same "must be a
 //!   JSON object" error CPython reaches, while gap objects/arrays
-//!   surface `serde_json`'s diagnostic.
+//!   surface `serde_json`'s diagnostic. Integers past the `u64` range
+//!   likewise parse as `f64`, so a huge `status` renders in exponent
+//!   form where CPython keeps exact digits (error strings only).
 //! * `got {status!r}` is `py_repr` (below): `None`/`True`/`False`,
 //!   shortest floats in CPython exponent spelling, Python string quoting.
 //!   Only ASCII controls are escaped; other non-ASCII scalars pass through
