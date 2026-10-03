@@ -26,8 +26,10 @@
 //! `workspaces/<slug>/workspace-themes/` (W19: GET/POST),
 //! `workspaces/<slug>/workspace-themes/<pk>/` (W20: GET/PATCH/DELETE),
 //! `workspaces/<slug>/user-activity/<user_id>/export/` (W23: POST).
-//! Every other method on those paths answers DRF's 405 inline, except
-//! OPTIONS which proxies (DRF metadata is unportable).
+//! Every other method on those paths replays the view's auth/gate
+//! prelude first (DRF answers 401/403 before the 405 lookup) and
+//! answers DRF's 405 only for survivors, except OPTIONS which proxies
+//! (DRF metadata is unportable).
 //!
 //! Fixture ids: F-W24-15
 //! (`rust-api/fixtures/app_workspace/handlers/routes.golden.json`);
@@ -130,47 +132,143 @@ fn method_not_allowed_response(method: &str) -> Response {
     )
 }
 
-async fn get_not_allowed() -> Response {
-    method_not_allowed_response("GET")
-}
-async fn post_not_allowed() -> Response {
-    method_not_allowed_response("POST")
-}
-async fn put_not_allowed() -> Response {
-    method_not_allowed_response("PUT")
-}
-async fn patch_not_allowed() -> Response {
-    method_not_allowed_response("PATCH")
-}
-async fn delete_not_allowed() -> Response {
-    method_not_allowed_response("DELETE")
-}
-async fn head_not_allowed() -> Response {
-    method_not_allowed_response("HEAD")
+/// Unowned methods on owned paths: DRF's `dispatch` runs `initial()`
+/// (authentication + `check_permissions`) *before* the handler lookup
+/// that produces the 405 (`rest_framework/views.py:497-504`), so each
+/// route below replays its view's exact prelude — the actor first (401
+/// when anonymous), then that view's `permission_classes` entry with
+/// the actual request method — and answers the 405 bytes only for
+/// survivors (the `v1_projects::handlers_state_estimate` precedent).
+/// The `@allow_permission` decorators never run here: they wrap
+/// dispatched actions, and no action dispatches on an unowned method.
+/// Object lookups never run either (`get_object` lives inside the
+/// actions), so bogus slugs/pks still 405 for survivors, never 404.
+async fn slug_check_not_allowed(
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: axum::http::Method,
+) -> HandlerResult {
+    // `WorkSpaceAvailabilityCheckEndpoint` keeps the default
+    // `[IsAuthenticated]`: any login survives.
+    let _user_id = actor_user_id(extension)?;
+    Ok(method_not_allowed_response(method.as_str()))
 }
 
-/// Owned methods per route; anything else 405s inline (OPTIONS proxies).
+async fn workspaces_not_allowed(
+    State(state): State<AppState>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: axum::http::Method,
+) -> HandlerResult {
+    // `WorkSpaceViewSet.permission_classes = [WorkSpaceBasePermission]`
+    // with `workspace_slug=None` on the collection: PUT/PATCH/DELETE
+    // deny (no membership row can match a null slug), POST and the
+    // safe methods pass any login. The list-action decorator never
+    // runs (no action dispatches), so no 400 here.
+    let user_id = actor_user_id(extension)?;
+    let pool = pool_of(&state)?;
+    if let Err(response) = check_class_base(&pool, None, &user_id, method.as_str()).await {
+        return Ok(response);
+    }
+    Ok(method_not_allowed_response(method.as_str()))
+}
+
+async fn workspace_not_allowed(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: axum::http::Method,
+) -> HandlerResult {
+    // Same class with the URL slug; POST and HEAD pass any login. No
+    // object lookup: `get_object` never runs before the 405.
+    let user_id = actor_user_id(extension)?;
+    let pool = pool_of(&state)?;
+    if let Err(response) = check_class_base(&pool, Some(&slug), &user_id, method.as_str()).await {
+        return Ok(response);
+    }
+    Ok(method_not_allowed_response(method.as_str()))
+}
+
+async fn my_workspaces_not_allowed(
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: axum::http::Method,
+) -> HandlerResult {
+    // `UserWorkSpacesEndpoint` keeps the default `[IsAuthenticated]`:
+    // any login survives.
+    let _user_id = actor_user_id(extension)?;
+    Ok(method_not_allowed_response(method.as_str()))
+}
+
+async fn themes_not_allowed(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: axum::http::Method,
+) -> HandlerResult {
+    // `WorkspaceThemeViewSet.permission_classes =
+    // [WorkSpaceAdminPermission]`, active Admin/Member, every method.
+    let user_id = actor_user_id(extension)?;
+    let pool = pool_of(&state)?;
+    if let Err(response) = check_class_admin(&pool, &slug, &user_id).await {
+        return Ok(response);
+    }
+    Ok(method_not_allowed_response(method.as_str()))
+}
+
+async fn theme_not_allowed(
+    State(state): State<AppState>,
+    Path((slug, _pk)): Path<(String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: axum::http::Method,
+) -> HandlerResult {
+    // Same admin class; the pk is unread (no lookup before the 405).
+    let user_id = actor_user_id(extension)?;
+    let pool = pool_of(&state)?;
+    if let Err(response) = check_class_admin(&pool, &slug, &user_id).await {
+        return Ok(response);
+    }
+    Ok(method_not_allowed_response(method.as_str()))
+}
+
+async fn export_not_allowed(
+    State(state): State<AppState>,
+    Path((slug, _user_id_text)): Path<(String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: axum::http::Method,
+) -> HandlerResult {
+    // `ExportWorkspaceUserActivityEndpoint.permission_classes =
+    // [WorkspaceEntityPermission]` with the actual method: safe
+    // methods need any active membership, writes need Admin/Member.
+    // No user lookup before the 405.
+    let user_id = actor_user_id(extension)?;
+    let pool = pool_of(&state)?;
+    if let Err(response) = check_class_entity(&pool, &slug, &user_id, method.as_str()).await {
+        return Ok(response);
+    }
+    Ok(method_not_allowed_response(method.as_str()))
+}
+
+/// Owned methods per route; anything else replays the view's prelude
+/// and 405s for survivors (OPTIONS proxies).
 pub fn routes() -> Router<AppState> {
     use axum::routing::{get, post};
     Router::new()
         .route(
             SLUG_CHECK_PATH,
             get(slug_check)
-                .post(post_not_allowed)
-                .put(put_not_allowed)
-                .patch(patch_not_allowed)
-                .delete(delete_not_allowed)
-                .head(head_not_allowed)
+                .post(slug_check_not_allowed)
+                .put(slug_check_not_allowed)
+                .patch(slug_check_not_allowed)
+                .delete(slug_check_not_allowed)
+                .head(slug_check_not_allowed)
                 .options(crate::edge::proxy),
         )
         .route(
             WORKSPACES_PATH,
             get(list_workspaces)
                 .post(create_workspace)
-                .put(put_not_allowed)
-                .patch(patch_not_allowed)
-                .delete(delete_not_allowed)
-                .head(head_not_allowed)
+                .put(workspaces_not_allowed)
+                .patch(workspaces_not_allowed)
+                .delete(workspaces_not_allowed)
+                .head(workspaces_not_allowed)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -179,28 +277,28 @@ pub fn routes() -> Router<AppState> {
                 .put(update_workspace)
                 .patch(partial_update_workspace)
                 .delete(destroy_workspace)
-                .post(post_not_allowed)
-                .head(head_not_allowed)
+                .post(workspace_not_allowed)
+                .head(workspace_not_allowed)
                 .options(crate::edge::proxy),
         )
         .route(
             ME_WORKSPACES_PATH,
             get(my_workspaces)
-                .post(post_not_allowed)
-                .put(put_not_allowed)
-                .patch(patch_not_allowed)
-                .delete(delete_not_allowed)
-                .head(head_not_allowed)
+                .post(my_workspaces_not_allowed)
+                .put(my_workspaces_not_allowed)
+                .patch(my_workspaces_not_allowed)
+                .delete(my_workspaces_not_allowed)
+                .head(my_workspaces_not_allowed)
                 .options(crate::edge::proxy),
         )
         .route(
             THEMES_PATH,
             get(list_themes)
                 .post(create_theme)
-                .put(put_not_allowed)
-                .patch(patch_not_allowed)
-                .delete(delete_not_allowed)
-                .head(head_not_allowed)
+                .put(themes_not_allowed)
+                .patch(themes_not_allowed)
+                .delete(themes_not_allowed)
+                .head(themes_not_allowed)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -208,19 +306,19 @@ pub fn routes() -> Router<AppState> {
             get(retrieve_theme)
                 .patch(partial_update_theme)
                 .delete(destroy_theme)
-                .post(post_not_allowed)
-                .put(put_not_allowed)
-                .head(head_not_allowed)
+                .post(theme_not_allowed)
+                .put(theme_not_allowed)
+                .head(theme_not_allowed)
                 .options(crate::edge::proxy),
         )
         .route(
             EXPORT_PATH,
             post(export_activity)
-                .get(get_not_allowed)
-                .put(put_not_allowed)
-                .patch(patch_not_allowed)
-                .delete(delete_not_allowed)
-                .head(head_not_allowed)
+                .get(export_not_allowed)
+                .put(export_not_allowed)
+                .patch(export_not_allowed)
+                .delete(export_not_allowed)
+                .head(export_not_allowed)
                 .options(crate::edge::proxy),
         )
 }
@@ -2708,26 +2806,49 @@ fn export_sql() -> (String, Vec<String>) {
     positional_placeholders(&sql)
 }
 
-/// `parse_date` for the export `date` (verified live): strict ISO,
-/// 1-2 digit fields, basic `YYYYMMDD`; anything else is the
+/// `parse_date` for the export `date` (every shape below probed
+/// through `DateField.to_python`, Django 4.2.30): dashed
+/// `YYYY-M-D` with a 4-digit year 1-9999 and 1-2 digit month/day, or
+/// basic `YYYYMMDD` with year >= 1; anything else is the
 /// `ValidationError` 400. Non-string truthy input is the `TypeError`
-/// 500 arm (handled by the caller via `py_str` gating).
+/// 500 arm (handled by the caller via `py_str` gating). Accepted gap:
+/// a trailing `\n` is valid in Django (the regex `$` matches before
+/// it) but rejected here — pathological, not chased.
 pub(crate) fn parse_export_date(text: &str) -> Option<chrono::NaiveDate> {
     if text.len() == 8 && text.bytes().all(|byte| byte.is_ascii_digit()) {
+        let year: i32 = text[0..4].parse().ok()?;
+        if year < 1 {
+            return None;
+        }
         return chrono::NaiveDate::from_ymd_opt(
-            text[0..4].parse().ok()?,
+            year,
             text[4..6].parse().ok()?,
             text[6..8].parse().ok()?,
         );
     }
     let mut parts = text.split('-');
-    let year: i32 = parts.next()?.parse().ok()?;
-    let month: u32 = parts.next()?.parse().ok()?;
-    let day: u32 = parts.next()?.parse().ok()?;
+    let (year_seg, month_seg, day_seg) = (parts.next()?, parts.next()?, parts.next()?);
     if parts.next().is_some() {
         return None;
     }
-    if !(1000..=9999).contains(&year) {
+    // Rust's int parser accepts a leading `+`, which Django's `\d`
+    // never matches, so the segments must be pure ASCII digits first.
+    if year_seg.len() != 4
+        || !(1..=2).contains(&month_seg.len())
+        || !(1..=2).contains(&day_seg.len())
+    {
+        return None;
+    }
+    if !year_seg.bytes().all(|byte| byte.is_ascii_digit())
+        || !month_seg.bytes().all(|byte| byte.is_ascii_digit())
+        || !day_seg.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let year: i32 = year_seg.parse().ok()?;
+    let month: u32 = month_seg.parse().ok()?;
+    let day: u32 = day_seg.parse().ok()?;
+    if !(1..=9999).contains(&year) {
         return None;
     }
     chrono::NaiveDate::from_ymd_opt(year, month, day)
@@ -4236,6 +4357,157 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn not_allowed_preludes_deny_before_405() {
+        // DRF runs initial() before the 405 lookup, so unowned methods
+        // deny first: anonymous 401s everywhere, denied members 403,
+        // and only survivors see the 405 bytes. The class checks below
+        // are the exact calls the per-route 405 handlers make (pool
+        // access makes the handlers themselves untestable without a
+        // live database). Both denial bodies are lowercase today via
+        // the shared consts — PIDASHCONV-708 owns the capital fix, so
+        // these literals pin the current bytes truthfully.
+        assert!(matches!(actor_user_id(None), Err(Denial::Unauthorized)));
+        let response = Denial::Unauthorized.into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response_text(response).await,
+            "{\"detail\":\"Authentication credentials were not provided.\"}"
+        );
+        // Authed PUT/PATCH/DELETE on the collection: the class check
+        // runs with workspace_slug=None, so every caller denies ...
+        let collection_scope = gates::tenant_context("");
+        let no_facts = class_facts_for("", None, false);
+        for method in ["PUT", "PATCH", "DELETE"] {
+            assert!(
+                matches!(
+                    gates::decide_class_base(method, &collection_scope, &no_facts),
+                    gates::GateOutcome::DenyClass
+                ),
+                "{method} on the collection denies"
+            );
+        }
+        // ... while POST and the safe methods pass any login ...
+        for method in ["POST", "GET", "HEAD"] {
+            assert!(
+                matches!(
+                    gates::decide_class_base(method, &collection_scope, &no_facts),
+                    gates::GateOutcome::Allow
+                ),
+                "{method} on the collection survives to the 405"
+            );
+        }
+        // ... and the denial renders the shared class-denial bytes.
+        let denied =
+            apply_outcome(gates::GateOutcome::DenyClass).expect_err("deny maps to a response");
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response_text(denied).await,
+            "{\"detail\":\"You do not have permission to perform this action.\"}"
+        );
+        // Outsider GET on export hits the entity safe arm (any
+        // membership), outsider writes hit the Admin/Member arm;
+        // members survive both.
+        let scope = gates::tenant_context("acme");
+        let member = class_facts_for("acme", Some(ROLE_MEMBER), false);
+        let outsider = class_facts_for("acme", None, false);
+        assert!(matches!(
+            gates::decide_class_entity("GET", &scope, &outsider),
+            gates::GateOutcome::DenyClass
+        ));
+        assert!(matches!(
+            gates::decide_class_entity("PUT", &scope, &outsider),
+            gates::GateOutcome::DenyClass
+        ));
+        assert!(matches!(
+            gates::decide_class_entity("GET", &scope, &member),
+            gates::GateOutcome::Allow
+        ));
+        assert!(matches!(
+            gates::decide_class_entity("DELETE", &scope, &member),
+            gates::GateOutcome::Allow
+        ));
+        // Guests read but do not write under the entity permission.
+        let guest = class_facts_for("acme", Some(ROLE_GUEST), false);
+        assert!(matches!(
+            gates::decide_class_entity("GET", &scope, &guest),
+            gates::GateOutcome::Allow
+        ));
+        assert!(matches!(
+            gates::decide_class_entity("PATCH", &scope, &guest),
+            gates::GateOutcome::DenyClass
+        ));
+        // Theme routes: outsiders deny on every method, members survive.
+        assert!(matches!(
+            gates::decide_class_admin(&scope, &outsider),
+            gates::GateOutcome::DenyClass
+        ));
+        assert!(matches!(
+            gates::decide_class_admin(&scope, &member),
+            gates::GateOutcome::Allow
+        ));
+        // Detail POST/HEAD pass any login (no lookup precedes them).
+        assert!(matches!(
+            gates::decide_class_base("POST", &scope, &outsider),
+            gates::GateOutcome::Allow
+        ));
+        assert!(matches!(
+            gates::decide_class_base("HEAD", &scope, &outsider),
+            gates::GateOutcome::Allow
+        ));
+    }
+
+    #[tokio::test]
+    async fn anon_unowned_methods_answer_401_on_every_route() {
+        use axum::http::Request;
+        use tower::ServiceExt;
+        // One unowned method per route (each 405 handler runs at least
+        // once): anonymous callers 401 through the router without ever
+        // touching the database, so no pool is attached.
+        let app = Router::new()
+            .merge(routes())
+            .with_state(AppState::new("test"));
+        for (method, uri) in [
+            ("POST", "/api/workspace-slug-check/"),
+            ("PUT", "/api/workspaces/"),
+            ("POST", "/api/workspaces/acme/"),
+            ("DELETE", "/api/users/me/workspaces/"),
+            ("PUT", "/api/workspaces/acme/workspace-themes/"),
+            (
+                "POST",
+                "/api/workspaces/acme/workspace-themes/11111111-1111-1111-1111-111111111111/",
+            ),
+            (
+                "GET",
+                "/api/workspaces/acme/user-activity/11111111-1111-1111-1111-111111111111/export/",
+            ),
+            (
+                "HEAD",
+                "/api/workspaces/acme/user-activity/11111111-1111-1111-1111-111111111111/export/",
+            ),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .expect("test request");
+            let response = app.clone().oneshot(request).await.expect("route serves");
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+            // Axum strips the body for HEAD (wire-correct: the status
+            // and headers still answer); every other method serves it.
+            let expected = if method == "HEAD" {
+                String::new()
+            } else {
+                "{\"detail\":\"Authentication credentials were not provided.\"}".to_owned()
+            };
+            assert_eq!(response_text(response).await, expected, "{method} {uri}");
+        }
+    }
+
     // -- body negotiation ----------------------------------------------------
 
     fn json_headers() -> HeaderMap {
@@ -4820,6 +5092,28 @@ mod tests {
         assert!(parse_export_date("xyz").is_none());
         assert!(parse_export_date("").is_none());
         assert!(parse_export_date("2026-09-24T00:00").is_none());
+        // Grammar gaps (every shape probed via `DateField.to_python`,
+        // Django 4.2.30): dashed years 1-999 are valid ...
+        assert!(parse_export_date("0001-01-01").is_some());
+        assert!(parse_export_date("0001-1-1").is_some());
+        assert!(parse_export_date("00010101").is_some());
+        // ... 3-digit month/day segments are not ...
+        assert!(parse_export_date("2026-007-04").is_none());
+        assert!(parse_export_date("2026-07-004").is_none());
+        assert!(parse_export_date("2026-1-111").is_none());
+        // ... and year 0 is not, in either arm.
+        assert!(parse_export_date("0000-01-01").is_none());
+        assert!(parse_export_date("00000101").is_none());
+        // Still rejected: non-4-digit years, `+` (Rust's int parser
+        // would accept it, Django's `\d` never does), padding.
+        assert!(parse_export_date("999-01-01").is_none());
+        assert!(parse_export_date("10000-01-01").is_none());
+        assert!(parse_export_date("+2026-01-01").is_none());
+        assert!(parse_export_date("2026-+1-01").is_none());
+        assert!(parse_export_date(" 2026-01-01").is_none());
+        assert!(parse_export_date("2026-01-01 ").is_none());
+        assert!(parse_export_date("2026-00-10").is_none());
+        assert!(parse_export_date("2026-01-00").is_none());
     }
 
     #[test]
