@@ -73,7 +73,8 @@
 //!    (`:52`).
 //! 9. R9: `retrieve` is NOT overridden on the sticky viewset, so it falls
 //!    through to the `ModelViewSet` default — authenticated-only, with NO
-//!    workspace/role check.
+//!    `allow_permission` workspace-membership/role gate (row scoping via
+//!    `get_queryset` still applies).
 //! 10. R10/R11: the autocreate `bulk_create` runs INSIDE the per-key loop
 //!     over the GROWING key list with `ignore_conflicts=True`, and the
 //!     `values_list("key")` existence check re-queries per key (N+1) —
@@ -81,8 +82,8 @@
 //! 11. R11: the sidebar PATCH lookup (`user_preference.py:88`) has NO user
 //!     filter (vs the home PATCH, `home.py:69`) — a member can rewrite
 //!     ANOTHER user's row.
-//! 12. R10: a missing home pref answers 400 `{"detail": "Preference not
-//!     found"}` (`home.py:79`) — 400, not 404.
+//! 12. R10: a missing home pref answers 400 `{"Detail": "Preference not
+//!     found"}` (`home.py:79`) — 400, not 404, and note the capital `D`.
 //! 13. R12: the HARD `entity_name__in=["issue", "page", "project"]` clamp
 //!     (`recent_visit.py:33`) applies AFTER the optional `?entity_name=`
 //!     filter — a non-listed entity name yields `[]`.
@@ -345,8 +346,9 @@ pub fn cycle_count_annotation_sql(group: Option<&str>) -> String {
 }
 
 /// Full representative R5 SELECT: scope + `select_related("project",
-/// "workspace", "owned_by")` (`:25-27`) as joins (`owned_by` is nullable,
-/// `db/models/cycle.py:64-68`, so that join is `LEFT`) + the six
+/// "workspace", "owned_by")` (`:25-27`) as joins (all three FKs
+/// non-nullable — `owned_by` has no `null=True`,
+/// `db/models/cycle.py:65-69` — so every join is inner) + the six
 /// annotations + always-`-created_at` order + `.distinct()` (`:101`) —
 /// contrast the module list, which has no distinct.
 pub fn cycle_list_sql() -> String {
@@ -357,7 +359,7 @@ pub fn cycle_list_sql() -> String {
             .map(|g| cycle_count_annotation_sql(Some(g))),
     );
     format!(
-        "SELECT DISTINCT cycles.*, {} FROM cycles JOIN projects ON projects.id = cycles.project_id JOIN workspaces ON workspaces.id = cycles.workspace_id LEFT JOIN users owner ON owner.id = cycles.owned_by_id LEFT JOIN cycle_issues ic ON ic.cycle_id = cycles.id LEFT JOIN issues i ON i.id = ic.issue_id LEFT JOIN states s ON s.id = i.state_id WHERE {} GROUP BY cycles.id ORDER BY {}",
+        "SELECT DISTINCT cycles.*, {} FROM cycles JOIN projects ON projects.id = cycles.project_id JOIN workspaces ON workspaces.id = cycles.workspace_id JOIN users owner ON owner.id = cycles.owned_by_id LEFT JOIN cycle_issues ic ON ic.cycle_id = cycles.id LEFT JOIN issues i ON i.id = ic.issue_id LEFT JOIN states s ON s.id = i.state_id WHERE {} GROUP BY cycles.id ORDER BY {}",
         annotations.join(", "),
         cycle_scope_where(),
         CYCLE_LIST_ORDER_SQL,
@@ -771,13 +773,14 @@ pub const STICKY_LIST_PER_PAGE: i32 = 20;
 /// explicit order. `filter_queryset` (`:22`) is a NO-OP here — the viewset
 /// defines no `filterset_fields`/`search_fields`, so neither backend
 /// filter applies. Handlers AND [`sticky_query_where`] when `?query=` is
-/// present.
+/// truthy (empty adds no filter, `:42`, `:44`).
 ///
 /// NOTE (ported bug 9): `retrieve` is NOT overridden, so it falls through
 /// to the `ModelViewSet` default — authenticated-only, with NO
-/// workspace/role scoping. `partial_update`/`destroy` (`:54-60`) run the
-/// stock actions over this scope behind creator-only gates (guards
-/// territory).
+/// `allow_permission` workspace-membership/role gate (row scoping via this
+/// scope still applies through `get_object`). `partial_update`/`destroy`
+/// (`:54-60`) run the stock actions over this scope behind creator-only
+/// gates (guards territory).
 pub fn sticky_list_sql() -> String {
     format!(
         "SELECT DISTINCT stickies.*, workspaces.*, owners.* FROM stickies JOIN workspaces ON workspaces.id = stickies.workspace_id JOIN users owners ON owners.id = stickies.owner_id WHERE {} ORDER BY {}",
@@ -893,8 +896,8 @@ pub fn home_pref_response_sql() -> String {
 
 /// R10 PATCH lookup (`:69`): `filter(key, slug, user).first()` — `LIMIT 1`
 /// over default `-created_at` order. NOTE the user filter (contrast the
-/// sidebar PATCH). A miss answers 400 `{"detail": "Preference not found"}`
-/// (`:79`, ported bug 12 — 400, not 404); a hit saves through the
+/// sidebar PATCH). A miss answers 400 `{"Detail": "Preference not found"}`
+/// (`:79`, ported bug 12 — 400, not 404, capital `D`); a hit saves through the
 /// serializer (full save, `updated_at` stamped).
 pub fn home_pref_patch_lookup_sql() -> String {
     format!(
@@ -1024,14 +1027,15 @@ pub const RECENT_VISITS_CAP: i32 = 20;
 
 /// R12 scope: `filter(workspace__slug, user)` (`:26`) + the optional
 /// `?entity_name=` narrowing (`:28-31`) + the HARD allowlist clamp (`:33`,
-/// ported bug 13). Pass the entity param through when present; the clamp
-/// applies regardless — a non-listed `?entity_name=` yields `[]`.
+/// ported bug 13). The narrowing applies only when the param is TRUTHY
+/// (`if entity_name:`, `:30` — an empty `?entity_name=` adds no filter);
+/// the clamp applies regardless — a non-listed `?entity_name=` yields `[]`.
 pub fn recent_visits_where(entity: Option<&str>) -> String {
     let mut where_clause = format!(
         "user_recent_visits.workspace_id = {} AND user_recent_visits.user_id = :user AND user_recent_visits.deleted_at IS NULL",
         workspace_id_by_slug_sql()
     );
-    if entity.is_some() {
+    if entity.is_some_and(|e| !e.is_empty()) {
         where_clause.push_str(" AND user_recent_visits.entity_name = :entity");
     }
     where_clause.push_str(" AND user_recent_visits.entity_name IN ('issue', 'page', 'project')");
@@ -1290,7 +1294,8 @@ mod tests {
         }
         let sql = cycle_list_sql();
         assert!(sql.starts_with("SELECT DISTINCT cycles.*"));
-        assert!(sql.contains("LEFT JOIN users owner ON owner.id = cycles.owned_by_id"));
+        assert!(sql.contains("JOIN users owner ON owner.id = cycles.owned_by_id"));
+        assert!(!sql.contains("LEFT JOIN users owner"));
         assert!(sql.ends_with("ORDER BY cycles.created_at DESC"));
     }
 
@@ -1577,6 +1582,8 @@ mod tests {
             assert!(sql.contains("user_recent_visits.entity_name IN ('issue', 'page', 'project')"));
         }
         assert!(!recent_visits_where(None).contains(":entity"));
+        // `if entity_name:` is a truthiness check — an empty param adds no filter.
+        assert_eq!(recent_visits_where(Some("")), recent_visits_where(None));
         assert!(
             recent_visits_where(Some("cycle")).contains("user_recent_visits.entity_name = :entity")
         );
