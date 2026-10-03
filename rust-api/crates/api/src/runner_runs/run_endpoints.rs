@@ -323,17 +323,18 @@ pub fn approval_id(data: &Value) -> Result<Uuid, FrameError> {
 }
 
 /// `request.data.get("expires_at")` as an optional timestamptz input
-/// (`run_endpoints.py:266`): null, `""`, `[]` and `{}` bind NULL
-/// (Django's `empty_values`), strings bind as text for Postgres to
-/// parse, everything else is the source's `ValidationError` (500).
+/// (`run_endpoints.py:266`, `chat.py:649`): only a missing key or
+/// `null` binds NULL. Both endpoints pass the raw JSON value into
+/// `update_or_create` on a plain `DateTimeField(null=True)`
+/// (`models.py:1240,1413`), whose `to_python` returns `None` solely
+/// for `None` — `""` raises `ValidationError`, `[]`/`{}` raise
+/// `TypeError` (both uncaught, 500). Strings bind as text for
+/// Postgres to parse; everything else is the source's 500.
 pub fn expires_at_text(data: &Value) -> Result<Option<String>, FrameError> {
     let raw = data.as_object().ok_or(FrameError)?.get("expires_at");
     match raw {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) if text.is_empty() => Ok(None),
-        Some(Value::Array(items)) if items.is_empty() => Ok(None),
-        Some(Value::Object(map)) if map.is_empty() => Ok(None),
-        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(Value::String(text)) if !text.is_empty() => Ok(Some(text.clone())),
         Some(_) => Err(FrameError),
     }
 }
@@ -2990,29 +2991,21 @@ mod tests {
     }
 
     #[test]
-    fn expires_at_text_nulls_empties_and_rejects() {
+    fn expires_at_text_nulls_and_rejects() {
         assert_eq!(expires_at_text(&json!({})).expect("missing"), None);
         assert_eq!(
             expires_at_text(&json!({"expires_at": null})).expect("null"),
             None
         );
         assert_eq!(
-            expires_at_text(&json!({"expires_at": ""})).expect("empty"),
-            None
-        );
-        assert_eq!(
             expires_at_text(&json!({"expires_at": "2026-01-01T00:00:00Z"})).expect("iso"),
             Some("2026-01-01T00:00:00Z".to_owned())
         );
-        // Django `empty_values`: `[]` and `{}` bind NULL.
-        assert_eq!(
-            expires_at_text(&json!({"expires_at": []})).expect("empty array"),
-            None
-        );
-        assert_eq!(
-            expires_at_text(&json!({"expires_at": {}})).expect("empty object"),
-            None
-        );
+        // `DateTimeField.to_python` on the raw value: `""` is a
+        // `ValidationError`, `[]`/`{}` a `TypeError` — all 500.
+        assert!(expires_at_text(&json!({"expires_at": ""})).is_err());
+        assert!(expires_at_text(&json!({"expires_at": []})).is_err());
+        assert!(expires_at_text(&json!({"expires_at": {}})).is_err());
         assert!(expires_at_text(&json!({"expires_at": 5})).is_err());
         assert!(expires_at_text(&json!({"expires_at": [1]})).is_err());
         assert!(expires_at_text(&json!({"expires_at": {"a": 1}})).is_err());
