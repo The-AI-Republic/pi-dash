@@ -51,6 +51,7 @@ pub mod issue_filters;
 pub mod license;
 pub mod r#loop;
 pub mod migrations;
+pub mod orchestration;
 pub mod pool;
 pub mod prompting;
 pub mod redis;
