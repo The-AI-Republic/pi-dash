@@ -13,3 +13,15 @@
 
 pub mod gates;
 pub mod handlers_prefs;
+pub mod handlers_user_extras;
+
+use axum::Router;
+
+use crate::state::AppState;
+
+/// App workspace routes: each handler file exposes its own `routes()`
+/// (sibling D-24 handler issues extend this merge; merges keep both
+/// sides), merged here for the F-10 overlay seam.
+pub fn routes() -> Router<AppState> {
+    handlers_prefs::routes().merge(handlers_user_extras::routes())
+}

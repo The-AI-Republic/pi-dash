@@ -211,7 +211,10 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // description (PIDASHCONV-332) + state ops (PIDASHCONV-328)
         // in `app_pages`; D-36 scheduler definitions (PIDASHCONV-633) +
         // scheduler bindings (PIDASHCONV-634) + occurrences
-        // (PIDASHCONV-635) in `app_scheduler`; sibling handler issues
+        // (PIDASHCONV-635) in `app_scheduler`; D-24 accounts/profile/
+        // graphs/dashboard (PIDASHCONV-620) in `app_workspace`
+        // (siblings 615-619/621-624 extend that module's merge,
+        // keeping both sides); sibling handler issues
         // extend the merge; merges keep both sides).
         RouteGroup::App => crate::app_issues::routes()
             .merge(crate::app_views_search::routes())
@@ -223,7 +226,8 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::app_assets::routes())
             .merge(crate::app_analytics::routes())
             .merge(crate::app_pages::routes())
-            .merge(crate::app_scheduler::routes()),
+            .merge(crate::app_scheduler::routes())
+            .merge(crate::app_workspace::routes()),
         RouteGroup::License => crate::license::routes(),
         // Space handlers merge their routers here (intake: PIDASHCONV-177;
         // sibling handler issues extend the merge; merges keep both sides).
