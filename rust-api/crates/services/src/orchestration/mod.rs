@@ -12,6 +12,11 @@
 //!   grouped list, activity enqueue).
 //! * [`clock`] — `orchestration/scheduling.py` clock core (`reconcile`,
 //!   the five event handlers, clock primitives, thin senders).
+//! * [`creation`] — `orchestration/service.py` creation core (run
+//!   builders, parenting/pin/config, resolvers, project-move handoff)
+//!   as async drivers over the [`creation::CreationSeam`] /
+//!   [`creation::FinalizeAgentRunSeam`] traits; the jobs-side
+//!   `LiveCreationStore` implements them over live SQL.
 //!
 //! Read-only queries ([`blockers`]) plus handler-executed write SQL
 //! ([`relations`]: relate `INSERT`, unrelate soft-delete `UPDATE`,
@@ -34,13 +39,44 @@
 //! [`blockers`], FX-ORCH-04
 //! (`rust-api/fixtures/orchestration/fx04_relations/`) alongside
 //! [`relations`], FX-ORCH-05
-//! (`rust-api/fixtures/orchestration/fx05_clock/`) alongside [`clock`].
+//! (`rust-api/fixtures/orchestration/fx05_clock/`) alongside [`clock`],
+//! FX-ORCH-06
+//! (`rust-api/fixtures/orchestration/fx06_creation/`) alongside
+//! [`creation`].
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod blockers;
 pub mod clock;
+pub mod creation;
 pub mod relations;
+
+pub use creation::{
+    active_run_sql, complete_project_move_handoff, create_and_dispatch_run,
+    create_continuation_run, create_project_move_handoff_run, fallback_creator_select,
+    handoff_marker, is_automatic_issue_trigger, is_human_triggered, latest_prior_run_sql,
+    parent_done_payload, parent_for_next_run, phase_kind_for_issue, pinned_runner_for,
+    render_first_turn, resolve_pod_for_issue, resolve_pod_select, run_config_for_issue,
+    run_insert_returning_sql, run_lock_sql, run_select_sql, select_parent_for_next_run,
+    stamp_handoff_marker, tick_value, user_id_for_run, ActorRequest, AdmissionError,
+    ContinuationRequest, CreateDispatchRequest, CreationError, CreationSeam, ExecutionError,
+    ExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, HandoffCreateRequest, IssueView,
+    LockedIssue, NewAgentRun, ParentCandidate, PodView, ProjectView, RenderBundle, RenderedTurn,
+    RunRenderRef, RunView, RunnerView, StateView, TickerBudget, ASSIGNED_POD_SELECT_SQL,
+    BUNDLE_ANCESTOR_HOP_SQL, BUNDLE_ASSIGNEES_SQL, BUNDLE_CHILDREN_SQL, BUNDLE_CODE_REVIEWS_SQL,
+    BUNDLE_COMMENTS_SQL, BUNDLE_DONE_PAYLOAD_SQL, BUNDLE_LABELS_SQL, BUNDLE_OVERRIDES_SQL,
+    BUNDLE_PARENT_COLS_SQL, BUNDLE_PARENT_DESCRIPTION_SQL, BUNDLE_PRIOR_RUN_COUNT_SQL,
+    BUNDLE_PROJECT_IDENTIFIER_SQL, BUNDLE_PROJECT_STATES_SQL, BUNDLE_RELATIONS_SQL,
+    BUNDLE_RELATION_TARGETS_SQL, BUNDLE_REMOTE_SQL, BUNDLE_SEQUENCE_SQL, BUNDLE_TICKER_SQL,
+    BUNDLE_WORKSPACE_SQL, DEFAULT_POD_SELECT_SQL, ERROR_CODE_PROMPT_BUILD_FAILED,
+    FINALIZE_UPDATE_SQL, ISSUE_LOCK_SQL, ISSUE_SELECT_SQL, OWNER_UNASSIGNED,
+    PROJECT_MOVE_HANDOFF_CONFIG_KEY, PROJECT_SELECT_SQL, PROMPT_UPDATE_SQL, REASON_CREATED,
+    REASON_RENDER_FAILED, RUNNER_SELECT_SQL, RUNNER_STATUS_REVOKED, RUN_CONFIG_UPDATE_SQL,
+    RUN_INSERT_SQL, RUN_VIEW_COLUMNS, STATE_SELECT_SQL, STATUS_QUEUED,
+    SUPPRESSED_ISSUE_MOVED_AGAIN, TERMINAL_EVENT_EXISTS_SQL, TERMINAL_EVENT_INSERT_SQL,
+    TERMINAL_EVENT_SEQ_SQL, TICKER_RESUME_SELECT_SQL, USER_FLAGS_SELECT_SQL,
+    WORK_ITEM_ID_SELECT_SQL,
+};
 
 pub use blockers::{
     blocked_by_edges_sql, blockers_sql, blocking_edges_sql, dependents_sql, edge_included,

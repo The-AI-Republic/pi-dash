@@ -55,6 +55,7 @@ pub mod loop_fire;
 /// the single file the issue owns, no `mod.rs`.
 #[path = "loop/scan.rs"]
 pub mod loop_scan;
+pub mod orchestration;
 pub mod queue;
 /// Approval expiry + runner/session sweeps (D-15 L6a, PIDASHCONV-539):
 /// task bodies + `worker::Registry` handlers over the L4 planners.
