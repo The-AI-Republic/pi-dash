@@ -20,8 +20,9 @@
 //! `$n` in `*_PARAMS` order. The closed-group set reuses
 //! [`pidash_db::app_project::models::state::StateGroup`] — never
 //! re-ported — and the stored/inverse mapping reuses the merged
-//! assistant `actual_relation` / `inverse_relation` helpers (the only
-//! intra-crate call here; no D-11 edge).
+//! assistant `actual_relation` / `inverse_relation` helpers, plus
+//! `py_strip` for `strip()` parity (the only intra-crate calls here;
+//! no D-11 edge).
 //!
 //! Fixture ids replayed by the unit tests: FX-ORCH-03
 //! (`rust-api/fixtures/orchestration/fx03_blockers/`) alongside

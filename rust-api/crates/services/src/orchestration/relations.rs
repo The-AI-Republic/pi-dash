@@ -36,7 +36,9 @@
 //!
 //! The stored/inverse mapping reuses the merged assistant helpers
 //! ([`actual_relation`] / [`inverse_relation`] from
-//! `assistant::tools_issues`) — never re-ported. Everything else is
+//! `assistant::tools_issues`) — never re-ported — as does the
+//! `strip()` parity helper [`py_strip`] (Python also strips
+//! U+001C–U+001F, which `str::trim` leaves). Everything else is
 //! this module's own port: the vocabulary is owned here (as
 //! `relations.py` owns it in Python), the SQL uses this module's
 //! `:name` convention (the assistant inline port uses `$n`), results
@@ -89,7 +91,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use crate::assistant::tools_issues::{actual_relation, inverse_relation};
+use crate::assistant::tools_issues::{actual_relation, inverse_relation, py_strip};
 
 // ---------------------------------------------------------------------------
 // Vocabulary (`relations.py:55-74`)
@@ -138,13 +140,14 @@ impl RelationError {
     }
 }
 
-/// `validate_relation_type` (`relations.py:81-85`): stripped,
+/// `validate_relation_type` (`relations.py:81-85`): stripped with
+/// [`py_strip`] (Python's `strip()` set, U+001C–U+001F included),
 /// lowercased; the message joins [`RELATION_TYPES`] in tuple order.
 /// Byte-exact. Python also accepts `None` (same message); `None` is
 /// unrepresentable at this `&str` boundary — a JSON `null` is rejected
 /// by deserialization upstream.
 pub fn validate_relation_type(relation_type: &str) -> Result<String, RelationError> {
-    let value = relation_type.trim().to_lowercase();
+    let value = py_strip(relation_type).to_lowercase();
     if RELATION_TYPES.contains(&value.as_str()) {
         Ok(value)
     } else {
@@ -281,14 +284,17 @@ pub struct ClassifiedRef {
 }
 
 /// The per-reference half of `resolve_refs` (`relations.py:148-158`).
-/// `Uuid::parse_str` accepts exactly the spellings CPython's
+/// `Uuid::parse_str` accepts the well-formed spellings CPython's
 /// `uuid.UUID` does (simple, hyphenated, `{braced}`, lowercase
 /// `urn:uuid:` — uppercase `URN:UUID:` fails on both sides, verified
-/// against uuid 1.23 `parser.rs`). The identifier split mirrors
+/// against uuid 1.23 `parser.rs`); CPython is additionally lenient
+/// about misplaced hyphens and stray `uuid:`/`{}` fragments, which
+/// stay unresolved here, matching the merged assistant precedent.
+/// The identifier split mirrors
 /// `rpartition("-")` plus the `sep and project_ident and
 /// seq.isdigit()` gate, with ASCII-only digits (quirk 4).
 pub fn classify_ref(raw: &str) -> ClassifiedRef {
-    let stripped = raw.trim();
+    let stripped = py_strip(raw);
     if stripped.is_empty() {
         return ClassifiedRef {
             stripped: String::new(),
@@ -324,7 +330,7 @@ pub fn classify_ref(raw: &str) -> ClassifiedRef {
 /// — the stripped text, or the raw text when nothing is left after
 /// stripping.
 pub fn unresolved_passthrough(raw: &str) -> String {
-    let stripped = raw.trim();
+    let stripped = py_strip(raw);
     if stripped.is_empty() {
         raw.to_owned()
     } else {
@@ -1142,6 +1148,28 @@ mod tests {
             errors["''"].as_str(),
             "None shares the invalid-type message"
         );
+    }
+
+    /// Python's `strip()` set includes U+001C–U+001F, which
+    /// `str::trim` leaves; [`py_strip`] keeps parity (verified against
+    /// CPython: `" \u{1c}FX4A-1\u{1c} ".strip() == "FX4A-1"`).
+    #[test]
+    fn strip_parity_covers_separator_controls() {
+        assert_eq!(
+            validate_relation_type("\u{1c}Blocking\u{1f}").expect("valid type"),
+            "blocking"
+        );
+        let classified = classify_ref("\u{1c}FX4A-1\u{1d}");
+        assert_eq!(classified.stripped, "FX4A-1");
+        assert_eq!(
+            classified.kind,
+            RefKind::Identifier {
+                project_code: "FX4A".to_owned(),
+                sequence_id: 1,
+            }
+        );
+        // All-separators: `ref or str(raw)` keeps the raw text.
+        assert_eq!(unresolved_passthrough("\u{1c}  \u{1e}"), "\u{1c}  \u{1e}");
     }
 
     #[test]
