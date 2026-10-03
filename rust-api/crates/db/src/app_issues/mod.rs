@@ -14,13 +14,14 @@
 //! * [`models_engage`] — `IssueComment`, `CommentReaction`,
 //!   `IssueReaction`, `IssueVote`, `IssueSubscriber` (PIDASHCONV-646).
 //!
-//! The sibling models issue (PIDASHCONV-647) adds its own `models_*.rs`
-//! file here and re-exports its row structs below next to
-//! [`models_core`]'s.
+//! * [`models_read`] — `IssueActivity`, `IssueVersion`,
+//!   `IssueDescriptionVersion`, `CycleIssue`, `ModuleIssue`
+//!   (PIDASHCONV-647).
 
 pub mod models_core;
 pub mod models_engage;
 pub mod models_links;
+pub mod models_read;
 
 pub use models_core::{
     issue::Issue, issue_assignee::IssueAssignee, issue_label::IssueLabel, label::Label,
@@ -34,4 +35,9 @@ pub use models_links::{
     file_asset::FileAsset, git_code_review_link::GitCodeReviewLink,
     github_pull_request_link::GithubPullRequestLink, issue_link::IssueLink,
     issue_relation::IssueRelation,
+};
+pub use models_read::{
+    cycle_issue::CycleIssue, issue_activity::IssueActivity,
+    issue_description_version::IssueDescriptionVersion, issue_version::IssueVersion,
+    module_issue::ModuleIssue,
 };
