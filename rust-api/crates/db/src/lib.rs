@@ -21,6 +21,7 @@
 //! - [`tx`]: transaction wrapper with post-commit actions.
 //! - [`migrations`]: private migration directory convention (F-10).
 //! - [`v1_assets`]: api-v1 file-asset / sticky / intake models (D-21).
+//! - [`v1_cli_auth`]: api-v1 CLI auth + runner v1 Runner read model (D-22).
 //! - [`v1_cycles_modules`]: api-v1 cycles + modules models (D-20).
 //! - [`v1_projects`]: api-v1 projects/members/states/estimates models (D-19).
 //!
@@ -55,6 +56,7 @@ pub mod tasks_cleanup;
 pub mod tasks_ticker;
 pub mod tx;
 pub mod v1_assets;
+pub mod v1_cli_auth;
 pub mod v1_cycles_modules;
 pub mod v1_projects;
 
