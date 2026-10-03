@@ -78,6 +78,22 @@ async function restoreTimeline(seed: ParitySeedFacts, projectId: string, ctx: Ti
   });
 }
 
+/** Switch one timeline preference and reload so the timeline re-renders. */
+async function setTimelineFilters(
+  driver: ParityDriver,
+  seed: ParitySeedFacts,
+  projectId: string,
+  ctx: TimelineContext,
+  filters: Record<string, unknown>
+): Promise<void> {
+  const current = await serverProjectUserProperties(seed.workspaceSlug, projectId, ctx.user.cookie);
+  await serverPatchProjectUserProperties(seed.workspaceSlug, projectId, ctx.user.cookie, {
+    display_filters: { ...current.displayFilters, ...filters },
+  });
+  await driver.boardReloadIssues();
+  await driver.ganttOpenTimeline();
+}
+
 /** Server-side UUID of an issue looked up by its name. */
 async function issueIdByName(seed: ParitySeedFacts, projectId: string, cookie: string, name: string): Promise<string> {
   const rows = await serverIssues(seed.workspaceSlug, projectId, cookie);
@@ -159,13 +175,16 @@ test(
       const week = await driver.ganttDayWidth();
       await driver.ganttSetZoom("Month");
       expect(await driver.ganttActiveZoom()).toBe("Month");
+      expect(await driver.ganttTodayVisible()).toBe(true);
       const month = await driver.ganttDayWidth();
       await driver.ganttSetZoom("Quarter");
       expect(await driver.ganttActiveZoom()).toBe("Quarter");
+      expect(await driver.ganttTodayVisible()).toBe(true);
       const quarter = await driver.ganttDayWidth();
       expect(week).toBeGreaterThan(month);
       expect(month).toBeGreaterThan(quarter);
       await driver.ganttSetZoom("Week");
+      expect(await driver.ganttTodayVisible()).toBe(true);
     });
 
     await test.step("weekends tint and weeks start per the user profile", async () => {
@@ -319,6 +338,65 @@ test(
 );
 
 test(
+  specTitle(["ISS-050"], "reorder issues from the gantt sidebar"),
+  { tag: specTags(["ISS-050"]) },
+  async ({ driver, seed }) => {
+    const owner = await signInFreshUser(seed.email, seed.password);
+    const [first, second, third] = seed.issueNames;
+    if (!first || !second || !third) throw new Error("[parity] seed names missing.");
+    const ids = await Promise.all(
+      [first, second, third].map((name) => issueIdByName(seed, seed.projectId, owner.cookie, name))
+    );
+    const ranks = await Promise.all(
+      ids.map(async (id) => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).sortOrder)
+    );
+    const ctx = await openTimeline(driver, seed, seed.projectId);
+    await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
+
+    await test.step("manual order persists the new sequence", async () => {
+      expect((await driver.ganttSidebarRows()).map((row) => row.name)).toEqual([first, second, third]);
+      await driver.ganttDragRowBefore(third, first);
+      await expect
+        .poll(async () => (await driver.ganttSidebarRows()).map((row) => row.name), { timeout: 60_000 })
+        .toEqual([third, first, second]);
+      const moved = await serverIssueDetails(seed.workspaceSlug, seed.projectId, ids[2] ?? "", owner.cookie);
+      expect(moved.sortOrder).toBeLessThan(ranks[0] ?? 0);
+    });
+
+    await test.step("a sorted timeline suppresses the reorder", async () => {
+      // Outside manual sort the sidebar DnD instance is disabled: the drop
+      // changes neither the row order nor the server ranks, and no toast
+      // appears (the row's toast clause was corrected — see its note).
+      await setTimelineFilters(driver, seed, seed.projectId, ctx, { order_by: "-created_at" });
+      const rows = (await driver.ganttSidebarRows()).map((row) => row.name);
+      expect(rows).toHaveLength(3);
+      const before = await Promise.all(
+        ids.map(
+          async (id) => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).sortOrder
+        )
+      );
+      await driver.ganttAttemptRowBefore(rows[2] ?? "", rows[0] ?? "");
+      expect((await driver.ganttSidebarRows()).map((row) => row.name)).toEqual(rows);
+      const after = await Promise.all(
+        ids.map(
+          async (id) => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).sortOrder
+        )
+      );
+      expect(after).toEqual(before);
+    });
+
+    await test.step("cleanup restores orders and preferences", async () => {
+      await Promise.all(
+        ids.map((id, index) =>
+          serverPatchIssue(seed.workspaceSlug, seed.projectId, id, { sort_order: ranks[index] ?? 0 }, owner.cookie)
+        )
+      );
+      await restoreTimeline(seed, seed.projectId, ctx);
+    });
+  }
+);
+
+test(
   specTitle(["ISS-051"], "move a gantt bar to reschedule"),
   { tag: specTags(["ISS-051"]) },
   async ({ driver, seed }) => {
@@ -340,10 +418,62 @@ test(
 
     await test.step("dragging shifts both dates by the same offset", async () => {
       await driver.ganttDragBar(name, 3);
-      const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie);
-      expect(details.startDate).toBe(isoDay(1));
-      expect(details.targetDate).toBe(isoDay(7));
+      // The batch persist lands just after the drop; poll the server truth.
+      // (The bar itself snaps back — NEWFRONT-161 pins that stale UI.)
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).startDate, {
+          timeout: 60_000,
+        })
+        .toBe(isoDay(1));
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).targetDate, {
+          timeout: 60_000,
+        })
+        .toBe(isoDay(7));
       expect(await driver.ganttBarExists(name)).toBe(true);
+    });
+
+    await test.step("cleanup clears the dates and restores preferences", async () => {
+      await serverPatchIssue(
+        seed.workspaceSlug,
+        seed.projectId,
+        id,
+        { start_date: null, target_date: null },
+        owner.cookie
+      );
+      await restoreTimeline(seed, seed.projectId, ctx);
+    });
+  }
+);
+
+test(
+  specTitle(["ISS-051"], "bug:161 the bar snaps back after a move while the server persists"),
+  { tag: specTags(["ISS-051"]) },
+  async ({ driver, seed }) => {
+    const owner = await signInFreshUser(seed.email, seed.password);
+    const name = seed.issueNames[0] ?? "";
+    const id = await issueIdByName(seed, seed.projectId, owner.cookie, name);
+    await serverPatchIssue(
+      seed.workspaceSlug,
+      seed.projectId,
+      id,
+      { start_date: isoDay(-2), target_date: isoDay(4) },
+      owner.cookie
+    );
+    const ctx = await openTimeline(driver, seed, seed.projectId);
+    await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
+
+    await test.step("the drop persists but the bar shows the old offset", async () => {
+      const before = await driver.ganttBarOffset(name);
+      await driver.ganttDragBar(name, 2);
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).startDate, {
+          timeout: 60_000,
+        })
+        .toBe(isoDay(0));
+      // Intended: the bar stays at the dropped offset. Observed: it snaps
+      // back to the pre-drag offset and stays stale until a reload.
+      await expect.poll(() => driver.ganttBarOffset(name), { timeout: 30_000 }).toEqual(before);
     });
 
     await test.step("cleanup clears the dates and restores preferences", async () => {
@@ -382,9 +512,16 @@ test(
 
     await test.step("dragging moves the start and keeps the target", async () => {
       await driver.ganttResizeBar(name, "left", 2);
-      const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie);
-      expect(details.startDate).toBe(isoDay(-2));
-      expect(details.targetDate).toBe(isoDay(4));
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).startDate, {
+          timeout: 60_000,
+        })
+        .toBe(isoDay(-2));
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).targetDate, {
+          timeout: 60_000,
+        })
+        .toBe(isoDay(4));
     });
 
     await test.step("cleanup clears the dates and restores preferences", async () => {
@@ -419,9 +556,16 @@ test(
 
     await test.step("dragging moves the target and keeps the start", async () => {
       await driver.ganttResizeBar(name, "right", 3);
-      const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie);
-      expect(details.startDate).toBe(isoDay(-4));
-      expect(details.targetDate).toBe(isoDay(5));
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).startDate, {
+          timeout: 60_000,
+        })
+        .toBe(isoDay(-4));
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).targetDate, {
+          timeout: 60_000,
+        })
+        .toBe(isoDay(5));
     });
 
     await test.step("a half-dated bar gains its missing date", async () => {
@@ -430,9 +574,59 @@ test(
       await driver.ganttOpenTimeline();
       await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
       await driver.ganttResizeBar(name, "right", 4);
-      const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie);
-      expect(details.startDate).toBe(isoDay(-4));
-      expect(details.targetDate).not.toBeNull();
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).startDate, {
+          timeout: 60_000,
+        })
+        .toBe(isoDay(-4));
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).targetDate, {
+          timeout: 60_000,
+        })
+        .not.toBeNull();
+    });
+
+    await test.step("cleanup clears the dates and restores preferences", async () => {
+      await serverPatchIssue(
+        seed.workspaceSlug,
+        seed.projectId,
+        id,
+        { start_date: null, target_date: null },
+        owner.cookie
+      );
+      await restoreTimeline(seed, seed.projectId, ctx);
+    });
+  }
+);
+
+test(
+  specTitle(["ISS-053"], "bug:161 the bar keeps its old width after a resize while the server persists"),
+  { tag: specTags(["ISS-053"]) },
+  async ({ driver, seed }) => {
+    const owner = await signInFreshUser(seed.email, seed.password);
+    const name = seed.issueNames[2] ?? "";
+    const id = await issueIdByName(seed, seed.projectId, owner.cookie, name);
+    await serverPatchIssue(
+      seed.workspaceSlug,
+      seed.projectId,
+      id,
+      { start_date: isoDay(-4), target_date: isoDay(2) },
+      owner.cookie
+    );
+    const ctx = await openTimeline(driver, seed, seed.projectId);
+    await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
+
+    await test.step("the drop persists but the bar shows the old width", async () => {
+      const before = await driver.ganttBarOffset(name);
+      await driver.ganttResizeBar(name, "right", 2);
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).targetDate, {
+          timeout: 60_000,
+        })
+        .toBe(isoDay(4));
+      // Intended: the bar stays at the dropped width. Observed: it snaps
+      // back to the pre-drag width and stays stale until a reload.
+      await expect.poll(() => driver.ganttBarOffset(name), { timeout: 30_000 }).toEqual(before);
     });
 
     await test.step("cleanup clears the dates and restores preferences", async () => {
@@ -465,19 +659,22 @@ test(
       expect(await driver.ganttBarExists(weekTitle)).toBe(true);
       const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, weekId, owner.cookie);
       expect(details.startDate).not.toBeNull();
-      expect(details.targetDate).toBe(details.startDate);
+      expect(details.targetDate).not.toBeNull();
+      // The planted block spans start..start+1 (a one-day difference).
+      const span = (Date.parse(details.targetDate ?? "") - Date.parse(details.startDate ?? "")) / 86_400_000;
+      expect(span).toBe(1);
     });
 
     await test.step("quarter view plants a week-long block", async () => {
       const quarterTitle = `GT quarter ${uniqueSuffix().slice(0, 6)}`;
       const quarterId = await serverCreateIssue(seed.workspaceSlug, seed.projectId, owner.cookie, quarterTitle, home);
       await driver.ganttSetZoom("Quarter");
-      await driver.ganttAddBlock(quarterTitle, 2);
+      await driver.ganttAddBlock(quarterTitle, 8);
       const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, quarterId, owner.cookie);
       expect(details.startDate).not.toBeNull();
       expect(details.targetDate).not.toBeNull();
       const span = (Date.parse(details.targetDate ?? "") - Date.parse(details.startDate ?? "")) / 86_400_000;
-      expect(span).toBe(6);
+      expect(span).toBe(7);
       await serverDeleteIssue(seed.workspaceSlug, seed.projectId, quarterId, owner.cookie);
     });
 
@@ -645,6 +842,28 @@ test(
         expect(await driver.ganttHandlesVisible(dated)).toBe(false);
         expect(await driver.ganttRowAddVisible(plain)).toBe(false);
         expect(await driver.ganttHasQuickAdd()).toBe(false);
+        // Reorder and reschedule attempts change nothing for guests.
+        const order = (await driver.ganttSidebarRows()).map((row) => row.name);
+        const rankOf = async (name: string): Promise<number> =>
+          (
+            await serverIssueDetails(
+              seed.workspaceSlug,
+              seed.projectId,
+              await issueIdByName(seed, seed.projectId, owner.cookie, name),
+              owner.cookie
+            )
+          ).sortOrder;
+        const ranks = await Promise.all(order.map((name) => rankOf(name)));
+        const datesBefore = await serverIssueDetails(seed.workspaceSlug, seed.projectId, datedId, owner.cookie);
+        await driver.ganttAttemptRowBefore(order[2] ?? "", order[0] ?? "");
+        expect((await driver.ganttSidebarRows()).map((row) => row.name)).toEqual(order);
+        await driver.ganttAttemptBarMove(dated, 2);
+        const datesAfter = await serverIssueDetails(seed.workspaceSlug, seed.projectId, datedId, owner.cookie);
+        expect(datesAfter.startDate).toBe(datesBefore.startDate);
+        expect(datesAfter.targetDate).toBe(datesBefore.targetDate);
+        await expect
+          .poll(async () => Promise.all(order.map((name) => rankOf(name))), { timeout: 30_000 })
+          .toEqual(ranks);
       } finally {
         await serverPatchProject(seed.workspaceSlug, seed.projectId, owner.cookie, { guest_view_all_features: false });
       }
@@ -669,23 +888,46 @@ test(
   async ({ driver, seed }) => {
     const owner = await signInFreshUser(seed.email, seed.password);
     const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
-    const projectId = await serverCreateProject(seed.workspaceSlug, owner.cookie, `GT empty ${suffix}`, `GE${suffix}`);
-    await openTimeline(driver, seed, projectId);
-    await expect.poll(() => driver.ganttTimelineVisible(), { timeout: 120_000 }).toBe(true);
 
-    await test.step("an empty project shows no rows and a zero count", async () => {
-      expect(await driver.ganttSidebarRows()).toHaveLength(0);
-      expect((await driver.ganttHeader()).count).toBe(0);
+    await test.step("an empty project shows the first-run state, not a chart", async () => {
+      const emptyId = await serverCreateProject(seed.workspaceSlug, owner.cookie, `GT empty ${suffix}`, `GE${suffix}`);
+      // Bypass openTimeline: no chart ever renders to wait for.
+      const before = await serverProjectUserProperties(seed.workspaceSlug, emptyId, owner.cookie);
+      await serverPatchProjectUserProperties(seed.workspaceSlug, emptyId, owner.cookie, {
+        display_filters: {
+          ...before.displayFilters,
+          layout: "gantt_chart",
+          group_by: null,
+          order_by: "sort_order",
+          sub_group_by: null,
+          show_empty_groups: true,
+        },
+      });
+      await driver.openAuthenticated(`/${seed.workspaceSlug}/projects/${emptyId}/issues`, browserCookies(owner));
+      await expect.poll(() => driver.ganttEmptyVisible(), { timeout: 120_000 }).toBe(true);
+      expect(await driver.boardActiveLayout()).toBe("gantt");
+      expect(await driver.ganttTimelineVisible()).toBe(false);
+      await serverDeleteProject(seed.workspaceSlug, emptyId, owner.cookie);
     });
 
-    await test.step("reloading shows sidebar skeletons before the rows", async () => {
+    await test.step("reloading shows skeletons and a loading label before the rows", async () => {
+      const ctx = await openTimeline(driver, seed, seed.projectId);
+      await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
       // The delayed fetch widens the loading window deterministically; the
-      // skeleton itself is the behavior under test.
+      // skeleton rows and header label are the behavior under test.
       expect(await driver.ganttLoadingObservedOnReload()).toBe(true);
+      await restoreTimeline(seed, seed.projectId, ctx);
     });
 
-    await test.step("cleanup removes the scratch project", async () => {
-      await serverDeleteProject(seed.workspaceSlug, projectId, owner.cookie);
+    await test.step("a 100+ timeline pulses its load-more sentinel", async () => {
+      const bigId = await serverCreateProject(seed.workspaceSlug, owner.cookie, `GT bulk ${suffix}`, `GB${suffix}`);
+      const home = await serverDefaultStateId(seed.workspaceSlug, bigId, owner.cookie);
+      for (let index = 0; index < 105; index += 1) {
+        await serverCreateIssue(seed.workspaceSlug, bigId, owner.cookie, `GT bulk ${suffix} ${index}`, home);
+      }
+      await openTimeline(driver, seed, bigId);
+      expect(await driver.ganttLoadMoreObservedOnScroll()).toBe(true);
+      await serverDeleteProject(seed.workspaceSlug, bigId, owner.cookie);
     });
   }
 );

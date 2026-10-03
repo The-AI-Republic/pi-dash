@@ -2448,8 +2448,16 @@ export interface ParityDriver {
   ganttAttemptRowBefore(sourceName: string, targetName: string): Promise<void>;
   /** Whether an issue renders a dated bar (vs an empty row). */
   ganttBarExists(issueName: string): Promise<boolean>;
-  /** Drag a bar body horizontally by whole days; resolves once it settles. */
+  /** A bar's chart offset in pixels: left margin and width (zeros when no bar). */
+  ganttBarOffset(issueName: string): Promise<{ marginLeft: number; width: number }>;
+  /** Drag a bar body horizontally by whole days; resolves once the drag engages. */
   ganttDragBar(issueName: string, dayDelta: number): Promise<void>;
+  /**
+   * Attempt a bar move the timeline may refuse; resolves after a fixed
+   * wait instead of engaging. Refused drags move nothing: callers assert
+   * the persisted dates via the API.
+   */
+  ganttAttemptBarMove(issueName: string, dayDelta: number): Promise<void>;
   /** Drag a bar edge handle by whole days; resolves once it settles. */
   ganttResizeBar(issueName: string, side: "left" | "right", dayDelta: number): Promise<void>;
   /** Hover a bar edge handle and read its floating date label (null when absent). */
@@ -2489,6 +2497,14 @@ export interface ParityDriver {
    * behavior under test.
    */
   ganttLoadingObservedOnReload(): Promise<boolean>;
+  /** Whether the timeline shows its first-run empty state (no chart). */
+  ganttEmptyVisible(): Promise<boolean>;
+  /**
+   * Reload with the issues API delayed, scroll a 100+ issue timeline to
+   * its end, and report whether the load-more sentinel pulsed while the
+   * next page fetched. The delay is test-only network shaping.
+   */
+  ganttLoadMoreObservedOnScroll(): Promise<boolean>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

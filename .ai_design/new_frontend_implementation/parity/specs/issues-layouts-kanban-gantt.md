@@ -162,8 +162,11 @@ Endpoint shorthand (backend contracts, also used by the inventory): `BASE` =
 - Rows drag to reorder with a drop indicator; the new sort position derives
   from the neighbours (a step below the first row, above the last, midpoint
   between). Reordering is a separate drag instance from card dragging and
-  applies only in manual sort order. Recon flag: the not-manually-sorted
-  warning toast is verified against the live app (its trigger may be dead).
+  applies only in manual sort order. Live recon (NEWFRONT-118 run 4):
+  outside manual sort the DnD instance is disabled and the drop is a
+  silent no-op — no warning toast exists anywhere in the old frontend,
+  so the row's toast clause is corrected to the silent-suppression
+  design (an inventory inaccuracy, not an old bug).
 - While loading, the sidebar shows skeleton rows and the header a loading
   label; the load-more sentinel renders as a pulsing placeholder.
 

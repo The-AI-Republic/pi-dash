@@ -3996,8 +3996,16 @@ export class WebNewDriver implements ParityDriver {
     return todo("ganttBarExists");
   }
 
+  async ganttBarOffset(_issueName: string): Promise<{ marginLeft: number; width: number }> {
+    return todo("ganttBarOffset");
+  }
+
   async ganttDragBar(_issueName: string, _dayDelta: number): Promise<void> {
     return todo("ganttDragBar");
+  }
+
+  async ganttAttemptBarMove(_issueName: string, _dayDelta: number): Promise<void> {
+    return todo("ganttAttemptBarMove");
   }
 
   async ganttResizeBar(_issueName: string, _side: "left" | "right", _dayDelta: number): Promise<void> {
@@ -4066,5 +4074,13 @@ export class WebNewDriver implements ParityDriver {
 
   async ganttLoadingObservedOnReload(): Promise<boolean> {
     return todo("ganttLoadingObservedOnReload");
+  }
+
+  async ganttEmptyVisible(): Promise<boolean> {
+    return todo("ganttEmptyVisible");
+  }
+
+  async ganttLoadMoreObservedOnScroll(): Promise<boolean> {
+    return todo("ganttLoadMoreObservedOnScroll");
   }
 }
