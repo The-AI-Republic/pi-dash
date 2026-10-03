@@ -278,11 +278,9 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // Registration is the cutover granularity — sibling paths have
         // no Rust route and keep proxying to Django through the
         // fallback.
-        RouteGroup::RunnerWeb => {
-            crate::runner_runs::routes()
-                .merge(crate::runner_runs::chat::web_routes())
-                .merge(crate::runner_enroll::manage::routes())
-        }
+        RouteGroup::RunnerWeb => crate::runner_runs::routes()
+            .merge(crate::runner_runs::chat::web_routes())
+            .merge(crate::runner_enroll::manage::routes()),
         RouteGroup::Runner => crate::runner_runs::run_endpoints::routes()
             .merge(crate::runner_runs::chat::daemon_routes())
             .merge(crate::runner_runs::daemon_routes()),
