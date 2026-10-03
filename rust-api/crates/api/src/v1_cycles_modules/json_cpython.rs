@@ -1178,11 +1178,14 @@ impl JNum {
         }
     }
 
-    /// Python `str()`: ints verbatim (unbounded), floats via
-    /// `paginator::py_float_str`.
+    /// Python `str()`: ints verbatim (unbounded — the grammar admits no
+    /// non-canonical spellings except `-0`, which `int()` folds to `0`),
+    /// floats via `paginator::py_float_str`.
     pub fn py_string(&self) -> String {
         if self.is_float {
             crate::paginator::py_float_str(self.as_f64())
+        } else if self.text == "-0" {
+            "0".to_owned()
         } else {
             self.text.clone()
         }
@@ -1245,6 +1248,49 @@ impl JObject {
     /// Iterate members in first-seen order.
     pub fn iter(&self) -> impl Iterator<Item = &(JStr, JVal)> {
         self.entries.iter()
+    }
+}
+
+impl JVal {
+    /// Whether the value is an object.
+    pub fn is_object(&self) -> bool {
+        matches!(self, JVal::Object(_))
+    }
+
+    /// Move the object out of an owned value (`None` for anything else).
+    /// (`JVal` implements [`Drop`], so callers cannot move variant
+    /// contents out with a plain `match`.)
+    pub fn into_object(mut self) -> Option<JObject> {
+        match &mut self {
+            JVal::Object(map) => Some(std::mem::take(map)),
+            _ => None,
+        }
+    }
+}
+
+impl Drop for JVal {
+    fn drop(&mut self) {
+        // Iterative: values nest to `MAX_CONTAINER_DEPTH` and the derived
+        // drop recurses per level, overflowing 2MB workers past ~4000
+        // levels — the same abort class as serde's `Map` drop (found in
+        // the 626 review: the parity battery aborted on macOS defaults).
+        // Children move onto an explicit work stack; each visited shell
+        // is forgotten (it holds no allocation — children leave via
+        // `take`, which resets to capacity zero), so no visited value
+        // ever re-enters this `drop`.
+        let mut stack = vec![std::mem::replace(self, JVal::Null)];
+        while let Some(mut owned) = stack.pop() {
+            match &mut owned {
+                JVal::Array(items) => stack.extend(std::mem::take(items)),
+                JVal::Object(object) => stack.extend(
+                    std::mem::take(&mut object.entries)
+                        .into_iter()
+                        .map(|(_, member)| member),
+                ),
+                JVal::Null | JVal::Bool(_) | JVal::Num(_) | JVal::Str(_) => {}
+            }
+            std::mem::forget(owned);
+        }
     }
 }
 
@@ -2465,7 +2511,7 @@ mod tests {
         // Astral pairs combine instead.
         let paired = parse_request_bytes(b"\"\\ud834\\udd1e\"").expect("astral");
         assert!(
-            matches!(paired, JVal::Str(text) if text.to_clean_string().as_deref() == Some("\u{1D11E}"))
+            matches!(&paired, JVal::Str(text) if text.to_clean_string().as_deref() == Some("\u{1D11E}"))
         );
     }
 
@@ -2550,7 +2596,7 @@ mod tests {
     fn request_data_empty_and_tail_drop() {
         // Zero-length short-circuits to `{}` (DRF `_parse`).
         assert!(matches!(
-            parse_request_data(b""),
+            &parse_request_data(b""),
             Ok(JVal::Object(map)) if map.is_empty()
         ));
         // A trailing incomplete sequence parses as the truncated text.
@@ -2612,5 +2658,40 @@ mod tests {
         assert!(matches!(at(9936, "1}"), Err(JsonFail::Recursion)));
         let deep = format!("{{\"a\": {}1{}}}", "[".repeat(9938), "]".repeat(9938));
         assert!(parse_request_bytes(deep.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn number_rendering_matches_oracle() {
+        // `str(int)` canonicalizes the only non-canonical spelling;
+        // `float()` saturates out-of-range literals (both verified live
+        // through the oracle: `{"name": -0}` stores `"0"`, `1e400` echoes
+        // `"inf"`).
+        assert_eq!(JNum::int("-0".to_owned()).py_string(), "0");
+        assert_eq!(JNum::int("0".to_owned()).py_string(), "0");
+        assert_eq!(JNum::int("123".to_owned()).py_string(), "123");
+        assert_eq!(JNum::float("1e400".to_owned()).py_string(), "inf");
+        assert_eq!(JNum::float("1e-400".to_owned()).py_string(), "0.0");
+        assert_eq!(JNum::float("1.5".to_owned()).py_string(), "1.5");
+        let huge = "9".repeat(4300);
+        assert_eq!(JNum::int(huge.clone()).py_string(), huge);
+    }
+
+    #[test]
+    fn deep_values_drop_on_small_stack() {
+        // Request values nest to the 9939 cap and drop on 2MB tokio
+        // workers: the derived drop recurses per level and aborts, so
+        // `Drop` dismantles iteratively (array and object chains — the
+        // object shape is the fatter drop path).
+        let array_doc = format!("{{\"a\": {}1{}}}", "[".repeat(9938), "]".repeat(9938));
+        let object_doc = format!("{}{}{}", "{\"a\": ".repeat(9939), "1", "}".repeat(9939));
+        for raw in [array_doc, object_doc] {
+            let value = parse_request_bytes(raw.as_bytes()).expect("parseable");
+            std::thread::Builder::new()
+                .stack_size(2 * 1024 * 1024)
+                .spawn(move || drop(value))
+                .expect("spawn")
+                .join()
+                .expect("no stack overflow");
+        }
     }
 }

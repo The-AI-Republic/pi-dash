@@ -471,38 +471,64 @@ pub fn django_dumps(value: &Value) -> String {
 }
 
 fn dumps_value(into: &mut String, value: &Value) {
-    match value {
-        Value::Null => into.push_str("null"),
-        Value::Bool(true) => into.push_str("true"),
-        Value::Bool(false) => into.push_str("false"),
-        Value::Number(n) => dumps_number(into, n),
-        Value::String(s) => {
-            into.push('"');
-            dumps_escape(into, s);
-            into.push('"');
-        }
-        Value::Array(items) => {
-            into.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    into.push_str(", ");
-                }
-                dumps_value(into, item);
+    // Iterative over an explicit stack: callers may pass values nested
+    // to the 9939 request cap (the cycle add path echoes raw `issues`),
+    // and the recursive walk overflows 2MB workers. Output is unchanged
+    // (same scalars, separators and key order).
+    enum Task<'v> {
+        Emit(&'v Value),
+        Key(&'v str),
+        Lit(&'static str),
+        Seal(char),
+    }
+    fn scalar(into: &mut String, value: &Value) {
+        match value {
+            Value::Null => into.push_str("null"),
+            Value::Bool(true) => into.push_str("true"),
+            Value::Bool(false) => into.push_str("false"),
+            Value::Number(n) => dumps_number(into, n),
+            Value::String(s) => {
+                into.push('"');
+                dumps_escape(into, s);
+                into.push('"');
             }
-            into.push(']');
+            Value::Array(_) | Value::Object(_) => unreachable!("scalars only"),
         }
-        Value::Object(map) => {
-            into.push('{');
-            for (index, (key, item)) in map.iter().enumerate() {
-                if index > 0 {
-                    into.push_str(", ");
+    }
+    let mut stack = vec![Task::Emit(value)];
+    while let Some(task) = stack.pop() {
+        match task {
+            Task::Emit(Value::Array(items)) => {
+                into.push('[');
+                stack.push(Task::Seal(']'));
+                for (index, item) in items.iter().rev().enumerate() {
+                    if index > 0 {
+                        stack.push(Task::Lit(", "));
+                    }
+                    stack.push(Task::Emit(item));
                 }
+            }
+            Task::Emit(Value::Object(map)) => {
+                into.push('{');
+                stack.push(Task::Seal('}'));
+                for (index, (key, item)) in map.iter().rev().enumerate() {
+                    if index > 0 {
+                        stack.push(Task::Lit(", "));
+                    }
+                    stack.push(Task::Emit(item));
+                    stack.push(Task::Lit("\": "));
+                    stack.push(Task::Key(key));
+                }
+            }
+            Task::Emit(leaf) => scalar(into, leaf),
+            Task::Key(key) => {
+                // Opening quote plus text; the `": "` literal carries the
+                // closing quote, exactly like the recursive original.
                 into.push('"');
                 dumps_escape(into, key);
-                into.push_str("\": ");
-                dumps_value(into, item);
             }
-            into.push('}');
+            Task::Lit(text) => into.push_str(text),
+            Task::Seal(closer) => into.push(closer),
         }
     }
 }
@@ -2203,6 +2229,27 @@ mod tests {
             django_dumps(&json!({"n": "line\nbreak\ttab\"q\"\\\u{8}s", "u": "café \u{1F44D} \u{1}"})),
             "{\"n\": \"line\\nbreak\\ttab\\\"q\\\"\\\\\\bs\", \"u\": \"caf\\u00e9 \\ud83d\\udc4d \\u0001\"}"
         );
+    }
+
+    #[test]
+    fn dumps_deep_value_survives_small_stack() {
+        // The cycle add path echoes raw `issues` (a dict with deep values
+        // passes validation on its keys): the walk must not recurse.
+        let mut deep = json!(1);
+        for _ in 0..9938 {
+            deep = Value::Array(vec![deep]);
+        }
+        let text = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let text = django_dumps(&deep);
+                crate::json_compact::drop_value_deep(deep);
+                text
+            })
+            .expect("spawn")
+            .join()
+            .expect("no stack overflow");
+        assert_eq!(text.len(), 9938 + 1 + 9938);
     }
 
     // FX-ACT-03 · serializer shape: flat columns + details.

@@ -2588,10 +2588,9 @@ pub fn parse_body_value(raw: &[u8]) -> Result<JVal, Denial> {
 /// non-object body 500s on `.get` (`AttributeError` — verified live for
 /// `[]`/`null`/`"x"`/`5`/`true` on all three paths).
 pub fn parse_object_or_500(raw: &[u8]) -> Result<JObject, Denial> {
-    match parse_body_value(raw)? {
-        JVal::Object(map) => Ok(map),
-        _ => Err(Denial::ServerError),
-    }
+    parse_body_value(raw)?
+        .into_object()
+        .ok_or(Denial::ServerError)
 }
 
 /// Parse the request body (`is_valid()` input stage): [`parse_body_value`]
@@ -2607,13 +2606,15 @@ pub fn parse_body(raw: &[u8]) -> Result<JObject, Denial> {
 /// (Split from [`parse_body`] so PATCH can run the completed gate on the
 /// raw value first — `views/cycle.py:512-520`.)
 pub fn coerce_body_object(value: JVal) -> Result<JObject, Denial> {
-    match value {
-        JVal::Object(map) => Ok(map),
+    if value.is_object() {
+        return value.into_object().ok_or(Denial::ServerError);
+    }
+    match &value {
         JVal::Null => Err(Denial::FieldErrors(
             r#"{"non_field_errors":["No data provided"]}"#.to_owned(),
         )),
         other => {
-            let kind = match &other {
+            let kind = match other {
                 JVal::Array(_) => "list",
                 JVal::Str(_) => "str",
                 // Int-vs-float is grammatical (the parser splits them):
@@ -3502,7 +3503,7 @@ fn parse_fromiso_tz_tail(rest: &str, frac_len: usize, shape_only: bool) -> Optio
                 if *first == b'+' || *first == b'-' {
                     return Some(Some(parse_fromiso_offset(rest, shape_only)?));
                 }
-                if *first == b'Z' || !allowance.is_none_or(|max| skips < max) {
+                if *first == b'Z' || allowance.is_some_and(|max| skips >= max) {
                     return None;
                 }
                 let skip = rest.chars().next()?.len_utf8();
@@ -5962,17 +5963,23 @@ pub async fn add_cycle_issues_inner(
     // `new_issues`: the raw values minus the existing strings, deduped in
     // first-seen order (Django's `set()` order is hash-random per process).
     // Dict `issues` iterate into KEYS for the set difference too.
-    let raw_items: Vec<JVal> = match issues_value {
-        JVal::Array(items) => items.clone(),
+    // Borrowed, never cloned: `issues` may nest to the 9939 cap and
+    // `Clone` recurses per level (only the flat key strings materialize).
+    let owned_keys: Vec<JVal> = match issues_value {
         JVal::Object(object) => object
             .iter()
             .map(|(key, _)| JVal::Str(key.clone()))
             .collect(),
         _ => Vec::new(),
     };
+    let raw_items: Vec<&JVal> = match issues_value {
+        JVal::Array(items) => items.iter().collect(),
+        JVal::Object(_) => owned_keys.iter().collect(),
+        _ => Vec::new(),
+    };
     let mut seen: Vec<&JVal> = Vec::new();
     let mut new_values: Vec<&JVal> = Vec::new();
-    for value in &raw_items {
+    for value in raw_items.iter().copied() {
         if seen.iter().any(|known| json_value_eq(known, value)) {
             continue;
         }
@@ -6064,10 +6071,18 @@ pub async fn add_cycle_issues_inner(
     // `cycles_list`; `project_id` is the rewritten UUID. Epoch whole
     // seconds, like `int(now().timestamp())`.
     let now = micros_now();
-    let requested_text =
-        pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&serde_json::json!({
-            "cycles_list": to_serde_publish(issues_value),
-        }));
+    // The `cycles_list` echo can nest to the 9939 request cap (a dict
+    // `issues` with deep values passes validation on its keys): dismantle
+    // iteratively — serde's `Map` drop recurses per level.
+    let requested_text = {
+        let wrapper = serde_json::Value::Object(serde_json::Map::from_iter([(
+            "cycles_list".to_owned(),
+            to_serde_publish(issues_value),
+        )]));
+        let text = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&wrapper);
+        pidash_jobs::json_compact::drop_value_deep(wrapper);
+        text
+    };
     let dump_text = render_bridge_dump(&bridges);
     let current_text =
         pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&serde_json::json!({
@@ -6125,27 +6140,51 @@ pub fn raw_contains(issues: &JVal, text: &str) -> bool {
 /// dedupe): `True == 1` and `1 == 1.0` in Python, but JSON ints and
 /// floats stay distinct here — the only dedupe that matters in practice
 /// is string identity, and Python string equality is exact equality.
+/// Iterative over an explicit stack: the dedupe runs on RAW values, which
+/// may nest to the 9939 cap.
 pub fn json_value_eq(left: &JVal, right: &JVal) -> bool {
-    match (left, right) {
-        (JVal::Null, JVal::Null) => true,
-        (JVal::Bool(a), JVal::Bool(b)) => a == b,
-        (JVal::Bool(a), JVal::Num(n)) | (JVal::Num(n), JVal::Bool(a)) => {
-            let bit = i64::from(*a);
-            n.as_i64().is_some_and(|v| v == bit)
-                || n.as_u64().is_some_and(|v| v == bit as u64)
-                || n.as_f64() == bit as f64
+    fn scalar_eq(left: &JVal, right: &JVal) -> Option<bool> {
+        match (left, right) {
+            (JVal::Null, JVal::Null) => Some(true),
+            (JVal::Bool(a), JVal::Bool(b)) => Some(a == b),
+            (JVal::Bool(a), JVal::Num(n)) | (JVal::Num(n), JVal::Bool(a)) => {
+                let bit = i64::from(*a);
+                Some(
+                    n.as_i64().is_some_and(|v| v == bit)
+                        || n.as_u64().is_some_and(|v| v == bit as u64)
+                        || n.as_f64() == bit as f64,
+                )
+            }
+            (JVal::Num(a), JVal::Num(b)) => Some(
+                a.as_i64().zip(b.as_i64()).is_some_and(|(x, y)| x == y)
+                    || a.as_u64().zip(b.as_u64()).is_some_and(|(x, y)| x == y)
+                    || a.as_f64() == b.as_f64(),
+            ),
+            (JVal::Str(a), JVal::Str(b)) => Some(a == b),
+            (JVal::Array(_), JVal::Array(_)) => None,
+            _ => Some(false),
         }
-        (JVal::Num(a), JVal::Num(b)) => {
-            a.as_i64().zip(b.as_i64()).is_some_and(|(x, y)| x == y)
-                || a.as_u64().zip(b.as_u64()).is_some_and(|(x, y)| x == y)
-                || a.as_f64() == b.as_f64()
-        }
-        (JVal::Str(a), JVal::Str(b)) => a == b,
-        (JVal::Array(a), JVal::Array(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| json_value_eq(x, y))
-        }
-        _ => false,
     }
+    let mut stack: Vec<(&JVal, &JVal)> = vec![(left, right)];
+    while let Some((left, right)) = stack.pop() {
+        match scalar_eq(left, right) {
+            Some(equal) => {
+                if !equal {
+                    return false;
+                }
+            }
+            None => {
+                let (JVal::Array(a), JVal::Array(b)) = (left, right) else {
+                    unreachable!("arrays only")
+                };
+                if a.len() != b.len() {
+                    return false;
+                }
+                stack.extend(a.iter().zip(b.iter()));
+            }
+        }
+    }
+    true
 }
 
 /// The coerced issue id for a new raw value (the filter already validated
@@ -8034,13 +8073,13 @@ mod tests {
         }
         // The tail-drop can leave a VALID document: `{"a":1}\xc3`
         // parses as `{"a":1}` (verified live through the oracle).
-        match parse_body_value(b"{\"a\":1}\xc3").expect("tail-drop valid") {
+        match &parse_body_value(b"{\"a\":1}\xc3").expect("tail-drop valid") {
             JVal::Object(object) => assert!(object.get("a").is_some()),
             value => panic!("expected object, got {value:?}"),
         }
         // An empty body is `{}`, never a parse error (DRF's
         // content-length short-circuit, verified live).
-        match parse_body_value(b"").expect("empty body") {
+        match &parse_body_value(b"").expect("empty body") {
             JVal::Object(object) => assert!(object.is_empty()),
             value => panic!("expected empty object, got {value:?}"),
         }
@@ -8060,7 +8099,7 @@ mod tests {
         assert!(matches!(at_margin(9936, "1}"), Err(Denial::ServerError)));
         // Terminated lone surrogates parse (CPython accepts them): the
         // field holds the exact surrogate units.
-        match parse_body_value(br#"{"a": "\ud800"}"#).expect("lone surrogate") {
+        match &parse_body_value(br#"{"a": "\ud800"}"#).expect("lone surrogate") {
             JVal::Object(object) => match object.get("a") {
                 Some(JVal::Str(text)) => {
                     assert!(text.has_surrogate());
@@ -8137,7 +8176,19 @@ mod tests {
             coerce_char(Some(&jstr("  ")), true, false, None).expect("blank-ok"),
             Some(String::new())
         );
-        // Numbers stringify; bools fail.
+        // Numbers stringify; bools fail. `-0` folds to `0` (`int()`
+        // canonicalizes the only non-canonical int spelling).
+        assert_eq!(
+            coerce_char(
+                Some(&JVal::Num(JNum::int("-0".to_owned()))),
+                false,
+                false,
+                Some(255)
+            )
+            .expect("minus zero")
+            .as_deref(),
+            Some("0")
+        );
         assert_eq!(
             coerce_char(
                 Some(&JVal::Num(JNum::int("123".to_owned()))),
@@ -9147,6 +9198,25 @@ mod tests {
             &JVal::Str(JStr::from_text("5")),
             &JVal::Num(JNum::int("5".to_owned()))
         ));
+    }
+
+    #[test]
+    fn json_value_eq_deep_survives_small_stack() {
+        // The add-path dedupe runs on RAW values, which may nest to the
+        // 9939 cap: the comparison must not recurse (a recursive walk
+        // aborts the 2MB worker).
+        let deep = format!("{}1{}", "[".repeat(9938), "]".repeat(9938));
+        let left = parse_body_value(deep.as_bytes()).expect("left");
+        let right = parse_body_value(deep.as_bytes()).expect("right");
+        let shallow = parse_body_value(b"[1]").expect("shallow");
+        let (equal, unequal) = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || (json_value_eq(&left, &right), json_value_eq(&left, &shallow)))
+            .expect("spawn")
+            .join()
+            .expect("no stack overflow");
+        assert!(equal);
+        assert!(!unequal);
     }
 
     #[test]
