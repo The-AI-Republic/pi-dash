@@ -329,3 +329,76 @@ receivers disconnected, since signals are FX-07 scope).
   work item), and `:640-647`
   (`reset_ticker_after_comment_and_run`: re-timed with
   budget, `POOL_SPENT` when spent).
+
+## FX-ORCH-06 creation (DB)
+
+Generator `/tmp/fx_orch_06.py` against `pidash_524_scratch` (frozen
+clock 2026-06-01T12:00Z, `fx6-` slugs, orchestration Issue signals
+disconnected). Real `execution_fields` (local-runner projects) and real
+`build_first_turn` on the migrate-seeded templates except where a case
+stubs a seam (named per case); real `finalize_agent_run`;
+`dispatch_after_commit` + `transaction.on_commit` captured, never
+executed (so the celery `.delay` and terminal hooks in
+`_publish_effects` never fire — captured callback names are recorded).
+Run UUIDs are random per run: the prompt/`prompt_manifest` carry
+`<run-id>`, dispatch captures and `replacement_run_id` carry fixture
+labels, auto-created pod UUIDs in markers carry pod names; projects /
+issues / users use fixed seeded UUIDs. Every service call runs under
+`impersonate(<its creator>)` because `BaseModel.save` sources
+`created_by` from crum. Regeneration is byte-identical (verified).
+
+- `fx06_creation/create_dispatch.before_after.json` —
+  `orchestration/service.py:735-830` (`_create_and_dispatch_run`),
+  `:157-167` (`_phase_kind_for_issue`), `:550-566`
+  (`_run_config_for_issue`), `:528-547` (`_pinned_runner_for`):
+  C1 created, no parent (QUEUED / `state_transition` /
+  `coding-task` stamp / prompt+manifest / repo `run_config` / owner
+  NULL / `local_runner` execution merge / dispatch captured);
+  C2 terminal parent + eligible runner → parent linkage + pin;
+  C3 `fresh_session` drops parent + pin; C4 admission error →
+  FAILED with `error_code` verbatim and reason = the code
+  (`lock_cloud_creation_capacity` stubbed with the real
+  `run_quota_exceeded` dict shape); C5 render failure → FAILED
+  `prompt_build_failed` (`PromptRenderError` stub); C6 executor
+  unavailable → reason string, no run, no dispatch.
+- `fx06_creation/continuation.before_after.json` —
+  `orchestration/service.py:443-525` (`_create_continuation_run`):
+  K1 created with parent linkage + pin
+  (`comment_and_run` trigger); K2 admission-error FAILED;
+  K3 render-failed; K4 executor-unavailable, no run.
+- `fx06_creation/parent_pin.matrix.json` —
+  `orchestration/service.py:110-154` (`parent_for_next_run`):
+  P1 no-latest → `(None, True)`; P2 non-ticking state →
+  `(latest, False)`; P3 same stage → `(latest, False)`;
+  P4 cross-stage into `fresh_session_on_entry` review →
+  `(None, True)`; P5 hand-back with `resume_parent_run` →
+  `(resume, False)`; P6 hand-back without → `(None, True)`;
+  P7/P8 explicit `cross_stage` overrides; kinds
+  (`coding-task` / `review` / `test`) and `fresh_session_on_entry`
+  flags resolved live. `:528-547` (`_pinned_runner_for`):
+  M1 no runner → `None`; M2 revoked → `None`; M3 pod
+  mismatch → `None`; M4 eligible → pinned; M5 no target pod
+  skips the check.
+- `fx06_creation/resolvers.golden.json` —
+  `orchestration/service.py:303-316`
+  (`_resolve_fallback_creator`: creator → lead → default
+  assignee → `None`); `:319-338` (`_resolve_pod_for_issue`:
+  assigned → default, dangling id → default, no project →
+  `None`; the last two use in-memory instances since DB FKs
+  forbid them); `:550-566` (`_run_config_for_issue`: handoff
+  marker stripped, repo fields refreshed, overrides survive,
+  base dict unmutated).
+- `fx06_creation/handoff.before_after.json` —
+  `orchestration/service.py:53-57`
+  (`PROJECT_MOVE_HANDOFF_CONFIG_KEY`), `:569-641`
+  (`_create_project_move_handoff_run`), `:644-732`
+  (`complete_project_move_handoff`; markers seeded directly —
+  the writer is the out-of-scope issue-move path): H2 happy
+  path (replacement inherits trigger, parents on source, pin
+  cleared, marker stripped + repo refreshed, `replacement_run_id`
+  stamped, dispatched) — note the replacement's `phase_kind` is
+  `""`: unlike the other builders the handoff create stamps no
+  phase kind; H3 idempotency; H4 moved-again suppression;
+  H5 active-run-wins; H7 guards (unknown run / non-terminal /
+  no marker → `None`); H8 executor-fallback `LOCAL_RUNNER` row;
+  H9 active-race returns existing; H6 no target pod → `None`.
