@@ -3760,6 +3760,855 @@ export async function deleteIssueStatus(
   return res.status;
 }
 
+// ---------------------------------------------------------------------------
+// Sidebar + workspace navigation parity helpers (NEWFRONT-125, rows SHELL-046..062).
+//
+// Added additively to the shared helpers above (never forking them). Cookie-style
+// session helpers complement the FreshUser-style ones above: the sidebar scenarios
+// sign in through the UI and pass the session cookie explicitly. workspaceMemberEmails
+// is the cookie-style sibling of workspaceMembers above (kept separate because the
+// signatures are incompatible).
+// ---------------------------------------------------------------------------
+async function fetchWithRetry(input: string, init?: RequestInit, attempts: number = 8): Promise<Response> {
+  let delayMs = 2000;
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const res = await fetch(input, init);
+      if (res.status !== 429 && res.status < 500) return res;
+      if (attempt === attempts) return res;
+      const retryAfter = Number(res.headers.get("retry-after"));
+      await res.arrayBuffer().catch(() => {});
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : delayMs;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    } catch (error) {
+      // The scratch API restarts under load; a refused connection is
+      // retryable exactly like a 503.
+      lastError = error;
+      if (attempt === attempts) break;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    delayMs = Math.min(delayMs * 2, 30_000);
+  }
+  throw new Error(`[parity] fetch retry exhausted: ${String(lastError)}`);
+}
+
+async function csrfPair(apiBase: string): Promise<{ token: string; cookie: string }> {
+  const tokenRes = await fetchWithRetry(`${apiBase}/auth/get-csrf-token/`);
+  if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
+  const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
+  const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
+  if (token === "") throw new Error("[parity] CSRF token response carried no token.");
+  return { token, cookie: cookieHeader(setCookieHeaders(tokenRes)) };
+}
+
+async function apiJson(
+  method: string,
+  path: string,
+  sessionCookie: string,
+  body?: unknown,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  const res = await fetchWithRetry(`${apiBase}${path}`, {
+    method,
+    headers: {
+      cookie: sessionCookie,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const text = await res.text();
+  let payload: unknown = null;
+  try {
+    payload = text === "" ? null : (JSON.parse(text) as unknown);
+  } catch {
+    payload = text;
+  }
+  return { status: res.status, payload };
+}
+
+/**
+ * Single-shot sibling of apiJson: one request, no backoff. For endpoints
+ * with a known deterministic failure (see inviteProjectMember), where the
+ * retrying call would burn minutes distinguishing a broken endpoint from
+ * sloth before the scenario's fallback runs.
+ */
+async function apiJsonSingle(
+  method: string,
+  path: string,
+  sessionCookie: string,
+  body?: unknown,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  const res = await fetch(`${apiBase}${path}`, {
+    method,
+    headers: {
+      cookie: sessionCookie,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const text = await res.text();
+  let payload: unknown = null;
+  try {
+    payload = text === "" ? null : (JSON.parse(text) as unknown);
+  } catch {
+    payload = text;
+  }
+  return { status: res.status, payload };
+}
+
+export async function ensureUserSession(
+  email: string,
+  password: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const { token, cookie } = await csrfPair(apiBase);
+  await fetchWithRetry(`${apiBase}/auth/sign-up/`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", cookie },
+    body: new URLSearchParams({ email, password, csrfmiddlewaretoken: token }),
+    redirect: "manual",
+  });
+  return signInSession(email, password, apiBase);
+}
+
+export const WORKSPACE_ROLE_GUEST = 5;
+
+export const WORKSPACE_ROLE_MEMBER = 15;
+
+export async function ensureWorkspaceMember(
+  workspaceSlug: string,
+  ownerSession: string,
+  email: string,
+  password: string,
+  role: number,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const memberSession = await ensureUserSession(email, password, apiBase);
+  const members = await apiJson("GET", `/api/workspaces/${workspaceSlug}/members/`, ownerSession, undefined, apiBase);
+  const rows: unknown[] = Array.isArray(members.payload)
+    ? members.payload
+    : ((members.payload as { results?: unknown[] }).results ?? []);
+  const already = rows.some((row) => (row as { member?: { email?: unknown } }).member?.email === email);
+  if (already) {
+    await onboardUser(memberSession, apiBase);
+    return memberSession;
+  }
+  await apiJson(
+    "POST",
+    `/api/workspaces/${workspaceSlug}/invitations/`,
+    ownerSession,
+    { emails: [{ email, role }] },
+    apiBase
+  );
+  const invites = await apiJson("GET", "/api/users/me/workspaces/invitations/", memberSession, undefined, apiBase);
+  const pending: unknown[] = Array.isArray(invites.payload)
+    ? invites.payload
+    : ((invites.payload as { results?: unknown[] }).results ?? []);
+  const match = pending.find(
+    (row) =>
+      ((row as { workspace?: { slug?: unknown } }).workspace?.slug === workspaceSlug ||
+        (row as { slug?: unknown }).slug === workspaceSlug) &&
+      typeof (row as { id?: unknown }).id === "string"
+  ) as { id: string; token?: unknown } | undefined;
+  if (match === undefined) throw new Error(`[parity] no pending invitation for ${email}.`);
+  const token = typeof match.token === "string" ? match.token : "";
+  const joined = await apiJson(
+    "POST",
+    `/api/workspaces/${workspaceSlug}/invitations/${match.id}/join/`,
+    memberSession,
+    { token, accepted: true },
+    apiBase
+  );
+  if (joined.status !== 200) throw new Error(`[parity] invitation join failed with HTTP ${joined.status}.`);
+  await onboardUser(memberSession, apiBase);
+  return memberSession;
+}
+
+export async function workspaceMemberEmails(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ email: string }[]> {
+  const res = await apiJson("GET", `/api/workspaces/${workspaceSlug}/members/`, sessionCookie, undefined, apiBase);
+  if (res.status !== 200) {
+    throw new Error(`[parity] workspace members read failed with HTTP ${res.status}.`);
+  }
+  const rows: unknown[] = Array.isArray(res.payload)
+    ? res.payload
+    : ((res.payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const r = row as { member?: { email?: unknown } | string; email?: unknown };
+    const email = typeof r.member === "string" ? r.email : (r.member?.email ?? r.email);
+    return { email: typeof email === "string" ? email : "" };
+  });
+}
+
+export async function ownerSession(
+  seed: { email: string; password: string },
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const session = await signInSession(seed.email, seed.password, apiBase);
+  await onboardUser(session, apiBase);
+  return session;
+}
+
+export async function onboardUser(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<void> {
+  const onboarded = await apiJson("PATCH", "/api/users/me/onboard/", sessionCookie, { is_onboarded: true }, apiBase);
+  if (onboarded.status !== 200) {
+    throw new Error(`[parity] onboard write failed with HTTP ${onboarded.status}.`);
+  }
+  const toured = await apiJson(
+    "PATCH",
+    "/api/users/me/tour-completed/",
+    sessionCookie,
+    { is_tour_completed: true },
+    apiBase
+  );
+  if (toured.status !== 200) {
+    throw new Error(`[parity] tour write failed with HTTP ${toured.status}.`);
+  }
+}
+
+export interface ParityProject {
+  id: string;
+  name: string;
+  identifier: string;
+}
+
+export async function ensureProject(
+  workspaceSlug: string,
+  sessionCookie: string,
+  name: string,
+  identifier: string,
+  apiBase: string = apiBaseFromEnv(),
+  extra?: Record<string, unknown>
+): Promise<ParityProject> {
+  const created = await apiJson(
+    "POST",
+    `/api/workspaces/${workspaceSlug}/projects/`,
+    sessionCookie,
+    { name, identifier, ...(extra ?? {}) },
+    apiBase
+  );
+  if (created.status === 200 || created.status === 201) {
+    const row = created.payload as { id: string; name: string; identifier: string };
+    return { id: row.id, name: row.name, identifier: row.identifier };
+  }
+  const listed = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/details/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  const rows: unknown[] = Array.isArray(listed.payload)
+    ? listed.payload
+    : ((listed.payload as { results?: unknown[] }).results ?? []);
+  const match = rows.find((row) => (row as { identifier?: unknown }).identifier === identifier) as
+    | ParityProject
+    | undefined;
+  if (match === undefined) throw new Error(`[parity] project ${identifier} neither created nor listed.`);
+  return { id: match.id, name: match.name, identifier: match.identifier };
+}
+
+export async function patchUserProperties(
+  workspaceSlug: string,
+  sessionCookie: string,
+  patch: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  // Read first: the scratch API throttles write endpoints hardest under
+  // shared-stack load, so a guard re-pinning an unchanged value skips the
+  // PATCH instead of burning backoff inside a storm. End state is identical.
+  const current = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/user-properties/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (current.status !== 200) {
+    throw new Error(`[parity] user-properties read failed with HTTP ${current.status}.`);
+  }
+  const props = (Array.isArray(current.payload) ? current.payload[0] : current.payload) as Record<string, unknown>;
+  const drifted = Object.entries(patch).some(([key, value]) => props?.[key] !== value);
+  if (!drifted) return props ?? {};
+  const res = await apiJson(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/user-properties/`,
+    sessionCookie,
+    patch,
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] user properties write failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+  return res.payload as Record<string, unknown>;
+}
+
+export async function inviteProjectMember(
+  workspaceSlug: string,
+  ownerSessionCookie: string,
+  projectId: string,
+  memberSessionCookie: string,
+  email: string,
+  role: number = WORKSPACE_ROLE_GUEST,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const members = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/members/`,
+    ownerSessionCookie,
+    undefined,
+    apiBase
+  );
+  const rows: unknown[] = Array.isArray(members.payload)
+    ? members.payload
+    : ((members.payload as { results?: unknown[] }).results ?? []);
+  const memberEmailOf = (row: unknown): unknown => {
+    const r = row as { member?: { email?: unknown; id?: unknown } | string; email?: unknown };
+    if (typeof r.member === "string") return r.email;
+    return r.member?.email ?? r.email;
+  };
+  const memberIdOf = (row: unknown): unknown => {
+    const r = row as { member?: { email?: unknown; id?: unknown } | string };
+    if (typeof r.member === "string") return r.member;
+    return r.member?.id;
+  };
+  // Prefer identity over email: project-membership rows carry the member
+  // as a bare user id, so the legacy email comparison never matches and
+  // every call falls through to the invite POST, which 500s on the shared
+  // stack (NEWFRONT-151). The workspace membership embeds the identity to
+  // resolve the invitee first.
+  let already = false;
+  try {
+    const wsMembers = await apiJson(
+      "GET",
+      `/api/workspaces/${workspaceSlug}/members/`,
+      ownerSessionCookie,
+      undefined,
+      apiBase
+    );
+    const wsRows: unknown[] = Array.isArray(wsMembers.payload)
+      ? wsMembers.payload
+      : ((wsMembers.payload as { results?: unknown[] }).results ?? []);
+    const match = wsRows.find((row) => memberEmailOf(row) === email);
+    const userId = match === undefined ? undefined : memberIdOf(match);
+    if (typeof userId === "string" && userId.length > 0) {
+      already = rows.some((row) => {
+        const r = row as { is_active?: unknown };
+        return memberIdOf(row) === userId && r.is_active !== false;
+      });
+    }
+  } catch {
+    // Fall through to the legacy email check below.
+  }
+  if (!already) {
+    already = rows.some((row) => {
+      const r = row as { is_active?: unknown };
+      return memberEmailOf(row) === email && r.is_active !== false;
+    });
+  }
+  if (already) return;
+  // Fast-fail on the known-broken endpoint (NEWFRONT-151): the invite POST
+  // 500s deterministically on the parity stack, and the retrying call would
+  // burn ~2 min of backoff per POST before the scenario's fallback runs —
+  // timing the scenario out while the bug is open. A single-shot POST
+  // separates the deterministic 500 (fail fast into the fallback) from
+  // sloth (429: take the retrying path once) and health (2xx: continue
+  // into accept). The old delayed re-POST is gone: fetchWithRetry already
+  // absorbs intermittent 5xx across its own attempts, so an outer retry
+  // only ever bought backoff, never information.
+  const invitePath = `/api/workspaces/${workspaceSlug}/projects/${projectId}/invitations/`;
+  const inviteBody = { emails: [{ email, role }] };
+  const probe = await apiJsonSingle("POST", invitePath, ownerSessionCookie, inviteBody, apiBase);
+  const invited =
+    probe.status === 429 ? await apiJson("POST", invitePath, ownerSessionCookie, inviteBody, apiBase) : probe;
+  if (invited.status !== 200 && invited.status !== 201) {
+    throw new Error(`[parity] project invite failed with HTTP ${invited.status}: ${JSON.stringify(invited.payload)}`);
+  }
+  const invites = await apiJson(
+    "GET",
+    `/api/users/me/workspaces/${workspaceSlug}/projects/invitations/`,
+    memberSessionCookie,
+    undefined,
+    apiBase
+  );
+  const pending: unknown[] = Array.isArray(invites.payload)
+    ? invites.payload
+    : ((invites.payload as { results?: unknown[] }).results ?? []);
+  const match = (pending.find((row) => {
+    const r = row as { project?: { id?: unknown }; project_id?: unknown; id?: unknown };
+    return (
+      (typeof r.project?.id === "string" && r.project.id === projectId) ||
+      (typeof r.project_id === "string" && r.project_id === projectId)
+    );
+  }) ?? pending[0]) as { id?: unknown } | undefined;
+  if (match === undefined || typeof match.id !== "string") {
+    throw new Error(`[parity] no pending project invitation for ${email}.`);
+  }
+  const joined = await apiJson(
+    "POST",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/join/${match.id}/`,
+    memberSessionCookie,
+    { email, accepted: true },
+    apiBase
+  );
+  if (joined.status !== 200 && joined.status !== 201) {
+    throw new Error(
+      `[parity] project invite accept failed with HTTP ${joined.status}: ${JSON.stringify(joined.payload)}`
+    );
+  }
+}
+
+export interface ParityPage {
+  id: string;
+  name: string;
+}
+
+export async function ensurePage(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityPage> {
+  const listed = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (listed.status === 200) {
+    const rows: unknown[] = Array.isArray(listed.payload)
+      ? listed.payload
+      : ((listed.payload as { results?: unknown[] }).results ?? []);
+    const match = rows.find((row) => (row as { name?: unknown }).name === name) as ParityPage | undefined;
+    if (match !== undefined) return { id: match.id, name: match.name };
+  }
+  const created = await apiJson(
+    "POST",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/`,
+    sessionCookie,
+    { name },
+    apiBase
+  );
+  if (created.status !== 200 && created.status !== 201) {
+    throw new Error(`[parity] page create failed with HTTP ${created.status}: ${JSON.stringify(created.payload)}`);
+  }
+  const row = created.payload as { id: string; name?: string };
+  return { id: row.id, name: row.name ?? name };
+}
+
+export async function deletePage(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  pageId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await apiJson(
+    "POST",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/archive/`,
+    sessionCookie,
+    {},
+    apiBase
+  );
+  const removed = await apiJson(
+    "DELETE",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (removed.status !== 200 && removed.status !== 204) {
+    throw new Error(`[parity] page delete failed with HTTP ${removed.status}.`);
+  }
+}
+
+export interface ParityCycle {
+  id: string;
+  name: string;
+}
+
+export async function ensureCycle(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityCycle> {
+  const listed = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (listed.status === 200) {
+    const rows: unknown[] = Array.isArray(listed.payload)
+      ? listed.payload
+      : ((listed.payload as { results?: unknown[] }).results ?? []);
+    const match = rows.find((row) => (row as { name?: unknown }).name === name) as ParityCycle | undefined;
+    if (match !== undefined) return { id: match.id, name: match.name };
+  }
+  const created = await apiJson(
+    "POST",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/`,
+    sessionCookie,
+    { name },
+    apiBase
+  );
+  if (created.status !== 200 && created.status !== 201) {
+    throw new Error(`[parity] cycle create failed with HTTP ${created.status}: ${JSON.stringify(created.payload)}`);
+  }
+  const row = created.payload as { id: string; name?: string };
+  return { id: row.id, name: row.name ?? name };
+}
+
+export interface ParityWorkspace {
+  id: string;
+  slug: string;
+  name: string;
+}
+
+export async function ensureWorkspace(
+  sessionCookie: string,
+  name: string,
+  slug: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityWorkspace> {
+  const created = await apiJson("POST", "/api/workspaces/", sessionCookie, { name, slug }, apiBase);
+  if (created.status === 200 || created.status === 201) {
+    const row = created.payload as { id: string; slug: string; name: string };
+    return { id: row.id, slug: row.slug, name: row.name };
+  }
+  const listed = await apiJson("GET", "/api/users/me/workspaces/", sessionCookie, undefined, apiBase);
+  const rows: unknown[] = Array.isArray(listed.payload)
+    ? listed.payload
+    : ((listed.payload as { results?: unknown[] }).results ?? []);
+  const match = rows.find((row) => (row as { slug?: unknown }).slug === slug) as ParityWorkspace | undefined;
+  if (match === undefined) throw new Error(`[parity] workspace ${slug} neither created nor listed.`);
+  return { id: match.id, slug: match.slug, name: match.name };
+}
+
+export async function deleteWorkspace(
+  sessionCookie: string,
+  slug: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const removed = await apiJson("DELETE", `/api/workspaces/${slug}/`, sessionCookie, undefined, apiBase);
+  if (removed.status !== 200 && removed.status !== 204) {
+    throw new Error(`[parity] workspace delete failed with HTTP ${removed.status}.`);
+  }
+}
+
+export async function patchProjectFlags(
+  workspaceSlug: string,
+  sessionCookie: string,
+  projectId: string,
+  patch: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const current = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (current.status !== 200) {
+    throw new Error(`[parity] project read failed with HTTP ${current.status}.`);
+  }
+  const props = current.payload as Record<string, unknown>;
+  const drifted = Object.entries(patch).some(([key, value]) => props?.[key] !== value);
+  if (!drifted) return;
+  const res = await apiJson(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    patch,
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] project patch failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+}
+
+export interface ParityFavorite {
+  id: string;
+  entity_type: string;
+  entity_identifier: string | null;
+  name: string;
+  is_folder: boolean;
+  parent: string | null;
+}
+
+export async function listFavorites(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityFavorite[]> {
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/user-favorites/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) throw new Error(`[parity] favorites read failed with HTTP ${res.status}.`);
+  const rows: unknown[] = Array.isArray(res.payload)
+    ? res.payload
+    : ((res.payload as { results?: unknown[] }).results ?? []);
+  return rows as ParityFavorite[];
+}
+
+export async function createFavorite(
+  workspaceSlug: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityFavorite> {
+  const res = await apiJson("POST", `/api/workspaces/${workspaceSlug}/user-favorites/`, sessionCookie, body, apiBase);
+  if (res.status !== 200 && res.status !== 201) {
+    throw new Error(`[parity] favorite create failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+  return res.payload as ParityFavorite;
+}
+
+export async function deleteFavorite(
+  workspaceSlug: string,
+  sessionCookie: string,
+  favoriteId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await apiJson(
+    "DELETE",
+    `/api/workspaces/${workspaceSlug}/user-favorites/${favoriteId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200 && res.status !== 204) {
+    throw new Error(`[parity] favorite delete failed with HTTP ${res.status}.`);
+  }
+}
+
+// --- NEWFRONT-125 review fixes: last-workspace memory, default tab, workspace
+// --- logo, intake pending items, member roles. Appended; existing helpers
+// --- above are untouched per the shared parity contract.
+
+/** Last-visited workspace id from the session user's profile (null when unset). */
+export async function fetchLastWorkspaceId(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string | null> {
+  const res = await apiJson("GET", "/api/users/me/profile/", sessionCookie, undefined, apiBase);
+  if (res.status !== 200) throw new Error(`[parity] profile read failed with HTTP ${res.status}.`);
+  const id = (res.payload as { last_workspace_id?: unknown }).last_workspace_id;
+  return typeof id === "string" ? id : null;
+}
+
+/** Email plus workspace role for every member of a workspace. */
+export interface ParityWorkspaceMember {
+  email: string;
+  role: number;
+}
+
+export async function workspaceMemberRoles(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityWorkspaceMember[]> {
+  const res = await apiJson("GET", `/api/workspaces/${workspaceSlug}/members/`, sessionCookie, undefined, apiBase);
+  if (res.status !== 200) {
+    throw new Error(`[parity] workspace members read failed with HTTP ${res.status}.`);
+  }
+  const rows: unknown[] = Array.isArray(res.payload)
+    ? res.payload
+    : ((res.payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const r = row as { member?: { email?: unknown }; email?: unknown; role?: unknown };
+    const email = r.member?.email ?? r.email;
+    return {
+      email: typeof email === "string" ? email : "",
+      role: typeof r.role === "number" ? r.role : -1,
+    };
+  });
+}
+
+/**
+ * Set the member's default project tab; resolves with the stored navigation
+ * preferences. Other preference branches are carried over untouched.
+ */
+export async function setProjectDefaultTab(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  tabKey: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const current = await getProjectUserProperties(workspaceSlug, projectId, sessionCookie, apiBase);
+  const prefs = (current["preferences"] ?? {}) as Record<string, unknown>;
+  const navigation = (prefs["navigation"] ?? {}) as Record<string, unknown>;
+  const res = await apiJson(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/user-properties/`,
+    sessionCookie,
+    {
+      preferences: {
+        ...prefs,
+        navigation: { ...navigation, default_tab: tabKey },
+      },
+    },
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(
+      `[parity] project default-tab write failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`
+    );
+  }
+  const stored = (res.payload as { preferences?: unknown }).preferences as Record<string, unknown> | undefined;
+  return (stored?.["navigation"] ?? {}) as Record<string, unknown>;
+}
+
+/** Set or clear a workspace logo (null/empty clears back to the initial). */
+export async function patchWorkspaceLogo(
+  workspaceSlug: string,
+  sessionCookie: string,
+  logo: string | null,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await apiJson("PATCH", `/api/workspaces/${workspaceSlug}/`, sessionCookie, { logo }, apiBase);
+  if (res.status !== 200) {
+    throw new Error(`[parity] workspace logo write failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+}
+
+/** A pending triage row in a project's intake queue. The id is the underlying
+ * work-item id: the intake detail endpoint addresses rows by issue, and the
+ * row serializer expands `issue` into the full work item. */
+export interface ParityIntakeIssue {
+  id: string;
+}
+
+/** Pull the underlying work-item id out of a serialized intake row. */
+function intakeRowIssueId(row: unknown): string | null {
+  const issue = (row as { issue?: unknown }).issue;
+  if (typeof issue === "string" && issue.length > 0) return issue;
+  const nested = (issue as { id?: unknown } | null | undefined)?.id;
+  return typeof nested === "string" && nested.length > 0 ? nested : null;
+}
+
+export async function listIntakeIssues(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityIntakeIssue[]> {
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/intake-issues/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] intake list failed with HTTP ${res.status}.`);
+  }
+  const rows: unknown[] = Array.isArray(res.payload)
+    ? res.payload
+    : ((res.payload as { results?: unknown[] }).results ?? []);
+  return rows.flatMap((row) => {
+    const id = intakeRowIssueId(row);
+    return id === null ? [] : [{ id }];
+  });
+}
+
+/** Submit a work item to a project's intake queue (it lands pending triage). */
+export async function createIntakeIssue(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityIntakeIssue> {
+  const res = await apiJson(
+    "POST",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/intake-issues/`,
+    sessionCookie,
+    { issue: { name } },
+    apiBase
+  );
+  if (res.status !== 200 && res.status !== 201) {
+    throw new Error(`[parity] intake create failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+  const id = intakeRowIssueId(res.payload);
+  if (id === null) throw new Error("[parity] intake create response carried no issue id.");
+  return { id };
+}
+
+/** Materialize a project's intake queue row. Creating a project with the
+ * intake flag set stores the flag but no queue row, and the intake endpoints
+ * 404 ("Intake not found") until the project PATCH creates it — so PATCH the
+ * flag unconditionally (idempotent) before touching the queue. */
+export async function ensureProjectIntake(
+  workspaceSlug: string,
+  sessionCookie: string,
+  projectId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await apiJson(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    { intake_view: true },
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] intake materialize failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+}
+
+/** Read a workspace's member total as the switcher renders it. The switcher
+ * row counts from the workspace's own total field, not from the length of
+ * the members list (which can carry extra rows). */
+export async function fetchWorkspaceTotalMembers(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await apiJson("GET", `/api/workspaces/${workspaceSlug}/`, sessionCookie, undefined, apiBase);
+  if (res.status !== 200) {
+    throw new Error(`[parity] workspace read failed with HTTP ${res.status}.`);
+  }
+  const total = (res.payload as { total_members?: unknown }).total_members;
+  if (typeof total !== "number") throw new Error("[parity] workspace read carried no total_members.");
+  return total;
+}
+
+export async function deleteIntakeIssue(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  issueId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await apiJson(
+    "DELETE",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/intake-issues/${issueId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200 && res.status !== 204) {
+    throw new Error(`[parity] intake delete failed with HTTP ${res.status}.`);
+  }
+}
+
 /** Activity-feed server reads (NEWFRONT-114). The old app merges two split
  * history sources client-side: property-change entries
  * (`activity_type=issue-property`) and comments
