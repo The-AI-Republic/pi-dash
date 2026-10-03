@@ -614,8 +614,8 @@ pub struct HtmlCheck<'a> {
     /// The `is_valid` element of the validator's 3-tuple.
     pub is_valid: bool,
     /// The `clean_html` element; written back when `Some` (`:237-238`).
-    /// Note Python substitutes first and would raise after, so on invalid
-    /// input the substitution is unobservable.
+    /// Python raises before substituting (`:234-235`), so on invalid
+    /// input the substitution never happens.
     pub sanitized: Option<&'a str>,
 }
 
@@ -1848,9 +1848,10 @@ mod tests {
     #[test]
     fn validate_ok_cases_pass_through() {
         let fx = fixture();
-        // `ok_minimal`: absent keys skip every branch; absent relation keys
-        // validate as None (DRF `get_default()`), which is this kernel's
-        // `None` — identical downstream (`pop(..., None)`, `is not None`).
+        // `ok_minimal`: absent keys skip every branch (DRF `SkipField` —
+        // missing keys stay out of `validated_data`, never `None`), which
+        // is this kernel's `None` — identical downstream (`pop(..., None)`,
+        // `data.get(...)`, `is not None`).
         let golden = case(&fx, "validate", "ok_minimal");
         assert!(golden["valid"].as_bool().unwrap());
         let validated_keys = str_list(&golden["validated_keys"]);

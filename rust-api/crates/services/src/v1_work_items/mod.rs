@@ -33,21 +33,20 @@ pub mod shape_issue;
 pub enum FieldSpec {
     /// A plain field name (`isinstance(item, str)`, `base.py:55-56`).
     Include(String),
-    /// A `{name: [...]}` dict entry: the key joins `allowed`
-    /// (`base.py:59-60`) and the sub-list recurses (`base.py:44-49`).
+    /// A `{name: [...]}` dict entry: Python recurses into the sub-list
+    /// (`base.py:44-49`) and raises before the key could join `allowed`.
     Nested(String, Vec<FieldSpec>),
 }
 
 /// Failure modes of [`filter_fields`], mirroring the Python raises.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FilterError {
-    /// `TypeError` parity (`base.py:41-49`): Python recurses as
-    /// `self._filter_fields(self.fields[key], value)`, passing a `Field`
-    /// where the `fields` list belongs. Iterating a DRF `Field` raises
-    /// `TypeError`, so ANY nested-dict `fields=` entry raises — before the
-    /// allowed-list update for that entry is even reached. Views never pass
-    /// dicts (comma-split strings), so this arm is live only for direct
-    /// construction.
+    /// `TypeError` parity (`base.py:41-49`): Python recurses into
+    /// list-valued nested entries with a `Field` where the `fields` list
+    /// belongs, and iterating a `Field` raises — before the allowed-list
+    /// update is reached. Non-list dict values never recurse (plain
+    /// includes); views pass comma-split strings, so this arm is live
+    /// only for direct construction.
     #[error("nested fields= entry always raises TypeError in Python (base.py:41): {0}")]
     NestedNotSupported(String),
 }
