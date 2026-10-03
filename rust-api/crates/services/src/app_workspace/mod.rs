@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 
-//! App workspace/users/API-tokens domain surface (D-24, stage 5).
+//! App workspace/users/tokens domain surface (D-24, stage 5).
 //!
 //! Ports `apps/api/pi_dash/app/serializers/{workspace,user,api,favorite}.py`
 //! (this module) for the services layer, bottom-up:
 //!
+//! * [`ser_invite`] — invite + join-request + theme/props serializers
+//!   (`workspace.py:110-194`, PIDASHCONV-601).
 //! * [`ser_account_token`] — profile + account + API-token + favorite
 //!   serializers (PIDASHCONV-604).
 //! * [`ser_extras`] — user links, recent visits, home/user preferences,
@@ -20,7 +22,9 @@
 //! PIDASHCONV-605, `models_user` PIDASHCONV-607); on rebase keep both
 //! sides.
 //!
-//! Fixture input: F-W24-05 (`rust-api/fixtures/app_workspace/`
+//! Fixture input: F-W24-02
+//! (`rust-api/fixtures/app_workspace/serializers/invites.golden.json` +
+//! `TRACE.md`), F-W24-05 (`rust-api/fixtures/app_workspace/`
 //! `serializers/account_token_fav.golden.json` + `TRACE.md`), F-W24-03
 //! (`rust-api/fixtures/app_workspace/` `serializers/extras.golden.json` +
 //! `TRACE.md`), and F-W24-07 (`models/workspace_prefs.columns.json`);
@@ -34,3 +38,4 @@
 pub mod models_prefs;
 pub mod ser_account_token;
 pub mod ser_extras;
+pub mod ser_invite;
