@@ -14,6 +14,7 @@ pub mod integrations;
 pub mod license;
 pub mod orchestration;
 pub mod runner_runs;
+pub mod runner_sessions;
 pub mod tasks_cleanup;
 pub mod v1_assets;
 pub mod v1_cycles_modules;
