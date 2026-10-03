@@ -65,7 +65,7 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -127,6 +127,9 @@ pub enum Denial {
     ProjectNotFound,
     /// 400, `{"detail": ...}` lowercase (DRF `ParseError`: pagination, JSON).
     BadDetail(String),
+    /// 415, `{"detail": ...}` lowercase (DRF `UnsupportedMediaType`: no
+    /// parser for the request content type — PIDASHCONV-627).
+    UnsupportedMediaType(String),
     /// 400, `{"error": ...}` (view-inline).
     BadError(String),
     /// 400, serializer `errors` dict (pre-rendered bytes, field order).
@@ -154,6 +157,10 @@ impl Denial {
             Denial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::BadError(message) => (
@@ -2220,6 +2227,49 @@ pub fn parse_body(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> 
     if raw.is_empty() {
         return Ok(serde_json::Map::new());
     }
+    parse_json_map(raw)
+}
+
+/// Map a body-layer failure onto this module's denials (PIDASHCONV-627).
+fn map_body_error(error: super::body::BodyError) -> Denial {
+    match error {
+        super::body::BodyError::UnsupportedMediaType(message) => {
+            Denial::UnsupportedMediaType(message)
+        }
+        super::body::BodyError::ParseDetail(message) => Denial::BadDetail(message),
+        super::body::BodyError::ServerError => Denial::ServerError,
+    }
+}
+
+/// Content-negotiated `parse_body` (PIDASHCONV-627): empty is `{}`, form /
+/// multipart arrives as its text map, JSON keeps the existing serde path
+/// over the decoded text (no empty shortcut: CL>0 with empty decoded text
+/// is the EOF `ParseError`). The files map carries uploads per key.
+fn parse_body_ct(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<
+    (
+        serde_json::Map<String, Value>,
+        BTreeMap<String, Vec<super::body::FilePart>>,
+    ),
+    Denial,
+> {
+    match super::body::negotiate_body(headers, body, &super::body::MODULE_BODY_SPEC)
+        .map_err(map_body_error)?
+    {
+        super::body::NegotiatedBody::Empty => {
+            Ok((serde_json::Map::new(), BTreeMap::new()))
+        }
+        super::body::NegotiatedBody::JsonText(text) => {
+            Ok((parse_json_map(text.as_bytes())?, BTreeMap::new()))
+        }
+        super::body::NegotiatedBody::Form { map, files } => Ok((map, files)),
+    }
+}
+
+/// The `parse_body` serde path without the empty shortcut (PIDASHCONV-627).
+fn parse_json_map(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> {
     match serde_json::from_slice::<Value>(raw) {
         Ok(Value::Object(map)) => Ok(map),
         Ok(Value::Null) => Err(Denial::FieldErrors(
@@ -2246,6 +2296,38 @@ pub fn parse_body(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> 
             )))
         }
         Err(error) => Err(Denial::BadDetail(format!("JSON parse error - {error}"))),
+    }
+}
+
+/// Content-negotiated raw-object parse for the add-issues path
+/// (PIDASHCONV-627): empty is `{}`, form/multipart arrives as its text map,
+/// JSON keeps the full-value serde path (a non-object 500s on `.get`).
+fn parse_object_or_500_ct(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<
+    (
+        serde_json::Map<String, Value>,
+        BTreeMap<String, Vec<super::body::FilePart>>,
+    ),
+    Denial,
+> {
+    match super::body::negotiate_body(headers, body, &super::body::MODULE_BODY_SPEC)
+        .map_err(map_body_error)?
+    {
+        super::body::NegotiatedBody::Empty => {
+            Ok((serde_json::Map::new(), BTreeMap::new()))
+        }
+        super::body::NegotiatedBody::JsonText(text) => {
+            let bytes = text.as_bytes();
+            let value: Value = serde_json::from_slice(bytes)
+                .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}")))?;
+            match value {
+                Value::Object(map) => Ok((map, BTreeMap::new())),
+                _ => Err(Denial::ServerError),
+            }
+        }
+        super::body::NegotiatedBody::Form { map, files } => Ok((map, files)),
     }
 }
 
@@ -2694,12 +2776,40 @@ pub async fn coerce_write(
     pool: &PgPool,
     body: &serde_json::Map<String, Value>,
     partial: bool,
+    files: &BTreeMap<String, Vec<super::body::FilePart>>,
 ) -> Result<ModuleWrite, Denial> {
     use pidash_services::v1_cycles_modules::module_shapes as shapes;
     let mut errors: Vec<(String, String)> = Vec::new();
     let mut write = ModuleWrite::default();
 
+    // Uploads (PIDASHCONV-627): same file-wins shadowing as cycle.rs, except
+    // `members` keeps its text list (list fields append files after texts)
+    // and `status` receives the file's name (ChoiceField `str(data)`).
+    let mut effective = body.clone();
+    for key in files.keys() {
+        if key != "members" {
+            effective.remove(key);
+        }
+    }
+    if let Some(parts) = files.get("status") {
+        if let Some(last) = parts.last() {
+            effective.insert(
+                "status".to_owned(),
+                Value::String(last.filename.clone()),
+            );
+        }
+    }
+    let body = &effective;
+    // A dummy non-string for the file-is-not-a-string arms (bool fails
+    // `CharField` exactly like an upload does).
+    let file_marker = Value::Bool(true);
     // name: CharField(max 255, blank=False, null=False); required unless partial.
+    if files.contains_key("name") {
+        match coerce_char(Some(&file_marker), false, false, Some(255)) {
+            Err(fail) => errors.push(("name".to_owned(), fail.body)),
+            Ok(_) => unreachable!("upload is never a valid string"),
+        }
+    }
     match body.get("name") {
         None if partial => {}
         value => match coerce_char(value, false, false, Some(255)) {
@@ -2709,6 +2819,12 @@ pub async fn coerce_write(
         },
     }
     // description: CharField(blank=True); missing/None handled.
+    if files.contains_key("description") {
+        match coerce_char(Some(&file_marker), true, false, None) {
+            Err(fail) => errors.push(("description".to_owned(), fail.body)),
+            Ok(_) => unreachable!("upload is never a valid string"),
+        }
+    }
     match body.get("description") {
         None => {}
         Some(Value::Null) => errors.push((
@@ -2725,6 +2841,12 @@ pub async fn coerce_write(
     // explicit null clears (PATCH distinguishes the two, so the null arm
     // runs before validation).
     for key in ["start_date", "target_date"] {
+        if files.contains_key(key) {
+            errors.push((
+                key.to_owned(),
+                format!("[{}]", json_string(shapes::DRF_DATE_FORMAT_MESSAGE)),
+            ));
+        }
         match body.get(key) {
             None => {}
             Some(Value::Null) => {
@@ -2767,7 +2889,14 @@ pub async fn coerce_write(
             }
         }
     }
-    // lead: user PK (allow_null); missing absent; "" -> None.
+    // lead: user PK (allow_null); missing absent; "" -> None. A file fails
+    // the UUID parse with the upload's name as the echo (verified live;
+    // Django `UploadedFile.__str__` is the filename).
+    if let Some(parts) = files.get("lead") {
+        if let Some(last) = parts.last() {
+            errors.push(("lead".to_owned(), invalid_uuid_message(&last.filename)));
+        }
+    }
     match body.get("lead") {
         None => {}
         Some(value) => match coerce_pk_value(value, true) {
@@ -2791,50 +2920,72 @@ pub async fn coerce_write(
             Err(fail) => errors.push(("lead".to_owned(), fail.body)),
         },
     }
-    // members: list of user PKs; missing absent.
+    // members: list of user PKs; missing absent. Uploads append after the
+    // text values at shifted indexes (verified live: `{"1":[...]}` for one
+    // text plus one file); each file echoes its own filename.
+    let member_files = files.get("members");
     match coerce_members_shape(body.get("members")) {
-        Ok(None) => {}
-        Ok(Some(items)) => {
-            let mut ids = Vec::with_capacity(items.len());
-            let mut child_errors: Vec<(usize, String)> = Vec::new();
-            for (index, item) in items.iter().enumerate() {
-                match coerce_pk_value(item, false) {
-                    Ok(PkValue::Null) => {
-                        child_errors.push((index, r#"["This field may not be null."]"#.to_owned()))
-                    }
-                    Ok(PkValue::Id(id)) => {
-                        let echo = match item {
-                            Value::Number(_) => py_repr(item),
-                            Value::String(s) => s.clone(),
-                            _ => py_repr(item),
-                        };
-                        match check_user_exists(pool, &id, &echo, "members-exists").await {
-                            Ok(()) => ids.push(id),
-                            Err(fail) => {
-                                if fail.body.is_empty() {
-                                    return Err(Denial::ServerError);
+        Ok(maybe_items) => {
+            let texts: &[Value] = maybe_items.as_deref().unwrap_or(&[]);
+            let uploads: &[super::body::FilePart] =
+                member_files.map(Vec::as_slice).unwrap_or(&[]);
+            if maybe_items.is_none() && uploads.is_empty() {
+                // missing absent
+            } else {
+                let mut ids = Vec::with_capacity(texts.len());
+                let mut child_errors: Vec<(usize, String)> = Vec::new();
+                for (index, item) in texts.iter().enumerate() {
+                    match coerce_pk_value(item, false) {
+                        Ok(PkValue::Null) => child_errors.push((
+                            index,
+                            r#"["This field may not be null."]"#.to_owned(),
+                        )),
+                        Ok(PkValue::Id(id)) => {
+                            let echo = match item {
+                                Value::Number(_) => py_repr(item),
+                                Value::String(s) => s.clone(),
+                                _ => py_repr(item),
+                            };
+                            match check_user_exists(pool, &id, &echo, "members-exists").await {
+                                Ok(()) => ids.push(id),
+                                Err(fail) => {
+                                    if fail.body.is_empty() {
+                                        return Err(Denial::ServerError);
+                                    }
+                                    child_errors.push((index, fail.body));
                                 }
-                                child_errors.push((index, fail.body));
                             }
                         }
+                        Err(fail) => child_errors.push((index, fail.body)),
                     }
-                    Err(fail) => child_errors.push((index, fail.body)),
                 }
-            }
-            if child_errors.is_empty() {
-                write.members = Some(ids);
-            } else {
-                let parts: Vec<String> = child_errors
-                    .iter()
-                    .map(|(index, body)| format!("\"{index}\":{body}"))
-                    .collect();
-                errors.push(("members".to_owned(), format!("{{{}}}", parts.join(","))));
+                for (offset, part) in uploads.iter().enumerate() {
+                    child_errors.push((
+                        texts.len() + offset,
+                        invalid_uuid_message(&part.filename),
+                    ));
+                }
+                if child_errors.is_empty() {
+                    write.members = Some(ids);
+                } else {
+                    let parts: Vec<String> = child_errors
+                        .iter()
+                        .map(|(index, body)| format!("\"{index}\":{body}"))
+                        .collect();
+                    errors.push(("members".to_owned(), format!("{{{}}}", parts.join(","))));
+                }
             }
         }
         Err(fail) => errors.push(("members".to_owned(), fail.body)),
     }
     // external_source / external_id: CharField(max 255, blank+null).
     for key in ["external_source", "external_id"] {
+        if files.contains_key(key) {
+            match coerce_char(Some(&file_marker), true, true, Some(255)) {
+                Err(fail) => errors.push((key.to_owned(), fail.body)),
+                Ok(_) => unreachable!("upload is never a valid string"),
+            }
+        }
         match body.get(key) {
             None => {}
             Some(Value::Null) => {
@@ -3417,8 +3568,8 @@ pub async fn create_module_inner(
     )
     .await?;
     let project = fetch_project(&pre.pool, &project_id, &workspace_id).await?;
-    let raw = parse_body(body)?;
-    let write = coerce_write(&pre.pool, &raw, false).await?;
+    let (raw, files) = parse_body_ct(headers, body)?;
+    let write = coerce_write(&pre.pool, &raw, false, &files).await?;
     // `validate()`: the project gates (the context id is always present
     // and the row was just fetched; `module_view` is the live arm),
     // then the date order, then the members rewrite.
@@ -3559,6 +3710,12 @@ pub async fn create_module_inner(
         .await
         .map_err(|error| db_error(error, "module-create-members"))?;
     }
+    // Uploads that survive validation fail `.delay()` argument
+    // serialization *after* the insert, so the row persists and no
+    // activity is captured (PIDASHCONV-627; mirrors cycle create).
+    if !files.is_empty() {
+        return Err(Denial::ServerError);
+    }
     let job = pidash_jobs::v1_cycles_modules::publish::model_created_job(
         "module",
         &module_id.to_string(),
@@ -3661,8 +3818,8 @@ pub async fn patch_module_inner(
             "Archived module cannot be edited".to_owned(),
         ));
     }
-    let raw = parse_body(body)?;
-    let write = coerce_write(&pre.pool, &raw, true).await?;
+    let (raw, files) = parse_body_ct(headers, body)?;
+    let write = coerce_write(&pre.pool, &raw, true, &files).await?;
     // `validate()`: the project must still be live (its soft-delete
     // between gate and body would 404 here, matching `DoesNotExist`), the
     // module view must be on, the provided dates ordered; the members list
@@ -3792,6 +3949,11 @@ pub async fn patch_module_inner(
         "module-patch-update",
     )
     .await?;
+    // Uploads that survive validation fail `.delay()` argument
+    // serialization *after* the update (PIDASHCONV-627).
+    if !files.is_empty() {
+        return Err(Denial::ServerError);
+    }
     let job = pidash_jobs::v1_cycles_modules::publish::model_updated_job(
         "module",
         &pk.to_string(),
@@ -4279,17 +4441,15 @@ pub async fn add_module_issues_inner(
     .await?;
     // Raw `request.data` (no serializer): empty is `{}`, unparseable is the
     // DRF `ParseError`, a non-object 500s on `.get`.
-    let raw: serde_json::Map<String, Value> = if body.is_empty() {
-        serde_json::Map::new()
+    let (raw, files) = parse_object_or_500_ct(headers, body)?;
+    // An upload in `issues` is truthy, so it passes the required gate and
+    // dies in the UUID filter below (500). The module 404 runs first.
+    let issues_file = files.contains_key("issues");
+    let candidates = if issues_file {
+        Vec::new()
     } else {
-        let value: Value = serde_json::from_slice(body)
-            .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}")))?;
-        match value {
-            Value::Object(map) => map,
-            _ => return Err(Denial::ServerError),
-        }
+        coerce_issue_list(raw.get("issues"))?
     };
-    let candidates = coerce_issue_list(raw.get("issues"))?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT m."id", m."workspace_id" FROM "modules" m
            INNER JOIN "workspaces" w ON m."workspace_id" = w."id"
@@ -4305,6 +4465,10 @@ pub async fn add_module_issues_inner(
         return Err(Denial::NotFound);
     };
     let module_workspace_id = row_uuid(&row, "workspace_id", "module-issues-add-module")?;
+    // The UUID filter: an upload is not iterable-into-UUIDs (500).
+    if issues_file {
+        return Err(Denial::ServerError);
+    }
     // The re-query (`Issue.objects`: soft-delete scope only, so archived
     // and draft issues can be added): default `-created_at` order, which is
     // also the `str(queryset)` and creation order.

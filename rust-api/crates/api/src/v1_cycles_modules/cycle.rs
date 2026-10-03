@@ -73,7 +73,7 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -142,6 +142,9 @@ pub enum Denial {
     ProjectNotFound,
     /// 400, `{"detail": ...}` lowercase (DRF `ParseError`: pagination, JSON).
     BadDetail(String),
+    /// 415, `{"Detail": ...}` lowercase (DRF `UnsupportedMediaType`: no
+    /// parser for the request content type — PIDASHCONV-627).
+    UnsupportedMediaType(String),
     /// 400, `{"error": ...}` (view-inline).
     BadError(String),
     /// 400, serializer `errors` dict (pre-rendered bytes, field order).
@@ -180,6 +183,10 @@ impl Denial {
             Denial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::BadError(message) => (
@@ -2636,6 +2643,87 @@ pub fn coerce_body_object(value: JVal) -> Result<JObject, Denial> {
     }
 }
 
+/// Map a body-layer failure onto this module's denials (PIDASHCONV-627).
+fn map_body_error(error: super::body::BodyError) -> Denial {
+    match error {
+        super::body::BodyError::UnsupportedMediaType(message) => {
+            Denial::UnsupportedMediaType(message)
+        }
+        super::body::BodyError::ParseDetail(message) => Denial::BadDetail(message),
+        super::body::BodyError::ServerError => Denial::ServerError,
+    }
+}
+
+/// A form/multipart text map as a [`JObject`]: form producers only emit
+/// strings and arrays of strings, all surrogate-free Rust text.
+fn jobject_from_form_map(map: &serde_json::Map<String, Value>) -> JObject {
+    let mut object = JObject::new();
+    for (key, value) in map.iter() {
+        let jval = match value {
+            Value::String(text) => JVal::Str(JStr::from_clean(text.clone())),
+            Value::Array(items) => JVal::Array(
+                items
+                    .iter()
+                    .map(|item| match item {
+                        Value::String(text) => JVal::Str(JStr::from_clean(text.clone())),
+                        _ => unreachable!("form lists hold strings"),
+                    })
+                    .collect(),
+            ),
+            _ => unreachable!("form maps hold strings and string arrays"),
+        };
+        object.insert(JStr::from_clean(key.clone()), jval);
+    }
+    object
+}
+
+/// Content-negotiated `parse_body_value` (PIDASHCONV-627): empty is JSON
+/// `{}`, form/multipart arrives as its text map, JSON keeps the existing
+/// CPython-envelope path over the decoded text. The files map carries
+/// uploads per key (empty for JSON); `in` checks must consult both maps.
+fn parse_body_value_ct(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(JVal, BTreeMap<String, Vec<super::body::FilePart>>), Denial> {
+    match super::body::negotiate_body(headers, body, &super::body::CYCLE_BODY_SPEC)
+        .map_err(map_body_error)?
+    {
+        super::body::NegotiatedBody::Empty => {
+            Ok((JVal::Object(JObject::new()), BTreeMap::new()))
+        }
+        super::body::NegotiatedBody::JsonText(text) => {
+            parse_body_value(text.as_bytes()).map(|value| (value, BTreeMap::new()))
+        }
+        super::body::NegotiatedBody::Form { map, files } => {
+            Ok((JVal::Object(jobject_from_form_map(&map)), files))
+        }
+    }
+}
+
+/// Content-negotiated `parse_object_or_500` (PIDASHCONV-627).
+fn parse_object_or_500_ct(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<
+    (
+        JObject,
+        BTreeMap<String, Vec<super::body::FilePart>>,
+    ),
+    Denial,
+> {
+    match super::body::negotiate_body(headers, body, &super::body::CYCLE_BODY_SPEC)
+        .map_err(map_body_error)?
+    {
+        super::body::NegotiatedBody::Empty => Ok((JObject::new(), BTreeMap::new())),
+        super::body::NegotiatedBody::JsonText(text) => {
+            parse_object_or_500(text.as_bytes()).map(|object| (object, BTreeMap::new()))
+        }
+        super::body::NegotiatedBody::Form { map, files } => {
+            Ok((jobject_from_form_map(&map), files))
+        }
+    }
+}
+
 /// A single field-coercion failure: the pre-rendered message plus whether it
 /// is a per-field list (the usual shape) or an index-keyed object (list
 /// children, e.g. `members`).
@@ -4099,11 +4187,45 @@ pub async fn coerce_write(
     body: &JObject,
     partial: bool,
     user_timezone: &Tz,
+    files: &BTreeMap<String, Vec<super::body::FilePart>>,
 ) -> Result<CycleWrite, Denial> {
     let mut errors: Vec<(String, String)> = Vec::new();
     let mut write = CycleWrite::default();
 
+    // Uploads (PIDASHCONV-627): DRF appends files after data values, and
+    // scalar fields read the last value, so a file in a key wins over any
+    // text in it. Filed keys are shadowed out of the text map — except
+    // `ChoiceField`s, which only ever touch `str(data)`, so a file there
+    // is exactly its filename string (even a choice-named file validates).
+    // Every other filed key fails below with its field type's exact error
+    // (verified live), in field declaration order.
+    let mut effective = JObject::new();
+    for (key, value) in body.iter() {
+        if !files.keys().any(|filed| key.eq_str(filed)) {
+            effective.insert(key.clone(), value.clone());
+        }
+    }
+    if let Some(parts) = files.get("timezone") {
+        if let Some(last) = parts.last() {
+            effective.insert(
+                JStr::from_text("timezone"),
+                JVal::Str(JStr::from_clean(last.filename.clone())),
+            );
+        }
+    }
+    let body = &effective;
+    // A dummy non-string for the file-is-not-a-string arms (bool fails
+    // `CharField` exactly like an upload does).
+    let file_marker = JVal::Bool(true);
     // name: CharField(max 255, blank=False, null=False); required unless partial.
+    // A file here fails exactly like a non-string (uploads shadow the text
+    // map above, so the file and text arms never double-fire).
+    if files.contains_key("name") {
+        match coerce_char(Some(&file_marker), false, false, Some(255)) {
+            Err(fail) => errors.push(("name".to_owned(), fail.body)),
+            Ok(_) => unreachable!("upload is never a valid string"),
+        }
+    }
     match body.get("name") {
         None if partial => {}
         value => match coerce_char(value, false, false, Some(255)) {
@@ -4113,6 +4235,12 @@ pub async fn coerce_write(
         },
     }
     // description: TextField(blank=True, null=False); missing absent.
+    if files.contains_key("description") {
+        match coerce_char(Some(&file_marker), true, false, None) {
+            Err(fail) => errors.push(("description".to_owned(), fail.body)),
+            Ok(_) => unreachable!("upload is never a valid string"),
+        }
+    }
     match body.get("description") {
         None => {}
         Some(JVal::Null) => errors.push((
@@ -4130,6 +4258,12 @@ pub async fn coerce_write(
     // actor's zone (every other JSON type is the invalid message —
     // `to_internal_value` only accepts strings).
     for key in ["start_date", "end_date"] {
+        if files.contains_key(key) {
+            errors.push((
+                key.to_owned(),
+                format!("[{}]", json_string(DATETIME_INVALID_MESSAGE)),
+            ));
+        }
         match body.get(key) {
             None => {}
             Some(JVal::Null) => {
@@ -4178,6 +4312,17 @@ pub async fn coerce_write(
     }
     // owned_by: user PK (required=False, allow_null=True); missing absent;
     // "" -> None (then defaulted to the requester by `validate()`).
+    // The UUID parse chokes on the object itself (`AttributeError` on
+    // `.replace`), so a file never validates here — even when its
+    // filename is uuid-shaped. The echo renders `str(file)`.
+    if let Some(parts) = files.get("owned_by") {
+        if let Some(last) = parts.last() {
+            errors.push((
+                "owned_by".to_owned(),
+                invalid_uuid_message(&last.filename),
+            ));
+        }
+    }
     match body.get("owned_by") {
         None => {}
         Some(value) => match coerce_pk_value(value, true) {
@@ -4206,6 +4351,12 @@ pub async fn coerce_write(
     }
     // external_source / external_id: CharField(max 255, blank+null).
     for key in ["external_source", "external_id"] {
+        if files.contains_key(key) {
+            match coerce_char(Some(&file_marker), true, true, Some(255)) {
+                Err(fail) => errors.push((key.to_owned(), fail.body)),
+                Ok(_) => unreachable!("upload is never a valid string"),
+            }
+        }
         match body.get(key) {
             None => {}
             Some(JVal::Null) => {
@@ -4996,21 +5147,24 @@ pub async fn create_cycle_inner(
     // The both-or-neither gate runs on `request.data` BEFORE any
     // serializer (`views/cycle.py:305`), so a non-object body 500s on
     // `.get` instead of answering serializer errors.
-    let raw = parse_object_or_500(body)?;
+    let (raw, files) = parse_object_or_500_ct(headers, body)?;
     // Both-or-neither shape gate on the RAW body (`views/cycle.py:305-356`):
-    // present means the key exists with a non-null value.
+    // present means the key exists with a non-null value; uploaded files
+    // are present too (a file is never null — PIDASHCONV-627).
     let start_present = raw
         .get("start_date")
-        .is_some_and(|v| !matches!(v, JVal::Null));
+        .is_some_and(|v| !matches!(v, JVal::Null))
+        || files.contains_key("start_date");
     let end_present = raw
         .get("end_date")
-        .is_some_and(|v| !matches!(v, JVal::Null));
+        .is_some_and(|v| !matches!(v, JVal::Null))
+        || files.contains_key("end_date");
     if !shapes::create_dates_shape_ok(start_present, end_present) {
         return Err(Denial::BadError(
             shapes::CREATE_DATES_SHAPE_MESSAGE.to_owned(),
         ));
     }
-    let write = coerce_write(&pre.pool, &raw, false, &pre.actor.timezone).await?;
+    let write = coerce_write(&pre.pool, &raw, false, &pre.actor.timezone, &files).await?;
     // `validate()` (`serializers/cycle.py:61-106`): the project row comes
     // from `filter().first()` (missing → the 400 arm, unreachable past the
     // gate but ported), the legacy body id from the raw `project_id` key.
@@ -5124,6 +5278,12 @@ pub async fn create_cycle_inner(
     .execute(&pre.pool)
     .await
     .map_err(|error| db_write_error(error, "cycle-create-insert"))?;
+    // Uploads that survive validation (unknown keys) fail `.delay()`
+    // argument serialization *after* the insert, so the row persists and
+    // no activity is captured (PIDASHCONV-627, `P2` probe).
+    if !files.is_empty() {
+        return Err(Denial::ServerError);
+    }
     let job = pidash_jobs::v1_cycles_modules::publish::model_created_job(
         "cycle",
         &cycle_id.to_string(),
@@ -5171,6 +5331,18 @@ pub async fn create_cycle_inner(
 /// substring — and a hit on a list/str 500s on the narrowing `.get`
 /// (neither type has one). `in` on null/number/bool raises `TypeError` →
 /// 500. (All six non-dict shapes verified live against Django.)
+/// Content-negotiated [`completed_gate`]: dict bodies consult uploads
+/// too for the `sort_order` membership check (PIDASHCONV-627).
+fn completed_gate_ct(
+    value: &JVal,
+    files: &BTreeMap<String, Vec<super::body::FilePart>>,
+) -> Result<(), Denial> {
+    if matches!(value, JVal::Object(_)) && files.contains_key("sort_order") {
+        return Ok(());
+    }
+    completed_gate(value)
+}
+
 pub fn completed_gate(value: &JVal) -> Result<(), Denial> {
     const MESSAGE: &str = "The Cycle has already been completed so it cannot be edited";
     let reject = || Denial::BadError(MESSAGE.to_owned());
@@ -5254,17 +5426,18 @@ pub async fn patch_cycle_inner(
             "Archived cycle cannot be edited".to_owned(),
         ));
     }
-    let value = parse_body_value(body)?;
+    let (value, files) = parse_body_value_ct(headers, body)?;
     // Completed gate (`views/cycle.py:512-520`) on the RAW value, before
     // the serializer: without `sort_order` in it the edit is rejected;
     // with it the (dead) narrowing runs and the FULL body proceeds below.
+    // Uploaded files count for the `in` check (PIDASHCONV-627).
     if let Some(end_date) = before.end_date {
         if end_date < micros_now() {
-            completed_gate(&value)?;
+            completed_gate_ct(&value, &files)?;
         }
     }
     let raw = coerce_body_object(value)?;
-    let write = coerce_write(&pre.pool, &raw, true, &pre.actor.timezone).await?;
+    let write = coerce_write(&pre.pool, &raw, true, &pre.actor.timezone, &files).await?;
     // `validate()`: the project row comes from `filter().first()`; the
     // instance arm carries the cycle's own project id (same value here).
     let project: Option<ProjectRow> = sqlx::query(
@@ -5362,6 +5535,11 @@ pub async fn patch_cycle_inner(
         "cycle-patch-update",
     )
     .await?;
+    // Uploads surviving validation fail `.delay()` serialization after
+    // the update, with no activity captured (PIDASHCONV-627, `V11` probe).
+    if !files.is_empty() {
+        return Err(Denial::ServerError);
+    }
     let job = pidash_jobs::v1_cycles_modules::publish::model_updated_job(
         "cycle",
         &pk.to_string(),
@@ -5879,11 +6057,15 @@ pub async fn add_cycle_issues_inner(
     .await?;
     // Raw `request.data` (no serializer): empty is `{}`, unparseable is the
     // DRF `ParseError`, a non-object 500s on `.get`.
-    let raw = parse_object_or_500(body)?;
+    let (raw, files) = parse_object_or_500_ct(headers, body)?;
+    // An upload in `issues` is truthy, so it passes the falsy gate and
+    // dies in the UUID filter below (`D11` probe). Uploads in other keys
+    // never reach a serializer here and are ignored.
+    let issues_file = files.contains_key("issues");
     // `if not issues:` — truthiness, not length: missing/empty/null/0/false
     // share the two-key 400 (`views/cycle.py:928-932`).
     let issues_value = raw.get("issues");
-    if !issues_value.is_some_and(py_truthy) {
+    if !issues_file && !issues_value.is_some_and(py_truthy) {
         let body = format!(
             "{{\"error\":{},\"code\":{}}}",
             json_string("Work items are required"),
@@ -5891,7 +6073,10 @@ pub async fn add_cycle_issues_inner(
         );
         return Err(Denial::FieldErrors(body));
     }
-    let issues_value = issues_value.expect("truthy issues checked");
+    // A dummy truthy stand-in: only the file flag matters downstream (the
+    // 404 + completed checks run first, then the UUID filter 500s).
+    let file_truthy = JVal::Bool(true);
+    let issues_value = issues_value.unwrap_or(&file_truthy);
     // Order matters: Python runs `Cycle.objects.get` (404) and the
     // completed gate BEFORE the `issue_id__in` filter validates UUIDs
     // (400), so the coercion runs after both (`views/cycle.py:934-946`).
@@ -5919,6 +6104,11 @@ pub async fn add_cycle_issues_inner(
             );
             return Err(Denial::FieldErrors(body));
         }
+    }
+    // The upload dies here: iterating it for `issue_id__in` feeds bytes
+    // into the UUID parse (`TypeError` → generic 500, `D11`/`V13a`).
+    if issues_file {
+        return Err(Denial::ServerError);
     }
     let candidates: Vec<IssueCandidate> = coerce_add_issues(issues_value)?;
     // Existing bridges anywhere but this cycle (`~Q(cycle_id)`, no
@@ -6744,12 +6934,16 @@ pub async fn transfer_cycle_issues_inner(
     .await?;
     // Raw `request.data` (no serializer): `.get("new_cycle_id", False)`
     // 500s on a non-object body; falsy answers the 400.
-    let raw = parse_object_or_500(body)?;
+    let (raw, files) = parse_object_or_500_ct(headers, body)?;
+    // An upload here is truthy and dies in the target `pk` filter
+    // (`ValidationError` → the valid-detail 400, `P3`/`V14` probes).
+    let target_file = files.contains_key("new_cycle_id");
     let new_raw = raw.get("new_cycle_id");
-    if !new_raw.is_some_and(py_truthy) {
+    if !target_file && !new_raw.is_some_and(py_truthy) {
         return Err(Denial::BadError("New Cycle Id is required".to_owned()));
     }
-    let new_raw = new_raw.expect("truthy new_cycle_id checked");
+    let file_truthy = JVal::Bool(true);
+    let new_raw = new_raw.unwrap_or(&file_truthy);
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT c."id", c."end_date" FROM "cycles" c
            INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
@@ -6776,6 +6970,9 @@ pub async fn transfer_cycle_issues_inner(
     // `transfer_cycle_issues`: the target id coerces like a `pk` lookup
     // (strings parse, ints/bools fold via `UUID(int=...)`, everything else
     // 400s through the `ValidationError` branch).
+    if target_file {
+        return Err(Denial::BadError("Please provide valid detail".to_owned()));
+    }
     let new_cycle_id = match coerce_transfer_target(new_raw)? {
         Some(id) => id,
         None => return Err(Denial::ServerError),
