@@ -36,6 +36,10 @@ Endpoint shorthand (backend contracts, also used by the inventory): `BASE` =
   sub-group name, and the cumulative issue count across all its columns.
 - The board scrolls vertically in swimlane mode. Lanes with zero issues are
   hidden when the show-empty display filter is off.
+- Live recon (NEWFRONT-118 run 4): on the seeded stack, seed-created rows
+  without labels never reach a labels sub-grouped board — the None lane
+  renders empty (old bug NEWFRONT-158, pinned by a bug scenario); API-made
+  rows behave. Oracle swimlane scenarios use scratch projects.
 
 ### Collapse and empty groups (ISS-030–ISS-032)
 
@@ -115,8 +119,13 @@ Endpoint shorthand (backend contracts, also used by the inventory): `BASE` =
   an explicit load-more entry instead. Concurrent loads for one column are
   suppressed.
 - Columns and cards outside the viewport are replaced by height-estimated
-  placeholders until scrolled near. While dragging near an edge the board
-  auto-scrolls horizontally and the hovered column vertically.
+  placeholders until scrolled near. Live recon (NEWFRONT-118 run 4)
+  confirms the mechanism: loaded issues mount anchor shells for every
+  row, but only the visible window (about six cards) renders card
+  content — the rest stay 100px placeholder shells, so card-name readers
+  must tolerate empty shells and drags must hold from the window middle.
+  While dragging near an edge the board auto-scrolls horizontally and
+  the hovered column vertically.
 
 ## Gantt timeline (ISS-044–ISS-059)
 

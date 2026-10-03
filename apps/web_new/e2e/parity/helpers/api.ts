@@ -6796,7 +6796,14 @@ export interface LayoutsIssuePatch {
   sort_order?: number;
 }
 
-/** Patch one issue; throws unless the server accepts. */
+/**
+ * Patch one issue; throws unless the server accepts.
+ *
+ * WARNING (NEWFRONT-160): patching state_id to In Progress, In Review, or
+ * In Test answers 204 but silently keeps the default state instead — the
+ * same happens through UI drags. Fixtures must only target verified
+ * states (Backlog, Todo, Done, and created states); Cancelled is untested.
+ */
 export async function serverPatchIssue(
   workspaceSlug: string,
   projectId: string,

@@ -25,7 +25,6 @@ import {
   serverDeleteCycle,
   serverDeleteIssue,
   serverDeleteLabel,
-  serverDeleteModule,
   serverDeleteProject,
   serverDeleteState,
   serverIssueDetails,
@@ -319,21 +318,33 @@ test(
   specTitle(["ISS-031"], "collapse and expand a kanban swimlane"),
   { tag: specTags(["ISS-031"]) },
   async ({ driver, seed }) => {
+    // A scratch project keeps the lanes exact: the seed's unlabeled rows
+    // never reach a labels sub-grouped board (NEWFRONT-158); same
+    // workaround as ISS-029 for NEWFRONT-153.
     const owner = await signInFreshUser(seed.email, seed.password);
-    const suffix = uniqueSuffix().slice(0, 6);
-    const label = await serverCreateLabel(seed.workspaceSlug, seed.projectId, owner.cookie, `KB fold ${suffix}`);
-    const firstId = await issueIdByName(seed, seed.projectId, owner.cookie, seed.issueNames[0] ?? "");
-    await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { label_ids: [label.id] }, owner.cookie);
-    const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "state", sub_group_by: "labels" });
+    const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
+    const projectId = await serverCreateProject(seed.workspaceSlug, owner.cookie, `KB fold ${suffix}`, `KF${suffix}`);
+    const states = await serverListStates(seed.workspaceSlug, projectId, owner.cookie);
+    const home = states.find((state) => state.isDefault) ?? states[0];
+    if (!home) throw new Error("[parity] scratch project has no states.");
+    const label = await serverCreateLabel(seed.workspaceSlug, projectId, owner.cookie, `KB fold ${suffix}`);
+    const firstName = `KB fold a ${suffix}`;
+    const firstId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, firstName, home.id);
+    await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, `KB fold b ${suffix}`, home.id);
+    await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, `KB fold c ${suffix}`, home.id);
+    await serverPatchIssue(seed.workspaceSlug, projectId, firstId, { label_ids: [label.id] }, owner.cookie);
+    await openBoard(driver, seed, projectId, { group_by: "state", sub_group_by: "labels" });
     await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(2);
 
     await test.step("collapsing a lane hides its cards", async () => {
       expect(await driver.kanbanSwimlaneCollapsed(label.name)).toBe(false);
       await driver.kanbanToggleSwimlane(label.name);
       expect(await driver.kanbanSwimlaneCollapsed(label.name)).toBe(true);
+      // Lane columns load lazily: the toggle only waits for the collapse
+      // flag, so poll until the surviving lane's cards mount.
+      await expect.poll(() => driver.kanbanCards(), { timeout: 120_000 }).toHaveLength(2);
       const cards = await driver.kanbanCards();
-      expect(cards.map((card) => card.name)).not.toContain(seed.issueNames[0] ?? "");
-      expect(cards).toHaveLength(2);
+      expect(cards.map((card) => card.name)).not.toContain(firstName);
     });
 
     await test.step("the lane state survives a reload", async () => {
@@ -343,7 +354,41 @@ test(
       expect(await driver.kanbanSwimlaneCollapsed(label.name)).toBe(true);
       await driver.kanbanToggleSwimlane(label.name);
       expect(await driver.kanbanSwimlaneCollapsed(label.name)).toBe(false);
-      expect(await driver.kanbanCards()).toHaveLength(3);
+      await expect.poll(() => driver.kanbanCards(), { timeout: 120_000 }).toHaveLength(3);
+    });
+
+    await test.step("cleanup removes the scratch project", async () => {
+      await serverDeleteProject(seed.workspaceSlug, projectId, owner.cookie);
+    });
+  }
+);
+
+test(
+  specTitle(["ISS-031"], "bug: labels sub-grouping drops unlabeled seed issues (NEWFRONT-158)"),
+  { tag: specTags(["ISS-031"]) },
+  async ({ driver, seed }) => {
+    const owner = await signInFreshUser(seed.email, seed.password);
+    const suffix = uniqueSuffix().slice(0, 6);
+    const label = await serverCreateLabel(seed.workspaceSlug, seed.projectId, owner.cookie, `KB fold ${suffix}`);
+    const firstId = await issueIdByName(seed, seed.projectId, owner.cookie, seed.issueNames[0] ?? "");
+    await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { label_ids: [label.id] }, owner.cookie);
+    const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "state", sub_group_by: "labels" });
+    await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(2);
+
+    await test.step("the None lane stays empty on the seed project", async () => {
+      // Intended: the two unlabeled seed issues render here (count 2).
+      // Pinned: the labels sub-grouped query drops seed rows without
+      // labels, so the lane shows count 0 and no cards (NEWFRONT-158).
+      await expect
+        .poll(async () => (await driver.kanbanCards()).map((card) => card.name), { timeout: 120_000 })
+        .toContain(seed.issueNames[0] ?? "");
+      const lanes = await driver.kanbanSwimlanes();
+      expect(lanes.find((entry) => entry.name === "None")?.count).toBe(0);
+      const cards = await driver.kanbanCards();
+      expect(cards.map((card) => card.name)).not.toContain(seed.issueNames[1] ?? "");
+      expect(cards.map((card) => card.name)).not.toContain(seed.issueNames[2] ?? "");
+      const rows = await serverIssues(seed.workspaceSlug, seed.projectId, owner.cookie);
+      expect(rows).toHaveLength(3);
     });
 
     await test.step("cleanup removes the label and restores preferences", async () => {
@@ -680,18 +725,8 @@ test(
       `Done ${suffix}`,
       "completed"
     );
-    const label = await serverCreateLabel(seed.workspaceSlug, seed.projectId, owner.cookie, `KB move ${suffix}`);
-    const cycle = await serverCreateCycle(
-      seed.workspaceSlug,
-      seed.projectId,
-      owner.cookie,
-      `KB move ${suffix}`,
-      "2026-09-15",
-      "2026-11-15"
-    );
-    const module = await serverCreateModule(seed.workspaceSlug, seed.projectId, owner.cookie, `KB move ${suffix}`);
-    const [alpha, beta, gamma] = seed.issueNames;
-    if (!alpha || !beta || !gamma) throw new Error("[parity] seed names missing.");
+    const [alpha] = seed.issueNames;
+    if (!alpha) throw new Error("[parity] seed names missing.");
     const statesAfter = await serverListStates(seed.workspaceSlug, seed.projectId, owner.cookie);
     const doneName = statesAfter.find((state) => state.id === doneId)?.name ?? "";
     const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "state" });
@@ -705,44 +740,11 @@ test(
       await serverPatchIssue(seed.workspaceSlug, seed.projectId, id, { state_id: home.id }, owner.cookie);
     });
 
-    await test.step("array fields add the destination and clear on None", async () => {
-      await setBoardFilters(driver, seed, seed.projectId, ctx, { group_by: "labels" });
-      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
-      const none = (await driver.kanbanColumns()).find((entry) => entry.name !== label.name)?.name ?? "";
-      await driver.kanbanDragCardToColumnEnd(beta, label.name);
-      await expect.poll(() => driver.kanbanColumnCards(label.name), { timeout: 60_000 }).toContain(beta);
-      const id = await issueIdByName(seed, seed.projectId, owner.cookie, beta);
-      expect((await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).labelIds).toContain(
-        label.id
-      );
-      await driver.kanbanDragCardToColumnEnd(beta, none);
-      await expect.poll(() => driver.kanbanColumnCards(none), { timeout: 60_000 }).toContain(beta);
-      expect((await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).labelIds).toHaveLength(0);
-    });
-
-    await test.step("module membership moves through the module call", async () => {
-      await setBoardFilters(driver, seed, seed.projectId, ctx, { group_by: "module" });
-      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
-      await driver.kanbanDragCardToColumnEnd(gamma, module.name);
-      await expect.poll(() => driver.kanbanColumnCards(module.name), { timeout: 60_000 }).toContain(gamma);
-      const id = await issueIdByName(seed, seed.projectId, owner.cookie, gamma);
-      expect((await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).moduleIds).toContain(
-        module.id
-      );
-    });
-
-    await test.step("cycle membership moves through the cycle call", async () => {
-      await setBoardFilters(driver, seed, seed.projectId, ctx, { group_by: "cycle" });
-      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
-      await driver.kanbanDragCardToColumnEnd(beta, cycle.name);
-      await expect.poll(() => driver.kanbanColumnCards(cycle.name), { timeout: 60_000 }).toContain(beta);
-      const id = await issueIdByName(seed, seed.projectId, owner.cookie, beta);
-      expect((await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).cycleId).toBe(cycle.id);
-    });
-
     await test.step("a disallowed grouping warns and moves nothing", async () => {
       await setBoardFilters(driver, seed, seed.projectId, ctx, { group_by: "state_detail.group" });
-      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
+      // State groups render the whole seven-value domain, not just the
+      // occupied ones; the three seed cards land in the Todo column.
+      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).not.toHaveLength(0);
       await expect.poll(() => driver.kanbanCards(), { timeout: 60_000 }).toHaveLength(3);
       const columns = await driver.kanbanColumns();
       let target = "";
@@ -767,9 +769,6 @@ test(
     });
 
     await test.step("cleanup removes every fixture and restores preferences", async () => {
-      await serverDeleteCycle(seed.workspaceSlug, seed.projectId, cycle.id, owner.cookie);
-      await serverDeleteModule(seed.workspaceSlug, seed.projectId, module.id, owner.cookie);
-      await serverDeleteLabel(seed.workspaceSlug, seed.projectId, label.id, owner.cookie);
       await serverDeleteState(seed.workspaceSlug, seed.projectId, doneId, owner.cookie);
       const rows = await serverIssues(seed.workspaceSlug, seed.projectId, owner.cookie);
       expect(rows).toHaveLength(3);
@@ -779,81 +778,228 @@ test(
 );
 
 test(
+  specTitle(["ISS-038"], "membership moves across label, module and cycle columns"),
+  { tag: specTags(["ISS-038"]) },
+  async ({ driver, seed }) => {
+    // A scratch project keeps None exact: labels-grouped boards drop
+    // unlabeled seed rows entirely (NEWFRONT-158), so the None column
+    // only renders for API-made issues.
+    const owner = await signInFreshUser(seed.email, seed.password);
+    const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
+    const projectId = await serverCreateProject(seed.workspaceSlug, owner.cookie, `KB member ${suffix}`, `KE${suffix}`);
+    const states = await serverListStates(seed.workspaceSlug, projectId, owner.cookie);
+    const home = states.find((state) => state.isDefault) ?? states[0];
+    if (!home) throw new Error("[parity] scratch project has no states.");
+    const label = await serverCreateLabel(seed.workspaceSlug, projectId, owner.cookie, `KB member ${suffix}`);
+    const cycle = await serverCreateCycle(
+      seed.workspaceSlug,
+      projectId,
+      owner.cookie,
+      `KB member ${suffix}`,
+      "2026-09-15",
+      "2026-11-15"
+    );
+    const module = await serverCreateModule(seed.workspaceSlug, projectId, owner.cookie, `KB member ${suffix}`);
+    const alpha = `KB member a ${suffix}`;
+    const beta = `KB member b ${suffix}`;
+    const gamma = `KB member c ${suffix}`;
+    const alphaId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, alpha, home.id);
+    const betaId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, beta, home.id);
+    const gammaId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, gamma, home.id);
+    const ctx = await openBoard(driver, seed, projectId, { group_by: "labels" });
+    await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
+
+    await test.step("array fields add the destination and clear on None", async () => {
+      const none = (await driver.kanbanColumns()).find((entry) => entry.name !== label.name)?.name ?? "";
+      expect(none).not.toBe("");
+      await driver.kanbanDragCardToColumnEnd(beta, label.name);
+      await expect.poll(() => driver.kanbanColumnCards(label.name), { timeout: 60_000 }).toContain(beta);
+      expect((await serverIssueDetails(seed.workspaceSlug, projectId, betaId, owner.cookie)).labelIds).toContain(
+        label.id
+      );
+      await driver.kanbanDragCardToColumnEnd(beta, none);
+      await expect.poll(() => driver.kanbanColumnCards(none), { timeout: 60_000 }).toContain(beta);
+      expect((await serverIssueDetails(seed.workspaceSlug, projectId, betaId, owner.cookie)).labelIds).toHaveLength(0);
+    });
+
+    await test.step("module membership moves through the module call", async () => {
+      await setBoardFilters(driver, seed, projectId, ctx, { group_by: "module" });
+      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
+      await driver.kanbanDragCardToColumnEnd(gamma, module.name);
+      await expect.poll(() => driver.kanbanColumnCards(module.name), { timeout: 60_000 }).toContain(gamma);
+      expect((await serverIssueDetails(seed.workspaceSlug, projectId, gammaId, owner.cookie)).moduleIds).toContain(
+        module.id
+      );
+    });
+
+    await test.step("cycle membership moves through the cycle call", async () => {
+      await setBoardFilters(driver, seed, projectId, ctx, { group_by: "cycle" });
+      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
+      await driver.kanbanDragCardToColumnEnd(alpha, cycle.name);
+      await expect.poll(() => driver.kanbanColumnCards(cycle.name), { timeout: 60_000 }).toContain(alpha);
+      expect((await serverIssueDetails(seed.workspaceSlug, projectId, alphaId, owner.cookie)).cycleId).toBe(cycle.id);
+    });
+
+    await test.step("cleanup removes the scratch project", async () => {
+      await serverDeleteProject(seed.workspaceSlug, projectId, owner.cookie);
+    });
+  }
+);
+
+test(
+  specTitle(["ISS-038"], "bug: moves into In Progress land in Backlog (NEWFRONT-160)"),
+  { tag: specTags(["ISS-038"]) },
+  async ({ driver, seed }) => {
+    const owner = await signInFreshUser(seed.email, seed.password);
+    const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
+    const projectId = await serverCreateProject(seed.workspaceSlug, owner.cookie, `KB stuck ${suffix}`, `KS${suffix}`);
+    const states = await serverListStates(seed.workspaceSlug, projectId, owner.cookie);
+    const home = states.find((state) => state.isDefault) ?? states[0];
+    if (!home) throw new Error("[parity] scratch project has no states.");
+    const name = `KB stuck ${suffix}`;
+    const id = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, name, home.id);
+    await openBoard(driver, seed, projectId, { group_by: "state" });
+    await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(states.length);
+
+    await test.step("the card renders moved but the server kept Backlog", async () => {
+      // Intended: the issue lands in In Progress (UI and server agree).
+      // Pinned: the drop applies optimistically in the UI, but moves into
+      // In Progress, In Review, or In Test silently land in the default
+      // state on the server (NEWFRONT-160).
+      await driver.kanbanDragCardToColumnEnd(name, "In Progress");
+      await expect.poll(() => driver.kanbanColumnCards("In Progress"), { timeout: 60_000 }).toContain(name);
+      const details = await serverIssueDetails(seed.workspaceSlug, projectId, id, owner.cookie);
+      expect(details.stateId).toBe(home.id);
+    });
+
+    await test.step("cleanup removes the scratch project", async () => {
+      await serverDeleteProject(seed.workspaceSlug, projectId, owner.cookie);
+    });
+  }
+);
+
+test(
   specTitle(["ISS-039"], "move a card across swimlanes"),
   { tag: specTags(["ISS-039"]) },
   async ({ driver, seed }) => {
+    // A scratch project keeps the lanes exact: the seed's unlabeled rows
+    // never reach a labels sub-grouped board (NEWFRONT-158); same
+    // workaround as ISS-029.
     const owner = await signInFreshUser(seed.email, seed.password);
-    const suffix = uniqueSuffix().slice(0, 6);
-    const states = await serverListStates(seed.workspaceSlug, seed.projectId, owner.cookie);
+    const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
+    const projectId = await serverCreateProject(seed.workspaceSlug, owner.cookie, `KB move ${suffix}`, `KM${suffix}`);
+    const states = await serverListStates(seed.workspaceSlug, projectId, owner.cookie);
     const home = states.find((state) => state.isDefault) ?? states[0];
-    if (!home) throw new Error("[parity] seed project has no states.");
-    const doneId = await serverCreateState(
-      seed.workspaceSlug,
-      seed.projectId,
-      owner.cookie,
-      `Done ${suffix}`,
-      "completed"
-    );
-    const label = await serverCreateLabel(seed.workspaceSlug, seed.projectId, owner.cookie, `KB lane ${suffix}`);
-    const [alpha, beta, gamma] = seed.issueNames;
-    if (!alpha || !beta || !gamma) throw new Error("[parity] seed names missing.");
-    const gammaId = await issueIdByName(seed, seed.projectId, owner.cookie, gamma);
+    if (!home) throw new Error("[parity] scratch project has no states.");
+    // The destination is the nearest default state, not a fresh trailing
+    // one: a created state lands columns off-screen, outside the
+    // virtualized content window, where the drop target never renders.
+    const dest =
+      states.find((state) => !state.isDefault && state.group === home.group) ??
+      states.find((state) => !state.isDefault);
+    if (!dest) throw new Error("[parity] scratch project has no second state.");
+    const doneId = dest.id;
+    const label = await serverCreateLabel(seed.workspaceSlug, projectId, owner.cookie, `KB move ${suffix}`);
+    const alpha = `KB move a ${suffix}`;
+    const beta = `KB move b ${suffix}`;
+    const gamma = `KB move c ${suffix}`;
+    const alphaId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, alpha, home.id);
+    const betaId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, beta, home.id);
+    const gammaId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, gamma, home.id);
     await serverPatchIssue(
       seed.workspaceSlug,
-      seed.projectId,
+      projectId,
       gammaId,
-      { state_id: doneId, label_ids: [label.id], target_date: "2026-12-03" },
+      { state_id: doneId, label_ids: [label.id] },
       owner.cookie
     );
-    const alphaId = await issueIdByName(seed, seed.projectId, owner.cookie, alpha);
-    await serverPatchIssue(seed.workspaceSlug, seed.projectId, alphaId, { target_date: "2026-12-01" }, owner.cookie);
-    const betaId = await issueIdByName(seed, seed.projectId, owner.cookie, beta);
-    await serverPatchIssue(seed.workspaceSlug, seed.projectId, betaId, { target_date: "2026-12-02" }, owner.cookie);
-    const doneName = `Done ${suffix}`;
-    const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "state", sub_group_by: "labels" });
+    const doneName = dest.name;
+    const ctx = await openBoard(driver, seed, projectId, { group_by: "state", sub_group_by: "labels" });
     await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(2);
 
     await test.step("dropping across lanes updates both values", async () => {
       await driver.kanbanDragCardBefore(alpha, gamma);
       await expect.poll(() => driver.kanbanCellCards(doneName, label.name), { timeout: 60_000 }).toContain(alpha);
-      const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, alphaId, owner.cookie);
+      const details = await serverIssueDetails(seed.workspaceSlug, projectId, alphaId, owner.cookie);
       expect(details.stateId).toBe(doneId);
       expect(details.labelIds).toContain(label.id);
     });
 
     await test.step("a non-draggable dimension refuses the move", async () => {
-      await setBoardFilters(driver, seed, seed.projectId, ctx, { sub_group_by: "target_date" });
-      await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(3);
+      // State groups render swimlanes but are not a draggable dimension
+      // (target_date lanes crash the board: NEWFRONT-159). Gamma moves to
+      // Done so the three issues span three groups; beta stays home.
+      // Fixtures must avoid In Progress/In Review/In Test — moves there
+      // silently land in Backlog (NEWFRONT-160).
+      const completedState = states.find((state) => state.group === "completed");
+      if (!completedState) throw new Error("[parity] scratch project lacks a completed state.");
+      await serverPatchIssue(seed.workspaceSlug, projectId, gammaId, { state_id: completedState.id }, owner.cookie);
+      await setBoardFilters(driver, seed, projectId, ctx, { sub_group_by: "state_detail.group" });
+      await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).not.toHaveLength(0);
+      await expect
+        .poll(async () => (await driver.kanbanCards()).map((card) => card.name), { timeout: 120_000 })
+        .toEqual(expect.arrayContaining([alpha, beta, gamma]));
       const placed = await driver.kanbanCards();
       const betaBefore = placed.find((card) => card.name === beta);
       // A refused move never settles, so attempt without settling and assert
       // the card never left its cell.
       await driver.kanbanAttemptCardBefore(beta, gamma);
       expect((await driver.kanbanCards()).find((card) => card.name === beta)).toEqual(betaBefore);
-      const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, betaId, owner.cookie);
+      const details = await serverIssueDetails(seed.workspaceSlug, projectId, betaId, owner.cookie);
       expect(details.stateId).toBe(home.id);
-      expect(details.targetDate).toBe("2026-12-02");
+      expect(details.labelIds).toHaveLength(0);
     });
 
-    await test.step("cleanup restores every patched field", async () => {
-      await serverPatchIssue(
-        seed.workspaceSlug,
-        seed.projectId,
-        alphaId,
-        { state_id: home.id, label_ids: [], target_date: null },
-        owner.cookie
-      );
-      await serverPatchIssue(seed.workspaceSlug, seed.projectId, betaId, { target_date: null }, owner.cookie);
-      await serverPatchIssue(
-        seed.workspaceSlug,
-        seed.projectId,
-        gammaId,
-        { state_id: home.id, label_ids: [], target_date: null },
-        owner.cookie
-      );
-      await serverDeleteLabel(seed.workspaceSlug, seed.projectId, label.id, owner.cookie);
-      await serverDeleteState(seed.workspaceSlug, seed.projectId, doneId, owner.cookie);
-      await restoreBoard(seed, seed.projectId, ctx);
+    await test.step("cleanup removes the scratch project", async () => {
+      await serverDeleteProject(seed.workspaceSlug, projectId, owner.cookie);
+    });
+  }
+);
+
+test(
+  specTitle(["ISS-039"], "bug: target_date swimlanes render a blank board (NEWFRONT-159)"),
+  { tag: specTags(["ISS-039"]) },
+  async ({ driver, seed }) => {
+    const owner = await signInFreshUser(seed.email, seed.password);
+    const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
+    const projectId = await serverCreateProject(seed.workspaceSlug, owner.cookie, `KB dates ${suffix}`, `KD${suffix}`);
+    const states = await serverListStates(seed.workspaceSlug, projectId, owner.cookie);
+    const home = states.find((state) => state.isDefault) ?? states[0];
+    if (!home) throw new Error("[parity] scratch project has no states.");
+    const aId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, `KB dates a ${suffix}`, home.id);
+    const bId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, `KB dates b ${suffix}`, home.id);
+    const cId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, `KB dates c ${suffix}`, home.id);
+    await serverPatchIssue(seed.workspaceSlug, projectId, aId, { target_date: "2026-12-01" }, owner.cookie);
+    await serverPatchIssue(seed.workspaceSlug, projectId, bId, { target_date: "2026-12-02" }, owner.cookie);
+    await serverPatchIssue(seed.workspaceSlug, projectId, cId, { target_date: "2026-12-03" }, owner.cookie);
+    const ctx = await openBoard(driver, seed, projectId, { group_by: "state" });
+
+    await test.step("the dated lanes never mount", async () => {
+      // Intended: one swimlane per target date with its issue as a card.
+      // Pinned: the sub-grouped fetch succeeds but the board body stays
+      // blank — no lanes ever mount (NEWFRONT-159). Bounded: the flat
+      // board above warms the host, and a healthy board mounts lanes in
+      // seconds once kanban is active, so 60 empty seconds is the crash.
+      const current = await serverProjectUserProperties(seed.workspaceSlug, projectId, ctx.user.cookie);
+      await serverPatchProjectUserProperties(seed.workspaceSlug, projectId, ctx.user.cookie, {
+        display_filters: { ...current.displayFilters, sub_group_by: "target_date" },
+      });
+      await driver.boardReloadIssues();
+      await expect.poll(() => driver.boardActiveLayout(), { timeout: 120_000 }).toBe("kanban");
+      let mounted = false;
+      try {
+        await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 60_000 }).not.toHaveLength(0);
+        mounted = true;
+      } catch {
+        mounted = false;
+      }
+      expect(mounted).toBe(false);
+      const rows = await serverIssues(seed.workspaceSlug, projectId, owner.cookie);
+      expect(rows).toHaveLength(3);
+    });
+
+    await test.step("cleanup removes the scratch project", async () => {
+      await serverDeleteProject(seed.workspaceSlug, projectId, owner.cookie);
     });
   }
 );
@@ -976,7 +1122,7 @@ test(
 );
 
 test(
-  specTitle(["ISS-043"], "kanban virtualization and drag auto-scroll"),
+  specTitle(["ISS-043"], "kanban virtualization window and drag auto-scroll"),
   { tag: specTags(["ISS-043"]) },
   async ({ driver, seed }) => {
     const owner = await signInFreshUser(seed.email, seed.password);
@@ -991,8 +1137,8 @@ test(
     // Created sequentially so the server order matches the name order and
     // the last name is deterministically at the column end.
     const names: string[] = [];
-    for (let index = 0; index < 101; index += 1) {
-      const name = `KB virt ${suffix} ${String(index + 1).padStart(3, "0")}`;
+    for (let index = 0; index < 61; index += 1) {
+      const name = `KB virt ${suffix} ${String(index + 1).padStart(2, "0")}`;
       names.push(name);
       await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, name, home.id);
     }
@@ -1000,26 +1146,47 @@ test(
     await openBoard(driver, seed, projectId, { group_by: "state" });
     await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(8);
 
-    await test.step("only a window of cards mounts at once", async () => {
-      for (let attempt = 0; attempt < 8; attempt += 1) {
+    await test.step("only a window of cards renders content at once", async () => {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
         await driver.kanbanColumnScrollEnd(home.name);
         if ((await driver.kanbanColumnCards(home.name)).includes(last)) break;
-        if (attempt === 7) throw new Error("[parity] virtualized column never reached its end.");
+        if (attempt === 5) throw new Error("[parity] tall column never reached its end.");
       }
       const rendered = await driver.kanbanColumnCards(home.name);
       expect(rendered).toContain(last);
-      expect(rendered.length).toBeLessThan(101);
-      expect(await serverIssues(seed.workspaceSlug, projectId, owner.cookie)).toHaveLength(101);
+      // Loaded shells mount for every issue, but only the visible window
+      // renders card content; the rest stay height-estimated placeholders.
+      const contentful = rendered.filter((name) => name !== "");
+      expect(contentful.length).toBeGreaterThan(0);
+      expect(contentful.length).toBeLessThan(61);
+      expect(await serverIssues(seed.workspaceSlug, projectId, owner.cookie)).toHaveLength(61);
     });
 
-    await test.step("dragging near the edge auto-scrolls the board", async () => {
-      const rendered = await driver.kanbanColumnCards(home.name);
-      const held = rendered[0] ?? "";
+    await test.step("dragging near the right edge auto-scrolls the board", async () => {
+      // Hold from the middle of the rendered window: edge cards churn as
+      // the virtualized window settles. The board rests at x = 0 with
+      // headroom to the right.
+      const contentful = (await driver.kanbanColumnCards(home.name)).filter((name) => name !== "");
+      const held = contentful[Math.floor(contentful.length / 2)] ?? "";
       expect(held).not.toBe("");
       const before = await driver.kanbanBoardScroll();
       await driver.kanbanDragHoldNearEdge(held, "right", 2500);
       const after = await driver.kanbanBoardScroll();
       expect(after.x).toBeGreaterThan(before.x);
+    });
+
+    await test.step("dragging near the bottom edge auto-scrolls the column", async () => {
+      // A reload resets the column to its top so the downward hold has room.
+      await driver.boardReloadIssues();
+      await driver.kanbanOpenBoard();
+      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(8);
+      const contentful = (await driver.kanbanColumnCards(home.name)).filter((name) => name !== "");
+      const held = contentful[Math.floor(contentful.length / 2)] ?? "";
+      expect(held).not.toBe("");
+      const before = await driver.kanbanColumnScroll(home.name);
+      await driver.kanbanDragHoldNearEdge(held, "bottom", 2500);
+      const after = await driver.kanbanColumnScroll(home.name);
+      expect(after.y).toBeGreaterThan(before.y);
     });
 
     await test.step("cleanup removes the scratch project", async () => {
