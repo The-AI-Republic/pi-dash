@@ -800,6 +800,152 @@ export interface ParityDriver {
   clickCommentAndRun(): Promise<void>;
   /** True while Comment & Run is disabled (the empty-composer short-circuit). */
   commentAndRunDisabled(): Promise<boolean>;
+  // --- Sidebar + workspace navigation (NEWFRONT-125, SHELL-046..062). Appended;
+  // --- existing entries above are untouched per the shared driver contract.
+  /** Click an entry of the open help menu; resolves with the popup URL when one opens. */
+  activateHelpEntry(name: string): Promise<string | null>;
+  /** Click an entry of the open user menu. */
+  activateUserMenuItem(name: string): Promise<void>;
+  /** Click the main content area (outside click for slide-overs and menus). */
+  clickMainContent(): Promise<void>;
+  /** Dismiss the topmost dialog or menu. */
+  dismissTopmost(): Promise<void>;
+  /** Drag one sidebar project row above another. */
+  dragSidebarProjectBefore(sourceName: string, targetName: string): Promise<void>;
+  /** Entry labels of the sidebar Favorites section, in display order. */
+  favoriteEntryNames(): Promise<string[]>;
+  /** Item labels of the currently open help menu. */
+  helpMenuTexts(): Promise<string[]>;
+  /** Whether the sidebar project-creation button is rendered. */
+  isCreateProjectVisible(): Promise<boolean>;
+  /** Whether a dialog containing the given text is visible. */
+  isDialogWithTextVisible(text: string): Promise<boolean>;
+  /** Whether the favorites folder dialog is open. */
+  isFavoritesFolderDialogOpen(): Promise<boolean>;
+  /** Whether the sidebar Favorites section is expanded. */
+  isFavoritesOpen(): Promise<boolean>;
+  /** Whether the secondary-destinations disclosure is expanded. */
+  isMoreSectionOpen(): Promise<boolean>;
+  /** Whether a project-creation button is rendered in the overflow slide-over. */
+  isOverflowCreateVisible(): Promise<boolean>;
+  /** Whether the overflow slide-over shows its no-match empty state. */
+  isOverflowEmptyStateVisible(): Promise<boolean>;
+  /** Whether a sidebar project row's link is currently inside the viewport. */
+  isProjectRowInViewport(projectName: string): Promise<boolean>;
+  /** Whether a sidebar project row's sub-navigation is expanded. */
+  isProjectRowOpen(projectName: string): Promise<boolean>;
+  /** Whether the sidebar Projects group is expanded. */
+  isProjectsGroupOpen(): Promise<boolean>;
+  /** Whether the projects overflow slide-over is open. */
+  isProjectsOverflowOpen(): Promise<boolean>;
+  /** Whether the Projects-group overflow toggle (extra projects) is rendered. */
+  isProjectsOverflowVisible(): Promise<boolean>;
+  /** Whether the quick-create dialog is open. */
+  isQuickCreateDialogOpen(): Promise<boolean>;
+  /** Whether the sidebar quick-create control is enabled. */
+  isQuickCreateEnabled(): Promise<boolean>;
+  /** True while the app sidebar is rendered on screen (false on full-width routes). */
+  isSidebarOnScreen(): Promise<boolean>;
+  /** Whether a toast or notice with the given text is visible. */
+  isToastVisible(text: string): Promise<boolean>;
+  /** Links of the secondary-destinations disclosure when expanded. */
+  moreSectionLinks(): Promise<{ text: string; href: string | null }[]>;
+  /** Follow a Favorites entry to its destination. */
+  openFavoriteEntry(name: string): Promise<void>;
+  /** Expand a Favorites folder to reveal its entries. */
+  openFavoritesFolder(name: string): Promise<void>;
+  /** Open the favorites folder creation dialog. */
+  openFavoritesFolderDialog(): Promise<void>;
+  /** Open the help menu from the sidebar. */
+  openHelpMenu(): Promise<void>;
+  /** Open the quick-actions menu of the named sidebar project row. */
+  openProjectQuickMenu(projectName: string): Promise<void>;
+  /** Follow a sidebar link by its label. */
+  openSidebarLink(text: string): Promise<void>;
+  /** Open the user menu from the sidebar account area. */
+  openUserMenu(): Promise<void>;
+  /** Follow a workspace-relative path (deep link); requires an authenticated session. */
+  openWorkspacePath(path: string): Promise<void>;
+  /** Open the workspace switcher from the sidebar. */
+  openWorkspaceSwitcher(): Promise<void>;
+  /** Project names listed in the overflow slide-over. */
+  overflowProjectNames(): Promise<string[]>;
+  /** Item labels of the currently open project quick-actions menu. */
+  projectQuickMenuTexts(): Promise<string[]>;
+  /** Href of a sidebar project row, if the row is rendered. */
+  projectRowHref(projectName: string): Promise<string | null>;
+  /** Links of the currently expanded project sub-navigation. */
+  projectSubnavLinks(): Promise<{ text: string; href: string | null }[]>;
+  /** Drop the current session so a different user can sign in. */
+  resetSession(): Promise<void>;
+  /** Type into the overflow slide-over search box. */
+  searchOverflowProjects(query: string): Promise<void>;
+  /** Expand or collapse the sidebar Favorites section. */
+  setFavoritesOpen(open: boolean): Promise<void>;
+  /** Expand or collapse the secondary-destinations disclosure. */
+  setMoreSectionOpen(open: boolean): Promise<void>;
+  /**
+   * Bring a sidebar project row to the wanted expansion state, toggling
+   * again when a remount swallows the first click. Leaves the final state
+   * to the caller's poll: it never asserts by itself.
+   */
+  setProjectRowOpen(projectName: string, open: boolean): Promise<void>;
+  /** Expand or collapse the sidebar Projects group. */
+  setProjectsGroupOpen(open: boolean): Promise<void>;
+  /** Open or close the projects overflow slide-over. */
+  setProjectsOverflowOpen(open: boolean): Promise<void>;
+  /** Link labels rendered in the app sidebar, in display order. */
+  sidebarLinkTexts(): Promise<string[]>;
+  /**
+   * Rendered tone of a sidebar row: computed background and foreground.
+   * Scenarios compare rows against each other (active versus idle) instead
+   * of asserting a fixed color, so a redesign keeps the scenario green.
+   */
+  sidebarRowTone(linkText: string): Promise<{ background: string; color: string }>;
+  /** Section headings rendered in the app sidebar (Projects, Favorites, ...). */
+  sidebarSectionNames(): Promise<string[]>;
+  /** Submit the favorites folder dialog with a name. */
+  submitFavoritesFolderName(name: string): Promise<void>;
+  /** Pick a workspace in the open switcher. */
+  switchWorkspace(name: string): Promise<void>;
+  /** Expand or collapse a sidebar project row's inline sub-navigation. */
+  toggleProjectRow(projectName: string): Promise<void>;
+  /** Item labels of the currently open user menu. */
+  userMenuTexts(): Promise<string[]>;
+  /**
+   * Workspace identity mark: whether a logo image renders, its accessible
+   * label, and the fallback initial shown when no logo is uploaded.
+   */
+  workspaceLogoState(): Promise<{ hasImage: boolean; label: string | null; initial: string | null }>;
+  /** Text content of the currently open workspace switcher. */
+  workspaceSwitcherTexts(): Promise<string[]>;
+
+  /** Open the sidebar quick-create dialog. */
+  openQuickCreate(): Promise<void>;
+  // --- NEWFRONT-125 review fixes. Appended; existing entries above are
+  // --- untouched per the shared driver contract.
+  /** Click an entry of the open project quick-actions menu. */
+  activateProjectQuickMenuItem(name: string): Promise<void>;
+  /** Drag one sidebar Favorites entry above another. */
+  dragFavoriteBefore(sourceName: string, targetName: string): Promise<void>;
+  /** Open the quick-actions menu of the named Favorites entry or folder. */
+  openFavoriteQuickMenu(name: string): Promise<void>;
+  /** Item labels of the currently open Favorites quick-actions menu. */
+  favoriteQuickMenuTexts(): Promise<string[]>;
+  /** Click an entry of the open Favorites quick-actions menu. */
+  activateFavoriteQuickMenuItem(name: string): Promise<void>;
+  /** Collapse or expand the app sidebar; ends with the state applied. */
+  setSidebarCollapsed(collapsed: boolean): Promise<void>;
+  /** Whether the app sidebar is currently collapsed. */
+  isSidebarCollapsed(): Promise<boolean>;
+  /** Open the compact (top-bar) user menu. */
+  openCompactUserMenu(): Promise<void>;
+  /** Label of the active tab in the open profile-settings dialog, if any. */
+  profileSettingsActiveTab(): Promise<string | null>;
+  /** Whether the sidebar peek overlay is currently visible. */
+  isSidebarPeekVisible(): Promise<boolean>;
+  /** Close the topmost dialog by clicking the overlay outside its panel. */
+  dismissDialogByOverlayClick(): Promise<void>;
   // Activity feed (NEWFRONT-114, rows CMT-013..017). Oracle selectors read
   // the running old app's user-visible structure only: the "Activity"
   // heading scopes the section, header icon buttons are addressed from the
@@ -1366,6 +1512,10 @@ export interface ParityDriver {
   activeCyclesHeaderVisible(): Promise<boolean>;
   /** True while the generic error notice shows (bare-address flows). */
   errorNoticeVisible(): Promise<boolean>;
+  // --- NEWFRONT-125 re-review fix (049 placeholders). Appended; existing
+  // --- entries above are untouched per the shared driver contract.
+  /** Placeholder blocks in the on-screen sidebar's project list while it loads; zero once rows render. */
+  sidebarProjectPlaceholderCount(): Promise<number>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

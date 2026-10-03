@@ -2255,4 +2255,273 @@ export class WebNewDriver implements ParityDriver {
   async focusedControlName(): Promise<null> {
     return todo("focusedControlName");
   }
+
+  // Sidebar + workspace navigation (NEWFRONT-125, SHELL-046..062).
+  // Throwing stubs per the shared driver contract; the sidebar area fills
+  // these in when it lands. (Restored: the base merge dropped them.)
+  async resetSession(): Promise<void> {
+    return todo("resetSession");
+  }
+
+  async openWorkspacePath(_path: string): Promise<void> {
+    return todo("openWorkspacePath");
+  }
+
+  async isCreateProjectVisible(): Promise<boolean> {
+    return todo("isCreateProjectVisible");
+  }
+
+  async isSidebarOnScreen(): Promise<boolean> {
+    return todo("isSidebarOnScreen");
+  }
+
+  async sidebarLinkTexts(): Promise<string[]> {
+    return todo("sidebarLinkTexts");
+  }
+
+  async sidebarRowTone(_linkText: string): Promise<{ background: string; color: string }> {
+    return todo("sidebarRowTone");
+  }
+
+  async isProjectsGroupOpen(): Promise<boolean> {
+    return todo("isProjectsGroupOpen");
+  }
+
+  async setProjectsGroupOpen(_open: boolean): Promise<void> {
+    return todo("setProjectsGroupOpen");
+  }
+
+  async projectRowHref(_projectName: string): Promise<string | null> {
+    return todo("projectRowHref");
+  }
+
+  async isProjectRowInViewport(_projectName: string): Promise<boolean> {
+    return todo("isProjectRowInViewport");
+  }
+
+  async toggleProjectRow(_projectName: string): Promise<void> {
+    return todo("toggleProjectRow");
+  }
+
+  async isProjectRowOpen(_projectName: string): Promise<boolean> {
+    return todo("isProjectRowOpen");
+  }
+
+  async setProjectRowOpen(_projectName: string, _open: boolean): Promise<void> {
+    return todo("setProjectRowOpen");
+  }
+
+  async projectSubnavLinks(): Promise<{ text: string; href: string | null }[]> {
+    return todo("projectSubnavLinks");
+  }
+
+  async isQuickCreateEnabled(): Promise<boolean> {
+    return todo("isQuickCreateEnabled");
+  }
+
+  async openQuickCreate(): Promise<void> {
+    return todo("openQuickCreate");
+  }
+
+  async isQuickCreateDialogOpen(): Promise<boolean> {
+    return todo("isQuickCreateDialogOpen");
+  }
+
+  async openProjectQuickMenu(_projectName: string): Promise<void> {
+    return todo("openProjectQuickMenu");
+  }
+
+  async projectQuickMenuTexts(): Promise<string[]> {
+    return todo("projectQuickMenuTexts");
+  }
+
+  async isProjectsOverflowVisible(): Promise<boolean> {
+    return todo("isProjectsOverflowVisible");
+  }
+
+  async isProjectsOverflowOpen(): Promise<boolean> {
+    return todo("isProjectsOverflowOpen");
+  }
+
+  async setProjectsOverflowOpen(_open: boolean): Promise<void> {
+    return todo("setProjectsOverflowOpen");
+  }
+
+  async searchOverflowProjects(_query: string): Promise<void> {
+    return todo("searchOverflowProjects");
+  }
+
+  async overflowProjectNames(): Promise<string[]> {
+    return todo("overflowProjectNames");
+  }
+
+  async isOverflowEmptyStateVisible(): Promise<boolean> {
+    return todo("isOverflowEmptyStateVisible");
+  }
+
+  async isMoreSectionOpen(): Promise<boolean> {
+    return todo("isMoreSectionOpen");
+  }
+
+  async setMoreSectionOpen(_open: boolean): Promise<void> {
+    return todo("setMoreSectionOpen");
+  }
+
+  async moreSectionLinks(): Promise<{ text: string; href: string | null }[]> {
+    return todo("moreSectionLinks");
+  }
+
+  async sidebarSectionNames(): Promise<string[]> {
+    return todo("sidebarSectionNames");
+  }
+
+  async isFavoritesOpen(): Promise<boolean> {
+    return todo("isFavoritesOpen");
+  }
+
+  async setFavoritesOpen(_open: boolean): Promise<void> {
+    return todo("setFavoritesOpen");
+  }
+
+  async isOverflowCreateVisible(): Promise<boolean> {
+    return todo("isOverflowCreateVisible");
+  }
+
+  async activateHelpEntry(_name: string): Promise<string | null> {
+    return todo("activateHelpEntry");
+  }
+
+  async isToastVisible(_text: string): Promise<boolean> {
+    return todo("isToastVisible");
+  }
+
+  async isDialogWithTextVisible(_text: string): Promise<boolean> {
+    return todo("isDialogWithTextVisible");
+  }
+
+  async dismissTopmost(): Promise<void> {
+    return todo("dismissTopmost");
+  }
+
+  async clickMainContent(): Promise<void> {
+    return todo("clickMainContent");
+  }
+
+  async openSidebarLink(_text: string): Promise<void> {
+    return todo("openSidebarLink");
+  }
+
+  async switchWorkspace(_name: string): Promise<void> {
+    return todo("switchWorkspace");
+  }
+
+  async activateUserMenuItem(_name: string): Promise<void> {
+    return todo("activateUserMenuItem");
+  }
+
+  async dragSidebarProjectBefore(_sourceName: string, _targetName: string): Promise<void> {
+    return todo("dragSidebarProjectBefore");
+  }
+
+  async openFavoritesFolderDialog(): Promise<void> {
+    return todo("openFavoritesFolderDialog");
+  }
+
+  async submitFavoritesFolderName(_name: string): Promise<void> {
+    return todo("submitFavoritesFolderName");
+  }
+
+  async isFavoritesFolderDialogOpen(): Promise<boolean> {
+    return todo("isFavoritesFolderDialogOpen");
+  }
+
+  async favoriteEntryNames(): Promise<string[]> {
+    return todo("favoriteEntryNames");
+  }
+
+  async openFavoriteEntry(_name: string): Promise<void> {
+    return todo("openFavoriteEntry");
+  }
+
+  async openFavoritesFolder(_name: string): Promise<void> {
+    return todo("openFavoritesFolder");
+  }
+
+  async openWorkspaceSwitcher(): Promise<void> {
+    return todo("openWorkspaceSwitcher");
+  }
+
+  async workspaceSwitcherTexts(): Promise<string[]> {
+    return todo("workspaceSwitcherTexts");
+  }
+
+  async openUserMenu(): Promise<void> {
+    return todo("openUserMenu");
+  }
+
+  async userMenuTexts(): Promise<string[]> {
+    return todo("userMenuTexts");
+  }
+
+  async openHelpMenu(): Promise<void> {
+    return todo("openHelpMenu");
+  }
+
+  async helpMenuTexts(): Promise<string[]> {
+    return todo("helpMenuTexts");
+  }
+
+  async workspaceLogoState(): Promise<{ hasImage: boolean; label: string | null; initial: string | null }> {
+    return todo("workspaceLogoState");
+  }
+
+  // --- NEWFRONT-125 review-fix stubs. Mirror of the interface additions.
+
+  async activateProjectQuickMenuItem(_name: string): Promise<void> {
+    return todo("activateProjectQuickMenuItem");
+  }
+
+  async dragFavoriteBefore(_sourceName: string, _targetName: string): Promise<void> {
+    return todo("dragFavoriteBefore");
+  }
+
+  async openFavoriteQuickMenu(_name: string): Promise<void> {
+    return todo("openFavoriteQuickMenu");
+  }
+
+  async favoriteQuickMenuTexts(): Promise<string[]> {
+    return todo("favoriteQuickMenuTexts");
+  }
+
+  async activateFavoriteQuickMenuItem(_name: string): Promise<void> {
+    return todo("activateFavoriteQuickMenuItem");
+  }
+
+  async setSidebarCollapsed(_collapsed: boolean): Promise<void> {
+    return todo("setSidebarCollapsed");
+  }
+
+  async isSidebarCollapsed(): Promise<boolean> {
+    return todo("isSidebarCollapsed");
+  }
+
+  async openCompactUserMenu(): Promise<void> {
+    return todo("openCompactUserMenu");
+  }
+
+  async profileSettingsActiveTab(): Promise<string | null> {
+    return todo("profileSettingsActiveTab");
+  }
+
+  async isSidebarPeekVisible(): Promise<boolean> {
+    return todo("isSidebarPeekVisible");
+  }
+
+  async dismissDialogByOverlayClick(): Promise<void> {
+    return todo("dismissDialogByOverlayClick");
+  }
+
+  async sidebarProjectPlaceholderCount(): Promise<number> {
+    return todo("sidebarProjectPlaceholderCount");
+  }
 }

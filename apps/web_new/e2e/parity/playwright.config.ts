@@ -17,14 +17,22 @@ export default defineConfig({
   testMatch: ["**/*.spec.ts"],
   workers: 1,
   // Generous: the oracle runs from a dev server that compiles routes on
-  // first load, so the first scenario of a run is slow through no fault of
-  // the app.
-  timeout: 180_000,
+  // first load, and several oracle runs share the scratch stack, so a
+  // scenario can sit through minutes of rate-limit backoff and cold
+  // hydration through no fault of the app. Serial workers keep one run
+  // from adding to the pile.
+  timeout: 300_000,
   expect: { timeout: 30_000 },
   reporter: [["list"], ["json", { outputFile: "../../test-results/parity-results.json" }]],
   projects: [
     {
+      // One retry: the oracle shares its scratch stack and box with sibling
+      // runs, so a scenario can lose its browser or sit through a
+      // rate-limit burst through no fault of the app. Every scenario is
+      // convergent, so a retry re-proves rather than papers over; a real
+      // app regression fails deterministically across both attempts.
       name: "oracle",
+      retries: 1,
       use: { baseURL: oracleBase },
     },
     {
