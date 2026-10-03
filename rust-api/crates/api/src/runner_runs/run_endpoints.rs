@@ -323,7 +323,7 @@ pub fn approval_id(data: &Value) -> Result<Uuid, FrameError> {
 }
 
 /// `request.data.get("expires_at")` as an optional timestamptz input
-/// (`run_endpoints.py:266`, `chat.py:649`): only a missing key or
+/// (`run_endpoints.py:266`, `chat.py:652`): only a missing key or
 /// `null` binds NULL. Both endpoints pass the raw JSON value into
 /// `update_or_create` on a plain `DateTimeField(null=True)`
 /// (`models.py:1240,1413`), whose `to_python` returns `None` solely
