@@ -34,6 +34,7 @@ pub mod ordering;
 pub mod params;
 pub mod serializers_assoc;
 pub mod serializers_engage;
+pub mod serializers_label;
 pub mod serializers_links;
 pub mod serializers_refs;
 pub mod shape;
@@ -48,6 +49,12 @@ pub use serializers_engage::{
     IssueSubscriberRow, IssueSubscriberView, APP_ISSUE_FLAT_FIELDS, GITHUB_COMMENT_SYNC_PROBE_SQL,
     GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_COMMENT_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL,
     ISSUE_ACTIVITY_ALL_FIELDS, ISSUE_REACTION_LITE_FIELDS, ISSUE_SUBSCRIBER_ALL_FIELDS,
+};
+pub use serializers_label::{
+    app_label_to_representation, validate_label_name, AppLabelRow, AppLabelView, APP_LABEL_FIELDS,
+    APP_LABEL_READONLY_INPUT_FIELDS, APP_LABEL_WRITABLE_FIELDS, LABEL_NAME_ALREADY_EXISTS,
+    LABEL_NAME_CONFLICT_BODY, LABEL_NAME_CONFLICT_EXCLUDING_SELF_PROBE_SQL,
+    LABEL_NAME_CONFLICT_PROBE_SQL,
 };
 pub use serializers_links::{
     git_code_review_link_to_representation, github_pull_request_link_to_representation,
