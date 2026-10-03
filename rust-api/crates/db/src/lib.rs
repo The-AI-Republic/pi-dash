@@ -17,6 +17,7 @@
 //! - [`filterset`]: the `IssueFilterSet` declaration and leaf compiler (F-07).
 //! - [`issue_filters`]: the legacy `issue_filters` query-param compiler (F-07).
 //! - [`soft_delete`]: soft-delete read scope, write statements, view DDL.
+//! - [`runner_enroll`]: runner enrollment/auth/machine columns + pure model methods (D-13).
 //! - [`space`]: space public API (D-02) read columns + manager scopes.
 //! - [`tx`]: transaction wrapper with post-commit actions.
 //! - [`migrations`]: private migration directory convention (F-10).
@@ -53,6 +54,7 @@ pub mod migrations;
 pub mod pool;
 pub mod prompting;
 pub mod redis;
+pub mod runner_enroll;
 pub mod runner_runs;
 pub mod soft_delete;
 pub mod space;
