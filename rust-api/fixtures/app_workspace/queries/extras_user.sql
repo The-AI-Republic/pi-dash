@@ -95,7 +95,8 @@ FROM draft_issues d WHERE d.workspace_id = <ws> GROUP BY d.id;
 --     found" :166; ctx project_id=data-or-issue :168, cycle_id=data-or-
 --     "not_provided" :176 -> save -> 204. retrieve (:187-197): same fetch else
 --     404 "The required object does not exist." :192 -> DetailSerializer 200.
---   destroy (:199-203): DraftIssue.objects.get(slug,pk).delete() HARD -> 204.
+--   destroy (:199-203): DraftIssue.objects.get(slug,pk).delete() SOFT (default
+--   soft=True; no delete() override in db/models/draft.py) -> 204.
 --   draft-to-issue (:206-312): fetch pk=draft_id :207; no project -> 400
 --     "Project is required to create an issue." :211; IssueCreateSerializer(ctx
 --     request, project_id, workspace_id, default_assignee_id :217-222) -> save;
@@ -215,7 +216,7 @@ FROM draft_issues d WHERE d.workspace_id = <ws> GROUP BY d.id;
 --   :179. user-properties :253-278: get_or_create(user,ws) PATCH :259 / GET
 --   :273. profile :281-368: User.get :283; requester WorkspaceMember.get
 --   active :285-287; projects+4 counts iff requester role>=15 :289-351 else []
---   (user_data always); 7 user_data fields :356-365. activity :374-394:
+--   (user_data always); 8 user_data fields :356-365. activity :374-394:
 --   ~field-in-4 + slug + member-active + unarchived + actor, ?project= multi
 --   :375-387, paginate. stats :397-521: state/priority dists, created/
 --   assigned/pending/completed/subscribed counts, present/upcoming cycles.

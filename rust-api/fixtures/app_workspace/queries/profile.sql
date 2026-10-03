@@ -5,10 +5,10 @@
 --   dashboard graph cross-ref app/views/workspace/base.py:257-290.
 --   NOTE: no permission_classes on :281,:397,:524,:541 classes (any
 --   authenticated caller; siblings use WorkspaceViewer/EntityPermission) — PORT.
---   Last-visited endpoint (:69-96) has NO fixture query here: it reads
---   User.last_workspace_id while destroy clears Profile.last_workspace_id only
---   (base.py:176-181), so a stale id raises Workspace.DoesNotExist -> 500;
---   full record in F-W24-15.
+--   Last-visited endpoint (:69-96) has NO fixture query here: user.last_workspace_id
+--   (:73) raises AttributeError — the field lives on Profile (db/models/user.py:236),
+--   not User — so the 500 fires before any Workspace lookup (the :81 DoesNotExist
+--   path and :75-79 None branch are unreachable); full record in F-W24-15.
 --
 -- R1 profile-issues annotations, apply_annotations (:105-134):
 --   cycle_id = Subquery(CycleIssue WHERE issue=OuterRef(id) AND
