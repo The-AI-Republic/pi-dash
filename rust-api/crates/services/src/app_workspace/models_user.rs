@@ -239,9 +239,17 @@ pub mod user {
     /// `None`. Both `avatar_url` and `cover_image_url` share this shape
     /// (mirroring `Workspace.logo_url`); the two public wrappers name the
     /// field so call sites read like the Python.
-    fn resolve_image_url<'a>(asset_url: Option<&'a str>, direct: &'a str) -> Option<&'a str> {
-        if let Some(url) = asset_url {
-            return Some(url);
+    fn resolve_image_url<'a>(
+        asset_attached: bool,
+        asset_url: Option<&'a str>,
+        direct: &'a str,
+    ) -> Option<&'a str> {
+        // Python checks only the FK's presence (`if self.avatar_asset:`):
+        // when attached the asset URL is returned as-is with NO
+        // fall-through, even when it maps to no URL (same shape as the
+        // merged `resolve_workspace_logo_url` precedent).
+        if asset_attached {
+            return asset_url;
         }
         if direct.is_empty() {
             return None;
@@ -250,25 +258,34 @@ pub mod user {
     }
 
     /// `User.avatar_url` (`user.py:142-151`): `avatar_asset.asset_url` when
-    /// the FK is set (returned as-is, even if empty — Python checks only
-    /// the FK's presence), else `avatar` when non-empty, else `None`.
-    /// The caller resolves `asset_url` from the `FileAsset` row.
-    pub fn avatar_url<'a>(avatar_asset_url: Option<&'a str>, avatar: &'a str) -> Option<&'a str> {
-        resolve_image_url(avatar_asset_url, avatar)
+    /// the FK is set (returned as-is, even if empty or `None` — Python
+    /// checks only the FK's presence), else `avatar` when non-empty, else
+    /// `None`. The caller resolves `asset_url` from the `FileAsset` row and
+    /// passes FK presence separately.
+    pub fn avatar_url<'a>(
+        avatar_asset_attached: bool,
+        avatar_asset_url: Option<&'a str>,
+        avatar: &'a str,
+    ) -> Option<&'a str> {
+        resolve_image_url(avatar_asset_attached, avatar_asset_url, avatar)
     }
 
     /// `User.cover_image_url` (`user.py:153-162`): same shape as
     /// [`avatar_url`] over `cover_image_asset` / `cover_image`.
     pub fn cover_image_url<'a>(
+        cover_image_asset_attached: bool,
         cover_image_asset_url: Option<&'a str>,
         cover_image: Option<&'a str>,
     ) -> Option<&'a str> {
         // `cover_image` is nullable (`:77`) while `avatar` is not (`:68`),
         // so the direct arm takes `Option`; `None` and `""` both fall to
         // `None`, matching `if self.cover_image:`.
+        if cover_image_asset_attached {
+            return cover_image_asset_url;
+        }
         match cover_image {
-            Some(value) => resolve_image_url(cover_image_asset_url, value),
-            None => cover_image_asset_url,
+            Some(value) if !value.is_empty() => Some(value),
+            _ => None,
         }
     }
 
@@ -991,35 +1008,45 @@ mod tests {
 
     #[test]
     fn user_avatar_url_goldens() {
-        // Asset arm wins and is returned as-is (Python checks only the FK).
+        // Asset arm wins and is returned as-is (Python checks only the FK):
+        // no fall-through, even when the URL is empty or missing.
         assert_eq!(
-            user::avatar_url(Some("https://cdn/a.png"), "https://x/b.png"),
+            user::avatar_url(true, Some("https://cdn/a.png"), "https://x/b.png"),
             Some("https://cdn/a.png")
         );
-        assert_eq!(user::avatar_url(Some(""), "https://x/b.png"), Some(""));
+        assert_eq!(
+            user::avatar_url(true, Some(""), "https://x/b.png"),
+            Some("")
+        );
+        assert_eq!(user::avatar_url(true, None, "https://x/b.png"), None);
         // Direct arm: non-empty passes through, empty falls to None.
         assert_eq!(
-            user::avatar_url(None, "https://x/b.png"),
+            user::avatar_url(false, None, "https://x/b.png"),
             Some("https://x/b.png")
         );
-        assert_eq!(user::avatar_url(None, ""), None);
+        assert_eq!(user::avatar_url(false, None, ""), None);
     }
 
     #[test]
     fn user_cover_image_url_goldens() {
         assert_eq!(
-            user::cover_image_url(Some("https://cdn/c.png"), Some("https://x/d.png")),
+            user::cover_image_url(true, Some("https://cdn/c.png"), Some("https://x/d.png")),
             Some("https://cdn/c.png")
         );
+        // Attached with no URL: no fall-through (Python returns None).
         assert_eq!(
-            user::cover_image_url(None, Some("https://x/d.png")),
+            user::cover_image_url(true, None, Some("https://x/d.png")),
+            None
+        );
+        assert_eq!(
+            user::cover_image_url(false, None, Some("https://x/d.png")),
             Some("https://x/d.png")
         );
         // cover_image is nullable: None and "" both fall to None.
-        assert_eq!(user::cover_image_url(None, Some("")), None);
-        assert_eq!(user::cover_image_url(None, None), None);
+        assert_eq!(user::cover_image_url(false, None, Some("")), None);
+        assert_eq!(user::cover_image_url(false, None, None), None);
         assert_eq!(
-            user::cover_image_url(Some("https://cdn/c.png"), None),
+            user::cover_image_url(true, Some("https://cdn/c.png"), None),
             Some("https://cdn/c.png")
         );
     }
