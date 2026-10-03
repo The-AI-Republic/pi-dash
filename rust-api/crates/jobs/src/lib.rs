@@ -56,6 +56,9 @@ pub mod loop_fire;
 #[path = "loop/scan.rs"]
 pub mod loop_scan;
 pub mod queue;
+/// Approval expiry + runner/session sweeps (D-15 L6a, PIDASHCONV-539):
+/// task bodies + `worker::Registry` handlers over the L4 planners.
+pub mod runner_runs;
 pub mod schedule;
 pub mod scheduler;
 pub mod space;
