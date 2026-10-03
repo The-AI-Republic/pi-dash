@@ -6064,12 +6064,13 @@ export class WebDriver implements ParityDriver {
   async openSwitchAccount(): Promise<void> {
     const page = this.page;
     // The onboarding header names the signed-in account in a dropdown
-    // trigger (avatar + display name, which is the email for a fresh
-    // account). The menu items mount only once the trigger opens the menu,
-    // so wait for the trigger — never the item — then open it. Match on
-    // "@": the header is a plain div (no header landmark), and its back
-    // button (present from step two on) carries no accessible name.
-    const trigger = page.getByRole("button", { name: /@/ }).first();
+    // trigger (avatar + display name — the display name, not the email, so
+    // "@" matching fails on fresh accounts). The menu items mount only once
+    // the trigger opens the menu, so wait for the trigger — never the item
+    // — then open it. The trigger is the page's menu button (the header is
+    // a plain div with no landmark, and its back button carries no
+    // accessible name, so text matching is unreliable here).
+    const trigger = page.locator('button[aria-haspopup="menu"]').first();
     await trigger.waitFor();
     await trigger.click();
     await page.getByText("Wrong e-mail address?", { exact: true }).click();

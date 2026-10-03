@@ -133,14 +133,19 @@ test(
   async ({ driver, seed }) => {
     const email = throwawayEmail("parity-deactivate");
 
-    await test.step("a throwaway account exists (never the seed owner)", async () => {
+    const workspaceSlug = await test.step("a throwaway account exists (never the seed owner)", async () => {
       const session = await createAccountSession(email, THROWAWAY_PASSWORD);
       await setOnboarded(session);
+      // An onboarded user with no workspace lands on workspace creation,
+      // not the app shell — give the throwaway a workspace so Settings (and
+      // deactivation) is reachable.
+      return createWorkspace(session, "Throwaway Workspace", `throwaway-ws-${Date.now()}`);
     });
 
     await test.step("sign in as the throwaway and open deactivation", async () => {
       await driver.openEntry();
       await driver.signInWithPassword(email, THROWAWAY_PASSWORD);
+      await driver.visit(`/${workspaceSlug}`);
       await driver.openDeactivateAccount();
     });
 
@@ -240,11 +245,14 @@ test(
     });
 
     await test.step("the auto-attempt fails with an explanation, staying editable", async () => {
-      await expect.poll(() => driver.showsText("Could not approve"), POLL_60).toBe(true);
+      // Bogus codes surface the server's "not recognized" detail; the
+      // generic "Could not approve" fallback only shows when the server
+      // returns no error detail.
+      await expect.poll(() => driver.showsText("Code not recognized"), POLL_60).toBe(true);
       await driver.typeDeviceCode("abcd1234");
       expect(await driver.deviceCodeFieldValue()).toBe("ABCD-1234");
       await driver.submitDeviceApproval();
-      await expect.poll(() => driver.showsText("Could not approve"), POLL_60).toBe(true);
+      await expect.poll(() => driver.showsText("Code not recognized"), POLL_60).toBe(true);
     });
 
     await test.step("the server approved nothing", async () => {
