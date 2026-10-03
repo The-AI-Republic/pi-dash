@@ -1898,7 +1898,9 @@ fn skip_ws_from(bytes: &[u8], mut pos: usize) -> usize {
 /// CPython's `UnicodeDecodeError` text for the first bad sequence
 /// (`codecs.getreader("utf-8")`, strict): the lead byte selects the
 /// reason, the valid-continuation run selects the byte/bytes form.
-fn utf8_decode_detail(raw: &[u8]) -> String {
+/// Shared with the body layer (PIDASHCONV-627), which needs the same
+/// text for charset-decoded request bodies.
+pub(crate) fn utf8_decode_detail(raw: &[u8]) -> String {
     let start = std::str::from_utf8(raw)
         .expect_err("invalid UTF-8 checked")
         .valid_up_to();
