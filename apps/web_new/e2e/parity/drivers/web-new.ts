@@ -3996,10 +3996,6 @@ export class WebNewDriver implements ParityDriver {
     return todo("ganttBarExists");
   }
 
-  async ganttBarOffset(_issueName: string): Promise<{ marginLeft: number; width: number }> {
-    return todo("ganttBarOffset");
-  }
-
   async ganttDragBar(_issueName: string, _dayDelta: number): Promise<void> {
     return todo("ganttDragBar");
   }

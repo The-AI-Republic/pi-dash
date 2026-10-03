@@ -2448,8 +2448,6 @@ export interface ParityDriver {
   ganttAttemptRowBefore(sourceName: string, targetName: string): Promise<void>;
   /** Whether an issue renders a dated bar (vs an empty row). */
   ganttBarExists(issueName: string): Promise<boolean>;
-  /** A bar's chart offset in pixels: left margin and width (zeros when no bar). */
-  ganttBarOffset(issueName: string): Promise<{ marginLeft: number; width: number }>;
   /** Drag a bar body horizontally by whole days; resolves once the drag engages. */
   ganttDragBar(issueName: string, dayDelta: number): Promise<void>;
   /**
@@ -2492,8 +2490,8 @@ export interface ParityDriver {
   ganttLoadMoreVisible(): Promise<boolean>;
   /**
    * Reload with the issues API delayed so the loading state is observable,
-   * and report whether sidebar skeletons showed before the timeline loaded.
-   * The delay is test-only network shaping; the skeleton itself is the
+   * and report whether the layout loader showed before the timeline did.
+   * The delay is test-only network shaping; the loader itself is the
    * behavior under test.
    */
   ganttLoadingObservedOnReload(): Promise<boolean>;
