@@ -33,6 +33,7 @@
 pub mod ordering;
 pub mod params;
 pub mod serializers_links;
+pub mod serializers_refs;
 pub mod shape;
 
 pub use ordering::{order_sql, priority_case_sql, state_case_sql, OrderSpec};
@@ -45,6 +46,15 @@ pub use serializers_links::{
     IssueAttachmentLiteView, IssueLinkLiteRow, IssueLinkLiteView, UserLiteRow, UserLiteView,
     GITHUB_PR_LINK_FIELDS, GIT_CODE_REVIEW_LINK_FIELDS, ISSUE_ATTACHMENT_LITE_FIELDS,
     ISSUE_LINK_LITE_FIELDS, USER_LITE_FIELDS,
+};
+pub use serializers_refs::{
+    cycle_base_to_representation, issue_intake_to_representation, issue_state_to_representation,
+    label_lite_to_representation, module_base_to_representation, project_lite_to_representation,
+    state_lite_to_representation, CycleBaseRow, CycleBaseView, IssueIntakeRow, IssueIntakeView,
+    IssueStateRow, IssueStateView, LabelLiteRow, LabelLiteView, ModuleBaseRow, ModuleBaseView,
+    ProjectLiteRow, ProjectLiteView, StateLiteRow, StateLiteView, CYCLE_BASE_FIELDS,
+    ISSUE_INTAKE_FIELDS, ISSUE_STATE_FIELDS, LABEL_LITE_FIELDS, MODULE_BASE_FIELDS,
+    PROJECT_LITE_FIELDS, STATE_LITE_FIELDS,
 };
 pub use shape::{
     deleted_ids_body, envelope, group_mismatch_body, issues_required_body, on_results_fields,
