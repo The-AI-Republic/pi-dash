@@ -15,6 +15,7 @@
 //! * [`ser_shared`] — shared + nested serializers (PIDASHCONV-566).
 //! * [`tasks`] — task call-sites + invite tokens + `handle_exception`
 //!   table (PIDASHCONV-570).
+//! * [`queries`] — read querysets + identifier routing (PIDASHCONV-568).
 //!
 //! Wiring note: the crate root declares `pub mod app_project;`. Sibling
 //! issues have all landed (`ser_project` PIDASHCONV-563, `ser_member`
@@ -25,7 +26,8 @@
 //! is the Done-when oracle for this layer. Shared goldens: FX-APROJ-04
 //! (`FX-APROJ-04.serializers_shared.json`). Member/invite goldens:
 //! FX-APROJ-02 (`FX-APROJ-02.serializers_member_invite.json`). Project
-//! goldens: FX-APROJ-01 (`FX-APROJ-01.serializers_project.json`).
+//! goldens: FX-APROJ-01 (`FX-APROJ-01.serializers_project.json`). Queries
+//! goldens: FX-APROJ-06 (`FX-APROJ-06.queries.json`).
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 //!
@@ -35,6 +37,7 @@
 //! 2026-09-23T08:30:31.434101Z, no rows for this domain); PIDASHCONV-1
 //! rulebook (updated 2026-10-02T22:09:36Z).
 
+pub mod queries;
 pub mod ser_member;
 pub mod ser_project;
 pub mod ser_shared;
