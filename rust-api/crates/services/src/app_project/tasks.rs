@@ -647,7 +647,7 @@ pub fn invite_create_failure() -> (u16, &'static str) {
 /// `super().handle_exception(exc)` path — DRF 3.15.2 `exception_handler`
 /// (`rest_framework/views.py:71-101`) via the project's
 /// `auth_exception_handler` (which additionally pins `NotAuthenticated`
-/// to 401): scalar details render `{"Detail": ...}` (capital D), list/dict
+/// to 401): scalar details render `{"detail": ...}` (lowercase d), list/dict
 /// details render as-is; Django `Http404(*args)` /
 /// `PermissionDenied(*args)` become `NotFound(*args)` /
 /// `PermissionDenied(*args)` first.
@@ -659,11 +659,11 @@ pub enum ViewError {
     ValidationError,
     /// `ObjectDoesNotExist` → 404.
     ObjectDoesNotExist,
-    /// Django `Http404(message)` → 404 `{"Detail": message}`. Arg-less
+    /// Django `Http404(message)` → 404 `{"detail": message}`. Arg-less
     /// `Http404()` renders DRF's `NotFound.default_detail` (`"Not found."`)
     /// — callers pass that text.
     Http404(String),
-    /// Django `PermissionDenied(message)` → 403 `{"Detail": message}`.
+    /// Django `PermissionDenied(message)` → 403 `{"detail": message}`.
     /// Arg-less renders `"You do not have permission to perform this action."`
     /// — callers pass that text.
     DjangoPermissionDenied(String),
@@ -702,14 +702,14 @@ pub fn handle_exception(err: &ViewError) -> (u16, String) {
 }
 
 /// DRF `exception_handler`'s body rule (`rest_framework/views.py:93-96`):
-/// list/dict details render as-is, anything else renders `{"Detail": …}`.
+/// list/dict details render as-is, anything else renders `{"detail": …}`.
 pub fn detail_body(detail: &Value) -> String {
     match detail {
         Value::Array(_) | Value::Object(_) => {
             serde_json::to_string(detail).expect("JSON value serializes")
         }
         _ => format!(
-            r#"{{"Detail":{}}}"#,
+            r#"{{"detail":{}}}"#,
             serde_json::to_string(detail).expect("JSON value serializes")
         ),
     }
@@ -1212,7 +1212,7 @@ mod tests {
         );
         assert_eq!(
             handle_exception(&ViewError::Http404("Project not found".to_owned())),
-            (404, r#"{"Detail":"Project not found"}"#.to_owned())
+            (404, r#"{"detail":"Project not found"}"#.to_owned())
         );
         assert_eq!(
             handle_exception(&ViewError::KeyError),
@@ -1233,21 +1233,21 @@ mod tests {
                 status: 500,
                 detail: Value::String("boom".to_owned()),
             }),
-            (500, r#"{"Detail":"boom"}"#.to_owned())
+            (500, r#"{"detail":"boom"}"#.to_owned())
         );
         assert_eq!(
             handle_exception(&ViewError::ApiException {
                 status: 404,
                 detail: Value::String("nope".to_owned()),
             }),
-            (404, r#"{"Detail":"nope"}"#.to_owned())
+            (404, r#"{"detail":"nope"}"#.to_owned())
         );
         assert_eq!(
             handle_exception(&ViewError::ApiException {
                 status: 403,
                 detail: Value::String("denied".to_owned()),
             }),
-            (403, r#"{"Detail":"denied"}"#.to_owned())
+            (403, r#"{"detail":"denied"}"#.to_owned())
         );
     }
 
@@ -1268,23 +1268,23 @@ mod tests {
             }),
             (
                 401,
-                r#"{"Detail":"Authentication credentials were not provided."}"#.to_owned()
+                r#"{"detail":"Authentication credentials were not provided."}"#.to_owned()
             )
         );
         assert_eq!(
             handle_exception(&ViewError::DjangoPermissionDenied("denied".to_owned())),
-            (403, r#"{"Detail":"denied"}"#.to_owned())
+            (403, r#"{"detail":"denied"}"#.to_owned())
         );
     }
 
     /// DRF `exception_handler` (`views.py:93-96`): list/dict details render
-    /// as-is, without the `Detail` envelope.
+    /// as-is, without the `detail` envelope.
     #[test]
     fn detail_body_passes_through_lists_and_dicts() {
         assert_eq!(detail_body(&serde_json::json!(["a", 1])), r#"["a",1]"#);
         assert_eq!(detail_body(&serde_json::json!({"a": 1})), r#"{"a":1}"#);
-        assert_eq!(detail_body(&Value::Null), r#"{"Detail":null}"#);
-        assert_eq!(detail_body(&Value::Bool(true)), r#"{"Detail":true}"#);
+        assert_eq!(detail_body(&Value::Null), r#"{"detail":null}"#);
+        assert_eq!(detail_body(&Value::Bool(true)), r#"{"detail":true}"#);
     }
 
     /// QUIRK-dispatch-returns-exc: the outer `except` has no wire effect
