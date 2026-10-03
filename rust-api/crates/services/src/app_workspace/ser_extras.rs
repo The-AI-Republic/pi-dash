@@ -355,10 +355,10 @@ fn django_url_valid(value: &str) -> bool {
     }
     // Userinfo + host + port decomposition (the regex minus host class).
     let Some(parts) = split_url_structure(authority) else {
-        // The IDN retry re-runs the same structural match over an
-        // ACE-encoded host: userinfo/port/path failures are never fixed
-        // by it (punycode never removes `@`, `:` or whitespace), so a
-        // structural failure is final.
+        // Userinfo/path failures are never fixed by the IDN retry
+        // (punycode never removes `@`, `:` or whitespace), so a structural
+        // failure there is final. (A non-ASCII port is also final here —
+        // see the retry note below for the one mapping corner this keeps.)
         return false;
     };
     if parts.bracketed {
@@ -374,10 +374,13 @@ fn django_url_valid(value: &str) -> bool {
     // IDN retry (`validators.py:131-140`): ACE-encode and re-match. Only
     // reachable for non-ASCII hosts (an all-ASCII netloc round-trips
     // byte-identical, so the retry is futile there and skipped); the cap
-    // still applies to the ORIGINAL hostname. Host-only encoding is
-    // verdict-equivalent to Django's whole-netloc `punycode()`: userinfo
-    // already passed structurally (non-ASCII userinfo matches
-    // `[^\s:@/]+` on the first pass) and ports are ASCII digits.
+    // still applies to the ORIGINAL hostname. Only the host is encoded:
+    // userinfo already passed structurally, and no structural userinfo
+    // failure is repairable by IDNA mapping. Known gap (shared with the
+    // merged module-link transcription): a non-ASCII port that mapping
+    // would repair (Django accepts `http://example.com:８０８０/`) is
+    // rejected here, where Django's whole-netloc `punycode()` re-match
+    // accepts it.
     if parts.host.is_ascii() {
         return false;
     }
@@ -674,15 +677,19 @@ fn valid_tld_label(tld: &str) -> bool {
         return false;
     }
     // `xn--[a-z0-9]{1,59}` (case-insensitive). `get` (not slicing:
-    // byte 4 may split a multibyte char) then ASCII compare.
+    // byte 4 may split a multibyte char) then ASCII compare. A hyphenated
+    // `xn--` label without digits (e.g. `xn--a-b`) fails this arm but still
+    // matches the general arm below — Django's alternation accepts either
+    // (same fall-through as the module-link transcription).
     if tld
         .get(..4)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("xn--"))
     {
         let rest = &tld[4..];
-        return !rest.is_empty()
-            && rest.len() <= 59
-            && rest.bytes().all(|b| b.is_ascii_alphanumeric());
+        if !rest.is_empty() && rest.len() <= 59 && rest.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return true;
+        }
+        // Else fall through to the general branch.
     }
     let chars: Vec<char> = tld.chars().collect();
     if chars.len() < 2 || chars.len() > 63 {
@@ -2181,6 +2188,9 @@ mod tests {
             ("http://x-.io/", false),
             ("http://xn--a.io/", true),
             ("http://a.xn--p1ai/", true),
+            ("http://example.xn--a-b/", true),
+            ("http://example.XN--A-B/", true),
+            ("http://example.xn--a1-b/", false),
             ("http://[::FFFF:1.2.3.4]/", true),
             ("http://[::ffff:1.2.3.256]/", false),
             ("HTTP://E.COM", true),
@@ -2318,6 +2328,8 @@ mod tests {
                 ),
                 false,
             ),
+            (format!("http://example.xn--{}/", "b".repeat(59)), true),
+            (format!("http://example.xn--{}/", "b".repeat(60)), false),
         ];
         for (input, expected) in &long {
             assert_eq!(
