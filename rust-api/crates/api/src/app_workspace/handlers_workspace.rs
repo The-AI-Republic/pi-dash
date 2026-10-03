@@ -87,7 +87,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use chrono::TimeZone;
+use chrono::{Datelike, TimeZone};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
 
@@ -128,7 +128,7 @@ pub const EXPORT_PATH: &str = "/api/workspaces/{slug}/user-activity/{user_id}/ex
 fn method_not_allowed_response(method: &str) -> Response {
     json_response(
         StatusCode::METHOD_NOT_ALLOWED,
-        format!("{{\"Detail\":\"Method \\\"{method}\\\" not allowed.\"}}"),
+        format!("{{\"detail\":\"Method \\\"{method}\\\" not allowed.\"}}"),
     )
 }
 
@@ -782,7 +782,7 @@ fn unsupported_media_type(content_type: &str) -> Response {
     json_response(
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
         format!(
-            "{{\"Detail\":{}}}",
+            "{{\"detail\":{}}}",
             serde_json::to_string(&message).expect("415 string")
         ),
     )
@@ -792,7 +792,7 @@ fn parse_error_response(detail: String) -> Response {
     json_response(
         StatusCode::BAD_REQUEST,
         format!(
-            "{{\"Detail\":{}}}",
+            "{{\"detail\":{}}}",
             serde_json::to_string(&detail).expect("detail string")
         ),
     )
@@ -1335,7 +1335,20 @@ pub(crate) fn validate_choice_field(input: InputValue<'_>, required: bool) -> Ch
 
 /// DRF `DateTimeField` input (`deleted_at`): strings parse ISO-8601
 /// (naive attaches the request zone), anything else is `invalid`.
-/// Returns the UTC instant, or `None` for JSON/form null.
+/// Returns the UTC instant, or `None` for JSON/form null. Accepted
+/// gap: DST-gap naive inputs 400 here, while Django 200s them
+/// (probed: `DateTimeField.run_validation("2026-03-08 02:30:00")` with
+/// `America/New_York` active resolves the pre-transition offset —
+/// `zoneinfo.make_aware` never raises and `valid_datetime` passes).
+/// `chrono-tz` exposes no pre-transition offset, so the gap stays a
+/// 400 — pinned by `datetime_inputs_attach_the_actor_zone`. Second
+/// accepted gap (pathological, not chased): year-9999/0001 datetimes
+/// near the `datetime` range edge — Django 400s aware inputs whose
+/// `astimezone` to the request zone overflows (`overflow` arm,
+/// including a year-1 positive-zone quirk that resists wall-year
+/// gating) and 500s naive inputs whose `valid_datetime` UTC
+/// roundtrip overflows (raw `OverflowError` through the generic arm);
+/// chrono's wide range accepts all of them (all probed).
 pub(crate) enum DateTimeOutcome {
     Skip,
     Value(chrono::DateTime<chrono::Utc>),
@@ -1394,46 +1407,96 @@ enum ParsedDateTime {
     Aware(chrono::DateTime<chrono::Utc>),
 }
 
-/// `django.utils.dateparse.parse_datetime` (3.12 `fromisoformat` +
-/// `datetime_re` fallback, verified live): strict ISO plus space sep,
-/// 1-2 digit fields, any single-char date/time separator, comma/dot
-/// fractions (truncated to micros), `Z`/numeric offsets, date-only
-/// (midnight), basic `YYYYMMDD`, and `Www` week dates. Anything else —
-/// or an impossible calendar — is `None`.
+/// `django.utils.dateparse.parse_datetime` = 3.12 `fromisoformat`
+/// first, `datetime_re` fallback second (every shape below probed,
+/// Django 4.2.30): the strict arm takes padded/basic/week dates, any
+/// single-char separator, 2-digit times with hour-only and fractions
+/// anywhere last (unlimited digits, truncated to micros); the regex
+/// arm takes extended dates (1-2 digit fields) with `[T ]HH:MM`,
+/// 1-2 digit fields, fractions on seconds only (at most 12 digits),
+/// optional trailing whitespace and an optional zone. Anything else —
+/// or an impossible calendar — is `None`. Accepted gaps (all probed,
+/// pinned by `datetime_accepted_gaps_stay_pinned`): a single trailing
+/// `\n` after a zone (the regex `$` matches before it — same quirk
+/// as the export-date `\n` gap), and `fromisoformat` junk tolerance
+/// before the zone (a trailing colon, stray letters/digits, or
+/// non-space chars after a 6+ digit fraction are skipped).
 fn parse_drf_datetime(text: &str) -> Option<ParsedDateTime> {
-    // Week dates first (`2026-W05-3`, optional time): 2-digit week only.
+    // Week dates first (strict arm only: the regex needs dashes).
     if let Some(parsed) = parse_week_datetime(text) {
         return Some(parsed);
     }
-    // Split the trailing zone (`Z`, `+HH`, `+HHMM`, `+HH:MM`).
-    let (head, offset_secs) = split_datetime_zone(text)?;
+    // Split the trailing zone (`Z`, `+HH`, `+HHMM`, `+HH:MM`). A sigil
+    // at 11+ always starts a zone: the separator sits at 8 (basic) or
+    // 10 (extended), so 9-10 hold time digits that never contain one.
+    let (head, offset_secs) = split_datetime_zone(text, 11)?;
     // Cursor-parse the extended date (`YYYY-M-D`, 1-2 digit fields).
     let bytes = head.as_bytes();
     if bytes.len() < 8 || !bytes[0..4].iter().all(|byte| byte.is_ascii_digit()) || bytes[4] != b'-'
     {
-        // Basic `YYYYMMDD` (+ optional basic time) instead.
+        // Basic `YYYYMMDD` (+ optional strict time) instead.
         return parse_basic_datetime(head, offset_secs);
     }
     let mut cursor = 5;
+    let month_start = cursor;
     let month = take_digits(head, &mut cursor, 2)?;
+    let month_len = cursor - month_start;
     if head.as_bytes().get(cursor) != Some(&b'-') {
         return None;
     }
     cursor += 1;
+    let day_start = cursor;
     let day = take_digits(head, &mut cursor, 2)?;
+    let day_len = cursor - day_start;
     let year: i32 = head[0..4].parse().ok()?;
     let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+    let padded = month_len == 2 && day_len == 2;
     if cursor == head.len() {
-        // Date-only means midnight.
+        // Date-only means midnight — padded only (`fromisoformat`
+        // rejects non-padded; the regex needs a time), and never with
+        // a zone (`Z`-after-date 400s).
+        if !padded || offset_secs.is_some() {
+            return None;
+        }
         return Some(attach_offset(date.and_hms_opt(0, 0, 0)?, offset_secs));
     }
-    // Any single char separates date and time (`T`, space, `x`, ...).
+    // Any single char separates date and time (`T`, space, `+`, `X`, ...):
+    // a `±HH:MM` tail after the date is separator + naive time, not a
+    // zone (`2026-09-24+05:00` is naive 05:00, probed).
     let separator = head[cursor..].chars().next()?;
     let time_part = &head[cursor + separator.len_utf8()..];
     if time_part.is_empty() {
         return None;
     }
-    let (hour, minute, second, micros) = parse_hms(time_part)?;
+    if !padded && !matches!(separator, 'T' | ' ') {
+        // Non-padded dates only parse via the regex fallback, which
+        // needs `[T ]`.
+        return None;
+    }
+    // Trailing whitespace is a regex-arm shape (`\s*(tz)?$`): it is only
+    // valid after `[T ]`, and it forces the regex arm (a stripped
+    // hour-only or fraction still 400s).
+    let mut time_core = time_part;
+    let mut had_ws = false;
+    if matches!(separator, 'T' | ' ') {
+        // Python `\s` (not Rust's narrower `is_whitespace`, which drops
+        // `\x1c`-`\x1f`): space, ASCII controls, NEL, NBSP, all Zs.
+        let stripped = time_part
+            .trim_end_matches(|ch: char| ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}'));
+        had_ws = stripped.len() != time_part.len();
+        if stripped.is_empty() {
+            return None;
+        }
+        time_core = stripped;
+    }
+    let parsed = if !padded || had_ws {
+        parse_hms_mode(time_core, TimeMode::Regex)
+    } else {
+        // Padded extended dates mix freely: `T0500` after dashes parses
+        // (probed), like `T05:00` after `YYYYMMDD` on the basic path.
+        parse_hms_mode(time_core, TimeMode::Union).or_else(|| parse_hms_basic(time_core))
+    };
+    let (hour, minute, second, micros) = parsed?;
     let naive = date.and_hms_micro_opt(hour, minute, second, micros)?;
     Some(attach_offset(naive, offset_secs))
 }
@@ -1453,7 +1516,9 @@ fn take_digits(text: &str, cursor: &mut usize, max: usize) -> Option<u32> {
     Some(value)
 }
 
-/// Basic-format datetimes (`YYYYMMDD[THHMMSS]`, verified live).
+/// Basic-format datetimes (strict arm only: the regex needs dashes,
+/// so no 1-digit fields and no trailing whitespace; extended times mix
+/// in — `20260924T05:00` parses, probed).
 fn parse_basic_datetime(head: &str, offset_secs: Option<i32>) -> Option<ParsedDateTime> {
     if head.len() < 8 || !head.bytes().take(8).all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -1465,59 +1530,154 @@ fn parse_basic_datetime(head: &str, offset_secs: Option<i32>) -> Option<ParsedDa
     )?;
     let rest = &head[8..];
     if rest.is_empty() {
+        // Date-only: never with a zone (`Z`-after-date 400s).
+        if offset_secs.is_some() {
+            return None;
+        }
         return Some(attach_offset(date.and_hms_opt(0, 0, 0)?, offset_secs));
     }
-    // A single separator char, then basic `HHMM[SS]`.
+    // A single separator char, then a strict time in either form.
     let separator = rest.chars().next()?;
     let time_part = &rest[separator.len_utf8()..];
     if time_part.is_empty() {
         return None;
     }
-    let (hour, minute, second, micros) = parse_hms_basic(time_part)?;
+    let (hour, minute, second, micros) =
+        parse_hms_basic(time_part).or_else(|| parse_hms_mode(time_part, TimeMode::Strict))?;
     let naive = date.and_hms_micro_opt(hour, minute, second, micros)?;
     Some(attach_offset(naive, offset_secs))
 }
 
-fn parse_hms(text: &str) -> Option<(u32, u32, u32, u32)> {
-    let mut parts = text.split(':');
-    let hour: u32 = parts.next()?.parse().ok()?;
-    let minute: u32 = parts.next()?.parse().ok()?;
-    let (second, micros) = match parts.next() {
-        None => (0, 0),
-        Some(rest) => {
-            if let Some(dot) = rest.find(['.', ',']) {
-                let seconds: u32 = rest[..dot].parse().ok()?;
-                let fraction = &rest[dot + 1..];
-                if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
-                    return None;
-                }
-                let mut micros_text = fraction.to_owned();
-                micros_text.truncate(6);
-                while micros_text.len() < 6 {
-                    micros_text.push('0');
-                }
-                (seconds, micros_text.parse().ok()?)
-            } else {
-                (rest.parse().ok()?, 0)
-            }
-        }
+/// Which `parse_datetime` arm an extended time must satisfy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TimeMode {
+    /// `fromisoformat` only: 2-digit fields, hour-only OK, fraction
+    /// after any last component, unlimited fraction digits.
+    Strict,
+    /// `datetime_re` only: 1-2 digit fields, minute required, fraction
+    /// on seconds only, at most 12 fraction digits.
+    Regex,
+    /// Either arm (padded extended dates): strict shapes take
+    /// unlimited fractions, regex-only shapes cap at 12.
+    Union,
+}
+
+/// A 1-2 char ASCII-digit run (Rust's int parser would also take `+`,
+/// which Django's `\d` never matches).
+fn is_digit_run(segment: &str, min: usize, max: usize) -> bool {
+    (min..=max).contains(&segment.len()) && segment.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Extended time `HH[:MM[:SS]][.fraction]` (probed `parse_datetime`):
+/// a fraction after hour-only or minute counts as seconds micros
+/// (`T10.5` is 10:00:00.500000), hour-only needs 2 digits (`T1`
+/// 400s), and 3-digit or `+`-prefixed segments 400. Range checks
+/// (hour 24+, minute 60+) happen at the `and_hms_micro_opt` caller.
+fn parse_hms_mode(text: &str, mode: TimeMode) -> Option<(u32, u32, u32, u32)> {
+    // The fraction trails the last component, whichever it is.
+    let (core, fraction) = match text.find(['.', ',']) {
+        Some(dot) => (text.get(..dot)?, Some(text.get(dot + 1..)?)),
+        None => (text, None),
     };
+    if let Some(digits) = fraction {
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+    }
+    let mut parts = core.split(':');
+    let hour_seg = parts.next()?;
+    let minute_seg = parts.next();
+    let second_seg = parts.next();
     if parts.next().is_some() {
         return None;
     }
+    if !is_digit_run(hour_seg, 1, 2) {
+        return None;
+    }
+    if mode == TimeMode::Strict && hour_seg.len() != 2 {
+        return None;
+    }
+    let mut all_two = hour_seg.len() == 2;
+    let mut minute = 0;
+    if let Some(seg) = minute_seg {
+        if !is_digit_run(seg, 1, 2) {
+            return None;
+        }
+        if mode == TimeMode::Strict && seg.len() != 2 {
+            return None;
+        }
+        all_two &= seg.len() == 2;
+        minute = seg.parse().ok()?;
+    } else if mode == TimeMode::Regex {
+        // The regex fallback requires `HH:MM`.
+        return None;
+    } else if hour_seg.len() != 2 {
+        // Hour-only is strict-only: `fromisoformat` needs `HH`.
+        return None;
+    }
+    let mut second = 0;
+    if let Some(seg) = second_seg {
+        if !is_digit_run(seg, 1, 2) {
+            return None;
+        }
+        if mode == TimeMode::Strict && seg.len() != 2 {
+            return None;
+        }
+        all_two &= seg.len() == 2;
+        second = seg.parse().ok()?;
+    } else if fraction.is_some() && mode == TimeMode::Regex {
+        // The regex only fractions seconds.
+        return None;
+    }
+    if mode == TimeMode::Union {
+        // Strict accepts everything above; the regex arm needs `HH:MM`
+        // with fractions on seconds only (`T1:00.5` and `T10:0.5` 400).
+        let regex_ok = minute_seg.is_some() && (fraction.is_none() || second_seg.is_some());
+        if !regex_ok && !all_two {
+            return None;
+        }
+    }
+    let micros = match fraction {
+        None => 0,
+        Some(digits) => {
+            // Strict (`fromisoformat`) truncates any length; the regex
+            // fallback caps at 12 (`\d{1,6}\d{0,6}` in `dateparse.py`).
+            let strict_shape = mode != TimeMode::Regex && all_two;
+            if !strict_shape && digits.len() > 12 {
+                return None;
+            }
+            let mut padded = digits.to_owned();
+            padded.truncate(6);
+            while padded.len() < 6 {
+                padded.push('0');
+            }
+            padded.parse().ok()?
+        }
+    };
+    let hour: u32 = hour_seg.parse().ok()?;
     Some((hour, minute, second, micros))
 }
 
+/// Basic time `HH[MM[SS]][.fraction]` (`fromisoformat` strict:
+/// 2-digit hour-only, fixed widths, fractions truncated; `+`-prefixed
+/// or 1-digit heads 400, probed).
 fn parse_hms_basic(text: &str) -> Option<(u32, u32, u32, u32)> {
     let (head, fraction) = match text.find(['.', ',']) {
-        Some(dot) => (&text[..dot], Some(&text[dot + 1..])),
+        Some(dot) => (text.get(..dot)?, Some(text.get(dot + 1..)?)),
         None => (text, None),
     };
-    if head.len() != 4 && head.len() != 6 {
+    if head.len() != 2 && head.len() != 4 && head.len() != 6 {
+        return None;
+    }
+    if !head.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     let hour: u32 = head.get(0..2)?.parse().ok()?;
-    let minute: u32 = head.get(2..4)?.parse().ok()?;
+    let minute: u32 = if head.len() >= 4 {
+        head.get(2..4)?.parse().ok()?
+    } else {
+        0
+    };
     let second: u32 = if head.len() == 6 {
         head.get(4..6)?.parse().ok()?
     } else {
@@ -1540,60 +1700,189 @@ fn parse_hms_basic(text: &str) -> Option<(u32, u32, u32, u32)> {
     Some((hour, minute, second, micros))
 }
 
-/// `Www` week dates (`2026-W05-3`, optional time suffix): 2-digit week,
-/// Monday-anchored ISO weeks.
-fn parse_week_datetime(text: &str) -> Option<ParsedDateTime> {
-    let (head, offset_secs) = split_datetime_zone(text)?;
-    let week_pos = head.find("-W")?;
-    let (year_text, rest) = head.split_at(week_pos);
-    let rest = rest.strip_prefix("-W")?;
-    if year_text.len() != 4 || !year_text.bytes().all(|byte| byte.is_ascii_digit()) {
+/// Split an ISO week date prefix (`YYYY-Www-D`, `YYYYWwwD`,
+/// `YYYY-Www`, `YYYYWww`) from its remainder: strict uppercase `W`,
+/// 2-digit week, day `1-7` (absent means Monday), year `1-9999`, no
+/// mixed forms (`2026-W011` and `2026W01-1` 400, probed). The
+/// remainder (separator + time, zone, or junk) is left unvalidated
+/// for the caller. Greedy day first; the datetime path backtracks to
+/// no-day below (the export path never backtracks: its remainder
+/// must be empty).
+fn split_week_date(text: &str) -> Option<(chrono::NaiveDate, &str)> {
+    split_week_date_inner(text, true)
+}
+
+/// No-day re-read for backtracking: same week, Monday, the day chars
+/// (if any) left in the remainder for separator + time duty.
+fn split_week_date_noday(text: &str) -> Option<(chrono::NaiveDate, &str)> {
+    split_week_date_inner(text, false)
+}
+
+fn split_week_date_inner(text: &str, greedy_day: bool) -> Option<(chrono::NaiveDate, &str)> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 7 || !bytes[0..4].iter().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    let year: i32 = year_text.parse().ok()?;
-    let (week_text, day_text) = rest.split_once('-')?;
-    if week_text.len() != 2 {
+    let year: i32 = text.get(0..4)?.parse().ok()?;
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
+    // Dashed (`-Www`) or basic (`Www`) — the day form must match.
+    let dashed = bytes[4] == b'-';
+    let (week_text, after_week) = if dashed {
+        if bytes.get(5) != Some(&b'W') {
+            return None;
+        }
+        (text.get(6..8)?, text.get(8..)?)
+    } else if bytes[4] == b'W' {
+        (text.get(5..7)?, text.get(7..)?)
+    } else {
+        return None;
+    };
+    if week_text.len() != 2 || !week_text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     let week: u32 = week_text.parse().ok()?;
-    // Optional time suffix after the weekday digit.
-    let (day_text, time_text) = match day_text.len() {
-        1 => (day_text, None),
-        len if len > 2 => {
-            let day = day_text.get(0..1)?;
-            let time = day_text.get(1..)?.strip_prefix(['T', ' '])?;
-            (day, Some(time))
+    // Day: `-D` (dashed) or bare `D` (basic); absent means Monday.
+    // Anything else starts the remainder (a separator, a zone, junk).
+    let (weekday, rest) = if !greedy_day {
+        (1, after_week)
+    } else if dashed {
+        match after_week.as_bytes().first() {
+            Some(b'-') => {
+                let weekday: u32 = after_week.get(1..2)?.parse().ok()?;
+                (weekday, after_week.get(2..)?)
+            }
+            _ => (1, after_week),
         }
-        _ => return None,
+    } else {
+        match after_week.as_bytes().first() {
+            Some(b'0'..=b'9') => {
+                let weekday: u32 = after_week.get(0..1)?.parse().ok()?;
+                (weekday, after_week.get(1..)?)
+            }
+            _ => (1, after_week),
+        }
     };
-    let weekday: u32 = day_text.parse().ok()?;
     if !(1..=7).contains(&weekday) {
         return None;
     }
     let weekday = chrono::Weekday::try_from(weekday as u8 - 1).ok()?;
     let date = chrono::NaiveDate::from_isoywd_opt(year, week, weekday)?;
-    let naive = match time_text {
-        None => date.and_hms_opt(0, 0, 0)?,
-        Some(time) => {
-            let (hour, minute, second, micros) = parse_hms(time)?;
-            date.and_hms_micro_opt(hour, minute, second, micros)?
-        }
-    };
+    // `fromisoformat` builds a `date`, which caps at year 9999: ISO
+    // weeks spilling past it (`9999-W52-6/7` land in year 10000,
+    // probed) 400, while chrono would accept them.
+    if !(1..=9999).contains(&date.year()) {
+        return None;
+    }
+    Some((date, rest))
+}
+
+/// `Www` week datetimes (strict arm only: the regex needs dashes, so
+/// no 1-digit time fields and no trailing whitespace; basic times and
+/// hour-only mix in — `2026-W01-1T100000` parses, probed). Greedy day
+/// first, backtracking to no-day when the greedy rest fails
+/// (`2026-W01-15:00` is Monday 15:00, but `2026-W01-5:00` is Friday
+/// 00:00 — greedy wins ties, all probed).
+fn parse_week_datetime(text: &str) -> Option<ParsedDateTime> {
+    split_week_date(text)
+        .and_then(|(date, rest)| finish_week_datetime(date, rest))
+        .or_else(|| {
+            split_week_date_noday(text).and_then(|(date, rest)| finish_week_datetime(date, rest))
+        })
+}
+
+/// Monday midnight for bare week dates, else separator + strict time
+/// with an optional zone, over a split week date.
+fn finish_week_datetime(date: chrono::NaiveDate, rest: &str) -> Option<ParsedDateTime> {
+    if rest.is_empty() {
+        return Some(ParsedDateTime::Naive(date.and_hms_opt(0, 0, 0)?));
+    }
+    // The zone splits off the remainder (the separator sits at
+    // rest[0], so a sigil at rest[3]+ always starts a zone tail).
+    let (time_head, offset_secs) = split_datetime_zone(rest, 3)?;
+    if time_head.is_empty() {
+        // Bare `Z`/zone with no time (`Z`-after-date 400s).
+        return None;
+    }
+    // Any single char separates date and time here too (`2026-W01+05:00`
+    // is naive Monday 05:00, probed).
+    let separator = time_head.chars().next()?;
+    let time_part = &time_head[separator.len_utf8()..];
+    if time_part.is_empty() {
+        return None;
+    }
+    let (hour, minute, second, micros) =
+        parse_hms_mode(time_part, TimeMode::Strict).or_else(|| parse_hms_basic(time_part))?;
+    let naive = date.and_hms_micro_opt(hour, minute, second, micros)?;
     Some(attach_offset(naive, offset_secs))
 }
 
 /// Split the trailing zone designator: `Z` is UTC (lowercase `z` is
 /// rejected — verified live), `±HH[:MM]` / `±HHMM` / `±HH` under 24h
 /// are offsets, anything else is naive. Returns `None` when the tail
-/// is a malformed offset.
-fn split_datetime_zone(text: &str) -> Option<(&str, Option<i32>)> {
-    if let Some(head) = text.strip_suffix('Z') {
-        return Some((head, Some(0)));
+/// is a malformed offset. Only sigils at `min_sigil_pos`+ count (the
+/// caller excludes its separator slot: 11 on the main path, 3 on the
+/// week remainder).
+/// Strip whitespace between time and zone (probed `fromisoformat`):
+/// after a fraction-free time, exactly one of space, `\t\n\r`,
+/// `\x0b\x0c`, `\x1c`-`\x1f` (`\x85`/NBSP/Unicode spaces and second
+/// chars 400); after a fraction shorter than 6 digits, none at all
+/// (`T10.5 +05:00` 400s); after 6+ fraction digits, the whole run.
+/// Anything else in that slot (`X`, `:`, extra digits, `\x85` after
+/// a long fraction — `fromisoformat` skips one junk char there) is a
+/// documented pathological gap, not chased.
+fn strip_zone_space(head: &str) -> &str {
+    fn is_zone_space(ch: char) -> bool {
+        matches!(
+            ch,
+            ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c' | '\u{1c}'..='\u{1f}'
+        )
     }
-    // A zone sigil can only follow the time (position 13+ guards dates).
+    let stripped = head.trim_end_matches(is_zone_space);
+    if stripped.len() == head.len() {
+        return head;
+    }
+    // Fraction digits immediately before the space run (if any).
+    let bytes = stripped.as_bytes();
+    let mut index = bytes.len();
+    while index > 0 && bytes[index - 1].is_ascii_digit() {
+        index -= 1;
+    }
+    let fraction_len = bytes.len() - index;
+    let has_fraction =
+        fraction_len > 0 && index > 0 && (bytes[index - 1] == b'.' || bytes[index - 1] == b',');
+    if has_fraction {
+        // Long fractions shed the whole run; short ones shed nothing.
+        if fraction_len >= 6 {
+            return stripped;
+        }
+        return head;
+    }
+    // Fraction-free: exactly one char goes (a second stays for the
+    // time parsers to reject, or the regex arm to strip).
+    let last = head.chars().next_back().expect("trailing space");
+    &head[..head.len() - last.len_utf8()]
+}
+
+fn split_datetime_zone(text: &str, min_sigil_pos: usize) -> Option<(&str, Option<i32>)> {
+    if let Some(head) = text.strip_suffix('Z') {
+        // A zone tail under the `Z` (`+05:00Z`, `ZZ`) is junk in both
+        // arms — but the recursion only inspects the shorter head, so
+        // it always terminates.
+        let (_, inner) = split_datetime_zone(head, min_sigil_pos)?;
+        if inner.is_some() {
+            return None;
+        }
+        return Some((strip_zone_space(head), Some(0)));
+    }
+    // A zone sigil can only follow the time (the caller guards dates).
     let bytes = text.as_bytes();
     let mut sigil_at: Option<usize> = None;
-    for (index, byte) in bytes.iter().enumerate().skip(13) {
+    for (index, byte) in bytes.iter().enumerate() {
+        if index < min_sigil_pos {
+            continue;
+        }
         if *byte == b'+' || *byte == b'-' {
             sigil_at = Some(index);
         }
@@ -1619,7 +1908,10 @@ fn split_datetime_zone(text: &str) -> Option<(&str, Option<i32>)> {
     if hours > 23 || minutes > 59 {
         return None;
     }
-    Some((head, Some(sign * (hours * 3600 + minutes * 60))))
+    Some((
+        strip_zone_space(head),
+        Some(sign * (hours * 3600 + minutes * 60)),
+    ))
 }
 
 fn attach_offset(naive: chrono::NaiveDateTime, offset_secs: Option<i32>) -> ParsedDateTime {
@@ -1850,7 +2142,7 @@ pub(crate) async fn parse_list_filters(
     }
     let mut search_patterns = Vec::new();
     if let Some(raw) = query_last(query, "search") {
-        for term in search_terms(&raw) {
+        for term in search_terms(&raw)? {
             search_patterns.push(format!("%{}%", escape_like(&term)));
         }
     }
@@ -1860,12 +2152,21 @@ pub(crate) async fn parse_list_filters(
     })
 }
 
-/// `SearchFilter.get_search_terms`: collapse NULs, commas split, quotes
-/// group (`search_smart_split`).
-pub(crate) fn search_terms(raw: &str) -> Vec<String> {
-    let cleaned: String = raw.chars().filter(|ch| *ch != '\x00').collect();
+/// `SearchFilter.get_search_terms`: the raw value runs through
+/// `CharField.run_validation` first, whose
+/// `ProhibitNullCharactersValidator` rejects NULs before `smart_split`
+/// ever runs (probed: 400 with the bare message list); survivors
+/// split on commas with quotes grouping (`search_smart_split`).
+#[allow(clippy::result_large_err)]
+pub(crate) fn search_terms(raw: &str) -> Result<Vec<String>, Response> {
+    if raw.contains('\x00') {
+        return Err(json_response(
+            StatusCode::BAD_REQUEST,
+            r#"["Null characters are not allowed."]"#.to_owned(),
+        ));
+    }
     let mut terms = Vec::new();
-    for bit in django_smart_split(&cleaned) {
+    for bit in django_smart_split(raw) {
         let stripped = bit.trim_matches(',').trim();
         if stripped.is_empty() {
             continue;
@@ -1883,7 +2184,7 @@ pub(crate) fn search_terms(raw: &str) -> Vec<String> {
             }
         }
     }
-    terms
+    Ok(terms)
 }
 
 /// Django `smart_split`: whitespace splits, quoted phrases (either
@@ -2808,13 +3109,24 @@ fn export_sql() -> (String, Vec<String>) {
 
 /// `parse_date` for the export `date` (every shape below probed
 /// through `DateField.to_python`, Django 4.2.30): dashed
-/// `YYYY-M-D` with a 4-digit year 1-9999 and 1-2 digit month/day, or
-/// basic `YYYYMMDD` with year >= 1; anything else is the
-/// `ValidationError` 400. Non-string truthy input is the `TypeError`
-/// 500 arm (handled by the caller via `py_str` gating). Accepted gap:
-/// a trailing `\n` is valid in Django (the regex `$` matches before
-/// it) but rejected here — pathological, not chased.
+/// `YYYY-M-D` with a 4-digit year 1-9999 and 1-2 digit month/day,
+/// basic `YYYYMMDD` with year >= 1, or ISO week dates (`YYYY-Www-D`,
+/// `YYYYWwwD`, `YYYY-Www`, `YYYYWww` — strict, Monday default, no
+/// mixed forms); anything else is the `ValidationError` 400.
+/// Non-string truthy input is the `TypeError` 500 arm (handled by the
+/// caller via `py_str` gating). Accepted gap: a trailing `\n` is
+/// valid in Django for plain dashed dates (the regex `$` matches
+/// before it) but rejected here — pathological, not chased.
 pub(crate) fn parse_export_date(text: &str) -> Option<chrono::NaiveDate> {
+    if text.bytes().any(|byte| byte == b'W') {
+        // Any `W` means week-intent: strict week date or nothing
+        // (`fromisoformat` fails anything else with a `W`, and the
+        // `date_re` fallback has no `W` arm).
+        return match split_week_date(text) {
+            Some((date, "")) => Some(date),
+            _ => None,
+        };
+    }
     if text.len() == 8 && text.bytes().all(|byte| byte.is_ascii_digit()) {
         let year: i32 = text[0..4].parse().ok()?;
         if year < 1 {
@@ -2997,11 +3309,11 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 
 /// Stock `get_object` miss: `get_object_or_404` raises `Http404("No <Model>
 /// matches the given query.")`, rewrapped by DRF as `NotFound` — 404
-/// `{"Detail":"No <Model> matches the given query."}` (DRF `NotFound`).
+/// `{"detail":"No <Model> matches the given query."}` (DRF `NotFound`).
 fn detail_not_found_response(model: &str) -> Response {
     json_response(
         StatusCode::NOT_FOUND,
-        format!("{{\"Detail\":\"No {model} matches the given query.\"}}"),
+        format!("{{\"detail\":\"No {model} matches the given query.\"}}"),
     )
 }
 /// One `soft_delete_related_objects.delay(app_label, model_name, pk,
@@ -4833,6 +5145,74 @@ mod tests {
             "2026-01-01x00:00:00",
             "2026-01-01T00:00:00+23:59",
             "2026-W05-3",
+            // Hour-only + basic hour-only (strict arm).
+            "2026-09-24T10",
+            "20260924T10",
+            "2026-W01-1T10",
+            // Fractions after hour/minute count as seconds micros.
+            "2026-09-24T10.5",
+            "2026-09-24T10,5",
+            "2026-09-24T10:00.5",
+            // Hour-only + zone composes.
+            "2026-09-24T10+05:00",
+            "20260924T10+05:00",
+            "2026-09-24T10Z",
+            "2026-W01-1T10Z",
+            "2026-W01-1T10+05:00",
+            "2026W01T10+05:00",
+            // Date/time form mixing (strict arm).
+            "20260924T05:00",
+            "2026-09-24T0500",
+            "2026W011T10:00:00",
+            "2026-W01-1T100000",
+            "2026-W01-1T1000",
+            // Week forms: basic + no-day + space sep.
+            "2026W011",
+            "2026-W01",
+            "2026W01",
+            "2026-W01T10:00:00",
+            "2026W01T100000",
+            "2026-W01-1 10:00:00",
+            "2026-W01-1T10:00:00+05:00",
+            // Any single char separates date and time.
+            "2026-09-24.05:00",
+            "2026-09-24/05:00",
+            "2026-09-24_05:00:00",
+            // Trailing whitespace is a regex-arm shape (after `[T ]`).
+            "2026-09-24T05:00 ",
+            "2026-09-24T05:00\t",
+            "2026-09-24T05:00\n",
+            "2026-09-24T05:00\r\n",
+            "2026-09-24T05:00\u{85}",
+            "2026-09-24T05:00\u{1c}",
+            "2026-09-24T05:00\u{a0}",
+            "2026-09-24T05:00\u{2000}",
+            "2026-09-24T05:00 +05:00",
+            // Non-padded dates parse via the regex arm (`[T ]` + colon).
+            "2026-9-1T05:00",
+            "2026-9-1 05:00",
+            // Week backtracking: greedy day first, no-day on failure.
+            "2026-W01-15:00",
+            "2026-W01-12",
+            "2026-W01-05:00",
+            "2026W01010:00",
+            "2026W01500:00",
+            "2026-W01-5:00",
+            "2026-W01-1-05:00",
+            "2026-W01-1X10:00",
+            // Single space between fraction-free time and zone.
+            "2026-09-24T10 +05:00",
+            "20260924T100000 +05:00",
+            "2026-W01-1T10 +05:00",
+            "2026-09-24T10\t+05:00",
+            "2026-09-24T10 Z",
+            "2026-09-24X10:00 +05:00",
+            // 6+ digit fractions shed a whole space run before the zone.
+            "2026-09-24T10:00:00.555555 +05:00",
+            "2026-09-24T10:00:00.555555  +05:00",
+            "20260924T100000.555555  +05:00",
+            "2026-W01-1T10:00:00.555555 +05:00",
+            "2026-09-24T10.555555 +05:00",
         ] {
             assert!(parse_drf_datetime(text).is_some(), "{text} parses");
         }
@@ -4846,6 +5226,67 @@ mod tests {
             "not-a-date",
             "",
             "2026-024",
+            // Hour-only needs 2 digits; 3-digit and `+` segments 400.
+            "2026-09-24T1",
+            "20260924T1",
+            "2026-09-24T007:00:00",
+            "2026-09-24T+1:00:00",
+            "2026-09-24T10:+1:00",
+            "2026-09-24T10:00:+1",
+            "2026-09-24T+10+05:00",
+            // Empty segments and fractions 400.
+            "2026-09-24T10:",
+            "2026-09-24T10:00:",
+            "2026-09-24T:00",
+            "2026-09-24T10:00:00.",
+            "2026-09-24T.5",
+            // Mixed 1-digit/strict shapes match neither arm.
+            "2026-09-24T1:00.5",
+            "2026-09-24T10:0.5",
+            // Non-padded date-only and non-padded + non-`[T ]` time 400.
+            "2026-9-1",
+            "2026-9-1+05:00",
+            "2026-9-1X05:00",
+            "2026-9-1T0500",
+            "2026-9-1T10",
+            "2026-9-1T10+05:00",
+            "2026-9-1T1:00.5",
+            // `Z`-after-date 400s; date-only never carries a zone.
+            "2026-09-24Z",
+            "2026-W01-1Z",
+            "20260924Z",
+            // Week times are strict-only (no 1-digit fields).
+            "2026-W01-1T1:2:3",
+            "2026-W01-1T1:00",
+            // Mixed week forms 400.
+            "9999-W52-7",
+            "9999-W52-6",
+            "2026-W011",
+            "2026W01-1",
+            "2026-W011T10:00:00",
+            "2026W01-1T10:00:00",
+            // Trailing whitespace outside the regex arm 400s.
+            "20260924T100000 ",
+            "2026-09-24X05:00 ",
+            "2026-W01-1T10:00:00 ",
+            "2026-09-24 ",
+            "2026-09-24T10 ",
+            " 2026-09-24T05:00",
+            "2026-09-24T 05:00",
+            "2026-09-24T05:00+05:00 ",
+            // Zones: malformed tails and unparseable heads 400.
+            "2026-09-24T05:00+05:00Z",
+            "2026-09-24T10:00:00ZZ",
+            "2026-09-24T10:00+9",
+            "2026-09-24T10:00+999",
+            // Short fractions forbid the space before the zone
+            // (strict-only shapes; `T`-colon ones pass via regex).
+            "2026-09-24T10.5 +05:00",
+            "20260924T100000.55555 +05:00",
+            "2026-W01-1T10:00:00.55555 +05:00",
+            // Week backtracking still rejects garbage.
+            "2026-W01-010:00",
+            "2026-W01-50:00",
         ] {
             assert!(parse_drf_datetime(text).is_none(), "{text} rejects");
         }
@@ -4856,6 +5297,108 @@ mod tests {
             }
             _ => panic!("naive"),
         }
+        // Strict shapes truncate any fraction length; regex-only shapes
+        // (a 1-digit field forces the regex) cap at 12 digits (probed).
+        assert!(parse_drf_datetime("2026-09-24T10.12345678901234").is_some());
+        assert!(parse_drf_datetime("2026-09-24T1:00:00.111111111111").is_some());
+        assert!(parse_drf_datetime("2026-09-24T1:00:00.1111111111111").is_none());
+    }
+
+    #[test]
+    fn datetime_values_match_parse_datetime() {
+        // (input, expected naive `YYYY-MM-DDTHH:MM:SS.ffffff` or aware RFC 3339)
+        for (text, want) in [
+            // `±HH:MM` after the date is separator + naive time, not a zone.
+            ("2026-09-24+05:00", "2026-09-24T05:00:00.000000"),
+            ("2026-09-24+05:30", "2026-09-24T05:30:00.000000"),
+            ("2026-09-24-05:00", "2026-09-24T05:00:00.000000"),
+            ("2026-09-24+05", "2026-09-24T05:00:00.000000"),
+            ("2026-09-24+0500", "2026-09-24T05:00:00.000000"),
+            ("2026-09-24X05:00", "2026-09-24T05:00:00.000000"),
+            ("20260924+05:00", "2026-09-24T05:00:00.000000"),
+            ("20260924-05:00", "2026-09-24T05:00:00.000000"),
+            ("2026-W01-1+05:00", "2025-12-29T05:00:00.000000"),
+            ("2026-W01-1-05:00", "2025-12-29T05:00:00.000000"),
+            ("2026-W01+05:00", "2025-12-29T05:00:00.000000"),
+            ("2026W011+05:00", "2025-12-29T05:00:00.000000"),
+            ("2026-09-24+00:00", "2026-09-24T00:00:00.000000"),
+            // Monday default for no-day weeks.
+            ("2026-W01", "2025-12-29T00:00:00.000000"),
+            ("2026W01", "2025-12-29T00:00:00.000000"),
+            ("2026W01T10", "2025-12-29T10:00:00.000000"),
+            ("2026-W01T10", "2025-12-29T10:00:00.000000"),
+            // Fractions after hour/minute are seconds micros.
+            ("2026-09-24T10.5", "2026-09-24T10:00:00.500000"),
+            ("2026-09-24T10,5", "2026-09-24T10:00:00.500000"),
+            ("2026-09-24T10:00.5", "2026-09-24T10:00:00.500000"),
+            ("20260924T1000.5", "2026-09-24T10:00:00.500000"),
+            ("2026-W01-1T10.5", "2025-12-29T10:00:00.500000"),
+            // Week backtracking values (greedy wins ties).
+            ("2026-W01-15:00", "2025-12-29T15:00:00.000000"),
+            ("2026-W01-12", "2025-12-29T12:00:00.000000"),
+            ("2026W01010:00", "2025-12-29T10:00:00.000000"),
+            ("2026W01500:00", "2025-12-29T00:00:00.000000"),
+            ("2026-W01-5:00", "2026-01-02T00:00:00.000000"),
+        ] {
+            match parse_drf_datetime(text).expect("parses") {
+                ParsedDateTime::Naive(naive) => {
+                    assert_eq!(
+                        naive.format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
+                        want,
+                        "{text}"
+                    );
+                }
+                ParsedDateTime::Aware(_) => panic!("{text} is naive"),
+            }
+        }
+        for (text, want) in [
+            ("2026-09-24T10+05:00", "2026-09-24T05:00:00+00:00"),
+            ("2026-09-24T10Z", "2026-09-24T10:00:00+00:00"),
+            ("2026-09-24+05:00Z", "2026-09-24T05:00:00+00:00"),
+            ("2026-W01-1T10Z", "2025-12-29T10:00:00+00:00"),
+            ("2026-09-24T05:00.5+05:00", "2026-09-24T00:00:00.500+00:00"),
+            ("2026-09-24T05:00 +05:00", "2026-09-24T00:00:00+00:00"),
+        ] {
+            match parse_drf_datetime(text).expect("parses") {
+                ParsedDateTime::Aware(instant) => {
+                    assert_eq!(
+                        instant.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false),
+                        want,
+                        "{text}"
+                    );
+                }
+                ParsedDateTime::Naive(_) => panic!("{text} is aware"),
+            }
+        }
+    }
+
+    #[test]
+    fn datetime_accepted_gaps_stay_pinned() {
+        // Probed Django-200 shapes this port answers 400, each an
+        // accepted pathological gap (see `parse_drf_datetime` docs).
+        // Pinned so they cannot drift silently.
+        for text in [
+            // Regex `$` matches before a single trailing `\n` after a
+            // zone (same quirk as the export-date `\n` gap).
+            "2026-09-24T10:00Z\n",
+            "2026-09-24T10:00+05:00\n",
+            "2026-9-1T1:2:3 +05:00\n",
+            // `fromisoformat` junk-before-zone tolerance: a trailing
+            // colon, stray letters/digits, or non-space chars after a
+            // long fraction are skipped before the zone.
+            "2026-09-24T10:Z",
+            "2026-09-24T10:+05:00",
+            "2026-09-24T10X+05:00",
+            "2026-09-24T105+05:00",
+            "2026-09-24T10:00:00.555555X+05:00",
+            "2026-W01-1T10:00:00.555555\u{85}+05:00",
+            "2026-W01-1T10:Z",
+        ] {
+            assert!(parse_drf_datetime(text).is_none(), "{text} gap stays 400");
+        }
+        // Export twin of the `\n` gap (D2): `date_re$` matches before
+        // it, so Django 200s; this port 400s.
+        assert!(parse_export_date("2026-09-24\n").is_none());
     }
 
     #[test]
@@ -5026,22 +5569,23 @@ mod tests {
     async fn method_not_allowed_names_the_method() {
         let response = method_not_allowed_response("GET");
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-        assert_eq!(
-            response_text(response).await,
-            "{\"Detail\":\"Method \\\"GET\\\" not allowed.\"}"
-        );
+        let body = response_text(response).await;
+        assert_eq!(body, "{\"detail\":\"Method \\\"GET\\\" not allowed.\"}");
+        // Glyph-proof guard: the DRF key is lowercase-d (byte 100, not
+        // 68) — letter-case glyphs misled four runs here (PIDASHCONV-708).
+        assert_eq!(body.as_bytes()[2], 100);
         let response = unsupported_media_type("text/csv");
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert_eq!(
             response_text(response).await,
-            "{\"Detail\":\"Unsupported media type \\\"text/csv\\\" in request.\"}"
+            "{\"detail\":\"Unsupported media type \\\"text/csv\\\" in request.\"}"
         );
         // Attacker-controlled content types escape like the renderer.
         let response = unsupported_media_type("a\"b\\c");
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert_eq!(
             response_text(response).await,
-            "{\"Detail\":\"Unsupported media type \\\"a\\\"b\\\\c\\\" in request.\"}"
+            "{\"detail\":\"Unsupported media type \\\"a\\\"b\\\\c\\\" in request.\"}"
         );
         for (model, want) in [
             ("Workspace", "No Workspace matches the given query."),
@@ -5054,7 +5598,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
             assert_eq!(
                 response_text(response).await,
-                format!("{{{:?}:{:?}}}", "Detail", want)
+                format!("{{{:?}:{:?}}}", "detail", want)
             );
         }
         let response = class_denied_response();
@@ -5065,19 +5609,36 @@ mod tests {
 
     #[test]
     fn search_terms_follow_smart_split() {
-        assert_eq!(search_terms("Acme"), vec!["Acme".to_owned()]);
-        assert_eq!(search_terms(""), Vec::<String>::new());
-        assert_eq!(search_terms("  , ,"), Vec::<String>::new());
+        let terms = |raw: &str| search_terms(raw).expect("terms");
+        assert_eq!(terms("Acme"), vec!["Acme".to_owned()]);
+        assert_eq!(terms(""), Vec::<String>::new());
+        assert_eq!(terms("  , ,"), Vec::<String>::new());
         assert_eq!(
-            search_terms("foo,bar  baz"),
+            terms("foo,bar  baz"),
             vec!["foo".to_owned(), "bar".to_owned(), "baz".to_owned()]
         );
         assert_eq!(
-            search_terms("\"foo bar\" baz"),
+            terms("\"foo bar\" baz"),
             vec!["foo bar".to_owned(), "baz".to_owned()]
         );
-        assert_eq!(search_terms("'it\\'s'"), vec!["it's".to_owned()]);
+        assert_eq!(terms("'it\\'s'"), vec!["it's".to_owned()]);
         assert_eq!(escape_like("100%_x\\y"), "100\\%\\_x\\\\y");
+    }
+
+    #[tokio::test]
+    async fn search_terms_reject_nul_like_drf() {
+        // Probed: stock `SearchFilter.get_search_terms` raises through
+        // `ProhibitNullCharactersValidator` before `smart_split` runs —
+        // 400 with the bare message list, never a 500 and never a
+        // NUL-stripped 200.
+        for raw in ["a\x00b", "\x00"] {
+            let response = search_terms(raw).expect_err("NUL rejects");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response_text(response).await,
+                "[\"Null characters are not allowed.\"]"
+            );
+        }
     }
 
     // -- export ----------------------------------------------------------------
@@ -5114,6 +5675,37 @@ mod tests {
         assert!(parse_export_date("2026-01-01 ").is_none());
         assert!(parse_export_date("2026-00-10").is_none());
         assert!(parse_export_date("2026-01-00").is_none());
+        // ISO week dates (every shape probed via model
+        // `DateField.to_python`, Django 4.2.30): all four forms parse
+        // to the ISO Monday-anchored date ...
+        for text in ["2026-W01-1", "2026W011", "2026-W01", "2026W01"] {
+            assert_eq!(
+                parse_export_date(text),
+                chrono::NaiveDate::from_ymd_opt(2025, 12, 29),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            parse_export_date("2026-W52-7"),
+            chrono::NaiveDate::from_ymd_opt(2026, 12, 27)
+        );
+        // ... and every malformed week shape 400s.
+        for text in [
+            "2026-w01-1",
+            "2026-W1-1",
+            "2026-W00-1",
+            "2026-W01-0",
+            "2026-W01-8",
+            "0000-W01-1",
+            "9999-W52-7",
+            "9999-W52-6",
+            "2026-W011",
+            "2026W01-1",
+            "2026-W01-1 ",
+            "2026-W01-1x",
+        ] {
+            assert!(parse_export_date(text).is_none(), "{text} rejects");
+        }
     }
 
     #[test]
