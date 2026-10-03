@@ -53,6 +53,7 @@ use crate::scope::TenantScope;
 pub mod allow;
 pub mod desktop;
 pub mod instance;
+pub mod membership;
 pub mod page;
 pub mod project;
 pub mod runner;
