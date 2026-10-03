@@ -139,14 +139,21 @@ pub fn coerce_token(raw: &Value) -> Option<i64> {
             } else if let Some(v) = n.as_u64() {
                 (v <= BIGINT_MAX as u64).then_some(v as i64)
             } else if let Some(f) = n.as_f64() {
-                // Truncation toward zero; `2^63` (or more, or non-finite)
-                // can never truncate into range — the `as f64` of
-                // BIGINT_MAX itself rounds up to 2^63, so compare against
-                // 2^63 exactly.
-                if !f.is_finite() || !(0.0..9_223_372_036_854_775_808.0).contains(&f) {
+                // `int()` truncates toward zero *before* the range check,
+                // so fractions in (-1, 0) become 0 and pass; only
+                // non-finite values and magnitudes past 2^63 can never
+                // land in range — the `as f64` of BIGINT_MAX itself
+                // rounds up to 2^63, so compare the truncated value
+                // against 2^63 exactly.
+                if !f.is_finite() {
                     None
                 } else {
-                    Some(f.trunc() as i64)
+                    let truncated = f.trunc();
+                    if (0.0..9_223_372_036_854_775_808.0).contains(&truncated) {
+                        Some(truncated as i64)
+                    } else {
+                        None
+                    }
                 }
             } else {
                 None
@@ -470,6 +477,9 @@ mod tests {
             );
         }
         assert_eq!(coerce_token(&json!(-4.5)), None); // truncates to -4, then < 0
+        assert_eq!(coerce_token(&json!(-0.5)), Some(0)); // truncates to 0, then in range
+        assert_eq!(coerce_token(&json!(-0.999)), Some(0));
+        assert_eq!(coerce_token(&json!(-1.0)), None); // truncates to -1, then < 0
         assert_eq!(coerce_token(&json!(9.99)), Some(9));
         assert_eq!(coerce_token(&json!(0.0)), Some(0));
         assert_eq!(coerce_token(&json!(1e19)), None); // past BIGINT_MAX
