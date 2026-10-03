@@ -118,7 +118,7 @@
 //!
 //! ## `agent_run_event` (D-15)
 //!
-//! `agent_run_id` (bigint FK filter) + `seq` (`-seq` order,
+//! `agent_run_id` (UUID FK filter) + `seq` (`-seq` order,
 //! `values_list`, resume_ack `last_seq`). `id`, `kind`, `payload`,
 //! `created_at` are never referenced (`Meta.ordering`
 //! `["agent_run", "seq"]` is overridden by the explicit `-seq`).
