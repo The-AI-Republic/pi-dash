@@ -52,8 +52,9 @@
 //! 1. `validate_tzid`'s `(value or "UTC")` fallback and the `None → []`
 //!    branch of `_validate_iso_datetime_list` are unreachable via HTTP
 //!    (DRF blank/null checks preempt) — ported verbatim anyway.
-//! 2. `ZoneInfo('')` (and `'.'`, `'..'`, absolute or non-normalized keys)
-//!    raises a bare `ValueError`, not `ZoneInfoNotFoundError`, so a direct
+//! 2. `ZoneInfo('')` (and `'.'`, `'..'`, absolute or non-normalized
+//!    keys, and single-segment keys with a NUL byte) raises a bare
+//!    `ValueError`, not `ZoneInfoNotFoundError`, so a direct
 //!    `validate_tzid('   ')` escapes as a 500 — ported as the distinct
 //!    [`TzidError::InvalidKey`] variant.
 //! 3. CPython `fromisoformat` drops offset microseconds when HH=MM=SS=0
@@ -997,10 +998,11 @@ pub enum TzidError {
 /// `ZoneInfo`): the deterministic approximation of "present in the system
 /// tzdata". Known boundary: exotic keys that exist in a tzdata install but
 /// are not `chrono-tz` variants (`localtime`, `Factory`, `posix/...`,
-/// `right/...`) and non-zone root files that make `ZoneInfo` raise
-/// `ValueError` (`zone.tab`, ...) diverge — the former 400 here where the
-/// system copy may accept, the latter 400 here where Python 500s. No
-/// contract input exercises those.
+/// `right/...`), non-zone root files that make `ZoneInfo` raise
+/// `ValueError` (`zone.tab`, ...), and NUL bytes in multi-segment keys
+/// (whose verdict depends on which parent directories exist) diverge —
+/// the former 400 here where the system copy may accept, the rest 400
+/// here where Python 500s. No contract input exercises those.
 pub fn validate_tzid(value: &str) -> Result<String, TzidError> {
     if value.is_empty() {
         return Ok("UTC".to_owned());
@@ -1061,6 +1063,16 @@ fn zoneinfo_key_error(key: &str) -> Option<String> {
         return Some(format!(
             "ZoneInfo keys must refer to subdirectories of TZPATH, got: {key}"
         ));
+    }
+    // A NUL byte in a single-segment key always fails `open()` argument
+    // parsing (`ValueError: embedded null byte`) before any filesystem
+    // access. In multi-segment keys the outcome depends on whether the
+    // parent directories exist (a missing parent surfaces NZNF first —
+    // e.g. `a/\x00` misses where `America/\x00` NUL-errors), so only the
+    // single-segment shape is deterministic enough to model; the rest
+    // falls through to the membership check below.
+    if !key.contains('/') && key.contains('\x00') {
+        return Some("embedded null byte".to_owned());
     }
     None
 }
@@ -1236,14 +1248,16 @@ fn escape_json_string(value: &str) -> String {
 /// noncharacters pass through where CPython would escape them — no
 /// contract input exercises those.
 fn py_repr_str(value: &str) -> String {
-    if value.contains('\'') && !value.contains('"') {
-        return format!("\"{value}\"");
-    }
+    // Quote choice: double quotes iff the value contains `'` but no `"`.
+    // Every other escape applies identically under either quote — only
+    // the quote character itself differs (`repr("a'b\n")` is `"a'b\n"`,
+    // backslash-n escaped inside double quotes).
+    let double_quoted = value.contains('\'') && !value.contains('"');
     let mut out = String::with_capacity(value.len() + 2);
-    out.push('\'');
+    out.push(if double_quoted { '"' } else { '\'' });
     for c in value.chars() {
         match c {
-            '\'' => out.push_str("\\'"),
+            '\'' if !double_quoted => out.push_str("\\'"),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
@@ -1261,7 +1275,7 @@ fn py_repr_str(value: &str) -> String {
             c => out.push(c),
         }
     }
-    out.push('\'');
+    out.push(if double_quoted { '"' } else { '\'' });
     out
 }
 
@@ -2667,6 +2681,9 @@ mod tests {
         for (input, expected) in [
             ("a\x00b", "Invalid isoformat string: 'a\\x00b'"),
             ("a'b", "Invalid isoformat string: \"a'b\""),
+            // Double-quoted echoes still escape everything else.
+            ("a'b\nc", "Invalid isoformat string: \"a'b\\nc\""),
+            ("a'b\\c", "Invalid isoformat string: \"a'b\\\\c\""),
             ("a\"b", "Invalid isoformat string: 'a\"b'"),
             ("a\\b", "Invalid isoformat string: 'a\\\\b'"),
             ("a\nb", "Invalid isoformat string: 'a\\nb'"),
@@ -2816,6 +2833,10 @@ mod tests {
                 "../..",
                 "ZoneInfo keys must refer to subdirectories of TZPATH, got: ../..",
             ),
+            // Single-segment NUL always fails `open()` argument parsing.
+            ("a\x00b", "embedded null byte"),
+            ("\x00", "embedded null byte"),
+            ("UTC\x00", "embedded null byte"),
         ] {
             // `""` takes the `UTC` fallback before any key check.
             if key.is_empty() {
@@ -2829,8 +2850,18 @@ mod tests {
             );
         }
         // Well-shaped but unknown → the 400 message (shape check passes,
-        // membership fails).
-        for key in ["a\\b", "a:b", "~", "...", "Mars/Olympus", "Factory "] {
+        // membership fails). Multi-segment NUL lands here too: the
+        // verdict depends on parent-directory existence, so it is
+        // deliberately unmodeled (this parent exists nowhere).
+        for key in [
+            "a\\b",
+            "a:b",
+            "~",
+            "...",
+            "Mars/Olympus",
+            "Factory ",
+            "zz-no-such-dir-xyz/\x00",
+        ] {
             assert!(
                 matches!(validate_tzid(key), Err(TzidError::Unknown(_))),
                 "key {key:?}"
@@ -3038,6 +3069,12 @@ mod tests {
             ("abc", "'abc'"),
             ("", "''"),
             ("a'b", "\"a'b\""),
+            // Under double quotes only the quote char differs: backslash,
+            // controls and nonprintables still escape.
+            ("a'b\nc", "\"a'b\\nc\""),
+            ("a'b\\c", "\"a'b\\\\c\""),
+            ("a'b\x00c", "\"a'b\\x00c\""),
+            ("'\u{a0}", "\"'\\xa0\""),
             ("a\"b", "'a\"b'"),
             ("'\"", "'\\'\"'"),
             ("a\\b", "'a\\\\b'"),
