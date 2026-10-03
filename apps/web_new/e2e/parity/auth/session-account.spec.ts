@@ -371,16 +371,13 @@ test(
     await test.step("type the secret and submit with Enter only", async () => {
       await driver.typeText(seed.password);
       await driver.pressKey("Enter");
-      // The credential POST is still in flight when Enter lands: wait for
-      // the app to leave the entry before navigating, or the goto cancels
-      // the submit and the session never starts.
-      await expect.poll(() => driver.isSignedOut(), POLL_60).toBe(false);
-      // The native form POST ends in a full page load followed by the
-      // app's own post-sign-in redirect, which can still be in flight and
-      // interrupt our goto — retry until the issues page actually opens.
-      await expect(async () => {
-        await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
-      }).toPass({ timeout: 120_000 });
+      // The native credential POST ends in a full page load (302 to "/")
+      // followed by the app's own redirect to the last workspace. The
+      // entry placeholder vanishes mid-flight, so a signed-out poll
+      // passes too early and a goto races the redirect and gets
+      // interrupted — wait for the workspace landing instead.
+      await expect.poll(() => driver.currentPath(), POLL_60).toContain(seed.workspaceSlug);
+      await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
     });
 
     await test.step("the screen and the server agree", async () => {
