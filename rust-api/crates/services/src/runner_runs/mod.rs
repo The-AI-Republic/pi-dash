@@ -4,6 +4,17 @@
 //!
 //! * [`chat`] — the chat service closure (`services/chat.py`, L5,
 //!   PIDASHCONV-537).
+//! * [`guards`] — `runner/services/permissions.py:1-137` (predicate SQL),
+//!   `runner/views/runs.py:67-122` (`_parse_pagination`, `_can_view_run`,
+//!   `_can_cancel_run`) and the 404-not-403 denial (L3, PIDASHCONV-529).
+//! * [`shape`] — `runner/serializers.py` run (`:241-319`), approval
+//!   (`:320-340`) and chat (`:342-422`) shapes, plus the
+//!   accept/decline decision validation (L3, PIDASHCONV-529).
+//!
+//! The L3 guards/shapes are pure kernels over caller-owned L2 rows
+//! ([`pidash_db::runner_runs`] in, `Serialize` views and SQL fragments
+//! out); fixture contract FX-RUN-04 plus the shape goldens inside
+//! FX-RUN-08/09.
 //!
 //! Pure port of the lifecycle closure in
 //! `apps/api/pi_dash/runner/services/`:
@@ -79,8 +90,10 @@
 
 pub mod chat;
 pub mod finalization;
+pub mod guards;
 pub mod lifecycle;
 pub mod scheduler_hook;
+pub mod shape;
 
 pub use finalization::{
     apply_done_payload_merge, effects_lock_passes, finalize_error_code, finalize_lock_passes,
