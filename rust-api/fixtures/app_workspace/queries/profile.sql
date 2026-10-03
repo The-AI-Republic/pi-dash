@@ -29,7 +29,7 @@
 --   grouped (:218-242) / sub-grouped (:184-215) / plain (:244-250) paginate,
 --   grouped counts filtered intake (status 1|-1|2 OR NULL) + unarchived +
 --   not draft (:207-214 / :234-241).
---   group_by_fields=issue_group_values (utils/grouper.py:146-224): state_id
+--   group_by_fields=issue_group_values (utils/grouper.py:146-219): state_id
 --   branch (:153-157) filters is_triage=False BUT State.objects=StateManager
 --   (db/models/state.py:79-83) adds NOT ("group" = 'triage') on top — PORT.
 -- R3 profile read, WorkspaceUserProfileEndpoint.get (:281-368):
