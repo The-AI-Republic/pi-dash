@@ -28,6 +28,7 @@ pub mod health;
 pub mod integrations;
 pub mod license;
 pub mod r#loop;
+pub mod orchestration;
 pub mod prompting;
 pub mod runner_enroll;
 pub mod runner_runs;
