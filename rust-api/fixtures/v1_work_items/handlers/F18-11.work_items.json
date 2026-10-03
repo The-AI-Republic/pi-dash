@@ -1,0 +1,1967 @@
+{
+  "$schema_note": "Static behaviour record. No code is executed by this file.",
+  "fixture": "F18-11",
+  "_method": "Live HTTP (httpx, member X-Api-Key) against Django runserver (pi_dash.settings.test) on scratch pidash_conv659. One recorded request -> status + body per route. IDs, datetimes, cursors, presigned URLs and signatures are live values (volatile); statuses, key sets, key order and error bodies are the pins.",
+  "_source": "apps/api/pi_dash/api/urls/work_item.py (38 routes); api/urls/label.py (2); api/urls/page.py (3)",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "routes": "38 work_item routes (12 deprecated issues/ twins + 26 work-items), incl. error bodies",
+  "calls": {
+    "search": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/work-items/search/",
+      "params": {
+        "search": "zxcvsearchtoken"
+      },
+      "status": 200,
+      "body": {
+        "issues": [
+          {
+            "name": "zxcvsearchtoken login flow",
+            "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+            "sequence_id": 1,
+            "project__identifier": "CT00003",
+            "project_id": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+            "workspace__slug": "ws-conv659-2"
+          }
+        ]
+      }
+    },
+    "search_advanced": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/work-items/search/advanced/",
+      "params": {
+        "q": "zxcvsearchtoken"
+      },
+      "status": 200,
+      "envelope": {
+        "query": "zxcvsearchtoken",
+        "count": 1
+      },
+      "results_full": [
+        {
+          "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "sequence_id": 1,
+          "identifier": "CT00003-1",
+          "name": "zxcvsearchtoken login flow",
+          "snippet": "zxcvsearchtoken the login flow breaks on retry with session expiry",
+          "state": {
+            "name": "Todo",
+            "group": "unstarted"
+          },
+          "project": {
+            "id": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+            "identifier": "CT00003",
+            "name": "Conv659 Project"
+          },
+          "workspace_slug": "ws-conv659-2",
+          "created_at": "2026-10-02T23:17:12.025108Z",
+          "updated_at": "2026-10-02T23:17:12.025108Z",
+          "completed_at": null,
+          "rank": 0.075990885,
+          "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-1"
+        }
+      ],
+      "results_rest_ids": []
+    },
+    "by_identifier": {
+      "method": "GET",
+      "status": 200,
+      "body": {
+        "id": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
+        "type_id": null,
+        "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-10",
+        "created_at": "2026-10-02T23:37:39.487318Z",
+        "updated_at": "2026-10-02T23:37:39.645340Z",
+        "deleted_at": null,
+        "point": null,
+        "name": "handler probe renamed",
+        "description_html": "<h1>H</h1><p>text</p>",
+        "description_binary": null,
+        "priority": "urgent",
+        "complexity_score": 0,
+        "start_date": null,
+        "target_date": null,
+        "sequence_id": 10,
+        "sort_order": 145535.0,
+        "completed_at": null,
+        "archived_at": null,
+        "is_draft": false,
+        "external_source": null,
+        "external_id": null,
+        "git_work_branch": "",
+        "created_via": null,
+        "agent_executor": null,
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "updated_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "parent": null,
+        "state": "97b22834-b823-4109-a527-b39aa310ceae",
+        "estimate_point": null,
+        "type": null,
+        "assigned_pod": null,
+        "assignees": [],
+        "labels": [],
+        "relations_summary": {
+          "blocked_by": [],
+          "blocking": []
+        },
+        "has_open_blockers": false,
+        "relations": {
+          "blocked_by": [],
+          "blocking": [],
+          "relates_to": [],
+          "duplicate": [],
+          "start_before": [],
+          "start_after": [],
+          "finish_before": [],
+          "finish_after": [],
+          "implemented_by": [],
+          "implements": []
+        }
+      }
+    },
+    "list": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/",
+      "status": 200,
+      "envelope": {
+        "grouped_by": null,
+        "sub_grouped_by": null,
+        "total_count": 9,
+        "next_cursor": "1000:1:0",
+        "prev_cursor": "1000:-1:1",
+        "next_page_results": false,
+        "prev_page_results": false,
+        "count": 9,
+        "total_pages": 1,
+        "total_results": 9,
+        "extra_stats": null
+      },
+      "results_full": [
+        {
+          "id": "c2cb70a1-b2c7-47b1-a56b-aa260c3d4f5f",
+          "type_id": null,
+          "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-7",
+          "created_at": "2026-10-02T23:33:38.788393Z",
+          "updated_at": "2026-10-02T23:33:38.758065Z",
+          "deleted_at": null,
+          "point": null,
+          "name": "perm probe",
+          "description_html": "<p></p>",
+          "description_binary": null,
+          "priority": "none",
+          "complexity_score": 0,
+          "start_date": null,
+          "target_date": null,
+          "sequence_id": 7,
+          "sort_order": 135535.0,
+          "completed_at": null,
+          "archived_at": null,
+          "is_draft": false,
+          "external_source": null,
+          "external_id": null,
+          "git_work_branch": "",
+          "created_via": null,
+          "agent_executor": null,
+          "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+          "updated_by": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "parent": null,
+          "state": "97b22834-b823-4109-a527-b39aa310ceae",
+          "estimate_point": null,
+          "type": null,
+          "assigned_pod": null,
+          "assignees": [],
+          "labels": []
+        },
+        {
+          "id": "2143bf91-62b6-45b6-8fe0-702122483419",
+          "type_id": null,
+          "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-6",
+          "created_at": "2026-10-02T23:30:58.429024Z",
+          "updated_at": "2026-10-02T23:30:58.429042Z",
+          "deleted_at": null,
+          "point": null,
+          "name": "Third issue",
+          "description_html": "<p></p>",
+          "description_binary": null,
+          "priority": "none",
+          "complexity_score": 0,
+          "start_date": null,
+          "target_date": null,
+          "sequence_id": 6,
+          "sort_order": 125535.0,
+          "completed_at": null,
+          "archived_at": null,
+          "is_draft": false,
+          "external_source": null,
+          "external_id": null,
+          "git_work_branch": "",
+          "created_via": null,
+          "agent_executor": null,
+          "created_by": null,
+          "updated_by": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "parent": null,
+          "state": "97b22834-b823-4109-a527-b39aa310ceae",
+          "estimate_point": null,
+          "type": null,
+          "assigned_pod": null,
+          "assignees": [],
+          "labels": []
+        }
+      ],
+      "results_rest_ids": [
+        "8cf74359-a898-48e9-95ac-0b6595ed4ff2",
+        "0c4a0be2-b19a-4fc2-acff-17c5eb36ffba",
+        "a0481077-6fbd-47aa-9b27-ac2595085857",
+        "772ffddc-9da2-4b8d-a49e-d195778bfce7",
+        "1431bba5-e025-4350-98c9-43d6cb58863f",
+        "25ace52e-c64d-4043-a700-911b1e42bffc",
+        "a7509d00-345f-47fb-bee3-6bcf7d3339e2"
+      ]
+    },
+    "detail": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/",
+      "status": 200,
+      "body": {
+        "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+        "type_id": null,
+        "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-1",
+        "created_at": "2026-10-02T23:17:12.025108Z",
+        "updated_at": "2026-10-02T23:17:12.025108Z",
+        "deleted_at": null,
+        "point": null,
+        "name": "zxcvsearchtoken login flow",
+        "description_html": "<p></p>",
+        "description_binary": null,
+        "priority": "high",
+        "complexity_score": 0,
+        "start_date": null,
+        "target_date": null,
+        "sequence_id": 1,
+        "sort_order": 65535.0,
+        "completed_at": null,
+        "archived_at": null,
+        "is_draft": false,
+        "external_source": null,
+        "external_id": null,
+        "git_work_branch": "",
+        "created_via": null,
+        "agent_executor": null,
+        "created_by": null,
+        "updated_by": null,
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "parent": null,
+        "state": "97b22834-b823-4109-a527-b39aa310ceae",
+        "estimate_point": null,
+        "type": null,
+        "assigned_pod": null,
+        "assignees": [
+          "79c81d76-5a93-4d3d-894d-5935576834b6"
+        ],
+        "labels": [
+          "c833c492-fa3d-49f5-85a4-0ef810642731"
+        ],
+        "relations_summary": {
+          "blocked_by": [],
+          "blocking": [
+            {
+              "identifier": "CT00003-2",
+              "state": "Todo",
+              "state_group": "unstarted"
+            }
+          ]
+        },
+        "has_open_blockers": false,
+        "relations": {
+          "blocked_by": [],
+          "blocking": [
+            {
+              "id": "25ace52e-c64d-4043-a700-911b1e42bffc",
+              "identifier": "CT00003-2",
+              "name": "Second issue",
+              "state": "Todo",
+              "state_group": "unstarted"
+            }
+          ],
+          "relates_to": [
+            {
+              "id": "2143bf91-62b6-45b6-8fe0-702122483419",
+              "identifier": "CT00003-6",
+              "name": "Third issue",
+              "state": "Todo",
+              "state_group": "unstarted"
+            }
+          ],
+          "duplicate": [],
+          "start_before": [],
+          "start_after": [],
+          "finish_before": [],
+          "finish_after": [],
+          "implemented_by": [],
+          "implements": []
+        }
+      }
+    },
+    "link_list": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/links/",
+      "status": 200,
+      "envelope": {
+        "grouped_by": null,
+        "sub_grouped_by": null,
+        "total_count": 2,
+        "next_cursor": "1000:1:0",
+        "prev_cursor": "1000:-1:1",
+        "next_page_results": false,
+        "prev_page_results": false,
+        "count": 2,
+        "total_pages": 1,
+        "total_results": 2,
+        "extra_stats": null
+      },
+      "results_full": [
+        {
+          "id": "22fae1bb-6847-4e33-b3ab-9cd45b6ada9b",
+          "created_at": "2026-10-02T23:23:54.220351Z",
+          "updated_at": "2026-10-02T23:23:54.237486Z",
+          "deleted_at": null,
+          "title": "renamed",
+          "url": "https://example.com/other",
+          "metadata": {},
+          "created_by": null,
+          "updated_by": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2"
+        },
+        {
+          "id": "b0e3d964-f48c-4add-b619-ee300c549c96",
+          "created_at": "2026-10-02T23:23:54.086909Z",
+          "updated_at": "2026-10-02T23:23:54.086931Z",
+          "deleted_at": null,
+          "title": "dup",
+          "url": "https://example.com/spec",
+          "metadata": {},
+          "created_by": null,
+          "updated_by": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2"
+        }
+      ],
+      "results_rest_ids": []
+    },
+    "link_detail": {
+      "method": "GET",
+      "status": 200,
+      "body": {
+        "id": "b0e3d964-f48c-4add-b619-ee300c549c96",
+        "created_at": "2026-10-02T23:23:54.086909Z",
+        "updated_at": "2026-10-02T23:23:54.086931Z",
+        "deleted_at": null,
+        "title": "dup",
+        "url": "https://example.com/spec",
+        "metadata": {},
+        "created_by": null,
+        "updated_by": null,
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2"
+      }
+    },
+    "comment_list": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/comments/",
+      "status": 200,
+      "envelope": {
+        "grouped_by": null,
+        "sub_grouped_by": null,
+        "total_count": 2,
+        "next_cursor": "1000:1:0",
+        "prev_cursor": "1000:-1:1",
+        "next_page_results": false,
+        "prev_page_results": false,
+        "count": 2,
+        "total_pages": 1,
+        "total_results": 2,
+        "extra_stats": null
+      },
+      "results_full": [
+        {
+          "id": "9c3230e4-8396-492e-bff6-c9c9f5d92141",
+          "is_member": true,
+          "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-1",
+          "created_at": "2026-10-02T23:33:38.828716Z",
+          "updated_at": "2026-10-02T23:33:38.818209Z",
+          "deleted_at": null,
+          "comment_html": "<p>g</p>",
+          "attachments": [],
+          "labels": [],
+          "access": "INTERNAL",
+          "external_source": null,
+          "external_id": null,
+          "speaker_type": "human",
+          "speaker_label": "",
+          "speaker_agent_run_id": null,
+          "edited_at": null,
+          "created_by": "83fb2e45-81a4-4c79-bf46-073cfc7cb845",
+          "updated_by": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "description": "990ee7fb-f5f1-4172-8e1b-d308b8c2838b",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "actor": "83fb2e45-81a4-4c79-bf46-073cfc7cb845",
+          "parent": null
+        },
+        {
+          "id": "6353d7bf-012d-45ba-82a1-d2ff209af168",
+          "is_member": true,
+          "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-1",
+          "created_at": "2026-10-02T23:17:12.036469Z",
+          "updated_at": "2026-10-02T23:17:12.036469Z",
+          "deleted_at": null,
+          "comment_html": "<p>test comment</p>",
+          "attachments": [],
+          "labels": [],
+          "access": "EXTERNAL",
+          "external_source": null,
+          "external_id": null,
+          "speaker_type": "human",
+          "speaker_label": "",
+          "speaker_agent_run_id": null,
+          "edited_at": null,
+          "created_by": null,
+          "updated_by": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "description": null,
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "actor": "79c81d76-5a93-4d3d-894d-5935576834b6",
+          "parent": null
+        }
+      ],
+      "results_rest_ids": []
+    },
+    "comment_detail": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/comments/6353d7bf-012d-45ba-82a1-d2ff209af168/",
+      "status": 200,
+      "body": {
+        "id": "6353d7bf-012d-45ba-82a1-d2ff209af168",
+        "is_member": true,
+        "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-1",
+        "created_at": "2026-10-02T23:17:12.036469Z",
+        "updated_at": "2026-10-02T23:17:12.036469Z",
+        "deleted_at": null,
+        "comment_html": "<p>test comment</p>",
+        "attachments": [],
+        "labels": [],
+        "access": "EXTERNAL",
+        "external_source": null,
+        "external_id": null,
+        "speaker_type": "human",
+        "speaker_label": "",
+        "speaker_agent_run_id": null,
+        "edited_at": null,
+        "created_by": null,
+        "updated_by": null,
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "description": null,
+        "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+        "actor": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "parent": null
+      }
+    },
+    "activity_list": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/activities/",
+      "status": 200,
+      "envelope": {
+        "grouped_by": null,
+        "sub_grouped_by": null,
+        "total_count": 7,
+        "next_cursor": "1000:1:0",
+        "prev_cursor": "1000:-1:1",
+        "next_page_results": false,
+        "prev_page_results": false,
+        "count": 7,
+        "total_pages": 1,
+        "total_results": 7,
+        "extra_stats": null
+      },
+      "results_full": [
+        {
+          "id": "4d99c67e-1059-4d9d-a205-0c0af7779c96",
+          "created_at": "2026-10-02T23:24:29.095428Z",
+          "updated_at": "2026-10-02T23:24:29.095428Z",
+          "deleted_at": null,
+          "verb": "created",
+          "field": null,
+          "old_value": null,
+          "new_value": null,
+          "comment": "contract activity",
+          "attachments": [],
+          "old_identifier": null,
+          "new_identifier": null,
+          "epoch": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "issue_comment": null,
+          "actor": null
+        },
+        {
+          "id": "32e7e87d-d850-4bc1-82ac-9f289f509515",
+          "created_at": "2026-10-02T23:24:49.911081Z",
+          "updated_at": "2026-10-02T23:24:49.911081Z",
+          "deleted_at": null,
+          "verb": "created",
+          "field": null,
+          "old_value": null,
+          "new_value": null,
+          "comment": "contract activity",
+          "attachments": [],
+          "old_identifier": null,
+          "new_identifier": null,
+          "epoch": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "issue_comment": null,
+          "actor": null
+        }
+      ],
+      "results_rest_ids": [
+        "56812c5c-8462-443c-a7cc-e997ea20c0fd",
+        "14a90a92-4f47-442e-85d7-11327c1fd59f",
+        "041e3018-b724-4a3b-8e66-611e969d6e88",
+        "98bb9aea-9dc9-489e-99f4-0258b8a210a7",
+        "302c2985-c06f-4b7d-96fa-4684295230be"
+      ]
+    },
+    "activity_detail": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/activities/4d99c67e-1059-4d9d-a205-0c0af7779c96/",
+      "status": 200,
+      "body": {
+        "id": "4d99c67e-1059-4d9d-a205-0c0af7779c96",
+        "created_at": "2026-10-02T23:24:29.095428Z",
+        "updated_at": "2026-10-02T23:24:29.095428Z",
+        "deleted_at": null,
+        "verb": "created",
+        "field": null,
+        "old_value": null,
+        "new_value": null,
+        "comment": "contract activity",
+        "attachments": [],
+        "old_identifier": null,
+        "new_identifier": null,
+        "epoch": null,
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+        "issue_comment": null,
+        "actor": null
+      }
+    },
+    "attachment_list": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/attachments/",
+      "status": 200,
+      "body": [
+        {
+          "id": "aeb3d7ac-0a45-4f7e-bedc-c74afa9c7832",
+          "created_at": "2026-10-02T23:26:34.768434Z",
+          "updated_at": "2026-10-02T23:26:34.768434Z",
+          "deleted_at": null,
+          "attributes": {},
+          "asset": "contract-asset",
+          "entity_type": "ISSUE_ATTACHMENT",
+          "entity_identifier": null,
+          "is_deleted": false,
+          "is_archived": false,
+          "external_id": null,
+          "external_source": null,
+          "size": 10.0,
+          "is_uploaded": true,
+          "storage_metadata": null,
+          "created_by": null,
+          "updated_by": null,
+          "user": null,
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "draft_issue": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "comment": null,
+          "page": null
+        },
+        {
+          "id": "2622f099-0eb6-456a-b50f-3c301e01daa0",
+          "created_at": "2026-10-02T23:26:10.246543Z",
+          "updated_at": "2026-10-02T23:26:10.246543Z",
+          "deleted_at": null,
+          "attributes": {},
+          "asset": "contract-asset",
+          "entity_type": "ISSUE_ATTACHMENT",
+          "entity_identifier": null,
+          "is_deleted": false,
+          "is_archived": false,
+          "external_id": null,
+          "external_source": null,
+          "size": 10.0,
+          "is_uploaded": true,
+          "storage_metadata": null,
+          "created_by": null,
+          "updated_by": null,
+          "user": null,
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "draft_issue": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "comment": null,
+          "page": null
+        },
+        {
+          "id": "cd195b7f-a88b-4e60-93d7-d0bb851b3721",
+          "created_at": "2026-10-02T23:25:46.119408Z",
+          "updated_at": "2026-10-02T23:25:46.119408Z",
+          "deleted_at": null,
+          "attributes": {},
+          "asset": "contract-asset",
+          "entity_type": "ISSUE_ATTACHMENT",
+          "entity_identifier": null,
+          "is_deleted": false,
+          "is_archived": false,
+          "external_id": null,
+          "external_source": null,
+          "size": 10.0,
+          "is_uploaded": true,
+          "storage_metadata": null,
+          "created_by": null,
+          "updated_by": null,
+          "user": null,
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "draft_issue": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "comment": null,
+          "page": null
+        },
+        {
+          "id": "10cdb4bf-cfaa-4533-982c-26735e77e9d8",
+          "created_at": "2026-10-02T23:25:33.819252Z",
+          "updated_at": "2026-10-02T23:25:33.819252Z",
+          "deleted_at": null,
+          "attributes": {},
+          "asset": "contract-asset",
+          "entity_type": "ISSUE_ATTACHMENT",
+          "entity_identifier": null,
+          "is_deleted": false,
+          "is_archived": false,
+          "external_id": null,
+          "external_source": null,
+          "size": 10.0,
+          "is_uploaded": true,
+          "storage_metadata": null,
+          "created_by": null,
+          "updated_by": null,
+          "user": null,
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "draft_issue": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "comment": null,
+          "page": null
+        },
+        {
+          "id": "c7b4a9ff-8742-44b4-89d0-de0fb5ff3d89",
+          "created_at": "2026-10-02T23:25:01.996010Z",
+          "updated_at": "2026-10-02T23:25:01.996010Z",
+          "deleted_at": null,
+          "attributes": {},
+          "asset": "contract-asset",
+          "entity_type": "ISSUE_ATTACHMENT",
+          "entity_identifier": null,
+          "is_deleted": false,
+          "is_archived": false,
+          "external_id": null,
+          "external_source": null,
+          "size": 10.0,
+          "is_uploaded": true,
+          "storage_metadata": null,
+          "created_by": null,
+          "updated_by": null,
+          "user": null,
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "draft_issue": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "comment": null,
+          "page": null
+        },
+        {
+          "id": "ef42b093-be95-4e88-92dc-8cf548182e4b",
+          "created_at": "2026-10-02T23:24:49.899552Z",
+          "updated_at": "2026-10-02T23:24:49.899552Z",
+          "deleted_at": null,
+          "attributes": {},
+          "asset": "contract-asset",
+          "entity_type": "ISSUE_ATTACHMENT",
+          "entity_identifier": null,
+          "is_deleted": false,
+          "is_archived": false,
+          "external_id": null,
+          "external_source": null,
+          "size": 10.0,
+          "is_uploaded": true,
+          "storage_metadata": null,
+          "created_by": null,
+          "updated_by": null,
+          "user": null,
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "draft_issue": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "comment": null,
+          "page": null
+        },
+        {
+          "id": "6064f148-3c69-4189-afcc-13faf5c12586",
+          "created_at": "2026-10-02T23:24:29.084512Z",
+          "updated_at": "2026-10-02T23:24:29.084512Z",
+          "deleted_at": null,
+          "attributes": {},
+          "asset": "contract-asset",
+          "entity_type": "ISSUE_ATTACHMENT",
+          "entity_identifier": null,
+          "is_deleted": false,
+          "is_archived": false,
+          "external_id": null,
+          "external_source": null,
+          "size": 10.0,
+          "is_uploaded": true,
+          "storage_metadata": null,
+          "created_by": null,
+          "updated_by": null,
+          "user": null,
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "draft_issue": null,
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "comment": null,
+          "page": null
+        }
+      ]
+    },
+    "relation_list": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/relations/",
+      "status": 200,
+      "body": {
+        "blocking": [
+          "25ace52e-c64d-4043-a700-911b1e42bffc"
+        ],
+        "blocked_by": [],
+        "duplicate": [],
+        "relates_to": [
+          "2143bf91-62b6-45b6-8fe0-702122483419"
+        ],
+        "start_after": [],
+        "start_before": [],
+        "finish_after": [],
+        "finish_before": []
+      }
+    },
+    "relation_grouped": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/relations/grouped/",
+      "status": 200,
+      "body": {
+        "issue": "CT00003-1",
+        "relations": {
+          "blocked_by": [],
+          "blocking": [
+            {
+              "id": "25ace52e-c64d-4043-a700-911b1e42bffc",
+              "identifier": "CT00003-2",
+              "name": "Second issue",
+              "state": "Todo",
+              "state_group": "unstarted"
+            }
+          ],
+          "relates_to": [
+            {
+              "id": "2143bf91-62b6-45b6-8fe0-702122483419",
+              "identifier": "CT00003-6",
+              "name": "Third issue",
+              "state": "Todo",
+              "state_group": "unstarted"
+            }
+          ],
+          "duplicate": [],
+          "start_before": [],
+          "start_after": [],
+          "finish_before": [],
+          "finish_after": [],
+          "implemented_by": [],
+          "implements": []
+        }
+      }
+    },
+    "workpad_get": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/workpad/",
+      "status": 200,
+      "body": {
+        "body": "",
+        "updated_at": "2026-10-02T23:17:12.025108Z"
+      }
+    },
+    "pr_list": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/github/pull-requests/",
+      "status": 200,
+      "envelope": {
+        "grouped_by": null,
+        "sub_grouped_by": null,
+        "total_count": 1,
+        "next_cursor": "1000:1:0",
+        "prev_cursor": "1000:-1:1",
+        "next_page_results": false,
+        "prev_page_results": false,
+        "count": 1,
+        "total_pages": 1,
+        "total_results": 1,
+        "extra_stats": null
+      },
+      "results_full": [
+        {
+          "id": "c9419f8a-b3f1-4d64-94ed-8612d9d6a9de",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "repo_owner": "contract-owner",
+          "repo_name": "contract-repo",
+          "pr_number": 7,
+          "url": "https://github.com/contract-owner/contract-repo/pull/7",
+          "title": "Contract PR",
+          "state": "open",
+          "merged": false,
+          "draft": false,
+          "pr_updated_at": null,
+          "created_at": "2026-10-02T23:23:04.606267Z",
+          "updated_at": "2026-10-02T23:23:04.606267Z",
+          "created_by": null
+        }
+      ],
+      "results_rest_ids": []
+    },
+    "review_list": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/code-reviews/",
+      "status": 200,
+      "envelope": {
+        "grouped_by": null,
+        "sub_grouped_by": null,
+        "total_count": 1,
+        "next_cursor": "1000:1:0",
+        "prev_cursor": "1000:-1:1",
+        "next_page_results": false,
+        "prev_page_results": false,
+        "count": 1,
+        "total_pages": 1,
+        "total_results": 1,
+        "extra_stats": null
+      },
+      "results_full": [
+        {
+          "id": "e162716e-596a-48f4-9cfb-baff2d9896f1",
+          "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "provider": "github",
+          "host_url": "https://github.com",
+          "namespace": "contract-owner",
+          "repo_name": "contract-repo",
+          "repo_external_id": "",
+          "external_id": "contract-e1",
+          "external_iid": "7",
+          "url": "https://github.com/contract-owner/contract-repo/pull/7",
+          "title": "Contract review",
+          "state": "open",
+          "merged": false,
+          "draft": false,
+          "remote_updated_at": null,
+          "metadata": {},
+          "created_at": "2026-10-02T23:23:04.649457Z",
+          "updated_at": "2026-10-02T23:23:04.649457Z",
+          "created_by": null
+        }
+      ],
+      "results_rest_ids": []
+    },
+    "create": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/",
+      "request": {
+        "name": "handler probe",
+        "priority": "medium",
+        "description_markdown": "# H\n\ntext"
+      },
+      "status": 201,
+      "body": {
+        "id": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
+        "type_id": null,
+        "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-10",
+        "created_at": "2026-10-02T23:37:39.425679Z",
+        "updated_at": "2026-10-02T23:37:39.425700Z",
+        "deleted_at": null,
+        "point": null,
+        "name": "handler probe",
+        "description_html": "<h1>H</h1><p>text</p>",
+        "description_binary": null,
+        "priority": "medium",
+        "complexity_score": 0,
+        "start_date": null,
+        "target_date": null,
+        "sequence_id": 10,
+        "sort_order": 145535.0,
+        "completed_at": null,
+        "archived_at": null,
+        "is_draft": false,
+        "external_source": null,
+        "external_id": null,
+        "git_work_branch": "",
+        "created_via": null,
+        "agent_executor": null,
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "updated_by": null,
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "parent": null,
+        "state": "97b22834-b823-4109-a527-b39aa310ceae",
+        "estimate_point": null,
+        "type": null,
+        "assigned_pod": null,
+        "assignees": [],
+        "labels": [],
+        "relations_summary": {
+          "blocked_by": [],
+          "blocking": []
+        },
+        "has_open_blockers": false
+      }
+    },
+    "patch": {
+      "method": "PATCH",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/",
+      "request": {
+        "priority": "urgent",
+        "name": "handler probe renamed"
+      },
+      "status": 200,
+      "body": {
+        "id": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
+        "type_id": null,
+        "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-10",
+        "created_at": "2026-10-02T23:37:39.487318Z",
+        "updated_at": "2026-10-02T23:37:39.645340Z",
+        "deleted_at": null,
+        "point": null,
+        "name": "handler probe renamed",
+        "description_html": "<h1>H</h1><p>text</p>",
+        "description_binary": null,
+        "priority": "urgent",
+        "complexity_score": 0,
+        "start_date": null,
+        "target_date": null,
+        "sequence_id": 10,
+        "sort_order": 145535.0,
+        "completed_at": null,
+        "archived_at": null,
+        "is_draft": false,
+        "external_source": null,
+        "external_id": null,
+        "git_work_branch": "",
+        "created_via": null,
+        "agent_executor": null,
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "updated_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "parent": null,
+        "state": "97b22834-b823-4109-a527-b39aa310ceae",
+        "estimate_point": null,
+        "type": null,
+        "assigned_pod": null,
+        "assignees": [],
+        "labels": [],
+        "relations_summary": {
+          "blocked_by": [],
+          "blocking": []
+        },
+        "has_open_blockers": false
+      }
+    },
+    "patch_bad_state": {
+      "method": "PATCH",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/",
+      "request": {
+        "state": "00000000-0000-0000-0000-000000000000"
+      },
+      "status": 400,
+      "body": {
+        "state": [
+          "Invalid pk \"00000000-0000-0000-0000-000000000000\" - object does not exist."
+        ]
+      }
+    },
+    "detail_404": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/00000000-0000-0000-0000-000000000000/",
+      "status": 404,
+      "body": {
+        "error": "The requested resource does not exist."
+      }
+    },
+    "create_invalid": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/",
+      "request": {
+        "priority": "bogus"
+      },
+      "status": 400,
+      "body": {
+        "name": [
+          "This field is required."
+        ],
+        "priority": [
+          "\"bogus\" is not a valid choice."
+        ]
+      }
+    },
+    "by_identifier_dup_sequence": {
+      "note": "With two issues sharing sequence_id 1 (raw-SQL seed + serializer-created rows), GET CT00003-1 returns 500 {'error': 'Something went wrong please try again later'} (MultipleObjectsReturned at views/issue.py:256). Observed live; the clean 200 above uses a unique sequence.",
+      "status": 500,
+      "body": {
+        "error": "Something went wrong please try again later"
+      }
+    },
+    "link_create": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/links/",
+      "request": {
+        "title": "t",
+        "url": "https://example.com/handler"
+      },
+      "status": 201,
+      "body": {
+        "id": "a2a74f25-183b-4f34-8c02-b34a653c1c1a",
+        "created_at": "2026-10-02T23:39:04.666289Z",
+        "updated_at": "2026-10-02T23:39:04.666298Z",
+        "deleted_at": null,
+        "title": "t",
+        "url": "https://example.com/handler",
+        "metadata": {},
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "updated_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "issue": "a9b6c9f9-2817-4967-a501-1e26caf4abea"
+      }
+    },
+    "link_patch": {
+      "method": "PATCH",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/links/a2a74f25-183b-4f34-8c02-b34a653c1c1a/",
+      "request": {
+        "title": "t2"
+      },
+      "status": 200,
+      "body": {
+        "id": "a2a74f25-183b-4f34-8c02-b34a653c1c1a",
+        "created_at": "2026-10-02T23:39:04.666289Z",
+        "updated_at": "2026-10-02T23:39:04.713052Z",
+        "deleted_at": null,
+        "title": "t2",
+        "url": "https://example.com/handler",
+        "metadata": {},
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "updated_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "issue": "a9b6c9f9-2817-4967-a501-1e26caf4abea"
+      }
+    },
+    "link_create_bad_url": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/links/",
+      "request": {
+        "title": "t",
+        "url": "nope"
+      },
+      "status": 400,
+      "body": {
+        "url": [
+          "Invalid URL format."
+        ]
+      }
+    },
+    "comment_create": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/comments/",
+      "request": {
+        "comment_html": "<p>handler comment</p>"
+      },
+      "status": 201,
+      "body": {
+        "id": "9448bec1-05fe-4242-b01a-9b7b9edd4931",
+        "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-10",
+        "created_at": "2026-10-02T23:39:04.850793Z",
+        "updated_at": "2026-10-02T23:39:04.835178Z",
+        "deleted_at": null,
+        "comment_html": "<p>handler comment</p>",
+        "attachments": [],
+        "labels": [],
+        "access": "INTERNAL",
+        "external_source": null,
+        "external_id": null,
+        "speaker_type": "human",
+        "speaker_label": "",
+        "speaker_agent_run_id": null,
+        "edited_at": null,
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "updated_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "description": "feeeb52c-3cbb-481a-a0a8-0b0d7e6d5308",
+        "issue": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
+        "actor": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "parent": null
+      }
+    },
+    "comment_patch": {
+      "method": "PATCH",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/comments/9448bec1-05fe-4242-b01a-9b7b9edd4931/",
+      "request": {
+        "comment_html": "<p>edited</p>"
+      },
+      "status": 200,
+      "body": {
+        "id": "9448bec1-05fe-4242-b01a-9b7b9edd4931",
+        "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-10",
+        "created_at": "2026-10-02T23:39:04.850793Z",
+        "updated_at": "2026-10-02T23:39:04.929045Z",
+        "deleted_at": null,
+        "comment_html": "<p>edited</p>",
+        "attachments": [],
+        "labels": [],
+        "access": "INTERNAL",
+        "external_source": null,
+        "external_id": null,
+        "speaker_type": "human",
+        "speaker_label": "",
+        "speaker_agent_run_id": null,
+        "edited_at": null,
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "updated_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "description": "feeeb52c-3cbb-481a-a0a8-0b0d7e6d5308",
+        "issue": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
+        "actor": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "parent": null
+      }
+    },
+    "relation_create": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/relations/",
+      "request": {
+        "relation_type": "blocked_by",
+        "issues": [
+          "25ace52e-c64d-4043-a700-911b1e42bffc"
+        ]
+      },
+      "status": 201,
+      "body": [
+        {
+          "id": "25ace52e-c64d-4043-a700-911b1e42bffc",
+          "project_id": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "sequence_id": 2,
+          "relation_type": "blocked_by",
+          "name": "Second issue",
+          "state_id": "97b22834-b823-4109-a527-b39aa310ceae",
+          "priority": "none",
+          "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+          "created_at": "2026-10-02T23:39:05.003258Z",
+          "updated_at": "2026-10-02T23:39:05.003271Z",
+          "updated_by": "79c81d76-5a93-4d3d-894d-5935576834b6"
+        }
+      ]
+    },
+    "relation_create_bad": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/relations/",
+      "request": {
+        "relation_type": "nope",
+        "issues": [
+          "25ace52e-c64d-4043-a700-911b1e42bffc"
+        ]
+      },
+      "status": 400,
+      "body": {
+        "relation_type": [
+          "\"nope\" is not a valid choice."
+        ]
+      }
+    },
+    "relate": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/relations/relate/",
+      "request": {
+        "relation_type": "relates_to",
+        "issues": [
+          "CT00003-1"
+        ]
+      },
+      "status": 200,
+      "body": {
+        "issue": "CT00003-10",
+        "relation_type": "relates_to",
+        "created": [
+          "CT00003-1"
+        ],
+        "unchanged": [],
+        "conflicts": [],
+        "relations": {
+          "blocked_by": [
+            {
+              "id": "25ace52e-c64d-4043-a700-911b1e42bffc",
+              "identifier": "CT00003-2",
+              "name": "Second issue",
+              "state": "Todo",
+              "state_group": "unstarted"
+            }
+          ],
+          "blocking": [],
+          "relates_to": [
+            {
+              "id": "1431bba5-e025-4350-98c9-43d6cb58863f",
+              "identifier": "CT00003-1",
+              "name": "pod issue",
+              "state": "Todo",
+              "state_group": "unstarted"
+            }
+          ],
+          "duplicate": [],
+          "start_before": [],
+          "start_after": [],
+          "finish_before": [],
+          "finish_after": [],
+          "implemented_by": [],
+          "implements": []
+        }
+      }
+    },
+    "relate_unresolvable": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/relations/relate/",
+      "request": {
+        "relation_type": "relates_to",
+        "issues": [
+          "ZZZ-999"
+        ]
+      },
+      "status": 404,
+      "body": {
+        "error": "work items not found or not accessible: ZZZ-999",
+        "unresolved": [
+          "ZZZ-999"
+        ]
+      }
+    },
+    "unrelate": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/relations/unrelate/",
+      "request": {
+        "relation_type": "relates_to",
+        "issues": [
+          "25ace52e-c64d-4043-a700-911b1e42bffc"
+        ]
+      },
+      "status": 200,
+      "body": {
+        "issue": "CT00003-10",
+        "relation_type": "relates_to",
+        "removed": [],
+        "not_related": [
+          "CT00003-2"
+        ],
+        "relations": {
+          "blocked_by": [
+            {
+              "id": "25ace52e-c64d-4043-a700-911b1e42bffc",
+              "identifier": "CT00003-2",
+              "name": "Second issue",
+              "state": "Todo",
+              "state_group": "unstarted"
+            }
+          ],
+          "blocking": [],
+          "relates_to": [
+            {
+              "id": "1431bba5-e025-4350-98c9-43d6cb58863f",
+              "identifier": "CT00003-1",
+              "name": "pod issue",
+              "state": "Todo",
+              "state_group": "unstarted"
+            }
+          ],
+          "duplicate": [],
+          "start_before": [],
+          "start_after": [],
+          "finish_before": [],
+          "finish_after": [],
+          "implemented_by": [],
+          "implements": []
+        }
+      }
+    },
+    "workpad_patch": {
+      "method": "PATCH",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/workpad/",
+      "request": {
+        "body": "# notes\n\n- a"
+      },
+      "status": 200,
+      "body": {
+        "updated_at": "2026-10-02T23:39:05.386973Z"
+      }
+    },
+    "workpad_patch_no_body": {
+      "method": "PATCH",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/workpad/",
+      "request": {
+        "workpad": "wrong key"
+      },
+      "status": 400,
+      "body": {
+        "error": "PATCH requires a `body` field in the request payload."
+      }
+    },
+    "attachment_get_redirect": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/attachments/6e20ee8b-c300-4689-8f6f-c84eda4c9766/",
+      "status": 302,
+      "location": "http://127.0.0.1:18359/conv659/contract-asset?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27fc30a7cd1eda4da585367aac5a99c013&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=conv659test%2F20261002%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261002T233905Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=9ab378b3e6649889d608d4705ac2efbf7ee0b97dd170e960863c57e6b4988b89",
+      "body": {
+        "<non-json>": ""
+      }
+    },
+    "pr_attach": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/github/pull-requests/",
+      "request": {
+        "url": "https://github.com/octocat/Hello-World/pull/42"
+      },
+      "status": 201,
+      "body": {
+        "id": "61ed2785-0ec2-49b0-9684-8e48516002f5",
+        "issue": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
+        "repo_owner": "octocat",
+        "repo_name": "hello-world",
+        "pr_number": 42,
+        "url": "https://github.com/octocat/hello-world/pull/42",
+        "title": "",
+        "state": "open",
+        "merged": false,
+        "draft": false,
+        "pr_updated_at": null,
+        "created_at": "2026-10-02T23:39:05.637848Z",
+        "updated_at": "2026-10-02T23:39:05.637858Z",
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6"
+      }
+    },
+    "pr_attach_again_idempotent": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/github/pull-requests/",
+      "request": {
+        "url": "https://github.com/octocat/Hello-World/pull/42"
+      },
+      "status": 200,
+      "body": {
+        "id": "61ed2785-0ec2-49b0-9684-8e48516002f5",
+        "issue": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
+        "repo_owner": "octocat",
+        "repo_name": "hello-world",
+        "pr_number": 42,
+        "url": "https://github.com/octocat/hello-world/pull/42",
+        "title": "",
+        "state": "open",
+        "merged": false,
+        "draft": false,
+        "pr_updated_at": null,
+        "created_at": "2026-10-02T23:39:05.637848Z",
+        "updated_at": "2026-10-02T23:39:05.637858Z",
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6"
+      }
+    },
+    "pr_attach_bad_url": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/github/pull-requests/",
+      "request": {
+        "url": "https://example.com/x"
+      },
+      "status": 400,
+      "body": {
+        "error": "A valid github.com pull request URL is required."
+      }
+    },
+    "pr_attach_conflict": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/25ace52e-c64d-4043-a700-911b1e42bffc/github/pull-requests/",
+      "request": {
+        "url": "https://github.com/octocat/Hello-World/pull/42"
+      },
+      "status": 409,
+      "body": {
+        "error": "This pull request is already linked to issue a9b6c9f9-2817-4967-a501-1e26caf4abea."
+      }
+    },
+    "review_attach": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/code-reviews/",
+      "request": {
+        "url": "https://github.com/octocat/Hello-World/pull/43"
+      },
+      "status": 201,
+      "body": {
+        "id": "b92d315a-5dfa-4674-9d1d-38144b505279",
+        "issue": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
+        "provider": "github",
+        "host_url": "https://github.com",
+        "namespace": "octocat",
+        "repo_name": "hello-world",
+        "repo_external_id": "",
+        "external_id": "",
+        "external_iid": "43",
+        "url": "https://github.com/octocat/hello-world/pull/43",
+        "title": "",
+        "state": "open",
+        "merged": false,
+        "draft": false,
+        "remote_updated_at": null,
+        "metadata": {},
+        "created_at": "2026-10-02T23:39:05.925323Z",
+        "updated_at": "2026-10-02T23:39:05.925331Z",
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6"
+      }
+    },
+    "review_attach_bad_url": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/code-reviews/",
+      "request": {
+        "url": "https://example.com/x"
+      },
+      "status": 400,
+      "body": {
+        "error": "A supported GitHub pull request or GitLab merge request URL is required."
+      }
+    },
+    "retick": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/re-tick/",
+      "status": 200,
+      "body": {
+        "granted": false,
+        "reason": "no_ticker",
+        "run_id": null
+      }
+    },
+    "wait": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/wait/",
+      "status": 200,
+      "body": {
+        "applied": false,
+        "reason": "no_ticker"
+      }
+    },
+    "run_ai": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/run-ai/",
+      "status": 409,
+      "body": {
+        "error": "no pod is available to run this work item",
+        "reason": "no_pod"
+      }
+    },
+    "yield_ok": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/yield/",
+      "request": {
+        "outcome": "progressed",
+        "note": "half done"
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "run_id": "640d8cdf-08fb-4772-82d3-2c693d0e105f",
+        "work_item_id": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
+        "outcome": "progressed"
+      }
+    },
+    "yield_bad_outcome": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/yield/",
+      "request": {
+        "outcome": "bogus"
+      },
+      "status": 400,
+      "body": {
+        "error": "outcome is required",
+        "allowed": [
+          "blocked",
+          "done",
+          "progressed",
+          "waiting_on_external",
+          "waiting_on_human"
+        ]
+      }
+    },
+    "yield_header_mismatch": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/yield/",
+      "request": {
+        "outcome": "done"
+      },
+      "request_headers": {
+        "X-Pi-Dash-Run-Id": "640d8cdf-08fb-4772-82d3-2c693d0e105f0"
+      },
+      "status": 400,
+      "body": {
+        "error": "X-Pi-Dash-Run-Id does not match the run in the URL"
+      }
+    },
+    "yield_inactive": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/yield/",
+      "request": {
+        "outcome": "done"
+      },
+      "status": 409,
+      "body": {
+        "error": "run is not active"
+      }
+    },
+    "pr_detach": {
+      "method": "DELETE",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/github/pull-requests/61ed2785-0ec2-49b0-9684-8e48516002f5/",
+      "status": 204,
+      "body": {
+        "<non-json>": ""
+      }
+    },
+    "review_detach": {
+      "method": "DELETE",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/code-reviews/b92d315a-5dfa-4674-9d1d-38144b505279/",
+      "status": 204,
+      "body": {
+        "<non-json>": ""
+      }
+    },
+    "link_delete": {
+      "method": "DELETE",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/links/a2a74f25-183b-4f34-8c02-b34a653c1c1a/",
+      "status": 204,
+      "body": {
+        "<non-json>": ""
+      }
+    },
+    "comment_delete": {
+      "method": "DELETE",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/comments/9448bec1-05fe-4242-b01a-9b7b9edd4931/",
+      "status": 204,
+      "body": {
+        "<non-json>": ""
+      }
+    },
+    "issue_delete": {
+      "method": "DELETE",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/",
+      "status": 204,
+      "body": {
+        "<non-json>": ""
+      }
+    },
+    "issue_delete_again": {
+      "method": "DELETE",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/",
+      "status": 404,
+      "body": {
+        "error": "The requested resource does not exist."
+      }
+    },
+    "page_both_bodies_http": {
+      "method": "POST",
+      "url": "/api/v1/.../pages/",
+      "request": {
+        "name": "x",
+        "description_markdown": "a",
+        "description_html": "<p>a</p>"
+      },
+      "status": 400,
+      "body": {
+        "non_field_errors": [
+          "Send the body as description_markdown or description_html, not both."
+        ]
+      },
+      "note": "Lives in labels_pages file too; duplicated here because the call was recorded alongside move setup."
+    },
+    "attachment_post_presign_full": {
+      "method": "POST",
+      "status": 200,
+      "request": {
+        "name": "g.pdf",
+        "type": "application/pdf",
+        "size": 200
+      },
+      "response_keys": [
+        "asset_id",
+        "asset_url",
+        "attachment",
+        "upload_data"
+      ],
+      "upload_data": {
+        "url": "http://127.0.0.1:18359/conv659",
+        "fields": {
+          "Content-Type": "application/pdf",
+          "key": "92989e99-51c6-4725-8069-45784951694f/dab9b34f7d614d078667ddba8fd7fd2d-g.pdf",
+          "x-amz-algorithm": "AWS4-HMAC-SHA256",
+          "x-amz-credential": "conv659test/20261002/us-east-1/s3/aws4_request",
+          "x-amz-date": "20261002T234112Z",
+          "policy": "eyJleHBpcmF0aW9uIjogIjIwMjYtMTAtMDNUMDA6NDE6MTJaIiwgImNvbmRpdGlvbnMiOiBbeyJidWNrZXQiOiAiY29udjY1OSJ9LCBbImNvbnRlbnQtbGVuZ3RoLXJhbmdlIiwgMSwgMjAwXSwgeyJDb250ZW50LVR5cGUiOiAiYXBwbGljYXRpb24vcGRmIn0sIHsia2V5IjogIjkyOTg5ZTk5LTUxYzYtNDcyNS04MDY5LTQ1Nzg0OTUxNjk0Zi9kYWI5YjM0ZjdkNjE0ZDA3ODY2N2RkYmE4ZmQ3ZmQyZC1nLnBkZiJ9LCB7ImJ1Y2tldCI6ICJjb252NjU5In0sIHsia2V5IjogIjkyOTg5ZTk5LTUxYzYtNDcyNS04MDY5LTQ1Nzg0OTUxNjk0Zi9kYWI5YjM0ZjdkNjE0ZDA3ODY2N2RkYmE4ZmQ3ZmQyZC1nLnBkZiJ9LCB7IngtYW16LWFsZ29yaXRobSI6ICJBV1M0LUhNQUMtU0hBMjU2In0sIHsieC1hbXotY3JlZGVudGlhbCI6ICJjb252NjU5dGVzdC8yMDI2MTAwMi91cy1lYXN0LTEvczMvYXdzNF9yZXF1ZXN0In0sIHsieC1hbXotZGF0ZSI6ICIyMDI2MTAwMlQyMzQxMTJaIn1dfQ==",
+          "x-amz-signature": "f8bdafaa13c5c3056b7b055a75459bdcd2804c0df211273cd8a37fc200111481"
+        }
+      },
+      "asset_id": "c8685c58-fc6f-45d6-9e12-92a0d3ccd195",
+      "asset_url": "/api/assets/v2/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/issues/a7509d00-345f-47fb-bee3-6bcf7d3339e2/attachments/c8685c58-fc6f-45d6-9e12-92a0d3ccd195/",
+      "attachment": {
+        "id": "c8685c58-fc6f-45d6-9e12-92a0d3ccd195",
+        "created_at": "2026-10-02T23:41:12.654500Z",
+        "updated_at": "2026-10-02T23:41:12.654517Z",
+        "deleted_at": null,
+        "attributes": {
+          "name": "g.pdf",
+          "type": "application/pdf",
+          "size": 200
+        },
+        "asset": "92989e99-51c6-4725-8069-45784951694f/dab9b34f7d614d078667ddba8fd7fd2d-g.pdf",
+        "entity_type": "ISSUE_ATTACHMENT",
+        "entity_identifier": null,
+        "is_deleted": false,
+        "is_archived": false,
+        "external_id": null,
+        "external_source": null,
+        "size": 200.0,
+        "is_uploaded": false,
+        "storage_metadata": {},
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "updated_by": null,
+        "user": null,
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "draft_issue": null,
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+        "comment": null,
+        "page": null
+      }
+    },
+    "attachment_confirm": {
+      "method": "PATCH",
+      "status": 204,
+      "request": {
+        "is_uploaded": true
+      },
+      "body": ""
+    },
+    "attachment_delete": {
+      "method": "DELETE",
+      "status": 204,
+      "body": ""
+    },
+    "put_405": {
+      "method": "PUT",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/",
+      "request": {
+        "name": "x"
+      },
+      "status": 405,
+      "body": {
+        "detail": "Method \"PUT\" not allowed."
+      }
+    }
+  },
+  "deprecated_twins": {
+    "search": {
+      "new_status": 200,
+      "old_status": 200,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "{\"issues\":[{\"name\":\"zxcvsearchtoken login flow\",\"id\":\"a7509d00-345f-47fb-bee3-6bcf7d3339e2\",\"sequence_id\":1,\"project__identifier\":\"CT00003\",\"project_id\":\"d715be3d-234f-46ef-89a3-97f0c7c04b7e\",\"workspa"
+    },
+    "by_identifier": {
+      "new_status": 500,
+      "old_status": 500,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "{\"error\":\"Something went wrong please try again later\"}"
+    },
+    "list": {
+      "new_status": 200,
+      "old_status": 200,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "{\"grouped_by\":null,\"sub_grouped_by\":null,\"total_count\":9,\"next_cursor\":\"1000:1:0\",\"prev_cursor\":\"1000:-1:1\",\"next_page_results\":false,\"prev_page_results\":false,\"count\":9,\"total_pages\":1,\"total_results"
+    },
+    "detail": {
+      "new_status": 200,
+      "old_status": 200,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "{\"id\":\"a7509d00-345f-47fb-bee3-6bcf7d3339e2\",\"type_id\":null,\"url\":\"http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-1\",\"created_at\":\"2026-10-02T23:17:12.025108Z\",\"updated_at\":\"2026-10-02T23:17:12.02"
+    },
+    "link_list": {
+      "new_status": 200,
+      "old_status": 200,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "{\"grouped_by\":null,\"sub_grouped_by\":null,\"total_count\":2,\"next_cursor\":\"1000:1:0\",\"prev_cursor\":\"1000:-1:1\",\"next_page_results\":false,\"prev_page_results\":false,\"count\":2,\"total_pages\":1,\"total_results"
+    },
+    "comment_list": {
+      "new_status": 200,
+      "old_status": 200,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "{\"grouped_by\":null,\"sub_grouped_by\":null,\"total_count\":2,\"next_cursor\":\"1000:1:0\",\"prev_cursor\":\"1000:-1:1\",\"next_page_results\":false,\"prev_page_results\":false,\"count\":2,\"total_pages\":1,\"total_results"
+    },
+    "activity_list": {
+      "new_status": 200,
+      "old_status": 200,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "{\"grouped_by\":null,\"sub_grouped_by\":null,\"total_count\":7,\"next_cursor\":\"1000:1:0\",\"prev_cursor\":\"1000:-1:1\",\"next_page_results\":false,\"prev_page_results\":false,\"count\":7,\"total_pages\":1,\"total_results"
+    },
+    "attachment_list": {
+      "new_status": 200,
+      "old_status": 200,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "[{\"id\":\"6e20ee8b-c300-4689-8f6f-c84eda4c9766\",\"created_at\":\"2026-10-02T23:39:05.535652Z\",\"updated_at\":\"2026-10-02T23:39:05.535652Z\",\"deleted_at\":null,\"attributes\":{},\"asset\":\"contract-asset\",\"entity_t"
+    },
+    "link_detail": {
+      "new_status": 200,
+      "old_status": 200,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "{\"id\":\"22fae1bb-6847-4e33-b3ab-9cd45b6ada9b\",\"created_at\":\"2026-10-02T23:23:54.220351Z\",\"updated_at\":\"2026-10-02T23:23:54.237486Z\",\"deleted_at\":null,\"title\":\"renamed\",\"url\":\"https://example.com/other\""
+    },
+    "comment_detail": {
+      "new_status": 200,
+      "old_status": 200,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "{\"id\":\"6353d7bf-012d-45ba-82a1-d2ff209af168\",\"is_member\":true,\"url\":\"http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-1\",\"created_at\":\"2026-10-02T23:17:12.036469Z\",\"updated_at\":\"2026-10-02T23:17:12."
+    },
+    "activity_detail": {
+      "new_status": 200,
+      "old_status": 200,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "{\"id\":\"4d99c67e-1059-4d9d-a205-0c0af7779c96\",\"created_at\":\"2026-10-02T23:24:29.095428Z\",\"updated_at\":\"2026-10-02T23:24:29.095428Z\",\"deleted_at\":null,\"verb\":\"created\",\"field\":null,\"old_value\":null,\"new"
+    },
+    "attachment_detail": {
+      "new_status": 302,
+      "old_status": 302,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "",
+      "note": "Both sides 302 with empty body; Location is a per-request presigned URL (volatile signature), so only status+body are pinned."
+    }
+  },
+  "move_endpoint": {
+    "move": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/30c96eff-8c2f-4af4-8a44-62fe7f1547cf/move/",
+      "status": 200,
+      "body": {
+        "id": "30c96eff-8c2f-4af4-8a44-62fe7f1547cf",
+        "type_id": null,
+        "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00001-2",
+        "created_at": "2026-10-02T23:40:18.319112Z",
+        "updated_at": "2026-10-02T23:40:18.397971Z",
+        "deleted_at": null,
+        "point": null,
+        "name": "move live golden",
+        "description_html": "<p></p>",
+        "description_binary": null,
+        "priority": "none",
+        "complexity_score": 0,
+        "start_date": null,
+        "target_date": null,
+        "sequence_id": 2,
+        "sort_order": 145535.0,
+        "completed_at": null,
+        "archived_at": null,
+        "is_draft": false,
+        "external_source": null,
+        "external_id": null,
+        "git_work_branch": "",
+        "created_via": null,
+        "agent_executor": null,
+        "created_by": null,
+        "updated_by": null,
+        "project": "b8a8b19c-5586-4e41-9be9-240e24354058",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "parent": null,
+        "state": "20a0852b-2c94-4218-b25b-5f8d85481fb3",
+        "estimate_point": null,
+        "type": null,
+        "assigned_pod": null,
+        "assignees": [],
+        "labels": [],
+        "relations_summary": {
+          "blocked_by": [],
+          "blocking": []
+        },
+        "has_open_blockers": false
+      },
+      "request": {
+        "project": "b8a8b19c-5586-4e41-9be9-240e24354058"
+      },
+      "db_before": {
+        "id": "30c96eff-8c2f-4af4-8a44-62fe7f1547cf",
+        "project_id": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "sequence_id": "12",
+        "state_id": "97b22834-b823-4109-a527-b39aa310ceae",
+        "parent_id": null,
+        "estimate_point_id": null,
+        "type_id": null,
+        "assigned_pod_id": null
+      },
+      "db_after": {
+        "id": "30c96eff-8c2f-4af4-8a44-62fe7f1547cf",
+        "project_id": "b8a8b19c-5586-4e41-9be9-240e24354058",
+        "sequence_id": "2",
+        "state_id": "20a0852b-2c94-4218-b25b-5f8d85481fb3",
+        "parent_id": null,
+        "estimate_point_id": null,
+        "type_id": null,
+        "assigned_pod_id": null
+      }
+    },
+    "move_missing_project": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/25ace52e-c64d-4043-a700-911b1e42bffc/move/",
+      "status": 400,
+      "body": {
+        "error": "project is required"
+      },
+      "request": {}
+    },
+    "move_non_dict_body": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/25ace52e-c64d-4043-a700-911b1e42bffc/move/",
+      "status": 400,
+      "body": {
+        "error": "project is required"
+      }
+    },
+    "move_same_project_noop": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/b8a8b19c-5586-4e41-9be9-240e24354058/work-items/30c96eff-8c2f-4af4-8a44-62fe7f1547cf/move/",
+      "status": 200,
+      "body": {
+        "id": "30c96eff-8c2f-4af4-8a44-62fe7f1547cf",
+        "type_id": null,
+        "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00001-2",
+        "created_at": "2026-10-02T23:40:18.319112Z",
+        "updated_at": "2026-10-02T23:40:18.397971Z",
+        "deleted_at": null,
+        "point": null,
+        "name": "move live golden",
+        "description_html": "<p></p>",
+        "description_binary": null,
+        "priority": "none",
+        "complexity_score": 0,
+        "start_date": null,
+        "target_date": null,
+        "sequence_id": 2,
+        "sort_order": 145535.0,
+        "completed_at": null,
+        "archived_at": null,
+        "is_draft": false,
+        "external_source": null,
+        "external_id": null,
+        "git_work_branch": "",
+        "created_via": null,
+        "agent_executor": null,
+        "created_by": null,
+        "updated_by": null,
+        "project": "b8a8b19c-5586-4e41-9be9-240e24354058",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "parent": null,
+        "state": "20a0852b-2c94-4218-b25b-5f8d85481fb3",
+        "estimate_point": null,
+        "type": null,
+        "assigned_pod": null,
+        "assignees": [],
+        "labels": [],
+        "relations_summary": {
+          "blocked_by": [],
+          "blocking": []
+        },
+        "has_open_blockers": false
+      },
+      "request": {
+        "project": "b8a8b19c-5586-4e41-9be9-240e24354058"
+      }
+    },
+    "move_target_forbidden": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/25ace52e-c64d-4043-a700-911b1e42bffc/move/",
+      "status": 403,
+      "body": {
+        "error": "You do not have permission to move work items into the target project"
+      },
+      "request": {
+        "project": "d328a948-70ce-4862-a6c2-32d908938039"
+      }
+    },
+    "move_target_no_state": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/25ace52e-c64d-4043-a700-911b1e42bffc/move/",
+      "status": 400,
+      "body": {
+        "error": "Target project does not have a workflow state"
+      },
+      "request": {
+        "project": "04bfd1ec-a187-40b8-a051-1420b049b28f"
+      }
+    },
+    "move_target_unknown": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/25ace52e-c64d-4043-a700-911b1e42bffc/move/",
+      "status": 404,
+      "body": {
+        "detail": "Project not found"
+      },
+      "request": {
+        "project": "NOPE"
+      }
+    }
+  }
+}
