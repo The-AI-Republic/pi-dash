@@ -97,6 +97,7 @@
 // intake `parse_body` precedent, which carries the same allow).
 #![allow(clippy::result_large_err)]
 
+pub mod chat;
 pub mod run_endpoints;
 
 use axum::extract::State;
@@ -825,6 +826,25 @@ pub enum PortError {
     Transport(String),
 }
 
+impl std::fmt::Display for PortError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // `RunnerOfflineError.__init__` (`outbox.py:78-82`):
+            // `f"runner {runner_id} is offline; type {message_type!r}
+            // cannot queue"`. Control types are plain identifiers, so
+            // `{!r}` always renders single quotes.
+            PortError::Offline {
+                runner_id,
+                message_type,
+            } => write!(
+                f,
+                "runner {runner_id} is offline; type '{message_type}' cannot queue"
+            ),
+            PortError::Transport(detail) => f.write_str(detail),
+        }
+    }
+}
+
 /// The D-10/D-11/D-12/D-14 boundary. Executors take `&impl RunnerPorts`
 /// (the L6a `SweepsRunsOutbox` precedent); production handlers pass
 /// [`LivePorts`], unit tests pass fakes. Each method names the exact
@@ -887,6 +907,10 @@ pub trait RunnerPorts: Send + Sync {
         &self,
         ticker_id: uuid::Uuid,
     ) -> impl std::future::Future<Output = Result<(), PortError>> + Send;
+    /// The shared Redis client for chat publishes (`redis_instance()`);
+    /// `None` when `REDIS_URL` is unset, in which case chat publishes
+    /// return silently.
+    fn redis_client(&self) -> Option<&redis::Client>;
 }
 
 // ---- Outbox wire (D-14 `outbox.py`, mirrored until the provider lands) ----
@@ -1013,10 +1037,6 @@ impl LivePorts {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
-    }
-
-    pub fn redis_client(&self) -> Option<&redis::Client> {
-        self.redis.as_ref()
     }
 }
 
@@ -1174,6 +1194,10 @@ impl RunnerPorts for LivePorts {
             .await
             .map_err(PortError::Transport)
     }
+
+    fn redis_client(&self) -> Option<&redis::Client> {
+        self.redis.as_ref()
+    }
 }
 
 /// Agent bot identity (`orchestration/workpad.py:29-32`).
@@ -1282,22 +1306,21 @@ async fn xadd_offline(
 
 /// `publish_event`: PUBLISH the serialized event on the session channel.
 /// A missing client is a no-op (`redis_instance()` returning `None`);
-/// every failure is swallowed with a log. The caller passes
-/// [`LivePorts::redis_client`].
-pub async fn publish_chat_event(client: Option<&redis::Client>, channel: &str, payload: &str) {
+/// every other failure propagates — the publish sits in `on_commit`
+/// unisolated, so the source 500s after commit too. The caller passes
+/// [`RunnerPorts::redis_client`].
+pub async fn publish_chat_event(
+    client: Option<&redis::Client>,
+    channel: &str,
+    payload: &str,
+) -> Result<(), redis::RedisError> {
     let Some(client) = client else {
-        return;
+        return Ok(());
     };
-    let outcome: Result<(), redis::RedisError> = async {
-        use redis::AsyncCommands;
-        let mut connection = client.get_multiplexed_async_connection().await?;
-        let _: () = connection.publish(channel, payload).await?;
-        Ok(())
-    }
-    .await;
-    if let Err(error) = outcome {
-        tracing::warn!(%error, channel, "publish chat event failed; swallowed");
-    }
+    use redis::AsyncCommands;
+    let mut connection = client.get_multiplexed_async_connection().await?;
+    let _: () = connection.publish(channel, payload).await?;
+    Ok(())
 }
 
 #[cfg(test)]
