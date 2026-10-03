@@ -22,6 +22,7 @@
 //! [`gate::DISABLED_BODY`).
 
 pub mod gate;
+pub mod handlers_occ;
 pub mod handlers_sched;
 
 use axum::Router;
@@ -32,5 +33,5 @@ use crate::state::AppState;
 /// (sibling D-36 handler issues extend this merge; merges keep both
 /// sides), merged here for the F-10 overlay seam.
 pub fn routes() -> Router<AppState> {
-    handlers_sched::routes()
+    handlers_occ::routes().merge(handlers_sched::routes())
 }
