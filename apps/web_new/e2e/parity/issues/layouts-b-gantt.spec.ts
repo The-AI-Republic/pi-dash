@@ -24,6 +24,7 @@ import {
   serverIssueDetails,
   serverIssues,
   serverPatchIssue,
+  serverPatchProject,
   serverPatchProjectUserProperties,
   serverProfileStartOfWeek,
   serverProjectUserProperties,
@@ -630,13 +631,23 @@ test(
     });
 
     await test.step("guests see the chart but no editing affordances", async () => {
-      const guest = await signInFreshUser(seed.guestEmail, seed.guestPassword);
-      await driver.openAuthenticated(`/${seed.workspaceSlug}/projects/${seed.projectId}/issues`, browserCookies(guest));
-      await driver.ganttOpenTimeline();
-      await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
-      expect(await driver.ganttHandlesVisible(dated)).toBe(false);
-      expect(await driver.ganttRowAddVisible(plain)).toBe(false);
-      expect(await driver.ganttHasQuickAdd()).toBe(false);
+      // Guests see an empty board until the project lets them use everything;
+      // even then the timeline stays view-only with no editing affordances.
+      await serverPatchProject(seed.workspaceSlug, seed.projectId, owner.cookie, { guest_view_all_features: true });
+      try {
+        const guest = await signInFreshUser(seed.guestEmail, seed.guestPassword);
+        await driver.openAuthenticated(
+          `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+          browserCookies(guest)
+        );
+        await driver.ganttOpenTimeline();
+        await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
+        expect(await driver.ganttHandlesVisible(dated)).toBe(false);
+        expect(await driver.ganttRowAddVisible(plain)).toBe(false);
+        expect(await driver.ganttHasQuickAdd()).toBe(false);
+      } finally {
+        await serverPatchProject(seed.workspaceSlug, seed.projectId, owner.cookie, { guest_view_all_features: false });
+      }
     });
 
     await test.step("cleanup clears the dates and restores preferences", async () => {

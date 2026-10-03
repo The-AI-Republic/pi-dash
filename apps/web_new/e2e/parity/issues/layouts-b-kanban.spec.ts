@@ -32,6 +32,7 @@ import {
   serverIssues,
   serverListStates,
   serverPatchIssue,
+  serverPatchProject,
   serverPatchProjectUserProperties,
   serverProjectUserProperties,
   signInFreshUser,
@@ -483,12 +484,23 @@ test(
       if (!seed.guestEmail || !seed.guestPassword) {
         throw new Error("[parity] seed carries no guest; re-run the stack seed step.");
       }
-      const guest = await signInFreshUser(seed.guestEmail, seed.guestPassword);
-      await driver.openAuthenticated(`/${seed.workspaceSlug}/projects/${seed.projectId}/issues`, browserCookies(guest));
-      await driver.kanbanOpenBoard();
-      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(1);
-      const column = (await driver.kanbanColumns())[0]?.name ?? "";
-      expect(await driver.kanbanColumnHasQuickAdd(column)).toBe(false);
+      // Guests see an empty board until the project lets them use everything;
+      // even then the board stays view-only with no quick-add entry.
+      await serverPatchProject(seed.workspaceSlug, seed.projectId, owner.cookie, { guest_view_all_features: true });
+      try {
+        const guest = await signInFreshUser(seed.guestEmail, seed.guestPassword);
+        await driver.openAuthenticated(
+          `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+          browserCookies(guest)
+        );
+        await driver.kanbanOpenBoard();
+        await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).not.toHaveLength(0);
+        for (const column of await driver.kanbanColumns()) {
+          expect(await driver.kanbanColumnHasQuickAdd(column.name)).toBe(false);
+        }
+      } finally {
+        await serverPatchProject(seed.workspaceSlug, seed.projectId, owner.cookie, { guest_view_all_features: false });
+      }
     });
 
     await test.step("cleanup removes the state and restores preferences", async () => {
@@ -528,16 +540,23 @@ test(
     });
 
     await test.step("cycle context offers create and add-existing", async () => {
-      await setBoardFilters(driver, seed, seed.projectId, ctx, { group_by: "cycle" });
-      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
-      expect(await driver.kanbanHeaderCreateVisible(cycle.name)).toBe(true);
-      await driver.kanbanHeaderCreate(cycle.name);
-      const items = await driver.kanbanHeaderMenuItems(cycle.name);
+      // "Cycle context" is the cycle route, not a cycle grouping: the menu
+      // renders only when the board opens with a cycle id in the path.
+      await driver.openAuthenticated(
+        `/${seed.workspaceSlug}/projects/${seed.projectId}/cycles/${cycle.id}`,
+        browserCookies(ctx.user)
+      );
+      await driver.kanbanOpenBoard();
+      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(1);
+      const column = (await driver.kanbanColumns())[0]?.name ?? "";
+      expect(await driver.kanbanHeaderCreateVisible(column)).toBe(true);
+      await driver.kanbanHeaderCreate(column);
+      const items = await driver.kanbanHeaderMenuItems(column);
       expect(items.some((entry) => /creat/i.test(entry))).toBe(true);
       expect(items.some((entry) => /exist/i.test(entry))).toBe(true);
       const create = items.find((entry) => /creat/i.test(entry)) ?? "";
-      await driver.kanbanHeaderMenuChoose(cycle.name, create);
-      expect(await driver.kanbanCreateModalVisible()).toBe(true);
+      await driver.kanbanHeaderMenuChoose(column, create);
+      await expect.poll(() => driver.kanbanCreateModalVisible(), { timeout: 30_000 }).toBe(true);
     });
 
     await test.step("cleanup removes the cycle and restores preferences", async () => {
