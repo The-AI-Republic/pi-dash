@@ -17,7 +17,6 @@
 //! a failed subscribe, or a failed replay all end the body instead of
 //! 500ing, exactly like the [`crate::assistant::events`] precedent.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -173,7 +172,7 @@ fn sse_not_found() -> Response {
 pub async fn chat_event_stream(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
+    Query(params): Query<crate::license::QueryMap>,
     headers: HeaderMap,
     extension: Option<Extension<SessionHandle>>,
 ) -> Response {
@@ -211,8 +210,9 @@ pub async fn chat_event_stream(
         return sse_not_found();
     }
 
+    // `QueryDict.get`: repeats take the last, never 400.
     let after = parse_after(
-        params.get("after").map(String::as_str),
+        crate::license::query_last(&params, "after").as_deref(),
         headers
             .get("last-event-id")
             .and_then(|value| value.to_str().ok()),

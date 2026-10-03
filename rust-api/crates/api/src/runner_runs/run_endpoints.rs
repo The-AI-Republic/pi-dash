@@ -323,14 +323,16 @@ pub fn approval_id(data: &Value) -> Result<Uuid, FrameError> {
 }
 
 /// `request.data.get("expires_at")` as an optional timestamptz input
-/// (`run_endpoints.py:266`): null or `""` binds NULL, strings bind as
-/// text for Postgres to parse, everything else is the source's
-/// `ValidationError` (500).
+/// (`run_endpoints.py:266`): null, `""`, `[]` and `{}` bind NULL
+/// (Django's `empty_values`), strings bind as text for Postgres to
+/// parse, everything else is the source's `ValidationError` (500).
 pub fn expires_at_text(data: &Value) -> Result<Option<String>, FrameError> {
     let raw = data.as_object().ok_or(FrameError)?.get("expires_at");
     match raw {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(text)) if text.is_empty() => Ok(None),
+        Some(Value::Array(items)) if items.is_empty() => Ok(None),
+        Some(Value::Object(map)) if map.is_empty() => Ok(None),
         Some(Value::String(text)) => Ok(Some(text.clone())),
         Some(_) => Err(FrameError),
     }
@@ -380,6 +382,8 @@ pub fn ticket_key(ticket: &str) -> String {
 /// `stream`, `runner_id` (`""` when unauthenticated — unreachable
 /// past `_resolve`, kept for exactness), `expires_at` as
 /// `timezone.now() + 60s` in `isoformat()` (`+00:00`, microseconds).
+/// Rendered with `json.dumps` separators (`", "` / `": "`) in source
+/// key order — Redis bytes, never served, but the gate diffs them.
 pub fn ticket_payload(
     run_id: &Uuid,
     stream: &str,
@@ -388,13 +392,12 @@ pub fn ticket_payload(
 ) -> String {
     let expires = (*now + chrono::Duration::seconds(60))
         .to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
-    serde_json::json!({
+    crate::assistant::events::py_dumps(&serde_json::json!({
         "run_id": run_id.to_string(),
         "stream": stream,
         "runner_id": runner_id.map(ToString::to_string).unwrap_or_default(),
         "expires_at": expires,
-    })
-    .to_string()
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1352,9 +1355,10 @@ async fn apply_scheduler_hook(
 
 /// Drain collected [`LifecycleEffect`]s after commit, in order, with
 /// Python's per-site isolation:
-/// * `PauseAndDrain`'s re-read miss skips silently; its orchestration
-///   and drain propagate (the drain is unisolated in
-///   `_pause_and_drain`) — a 500 with committed rows.
+/// * `PauseAndDrain`'s re-read miss skips only the orchestration; the
+///   runner drain runs unconditionally (`_pause_and_drain`,
+///   `run_lifecycle.py:230-238`). Both propagate — a 500 with
+///   committed rows.
 /// * `PostRunOrchestration`, `FireTick`, `DrainRunner`, `DrainPod`,
 ///   `DispatchWaiting` propagate (direct `on_commit` registrations
 ///   or unisolated inline calls).
@@ -1379,13 +1383,12 @@ pub async fn drain_lifecycle_effects(
                         .fetch_optional(pool)
                         .await
                         .map_err(|_| server_error())?;
-                if present.is_none() {
-                    continue;
+                if present.is_some() {
+                    ports
+                        .post_run_orchestration(run_id)
+                        .await
+                        .map_err(|_| server_error())?;
                 }
-                ports
-                    .post_run_orchestration(run_id)
-                    .await
-                    .map_err(|_| server_error())?;
                 ports
                     .drain_for_runner_by_id(runner_id)
                     .await
@@ -2087,6 +2090,12 @@ pub async fn run_completed(
     }
     let mut effects = Vec::new();
     if let Some(runner) = preamble.runner.as_ref() {
+        // A non-dict body is the source's `AttributeError` on `.get`
+        // (500) — but only *here*, after the dedupe and the runner
+        // check (`run_endpoints.py:296-306`).
+        if preamble.data.as_object().is_none() {
+            return server_error();
+        }
         let done_payload = preamble
             .data
             .get("done_payload")
@@ -2250,6 +2259,12 @@ pub async fn run_failed(
         }
         return json_response(StatusCode::OK, r#"{"ok":true}"#.to_owned());
     };
+    // A non-dict body is the source's `AttributeError` on `.get`
+    // (500) — but only *here*, after the dedupe and the runner check,
+    // before the first `reason` read (`run_endpoints.py:352`).
+    if preamble.data.as_object().is_none() {
+        return server_error();
+    }
     let ports = LivePorts::new(pool.clone(), &state);
     if reason_is(&preamble.data, "resume_unavailable") {
         return run_failed_requeue(&pool, &ports, tx, runner, run.id, false).await;
@@ -2426,6 +2441,12 @@ pub async fn run_cancelled(
     }
     let mut effects = Vec::new();
     if let Some(runner) = preamble.runner.as_ref() {
+        // A non-dict body is the source's `AttributeError` on `.get`
+        // (500) — but only *here*, after the dedupe and the runner
+        // check (`run_endpoints.py:431-441`).
+        if preamble.data.as_object().is_none() {
+            return server_error();
+        }
         let tokens = frame_tokens(&preamble.data);
         let model = preamble.data.get("model").cloned().unwrap_or(Value::Null);
         effects = match execute_finalize_terminal(
@@ -2915,9 +2936,13 @@ mod tests {
             .parse()
             .expect("uuid");
         let now: DateTime<Utc> = "2026-10-03T12:00:00Z".parse().expect("dt");
-        let payload: Value =
-            serde_json::from_str(&ticket_payload(&run_id, "log", Some(&runner_id), &now))
-                .expect("json");
+        let raw = ticket_payload(&run_id, "log", Some(&runner_id), &now);
+        // Byte-exact `json.dumps`: spaced separators, source key order.
+        assert_eq!(
+            raw,
+            r#"{"run_id": "0192d3b4-8c1c-7a2e-9f4b-6d5c8b7a6e5d", "stream": "log", "runner_id": "a11f797c-8430-44f9-8ae2-d3aef1c2cffc", "expires_at": "2026-10-03T12:01:00.000000+00:00"}"#
+        );
+        let payload: Value = serde_json::from_str(&raw).expect("json");
         // Python dict order: run_id, stream, runner_id, expires_at.
         let keys: Vec<&str> = payload
             .as_object()
@@ -2979,7 +3004,18 @@ mod tests {
             expires_at_text(&json!({"expires_at": "2026-01-01T00:00:00Z"})).expect("iso"),
             Some("2026-01-01T00:00:00Z".to_owned())
         );
+        // Django `empty_values`: `[]` and `{}` bind NULL.
+        assert_eq!(
+            expires_at_text(&json!({"expires_at": []})).expect("empty array"),
+            None
+        );
+        assert_eq!(
+            expires_at_text(&json!({"expires_at": {}})).expect("empty object"),
+            None
+        );
         assert!(expires_at_text(&json!({"expires_at": 5})).is_err());
+        assert!(expires_at_text(&json!({"expires_at": [1]})).is_err());
+        assert!(expires_at_text(&json!({"expires_at": {"a": 1}})).is_err());
     }
 
     #[test]

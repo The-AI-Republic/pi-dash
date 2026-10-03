@@ -1081,17 +1081,22 @@ async fn next_message_seq(
     Ok(chat_kernel::next_seq_after_max(max))
 }
 
-/// `append_event_locked` (`chat.py:236-247`): the idempotent event
-/// insert. An existing `source_key` returns the stored row without
-/// queuing a publish; otherwise the row inserts with the next `seq`
-/// and a [`ChatEffect::PublishEvent`] queues.
+/// `append_event_locked` (`services/chat.py:149-173`): the
+/// idempotent event insert. An existing `source_key` returns the
+/// stored row without queuing a publish; otherwise the row inserts
+/// with the next `seq` and a [`ChatEffect::PublishEvent`] queues.
+/// `full_source_key` is the pre-truncation key: the probe runs on the
+/// FULL key (`filter(source_key=source_key)`) while only the insert
+/// truncates (`source_key[:160]`), so an over-long repeat misses the
+/// probe and collides on insert (500), exactly as in the source.
 pub async fn append_event(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session_id: Uuid,
     inputs: &NewEventInputs,
+    full_source_key: &str,
     effects: &mut Vec<ChatEffect>,
 ) -> Result<AgentChatEvent, Response> {
-    if !inputs.source_key.is_empty() {
+    if !full_source_key.is_empty() {
         let existing: Option<EventRow> = sqlx::query_as(
             r#"SELECT "id", "session_id", "message_id", "seq", "source_key", "kind",
                   "payload", "created_at"
@@ -1099,7 +1104,7 @@ pub async fn append_event(
                WHERE ("session_id" = $1 AND "source_key" = $2)"#,
         )
         .bind(session_id)
-        .bind(&inputs.source_key)
+        .bind(full_source_key)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|_| server_error())?;
@@ -1231,21 +1236,29 @@ pub async fn active_assistant(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session: &AgentChatSession,
 ) -> Result<Option<AgentChatMessage>, Response> {
-    let scoped: Option<MessageRow> = sqlx::query_as(
-        r#"SELECT "id", "session_id", "role", "content", "content_parts", "status",
-              "local_item_id", "local_turn_id", "seq", "created_at", "completed_at"
-           FROM "agent_chat_message"
-           WHERE ("session_id" = $1 AND "local_turn_id" = $2 AND "status" = $3)
-           ORDER BY "created_at" DESC LIMIT 1"#,
-    )
-    .bind(session.id)
-    .bind(&session.active_turn_id)
-    .bind(AgentChatMessageStatus::Streaming.value())
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| server_error())?;
-    if let Some(scoped) = scoped {
-        return Ok(Some(message_from_row(scoped)?));
+    // The turn-scoped probe runs only with a turn (`if
+    // session.active_turn_id:`), and both probes carry the
+    // `role=ASSISTANT` filter from the shared base queryset
+    // (`services/chat.py:322-332`).
+    if !session.active_turn_id.is_empty() {
+        let scoped: Option<MessageRow> = sqlx::query_as(
+            r#"SELECT "id", "session_id", "role", "content", "content_parts", "status",
+                  "local_item_id", "local_turn_id", "seq", "created_at", "completed_at"
+               FROM "agent_chat_message"
+               WHERE ("session_id" = $1 AND "local_turn_id" = $2 AND "status" = $3
+                      AND "role" = $4)
+               ORDER BY "created_at" DESC LIMIT 1"#,
+        )
+        .bind(session.id)
+        .bind(&session.active_turn_id)
+        .bind(AgentChatMessageStatus::Streaming.value())
+        .bind(AgentChatMessageRole::Assistant.value())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| server_error())?;
+        if let Some(scoped) = scoped {
+            return Ok(Some(message_from_row(scoped)?));
+        }
     }
     let fallback: Option<MessageRow> = sqlx::query_as(
         r#"SELECT "id", "session_id", "role", "content", "content_parts", "status",
@@ -1385,7 +1398,7 @@ pub async fn complete_turn(
     .await
     .map_err(|_| server_error())?;
     for event in &plan.events {
-        append_event(tx, session.id, event, effects).await?;
+        append_event(tx, session.id, event, "", effects).await?;
     }
     if plan.queue_drain {
         effects.push(ChatEffect::DrainTasks {
@@ -1454,17 +1467,19 @@ pub async fn execute_fail_session(
         finalized,
         "",
     );
-    append_event(tx, session.id, &inputs, effects).await?;
+    append_event(tx, session.id, &inputs, "", effects).await?;
     if should_close {
         let inputs = chat_kernel::append_event_inputs(
             "chat_closed",
-            Some(&serde_json::json!({"close_requested": true})),
+            Some(&serde_json::json!({"reason": "close_requested"})),
             None,
             "",
         );
-        append_event(tx, session.id, &inputs, effects).await?;
+        append_event(tx, session.id, &inputs, "", effects).await?;
     }
-    if session.active_message_id.is_some() {
+    // `was_active = bool(active_message_id or active_turn_id)`
+    // (`chat.py:731`): either half drains.
+    if chat_kernel::turn_was_active(session) {
         effects.push(ChatEffect::DrainTasks {
             runner_id: session.runner_id,
             pod_id: Some(session.pod_id),
@@ -1482,7 +1497,9 @@ pub async fn execute_close_session(
     reason: &Value,
     effects: &mut Vec<ChatEffect>,
 ) -> Result<(), Response> {
-    let was_active = session.active_message_id.is_some();
+    // `was_active = bool(active_message_id or active_turn_id)`
+    // (`chat.py:761`): either half finalizes and drains.
+    let was_active = chat_kernel::turn_was_active(session);
     if was_active {
         finalize_active(tx, session, AgentChatMessageStatus::Cancelled).await?;
     }
@@ -1507,7 +1524,7 @@ pub async fn execute_close_session(
         None,
         "",
     );
-    append_event(tx, session.id, &inputs, effects).await?;
+    append_event(tx, session.id, &inputs, "", effects).await?;
     if was_active {
         effects.push(ChatEffect::DrainTasks {
             runner_id: session.runner_id,
@@ -1605,7 +1622,7 @@ pub async fn execute_mark_message_dispatch_failed(
         .map_err(|_| server_error())?;
     }
     for event in &plan.events {
-        append_event(&mut tx, session.id, event, effects).await?;
+        append_event(&mut tx, session.id, event, "", effects).await?;
     }
     if plan.queue_drain {
         effects.push(ChatEffect::DrainTasks {
@@ -1650,7 +1667,7 @@ pub async fn execute_mark_warm_dispatch_failed(
         None,
         "",
     );
-    append_event(&mut tx, session.id, &inputs, effects).await?;
+    append_event(&mut tx, session.id, &inputs, "", effects).await?;
     commit_tx(tx).await
 }
 
@@ -1658,12 +1675,14 @@ pub async fn execute_mark_warm_dispatch_failed(
 // Post-commit drain (`transaction.on_commit`, sync order)
 // ---------------------------------------------------------------------------
 
-/// Publish one event frame (`publish_event`, `chat.py:148-164`):
-/// re-read the row post-commit, serialize, and publish. A vanished
-/// row publishes nothing. A Redis failure propagates — the publish
-/// sits in `on_commit` unisolated, so the source 500s after commit
-/// too. A missing client returns silently (`redis_instance()`
-/// returning `None`).
+/// Publish one event frame (`publish_event`,
+/// `services/chat.py:140-147`): re-read the row post-commit,
+/// serialize, and publish. A vanished row publishes nothing, a
+/// missing client returns silently (`redis_instance()` returning
+/// `None`), and every publish failure is swallowed with a log line —
+/// the source's `except Exception: logger.exception(...)` never 500s
+/// an event-appending endpoint. Only the post-commit re-read error
+/// propagates (no source equivalent past the publish guard).
 pub async fn publish_event_frame(
     pool: &PgPool,
     ports: &impl RunnerPorts,
@@ -1696,15 +1715,16 @@ pub async fn publish_event_frame(
         created_at: created_at.as_str(),
     });
     let channel = pidash_types::runner_runs::consts::event_channel(&session_id);
-    publish_chat_event(ports.redis_client(), &channel, &frame)
-        .await
-        .map_err(|_| server_error())
+    if let Err(error) = publish_chat_event(ports.redis_client(), &channel, &frame).await {
+        tracing::error!(?error, event_id, "chat.publish: publish failed, event kept");
+    }
+    Ok(())
 }
 
 /// Drain collected [`ChatEffect`]s after commit, in order, with
 /// Python's per-site isolation:
-/// * `PublishEvent` propagates Redis failures (500 with committed
-///   rows — the publish is an unisolated `on_commit`).
+/// * `PublishEvent` swallows Redis failures with a log line
+///   (`publish_event`'s `except Exception`).
 /// * `DrainTasks` swallows-and-logs under one guard, skipping the pod
 ///   drain when the runner drain fails (`_drain`, `chat.py:196-207`).
 /// * `SendChatMessage` / `SendChatWarm` run the mark-failed backstop
@@ -1901,20 +1921,29 @@ fn workspace_forbidden() -> Response {
     json_response(StatusCode::FORBIDDEN, r#"{"error":"forbidden"}"#.to_owned())
 }
 
+/// Django `request.query_params.get` for the web filters: the last
+/// value wins on repeats (`QueryDict`), and a missing or empty param
+/// disables the filter (the source's `if workspace_id:` / `if
+/// runner_id:` / `if project_id:` guards).
+fn query_param(params: &crate::license::QueryMap, key: &str) -> Option<String> {
+    crate::license::query_last(params, key).filter(|raw| !raw.is_empty())
+}
+
 /// `GET /api/runners/chat/sessions/` (`chat.py:140-189`): the
 /// workspace/runner/project filters, the visibility predicate, the
 /// admin rule, the 100 cap. Query params parse as UUIDs or 500
-/// (Django's `ValidationError` on filter).
+/// (Django's `ValidationError` on filter); empty params disable the
+/// filter and repeats take the last (see [`query_param`]).
 pub async fn chat_sessions_list(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<crate::license::QueryMap>,
 ) -> Response {
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let workspace_id: Option<Uuid> = match params.get("workspace") {
+    let workspace_id: Option<Uuid> = match query_param(&params, "workspace") {
         Some(raw) => {
             let workspace_id: Uuid = match raw.parse() {
                 Ok(workspace_id) => workspace_id,
@@ -1932,7 +1961,7 @@ pub async fn chat_sessions_list(
         None => None,
     };
     let mut force_empty = false;
-    let runner_id: Option<Uuid> = match params.get("runner") {
+    let runner_id: Option<Uuid> = match query_param(&params, "runner") {
         Some(raw) => {
             let runner_id: Uuid = match raw.parse() {
                 Ok(runner_id) => runner_id,
@@ -1978,7 +2007,7 @@ pub async fn chat_sessions_list(
         }
         None => None,
     };
-    let project_id: Option<Uuid> = match params.get("project") {
+    let project_id: Option<Uuid> = match query_param(&params, "project") {
         Some(raw) => match raw.parse() {
             Ok(project_id) => Some(project_id),
             Err(_) => return server_error(),
@@ -2634,7 +2663,7 @@ pub async fn chat_message_create(
         Some(message_id),
         "",
     );
-    if append_event(&mut tx, session_id, &timing, &mut effects)
+    if append_event(&mut tx, session_id, &timing, "", &mut effects)
         .await
         .is_err()
     {
@@ -2791,12 +2820,13 @@ pub async fn chat_session_close(
     if chat_kernel::turn_was_active(&locked.session) {
         // Active: flag only — never touches the body, so a garbage
         // body still closes-requests.
+        let updated_at = Utc::now();
         if sqlx::query(
             r#"UPDATE "agent_chat_session" SET "close_requested" = $1, "updated_at" = $2
                WHERE "id" = $3"#,
         )
         .bind(true)
-        .bind(Utc::now())
+        .bind(updated_at)
         .bind(session_id)
         .execute(&mut *tx)
         .await
@@ -2823,6 +2853,9 @@ pub async fn chat_session_close(
         }
         let mut session = locked.session;
         session.close_requested = true;
+        // `save()` refreshes the in-memory `updated_at` (auto_now)
+        // before the source serializes — render the bound stamp.
+        session.updated_at = updated_at;
         let detail = match fetch_runner_detail(&pool, session.runner_id).await {
             Ok(detail) => detail,
             Err(response) => return response,
@@ -2838,13 +2871,14 @@ pub async fn chat_session_close(
         None => return server_error(),
     };
     let closed_at = Utc::now();
+    let updated_at = Utc::now();
     if sqlx::query(
         r#"UPDATE "agent_chat_session" SET "status" = $1, "closed_at" = $2, "updated_at" = $3
            WHERE "id" = $4"#,
     )
     .bind(AgentChatSessionStatus::Closed.value())
     .bind(closed_at)
-    .bind(Utc::now())
+    .bind(updated_at)
     .bind(session_id)
     .execute(&mut *tx)
     .await
@@ -2859,7 +2893,7 @@ pub async fn chat_session_close(
         None,
         "",
     );
-    if append_event(&mut tx, session_id, &inputs, &mut effects)
+    if append_event(&mut tx, session_id, &inputs, "", &mut effects)
         .await
         .is_err()
     {
@@ -2889,6 +2923,7 @@ pub async fn chat_session_close(
     let mut session = locked.session;
     session.status = AgentChatSessionStatus::Closed;
     session.closed_at = Some(closed_at);
+    session.updated_at = updated_at;
     let detail = match fetch_runner_detail(&pool, session.runner_id).await {
         Ok(detail) => detail,
         Err(response) => return response,
@@ -2903,13 +2938,13 @@ pub async fn chat_session_close(
 pub async fn chat_approvals_list(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<crate::license::QueryMap>,
 ) -> Response {
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let workspace_id: Option<Uuid> = match params.get("workspace") {
+    let workspace_id: Option<Uuid> = match query_param(&params, "workspace") {
         Some(raw) => {
             let workspace_id: Uuid = match raw.parse() {
                 Ok(workspace_id) => workspace_id,
@@ -2948,7 +2983,8 @@ pub async fn chat_approvals_list(
              ON ("agent_chat_approval"."session_id" = "agent_chat_session"."id")
            INNER JOIN "runner"
              ON ("agent_chat_session"."runner_id" = "runner"."id")
-           WHERE "runner"."owner_id" = $1 AND "runner"."visibility" = $2"#,
+           WHERE "runner"."owner_id" = $1 AND "runner"."visibility" = $2
+             AND "agent_chat_approval"."status" = 'pending'"#,
     );
     let mut position = 3;
     if let Some(workspace_id) = workspace_id {
@@ -3115,7 +3151,7 @@ pub async fn chat_approval_decide(
         None,
         "",
     );
-    if append_event(&mut tx, session.id, &inputs, &mut effects)
+    if append_event(&mut tx, session.id, &inputs, "", &mut effects)
         .await
         .is_err()
     {
@@ -3317,7 +3353,7 @@ pub async fn daemon_chat_started(
         None,
         "",
     );
-    if append_event(&mut tx, session.id, &inputs, &mut effects)
+    if append_event(&mut tx, session.id, &inputs, "", &mut effects)
         .await
         .is_err()
     {
@@ -3428,9 +3464,15 @@ pub async fn daemon_chat_message_started(
         Some(assistant.id),
         &source_key,
     );
-    if append_event(&mut tx, session.id, &inputs, &mut effects)
-        .await
-        .is_err()
+    if append_event(
+        &mut tx,
+        session.id,
+        &inputs,
+        source_key.as_str(),
+        &mut effects,
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
@@ -3446,26 +3488,20 @@ pub async fn daemon_chat_message_started(
     json_response(StatusCode::OK, r#"{"ok":true}"#.to_owned())
 }
 
-/// `POST .../messages/<message_id>/events/` (`chat.py:599-654`): the
-/// header key is the `source_key` (a hit replays the stored event in
-/// the duplicate answer); otherwise the frame appends, `assistant_delta`
-/// payloads accumulate onto the assistant message, and the event
-/// links to it.
+/// `POST /api/v1/runner/chat/sessions/<session_id>/events/`
+/// (`chat.py:586-629`): the header key is the `source_key` (a hit
+/// replays the stored event in the duplicate answer); otherwise the
+/// frame appends, `assistant_delta` payloads accumulate onto the
+/// assistant message, and the event links to it.
 pub async fn daemon_chat_event(
     State(state): State<AppState>,
-    Path((session_id, message_id)): Path<(String, String)>,
+    Path(session_id): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
     let (pool, preamble) = match daemon_chat_preamble(&state, &session_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    // The message id rides the URL for routing only (the handler
-    // never reads it past the converter); an unparseable id is the
-    // endpoint's 404, as Django's `<uuid:>` resolution 404s.
-    if message_id.parse::<Uuid>().is_err() {
-        return daemon_chat_not_found();
-    }
     if preamble.key.is_empty() {
         return missing_idempotency_key();
     }
@@ -3534,10 +3570,11 @@ pub async fn daemon_chat_event(
         None,
         preamble.key.as_str(),
     );
-    let mut event = match append_event(&mut tx, session.id, &inputs, &mut effects).await {
-        Ok(event) => event,
-        Err(response) => return response,
-    };
+    let mut event =
+        match append_event(&mut tx, session.id, &inputs, &preamble.key, &mut effects).await {
+            Ok(event) => event,
+            Err(response) => return response,
+        };
     if kind == "assistant_delta" {
         let delta = assistant_delta_text(&payload);
         let mut assistant = match active_assistant(&mut tx, &session).await {
@@ -3585,24 +3622,9 @@ pub async fn daemon_chat_event(
             }
             event.message_id = Some(assistant.id);
         }
-    } else {
-        let assistant = match active_assistant(&mut tx, &session).await {
-            Ok(assistant) => assistant,
-            Err(response) => return response,
-        };
-        if let Some(assistant) = assistant {
-            if sqlx::query(r#"UPDATE "agent_chat_event" SET "message_id" = $1 WHERE "id" = $2"#)
-                .bind(assistant.id)
-                .bind(event.id)
-                .execute(&mut *tx)
-                .await
-                .is_err()
-            {
-                return server_error();
-            }
-            event.message_id = Some(assistant.id);
-        }
     }
+    // Non-delta events never link the assistant: the source links
+    // only inside `if kind == "assistant_delta"` (`chat.py:613-627`).
     if commit_tx(tx).await.is_err() {
         return server_error();
     }
@@ -3753,6 +3775,9 @@ pub async fn daemon_chat_approval(
         }
     };
     let mut effects = Vec::new();
+    // Hoisted: the probe needs the FULL key (past 160 chars a repeat
+    // misses and collides on insert, `services/chat.py:158-166`).
+    let approval_source_key = format!("approval_requested:{local_approval_id}");
     let inputs = chat_kernel::append_event_inputs(
         "approval_requested",
         Some(&serde_json::json!({
@@ -3760,11 +3785,17 @@ pub async fn daemon_chat_approval(
             "local_approval_id": local_approval_id,
         })),
         None,
-        &format!("approval_requested:{local_approval_id}"),
+        &approval_source_key,
     );
-    if append_event(&mut tx, session.id, &inputs, &mut effects)
-        .await
-        .is_err()
+    if append_event(
+        &mut tx,
+        session.id,
+        &inputs,
+        &approval_source_key,
+        &mut effects,
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
@@ -3949,9 +3980,15 @@ pub async fn daemon_chat_message_complete(
         None,
         &source_key,
     );
-    if append_event(&mut tx, session.id, &inputs, &mut effects)
-        .await
-        .is_err()
+    if append_event(
+        &mut tx,
+        session.id,
+        &inputs,
+        source_key.as_str(),
+        &mut effects,
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
@@ -4175,7 +4212,7 @@ pub fn daemon_routes() -> Router<AppState> {
             owned(post(daemon_chat_message_started), POST_ONLY),
         )
         .route(
-            "/api/v1/runner/chat/sessions/{session_id}/messages/{message_id}/events/",
+            "/api/v1/runner/chat/sessions/{session_id}/events/",
             owned(post(daemon_chat_event), POST_ONLY),
         )
         .route(
@@ -4486,5 +4523,35 @@ mod tests {
         assert!(!payload_too_large(&json!({"content": "hi"})));
         let big = json!({"content": "x".repeat(300 * 1024)});
         assert!(payload_too_large(&big));
+    }
+
+    #[test]
+    fn query_param_takes_last_and_ignores_empty() {
+        use crate::license::{OneOrMany, QueryMap};
+        use std::collections::HashMap;
+        let mut params: QueryMap = HashMap::new();
+        assert_eq!(query_param(&params, "workspace"), None);
+        params.insert(
+            "workspace".to_owned(),
+            OneOrMany::One("0192d3b4-8c1c-7a2e-9f4b-6d5c8b7a6e5d".to_owned()),
+        );
+        assert_eq!(
+            query_param(&params, "workspace").as_deref(),
+            Some("0192d3b4-8c1c-7a2e-9f4b-6d5c8b7a6e5d")
+        );
+        // Repeats take the last (`QueryDict.get`).
+        params.insert(
+            "workspace".to_owned(),
+            OneOrMany::Many(vec!["aaa".to_owned(), "bbb".to_owned()]),
+        );
+        assert_eq!(query_param(&params, "workspace").as_deref(), Some("bbb"));
+        // Empty disables the filter (`if workspace_id:`).
+        params.insert("workspace".to_owned(), OneOrMany::One(String::new()));
+        assert_eq!(query_param(&params, "workspace"), None);
+        params.insert(
+            "runner".to_owned(),
+            OneOrMany::Many(vec!["aaa".to_owned(), String::new()]),
+        );
+        assert_eq!(query_param(&params, "runner"), None);
     }
 }
