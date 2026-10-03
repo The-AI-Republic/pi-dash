@@ -42,6 +42,7 @@
 //! - the manager's triage exclusion drops NULL-state rows with it
 //!   (`NOT (group = 'triage')` over a left join, three-valued logic).
 
+pub mod queries_core;
 pub mod render;
 
 use std::collections::HashMap;
