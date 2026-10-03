@@ -123,8 +123,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Django-level FK delete behavior (ORM-emulated; same shape as the
-/// D-05 `integrations::OnDelete`, D-19 `v1_projects::models::OnDelete`
-/// and D-22 `v1_cli_auth::models::OnDelete`).
+/// D-05 `integrations::OnDelete` and D-22 `v1_cli_auth::models::OnDelete`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OnDelete {
     /// `models.SET_NULL` — FK column must be nullable.
