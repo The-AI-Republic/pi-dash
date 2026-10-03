@@ -17,7 +17,13 @@
 //!   desktop enroll/delete (K1-K3)
 //!   (`runner/views/pods.py`, `projects.py:31-77,97-124`,
 //!   `desktop.py:107-149,168-194`, PIDASHCONV-584).
+//! * [`manage_reads`] — machine list + serialize (M2/M3/M5),
+//!   scope/presence probes (M1/M4), revoke/rotate writes (M6/M7),
+//!   runner list (R1), detail (R2), patch + busy-guard (R3)
+//!   (`runner/views/runners.py:49-59,73-246,289-425` +
+//!   `machine_commands.py:63-73`, PIDASHCONV-583).
 //!
 //! Later D-13 layer issues extend this module; they add files here, never a fork.
 pub mod catalog_reads;
 pub mod enroll_reads;
+pub mod manage_reads;
