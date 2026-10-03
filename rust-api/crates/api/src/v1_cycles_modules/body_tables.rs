@@ -10,6 +10,7 @@
 //! - gb18030 ranges fuzz-verified (4061 vectors) against live decode;
 //! - iso2022 planes derived from CJK tables, diff-asserted cell by cell;
 //! - NFKC reference sweeps full BMP + fuzz vs ucd_3_2_0.normalize.
+//!
 //! Committed battery (`body_battery.rs`) replays stratified samples.
 
 // Lead / illegal-single sentinels for CJK `singles` (outside Unicode).

@@ -1180,8 +1180,8 @@ fn percent_decode_str(
     let mut run = Vec::new();
     // One ASCII run: decode, append, shift its spans to output offsets.
     let flush = |out: &mut String,
-                     surr: &mut Vec<(usize, u16)>,
-                     run: &mut Vec<u8>|
+                 surr: &mut Vec<(usize, u16)>,
+                 run: &mut Vec<u8>|
      -> Result<(), BodyError> {
         if run.is_empty() {
             return Ok(());
