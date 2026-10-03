@@ -60,7 +60,7 @@
 //! validates (so the value is a non-empty string): it probes
 //! `Label.objects.filter(project_id=…, name__iexact=…)` — soft-deleted
 //! rows excluded by `SoftDeletionManager`
-//! (`db/models/mixins.py:56-58`) — excluding the instance's own pk on
+//! (`db/mixins.py:56-58`) — excluding the instance's own pk on
 //! update, and raises `ValidationError("LABEL_NAME_ALREADY_EXISTS")`
 //! when a row exists. On Postgres `iexact` compiles to
 //! `UPPER(name::text) = UPPER($n)` with the raw value bound
@@ -161,7 +161,7 @@ pub const LABEL_NAME_CONFLICT_BODY: &str = "{\"name\":[\"LABEL_NAME_ALREADY_EXIS
 /// Django `.exists()` probe for the create arm of `validate_name`
 /// (`issue.py:564-572`): `labels` (`db_table`, `label.py:43`) with the
 /// `project_id` scope, the Postgres `iexact` spelling, and the
-/// `SoftDeletionManager` tombstone guard (`mixins.py:56-58`). `$1` is
+/// `SoftDeletionManager` tombstone guard (`db/mixins.py:56-58`). `$1` is
 /// the context `project_id`, `$2` the raw candidate name.
 pub const LABEL_NAME_CONFLICT_PROBE_SQL: &str = "SELECT 1 FROM labels WHERE project_id = $1 AND UPPER(name::text) = UPPER($2) AND deleted_at IS NULL LIMIT 1";
 
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn conflict_probe_sql_pins_clauses() {
         // TRACE: issue.py:566 (.filter over Label.objects =
-        // SoftDeletionManager, mixins.py:56-58; Postgres iexact =
+        // SoftDeletionManager, db/mixins.py:56-58; Postgres iexact =
         // UPPER(name::text) = UPPER($n)); :568-569 (.exclude(pk) =
         // NOT (id = …)).
         for sql in [
