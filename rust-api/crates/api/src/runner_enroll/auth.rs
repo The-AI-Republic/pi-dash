@@ -45,7 +45,9 @@
 //! DRF's `APIView.handle_exception` (`views.py:458-466`) coerces an
 //! `AuthenticationFailed`/`NotAuthenticated` to **403** when the view's
 //! *first* authenticator provides no `WWW-Authenticate` challenge, and
-//! answers **401** with that challenge otherwise. `APIKeyAuthentication`
+//! answers **401** with that challenge otherwise. (`NotAuthenticated`
+//! never survives as 403: the project's `auth_exception_handler` forces it
+//! back to 401 — see [`not_authenticated_response`].) `APIKeyAuthentication`
 //! defines no `authenticate_header` (base returns `None`), so the same
 //! `Given API token is not valid` failure is a 403 on the create endpoint
 //! (`authentication_classes = [APIKeyAuthentication]`,
@@ -123,11 +125,12 @@ pub const CODE_CREDENTIALS_NOT_PROVIDED: &str = "Authentication credentials were
 /// every 401 they produce.
 pub const AUTHENTICATE_HEADER_BEARER: &str = "Bearer";
 
-/// Render an `AuthenticationFailed(code)` / `NotAuthenticated` denial exactly
-/// like DRF's `APIView.handle_exception` + `exception_handler`
+/// Render an `AuthenticationFailed(code)` denial exactly like DRF's
+/// `APIView.handle_exception` + `exception_handler`
 /// (`views.py:458-466,71-101`): `{"Detail": code}` (capital `D`, compact
 /// JSON), 401 plus `WWW-Authenticate` when the view's first authenticator
 /// supplies a challenge, else coerced to 403 with no challenge header.
+/// (`NotAuthenticated` differs — see [`not_authenticated_response`].)
 ///
 /// Pass the consuming view's `get_authenticate_header` output: `Some("Bearer")`
 /// for every view whose first class is one of the three
@@ -157,10 +160,25 @@ pub fn bearer_failure_response(code: &str) -> Response {
 }
 
 /// The missing-credential denial (`NotAuthenticated` via `permission_denied`
-/// when every authenticator returns `None`): same coercion rule as
-/// [`auth_failure_response`].
+/// when every authenticator returns `None`): ALWAYS 401, on every view. The
+/// project's `auth_exception_handler` forces `response.status_code = 401`
+/// for `NotAuthenticated` (`authentication/adapter/exception.py:22-24`),
+/// undoing `handle_exception`'s 403 coercion — so unlike
+/// [`auth_failure_response`], the status never depends on the view's first
+/// authenticator. Only the `WWW-Authenticate` challenge is conditional
+/// (present iff the first authenticator supplies one). F4 pins this
+/// (`drf_failure_shapes.NotAuthenticated`: "custom handler forces 401").
 pub fn not_authenticated_response(first_authenticate_header: Option<&str>) -> Response {
-    auth_failure_response(CODE_CREDENTIALS_NOT_PROVIDED, first_authenticate_header)
+    let body = serde_json::json!({ "Detail": CODE_CREDENTIALS_NOT_PROVIDED }).to_string();
+    let mut builder = Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(challenge) = first_authenticate_header {
+        builder = builder.header(header::WWW_AUTHENTICATE, challenge);
+    }
+    builder
+        .body(axum::body::Body::from(body))
+        .expect("auth denial builds")
 }
 
 /// Unhandled-failure escape (`UnicodeDecodeError` on the header,
@@ -215,9 +233,8 @@ fn authorization_bytes(headers: &HeaderMap) -> Option<&[u8]> {
 /// Runner identity for the `mt_` path (`_request_runner_id`,
 /// `authentication.py:174-180`): the URL `runner_id` wins, else the
 /// `X-Runner-Id` header stripped, blank meaning absent. Both inputs are
-/// already decoded; the header decode (present-but-non-UTF-8 is the
-/// source's `ValidationError` at `get(id=...)`, i.e. 500) happens in
-/// [`x_runner_id`].
+/// already decoded; callers holding raw headers use [`request_runner_id`],
+/// which also keeps the source's laziness (URL wins without decoding).
 pub fn select_runner_id(url_runner_id: Option<&str>, x_runner_id: Option<&str>) -> Option<String> {
     if let Some(url) = url_runner_id {
         return Some(url.to_owned());
@@ -241,6 +258,24 @@ fn x_runner_id(headers: &HeaderMap) -> Result<Option<String>, Response> {
             .map(|raw| Some(raw.to_owned()))
             .map_err(|_| server_error()),
     }
+}
+
+/// Runner identity for the `mt_` branch with the source's laziness
+/// (`_request_runner_id`, `authentication.py:174-180`): the URL id wins
+/// WITHOUT reading the header at all, so non-UTF-8 `X-Runner-Id` bytes on
+/// a URL-scoped route are ignored rather than a 500. Only when the route
+/// carries no id is the header decoded and combined via
+/// [`select_runner_id`].
+#[allow(clippy::result_large_err)]
+fn request_runner_id(
+    url_runner_id: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<Option<String>, Response> {
+    if url_runner_id.is_some() {
+        return Ok(select_runner_id(url_runner_id, None));
+    }
+    let header = x_runner_id(headers)?;
+    Ok(select_runner_id(None, header.as_deref()))
 }
 
 // ---------------------------------------------------------------------------
@@ -683,8 +718,7 @@ async fn authenticate_access_machine_token(
     if !member_or_revoke(pool, &token).await? {
         return Err(bearer_failure_response(CODE_MEMBERSHIP_REVOKED));
     }
-    let header_runner_id = x_runner_id(headers)?;
-    let runner_raw = select_runner_id(url_runner_id, header_runner_id.as_deref());
+    let runner_raw = request_runner_id(url_runner_id, headers)?;
     let Some(runner_raw) = runner_raw else {
         return Err(bearer_failure_response(CODE_RUNNER_ID_REQUIRED));
     };
@@ -1044,6 +1078,37 @@ mod tests {
         );
     }
 
+    /// The URL runner id wins WITHOUT reading `X-Runner-Id`
+    /// (`_request_runner_id`, `authentication.py:174-180`): non-UTF-8
+    /// header bytes on a URL-scoped route are ignored, not a 500. Only a
+    /// header-only request decodes the header (undecodable bytes are the
+    /// source's `ValidationError`, i.e. 500).
+    #[test]
+    fn url_runner_id_skips_header_decode() {
+        let mut poisoned = HeaderMap::new();
+        poisoned.insert(
+            "x-runner-id",
+            header::HeaderValue::from_bytes(b"\xff\xfe").expect("obs-text header"),
+        );
+        // URL present: the header is never touched.
+        assert_eq!(
+            request_runner_id(Some("url-id"), &poisoned).unwrap(),
+            Some("url-id".to_owned())
+        );
+        // Header-only: undecodable bytes are a 500.
+        assert!(request_runner_id(None, &poisoned).is_err());
+        // Header-only, well-formed: the stripped value.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-runner-id",
+            header::HeaderValue::from_static("  hdr-id  "),
+        );
+        assert_eq!(
+            request_runner_id(None, &headers).unwrap(),
+            Some("hdr-id".to_owned())
+        );
+    }
+
     /// URL-runner match is the plain string inequality
     /// (`authentication.py:113`): canonical equal matches, anything else
     /// (including a differently-cased but equal UUID) mismatches.
@@ -1241,10 +1306,14 @@ mod tests {
         assert_eq!(body, r#"{"Detail":"Given API token is not valid"}"#);
     }
 
-    /// Missing-credential denial follows the same coercion
-    /// (`permission_denied` → `NotAuthenticated` → `handle_exception`).
+    /// Missing-credential denial is always 401: the project's
+    /// `auth_exception_handler` forces the status for `NotAuthenticated`
+    /// (`authentication/adapter/exception.py:22-24`), undoing the 403
+    /// coercion `handle_exception` applies when the first authenticator
+    /// supplies no challenge. Only the `WWW-Authenticate` header follows
+    /// the first authenticator (F4 `NotAuthenticated`).
     #[tokio::test]
-    async fn not_authenticated_follows_coercion() {
+    async fn not_authenticated_is_always_401() {
         let (status, headers, body) =
             response_parts(not_authenticated_response(Some("Bearer"))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -1254,8 +1323,10 @@ mod tests {
             r#"{"Detail":"Authentication credentials were not provided."}"#
         );
 
+        // The create endpoint's `[APIKeyAuthentication]`: still 401 (the
+        // adapter override), just without a challenge.
         let (status, headers, body) = response_parts(not_authenticated_response(None)).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert!(headers.get(header::WWW_AUTHENTICATE).is_none());
         assert_eq!(
             body,
