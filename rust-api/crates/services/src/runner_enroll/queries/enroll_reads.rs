@@ -810,7 +810,9 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
 /// `runner_enroll::serializers::shapes` documents the same gap for its
 /// `py_trim`; this also covers U+0085, which Python strips too.)
 fn py_strip(s: &str) -> &str {
-    s.trim_matches(|c: char| c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c))
+    s.trim_matches(|c: char| {
+        c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c)
+    })
 }
 
 /// D-path host label (`_get_or_create_dev_machine:78`,
