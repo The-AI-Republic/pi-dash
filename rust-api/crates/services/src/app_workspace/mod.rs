@@ -21,11 +21,16 @@
 //! * [`queries_membership`] — workspace member / invite / join-request
 //!   query builders (PIDASHCONV-609).
 //!
+//! * [`queries_core`] — workspace core querysets: lists, dashboard
+//!   bundle, themes, export-CSV (PIDASHCONV-608).
+//!
 //! Wiring note: the crate root declares `pub mod app_workspace;`.
 //! Sibling issues add their own siblings to this file (`ser_invite`
 //! PIDASHCONV-601, `ser_extras` PIDASHCONV-602, `ser_user`
 //! PIDASHCONV-603, `models_workspace` PIDASHCONV-605, `models_prefs`
-//! PIDASHCONV-606, `models_user` PIDASHCONV-607); on rebase keep both sides.
+//! PIDASHCONV-606, `models_user` PIDASHCONV-607, `queries_membership`
+//! PIDASHCONV-609, `queries_profile` PIDASHCONV-610); on rebase keep
+//! both sides.
 //!
 //! Fixture input: F-W24-01 (`rust-api/fixtures/app_workspace/`
 //! `serializers/workspace_core.golden.json` + `TRACE.md`), F-W24-02
@@ -34,7 +39,8 @@
 //! `serializers/account_token_fav.golden.json` + `TRACE.md`), F-W24-03
 //! (`rust-api/fixtures/app_workspace/` `serializers/extras.golden.json` +
 //! `TRACE.md`), F-W24-07 (`models/workspace_prefs.columns.json`, incl. the
-//! `UserFavorite` part), F-W24-08 (`models/user_token.columns.json`), and
+//! `UserFavorite` part), F-W24-08 (`models/user_token.columns.json`),
+//! F-W24-09 (`queries/core.sql` + `queries/core.rows.json`), and
 //! F-W24-10 (`queries/membership.sql` + `.rows.json`); the goldens are
 //! the Done-when oracles for this layer.
 //!
@@ -45,6 +51,7 @@
 
 pub mod models_prefs;
 pub mod models_user;
+pub mod queries_core;
 pub mod queries_membership;
 pub mod ser_account_token;
 pub mod ser_extras;
