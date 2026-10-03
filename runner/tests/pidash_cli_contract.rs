@@ -759,6 +759,42 @@ async fn run_yield_stop_ticking_succeeds_against_an_older_server_that_ignores_it
 }
 
 #[tokio::test]
+async fn run_yield_succeeds_for_a_scheduler_run() {
+    // A scheduler run has no work item. The server records the outcome on
+    // the run and answers 200 with `work_item_id: null` — the command must
+    // exit 0 on that shape, with the scheduler run's id on the same route
+    // an issue run uses.
+    let fake = start_fake(Box::new(|req| {
+        assert_eq!(req.method, "POST");
+        CannedResponse::ok(
+            r#"{"ok":true,"run_id":"471f1cf9-0000-4000-8000-000000000000","work_item_id":null,"outcome":"done","stop_ticking":false,"run_kind":"scheduler","scheduler_binding_id":"b1","detail":"outcome recorded; scheduled runs have no ticking clock, so stop_ticking was ignored"}"#,
+        )
+    }))
+    .await;
+    let run_id = "471f1cf9-0000-4000-8000-000000000000";
+    let client = client_for_run(&fake, run_id);
+    pidash::cli::run_cmd::cmd_yield(
+        &client,
+        pidash::cli::run_cmd::YieldArgs {
+            outcome: pidash::cli::run_cmd::Outcome::Done,
+            note: None,
+            run_id: None,
+            stop_ticking: true,
+        },
+    )
+    .await
+    .expect("a scheduler run's yield must succeed");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].path,
+        format!("/api/v1/workspaces/acme/agent-runs/{run_id}/yield/")
+    );
+    assert_eq!(recorded[0].run_id.as_deref(), Some(run_id));
+}
+
+#[tokio::test]
 async fn run_yield_without_a_run_id_fails_before_any_request() {
     let fake = start_fake(Box::new(|_req| CannedResponse::ok("{}"))).await;
     let client = client(&fake);
