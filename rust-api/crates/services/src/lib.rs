@@ -39,5 +39,6 @@ pub mod user_settings;
 pub mod v1_cycles_modules;
 pub mod v1_openapi;
 pub mod v1_projects;
+pub mod v1_work_items;
 
 pub use health::{db_summary, health_report};

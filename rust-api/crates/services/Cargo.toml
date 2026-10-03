@@ -13,7 +13,10 @@ pidash-auth = { path = "../auth" }
 # typed row builders.
 chrono = { version = "0.4.45", default-features = false, features = ["std", "serde"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1" }
+# D-18 work-item shapes: to_representation builds wire-ordered maps, so Map
+# must preserve insertion order (same locked serde_json 1.x + indexmap already
+# in rust-api/Cargo.lock via pidash-types — no lock churn).
+serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = { version = "2" }
 crc32fast = { version = "1" }
 flate2 = { version = "1" }
