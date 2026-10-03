@@ -15,6 +15,9 @@
 //! * [`models_prefs`] — per-user prefs/links + home/sidebar prefs +
 //!   recent visits models (PIDASHCONV-606).
 //!
+//! * [`queries_membership`] — workspace member / invite / join-request
+//!   query builders (PIDASHCONV-609).
+//!
 //! Wiring note: the crate root declares `pub mod app_workspace;`.
 //! Sibling issues add their own siblings to this file (`ser_workspace`
 //! PIDASHCONV-600, `ser_invite` PIDASHCONV-601, `ser_extras`
@@ -27,8 +30,9 @@
 //! `TRACE.md`), F-W24-05 (`rust-api/fixtures/app_workspace/`
 //! `serializers/account_token_fav.golden.json` + `TRACE.md`), F-W24-03
 //! (`rust-api/fixtures/app_workspace/` `serializers/extras.golden.json` +
-//! `TRACE.md`), and F-W24-07 (`models/workspace_prefs.columns.json`);
-//! the goldens are the Done-when oracles for this layer.
+//! `TRACE.md`), F-W24-07 (`models/workspace_prefs.columns.json`), and
+//! F-W24-10 (`queries/membership.sql` + `.rows.json`); the goldens are
+//! the Done-when oracles for this layer.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 //!
@@ -36,6 +40,7 @@
 //! (updated_at 2026-09-28T03:51:35.921141Z); PIDASHCONV-1 rulebook.
 
 pub mod models_prefs;
+pub mod queries_membership;
 pub mod ser_account_token;
 pub mod ser_extras;
 pub mod ser_invite;
