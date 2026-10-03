@@ -256,7 +256,9 @@ test(
           seed.workspaceSlug,
           seed.projectId,
           firstId,
-          { state_id: todoId, priority: null, assignee_ids: [], target_date: null },
+          // Priority clears with "none", not null (non-null CharField;
+          // null 400s the whole PATCH and the state restore never lands).
+          { state_id: todoId, priority: "none", assignee_ids: [], target_date: null },
           session
         );
       });

@@ -1425,7 +1425,10 @@ export class WebDriver implements ParityDriver {
     for (let i = 0; i < count; i++) {
       const header = sections.nth(i).locator('div[class*="group/list-header"]').first();
       if ((await header.count()) === 0) continue;
-      if (WebDriver.layoutsHeaderTitle((await header.innerText()) ?? "") === title) return sections.nth(i);
+      // Bounded like the row reads: a re-render mid-scan must not hang
+      // the caller to the test timeout.
+      const text = await header.innerText({ timeout: 10_000 }).catch(() => "");
+      if (text !== "" && WebDriver.layoutsHeaderTitle(text) === title) return sections.nth(i);
     }
     return null;
   }
@@ -1476,8 +1479,16 @@ export class WebDriver implements ParityDriver {
     const count = await rows.count();
     const names: string[] = [];
     for (let i = 0; i < count; i++) {
-      const text = await rows.nth(i).locator("p").first().innerText();
-      names.push(text.trim());
+      // A row mid-virtualization can detach between count() and the
+      // read; an unbounded read would hang to the test timeout, so a
+      // stuck row is skipped and the caller's poll re-reads instead.
+      const text = await rows
+        .nth(i)
+        .locator("p")
+        .first()
+        .innerText({ timeout: 10_000 })
+        .catch(() => "");
+      if (text.trim() !== "") names.push(text.trim());
     }
     return names;
   }
@@ -1494,7 +1505,11 @@ export class WebDriver implements ParityDriver {
   async layoutsListGroupLoadMore(title: string): Promise<void> {
     const section = await this.layoutsGroupSection(title);
     const before = await this.layoutsListGroupIssueNames(title);
-    await section.getByText("Load more").first().click();
+    // Fail fast when the row is absent: an unbounded click would hang to
+    // the test timeout (720s) with no actionable error.
+    const more = section.getByText("Load more").first();
+    await more.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await more.click({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     const deadline = Date.now() + 30_000;
     for (;;) {
       const after = await this.layoutsListGroupIssueNames(title);
@@ -1529,27 +1544,13 @@ export class WebDriver implements ParityDriver {
   }
 
   async layoutsRowCanEditState(issueName: string): Promise<boolean> {
-    // Guests and other read-only viewers render the chip without the
-    // dropdown. The dropdown carries its own search field, but the page
-    // already holds one, so editability reads as the field count growing
-    // after the click rather than as mere presence.
-    const search = this.page.getByPlaceholder("Search", { exact: true });
-    const before = await search.count();
+    // Read-only viewers (guests) render the chip disabled; members get an
+    // enabled chip that opens the state dropdown. The flag is the whole
+    // signal — opening the dropdown to probe it leaves shared menu state
+    // behind (a toggle-close race hung RowSetState for 300s), so no click.
     const chip = this.layoutsRowStateButton(issueName);
-    await chip.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
-    await chip.click();
-    const deadline = Date.now() + 5_000;
-    let opened = false;
-    for (;;) {
-      if ((await search.count()) > before) {
-        opened = true;
-        break;
-      }
-      if (Date.now() >= deadline) break;
-      await this.page.waitForTimeout(300);
-    }
-    await this.page.keyboard.press("Escape");
-    return opened;
+    await chip.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return !(await chip.isDisabled());
   }
 
   async layoutsRowHref(issueName: string): Promise<string | null> {
@@ -1575,9 +1576,19 @@ export class WebDriver implements ParityDriver {
     // The peek title is an editable textarea (a char counter like 18/255
     // sits beside it, which a text read would mistake for the title), so
     // the read takes the field value, falling back to the legacy line
-    // scan when the field is absent.
+    // scan when the field is absent. The panel shell renders before its
+    // issue fetch lands, so the read waits for content first.
     const panel = this.layoutsPeekPanel();
-    if ((await panel.count()) === 0) return null;
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await panel.count()) > 0) {
+        const field = panel.locator("textarea").first();
+        if ((await field.count()) > 0) return ((await field.inputValue()) ?? "").trim() || null;
+        if (/[A-Z]+-\d+/.test((await panel.innerText().catch(() => "")) ?? "")) break;
+      }
+      if (Date.now() >= deadline) return null;
+      await this.page.waitForTimeout(500);
+    }
     const field = panel.locator("textarea").first();
     if ((await field.count()) > 0) return ((await field.inputValue()) ?? "").trim() || null;
     const lines = ((await panel.innerText()) ?? "")
@@ -1623,11 +1634,12 @@ export class WebDriver implements ParityDriver {
   }
 
   async layoutsRowSubIssueNames(issueName: string): Promise<string[]> {
-    // Expanded children render as nested rows inside the parent's block,
-    // after the parent's own link.
+    // Expanded children render as sibling blocks inside the parent's own
+    // block container (an ancestor div carrying an issue_ id; the row
+    // link itself carries issue-<id>), after the parent's own link.
     const row = this.layoutsIssueRow(issueName);
     await row.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
-    const block = row.locator("xpath=..");
+    const block = row.locator('xpath=ancestor::div[starts-with(@id, "issue_")][1]');
     const nested = block.locator('a[id^="issue-"]');
     const count = await nested.count();
     const names: string[] = [];
@@ -1653,9 +1665,9 @@ export class WebDriver implements ParityDriver {
     const chip = this.layoutsRowStateButton(issueName);
     await chip.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     await chip.click();
-    // The option portal renders at the end of the document, after the
-    // row chips with the same text, so the last match is the option.
-    const option = this.page.getByRole("button", { name: stateName, exact: true }).last();
+    // The state menu is a listbox: its options carry the option role
+    // (the row chip keeps the button role, so no disambiguation needed).
+    const option = this.page.getByRole("option", { name: stateName, exact: true }).first();
     await option.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     await option.click();
     const deadline = Date.now() + 30_000;
@@ -1670,23 +1682,32 @@ export class WebDriver implements ParityDriver {
     // Priority is the first visible icon-only control in the strip: the
     // identifier is disabled, the state chip carries a span, the menu
     // triggers carry the toggle name, and the mobile trigger is hidden on
-    // desktop, so what remains first is the priority control.
+    // desktop, so what remains first is the priority control. The span
+    // check is explicit per candidate (a locator-level exclusion proved
+    // unreliable across engine versions and matched the state chip).
     const row = this.layoutsIssueRow(issueName);
     await row.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
-    const candidates = row.locator("button:not([disabled])").filter({ hasNot: row.locator("span") });
+    const candidates = row.locator("button:not([disabled])");
     const count = await candidates.count();
     for (let i = 0; i < count; i++) {
       const candidate = candidates.nth(i);
       if ((await candidate.getAttribute("aria-label")) === "Toggle quick actions menu") continue;
       if (!(await candidate.isVisible())) continue;
+      if ((await candidate.locator("span").count()) > 0) continue;
       return candidate;
     }
     throw new Error(`[parity] no priority control found on row "${issueName}".`);
   }
 
   async layoutsRowPriority(issueName: string): Promise<string> {
+    // The control is icon-only (no text, title, or label); the value is
+    // encoded in a border-priority-<value> marker class on its inner
+    // element. Absent marker (or a text render) reads as its fallback.
     const control = await this.layoutsRowPriorityControl(issueName);
     await control.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const html = (await control.innerHTML().catch(() => "")) ?? "";
+    const marker = html.match(/border-priority-([a-z]+)/)?.[1];
+    if (marker) return marker.charAt(0).toUpperCase() + marker.slice(1);
     const text = ((await control.innerText()) ?? "").trim();
     return text === "" ? "None" : text;
   }
@@ -1695,7 +1716,8 @@ export class WebDriver implements ParityDriver {
     const control = await this.layoutsRowPriorityControl(issueName);
     await control.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     await control.click();
-    const option = this.page.getByRole("button", { name: priorityName, exact: true }).last();
+    // Same listbox family as the state menu: options carry option role.
+    const option = this.page.getByRole("option", { name: priorityName, exact: true }).first();
     await option.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     await option.click();
     const deadline = Date.now() + 30_000;
@@ -1733,8 +1755,7 @@ export class WebDriver implements ParityDriver {
     const texts: string[] = [];
     for (let i = 0; i < count; i++) {
       const heading = items.nth(i).locator("h5").first();
-      const raw =
-        (await heading.count()) > 0 ? await heading.innerText() : await items.nth(i).innerText();
+      const raw = (await heading.count()) > 0 ? await heading.innerText() : await items.nth(i).innerText();
       texts.push((raw ?? "").trim().replace(/\s+/g, " "));
     }
     return texts;
@@ -1779,24 +1800,98 @@ export class WebDriver implements ParityDriver {
     throw new Error(`[parity] layouts driver ${target} not implemented yet.`);
   }
 
-  async layoutsSheetQuickAdd(_title: string): Promise<void> {
-    return this.layoutsTodo("layoutsSheetQuickAdd");
+  async layoutsSheetQuickAdd(title: string): Promise<void> {
+    // The sheet's add control is a plain button labelled for work items;
+    // the title form it opens is the shared quick-add form.
+    const trigger = this.page.getByRole("button", { name: "Add work item", exact: true }).first();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await trigger.click();
+    const field = this.page.getByPlaceholder("Work item title");
+    await field.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await field.fill(title);
+    await field.press("Enter");
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsSheetRowNames()).includes(title)) return;
+      if (Date.now() >= deadline) throw new Error("[parity] sheet quick-add never rendered its row.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
-  async layoutsSheetHasSubIssueToggle(_issueName: string): Promise<boolean> {
-    return this.layoutsTodo("layoutsSheetHasSubIssueToggle");
+  async layoutsSheetHasSubIssueToggle(issueName: string): Promise<boolean> {
+    // The leading cell's only button is the sub-issue chevron: selection
+    // renders a checkbox, the identifier is a link, so button presence
+    // is exactly the toggle's presence.
+    const first = this.layoutsSheetFirstCell(issueName);
+    await first.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return (await first.locator("button").count()) > 0;
   }
 
-  async layoutsSheetExpandSubIssues(_issueName: string): Promise<void> {
-    return this.layoutsTodo("layoutsSheetExpandSubIssues");
+  async layoutsSheetExpandSubIssues(issueName: string): Promise<void> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const cells = table.locator('td[id^="issue-"]');
+    const before = await cells.count();
+    const first = this.layoutsSheetFirstCell(issueName);
+    await first.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await first.locator("button").first().click();
+    // Expansion fetches the children, so new rows arrive asynchronously.
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await cells.count()) > before) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] sub-issues of "${issueName}" never rendered in the sheet.`);
+      await this.page.waitForTimeout(500);
+    }
   }
 
-  async layoutsSheetSubIssueNames(_issueName: string): Promise<string[]> {
-    return this.layoutsTodo("layoutsSheetSubIssueNames");
+  async layoutsSheetSubIssueNames(issueName: string): Promise<string[]> {
+    // Children render as the rows directly after the parent; each level
+    // indents with a wider spacer (inline width), so names are collected
+    // while the spacer stays wider than the parent's own.
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const cells = table.locator('tbody td[id^="issue-"]');
+    const count = await cells.count();
+    const names: string[] = [];
+    const depths: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const cell = cells.nth(i);
+      const label = cell.locator("p").first();
+      names.push((((await label.innerText().catch(() => "")) ?? "") as string).trim());
+      const spacer = cell.locator('div[style*="width"]').first();
+      const width =
+        (await spacer.count()) > 0 ? await spacer.evaluate((node) => (node as HTMLElement).style.width) : "";
+      depths.push(Number.parseFloat(width) || 0);
+    }
+    const parent = names.indexOf(issueName);
+    if (parent < 0) throw new Error(`[parity] no sheet row "${issueName}".`);
+    const parentDepth = depths[parent] ?? 0;
+    const out: string[] = [];
+    for (let i = parent + 1; i < count; i++) {
+      if ((depths[i] ?? 0) <= parentDepth) break;
+      const name = names[i] ?? "";
+      if (name !== "") out.push(name);
+    }
+    return out;
   }
 
-  async layoutsSheetOpenSubIssueCount(_issueName: string): Promise<void> {
-    return this.layoutsTodo("layoutsSheetOpenSubIssueCount");
+  async layoutsSheetOpenSubIssueCount(issueName: string): Promise<void> {
+    // The sub-issues column cell carries a "N sub-work item(s)" label that
+    // navigates to the issue's detail; the click landing is proven by the
+    // URL changing underneath it.
+    const first = this.layoutsSheetFirstCell(issueName);
+    await first.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const row = first.locator("xpath=ancestor::tr[1]");
+    const label = row.getByText(/sub-work items?/).first();
+    await label.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const before = this.page.url();
+    await label.click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (this.page.url() !== before) return;
+      if (Date.now() >= deadline) throw new Error("[parity] sub-issue count never navigated.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   // --- Calendar layout (ISS-021..026). Day tiles are a static month
@@ -1899,7 +1994,7 @@ export class WebDriver implements ParityDriver {
       const buttons = panel.locator("div.grid.grid-cols-4 > button");
       const count = await buttons.count();
       const months: string[] = [];
-      for (let i = 0; i < count; i++) months.push((((await buttons.nth(i).innerText()) ?? "").trim()));
+      for (let i = 0; i < count; i++) months.push(((await buttons.nth(i).innerText()) ?? "").trim());
       return months;
     } finally {
       await this.page.keyboard.press("Escape");
@@ -1911,7 +2006,7 @@ export class WebDriver implements ParityDriver {
     try {
       const year = panel.locator("span.text-11").first();
       await year.waitFor({ timeout: 15_000 });
-      return Number.parseInt((((await year.innerText()) ?? "").trim()), 10);
+      return Number.parseInt(((await year.innerText()) ?? "").trim(), 10);
     } finally {
       await this.page.keyboard.press("Escape");
     }
@@ -1921,14 +2016,14 @@ export class WebDriver implements ParityDriver {
     const panel = await this.layoutsCalOpenMonthPicker();
     try {
       const year = panel.locator("span.text-11").first();
-      const before = (((await year.innerText()) ?? "").trim());
+      const before = ((await year.innerText()) ?? "").trim();
       const header = year.locator("xpath=..");
       const buttons = header.locator("button");
       if (direction === "prev") await buttons.first().click();
       else await buttons.last().click();
       const deadline = Date.now() + 15_000;
       for (;;) {
-        if ((((await year.innerText()) ?? "").trim()) !== before) return;
+        if (((await year.innerText()) ?? "").trim() !== before) return;
         if (Date.now() >= deadline) throw new Error("[parity] month picker year never stepped.");
         await this.page.waitForTimeout(300);
       }
@@ -1967,7 +2062,10 @@ export class WebDriver implements ParityDriver {
   async layoutsCalSetMode(mode: "month" | "week"): Promise<void> {
     const panel = await this.layoutsCalOpenOptions();
     try {
-      await panel.locator("button", { hasText: mode === "month" ? "Month layout" : "Week layout" }).first().click();
+      await panel
+        .locator("button", { hasText: mode === "month" ? "Month layout" : "Week layout" })
+        .first()
+        .click();
     } finally {
       await this.page.keyboard.press("Escape");
     }
@@ -1984,7 +2082,7 @@ export class WebDriver implements ParityDriver {
     const cells = this.layoutsCalWeekHeaderCells();
     const count = await cells.count();
     for (let i = 0; i < count; i++) {
-      if ((((await cells.nth(i).innerText()) ?? "").trim()) === "Sat") return true;
+      if (((await cells.nth(i).innerText()) ?? "").trim() === "Sat") return true;
     }
     return false;
   }
@@ -2022,7 +2120,7 @@ export class WebDriver implements ParityDriver {
     const count = await blocks.count();
     const names: string[] = [];
     for (let i = 0; i < count; i++) {
-      names.push((((await this.layoutsCalBlockName(blocks.nth(i)).innerText()) ?? "").trim()));
+      names.push(((await this.layoutsCalBlockName(blocks.nth(i)).innerText()) ?? "").trim());
     }
     return names;
   }
@@ -2140,7 +2238,7 @@ export class WebDriver implements ParityDriver {
     const count = await blocks.count();
     const names: string[] = [];
     for (let i = 0; i < count; i++) {
-      names.push((((await this.layoutsCalBlockName(blocks.nth(i)).innerText()) ?? "").trim()));
+      names.push(((await this.layoutsCalBlockName(blocks.nth(i)).innerText()) ?? "").trim());
     }
     return names;
   }
@@ -2154,7 +2252,7 @@ export class WebDriver implements ParityDriver {
     const count = await entries.count();
     for (let i = 0; i < count; i++) {
       const heading = entries.nth(i).locator("h5").first();
-      if ((await heading.count()) > 0 && (((await heading.innerText()) ?? "").trim()) === item) {
+      if ((await heading.count()) > 0 && ((await heading.innerText()) ?? "").trim() === item) {
         return entries.nth(i);
       }
     }
@@ -2165,7 +2263,7 @@ export class WebDriver implements ParityDriver {
     const entry = await this.layoutsOpenRowMenuItem(issueName, item);
     try {
       if (((await entry.getAttribute("aria-disabled")) ?? "") === "true") return true;
-      return (((await entry.getAttribute("class")) ?? "").includes("text-placeholder"));
+      return ((await entry.getAttribute("class")) ?? "").includes("text-placeholder");
     } finally {
       await this.page.keyboard.press("Escape");
     }
@@ -2176,7 +2274,7 @@ export class WebDriver implements ParityDriver {
     try {
       const note = entry.locator("p").first();
       if ((await note.count()) === 0) return null;
-      return (((await note.innerText()) ?? "").trim().replace(/\s+/g, " "));
+      return ((await note.innerText()) ?? "").trim().replace(/\s+/g, " ");
     } finally {
       await this.page.keyboard.press("Escape");
     }
@@ -2193,7 +2291,7 @@ export class WebDriver implements ParityDriver {
   async layoutsWorkItemModalTitle(): Promise<string | null> {
     const heading = this.layoutsWorkItemModalTitleHeading();
     if ((await heading.count()) === 0) return null;
-    return (((await heading.innerText()) ?? "").trim());
+    return ((await heading.innerText()) ?? "").trim();
   }
 
   async layoutsWorkItemModalClose(): Promise<void> {
@@ -2260,9 +2358,7 @@ export class WebDriver implements ParityDriver {
     // The submit button ("Add selected work items") exists only while
     // the modal is open; the search input placeholder is shared with
     // other pickers, so the submit button is the marker.
-    return (
-      (await this.page.getByRole("button", { name: "Add selected work items", exact: true }).count()) > 0
-    );
+    return (await this.page.getByRole("button", { name: "Add selected work items", exact: true }).count()) > 0;
   }
 
   async layoutsAddExistingModalChoose(issueName: string): Promise<void> {
@@ -2371,7 +2467,7 @@ export class WebDriver implements ParityDriver {
     if ((await scope.count()) === 0) return null;
     const heading = scope.locator("h3").first();
     if ((await heading.count()) === 0) return null;
-    return (((await heading.innerText()) ?? "").trim());
+    return ((await heading.innerText()) ?? "").trim();
   }
 
   async layoutsEmptyActions(): Promise<Array<{ label: string; disabled: boolean }>> {
@@ -2382,7 +2478,7 @@ export class WebDriver implements ParityDriver {
     const actions: Array<{ label: string; disabled: boolean }> = [];
     for (let i = 0; i < count; i++) {
       actions.push({
-        label: (((await buttons.nth(i).innerText()) ?? "").trim().replace(/\s+/g, " ")),
+        label: ((await buttons.nth(i).innerText()) ?? "").trim().replace(/\s+/g, " "),
         disabled: await buttons.nth(i).isDisabled(),
       });
     }
@@ -2406,11 +2502,29 @@ export class WebDriver implements ParityDriver {
   }
 
   async layoutsSkeletonVisible(): Promise<boolean> {
-    return this.layoutsTodo("layoutsSkeletonVisible");
+    // Skeleton rows render as dozens of pulsing placeholder spans (the
+    // full loader paints three sections; group pagination paints rows).
+    // A lone pulsing overlay is the optimistic temp row instead, so the
+    // read thresholds well above one.
+    return (await this.page.locator('[class*="animate-pulse"]').count()) >= 5;
   }
 
   async layoutsMutationSpinnerVisible(): Promise<boolean> {
-    return this.layoutsTodo("layoutsMutationSpinnerVisible");
+    // Mutations float a fixed top-right box holding a status spinner
+    // while the request is in flight; toasts also use the status role
+    // but dock bottom-right, so the read scopes to fixed ancestors.
+    const boxes = this.page.locator("div.fixed", { has: this.page.locator('[role="status"]') });
+    const count = await boxes.count();
+    for (let i = 0; i < count; i++) {
+      if (
+        await boxes
+          .nth(i)
+          .isVisible()
+          .catch(() => false)
+      )
+        return true;
+    }
+    return false;
   }
 
   async layoutsRowHighlighted(issueName: string): Promise<boolean> {
@@ -2420,7 +2534,7 @@ export class WebDriver implements ParityDriver {
     const block = this.layoutsIssueRow(issueName);
     const deadline = Date.now() + 15_000;
     for (;;) {
-      if ((await block.count()) > 0 && (((await block.first().getAttribute("class")) ?? "").includes("highlight")))
+      if ((await block.count()) > 0 && ((await block.first().getAttribute("class")) ?? "").includes("highlight"))
         return true;
       if (Date.now() >= deadline) return false;
       await this.page.waitForTimeout(300);
@@ -2428,15 +2542,79 @@ export class WebDriver implements ParityDriver {
   }
 
   async layoutsTempRowVisible(): Promise<boolean> {
-    return this.layoutsTodo("layoutsTempRowVisible");
+    // An unconfirmed quick-add paints its row link with a pulsing
+    // overlay until the server confirms; skeleton placeholders are bare
+    // divs, never row links, so scoping to links disambiguates.
+    const rows = this.page.locator('a[id^="issue-"]', { has: this.page.locator('[class*="animate-pulse"]') });
+    const count = await rows.count();
+    for (let i = 0; i < count; i++) {
+      if (
+        await rows
+          .nth(i)
+          .isVisible()
+          .catch(() => false)
+      )
+        return true;
+    }
+    return false;
   }
 
-  async layoutsSheetCellSetDueDate(_issueName: string, _isoDate: string): Promise<void> {
-    return this.layoutsTodo("layoutsSheetCellSetDueDate");
+  async layoutsSheetCellSetDueDate(issueName: string, isoDate: string): Promise<void> {
+    // The due-date cell opens a month calendar in a portal: pick the
+    // month and year through its caption dropdowns, then the day. The
+    // grid also renders neighbouring-month days, so the click targets a
+    // day of the open month only (aria-label carries the month name).
+    const cell = await this.layoutsSheetCell(issueName, "Due date");
+    const trigger = cell.locator("button:not([disabled])").first();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await trigger.click();
+    const [year, month, day] = isoDate.split("-").map((part) => Number.parseInt(part, 10));
+    const monthNames = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+    const monthName = monthNames[(month ?? 1) - 1] ?? "";
+    const dialog = this.page.locator('[role="dialog"]').last();
+    await dialog.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const selects = dialog.locator("select");
+    if ((await selects.count()) >= 2) {
+      await selects.nth(0).selectOption({ label: monthName });
+      await selects.nth(1).selectOption({ label: String(year) });
+    }
+    const dayButton = dialog.getByRole("button", { name: `${monthName} ${day}, ${year}`, exact: true }).first();
+    await dayButton.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await dayButton.click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsSheetCellText(issueName, "Due date")).includes(String(day))) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] sheet cell never showed due day "${day}".`);
+      await this.page.waitForTimeout(500);
+    }
   }
 
-  async layoutsSheetCellSetAssignee(_issueName: string, _memberName: string): Promise<void> {
-    return this.layoutsTodo("layoutsSheetCellSetAssignee");
+  async layoutsSheetCellSetAssignee(issueName: string, memberName: string): Promise<void> {
+    const cell = await this.layoutsSheetCell(issueName, "Assignees");
+    const trigger = cell.locator("button:not([disabled])").first();
+    await this.layoutsSheetPickOption(trigger, memberName, issueName);
+    // The assignee cell renders avatars, not the name, so the menu
+    // closing (the option leaving the document) proves the pick landed.
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      const option = this.page.getByRole("option", { name: memberName, exact: true });
+      if ((await option.count()) === 0) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] assignee menu never closed on "${memberName}".`);
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsCalDayAddExisting(dayNumber: number): Promise<void> {
@@ -2465,7 +2643,7 @@ export class WebDriver implements ParityDriver {
     const names: string[] = [];
     const count = await options.count();
     for (let i = 0; i < count; i++) {
-      names.push((((await options.nth(i).locator("span.truncate").first().innerText()) ?? "").trim()));
+      names.push(((await options.nth(i).locator("span.truncate").first().innerText()) ?? "").trim());
     }
     return names;
   }
@@ -2498,7 +2676,10 @@ export class WebDriver implements ParityDriver {
     const dialog = this.page.getByRole("dialog");
     if ((await dialog.count()) === 0) return false;
     if ((await dialog.getByText(text, { exact: false }).count()) > 0) return true;
-    return (await dialog.getByDisplayValue(text).count()) > 0;
+    return dialog.first().evaluate((node, want) => {
+      const fields = node.querySelectorAll("input, textarea, select");
+      return Array.from(fields).some((field) => ((field as HTMLInputElement).value ?? "").includes(want));
+    }, text);
   }
 
   async layoutsListPageMenuChoose(item: string): Promise<void> {
@@ -2530,8 +2711,12 @@ export class WebDriver implements ParityDriver {
     }
   }
 
-  async layoutsSheetToggleSubIssues(_issueName: string): Promise<void> {
-    return this.layoutsTodo("layoutsSheetToggleSubIssues");
+  async layoutsSheetToggleSubIssues(issueName: string): Promise<void> {
+    // Same chevron as expand, but with no row-count expectation: past the
+    // nesting limit the toggle opens peek instead of expanding inline.
+    const first = this.layoutsSheetFirstCell(issueName);
+    await first.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await first.locator("button").first().click();
   }
   // --- NEWFRONT-117 round 2: spreadsheet (ISS-015..020). ---
 
@@ -2608,11 +2793,14 @@ export class WebDriver implements ParityDriver {
     const count = await cells.count();
     const names: string[] = [];
     for (let i = 0; i < count; i++) {
+      // Bounded like the list reads: a re-render mid-scan must not hang
+      // the caller to the test timeout.
       const cell = cells.nth(i);
       const label = cell.locator("p").first();
-      names.push((((await label.innerText().catch(() => "")) ?? "") as string).trim());
+      const text = await label.innerText({ timeout: 10_000 }).catch(() => "");
+      if (((text ?? "") as string).trim() !== "") names.push(((text ?? "") as string).trim());
     }
-    return names.filter((name) => name !== "");
+    return names;
   }
 
   async layoutsSheetFirstColumnSticky(): Promise<boolean> {
@@ -2655,9 +2843,9 @@ export class WebDriver implements ParityDriver {
   private async layoutsSheetPickOption(trigger: Locator, optionName: string, _issueName: string): Promise<void> {
     await trigger.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     await trigger.click();
-    // Dropdown portals render at the end of the document, after any row
-    // control carrying the same text, so the last match is the option.
-    const option = this.page.getByRole("button", { name: optionName, exact: true }).last();
+    // The property menus are listboxes (same family as the row's state
+    // menu): options carry the option role, not button.
+    const option = this.page.getByRole("option", { name: optionName, exact: true }).first();
     await option.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     await option.click();
   }

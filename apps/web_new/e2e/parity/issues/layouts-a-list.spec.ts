@@ -19,8 +19,8 @@ import {
   serverIssues,
   serverListStates,
   serverPatchIssue,
+  serverPatchProject,
   serverPatchProjectUserProperties,
-  serverWorkspaceUserId,
   sessionBrowserCookies,
   signInSession,
   uniqueSuffix,
@@ -233,6 +233,12 @@ test(
         expect(await driver.layoutsListGroupHasLoadMore("Todo")).toEqual(true);
         await driver.layoutsListGroupLoadMore("Todo");
         expect(await driver.layoutsListGroupHasLoadMore("Todo")).toEqual(false);
+        // Loaded rows virtualize: the tail renders only once scrolled
+        // into view, so drive the list down before asserting on it.
+        for (let scroll = 0; scroll < 6; scroll++) {
+          if ((await driver.layoutsListGroupIssueNames("Todo")).includes(tailName ?? "")) break;
+          await driver.layoutsListScrollEnd();
+        }
         await expect
           .poll(async () => driver.layoutsListGroupIssueNames("Todo"), { timeout: 300_000 })
           .toContain(tailName);
@@ -338,12 +344,20 @@ test(
 
       await driver.layoutsRowSetState(first, stateName);
       expect(await driver.layoutsRowState(first)).toEqual(stateName);
-      expect((await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, session)).stateId).toEqual(stateId);
+      // The row updates optimistically; the server PATCH lands after.
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, session)).stateId, {
+          timeout: 30_000,
+        })
+        .toEqual(stateId);
 
       await driver.layoutsRowSetPriority(first, "High");
       expect(await driver.layoutsRowPriority(first)).toEqual("High");
-      const priority = (await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, session)).priority;
-      expect((priority ?? "").toLowerCase()).toEqual("high");
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, session)).priority, {
+          timeout: 30_000,
+        })
+        .toEqual(expect.stringMatching(/^[Hh]igh$/));
 
       await driver.layoutsRowSetState(first, "Todo");
       await driver.layoutsRowSetPriority(first, "None");
@@ -355,9 +369,23 @@ test(
           seed.workspaceSlug,
           seed.projectId,
           firstId,
-          { state_id: todoId, priority: null },
+          // Priority clears with "none", not null (non-null CharField;
+          // null 400s the whole PATCH and the state restore never lands).
+          { state_id: todoId, priority: "none" },
           session
         ).catch(() => {});
+        // The row shows the restored state before the server persists
+        // it; deleting the temp state first answers 400, so wait for
+        // the move to land.
+        const deadline = Date.now() + 30_000;
+        for (;;) {
+          const current = await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, session).catch(
+            () => null
+          );
+          if (current?.stateId === todoId) break;
+          if (Date.now() >= deadline) break;
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
       }
       await serverDeleteState(seed.workspaceSlug, seed.projectId, stateId, session);
       await resetPrefs(seed.workspaceSlug, seed.projectId, session);
@@ -373,14 +401,13 @@ test(
     if (!seed.guestEmail || !seed.guestPassword) {
       throw new Error("[parity] seed facts carry no guest; re-run the stack seed step (see stack/README.md).");
     }
-    // Guests only see issues assigned to them, so the owner shares the
-    // first seed issue before the guest opens the list.
+    // Guests see only issues they created (the server drops guest
+    // assignees silently — role__gte=15 — and guests cannot create), so
+    // the owner flips guest_view_all_features for this test and restores
+    // it after; the flag is project-scoped and reversible.
     const ownerSession = await signInSession(seed.email, seed.password);
-    const guestId = await serverWorkspaceUserId(seed.workspaceSlug, seed.guestEmail, ownerSession);
-    const rows = await serverIssues(seed.workspaceSlug, seed.projectId, ownerSession);
     const first = seed.issueNames[0] ?? "";
-    const firstId = rows.find((row) => row.name === first)?.id ?? "";
-    await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { assignee_ids: [guestId] }, ownerSession);
+    await serverPatchProject(seed.workspaceSlug, seed.projectId, ownerSession, { guest_view_all_features: true });
     const guestSession = await signInSession(seed.guestEmail, seed.guestPassword);
     try {
       await resetPrefs(seed.workspaceSlug, seed.projectId, ownerSession);
@@ -391,7 +418,7 @@ test(
       expect(await driver.layoutsRowState(first)).toEqual("Todo");
       expect(await driver.layoutsRowCanEditState(first)).toEqual(false);
     } finally {
-      await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { assignee_ids: [] }, ownerSession);
+      await serverPatchProject(seed.workspaceSlug, seed.projectId, ownerSession, { guest_view_all_features: false });
     }
   }
 );
