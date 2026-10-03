@@ -57,19 +57,23 @@ test(
       expect(namesBefore).toEqual(expect.arrayContaining(["Your work", "Drafts"]));
 
       // Dropping an entry onto another moves it into that slot, so the
-      // expected order follows from whichever order we started from.
+      // expected order follows from whichever order we started from. Drag
+      // the top entry onto the one below it: the driver lands near the
+      // target's bottom edge, which only moves past the target when the
+      // drag runs downward (fresh seeds list Drafts first).
       const moved = (names: string[], dragged: string, target: string): string[] => {
         const next = names.filter((n) => n !== dragged);
         next.splice(names.indexOf(target), 0, dragged);
         return next;
       };
+      const [first, second] = namesBefore;
 
-      await driver.movePersonalItem("Your work", "Drafts");
+      await driver.movePersonalItem(first, second);
       await expect
         .poll(() => driver.personalItemNames(), { timeout: 15_000 })
-        .toEqual(moved(namesBefore, "Your work", "Drafts"));
+        .toEqual(moved(namesBefore, first, second));
 
-      await driver.movePersonalItem("Drafts", "Your work");
+      await driver.movePersonalItem(second, first);
       await expect.poll(() => driver.personalItemNames(), { timeout: 15_000 }).toEqual(namesBefore);
       await driver.page.keyboard.press("Escape");
     });
