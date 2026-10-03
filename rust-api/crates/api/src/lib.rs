@@ -33,6 +33,7 @@ pub mod app_pages;
 pub mod app_project;
 pub mod app_scheduler;
 pub mod app_views_search;
+pub mod app_workspace;
 pub mod assistant;
 pub mod auth_oauth;
 pub mod auth_session;
