@@ -1405,15 +1405,6 @@ export async function sessionValid(sessionCookie: string, apiBase: string = apiB
   return res.ok;
 }
 
-/** Deactivate the session's own account (same call the deactivate dialog makes). */
-export async function deactivateOwnAccount(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<void> {
-  const res = await fetch(`${apiBase}/api/users/me/`, {
-    method: "DELETE",
-    headers: { cookie: sessionCookie },
-  });
-  if (!res.ok && res.status !== 204) throw new Error(`[parity] deactivation failed with HTTP ${res.status}.`);
-}
-
 /** Start a CLI device flow; resolves with the user code to approve. */
 export async function startDeviceFlow(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<string> {
   const res = await fetch(`${apiBase}/api/v1/auth/device/start/`, {

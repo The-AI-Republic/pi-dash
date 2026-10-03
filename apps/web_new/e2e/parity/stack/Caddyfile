@@ -17,8 +17,11 @@
 	# advertises this URL as the CLI verification_uri, so the page must
 	# reach the frontend. First match wins: this exception stays ahead.
 	# (NEWFRONT-109: exact /auth/device and anything beneath it.)
+	# Honors the same ORACLE_UPSTREAM override as the catch-all below, so
+	# natively run frontends serve this page too (review: hardcoded
+	# oracle:3000 502d device routes whenever the override was set).
 	handle /auth/device* {
-		reverse_proxy oracle:3000
+		reverse_proxy {$ORACLE_UPSTREAM:oracle:3000}
 	}
 	handle /auth/* {
 		reverse_proxy api:8000

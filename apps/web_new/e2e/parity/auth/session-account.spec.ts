@@ -10,13 +10,19 @@
 // Recorded exceptions (see the hand-off comment; the issue pre-authorizes
 // explicit exceptions for desktop-only steps that cannot run here):
 // AUTH-022 and AUTH-023 have no scenario in this file. Verified against the
-// old tree: the OSS checkout has no OAuth provider flow (no provider buttons
-// in the auth forms, no error landing reading an error param), no
-// desktop-exchange endpoint, and the unavailable card
-// (ce/components/desktop/sign-in-card.tsx) renders only inside the desktop
-// build, which cannot run in this checkout. There is no web-observable seam
-// for either row here, so the parent merge run must cover them against an
+// old tree: the system-browser login plus pidash://auth/callback return
+// needs the desktop build, which cannot run in this checkout; the server
+// has no desktop-exchange endpoint; and both the error landing
+// (?error=/?error_description= "Sign-in didn't complete" alert) and the
+// unavailable card (ce/components/desktop/sign-in-card.tsx) render only
+// inside the desktop build. The web-observable provider pieces (provider
+// buttons when the instance enables OAuth, error_code failure banners)
+// belong to AUTH-003/AUTH-006, owned by a sibling, and the seeded stack
+// configures no OAuth provider — so no seam for either row is testable
+// here, and the parent merge run must cover them against an
 // edition/desktop build instead.
+// AUTH-017's desktop clause (the local webview store is wiped on sign-out)
+// is likewise desktop-only and has no scenario here for the same reason.
 import { test, expect } from "../fixtures";
 import {
   approveDeviceCode,
