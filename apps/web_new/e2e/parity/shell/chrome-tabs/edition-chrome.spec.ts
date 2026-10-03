@@ -11,6 +11,7 @@
 // inventory. Rows: SHELL-099 (suppression half), SHELL-100, SHELL-101,
 // SHELL-102.
 import { test, expect } from "../../fixtures";
+import { serverSetTourCompleted, signInSession } from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
 
 const ROWS = ["SHELL-099", "SHELL-100", "SHELL-101", "SHELL-102"];
@@ -22,6 +23,10 @@ test(
     await test.step("sign in through the UI", async () => {
       await driver.signInWithPassword(seed.email, seed.password);
     });
+
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    const session = await signInSession(seed.email, seed.password);
+    await serverSetTourCompleted(session, true);
 
     await test.step("rail-suppressed pages keep full content width", async () => {
       await driver.openWorkspaceHome(seed.workspaceSlug);

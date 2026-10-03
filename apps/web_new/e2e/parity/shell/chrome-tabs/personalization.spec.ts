@@ -13,7 +13,12 @@
 // target (bug NEWFRONT-137; web_new persists per member). Rows: SHELL-070,
 // SHELL-071.
 import { test, expect } from "../../fixtures";
-import { getWorkspaceUserProperties, patchWorkspaceUserProperties, signInSession } from "../../helpers/api";
+import {
+  getWorkspaceUserProperties,
+  patchWorkspaceUserProperties,
+  serverSetTourCompleted,
+  signInSession,
+} from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
 
 const ROWS_070 = ["SHELL-070"];
@@ -26,6 +31,10 @@ test(
     await test.step("sign in through the UI", async () => {
       await driver.signInWithPassword(seed.email, seed.password);
     });
+
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    const session = await signInSession(seed.email, seed.password);
+    await serverSetTourCompleted(session, true);
 
     await test.step("personal toggles flip with an immediate sidebar effect", async () => {
       await driver.openWorkspaceHome(seed.workspaceSlug);
@@ -75,6 +84,8 @@ test(
       await driver.signInWithPassword(seed.email, seed.password);
     });
     const session = await signInSession(seed.email, seed.password);
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    await serverSetTourCompleted(session, true);
     const originalProps = await getWorkspaceUserProperties(seed.workspaceSlug, session);
     const originalMode = (originalProps["navigation_control_preference"] as string | undefined) ?? "ACCORDION";
     const originalLimit = originalProps["navigation_project_limit"] as number | null | undefined;

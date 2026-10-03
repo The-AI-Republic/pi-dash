@@ -9,6 +9,7 @@
 // float it above content and collapse it on outside taps; collapse survives
 // reloads. Rows: SHELL-067, SHELL-068, SHELL-069, SHELL-098.
 import { test, expect } from "../../fixtures";
+import { serverSetTourCompleted, signInSession } from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
 
 const ROWS = ["SHELL-067", "SHELL-068", "SHELL-069", "SHELL-098"];
@@ -20,6 +21,10 @@ test(
     await test.step("sign in through the UI", async () => {
       await driver.signInWithPassword(seed.email, seed.password);
     });
+
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    const session = await signInSession(seed.email, seed.password);
+    await serverSetTourCompleted(session, true);
 
     await test.step("the shell carries title, quick actions and one account area", async () => {
       await driver.openWorkspaceHome(seed.workspaceSlug);

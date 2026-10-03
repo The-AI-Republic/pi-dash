@@ -9,6 +9,7 @@
 // The toggle flips the sidebar and always leaves peek cleared. Rows:
 // SHELL-065, SHELL-066.
 import { test, expect } from "../../fixtures";
+import { serverSetTourCompleted, signInSession } from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
 
 const ROWS = ["SHELL-065", "SHELL-066"];
@@ -17,6 +18,10 @@ test(specTitle(ROWS, "top bar composition and sidebar toggle"), { tag: specTags(
   await test.step("sign in through the UI", async () => {
     await driver.signInWithPassword(seed.email, seed.password);
   });
+
+  // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+  const session = await signInSession(seed.email, seed.password);
+  await serverSetTourCompleted(session, true);
 
   await test.step("the bar composes every control on a project page", async () => {
     await driver.openProjectTab(seed.workspaceSlug, seed.projectId, "issues");

@@ -22,6 +22,7 @@ import {
   patchProjectUserProperties,
   patchWorkspaceUserProperties,
   serverIssueKeys,
+  serverSetTourCompleted,
   signInSession,
 } from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
@@ -53,6 +54,8 @@ test(
       await driver.signInWithPassword(seed.email, seed.password);
     });
     const session = await signInSession(seed.email, seed.password);
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    await serverSetTourCompleted(session, true);
     const modeBefore = (await getWorkspaceUserProperties(seed.workspaceSlug, session))[
       "navigation_control_preference"
     ] as string | undefined;
@@ -113,6 +116,8 @@ test(
       await driver.signInWithPassword(seed.email, seed.password);
     });
     const session = await signInSession(seed.email, seed.password);
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    await serverSetTourCompleted(session, true);
     const modeBefore = (await getWorkspaceUserProperties(seed.workspaceSlug, session))[
       "navigation_control_preference"
     ] as string | undefined;
@@ -176,6 +181,8 @@ test(
       await driver.signInWithPassword(seed.email, seed.password);
     });
     const session = await signInSession(seed.email, seed.password);
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    await serverSetTourCompleted(session, true);
 
     await test.step("the bare address stays bare with nothing active", async () => {
       // No index route or redirect handles the bare project address: the
@@ -212,6 +219,8 @@ test(
       await driver.signInWithPassword(seed.email, seed.password);
     });
     const session = await signInSession(seed.email, seed.password);
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    await serverSetTourCompleted(session, true);
     const modeBefore = (await getWorkspaceUserProperties(seed.workspaceSlug, session))[
       "navigation_control_preference"
     ] as string | undefined;
@@ -270,6 +279,8 @@ test(
       await driver.signInWithPassword(seed.email, seed.password);
     });
     const session = await signInSession(seed.email, seed.password);
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    await serverSetTourCompleted(session, true);
     const modeBefore = (await getWorkspaceUserProperties(seed.workspaceSlug, session))[
       "navigation_control_preference"
     ] as string | undefined;

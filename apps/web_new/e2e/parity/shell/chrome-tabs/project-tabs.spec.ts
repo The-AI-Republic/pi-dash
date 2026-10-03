@@ -21,6 +21,7 @@ import {
   patchProject,
   patchProjectUserProperties,
   patchWorkspaceUserProperties,
+  serverSetTourCompleted,
   signInSession,
 } from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
@@ -39,6 +40,8 @@ test(
       await driver.signInWithPassword(seed.email, seed.password);
     });
     const session = await signInSession(seed.email, seed.password);
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    await serverSetTourCompleted(session, true);
     const originalProps = await getWorkspaceUserProperties(seed.workspaceSlug, session);
     const originalMode = originalProps["navigation_control_preference"] as string | undefined;
     const seedProject = await getProject(seed.workspaceSlug, seed.projectId, session);
@@ -126,6 +129,8 @@ test(
       await driver.signInWithPassword(seed.email, seed.password);
     });
     const session = await signInSession(seed.email, seed.password);
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    await serverSetTourCompleted(session, true);
     const originalProps = await getWorkspaceUserProperties(seed.workspaceSlug, session);
     const originalMode = originalProps["navigation_control_preference"] as string | undefined;
 
@@ -198,6 +203,8 @@ test(
       await driver.signInWithPassword(seed.email, seed.password);
     });
     const session = await signInSession(seed.email, seed.password);
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    await serverSetTourCompleted(session, true);
     const originalProps = await getWorkspaceUserProperties(seed.workspaceSlug, session);
     const originalMode = originalProps["navigation_control_preference"] as string | undefined;
 
@@ -264,6 +271,8 @@ test(
       await driver.signInWithPassword(seed.email, seed.password);
     });
     const session = await signInSession(seed.email, seed.password);
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    await serverSetTourCompleted(session, true);
     const originalProps = await getWorkspaceUserProperties(seed.workspaceSlug, session);
     const originalMode = originalProps["navigation_control_preference"] as string | undefined;
 

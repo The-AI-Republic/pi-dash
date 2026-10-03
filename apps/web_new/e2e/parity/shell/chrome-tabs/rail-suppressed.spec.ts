@@ -9,6 +9,7 @@
 // matching build where the strip is enabled. Rows: SHELL-063, SHELL-064,
 // SHELL-099.
 import { test, expect } from "../../fixtures";
+import { serverSetTourCompleted, signInSession } from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
 
 const ROWS = ["SHELL-063", "SHELL-064", "SHELL-099"];
@@ -20,6 +21,10 @@ test(
     await test.step("sign in through the UI", async () => {
       await driver.signInWithPassword(seed.email, seed.password);
     });
+
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    const session = await signInSession(seed.email, seed.password);
+    await serverSetTourCompleted(session, true);
 
     for (const open of [
       () => driver.openWorkspaceHome(seed.workspaceSlug),

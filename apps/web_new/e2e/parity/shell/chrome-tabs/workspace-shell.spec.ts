@@ -9,6 +9,7 @@
 // while the visitor moves between home, the projects list and project
 // pages. Rows: SHELL-001, SHELL-002.
 import { test, expect } from "../../fixtures";
+import { serverSetTourCompleted, signInSession } from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
 
 const ROWS = ["SHELL-001", "SHELL-002"];
@@ -27,6 +28,10 @@ test(
     await test.step("sign in through the UI", async () => {
       await driver.signInWithPassword(seed.email, seed.password);
     });
+
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    const session = await signInSession(seed.email, seed.password);
+    await serverSetTourCompleted(session, true);
 
     await test.step("home renders the shared chrome", async () => {
       await driver.openWorkspaceHome(seed.workspaceSlug);
