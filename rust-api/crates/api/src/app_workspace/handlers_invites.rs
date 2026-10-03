@@ -88,7 +88,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use http_body_util::BodyExt;
 use serde_json::{Map, Value};
 use sqlx::PgPool;
@@ -324,6 +324,13 @@ fn py_strip(value: &str) -> &str {
     value.trim_matches(|c: char| c.is_whitespace() || ('\x1c'..='\x1f').contains(&c))
 }
 
+/// What CPython `int()` strips: Unicode whitespace EXCEPT `\x1c`-`\x1f`
+/// (probed — `int("\x1c5")` raises while `"\x1c5".strip()` is `"5"`),
+/// i.e. exactly `char::is_whitespace`.
+fn py_int_strip(value: &str) -> &str {
+    value.trim_matches(|c: char| c.is_whitespace())
+}
+
 /// Python `int()` over a JSON value (`invite.py:63`): bools are 0/1,
 /// floats truncate toward zero, strings parse after stripping with an
 /// optional sign (underscores allowed between digits, ASCII digits only —
@@ -349,7 +356,7 @@ fn py_int(value: &Value) -> Result<i128, ()> {
             }
         }
         Value::String(raw) => {
-            let text = py_strip(raw);
+            let text = py_int_strip(raw);
             let digits = text
                 .strip_prefix('+')
                 .or_else(|| text.strip_prefix('-'))
@@ -570,6 +577,15 @@ fn epoch_float(now: &DateTime<Utc>) -> f64 {
     micros as f64 / 1_000_000.0
 }
 
+/// `auto_now` for the invite PATCH save: Django's clock resolves
+/// microseconds, so the value bound (and echoed in the 200) does too —
+/// a raw `Utc::now()` carries sub-microsecond digits that render as 9
+/// fraction digits where DRF renders 6 (per the merged PIDASHCONV-620
+/// precedent).
+fn patch_now() -> DateTime<Utc> {
+    Utc::now().round_subsecs(6)
+}
+
 /// `jwt.encode({"email": ..., "timestamp": ...}, SECRET_KEY, HS256)`
 /// (`invite.py:96-100`): the `"email"` claim is the WHOLE per-email dict
 /// (ported bug), the header is `{"typ":"JWT","alg":"HS256"}`, and both
@@ -594,15 +610,18 @@ fn invite_token(secret: &[u8], email_value: &Value, timestamp: f64) -> Result<St
     .map_err(|_| Denial::ServerError)
 }
 
-/// Split the direct `validate_email` call (`invite.py:91`,
-/// `join_request.py:54`) into Django's three outcomes (probed live):
-/// `None`/unparseable input raises `ValidationError` (400),
-/// non-string input raises `TypeError` (500), anything else goes to the
-/// `EmailValidator` port.
+/// Split the direct `validate_email` call (`invite.py:91`) into
+/// Django's three outcomes (probed live): falsy input (`None`, `""`,
+/// `0`, `[]`, …) fails the validator's `not value` check
+/// (`ValidationError` → 400); a container holding `"@"` passes the
+/// membership check and dies in `.rsplit` (`AttributeError` → 500);
+/// containers without it fail validation (400); truthy
+/// numbers/bools fail the `in` check (`TypeError` → 500); strings go
+/// to the `EmailValidator` port.
 enum EmailCheck {
     /// Failed validation: answer the caller's 400.
     Invalid,
-    /// `TypeError`: answer 500.
+    /// `TypeError`/`AttributeError`: answer 500.
     TypeError,
     /// A string to run through [`is_valid_email_str`].
     Candidate(String),
@@ -612,6 +631,18 @@ fn classify_email(value: Option<&Value>) -> EmailCheck {
     match value {
         None | Some(Value::Null) => EmailCheck::Invalid,
         Some(Value::String(s)) => EmailCheck::Candidate(s.clone()),
+        Some(value) if !py_truthy(value) => EmailCheck::Invalid,
+        // `"@" in value`: element equality for lists, key lookup for
+        // dicts — reaching `.rsplit` 500s; missing it 400s.
+        Some(Value::Array(items))
+            if items
+                .iter()
+                .any(|item| item.as_str().is_some_and(|s| s == "@")) =>
+        {
+            EmailCheck::TypeError
+        }
+        Some(Value::Object(map)) if map.contains_key("@") => EmailCheck::TypeError,
+        Some(Value::Array(_)) | Some(Value::Object(_)) => EmailCheck::Invalid,
         Some(_) => EmailCheck::TypeError,
     }
 }
@@ -621,6 +652,17 @@ fn classify_email(value: Option<&Value>) -> EmailCheck {
 /// Django 4.2 in PIDASHCONV-371).
 fn is_valid_email_str(value: &str) -> bool {
     crate::v1_projects::handlers_members::is_valid_email(value)
+}
+
+/// Audit columns after `BaseModel.save()` on an UPDATE
+/// (`db/models/base.py:23-43`): an authed caller stamps `updated_by`
+/// and keeps `created_by`; an anonymous caller nulls both. Returns
+/// `(updated_by_id, created_by_id)` for the `UPDATE`.
+fn audit_columns_on_update(
+    caller: Option<uuid::Uuid>,
+    current_created_by: Option<uuid::Uuid>,
+) -> (Option<uuid::Uuid>, Option<uuid::Uuid>) {
+    (caller, caller.and(current_created_by))
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +757,36 @@ struct WorkspaceLiteRow {
 // Auth + gates (DRF `initial()` order: authN, then `permission_classes`)
 // ---------------------------------------------------------------------------
 
+/// Gate/fetch SQL with a `workspace__slug` traversal. Django ignores
+/// the workspace soft-delete scope on forward-FK traversal (probed),
+/// so these carry NO `w.deleted_at` filter — while the member/invite/
+/// request-side scopes stay. Pinned by
+/// `forward_fk_traversal_ignores_workspace_scope`.
+const ADMIN_GATE_SQL: &str = "SELECT w.id, wm.role FROM workspace_members wm \
+     JOIN workspaces w ON w.id = wm.workspace_id \
+     WHERE w.slug = $1 AND wm.member_id = $2 \
+     AND wm.is_active = TRUE AND wm.deleted_at IS NULL AND wm.role IN (20, 15)";
+
+/// [`ADMIN_GATE_SQL`] for the owner gate (role Admin, no `is_active`).
+const OWNER_GATE_SQL: &str = "SELECT w.id FROM workspace_members wm \
+     JOIN workspaces w ON w.id = wm.workspace_id \
+     WHERE w.slug = $1 AND wm.member_id = $2 \
+     AND wm.deleted_at IS NULL AND wm.role = 20";
+
+/// One invite by pk + workspace slug (`invite.py:145,164,239`).
+const FETCH_INVITE_SQL: &str = "SELECT i.id, i.workspace_id, i.created_at, i.updated_at, \
+    i.deleted_at, i.email, i.accepted, i.token, i.message, i.responded_at, i.role, \
+    i.created_by_id, i.updated_by_id \
+    FROM workspace_member_invites i JOIN workspaces w ON w.id = i.workspace_id \
+    WHERE i.id = $1 AND w.slug = $2 AND i.deleted_at IS NULL";
+
+/// One join request by pk + workspace slug (`join_request.py:188,242`).
+const FETCH_JOIN_REQUEST_SQL: &str = "SELECT jr.id, jr.workspace_id, jr.requester_id, \
+    jr.created_at, jr.updated_at, jr.deleted_at, jr.admin_email, jr.message, jr.role, \
+    jr.status, jr.responded_at, jr.created_by_id, jr.updated_by_id, jr.responded_by_id \
+    FROM workspace_join_requests jr JOIN workspaces w ON w.id = jr.workspace_id \
+    WHERE jr.id = $1 AND w.slug = $2 AND jr.deleted_at IS NULL";
+
 /// The caller's workspace row for admin-gated routes: role (for the
 /// invite cap) plus the scoped workspace id.
 struct AdminGate {
@@ -724,7 +796,10 @@ struct AdminGate {
 
 /// Session auth + `WorkSpaceAdminPermission` (`permissions/workspace.py:61-71`):
 /// anonymous 401s; active Admin/Member passes. Unknown slugs 403 here —
-/// the gate runs before any object lookup, never 404.
+/// the gate runs before any object lookup, never 404. Django's
+/// `workspace__slug` traversal ignores the workspace soft-delete scope
+/// (probed), so no `w.deleted_at` filter here — on a deleted workspace
+/// the gate passes and the later direct `Workspace` lookup 404s.
 async fn resolve_class_admin(
     state: &AppState,
     slug: &str,
@@ -736,17 +811,12 @@ async fn resolve_class_admin(
             .await
             .map_err(|_| Denial::ServerError)?
             .ok_or(Denial::Unauthorized)?;
-    let row: Option<(uuid::Uuid, i16)> = sqlx::query_as(
-        "SELECT w.id, wm.role FROM workspace_members wm \
-         JOIN workspaces w ON w.id = wm.workspace_id \
-         WHERE w.slug = $1 AND w.deleted_at IS NULL AND wm.member_id = $2 \
-         AND wm.is_active = TRUE AND wm.deleted_at IS NULL AND wm.role IN (20, 15)",
-    )
-    .bind(slug)
-    .bind(actor.id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<(uuid::Uuid, i16)> = sqlx::query_as(ADMIN_GATE_SQL)
+        .bind(slug)
+        .bind(actor.id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let Some((workspace_id, role)) = row else {
         return Err(Denial::ForbiddenClass);
     };
@@ -760,7 +830,9 @@ async fn resolve_class_admin(
 }
 
 /// Session auth + `WorkspaceOwnerPermission` (`permissions/workspace.py:51-58`):
-/// role Admin with NO `is_active` check (ported as-is).
+/// role Admin with NO `is_active` check (ported as-is). The
+/// `workspace__slug` traversal is unscoped on the workspace side (see
+/// [`resolve_class_admin`]).
 async fn resolve_class_owner(
     state: &AppState,
     slug: &str,
@@ -772,17 +844,12 @@ async fn resolve_class_owner(
             .await
             .map_err(|_| Denial::ServerError)?
             .ok_or(Denial::Unauthorized)?;
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT w.id FROM workspace_members wm \
-         JOIN workspaces w ON w.id = wm.workspace_id \
-         WHERE w.slug = $1 AND w.deleted_at IS NULL AND wm.member_id = $2 \
-         AND wm.deleted_at IS NULL AND wm.role = 20",
-    )
-    .bind(slug)
-    .bind(actor.id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(OWNER_GATE_SQL)
+        .bind(slug)
+        .bind(actor.id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let Some((workspace_id,)) = row else {
         return Err(Denial::ForbiddenClass);
     };
@@ -1320,7 +1387,9 @@ struct InvitePatch {
     accepted: Option<bool>,
     deleted_at: Option<Option<DateTime<Utc>>>,
     created_by: Option<Option<uuid::Uuid>>,
-    updated_by: Option<Option<uuid::Uuid>>,
+    // No `updated_by`: the body value is validated (an invalid one
+    // still 400s) but `BaseModel.save()` overwrites it with the caller
+    // (`db/models/base.py:42`), so it is discarded after validation.
 }
 
 /// `ChoiceField(choices=[20, 15, 5])` (`role`, `workspace.py:241`):
@@ -1355,8 +1424,12 @@ fn validate_patch_role(value: &Value) -> Result<i16, String> {
 }
 
 /// DRF `BooleanField` (`accepted`): the `TRUE_VALUES` / `FALSE_VALUES`
-/// sets (probed live — `0.0` is false, `2` and `""` are invalid).
+/// sets (probed live — `1.0` is true and `0.0` is false by numeric
+/// equality with `1`/`0`; `2`, `2.0` and `""` are invalid).
 /// `None` is `may not be null`.
+/// Exact float equality is the semantics (set membership), not an
+/// approximation — hence the lint scope below.
+#[allow(clippy::float_cmp, clippy::float_cmp_const)]
 fn validate_patch_accepted(value: &Value) -> Result<bool, String> {
     const INVALID: &str = "Must be a valid boolean.";
     if value.is_null() {
@@ -1378,8 +1451,11 @@ fn validate_patch_accepted(value: &Value) -> Result<bool, String> {
                     _ => Err(INVALID.to_owned()),
                 }
             } else if let Some(f) = n.as_f64() {
-                // `0.0` is in `FALSE_VALUES`; every other float is out.
-                if f == 0.0 {
+                // Set membership: `1.0 == 1` is in `TRUE_VALUES`,
+                // `0.0 == 0` is in `FALSE_VALUES`, the rest are out.
+                if f == 1.0 {
+                    Ok(true)
+                } else if f == 0.0 {
                     Ok(false)
                 } else {
                     Err(INVALID.to_owned())
@@ -1406,8 +1482,9 @@ const DATETIME_INVALID_MESSAGE: &str =
 
 /// Django `parse_datetime` grammar (`django/utils/dateparse.py`):
 /// `YYYY-MM-DD[T ]HH:MM[:SS[.ffffff]][tz]` with 1-2 digit parts,
-/// optional seconds, up to 6+6 fractional digits (extras ignored), and
-/// `Z`/`±HH[:][MM]` tz (naive reads as UTC under `USE_TZ`).
+/// optional seconds, 1-12 fractional digits (13+ rejected; the first 6
+/// kept, probed live), and `Z`/`±HH[:][MM]` tz (naive reads as UTC
+/// under `USE_TZ`).
 fn parse_django_datetime(value: &str) -> Option<DateTime<Utc>> {
     let (date, time) = value.split_once(['T', ' '])?;
     let mut date_parts = date.split('-');
@@ -1462,8 +1539,11 @@ fn parse_django_datetime(value: &str) -> Option<DateTime<Utc>> {
         }
         let (second, micros) = match second_raw.split_once(['.', ',']) {
             Some((sec, frac)) => {
+                // Django's grammar caps the fraction at 12 digits
+                // (`\d{1,6}\d{0,6}`, probed) and keeps the first 6.
                 if !(1..=2).contains(&sec.len())
                     || frac.is_empty()
+                    || frac.len() > 12
                     || !frac.bytes().all(|b| b.is_ascii_digit())
                 {
                     return None;
@@ -1650,14 +1730,13 @@ async fn validate_invite_patch(pool: &PgPool, body: &Value) -> Result<InvitePatc
         }
     }
     if let Some(value) = data.get("updated_by") {
-        match validate_patch_user(pool, value).await {
-            Ok(user) => patch.updated_by = Some(user),
-            Err(message) => {
-                errors.insert(
-                    "updated_by".to_owned(),
-                    Value::Array(vec![Value::String(message)]),
-                );
-            }
+        // Validated for the 400 shape, then discarded: the save stamps
+        // the caller over it (`db/models/base.py:42`).
+        if let Err(message) = validate_patch_user(pool, value).await {
+            errors.insert(
+                "updated_by".to_owned(),
+                Value::Array(vec![Value::String(message)]),
+            );
         }
     }
     if errors.is_empty() {
@@ -1683,22 +1762,19 @@ fn non_dict_errors(kind: &str) -> Value {
 // ---------------------------------------------------------------------------
 
 /// Fetch one invite's row by pk + workspace (`invite.py:145,164,239`).
+/// The `workspace__slug` traversal is unscoped on the workspace side
+/// (see [`resolve_class_admin`]).
 async fn fetch_invite(
     pool: &PgPool,
     pk: &uuid::Uuid,
     slug: &str,
 ) -> Result<Option<InviteRow>, Denial> {
-    sqlx::query_as::<_, InviteRow>(
-        "SELECT i.id, i.workspace_id, i.created_at, i.updated_at, i.deleted_at, i.email, \
-         i.accepted, i.token, i.message, i.responded_at, i.role, i.created_by_id, i.updated_by_id \
-         FROM workspace_member_invites i JOIN workspaces w ON w.id = i.workspace_id \
-         WHERE i.id = $1 AND w.slug = $2 AND i.deleted_at IS NULL AND w.deleted_at IS NULL",
-    )
-    .bind(pk)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    sqlx::query_as::<_, InviteRow>(FETCH_INVITE_SQL)
+        .bind(pk)
+        .bind(slug)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// `GET /api/workspaces/<slug>/invitations/` (`invite.py:45-51`): the
@@ -1759,6 +1835,27 @@ struct PendingInvite {
     token: String,
 }
 
+/// How the `emails` input classifies (`invite.py:54-56`): missing,
+/// null, or falsy input 400s (`if not emails`); a truthy non-list
+/// iterates to an `AttributeError`/`TypeError` (500) — only a
+/// non-empty list reaches the role loop.
+enum EmailsInput<'a> {
+    /// A non-empty list: validate each entry.
+    Entries(&'a Vec<Value>),
+    /// Missing/null/falsy: the emails-required 400.
+    Missing,
+    /// Truthy non-list: 500.
+    ServerError,
+}
+
+fn classify_emails_input(value: Option<&Value>) -> EmailsInput<'_> {
+    match value {
+        Some(Value::Array(entries)) if !entries.is_empty() => EmailsInput::Entries(entries),
+        Some(value) if py_truthy(value) => EmailsInput::ServerError,
+        _ => EmailsInput::Missing,
+    }
+}
+
 /// `POST /api/workspaces/<slug>/invitations/` (`invite.py:53-142`), in
 /// Django's order: emails-required → requesting-user role → higher-role
 /// cap → workspace → already-member → per-email validate →
@@ -1787,10 +1884,14 @@ async fn invite_create(
         Some(data) => data,
         None => return Denial::ServerError.into_response(),
     };
-    // `if not emails` — null, missing, empty list/dict/string all 400.
-    let entries: &Vec<Value> = match data.get("emails") {
-        Some(Value::Array(entries)) if !entries.is_empty() => entries,
-        _ => return json_response(StatusCode::BAD_REQUEST, EMAILS_REQUIRED_BODY),
+    // `if not emails` — missing, null, and falsy values 400; a
+    // truthy non-list 500s in the iteration (`:63`).
+    let entries: &Vec<Value> = match classify_emails_input(data.get("emails")) {
+        EmailsInput::Entries(entries) => entries,
+        EmailsInput::Missing => {
+            return json_response(StatusCode::BAD_REQUEST, EMAILS_REQUIRED_BODY);
+        }
+        EmailsInput::ServerError => return Denial::ServerError.into_response(),
     };
     // The higher-role cap (`:63`): `int(email.get("role", 5))` per entry.
     // A non-dict entry has no `.get` (500); an uncoercible role is a
@@ -1812,8 +1913,9 @@ async fn invite_create(
     if roles.iter().any(|role| *role > i128::from(gate.role)) {
         return json_response(StatusCode::BAD_REQUEST, HIGHER_ROLE_BODY);
     }
-    // The workspace (`:70`; the gate already proved it exists, so a miss
-    // here is unreachable — still 404 like `.get`).
+    // The workspace (`:70`): a direct `Workspace.objects.get` (live-only
+    // base manager — the scope stays). On a deleted workspace the
+    // unscoped gate passed and this 404s late, exactly like Django.
     let workspace_id = match sqlx::query_scalar::<_, uuid::Uuid>(
         "SELECT w.id FROM workspaces w WHERE w.slug = $1 AND w.deleted_at IS NULL",
     )
@@ -2134,13 +2236,17 @@ async fn invite_patch(
         Ok(patch) => patch,
         Err(errors) => return Denial::BadJson(errors).into_response(),
     };
-    // `perform_update` → `save()` (stamps `updated_at` even for `{}`).
-    let now = Utc::now();
+    // `perform_update` → `save()` (stamps `updated_at` even for
+    // `{}`), and `BaseModel.save()` stamps `updated_by` with the caller
+    // on every update (`db/models/base.py:42`) — the body value was
+    // validated above but never stored. Microsecond clock: the bound
+    // value is echoed in the 200, so it resolves like Django's.
+    let now = patch_now();
     let role = patch.role.unwrap_or(row.role);
     let accepted = patch.accepted.unwrap_or(row.accepted);
     let deleted_at = patch.deleted_at.unwrap_or(row.deleted_at);
     let created_by_id = patch.created_by.unwrap_or(row.created_by_id);
-    let updated_by_id = patch.updated_by.unwrap_or(row.updated_by_id);
+    let updated_by_id = Some(actor.id);
     if let Err(error) = sqlx::query(
         "UPDATE workspace_member_invites SET role = $1, accepted = $2, deleted_at = $3, \
          created_by_id = $4, updated_by_id = $5, updated_at = $6 WHERE id = $7",
@@ -2189,7 +2295,7 @@ async fn invite_destroy(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let _gate = match resolve_class_admin(&state, &slug, extension).await {
+    let (actor, _gate) = match resolve_class_admin(&state, &slug, extension).await {
         Ok(resolved) => resolved,
         Err(denial) => return denial.into_response(),
     };
@@ -2199,15 +2305,18 @@ async fn invite_destroy(
         Err(denial) => return denial.into_response(),
     }
     // `SoftDeleteModel.delete(soft=True)` (`db/mixins.py:72-76`): stamps
-    // `deleted_at` through a full `save()` (so `updated_at` too). The
-    // `soft_delete_related_objects` sweep it fires is owned by the jobs
-    // plane (no D-24 publisher; unpinned by F-W24-14).
+    // `deleted_at` through a full `save()` (so `updated_at` and the
+    // crum `updated_by` too). The `soft_delete_related_objects` sweep
+    // it fires is owned by the jobs plane (no D-24 publisher; unpinned
+    // by F-W24-14).
     let now = Utc::now();
     if let Err(error) = sqlx::query(
-        "UPDATE workspace_member_invites SET deleted_at = $1, updated_at = $1 WHERE id = $2",
+        "UPDATE workspace_member_invites SET deleted_at = $1, updated_at = $1, updated_by_id = $3 \
+         WHERE id = $2",
     )
     .bind(now)
     .bind(id)
+    .bind(actor.id)
     .execute(pool)
     .await
     {
@@ -2289,14 +2398,22 @@ async fn join_post(
         return json_response(StatusCode::BAD_REQUEST, ALREADY_RESPONDED_INVITE_BODY);
     }
     // `accepted = ...; responded_at = now; save()` — full-row update.
+    // `BaseModel.save()` stamps `updated_by` with the responder
+    // (`db/models/base.py:42`); anonymous nulls BOTH audit columns
+    // (`:31-33`), so `created_by` keeps the row's value only when authed.
     let now = Utc::now();
     let accepted = data.get("accepted").is_some_and(py_truthy);
+    let responder_id: Option<uuid::Uuid> = actor.as_ref().map(|actor| actor.id);
+    let (updated_by_id, created_by_id) =
+        audit_columns_on_update(responder_id, invite.created_by_id);
     if let Err(error) = sqlx::query(
-        "UPDATE workspace_member_invites SET accepted = $1, responded_at = $2, updated_at = $2 \
-         WHERE id = $3",
+        "UPDATE workspace_member_invites SET accepted = $1, responded_at = $2, updated_at = $2, \
+         updated_by_id = $3, created_by_id = $4 WHERE id = $5",
     )
     .bind(accepted)
     .bind(now)
+    .bind(updated_by_id)
+    .bind(created_by_id)
     .bind(id)
     .execute(pool)
     .await
@@ -2333,10 +2450,15 @@ async fn join_post(
         )
             .into_response();
     };
-    // Reactivate-or-create (`:188-201`, NO `created_by` on the create —
-    // ported bug) + the `User`-model pointer no-op + track + delete.
-    let existing: Option<(uuid::Uuid,)> = match sqlx::query_as(
-        "SELECT wm.id FROM workspace_members wm WHERE wm.workspace_id = $1 AND wm.member_id = $2 \
+    // Reactivate-or-create (`:188-201`) + the `User`-model pointer
+    // no-op + track + delete. Both branches run a full `save()`: the
+    // update stamps `updated_by` (anonymous nulls both audit columns);
+    // the create stamps `created_by` with the responder and leaves
+    // `updated_by` NULL when authed (`db/models/base.py:37-39`),
+    // nulling both when anonymous (`:31-33`).
+    let existing: Option<(uuid::Uuid, Option<uuid::Uuid>)> = match sqlx::query_as(
+        "SELECT wm.id, wm.created_by_id FROM workspace_members wm \
+         WHERE wm.workspace_id = $1 AND wm.member_id = $2 \
          AND wm.deleted_at IS NULL ORDER BY wm.created_at DESC LIMIT 1",
     )
     .bind(invite.workspace_id)
@@ -2347,12 +2469,17 @@ async fn join_post(
         Ok(existing) => existing,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    if let Some((member_id,)) = existing {
+    if let Some((member_id, member_created_by)) = existing {
+        let (updated_by_id, created_by_id) =
+            audit_columns_on_update(responder_id, member_created_by);
         if let Err(error) = sqlx::query(
-            "UPDATE workspace_members SET is_active = TRUE, role = $1, updated_at = $2 WHERE id = $3",
+            "UPDATE workspace_members SET is_active = TRUE, role = $1, updated_at = $2, \
+             updated_by_id = $3, created_by_id = $4 WHERE id = $5",
         )
         .bind(invite.role)
         .bind(now)
+        .bind(updated_by_id)
+        .bind(created_by_id)
         .bind(member_id)
         .execute(pool)
         .await
@@ -2363,11 +2490,14 @@ async fn join_post(
             return Denial::ServerError.into_response();
         }
     } else if let Err(error) = sqlx::query(
-        "INSERT INTO workspace_members (id, created_at, updated_at, workspace_id, member_id, role) \
-         VALUES ($1, $2, $2, $3, $4, $5)",
+        "INSERT INTO workspace_members \
+         (id, created_at, updated_at, created_by_id, updated_by_id, workspace_id, member_id, \
+         role) \
+         VALUES ($1, $2, $2, $3, NULL, $4, $5, $6)",
     )
     .bind(uuid::Uuid::new_v4())
     .bind(now)
+    .bind(responder_id)
     .bind(invite.workspace_id)
     .bind(user_id)
     .bind(invite.role)
@@ -2403,11 +2533,19 @@ async fn join_post(
         ),
     )
     .await;
+    // The accept soft-delete (`.delete()` → `save()`): stamps
+    // `updated_by` with the responder, nulling both audit columns when
+    // anonymous (`db/models/base.py:31-42`).
+    let (accept_updated_by, accept_created_by) =
+        audit_columns_on_update(responder_id, invite.created_by_id);
     if sqlx::query(
-        "UPDATE workspace_member_invites SET deleted_at = $1, updated_at = $1 WHERE id = $2",
+        "UPDATE workspace_member_invites SET deleted_at = $1, updated_at = $1, updated_by_id = $3, \
+         created_by_id = $4 WHERE id = $2",
     )
     .bind(now)
     .bind(id)
+    .bind(accept_updated_by)
+    .bind(accept_created_by)
     .execute(pool)
     .await
     .is_err()
@@ -3080,24 +3218,20 @@ async fn user_join_requests_create(
 
 /// Fetch one join request by pk + workspace for approve/deny
 /// (`join_request.py:188,242`): direct `get_object_or_404`, NO status
-/// filter (non-pending rows 400 below, not 404).
+/// filter (non-pending rows 400 below, not 404). The
+/// `workspace__slug` traversal is unscoped on the workspace side (see
+/// [`resolve_class_admin`]).
 async fn fetch_join_request(
     pool: &PgPool,
     pk: &uuid::Uuid,
     slug: &str,
 ) -> Result<Option<JoinRequestRow>, Denial> {
-    sqlx::query_as::<_, JoinRequestRow>(
-        "SELECT jr.id, jr.workspace_id, jr.requester_id, jr.created_at, jr.updated_at, \
-         jr.deleted_at, jr.admin_email, jr.message, jr.role, jr.status, jr.responded_at, \
-         jr.created_by_id, jr.updated_by_id, jr.responded_by_id \
-         FROM workspace_join_requests jr JOIN workspaces w ON w.id = jr.workspace_id \
-         WHERE jr.id = $1 AND w.slug = $2 AND jr.deleted_at IS NULL AND w.deleted_at IS NULL",
-    )
-    .bind(pk)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    sqlx::query_as::<_, JoinRequestRow>(FETCH_JOIN_REQUEST_SQL)
+        .bind(pk)
+        .bind(slug)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// `GET /api/workspaces/<slug>/join-requests/` (`join_request.py:168-177`):
@@ -3209,8 +3343,9 @@ async fn join_request_approve(
     if queries::join_request_pending_blocks(&request.status) {
         return json_response(StatusCode::BAD_REQUEST, ALREADY_RESPONDED_REQUEST_BODY);
     }
-    // The approvee's workspace: the fetch's inner join proved it is
-    // live, so this re-read only resolves the id.
+    // The approvee's workspace: the fetch's inner join proved a
+    // workspace row exists (liveness unscoped), so this only resolves
+    // the id.
     let Some(workspace_id) = request.workspace_id else {
         return Denial::ServerError.into_response();
     };
@@ -3235,16 +3370,21 @@ async fn join_request_approve(
         .fetch_optional(&mut *tx)
         .await?;
         if let Some((member_id,)) = existing {
+            // The reactivate `.save()` stamps `updated_by` with the
+            // approver (`db/models/base.py:42`).
             sqlx::query(
-                "UPDATE workspace_members SET is_active = TRUE, role = $1, updated_at = $2 \
-                 WHERE id = $3",
+                "UPDATE workspace_members SET is_active = TRUE, role = $1, updated_at = $2, \
+                 updated_by_id = $4 WHERE id = $3",
             )
             .bind(request_role)
             .bind(now)
             .bind(member_id)
+            .bind(approver_id)
             .execute(&mut *tx)
             .await?;
         } else {
+            // The create `.save()` keeps `updated_by` NULL on add
+            // (`db/models/base.py:37-39`), so the column stays unset.
             sqlx::query(
                 "INSERT INTO workspace_members \
                  (id, created_at, updated_at, created_by_id, workspace_id, member_id, role) \
@@ -3264,9 +3404,11 @@ async fn join_request_approve(
             .bind(requester_id)
             .execute(&mut *tx)
             .await?;
+        // The status `.save()` stamps `updated_by` with the approver
+        // (`db/models/base.py:42`).
         sqlx::query(
             "UPDATE workspace_join_requests SET status = 'APPROVED', responded_at = $1, \
-             responded_by_id = $2, updated_at = $1 WHERE id = $3",
+             responded_by_id = $2, updated_at = $1, updated_by_id = $2 WHERE id = $3",
         )
         .bind(now)
         .bind(approver_id)
@@ -3333,9 +3475,11 @@ async fn join_request_deny(
         return json_response(StatusCode::BAD_REQUEST, ALREADY_RESPONDED_REQUEST_BODY);
     }
     let now = Utc::now();
+    // The deny `.save()` stamps `updated_by` with the denier
+    // (`db/models/base.py:42`; same id as `responded_by`, hence `$2`).
     if let Err(error) = sqlx::query(
         "UPDATE workspace_join_requests SET status = 'DENIED', responded_at = $1, \
-         responded_by_id = $2, updated_at = $1 WHERE id = $3",
+         responded_by_id = $2, updated_at = $1, updated_by_id = $2 WHERE id = $3",
     )
     .bind(now)
     .bind(actor.id)
@@ -3578,6 +3722,12 @@ mod tests {
             ("false", Ok(0)),
             ("5.9", Ok(5)),
             ("-5.9", Ok(-5)),
+            // `int()` strips Unicode whitespace — except `\x1c`-`\x1f`
+            // (probed; `str.strip()` takes those too).
+            ("\"\\u00a05\"", Ok(5)),
+            ("\"\\u00855\"", Ok(5)),
+            ("\"\\u001c5\"", Err(())),
+            ("\"5\\u001f\"", Err(())),
             ("\"\"", Err(())),
             ("\"20.0\"", Err(())),
             ("\"0x10\"", Err(())),
@@ -3703,20 +3853,56 @@ mod tests {
     }
 
     #[test]
+    fn patch_now_resolves_microseconds_like_django() {
+        // `auto_now` binds (and echoes) microsecond clock values: a raw
+        // `Utc::now()` would render 9 fraction digits where DRF renders 6.
+        for _ in 0..100 {
+            let now = patch_now();
+            assert_eq!(now.timestamp_subsec_nanos() % 1000, 0, "{now:?}");
+            let rendered = crate::serializer::render_datetime_in(&now, &chrono_tz::UTC);
+            let fraction = rendered
+                .split(['T'])
+                .nth(1)
+                .expect("time part")
+                .split(['Z', '+', '-'])
+                .next()
+                .expect("fraction part");
+            match fraction.split_once('.') {
+                None => {}
+                Some((_, digits)) => assert_eq!(digits.len(), 6, "{rendered}"),
+            }
+        }
+    }
+
+    #[test]
     fn email_classification_matches_django() {
         assert!(matches!(classify_email(None), EmailCheck::Invalid));
-        assert!(matches!(
-            classify_email(Some(&Value::Null)),
-            EmailCheck::Invalid
-        ));
-        assert!(matches!(
-            classify_email(Some(&serde_json::json!(5))),
-            EmailCheck::TypeError
-        ));
-        assert!(matches!(
-            classify_email(Some(&serde_json::json!([]))),
-            EmailCheck::TypeError
-        ));
+        // Falsy input → `ValidationError` (400), probed live.
+        for raw in ["null", "\"\"", "0", "0.0", "false", "[]", "{}"] {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            assert!(
+                matches!(classify_email(Some(&value)), EmailCheck::Invalid),
+                "classify_email({raw})"
+            );
+        }
+        // Containers without `"@"` → 400; with it → `.rsplit`
+        // `AttributeError` (500). Dict lookup is by key.
+        for raw in ["[\"x\"]", "[[]]", "{\"a\": \"@\"}"] {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            assert!(
+                matches!(classify_email(Some(&value)), EmailCheck::Invalid),
+                "classify_email({raw})"
+            );
+        }
+        // Truthy numbers/bools → `TypeError` (500); containers holding
+        // `"@"` → `AttributeError` (500).
+        for raw in ["5", "5.0", "true", "[\"@\"]", "{\"@\": 1}"] {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            assert!(
+                matches!(classify_email(Some(&value)), EmailCheck::TypeError),
+                "classify_email({raw})"
+            );
+        }
         assert!(matches!(
             classify_email(Some(&serde_json::json!("a@b.com"))),
             EmailCheck::Candidate(_)
@@ -3765,6 +3951,8 @@ mod tests {
             ("\"yes\"", true),
             ("\"1\"", true),
             ("\"0\"", false),
+            // Set membership by numeric equality: `1.0` is true.
+            ("1.0", true),
             ("0.0", false),
         ];
         for (raw, want) in ok {
@@ -3775,7 +3963,7 @@ mod tests {
                 "accepted({raw})"
             );
         }
-        let invalid = ["\"\"", "2", "\"x\"", "[]", "1.5", "{}"];
+        let invalid = ["\"\"", "2", "2.0", "\"x\"", "[]", "1.5", "{}"];
         for raw in invalid {
             let value: Value = serde_json::from_str(raw).expect("case is JSON");
             assert_eq!(
@@ -3813,7 +4001,20 @@ mod tests {
                 .expect("parses")
                 .is_some()
         );
-        for raw in ["\"nope\"", "\"\"", "5", "\"2026-13-45T99:99:99Z\"", "[]"] {
+        // 12 fractional digits parse (first 6 kept); 13+ are invalid.
+        let twelve =
+            validate_patch_deleted_at(&serde_json::json!("2026-01-02T03:04:05.123456789012Z"))
+                .expect("parses")
+                .expect("some");
+        assert_eq!(twelve.to_rfc3339(), "2026-01-02T03:04:05.123456+00:00");
+        for raw in [
+            "\"nope\"",
+            "\"\"",
+            "5",
+            "\"2026-13-45T99:99:99Z\"",
+            "\"2026-01-02T03:04:05.1234567890123Z\"",
+            "[]",
+        ] {
             let value: Value = serde_json::from_str(raw).expect("case is JSON");
             assert_eq!(
                 validate_patch_deleted_at(&value),
@@ -3899,6 +4100,70 @@ mod tests {
             classify_invitations(Some(&value)),
             InvitationsInput::InvalidUuid
         ));
+    }
+
+    #[test]
+    fn emails_input_matches_required_check() {
+        // Missing/null/falsy → the emails-required 400.
+        assert!(matches!(classify_emails_input(None), EmailsInput::Missing));
+        for raw in ["null", "\"\"", "0", "0.0", "false", "[]", "{}"] {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            assert!(
+                matches!(classify_emails_input(Some(&value)), EmailsInput::Missing),
+                "emails({raw})"
+            );
+        }
+        // A non-empty list reaches the role loop.
+        let value: Value = serde_json::from_str("[{\"email\": \"a@b.co\"}]").expect("case is JSON");
+        assert!(matches!(
+            classify_emails_input(Some(&value)),
+            EmailsInput::Entries(_)
+        ));
+        // A truthy non-list 500s in the iteration.
+        for raw in ["\"x\"", "5", "5.5", "true", "{\"a\": 1}"] {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            assert!(
+                matches!(
+                    classify_emails_input(Some(&value)),
+                    EmailsInput::ServerError
+                ),
+                "emails({raw})"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_columns_match_base_model_save() {
+        let caller = Some(uuid::Uuid::new_v4());
+        let created = Some(uuid::Uuid::new_v4());
+        // Authed update: stamp `updated_by`, keep `created_by`.
+        assert_eq!(audit_columns_on_update(caller, created), (caller, created));
+        assert_eq!(audit_columns_on_update(caller, None), (caller, None));
+        // Anonymous update: null both.
+        assert_eq!(audit_columns_on_update(None, created), (None, None));
+        assert_eq!(audit_columns_on_update(None, None), (None, None));
+    }
+
+    #[test]
+    fn forward_fk_traversal_ignores_workspace_scope() {
+        // The gates and fetches traverse `workspace__slug`, which Django
+        // does not scope to live workspaces — while the member/invite/
+        // request-side scopes stay.
+        for sql in [
+            ADMIN_GATE_SQL,
+            OWNER_GATE_SQL,
+            FETCH_INVITE_SQL,
+            FETCH_JOIN_REQUEST_SQL,
+        ] {
+            assert!(
+                !sql.contains("w.deleted_at"),
+                "workspace scope leaked into traversal SQL: {sql}"
+            );
+        }
+        assert!(ADMIN_GATE_SQL.contains("wm.deleted_at IS NULL"));
+        assert!(OWNER_GATE_SQL.contains("wm.deleted_at IS NULL"));
+        assert!(FETCH_INVITE_SQL.contains("i.deleted_at IS NULL"));
+        assert!(FETCH_JOIN_REQUEST_SQL.contains("jr.deleted_at IS NULL"));
     }
 
     #[test]
