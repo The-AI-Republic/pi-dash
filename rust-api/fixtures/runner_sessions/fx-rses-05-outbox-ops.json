@@ -1,0 +1,900 @@
+{
+  "fixture": "FX-RSES-05",
+  "_trace": "outbox.py:192-681 verbs; machine_outbox.py:133-393 twins",
+  "_method": "Ran the real outbox functions against scratch Postgres + real Redis DB 14 behind a logging proxy; SQL via CaptureQueriesContext.",
+  "active_session_id_for_runner": {
+    "none": {
+      "value": null,
+      "sql": [
+        "SELECT \"runner_session\".\"id\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = '2b5e80b9a1714c81b154bdabe36dfa35'::uuid) ORDER BY \"runner_session\".\"created_at\" DESC LIMIT 1"
+      ]
+    },
+    "some": {
+      "value": "0e16d83a-cd4d-4d2b-8d2a-3b8bb26b625f",
+      "matches": true,
+      "sql": [
+        "SELECT \"runner_session\".\"id\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = '2b5e80b9a1714c81b154bdabe36dfa35'::uuid) ORDER BY \"runner_session\".\"created_at\" DESC LIMIT 1"
+      ]
+    }
+  },
+  "active_session_id_for_machine": {
+    "none": {
+      "value": null,
+      "sql": [
+        "SELECT \"machine_session\".\"id\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = '12aad42ff4694813bfe28847b93b0500'::uuid AND \"machine_session\".\"revoked_at\" IS NULL) ORDER BY \"machine_session\".\"created_at\" DESC LIMIT 1"
+      ]
+    },
+    "some": {
+      "value": "b985818c-c753-49b4-ad8f-28114910e20c",
+      "matches": true,
+      "sql": [
+        "SELECT \"machine_session\".\"id\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = '12aad42ff4694813bfe28847b93b0500'::uuid AND \"machine_session\".\"revoked_at\" IS NULL) ORDER BY \"machine_session\".\"created_at\" DESC LIMIT 1"
+      ]
+    }
+  },
+  "enqueue_live": {
+    "stream_id": "1790987270342-0",
+    "sql": [
+      "SELECT \"runner_session\".\"id\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = '2b5e80b9a1714c81b154bdabe36dfa35'::uuid) ORDER BY \"runner_session\".\"created_at\" DESC LIMIT 1"
+    ],
+    "redis": [
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "groupname": "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "xadd",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "{'mid': 'e-live-1', 'type': 'config_push', 'payload': '{\"type\": \"config_push\", \"mid\": \"e-live-1\"}'}"
+        ],
+        "kwargs": {},
+        "result": "'1790987270342-0'"
+      }
+    ]
+  },
+  "machine_enqueue_live": {
+    "stream_id": "1790987270347-0",
+    "sql": [
+      "SELECT \"machine_session\".\"id\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = '12aad42ff4694813bfe28847b93b0500'::uuid AND \"machine_session\".\"revoked_at\" IS NULL) ORDER BY \"machine_session\".\"created_at\" DESC LIMIT 1"
+    ],
+    "redis": [
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'machine_stream:12aad42f-f469-4813-bfe2-8847b93b0500'",
+          "groupname": "'machine-group:12aad42f-f469-4813-bfe2-8847b93b0500'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "xadd",
+        "args": [
+          "'machine_stream:12aad42f-f469-4813-bfe2-8847b93b0500'",
+          "{'mid': 'e-mlive-1', 'type': 'ping', 'payload': '{\"type\": \"ping\", \"mid\": \"e-mlive-1\"}'}"
+        ],
+        "kwargs": {},
+        "result": "'1790987270347-0'"
+      }
+    ]
+  },
+  "enqueue_offline_buffer": {
+    "returned": null,
+    "sql": [
+      "SELECT \"runner_session\".\"id\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = '2b5e80b9a1714c81b154bdabe36dfa35'::uuid) ORDER BY \"runner_session\".\"created_at\" DESC LIMIT 1"
+    ],
+    "redis": [
+      {
+        "cmd": "xadd",
+        "args": [
+          "'runner_offline_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "{'mid': 'e-off-1', 'type': 'config_push', 'payload': '{\"type\": \"config_push\", \"mid\": \"e-off-1\"}'}"
+        ],
+        "kwargs": {
+          "maxlen": "1000",
+          "approximate": "True"
+        },
+        "result": "'1790987270354-0'"
+      },
+      {
+        "cmd": "expire",
+        "args": [
+          "'runner_offline_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "86400"
+        ],
+        "kwargs": {},
+        "result": "True"
+      }
+    ],
+    "buffer_len": 1,
+    "buffer_ttl": 86400
+  },
+  "machine_enqueue_offline_buffer": {
+    "returned": null,
+    "sql": [
+      "SELECT \"machine_session\".\"id\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = '12aad42ff4694813bfe28847b93b0500'::uuid AND \"machine_session\".\"revoked_at\" IS NULL) ORDER BY \"machine_session\".\"created_at\" DESC LIMIT 1"
+    ],
+    "redis": [
+      {
+        "cmd": "xadd",
+        "args": [
+          "'machine_offline_stream:12aad42f-f469-4813-bfe2-8847b93b0500'",
+          "{'mid': 'e-moff-1', 'type': 'ping', 'payload': '{\"type\": \"ping\", \"mid\": \"e-moff-1\"}'}"
+        ],
+        "kwargs": {
+          "maxlen": "1000",
+          "approximate": "True"
+        },
+        "result": "'1790987270361-0'"
+      },
+      {
+        "cmd": "expire",
+        "args": [
+          "'machine_offline_stream:12aad42f-f469-4813-bfe2-8847b93b0500'",
+          "86400"
+        ],
+        "kwargs": {},
+        "result": "True"
+      }
+    ],
+    "buffer_len": 1,
+    "buffer_ttl": 86400
+  },
+  "enqueue_offline_reject": {
+    "assign": "RunnerOfflineError: runner 2b5e80b9-a171-4c81-b154-bdabe36dfa35 is offline; type 'assign' cannot queue",
+    "cancel": "RunnerOfflineError: runner 2b5e80b9-a171-4c81-b154-bdabe36dfa35 is offline; type 'cancel' cannot queue",
+    "decide": "RunnerOfflineError: runner 2b5e80b9-a171-4c81-b154-bdabe36dfa35 is offline; type 'decide' cannot queue",
+    "resume_ack": "RunnerOfflineError: runner 2b5e80b9-a171-4c81-b154-bdabe36dfa35 is offline; type 'resume_ack' cannot queue",
+    "chat_warm": "RunnerOfflineError: runner 2b5e80b9-a171-4c81-b154-bdabe36dfa35 is offline; type 'chat_warm' cannot queue",
+    "chat_user_message": "RunnerOfflineError: runner 2b5e80b9-a171-4c81-b154-bdabe36dfa35 is offline; type 'chat_user_message' cannot queue",
+    "chat_cancel": "RunnerOfflineError: runner 2b5e80b9-a171-4c81-b154-bdabe36dfa35 is offline; type 'chat_cancel' cannot queue",
+    "chat_close": "RunnerOfflineError: runner 2b5e80b9-a171-4c81-b154-bdabe36dfa35 is offline; type 'chat_close' cannot queue",
+    "chat_decide": "RunnerOfflineError: runner 2b5e80b9-a171-4c81-b154-bdabe36dfa35 is offline; type 'chat_decide' cannot queue",
+    "config_push_ok": null
+  },
+  "machine_enqueue_offline_reject": {
+    "create_runner": "MachineOfflineError: dev machine 12aad42f-f469-4813-bfe2-8847b93b0500 is offline; type 'create_runner' cannot queue",
+    "config_push": "MachineOfflineError: dev machine 12aad42f-f469-4813-bfe2-8847b93b0500 is offline; type 'config_push' cannot queue",
+    "ping_ok": null
+  },
+  "enqueue_unknown_type": {
+    "runner": "ValueError: unknown message type 'nope'",
+    "runner_missing_type": "ValueError: unknown message type ''",
+    "machine": "ValueError: unknown machine message type 'nope'"
+  },
+  "redis_none": {
+    "enqueue": null,
+    "machine_enqueue": null,
+    "drain": 0,
+    "claim": 0,
+    "read": [],
+    "ack": 0,
+    "is_pel_drained": false,
+    "due_cleanup": [],
+    "safe_trim": null,
+    "reap_consumers": 0,
+    "delete_consumer": 0,
+    "ensure_group": null,
+    "get_command_result": null,
+    "note": "void fns returned without raising"
+  },
+  "drain_offline_into_live": {
+    "moved": 1,
+    "redis": [
+      {
+        "cmd": "xrange",
+        "args": [
+          "'runner_offline_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "[(b'1790987270367-0', {b'mid': b'0b6af375-6995-447e-a87a-00183479acef', b'type': b'config_push', b'payload': b'{\"type\": \"config_push\", \"mid\": \"0b6af375-6995-447e-a87a-00183479acef\"}'})]"
+      },
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "groupname": "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "xadd",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "{'mid': '0b6af375-6995-447e-a87a-00183479acef', 'type': 'config_push', 'payload': '{\"type\": \"config_push\", \"mid\": \"0b6af375-6995-447e-a87a-00183479acef\"}'}"
+        ],
+        "kwargs": {},
+        "result": "'1790987270370-0'"
+      },
+      {
+        "cmd": "delete",
+        "args": [
+          "'runner_offline_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "1"
+      }
+    ],
+    "buffer_exists_after": false,
+    "live_len_after": 1,
+    "live_entries_after": [
+      {
+        "id": "1790987270370-0",
+        "mid": "0b6af375-6995-447e-a87a-00183479acef",
+        "type": "config_push",
+        "payload": "{\"type\": \"config_push\", \"mid\": \"0b6af375-6995-447e-a87a-00183479acef\"}"
+      }
+    ]
+  },
+  "machine_drain_offline_into_live": {
+    "moved": 2,
+    "redis": [
+      {
+        "cmd": "xrange",
+        "args": [
+          "'machine_offline_stream:12aad42f-f469-4813-bfe2-8847b93b0500'"
+        ],
+        "kwargs": {},
+        "result": "[(b'1790987270361-0', {b'mid': b'e-moff-1', b'type': b'ping', b'payload': b'{\"type\": \"ping\", \"mid\": \"e-moff-1\"}'}), (b'1790987270368-0', {b'mid': b'4448f3a7-b821-450b-abf4-e8ff28ffd03a', b'type': b'ping', b'payload': b'{\"type\": \"ping\", \"mid\": \"4448f3a7-b821-450b-abf4-e8ff28ffd03a\"}'})]"
+      },
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'machine_stream:12aad42f-f469-4813-bfe2-8847b93b0500'",
+          "groupname": "'machine-group:12aad42f-f469-4813-bfe2-8847b93b0500'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "xadd",
+        "args": [
+          "'machine_stream:12aad42f-f469-4813-bfe2-8847b93b0500'",
+          "{'mid': 'e-moff-1', 'type': 'ping', 'payload': '{\"type\": \"ping\", \"mid\": \"e-moff-1\"}'}"
+        ],
+        "kwargs": {},
+        "result": "'1790987270372-0'"
+      },
+      {
+        "cmd": "xadd",
+        "args": [
+          "'machine_stream:12aad42f-f469-4813-bfe2-8847b93b0500'",
+          "{'mid': '4448f3a7-b821-450b-abf4-e8ff28ffd03a', 'type': 'ping', 'payload': '{\"type\": \"ping\", \"mid\": \"4448f3a7-b821-450b-abf4-e8ff28ffd03a\"}'}"
+        ],
+        "kwargs": {},
+        "result": "'1790987270372-1'"
+      },
+      {
+        "cmd": "delete",
+        "args": [
+          "'machine_offline_stream:12aad42f-f469-4813-bfe2-8847b93b0500'"
+        ],
+        "kwargs": {},
+        "result": "1"
+      }
+    ],
+    "buffer_exists_after": false
+  },
+  "drain_offline_empty": {
+    "moved": 0,
+    "redis": [
+      {
+        "cmd": "xrange",
+        "args": [
+          "'runner_offline_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "[]"
+      }
+    ]
+  },
+  "claim_justid_shape": {
+    "justid_result": [
+      "1790987270374-0",
+      "1790987270375-0"
+    ],
+    "full_result_cursor": "0-0",
+    "full_result_n_entries": 2,
+    "note": "JUSTID drops the cursor (redis-py returns response[1] only); the claim loop reads result[0] as the cursor and never terminates"
+  },
+  "claim_pending_nonempty_spins": {
+    "returned_within_1_5s": false,
+    "xautoclaim_iterations_in_1_5s": 18721,
+    "first_start_ids": [
+      "'0-0'",
+      "'1790987270374-0'",
+      "'1790987270374-0'",
+      "'1790987270374-0'",
+      "'1790987270374-0'",
+      "'1790987270374-0'"
+    ],
+    "garbage_claimed_after_flush_stop": 280830,
+    "garbage_note": "timing-dependent sample: sum of id-string lengths, proving len() ran over a single id, not a list",
+    "thread_stopped_after_flush": true
+  },
+  "claim_pending_none_consumer": {
+    "returned_within_0_6s": false,
+    "xautoclaim_iterations_in_0_6s": 6143,
+    "note": "same spin as the old_consumer path (None only feeds the dead delete branch)"
+  },
+  "claim_pending_empty_pel": {
+    "claimed": 0,
+    "redis": [
+      {
+        "cmd": "xautoclaim",
+        "args": [],
+        "kwargs": {
+          "name": "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "groupname": "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "consumername": "'consumer-13ebbddf-cbc2-4c1c-9fdc-2d845ff89c08'",
+          "min_idle_time": "0",
+          "start_id": "'0-0'",
+          "count": "200",
+          "justid": "True"
+        },
+        "result": "[]"
+      }
+    ],
+    "consumers_after": [
+      "consumer-0e16d83a-cd4d-4d2b-8d2a-3b8bb26b625f",
+      "consumer-13ebbddf-cbc2-4c1c-9fdc-2d845ff89c08"
+    ],
+    "old_consumer_kept": true
+  },
+  "delete_consumer_falsy": {
+    "none": 0,
+    "empty": 0,
+    "redis": []
+  },
+  "read_for_session": {
+    "use_zero_n": 0,
+    "gt": [
+      {
+        "stream_id": "1790987273758-0",
+        "mid": "rd1",
+        "type": "config_push",
+        "body": {
+          "type": "config_push",
+          "mid": "rd1",
+          "n": 1
+        }
+      },
+      {
+        "stream_id": "1790987273760-0",
+        "mid": "rd2",
+        "type": "config_push",
+        "body": {
+          "type": "config_push",
+          "mid": "rd2"
+        }
+      },
+      {
+        "stream_id": "1790987273760-1",
+        "mid": "rd3",
+        "type": "config_push",
+        "body": {}
+      }
+    ],
+    "redis": [
+      {
+        "cmd": "xreadgroup",
+        "args": [],
+        "kwargs": {
+          "groupname": "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "consumername": "'consumer-13ebbddf-cbc2-4c1c-9fdc-2d845ff89c08'",
+          "streams": "{'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35': '0'}",
+          "count": "100",
+          "block": "0"
+        },
+        "result": "[[b'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35', []]]"
+      },
+      {
+        "cmd": "xreadgroup",
+        "args": [],
+        "kwargs": {
+          "groupname": "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "consumername": "'consumer-13ebbddf-cbc2-4c1c-9fdc-2d845ff89c08'",
+          "streams": "{'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35': '>'}",
+          "count": "100",
+          "block": "0"
+        },
+        "result": "[[b'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35', [(b'1790987273758-0', {b'mid': b'rd1', b'type': b'config_push', b'payload': b'{\"type\": \"config_push\", \"mid\": \"rd1\", \"n\": 1}'}), (b'1790987273760-0', {b'mid': b'rd2', b'type': b'config_push', b'payload': b'{\"type\": \"config_push\", \"mid\": \"rd2\"}'}), (b'1790987273760-1', {b'mid': b'rd3', b'type': b'config_push', b'payload': b'{corrupt'})]]]"
+      }
+    ]
+  },
+  "ack_for_session": {
+    "acked": 3,
+    "acked_again": 0,
+    "empty": 0,
+    "falsy": 0,
+    "redis": [
+      {
+        "cmd": "xack",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "'1790987273758-0'",
+          "'1790987273760-0'",
+          "'1790987273760-1'"
+        ],
+        "kwargs": {},
+        "result": "3"
+      },
+      {
+        "cmd": "xack",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "'1790987273758-0'",
+          "'1790987273760-0'",
+          "'1790987273760-1'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      }
+    ]
+  },
+  "machine_read_for_session": {
+    "use_zero_n": 0,
+    "gt": [
+      {
+        "stream_id": "1790987273769-0",
+        "mid": "mrd1",
+        "type": "ping",
+        "body": {}
+      }
+    ],
+    "redis": [
+      {
+        "cmd": "xreadgroup",
+        "args": [],
+        "kwargs": {
+          "groupname": "'machine-group:12aad42f-f469-4813-bfe2-8847b93b0500'",
+          "consumername": "'machine-consumer-b985818c-c753-49b4-ad8f-28114910e20c'",
+          "streams": "{'machine_stream:12aad42f-f469-4813-bfe2-8847b93b0500': '0'}",
+          "count": "100",
+          "block": "0"
+        },
+        "result": "[[b'machine_stream:12aad42f-f469-4813-bfe2-8847b93b0500', []]]"
+      },
+      {
+        "cmd": "xreadgroup",
+        "args": [],
+        "kwargs": {
+          "groupname": "'machine-group:12aad42f-f469-4813-bfe2-8847b93b0500'",
+          "consumername": "'machine-consumer-b985818c-c753-49b4-ad8f-28114910e20c'",
+          "streams": "{'machine_stream:12aad42f-f469-4813-bfe2-8847b93b0500': '>'}",
+          "count": "100",
+          "block": "0"
+        },
+        "result": "[[b'machine_stream:12aad42f-f469-4813-bfe2-8847b93b0500', [(b'1790987273769-0', {b'mid': b'mrd1', b'type': b'ping', b'payload': b'{}'})]]]"
+      }
+    ]
+  },
+  "pel_marker": {
+    "redis": [
+      {
+        "cmd": "set",
+        "args": [
+          "'session_pel_drained:13ebbddf-cbc2-4c1c-9fdc-2d845ff89c08'",
+          "'1'"
+        ],
+        "kwargs": {
+          "ex": "7200"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "exists",
+        "args": [
+          "'session_pel_drained:13ebbddf-cbc2-4c1c-9fdc-2d845ff89c08'"
+        ],
+        "kwargs": {},
+        "result": "1"
+      },
+      {
+        "cmd": "delete",
+        "args": [
+          "'session_pel_drained:13ebbddf-cbc2-4c1c-9fdc-2d845ff89c08'"
+        ],
+        "kwargs": {},
+        "result": "1"
+      },
+      {
+        "cmd": "exists",
+        "args": [
+          "'session_pel_drained:13ebbddf-cbc2-4c1c-9fdc-2d845ff89c08'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      }
+    ],
+    "is_drained": true,
+    "ttl": 7200,
+    "ACCESS_TOKEN_TTL_SECS": 3600,
+    "ttl_is_2x": true,
+    "is_drained_after_clear": false
+  },
+  "machine_pel_marker": {
+    "redis": [
+      {
+        "cmd": "set",
+        "args": [
+          "'machine_session_pel_drained:b985818c-c753-49b4-ad8f-28114910e20c'",
+          "'1'"
+        ],
+        "kwargs": {
+          "ex": "7200"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "exists",
+        "args": [
+          "'machine_session_pel_drained:b985818c-c753-49b4-ad8f-28114910e20c'"
+        ],
+        "kwargs": {},
+        "result": "1"
+      }
+    ],
+    "is_drained": true,
+    "ttl": 7200
+  },
+  "stream_cleanup": {
+    "redis": [
+      {
+        "cmd": "zadd",
+        "args": [
+          "'runner_stream_cleanup'",
+          "{'2b5e80b9-a171-4c81-b154-bdabe36dfa35': 1790994473}"
+        ],
+        "kwargs": {},
+        "result": "1"
+      },
+      {
+        "cmd": "zrangebyscore",
+        "args": [
+          "'runner_stream_cleanup'",
+          "0",
+          "1790987273"
+        ],
+        "kwargs": {},
+        "result": "[]"
+      },
+      {
+        "cmd": "zrangebyscore",
+        "args": [
+          "'runner_stream_cleanup'",
+          "0",
+          "1790987273"
+        ],
+        "kwargs": {},
+        "result": "[b'2b5e80b9-a171-4c81-b154-bdabe36dfa35']"
+      },
+      {
+        "cmd": "zrem",
+        "args": [
+          "'runner_stream_cleanup'",
+          "'2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "1"
+      },
+      {
+        "cmd": "zrangebyscore",
+        "args": [
+          "'runner_stream_cleanup'",
+          "0",
+          "1790987273"
+        ],
+        "kwargs": {},
+        "result": "[]"
+      },
+      {
+        "cmd": "delete",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      },
+      {
+        "cmd": "delete",
+        "args": [
+          "'runner_offline_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      }
+    ],
+    "score_minus_now": 7200,
+    "expected_grace": 7200,
+    "due_now": [],
+    "due_after_backdate": [
+      "2b5e80b9-a171-4c81-b154-bdabe36dfa35"
+    ],
+    "due_after_remove": [],
+    "streams_gone": true
+  },
+  "machine_delete_stream": {
+    "redis": [
+      {
+        "cmd": "delete",
+        "args": [
+          "'machine_stream:12aad42f-f469-4813-bfe2-8847b93b0500'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      },
+      {
+        "cmd": "delete",
+        "args": [
+          "'machine_offline_stream:12aad42f-f469-4813-bfe2-8847b93b0500'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      }
+    ]
+  },
+  "reap_idle_consumers": {
+    "reaped": 0,
+    "redis": [
+      {
+        "cmd": "xinfo_consumers",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "[{'name': b'consumer-idle', 'pending': 0, 'idle': 198, 'inactive': -1}, {'name': b'consumer-keep', 'pending': 0, 'idle': 198, 'inactive': 198}]"
+      },
+      {
+        "cmd": "xgroup_delconsumer",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "'consumer-idle'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      }
+    ],
+    "consumers_after": [
+      "consumer-keep"
+    ],
+    "pending_guard": {
+      "reaped": 0,
+      "redis": [
+        {
+          "cmd": "xinfo_consumers",
+          "args": [
+            "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+            "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+          ],
+          "kwargs": {},
+          "result": "[{'name': b'consumer-pend', 'pending': 1, 'idle': 1, 'inactive': 1}]"
+        }
+      ],
+      "consumers_after": [
+        "consumer-pend"
+      ]
+    },
+    "default_floor": {
+      "reaped": 0,
+      "redis": [
+        {
+          "cmd": "xinfo_consumers",
+          "args": [
+            "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+            "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+          ],
+          "kwargs": {},
+          "result": "[{'name': b'consumer-df', 'pending': 0, 'idle': 76, 'inactive': 76}]"
+        }
+      ],
+      "LONG_POLL_INTERVAL_SECS": 25,
+      "RUNNER_STREAM_CONSUMER_IDLE_MS_set": null
+    }
+  },
+  "safe_trim": {
+    "trimmed": 0,
+    "redis": [
+      {
+        "cmd": "xinfo_groups",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "[{'name': b'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35', 'consumers': 1, 'pending': 1, 'last-delivered-id': b'1790987274107-1', 'entries-read': 2, 'lag': 0}]"
+      },
+      {
+        "cmd": "xpending",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "{'pending': 1, 'min': b'1790987274107-1', 'max': b'1790987274107-1', 'consumers': [{'name': b'consumer-a', 'pending': 1}]}"
+      },
+      {
+        "cmd": "xtrim",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {
+          "minid": "'1790987274107-0'"
+        },
+        "result": "0"
+      }
+    ],
+    "time_cutoff_id": "1790990874103-0",
+    "entry_ids": [
+      "1790987274107-0",
+      "1790987274107-1"
+    ],
+    "remaining_ids": [
+      "1790987274107-0",
+      "1790987274107-1"
+    ]
+  },
+  "safe_trim_no_group": {
+    "trimmed": null,
+    "redis": [
+      {
+        "cmd": "xinfo_groups",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "[]"
+      }
+    ]
+  },
+  "safe_trim_inside_floor": {
+    "trimmed": 0,
+    "redis": [
+      {
+        "cmd": "xinfo_groups",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "[{'name': b'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35', 'consumers': 1, 'pending': 1, 'last-delivered-id': b'1000-2', 'entries-read': 3, 'lag': 0}]"
+      },
+      {
+        "cmd": "xpending",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "{'pending': 1, 'min': b'1000-2', 'max': b'1000-2', 'consumers': [{'name': b'consumer-b', 'pending': 1}]}"
+      },
+      {
+        "cmd": "xtrim",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {
+          "minid": "'1000-1'"
+        },
+        "result": "0"
+      }
+    ],
+    "remaining_ids": [
+      "1000-0",
+      "1000-1",
+      "1000-2"
+    ],
+    "note": "exact MINID 1000-1 would evict 1000-0, but redis-py sends MINID ~ (approximate=True default) and one 3-entry node trims 0"
+  },
+  "safe_trim_bulk_approximate": {
+    "trimmed": 200,
+    "redis": [
+      {
+        "cmd": "xinfo_groups",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "[{'name': b'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35', 'consumers': 1, 'pending': 10, 'last-delivered-id': b'2299-0', 'entries-read': 300, 'lag': 0}]"
+      },
+      {
+        "cmd": "xpending",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
+          "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {},
+        "result": "{'pending': 10, 'min': b'2290-0', 'max': b'2299-0', 'consumers': [{'name': b'consumer-c', 'pending': 10}]}"
+      },
+      {
+        "cmd": "xtrim",
+        "args": [
+          "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'"
+        ],
+        "kwargs": {
+          "minid": "'2289-0'"
+        },
+        "result": "200"
+      }
+    ],
+    "len_before": 300,
+    "len_after": 100,
+    "first_remaining": [
+      "2200-0",
+      "2201-0",
+      "2202-0"
+    ],
+    "last_remaining": [
+      "2299-0",
+      "2298-0"
+    ]
+  },
+  "safe_trim_missing_stream": {
+    "trimmed": null,
+    "redis": []
+  },
+  "command_result": {
+    "redis": [
+      {
+        "cmd": "set",
+        "args": [
+          "'machine_cmd_result:req-1'",
+          "'{\"status\": \"ok\", \"runner_id\": \"2b5e80b9-a171-4c81-b154-bdabe36dfa35\"}'"
+        ],
+        "kwargs": {
+          "ex": "900"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "get",
+        "args": [
+          "'machine_cmd_result:req-1'"
+        ],
+        "kwargs": {},
+        "result": "'{\"status\": \"ok\", \"runner_id\": \"2b5e80b9-a171-4c81-b154-bdabe36dfa35\"}'"
+      },
+      {
+        "cmd": "get",
+        "args": [
+          "'machine_cmd_result:req-absent'"
+        ],
+        "kwargs": {},
+        "result": "None"
+      },
+      {
+        "cmd": "get",
+        "args": [
+          "'machine_cmd_result:req-bad'"
+        ],
+        "kwargs": {},
+        "result": "'{corrupt'"
+      }
+    ],
+    "got": {
+      "status": "ok",
+      "runner_id": "2b5e80b9-a171-4c81-b154-bdabe36dfa35"
+    },
+    "ttl": 900,
+    "expected_ttl": 900,
+    "missing": null,
+    "corrupt": null
+  }
+}

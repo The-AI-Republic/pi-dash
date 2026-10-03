@@ -1,0 +1,416 @@
+{
+  "fixture": "FX-RSES-03",
+  "_trace": "outbox.py:38-67 type sets, :120-136 _serialize, :164-189 _decode; machine_outbox.py:49-65 type sets; pubsub.py:34-42 group+envelope, :45-78 send verbs, :81-108 close, :110-176 revoke/remove+alias; matcher.py:306-330 _build_assign_msg; outbox.py:544-556 eviction",
+  "_method": "Pure sets/serializers read straight off the real modules and called directly with fixed vectors (valid_types/offline_reject/serialize/decode_read_result/ensure_envelope). Ran the real builder/verb functions against scratch Postgres + real Redis DB 14 behind a logging proxy; stream payloads read back from Redis.",
+  "valid_types_runner": [
+    "assign",
+    "cancel",
+    "chat_cancel",
+    "chat_close",
+    "chat_decide",
+    "chat_user_message",
+    "chat_warm",
+    "config_push",
+    "decide",
+    "force_refresh",
+    "remove_runner",
+    "resume_ack",
+    "revoke",
+    "welcome"
+  ],
+  "offline_reject_runner": [
+    "assign",
+    "cancel",
+    "chat_cancel",
+    "chat_close",
+    "chat_decide",
+    "chat_user_message",
+    "chat_warm",
+    "decide",
+    "resume_ack"
+  ],
+  "valid_types_machine": [
+    "config_push",
+    "create_runner",
+    "ping",
+    "welcome"
+  ],
+  "offline_reject_machine": [
+    "config_push",
+    "create_runner"
+  ],
+  "serialize": {
+    "explicit_mid": {
+      "mid": "mid-fixed-1",
+      "type": "assign",
+      "payload": "{\"type\": \"assign\", \"mid\": \"mid-fixed-1\", \"run_id\": \"r1\"}"
+    },
+    "default_mid_sample": {
+      "mid": "<uuid4>",
+      "type": "cancel",
+      "payload": "<see payload_mid_match>"
+    },
+    "default_mid_is_uuid4": true,
+    "payload_mid_matches_mid_field": true,
+    "missing_type": {
+      "mid": "m2",
+      "type": "",
+      "payload": "{\"mid\": \"m2\"}"
+    }
+  },
+  "decode_read_result": {
+    "none": [],
+    "empty": [],
+    "bytes_reply": [
+      {
+        "stream_id": "1714080000123-0",
+        "mid": "mm1",
+        "type": "assign",
+        "body": {
+          "mid": "mm1",
+          "type": "assign",
+          "run_id": "r1"
+        }
+      },
+      {
+        "stream_id": "1714080000124-0",
+        "mid": "mm2",
+        "type": "cancel",
+        "body": {
+          "mid": "mm2",
+          "type": "cancel"
+        }
+      }
+    ],
+    "corrupt_payload": [
+      {
+        "stream_id": "1-0",
+        "mid": "mm3",
+        "type": "assign",
+        "body": {}
+      }
+    ],
+    "missing_fields_fallback_to_body": [
+      {
+        "stream_id": "2-0",
+        "mid": "mm4",
+        "type": "decide",
+        "body": {
+          "mid": "mm4",
+          "type": "decide"
+        }
+      }
+    ],
+    "empty_payload_string": [
+      {
+        "stream_id": "3-0",
+        "mid": "",
+        "type": "",
+        "body": {}
+      }
+    ]
+  },
+  "ensure_envelope": {
+    "adds_mid": {
+      "type": "cancel",
+      "mid": "<uuid4>"
+    },
+    "adds_mid_is_uuid4": true,
+    "keeps_existing_mid": {
+      "type": "cancel",
+      "mid": "keep-me"
+    }
+  },
+  "build_assign_msg_full": {
+    "msg": {
+      "v": 1,
+      "type": "assign",
+      "run_id": "30a64411-fc3e-4217-956d-6f00ccbd30a9",
+      "work_item_id": "ee2bf318-7d95-41de-ab60-2462a29cb40a",
+      "prompt": "do the thing",
+      "repo_url": "https://example.com/r.git",
+      "repo_ref": "main",
+      "git_work_branch": "pi-dash/x",
+      "expected_codex_model": "claude-4",
+      "approval_policy_overrides": {
+        "network": "deny"
+      },
+      "deadline": null
+    },
+    "key_order": [
+      "v",
+      "type",
+      "run_id",
+      "work_item_id",
+      "prompt",
+      "repo_url",
+      "repo_ref",
+      "git_work_branch",
+      "expected_codex_model",
+      "approval_policy_overrides",
+      "deadline"
+    ],
+    "sql": []
+  },
+  "build_assign_msg_bare": {
+    "msg": {
+      "v": 1,
+      "type": "assign",
+      "run_id": "e5e8abb6-a20e-4ccd-8638-4c9e851a1cd3",
+      "work_item_id": null,
+      "prompt": "",
+      "repo_url": null,
+      "repo_ref": null,
+      "git_work_branch": null,
+      "expected_codex_model": null,
+      "approval_policy_overrides": null,
+      "deadline": null
+    },
+    "work_item_id": null
+  },
+  "resume_ack_shapes": {
+    "see": "FX-RSES-06 fx-rses-06-session-service.json for builder SQL + branches; wire shapes:",
+    "unknown_run": {
+      "type": "cancel",
+      "run_id": "3ef07f94-6573-45f8-a32f-3b947c58c236",
+      "reason": "unknown_run_on_reconnect"
+    },
+    "cancel_requested": {
+      "type": "cancel",
+      "run_id": "5235e198-6af1-40f2-a1e4-9e00a14ec2a0",
+      "reason": "cancellation_pending_on_reconnect"
+    },
+    "terminal": {
+      "type": "cancel",
+      "run_id": "7041563b-e598-45df-90d5-4443c29329fa",
+      "reason": "run_already_completed"
+    },
+    "live": {
+      "type": "resume_ack",
+      "run_id": "46970c5a-6f34-40f1-9897-5c7633d812ba",
+      "last_seq": 7,
+      "status": "running",
+      "thread_id": "th-live"
+    },
+    "live_no_events": {
+      "type": "resume_ack",
+      "run_id": "84b509ce-f7e0-47e8-8059-c73ba1a5e97f",
+      "last_seq": null,
+      "status": "running",
+      "thread_id": ""
+    }
+  },
+  "redeliver_shapes": {
+    "see": "FX-RSES-06 for builder SQL + ordering; wire shapes:",
+    "cancel_first": {
+      "v": 1,
+      "type": "cancel",
+      "run_id": "5235e198-6af1-40f2-a1e4-9e00a14ec2a0",
+      "reason": "cancellation_pending_on_reconnect"
+    },
+    "skip_cancel_falls_to_assign": "assign"
+  },
+  "pubsub_frames": {
+    "redis": [
+      {
+        "cmd": "xadd",
+        "args": [
+          "'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "{'mid': '23063966-a53f-4e08-b750-a13055ba950a', 'type': 'revoke', 'payload': '{\"type\": \"revoke\", \"reason\": \"runner revoked\", \"mid\": \"23063966-a53f-4e08-b750-a13055ba950a\"}'}"
+        ],
+        "kwargs": {
+          "maxlen": "1000",
+          "approximate": "True"
+        },
+        "result": "'1790986006326-0'"
+      },
+      {
+        "cmd": "expire",
+        "args": [
+          "'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "86400"
+        ],
+        "kwargs": {},
+        "result": "True"
+      },
+      {
+        "cmd": "xadd",
+        "args": [
+          "'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "{'mid': '0fb7215a-3f43-491b-a284-1d377227e228', 'type': 'revoke', 'payload': '{\"type\": \"revoke\", \"reason\": \"runner revoked\", \"mid\": \"0fb7215a-3f43-491b-a284-1d377227e228\"}'}"
+        ],
+        "kwargs": {
+          "maxlen": "1000",
+          "approximate": "True"
+        },
+        "result": "'1790986006331-0'"
+      },
+      {
+        "cmd": "expire",
+        "args": [
+          "'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "86400"
+        ],
+        "kwargs": {},
+        "result": "True"
+      },
+      {
+        "cmd": "xadd",
+        "args": [
+          "'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "{'mid': 'a40c12a4-8f50-4b20-ab42-ab000ea8d7a1', 'type': 'remove_runner', 'payload': '{\"type\": \"remove_runner\", \"runner_id\": \"7b1bf059-c24d-4a55-ae1a-20b8b05a160b\", \"reason\": \"deleted by user\", \"mid\": \"a40c12a4-8f50-4b20-ab42-ab000ea8d7a1\"}'}"
+        ],
+        "kwargs": {
+          "maxlen": "1000",
+          "approximate": "True"
+        },
+        "result": "'1790986006332-0'"
+      },
+      {
+        "cmd": "expire",
+        "args": [
+          "'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "86400"
+        ],
+        "kwargs": {},
+        "result": "True"
+      },
+      {
+        "cmd": "xadd",
+        "args": [
+          "'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "{'mid': 'aac5c735-baa5-4cfd-a103-6ba9c380bdda', 'type': 'revoke', 'payload': '{\"type\": \"revoke\", \"reason\": \"alias-check\", \"mid\": \"aac5c735-baa5-4cfd-a103-6ba9c380bdda\"}'}"
+        ],
+        "kwargs": {
+          "maxlen": "1000",
+          "approximate": "True"
+        },
+        "result": "'1790986006333-0'"
+      },
+      {
+        "cmd": "expire",
+        "args": [
+          "'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "86400"
+        ],
+        "kwargs": {},
+        "result": "True"
+      }
+    ],
+    "live_stream_payloads": [],
+    "offline_buffer_payloads": [
+      {
+        "id": "1790986006326-0",
+        "mid": "23063966-a53f-4e08-b750-a13055ba950a",
+        "type": "revoke",
+        "payload": "{\"type\": \"revoke\", \"reason\": \"runner revoked\", \"mid\": \"23063966-a53f-4e08-b750-a13055ba950a\"}"
+      },
+      {
+        "id": "1790986006331-0",
+        "mid": "0fb7215a-3f43-491b-a284-1d377227e228",
+        "type": "revoke",
+        "payload": "{\"type\": \"revoke\", \"reason\": \"runner revoked\", \"mid\": \"0fb7215a-3f43-491b-a284-1d377227e228\"}"
+      },
+      {
+        "id": "1790986006332-0",
+        "mid": "a40c12a4-8f50-4b20-ab42-ab000ea8d7a1",
+        "type": "remove_runner",
+        "payload": "{\"type\": \"remove_runner\", \"runner_id\": \"7b1bf059-c24d-4a55-ae1a-20b8b05a160b\", \"reason\": \"deleted by user\", \"mid\": \"a40c12a4-8f50-4b20-ab42-ab000ea8d7a1\"}"
+      },
+      {
+        "id": "1790986006333-0",
+        "mid": "aac5c735-baa5-4cfd-a103-6ba9c380bdda",
+        "type": "revoke",
+        "payload": "{\"type\": \"revoke\", \"reason\": \"alias-check\", \"mid\": \"aac5c735-baa5-4cfd-a103-6ba9c380bdda\"}"
+      }
+    ],
+    "send_to_runner_redis_none_no_raise": true,
+    "offline_assign_raises": "RunnerOfflineError: runner eb112792-fb4c-4427-8c12-b01ad18ca264 is offline; type 'assign' cannot queue"
+  },
+  "send_to_machine_live": {
+    "returned": "1790986006418-0",
+    "redis": [
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'machine_stream:a4dcdaa1-6f8d-4e7f-8185-9ab65b0eb3a8'",
+          "groupname": "'machine-group:a4dcdaa1-6f8d-4e7f-8185-9ab65b0eb3a8'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "xadd",
+        "args": [
+          "'machine_stream:a4dcdaa1-6f8d-4e7f-8185-9ab65b0eb3a8'",
+          "{'mid': '482a3e08-5f9c-4558-8004-237d959e0c18', 'type': 'ping', 'payload': '{\"type\": \"ping\", \"mid\": \"482a3e08-5f9c-4558-8004-237d959e0c18\"}'}"
+        ],
+        "kwargs": {},
+        "result": "'1790986006418-0'"
+      }
+    ]
+  },
+  "close_runner_session": {
+    "sql": [
+      "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = 'eb112792fb4c44278c12b01ad18ca264'::uuid) ORDER BY \"runner_session\".\"created_at\" DESC",
+      "UPDATE \"runner_session\" SET \"revoked_at\" = '2026-10-03 00:06:46.422474+00:00'::timestamptz, \"revoked_reason\" = 'force_close' WHERE \"runner_session\".\"id\" = '028337e172e44f0e98ecbd2be4890179'::uuid"
+    ],
+    "redis": [
+      {
+        "cmd": "delete",
+        "args": [
+          "'session_pel_drained:028337e1-72e4-4f0e-98ec-bd2be4890179'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      },
+      {
+        "cmd": "publish",
+        "args": [
+          "'session_eviction:eb112792-fb4c-4427-8c12-b01ad18ca264'",
+          "'{\"old_sid\": \"028337e1-72e4-4f0e-98ec-bd2be4890179\", \"new_sid\": \"\"}'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      }
+    ],
+    "row_after": {
+      "revoked": true,
+      "reason": "force_close"
+    }
+  },
+  "close_runner_session_noop": {
+    "redis": []
+  },
+  "eviction_publish": {
+    "redis": [
+      {
+        "cmd": "publish",
+        "args": [
+          "'session_eviction:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "'{\"old_sid\": \"old-s\", \"new_sid\": \"new-s\"}'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      },
+      {
+        "cmd": "publish",
+        "args": [
+          "'session_eviction:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "'{\"old_sid\": null, \"new_sid\": \"new-s2\"}'"
+        ],
+        "kwargs": {},
+        "result": "0"
+      }
+    ]
+  },
+  "ws_close_1008": {
+    "_trace": "runner/consumers.py:29-42 (skip stub, Dead Python Code \u00a74, NOT ported)",
+    "_method": "source-verified constant + contract suite test_ws_close.py (uvicorn: live-path 403 / unknown-path 500; runserver: 404/404); D-14 keeps the 1008 semantics, pinned by the gate",
+    "CLOSE_CODE_PROTOCOL_UNSUPPORTED": 1008,
+    "CLOSE_CODE_TICKET_INVALID": 4404,
+    "connect_behavior": "close(code=1008) before accept; no frames ever exchanged"
+  }
+}

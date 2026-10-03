@@ -1,0 +1,1423 @@
+{
+  "fixture": "FX-RSES-01",
+  "_trace": "models.py RunnerSession:688-720; MachineSession:723-762",
+  "_method": "Django _meta introspection at runtime (field order, column names, defaults evaluated via Field.get_default, constraints/indexes); FK-contract models are column lists only, owned by D-13/D-15. max_length recorded only for CharField-family (UUIDField reports max_length=32 as a Django form-validation artifact, not a DB constraint).",
+  "owned": {
+    "RunnerSession": {
+      "model": "runner.RunnerSession",
+      "db_table": "runner_session",
+      "ordering": [
+        "-created_at"
+      ],
+      "unique_together": [],
+      "fields": [
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "null": false,
+          "primary_key": true,
+          "unique": true,
+          "default": "<callable uuid4>"
+        },
+        {
+          "name": "runner",
+          "column": "runner_id",
+          "type": "ForeignKey",
+          "null": false,
+          "db_index": true,
+          "related_model": "runner.Runner",
+          "related_name": "sessions",
+          "on_delete": "CASCADE"
+        },
+        {
+          "name": "protocol_version",
+          "column": "protocol_version",
+          "type": "PositiveIntegerField",
+          "null": false,
+          "default": "4"
+        },
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "null": false,
+          "blank": true
+        },
+        {
+          "name": "last_seen_at",
+          "column": "last_seen_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "revoked_at",
+          "column": "revoked_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "revoked_reason",
+          "column": "revoked_reason",
+          "type": "CharField",
+          "null": false,
+          "max_length": 32,
+          "blank": true,
+          "default": "''"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "runner_session_one_active_per_runner",
+          "type": "UniqueConstraint",
+          "fields": [
+            "runner"
+          ],
+          "condition": "(AND: ('revoked_at__isnull', True))"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "runner_sess_runner__f0ef41_idx",
+          "fields": [
+            "runner",
+            "revoked_at"
+          ]
+        },
+        {
+          "name": "runner_sess_last_se_2406f1_idx",
+          "fields": [
+            "last_seen_at"
+          ]
+        }
+      ]
+    },
+    "MachineSession": {
+      "model": "runner.MachineSession",
+      "db_table": "machine_session",
+      "ordering": [
+        "-created_at"
+      ],
+      "unique_together": [],
+      "fields": [
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "null": false,
+          "primary_key": true,
+          "unique": true,
+          "default": "<callable uuid4>"
+        },
+        {
+          "name": "dev_machine",
+          "column": "dev_machine_id",
+          "type": "ForeignKey",
+          "null": false,
+          "db_index": true,
+          "related_model": "runner.DevMachine",
+          "related_name": "sessions",
+          "on_delete": "CASCADE"
+        },
+        {
+          "name": "protocol_version",
+          "column": "protocol_version",
+          "type": "PositiveIntegerField",
+          "null": false,
+          "default": "4"
+        },
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "null": false,
+          "blank": true
+        },
+        {
+          "name": "last_seen_at",
+          "column": "last_seen_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "revoked_at",
+          "column": "revoked_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "revoked_reason",
+          "column": "revoked_reason",
+          "type": "CharField",
+          "null": false,
+          "max_length": 32,
+          "blank": true,
+          "default": "''"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "machine_session_one_active_per_machine",
+          "type": "UniqueConstraint",
+          "fields": [
+            "dev_machine"
+          ],
+          "condition": "(AND: ('revoked_at__isnull', True))"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "machine_ses_dev_mac_885f2b_idx",
+          "fields": [
+            "dev_machine",
+            "revoked_at"
+          ]
+        },
+        {
+          "name": "machine_ses_last_se_b57ca0_idx",
+          "fields": [
+            "last_seen_at"
+          ]
+        }
+      ]
+    }
+  },
+  "fk_contract_column_lists": {
+    "Runner": {
+      "model": "runner.Runner",
+      "db_table": "runner",
+      "ordering": [
+        "-last_heartbeat_at",
+        "-created_at"
+      ],
+      "unique_together": [],
+      "fields": [
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "null": false,
+          "primary_key": true,
+          "unique": true,
+          "default": "<callable uuid4>"
+        },
+        {
+          "name": "owner",
+          "column": "owner_id",
+          "type": "ForeignKey",
+          "null": false,
+          "db_index": true,
+          "related_model": "db.User",
+          "related_name": "runners",
+          "on_delete": "CASCADE"
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "null": false,
+          "db_index": true,
+          "related_model": "db.Workspace",
+          "related_name": "runners",
+          "on_delete": "CASCADE"
+        },
+        {
+          "name": "dev_machine",
+          "column": "dev_machine_id",
+          "type": "ForeignKey",
+          "null": true,
+          "blank": true,
+          "db_index": true,
+          "related_model": "runner.DevMachine",
+          "related_name": "runners",
+          "on_delete": "SET_NULL"
+        },
+        {
+          "name": "pod",
+          "column": "pod_id",
+          "type": "ForeignKey",
+          "null": false,
+          "db_index": true,
+          "related_model": "runner.Pod",
+          "related_name": "runners",
+          "on_delete": "PROTECT"
+        },
+        {
+          "name": "name",
+          "column": "name",
+          "type": "CharField",
+          "null": false,
+          "max_length": 128
+        },
+        {
+          "name": "host_label",
+          "column": "host_label",
+          "type": "CharField",
+          "null": false,
+          "max_length": 255,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "provisioning",
+          "column": "provisioning",
+          "type": "CharField",
+          "null": false,
+          "max_length": 24,
+          "db_index": true,
+          "choices": [
+            "manual",
+            "desktop_bundled"
+          ],
+          "default": "RunnerProvisioning.MANUAL"
+        },
+        {
+          "name": "visibility",
+          "column": "visibility",
+          "type": "PositiveSmallIntegerField",
+          "null": false,
+          "db_index": true,
+          "choices": [
+            0
+          ],
+          "default": "Visibility.PRIVATE"
+        },
+        {
+          "name": "refresh_token_hash",
+          "column": "refresh_token_hash",
+          "type": "CharField",
+          "null": false,
+          "max_length": 128,
+          "blank": true,
+          "db_index": true,
+          "default": "''"
+        },
+        {
+          "name": "refresh_token_fingerprint",
+          "column": "refresh_token_fingerprint",
+          "type": "CharField",
+          "null": false,
+          "max_length": 16,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "refresh_token_generation",
+          "column": "refresh_token_generation",
+          "type": "PositiveIntegerField",
+          "null": false,
+          "default": "0"
+        },
+        {
+          "name": "previous_refresh_token_hash",
+          "column": "previous_refresh_token_hash",
+          "type": "CharField",
+          "null": false,
+          "max_length": 128,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "access_token_signing_key_version",
+          "column": "access_token_signing_key_version",
+          "type": "PositiveIntegerField",
+          "null": false,
+          "default": "1"
+        },
+        {
+          "name": "enrollment_token_hash",
+          "column": "enrollment_token_hash",
+          "type": "CharField",
+          "null": false,
+          "max_length": 128,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "enrollment_token_fingerprint",
+          "column": "enrollment_token_fingerprint",
+          "type": "CharField",
+          "null": false,
+          "max_length": 16,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "enrolled_at",
+          "column": "enrolled_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "capabilities",
+          "column": "capabilities",
+          "type": "JSONField",
+          "null": false,
+          "blank": true,
+          "default": "[]"
+        },
+        {
+          "name": "status",
+          "column": "status",
+          "type": "CharField",
+          "null": false,
+          "max_length": 16,
+          "db_index": true,
+          "choices": [
+            "online",
+            "offline",
+            "busy",
+            "revoked"
+          ],
+          "default": "RunnerStatus.OFFLINE"
+        },
+        {
+          "name": "os",
+          "column": "os",
+          "type": "CharField",
+          "null": false,
+          "max_length": 32,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "arch",
+          "column": "arch",
+          "type": "CharField",
+          "null": false,
+          "max_length": 32,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "runner_version",
+          "column": "runner_version",
+          "type": "CharField",
+          "null": false,
+          "max_length": 32,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "dev_metadata",
+          "column": "dev_metadata",
+          "type": "JSONField",
+          "null": false,
+          "blank": true,
+          "default": "{}"
+        },
+        {
+          "name": "protocol_version",
+          "column": "protocol_version",
+          "type": "PositiveIntegerField",
+          "null": false,
+          "default": "1"
+        },
+        {
+          "name": "last_heartbeat_at",
+          "column": "last_heartbeat_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "free_worktrees",
+          "column": "free_worktrees",
+          "type": "IntegerField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "null": false,
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "null": false,
+          "blank": true
+        },
+        {
+          "name": "revoked_at",
+          "column": "revoked_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "revoked_reason",
+          "column": "revoked_reason",
+          "type": "CharField",
+          "null": false,
+          "max_length": 32,
+          "blank": true,
+          "default": "''"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "runner_unique_name_per_pod",
+          "type": "UniqueConstraint",
+          "fields": [
+            "pod",
+            "name"
+          ]
+        }
+      ],
+      "indexes": [
+        {
+          "name": "runner_owner_i_cd64a7_idx",
+          "fields": [
+            "owner",
+            "status"
+          ]
+        },
+        {
+          "name": "runner_workspa_243566_idx",
+          "fields": [
+            "workspace",
+            "status"
+          ]
+        },
+        {
+          "name": "runner_pod_status_idx",
+          "fields": [
+            "pod",
+            "status"
+          ]
+        },
+        {
+          "name": "runner_dev_machine_status_idx",
+          "fields": [
+            "dev_machine",
+            "status"
+          ]
+        }
+      ]
+    },
+    "DevMachine": {
+      "model": "runner.DevMachine",
+      "db_table": "dev_machine",
+      "ordering": [
+        "-last_seen_at",
+        "-created_at"
+      ],
+      "unique_together": [],
+      "fields": [
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "null": false,
+          "primary_key": true,
+          "unique": true,
+          "default": "<callable uuid4>"
+        },
+        {
+          "name": "owner",
+          "column": "owner_id",
+          "type": "ForeignKey",
+          "null": false,
+          "db_index": true,
+          "related_model": "db.User",
+          "related_name": "dev_machines",
+          "on_delete": "CASCADE"
+        },
+        {
+          "name": "host_label",
+          "column": "host_label",
+          "type": "CharField",
+          "null": false,
+          "max_length": 255,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "label",
+          "column": "label",
+          "type": "CharField",
+          "null": false,
+          "max_length": 128,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "visibility",
+          "column": "visibility",
+          "type": "PositiveSmallIntegerField",
+          "null": false,
+          "db_index": true,
+          "choices": [
+            0
+          ],
+          "default": "Visibility.PRIVATE"
+        },
+        {
+          "name": "provisioning",
+          "column": "provisioning",
+          "type": "CharField",
+          "null": false,
+          "max_length": 24,
+          "db_index": true,
+          "choices": [
+            "manual",
+            "desktop_bundled"
+          ],
+          "default": "RunnerProvisioning.MANUAL"
+        },
+        {
+          "name": "last_seen_at",
+          "column": "last_seen_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "revoked_at",
+          "column": "revoked_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "null": false,
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "null": false,
+          "blank": true
+        }
+      ],
+      "constraints": [],
+      "indexes": [
+        {
+          "name": "dev_machine_owner_vis_idx",
+          "fields": [
+            "owner",
+            "visibility"
+          ]
+        },
+        {
+          "name": "dev_machine_owner_host_idx",
+          "fields": [
+            "owner",
+            "host_label"
+          ]
+        },
+        {
+          "name": "dev_machine_host_idx",
+          "fields": [
+            "host_label"
+          ]
+        }
+      ]
+    },
+    "AgentRun": {
+      "model": "runner.AgentRun",
+      "db_table": "agent_run",
+      "ordering": [
+        "-created_at"
+      ],
+      "unique_together": [],
+      "fields": [
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "null": false,
+          "primary_key": true,
+          "unique": true,
+          "default": "<callable uuid4>"
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "null": false,
+          "db_index": true,
+          "related_model": "db.Workspace",
+          "related_name": "agent_runs",
+          "on_delete": "CASCADE"
+        },
+        {
+          "name": "owner",
+          "column": "owner_id",
+          "type": "ForeignKey",
+          "null": true,
+          "blank": true,
+          "db_index": true,
+          "related_model": "db.User",
+          "related_name": "agent_runs",
+          "on_delete": "SET_NULL"
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": false,
+          "db_index": true,
+          "related_model": "db.User",
+          "related_name": "agent_runs_created",
+          "on_delete": "PROTECT"
+        },
+        {
+          "name": "pod",
+          "column": "pod_id",
+          "type": "ForeignKey",
+          "null": false,
+          "db_index": true,
+          "related_model": "runner.Pod",
+          "related_name": "agent_runs",
+          "on_delete": "PROTECT"
+        },
+        {
+          "name": "runner",
+          "column": "runner_id",
+          "type": "ForeignKey",
+          "null": true,
+          "blank": true,
+          "db_index": true,
+          "related_model": "runner.Runner",
+          "related_name": "agent_runs",
+          "on_delete": "SET_NULL"
+        },
+        {
+          "name": "pinned_runner",
+          "column": "pinned_runner_id",
+          "type": "ForeignKey",
+          "null": true,
+          "blank": true,
+          "db_index": true,
+          "related_model": "runner.Runner",
+          "related_name": "pinned_agent_runs",
+          "on_delete": "SET_NULL"
+        },
+        {
+          "name": "work_item",
+          "column": "work_item_id",
+          "type": "ForeignKey",
+          "null": true,
+          "blank": true,
+          "db_index": true,
+          "related_model": "db.Issue",
+          "related_name": "agent_runs",
+          "on_delete": "SET_NULL"
+        },
+        {
+          "name": "scheduler_binding",
+          "column": "scheduler_binding_id",
+          "type": "ForeignKey",
+          "null": true,
+          "blank": true,
+          "db_index": true,
+          "related_model": "db.SchedulerBinding",
+          "related_name": "agent_runs",
+          "on_delete": "SET_NULL"
+        },
+        {
+          "name": "parent_run",
+          "column": "parent_run_id",
+          "type": "ForeignKey",
+          "null": true,
+          "blank": true,
+          "db_index": true,
+          "related_model": "runner.AgentRun",
+          "related_name": "follow_up_runs",
+          "on_delete": "SET_NULL"
+        },
+        {
+          "name": "status",
+          "column": "status",
+          "type": "CharField",
+          "null": false,
+          "max_length": 24,
+          "db_index": true,
+          "choices": [
+            "queued",
+            "assigned",
+            "waiting_for_worktree",
+            "running",
+            "cancel_requested",
+            "awaiting_approval",
+            "awaiting_reauth",
+            "paused_awaiting_input",
+            "blocked",
+            "completed",
+            "failed",
+            "cancelled",
+            "refused"
+          ],
+          "default": "AgentRunStatus.QUEUED"
+        },
+        {
+          "name": "executor_kind",
+          "column": "executor_kind",
+          "type": "CharField",
+          "null": false,
+          "max_length": 24,
+          "db_index": true,
+          "choices": [
+            "local_runner",
+            "cloud_agent",
+            "managed_runner"
+          ],
+          "default": "AgentExecutorKind.LOCAL_RUNNER"
+        },
+        {
+          "name": "dispatch_attempts",
+          "column": "dispatch_attempts",
+          "type": "PositiveIntegerField",
+          "null": false,
+          "default": "0"
+        },
+        {
+          "name": "cancel_requested_at",
+          "column": "cancel_requested_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "cancel_reason",
+          "column": "cancel_reason",
+          "type": "CharField",
+          "null": false,
+          "max_length": 512,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "error_code",
+          "column": "error_code",
+          "type": "CharField",
+          "null": false,
+          "max_length": 64,
+          "blank": true,
+          "db_index": true,
+          "default": "''"
+        },
+        {
+          "name": "tool_plan",
+          "column": "tool_plan",
+          "type": "JSONField",
+          "null": false,
+          "blank": true,
+          "default": "{}"
+        },
+        {
+          "name": "terminal_hooks_applied_at",
+          "column": "terminal_hooks_applied_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "terminal_capacity_released_at",
+          "column": "terminal_capacity_released_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "prompt",
+          "column": "prompt",
+          "type": "TextField",
+          "null": false,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "trigger",
+          "column": "trigger",
+          "type": "CharField",
+          "null": false,
+          "max_length": 24,
+          "db_index": true,
+          "choices": [
+            "state_transition",
+            "run_ai",
+            "comment_and_run",
+            "tick",
+            "scheduler",
+            "direct"
+          ],
+          "default": "AgentRunTrigger.DIRECT"
+        },
+        {
+          "name": "prompt_manifest",
+          "column": "prompt_manifest",
+          "type": "JSONField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "phase_kind",
+          "column": "phase_kind",
+          "type": "CharField",
+          "null": false,
+          "max_length": 32,
+          "blank": true,
+          "db_index": true,
+          "default": "''"
+        },
+        {
+          "name": "run_config",
+          "column": "run_config",
+          "type": "JSONField",
+          "null": false,
+          "blank": true,
+          "default": "{}"
+        },
+        {
+          "name": "required_capabilities",
+          "column": "required_capabilities",
+          "type": "JSONField",
+          "null": false,
+          "blank": true,
+          "default": "[]"
+        },
+        {
+          "name": "thread_id",
+          "column": "thread_id",
+          "type": "CharField",
+          "null": false,
+          "max_length": 128,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "agent_metadata",
+          "column": "agent_metadata",
+          "type": "JSONField",
+          "null": false,
+          "blank": true,
+          "default": "{}"
+        },
+        {
+          "name": "lease_expires_at",
+          "column": "lease_expires_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "done_payload",
+          "column": "done_payload",
+          "type": "JSONField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "error",
+          "column": "error",
+          "type": "TextField",
+          "null": false,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "refusal_category",
+          "column": "refusal_category",
+          "type": "CharField",
+          "null": false,
+          "max_length": 32,
+          "blank": true,
+          "choices": [
+            "cyber",
+            "bio",
+            "reasoning_extraction",
+            "unknown"
+          ],
+          "default": "''"
+        },
+        {
+          "name": "llm_model",
+          "column": "llm_model",
+          "type": "CharField",
+          "null": false,
+          "max_length": 128,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "usage",
+          "column": "usage",
+          "type": "JSONField",
+          "null": false,
+          "blank": true,
+          "default": "{}"
+        },
+        {
+          "name": "input_tokens",
+          "column": "input_tokens",
+          "type": "BigIntegerField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "output_tokens",
+          "column": "output_tokens",
+          "type": "BigIntegerField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "total_tokens",
+          "column": "total_tokens",
+          "type": "BigIntegerField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "null": false,
+          "blank": true
+        },
+        {
+          "name": "assigned_at",
+          "column": "assigned_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "queue_position",
+          "column": "queue_position",
+          "type": "PositiveSmallIntegerField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "started_at",
+          "column": "started_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "ended_at",
+          "column": "ended_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        }
+      ],
+      "constraints": [
+        {
+          "name": "agent_run_cloud_has_no_local_assignment",
+          "type": "CheckConstraint",
+          "check": "(OR: ('executor_kind__in', [AgentExecutorKind.LOCAL_RUNNER, AgentExecutorKind.MANAGED_RUNNER]), (AND: ('assigned_at__isnull', True), ('executor_kind', AgentExecutorKind.CLOUD_AGENT), ('owner__isnull', True), ('pinned_runner__isnull', True), ('queue_position__isnull', True), ('runner__isnull', True)))"
+        },
+        {
+          "name": "agent_run_one_active_per_work_item",
+          "type": "UniqueConstraint",
+          "fields": [
+            "work_item"
+          ],
+          "condition": "(AND: ('work_item__isnull', False), ('status__in', ['queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth']))"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "agent_run_runner__1237dd_idx",
+          "fields": [
+            "runner",
+            "status"
+          ]
+        },
+        {
+          "name": "agent_run_owner_i_75b982_idx",
+          "fields": [
+            "owner",
+            "status"
+          ]
+        },
+        {
+          "name": "agent_run_workspa_987ef0_idx",
+          "fields": [
+            "workspace",
+            "status"
+          ]
+        },
+        {
+          "name": "agent_run_work_it_d042e7_idx",
+          "fields": [
+            "work_item",
+            "status"
+          ]
+        },
+        {
+          "name": "agent_run_pod_status_idx",
+          "fields": [
+            "pod",
+            "status"
+          ]
+        },
+        {
+          "name": "agent_run_created_status_idx",
+          "fields": [
+            "created_by",
+            "status"
+          ]
+        },
+        {
+          "name": "agent_run_cloud_dispatch_idx",
+          "fields": [
+            "executor_kind",
+            "status",
+            "lease_expires_at",
+            "created_at"
+          ]
+        },
+        {
+          "name": "agent_run_cloud_stale_idx",
+          "fields": [
+            "executor_kind",
+            "status",
+            "started_at"
+          ]
+        },
+        {
+          "name": "agent_run_term_hooks_idx",
+          "fields": [
+            "status",
+            "terminal_hooks_applied_at",
+            "ended_at"
+          ]
+        },
+        {
+          "name": "agent_run_term_capacity_idx",
+          "fields": [
+            "status",
+            "terminal_capacity_released_at",
+            "ended_at"
+          ]
+        }
+      ]
+    },
+    "Pod": {
+      "model": "runner.Pod",
+      "db_table": "pod",
+      "ordering": [
+        "-is_default",
+        "created_at"
+      ],
+      "unique_together": [],
+      "fields": [
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "null": false,
+          "primary_key": true,
+          "unique": true,
+          "default": "<callable uuid4>"
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "null": false,
+          "db_index": true,
+          "related_model": "db.Workspace",
+          "related_name": "pods",
+          "on_delete": "CASCADE"
+        },
+        {
+          "name": "project",
+          "column": "project_id",
+          "type": "ForeignKey",
+          "null": false,
+          "db_index": true,
+          "related_model": "db.Project",
+          "related_name": "pods",
+          "on_delete": "CASCADE"
+        },
+        {
+          "name": "name",
+          "column": "name",
+          "type": "CharField",
+          "null": false,
+          "max_length": 128
+        },
+        {
+          "name": "description",
+          "column": "description",
+          "type": "CharField",
+          "null": false,
+          "max_length": 512,
+          "blank": true,
+          "default": "''"
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "blank": true,
+          "db_index": true,
+          "related_model": "db.User",
+          "related_name": "pods_created",
+          "on_delete": "SET_NULL"
+        },
+        {
+          "name": "is_default",
+          "column": "is_default",
+          "type": "BooleanField",
+          "null": false,
+          "default": "False"
+        },
+        {
+          "name": "deleted_at",
+          "column": "deleted_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true,
+          "db_index": true
+        },
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "null": false,
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "null": false,
+          "blank": true
+        }
+      ],
+      "constraints": [
+        {
+          "name": "pod_unique_name_per_project_when_active",
+          "type": "UniqueConstraint",
+          "fields": [
+            "project",
+            "name"
+          ],
+          "condition": "(AND: ('deleted_at__isnull', True))"
+        },
+        {
+          "name": "pod_one_default_per_project_when_active",
+          "type": "UniqueConstraint",
+          "fields": [
+            "project"
+          ],
+          "condition": "(AND: ('is_default', True), ('deleted_at__isnull', True))"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "pod_project_is_def_idx",
+          "fields": [
+            "project",
+            "is_default"
+          ]
+        },
+        {
+          "name": "pod_workspc_is_def_idx",
+          "fields": [
+            "workspace",
+            "is_default"
+          ]
+        }
+      ]
+    },
+    "RunnerLiveState": {
+      "model": "runner.RunnerLiveState",
+      "db_table": "runner_live_state",
+      "ordering": [],
+      "unique_together": [],
+      "fields": [
+        {
+          "name": "runner",
+          "column": "runner_id",
+          "type": "OneToOneField",
+          "null": false,
+          "primary_key": true,
+          "unique": true,
+          "related_model": "runner.Runner",
+          "related_name": "live_state",
+          "on_delete": "CASCADE"
+        },
+        {
+          "name": "observed_run_id",
+          "column": "observed_run_id",
+          "type": "UUIDField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "last_event_at",
+          "column": "last_event_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "last_event_kind",
+          "column": "last_event_kind",
+          "type": "CharField",
+          "null": true,
+          "max_length": 64,
+          "blank": true
+        },
+        {
+          "name": "last_event_summary",
+          "column": "last_event_summary",
+          "type": "CharField",
+          "null": true,
+          "max_length": 200,
+          "blank": true
+        },
+        {
+          "name": "agent_pid",
+          "column": "agent_pid",
+          "type": "PositiveIntegerField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "agent_subprocess_alive",
+          "column": "agent_subprocess_alive",
+          "type": "BooleanField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "approvals_pending",
+          "column": "approvals_pending",
+          "type": "PositiveIntegerField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "usage",
+          "column": "usage",
+          "type": "JSONField",
+          "null": false,
+          "blank": true,
+          "default": "{}"
+        },
+        {
+          "name": "llm_model",
+          "column": "llm_model",
+          "type": "CharField",
+          "null": true,
+          "max_length": 128,
+          "blank": true
+        },
+        {
+          "name": "turn_count",
+          "column": "turn_count",
+          "type": "PositiveIntegerField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "null": false,
+          "blank": true
+        }
+      ],
+      "constraints": [],
+      "indexes": [
+        {
+          "name": "runner_live_watchdog_idx",
+          "fields": [
+            "observed_run_id",
+            "updated_at",
+            "last_event_at"
+          ]
+        }
+      ]
+    },
+    "AgentRunEvent": {
+      "model": "runner.AgentRunEvent",
+      "db_table": "agent_run_event",
+      "ordering": [
+        "agent_run",
+        "seq"
+      ],
+      "unique_together": [
+        [
+          "agent_run",
+          "seq"
+        ]
+      ],
+      "fields": [
+        {
+          "name": "id",
+          "column": "id",
+          "type": "BigAutoField",
+          "null": false,
+          "primary_key": true,
+          "unique": true,
+          "blank": true
+        },
+        {
+          "name": "agent_run",
+          "column": "agent_run_id",
+          "type": "ForeignKey",
+          "null": false,
+          "db_index": true,
+          "related_model": "runner.AgentRun",
+          "related_name": "events",
+          "on_delete": "CASCADE"
+        },
+        {
+          "name": "seq",
+          "column": "seq",
+          "type": "PositiveIntegerField",
+          "null": false
+        },
+        {
+          "name": "kind",
+          "column": "kind",
+          "type": "CharField",
+          "null": false,
+          "max_length": 64
+        },
+        {
+          "name": "payload",
+          "column": "payload",
+          "type": "JSONField",
+          "null": false,
+          "blank": true,
+          "default": "{}"
+        },
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "null": false,
+          "blank": true
+        }
+      ],
+      "constraints": [],
+      "indexes": []
+    }
+  }
+}

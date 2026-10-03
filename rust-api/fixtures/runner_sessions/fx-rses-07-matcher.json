@@ -1,0 +1,327 @@
+{
+  "fixture": "FX-RSES-07",
+  "_trace": "matcher.py:44-81 consts, :89-303 select/drain, :338-465 legacy/guards",
+  "_method": "Ran the real matcher functions against scratch Postgres (+ real Redis for the on_commit send_to_runner dispatch); SELECT...FOR UPDATE calls wrapped in transaction.atomic per their docstrings; SQL captured.",
+  "consts": {
+    "HEARTBEAT_GRACE": "datetime.timedelta(seconds=90)",
+    "HEARTBEAT_GRACE_seconds": 90.0,
+    "NON_TERMINAL_STATUSES": [
+      "queued",
+      "assigned",
+      "waiting_for_worktree",
+      "running",
+      "cancel_requested",
+      "awaiting_approval",
+      "awaiting_reauth",
+      "paused_awaiting_input"
+    ],
+    "BUSY_STATUSES": [
+      "assigned",
+      "waiting_for_worktree",
+      "running",
+      "cancel_requested",
+      "awaiting_approval",
+      "awaiting_reauth"
+    ],
+    "MACHINE_EXECUTORS": [
+      "local_runner",
+      "managed_runner"
+    ],
+    "AgentExecutorKind": [
+      "local_runner",
+      "cloud_agent",
+      "managed_runner"
+    ],
+    "Runner_MAX_PER_USER": 5
+  },
+  "select_runner_in_pod": {
+    "picked": "g-idle",
+    "sql": [
+      "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"free_worktrees\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= '2026-10-03 00:32:04.303170+00:00'::timestamptz AND \"runner\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND \"runner\".\"status\" = 'online' AND NOT (\"runner\".\"provisioning\" = 'desktop_bundled') AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED"
+    ],
+    "expect": "g-idle (freshest heartbeat among eligible; busy/stale/desktop/offline excluded)",
+    "all_busy_picked": null
+  },
+  "next_queued_run_for_pod": {
+    "picked": true,
+    "sql": [
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pinned_runner_id\" IS NULL AND \"agent_run\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND \"agent_run\".\"status\" = 'queued') ORDER BY \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+    ],
+    "expect": "oldest unpinned local run (q1); pinned + cloud excluded"
+  },
+  "next_for_runner": {
+    "picked_is_pinned": true,
+    "sql": [
+      "SELECT \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\" FROM \"pod\" WHERE \"pod\".\"id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid LIMIT 21",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\", EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) AS \"_runner_visible_issue\", EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1) AS \"_runner_visible_scheduler\", CASE WHEN \"agent_run\".\"pinned_runner_id\" = '297ebdfd8d3b44aeb295964880f92013'::uuid THEN 0 ELSE 1 END AS \"_is_mine\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND \"agent_run\".\"status\" = 'queued' AND (\"agent_run\".\"pinned_runner_id\" = '297ebdfd8d3b44aeb295964880f92013'::uuid OR \"agent_run\".\"pinned_runner_id\" IS NULL) AND (\"agent_run\".\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR \"agent_run\".\"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) OR EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1)) AND \"agent_run\".\"executor_kind\" = 'local_runner') ORDER BY 44 ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+    ],
+    "note": "filter_runs_usable_by_runner applied (D-11-owned passthrough); provisioning split to LOCAL_RUNNER for manual"
+  },
+  "next_for_runner_desktop": {
+    "picked": null,
+    "sql": [
+      "SELECT \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\" FROM \"pod\" WHERE \"pod\".\"id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid LIMIT 21",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\", EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) AS \"_runner_visible_issue\", EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1) AS \"_runner_visible_scheduler\", CASE WHEN \"agent_run\".\"pinned_runner_id\" = '44cfb1285f62479bbb9ea0d0910ad6cd'::uuid THEN 0 ELSE 1 END AS \"_is_mine\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND \"agent_run\".\"status\" = 'queued' AND (\"agent_run\".\"pinned_runner_id\" = '44cfb1285f62479bbb9ea0d0910ad6cd'::uuid OR \"agent_run\".\"pinned_runner_id\" IS NULL) AND (\"agent_run\".\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR \"agent_run\".\"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) OR EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1)) AND \"agent_run\".\"executor_kind\" = 'managed_runner' AND \"agent_run\".\"pinned_runner_id\" = '44cfb1285f62479bbb9ea0d0910ad6cd'::uuid) ORDER BY 44 ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+    ],
+    "expect": "None (no MANAGED_RUNNER run pinned to it)",
+    "after_managed_pin": true
+  },
+  "drain_pod": {
+    "assigned": 3,
+    "sql": [
+      "SAVEPOINT \"s8518327680_x1\"",
+      "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"free_worktrees\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= '2026-10-03 00:32:04.917186+00:00'::timestamptz AND \"runner\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND \"runner\".\"status\" = 'online' AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC FOR UPDATE SKIP LOCKED",
+      "SELECT \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\" FROM \"pod\" WHERE \"pod\".\"id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid LIMIT 21",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\", EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) AS \"_runner_visible_issue\", EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1) AS \"_runner_visible_scheduler\", CASE WHEN \"agent_run\".\"pinned_runner_id\" = '297ebdfd8d3b44aeb295964880f92013'::uuid THEN 0 ELSE 1 END AS \"_is_mine\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND \"agent_run\".\"status\" = 'queued' AND (\"agent_run\".\"pinned_runner_id\" = '297ebdfd8d3b44aeb295964880f92013'::uuid OR \"agent_run\".\"pinned_runner_id\" IS NULL) AND (\"agent_run\".\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR \"agent_run\".\"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) OR EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1)) AND \"agent_run\".\"executor_kind\" = 'local_runner') ORDER BY 44 ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+      "UPDATE \"agent_run\" SET \"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid, \"runner_id\" = '297ebdfd8d3b44aeb295964880f92013'::uuid, \"status\" = 'assigned', \"assigned_at\" = '2026-10-03 00:33:34.925146+00:00'::timestamptz WHERE \"agent_run\".\"id\" = 'bc03c3d02e8b460199bee84bca719b9c'::uuid",
+      "SELECT \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\" FROM \"pod\" WHERE \"pod\".\"id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid LIMIT 21",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\", EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) AS \"_runner_visible_issue\", EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1) AS \"_runner_visible_scheduler\", CASE WHEN \"agent_run\".\"pinned_runner_id\" = '44cfb1285f62479bbb9ea0d0910ad6cd'::uuid THEN 0 ELSE 1 END AS \"_is_mine\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND \"agent_run\".\"status\" = 'queued' AND (\"agent_run\".\"pinned_runner_id\" = '44cfb1285f62479bbb9ea0d0910ad6cd'::uuid OR \"agent_run\".\"pinned_runner_id\" IS NULL) AND (\"agent_run\".\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR \"agent_run\".\"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) OR EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1)) AND \"agent_run\".\"executor_kind\" = 'managed_runner' AND \"agent_run\".\"pinned_runner_id\" = '44cfb1285f62479bbb9ea0d0910ad6cd'::uuid) ORDER BY 44 ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+      "UPDATE \"agent_run\" SET \"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid, \"runner_id\" = '44cfb1285f62479bbb9ea0d0910ad6cd'::uuid, \"status\" = 'assigned', \"assigned_at\" = '2026-10-03 00:33:34.932592+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '49a5538b7aa949e0952e13881b619ed2'::uuid",
+      "SELECT \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\" FROM \"pod\" WHERE \"pod\".\"id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid LIMIT 21",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\", EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) AS \"_runner_visible_issue\", EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1) AS \"_runner_visible_scheduler\", CASE WHEN \"agent_run\".\"pinned_runner_id\" = '47584f3f13c148a4bb209988e8e74795'::uuid THEN 0 ELSE 1 END AS \"_is_mine\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND \"agent_run\".\"status\" = 'queued' AND (\"agent_run\".\"pinned_runner_id\" = '47584f3f13c148a4bb209988e8e74795'::uuid OR \"agent_run\".\"pinned_runner_id\" IS NULL) AND (\"agent_run\".\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR \"agent_run\".\"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) OR EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1)) AND \"agent_run\".\"executor_kind\" = 'local_runner') ORDER BY 44 ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+      "UPDATE \"agent_run\" SET \"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid, \"runner_id\" = '47584f3f13c148a4bb209988e8e74795'::uuid, \"status\" = 'assigned', \"assigned_at\" = '2026-10-03 00:33:34.939144+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '22fb3d92469e44679ac1ec4ec2e3c2d6'::uuid",
+      "RELEASE SAVEPOINT \"s8518327680_x1\""
+    ],
+    "redis": [
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'runner_stream:297ebdfd-8d3b-44ae-b295-964880f92013'",
+          "groupname": "'runner-group:297ebdfd-8d3b-44ae-b295-964880f92013'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "xadd",
+        "args": [
+          "'runner_stream:297ebdfd-8d3b-44ae-b295-964880f92013'",
+          "{'mid': '0e0d3309-7ea2-4e78-91db-ef6f352df543', 'type': 'assign', 'payload': '{\"v\": 1, \"type\": \"assign\", \"run_id\": \"bc03c3d0-2e8b-4601-99be-e84bca719b9c\", \"work_item_id\": \"d36a0a49-a1f3-41de-a09d-f8a74e031f4c\", \"prompt\": \"\", \"repo_url\": null, \"repo_ref\": null, \"git_work_branch\": null, \"expected_codex_model\": null, \"approval_policy_overrides\": null, \"deadline\": null, \"mid\": \"0e0d3309-7ea2-4e78-91db...<truncated 17 chars>"
+        ],
+        "kwargs": {},
+        "result": "'1790987614943-0'"
+      },
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'runner_stream:44cfb128-5f62-479b-bb9e-a0d0910ad6cd'",
+          "groupname": "'runner-group:44cfb128-5f62-479b-bb9e-a0d0910ad6cd'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "xadd",
+        "args": [
+          "'runner_stream:44cfb128-5f62-479b-bb9e-a0d0910ad6cd'",
+          "{'mid': '3cb9c3ab-4e47-4cc0-8585-902977f55aa3', 'type': 'assign', 'payload': '{\"v\": 1, \"type\": \"assign\", \"run_id\": \"49a5538b-7aa9-49e0-952e-13881b619ed2\", \"work_item_id\": \"6ac4ebb7-49fa-4376-a82e-ea0b922360a7\", \"prompt\": \"\", \"repo_url\": null, \"repo_ref\": null, \"git_work_branch\": null, \"expected_codex_model\": null, \"approval_policy_overrides\": null, \"deadline\": null, \"mid\": \"3cb9c3ab-4e47-4cc0-8585...<truncated 17 chars>"
+        ],
+        "kwargs": {},
+        "result": "'1790987614945-0'"
+      },
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'runner_stream:47584f3f-13c1-48a4-bb20-9988e8e74795'",
+          "groupname": "'runner-group:47584f3f-13c1-48a4-bb20-9988e8e74795'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "xadd",
+        "args": [
+          "'runner_stream:47584f3f-13c1-48a4-bb20-9988e8e74795'",
+          "{'mid': '9422bb62-b660-4987-a5b6-19636b3e44b8', 'type': 'assign', 'payload': '{\"v\": 1, \"type\": \"assign\", \"run_id\": \"22fb3d92-469e-4467-9ac1-ec4ec2e3c2d6\", \"work_item_id\": \"6b3ea0c3-37b9-4721-83f8-72a491601851\", \"prompt\": \"\", \"repo_url\": null, \"repo_ref\": null, \"git_work_branch\": null, \"expected_codex_model\": null, \"approval_policy_overrides\": null, \"deadline\": null, \"mid\": \"9422bb62-b660-4987-a5b6...<truncated 17 chars>"
+        ],
+        "kwargs": {},
+        "result": "'1790987614947-0'"
+      }
+    ],
+    "q1_after": {
+      "id": "22fb3d92-469e-4467-9ac1-ec4ec2e3c2d6",
+      "workspace_id": "af244c9a-30a7-4b4a-99b2-3a5c5ac09847",
+      "owner_id": "ce755a5b-0c64-4e83-8f27-6218e639df62",
+      "created_by_id": "ce755a5b-0c64-4e83-8f27-6218e639df62",
+      "pod_id": "c63d5b13-d567-45de-932a-6e5e28568cfb",
+      "runner_id": "47584f3f-13c1-48a4-bb20-9988e8e74795",
+      "pinned_runner_id": null,
+      "work_item_id": "6b3ea0c3-37b9-4721-83f8-72a491601851",
+      "scheduler_binding_id": null,
+      "parent_run_id": null,
+      "status": "assigned",
+      "executor_kind": "local_runner",
+      "dispatch_attempts": 0,
+      "cancel_requested_at": null,
+      "cancel_reason": "",
+      "error_code": "",
+      "tool_plan": {},
+      "terminal_hooks_applied_at": null,
+      "terminal_capacity_released_at": null,
+      "prompt": "",
+      "trigger": "direct",
+      "prompt_manifest": null,
+      "phase_kind": "",
+      "run_config": {},
+      "required_capabilities": [],
+      "thread_id": "",
+      "agent_metadata": {},
+      "lease_expires_at": null,
+      "done_payload": null,
+      "error": "",
+      "refusal_category": "",
+      "llm_model": "",
+      "usage": {},
+      "input_tokens": null,
+      "output_tokens": null,
+      "total_tokens": null,
+      "created_at": "2026-10-03T00:32:34.214440+00:00",
+      "assigned_at": "2026-10-03T00:33:34.939144+00:00",
+      "queue_position": null,
+      "started_at": null,
+      "ended_at": null
+    },
+    "q1_runner_is_idle2": true,
+    "pinned_after_status": "assigned",
+    "q2_still_queued": "queued"
+  },
+  "drain_for_runner": {
+    "assigned": true,
+    "sql": [
+      "SAVEPOINT \"s8518327680_x2\"",
+      "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"free_worktrees\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= '2026-10-03 00:32:04.970281+00:00'::timestamptz AND \"runner\".\"id\" = '4d0260535a2e406e8e84ee47c9f6d7ff'::uuid AND \"runner\".\"status\" = 'online' AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED",
+      "SELECT \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\" FROM \"pod\" WHERE \"pod\".\"id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid LIMIT 21",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\", EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) AS \"_runner_visible_issue\", EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1) AS \"_runner_visible_scheduler\", CASE WHEN \"agent_run\".\"pinned_runner_id\" = '4d0260535a2e406e8e84ee47c9f6d7ff'::uuid THEN 0 ELSE 1 END AS \"_is_mine\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND \"agent_run\".\"status\" = 'queued' AND (\"agent_run\".\"pinned_runner_id\" = '4d0260535a2e406e8e84ee47c9f6d7ff'::uuid OR \"agent_run\".\"pinned_runner_id\" IS NULL) AND (\"agent_run\".\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR \"agent_run\".\"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) OR EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1)) AND \"agent_run\".\"executor_kind\" = 'local_runner') ORDER BY 44 ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+      "UPDATE \"agent_run\" SET \"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid, \"runner_id\" = '4d0260535a2e406e8e84ee47c9f6d7ff'::uuid, \"status\" = 'assigned', \"assigned_at\" = '2026-10-03 00:33:34.984534+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '20077b4522634eb3b53a2b6ab178e067'::uuid",
+      "RELEASE SAVEPOINT \"s8518327680_x2\""
+    ],
+    "redis": [
+      {
+        "cmd": "xgroup_create",
+        "args": [],
+        "kwargs": {
+          "name": "'runner_stream:4d026053-5a2e-406e-8e84-ee47c9f6d7ff'",
+          "groupname": "'runner-group:4d026053-5a2e-406e-8e84-ee47c9f6d7ff'",
+          "id": "'$'",
+          "mkstream": "True"
+        },
+        "result": "True"
+      },
+      {
+        "cmd": "xadd",
+        "args": [
+          "'runner_stream:4d026053-5a2e-406e-8e84-ee47c9f6d7ff'",
+          "{'mid': '8ddf902b-ab47-4842-9cac-99ebcd608c5c', 'type': 'assign', 'payload': '{\"v\": 1, \"type\": \"assign\", \"run_id\": \"20077b45-2263-4eb3-b53a-2b6ab178e067\", \"work_item_id\": \"88871e4f-69d5-4470-b375-54c5702da105\", \"prompt\": \"\", \"repo_url\": null, \"repo_ref\": null, \"git_work_branch\": null, \"expected_codex_model\": null, \"approval_policy_overrides\": null, \"deadline\": null, \"mid\": \"8ddf902b-ab47-4842-9cac...<truncated 17 chars>"
+        ],
+        "kwargs": {},
+        "result": "'1790987614986-0'"
+      }
+    ],
+    "assigned_run_is_q2_oldest": true,
+    "assigned_run_after": {
+      "owner_id": "ce755a5b-0c64-4e83-8f27-6218e639df62",
+      "runner_id": "4d026053-5a2e-406e-8e84-ee47c9f6d7ff",
+      "status": "assigned",
+      "assigned_at": "2026-10-03T00:33:34.984534+00:00"
+    },
+    "q3_still_queued": "queued"
+  },
+  "drain_for_runner_sessionless": {
+    "assigned_return": true,
+    "raised": "RunnerOfflineError: runner 0855976a-0392-4c1b-b653-cce42a6e88c6 is offline; type 'assign' cannot queue",
+    "sql": [
+      "BEGIN",
+      "SAVEPOINT \"s8518327680_x3\"",
+      "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"free_worktrees\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= '2026-10-03 00:32:05.000033+00:00'::timestamptz AND \"runner\".\"id\" = '0855976a03924c1bb653cce42a6e88c6'::uuid AND \"runner\".\"status\" = 'online' AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED",
+      "SELECT \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\" FROM \"pod\" WHERE \"pod\".\"id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid LIMIT 21",
+      "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\", EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) AS \"_runner_visible_issue\", EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1) AS \"_runner_visible_scheduler\", CASE WHEN \"agent_run\".\"pinned_runner_id\" = '0855976a03924c1bb653cce42a6e88c6'::uuid THEN 0 ELSE 1 END AS \"_is_mine\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND \"agent_run\".\"status\" = 'queued' AND (\"agent_run\".\"pinned_runner_id\" = '0855976a03924c1bb653cce42a6e88c6'::uuid OR \"agent_run\".\"pinned_runner_id\" IS NULL) AND (\"agent_run\".\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR \"agent_run\".\"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid OR (U2.\"assignee_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U2.\"deleted_at\" IS NULL))) LIMIT 1) OR EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1)) AND \"agent_run\".\"executor_kind\" = 'local_runner') ORDER BY 44 ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+      "UPDATE \"agent_run\" SET \"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid, \"runner_id\" = '0855976a03924c1bb653cce42a6e88c6'::uuid, \"status\" = 'assigned', \"assigned_at\" = '2026-10-03 00:33:35.010481+00:00'::timestamptz WHERE \"agent_run\".\"id\" = 'b904638a37fc43188bdc3c5e1d91de2b'::uuid",
+      "RELEASE SAVEPOINT \"s8518327680_x3\"",
+      "COMMIT",
+      "SELECT \"runner_session\".\"id\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = '0855976a03924c1bb653cce42a6e88c6'::uuid) ORDER BY \"runner_session\".\"created_at\" DESC LIMIT 1"
+    ],
+    "redis": [],
+    "assigned_run_is_q3_oldest": true,
+    "assigned_run_status": "assigned",
+    "q4_still_queued": "queued",
+    "note": "row stays ASSIGNED (commit succeeded); the on_commit send_to_runner raised"
+  },
+  "drain_for_runner_by_id_missing": false,
+  "drain_pod_by_id_missing": 0,
+  "select_runner_for_run_legacy": {
+    "all_busy_picked": null,
+    "picked": "g-leg",
+    "sql": [
+      "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"free_worktrees\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= '2026-10-03 00:32:05.032439+00:00'::timestamptz AND \"runner\".\"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND \"runner\".\"status\" = 'online' AND \"runner\".\"workspace_id\" = 'af244c9a30a74b4a99b23a5c5ac09847'::uuid AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED"
+    ]
+  },
+  "count_active": {
+    "count": 8,
+    "sql": [
+      "SELECT COUNT(*) AS \"__count\" FROM \"runner\" WHERE (\"runner\".\"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND \"runner\".\"workspace_id\" = 'af244c9a30a74b4a99b23a5c5ac09847'::uuid AND NOT (\"runner\".\"status\" = 'revoked') AND NOT (\"runner\".\"provisioning\" = 'desktop_bundled'))"
+    ],
+    "can_register_another": false,
+    "can_sql": [
+      "SELECT COUNT(*) AS \"__count\" FROM \"runner\" WHERE (\"runner\".\"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND \"runner\".\"workspace_id\" = 'af244c9a30a74b4a99b23a5c5ac09847'::uuid AND NOT (\"runner\".\"status\" = 'revoked') AND NOT (\"runner\".\"provisioning\" = 'desktop_bundled'))"
+    ],
+    "note": "REVOKED + DESKTOP_BUNDLED excluded; cap Runner.MAX_PER_USER=5",
+    "after_revoke": 7
+  },
+  "eligible_for_assignment": {
+    "repr": "<Q: (AND: ('pk', UUID('297ebdfd-8d3b-44ae-b295-964880f92013')), ('status', RunnerStatus.ONLINE))>",
+    "q": "(AND: ('pk', UUID('297ebdfd-8d3b-44ae-b295-964880f92013')), ('status', RunnerStatus.ONLINE))"
+  },
+  "pod_has_runner_for_issue_principal": {
+    "issue_created_by_id": null,
+    "creator_owner": {
+      "value": true,
+      "sql": [
+        "SELECT \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects\".\"is_time_tracking_enabled\", \"projects\".\"is_issue_type_enabled\", \"projects\".\"is_default\", \"projects\".\"guest_view_all_features\", \"projects\".\"members_can_edit_states\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"estimate_id\", \"projects\".\"archive_in\", \"projects\".\"close_in\", \"projects\".\"logo_props\", \"projects\".\"default_state_id\", \"projects\".\"archived_at\", \"projects\".\"timezone\", \"projects\".\"external_source\", \"projects\".\"external_id\", \"projects\".\"repo_url\", \"projects\".\"base_branch\", \"projects\".\"agent_default_interval_seconds\", \"projects\".\"agent_default_max_ticks\", \"projects\".\"agent_review_default_interval_seconds\", \"projects\".\"agent_test_default_interval_seconds\", \"projects\".\"agent_ticking_enabled\", \"projects\".\"default_agent_executor\" FROM \"projects\" WHERE \"projects\".\"id\" = '0a80bd56e5174978870b98eb88afd78e'::uuid LIMIT 21",
+        "SELECT \"issue_assignees\".\"assignee_id\" FROM \"issue_assignees\" WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = '5e302935628f4fbba373bfbf12c3c979'::uuid) ORDER BY \"issue_assignees\".\"created_at\" DESC",
+        "SELECT 1 AS \"a\" FROM \"runner\" WHERE (\"runner\".\"owner_id\" IN ('ce755a5b0c644e838f276218e639df62'::uuid) AND \"runner\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND NOT (\"runner\".\"status\" = 'revoked') AND NOT (\"runner\".\"provisioning\" = 'desktop_bundled')) LIMIT 1"
+      ]
+    },
+    "stranger": {
+      "value": false,
+      "sql": [
+        "SELECT \"issue_assignees\".\"assignee_id\" FROM \"issue_assignees\" WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = '5e302935628f4fbba373bfbf12c3c979'::uuid) ORDER BY \"issue_assignees\".\"created_at\" DESC",
+        "SELECT 1 AS \"a\" FROM \"runner\" WHERE (\"runner\".\"owner_id\" IN ('c66176a9c988414d9ac5dfe9432e3e57'::uuid) AND \"runner\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND NOT (\"runner\".\"status\" = 'revoked') AND NOT (\"runner\".\"provisioning\" = 'desktop_bundled')) LIMIT 1"
+      ]
+    },
+    "assignee_via_through_table": {
+      "value": true,
+      "sql": [
+        "SELECT \"issue_assignees\".\"assignee_id\" FROM \"issue_assignees\" WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = '5e302935628f4fbba373bfbf12c3c979'::uuid) ORDER BY \"issue_assignees\".\"created_at\" DESC",
+        "SELECT 1 AS \"a\" FROM \"runner\" WHERE (\"runner\".\"owner_id\" IN ('c66176a9c988414d9ac5dfe9432e3e57'::uuid, '4c3ff169f81648eba5ddb8d93681b765'::uuid) AND \"runner\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND NOT (\"runner\".\"status\" = 'revoked') AND NOT (\"runner\".\"provisioning\" = 'desktop_bundled')) LIMIT 1"
+      ]
+    },
+    "soft_deleted_assignee": {
+      "value": false
+    },
+    "managed_branch_owner": {
+      "value": true,
+      "sql": [
+        "SELECT \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects\".\"is_time_tracking_enabled\", \"projects\".\"is_issue_type_enabled\", \"projects\".\"is_default\", \"projects\".\"guest_view_all_features\", \"projects\".\"members_can_edit_states\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"estimate_id\", \"projects\".\"archive_in\", \"projects\".\"close_in\", \"projects\".\"logo_props\", \"projects\".\"default_state_id\", \"projects\".\"archived_at\", \"projects\".\"timezone\", \"projects\".\"external_source\", \"projects\".\"external_id\", \"projects\".\"repo_url\", \"projects\".\"base_branch\", \"projects\".\"agent_default_interval_seconds\", \"projects\".\"agent_default_max_ticks\", \"projects\".\"agent_review_default_interval_seconds\", \"projects\".\"agent_test_default_interval_seconds\", \"projects\".\"agent_ticking_enabled\", \"projects\".\"default_agent_executor\" FROM \"projects\" WHERE \"projects\".\"id\" = '0a80bd56e5174978870b98eb88afd78e'::uuid LIMIT 21",
+        "SELECT 1 AS \"a\" FROM \"runner\" WHERE (\"runner\".\"owner_id\" = 'ce755a5b0c644e838f276218e639df62'::uuid AND \"runner\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND \"runner\".\"provisioning\" = 'desktop_bundled' AND NOT (\"runner\".\"status\" = 'revoked')) LIMIT 1"
+      ]
+    },
+    "managed_branch_no_creator": {
+      "value": false,
+      "sql": []
+    },
+    "revoked_and_desktop_excluded": {
+      "value": false,
+      "sql": [
+        "SELECT \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects\".\"is_time_tracking_enabled\", \"projects\".\"is_issue_type_enabled\", \"projects\".\"is_default\", \"projects\".\"guest_view_all_features\", \"projects\".\"members_can_edit_states\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"estimate_id\", \"projects\".\"archive_in\", \"projects\".\"close_in\", \"projects\".\"logo_props\", \"projects\".\"default_state_id\", \"projects\".\"archived_at\", \"projects\".\"timezone\", \"projects\".\"external_source\", \"projects\".\"external_id\", \"projects\".\"repo_url\", \"projects\".\"base_branch\", \"projects\".\"agent_default_interval_seconds\", \"projects\".\"agent_default_max_ticks\", \"projects\".\"agent_review_default_interval_seconds\", \"projects\".\"agent_test_default_interval_seconds\", \"projects\".\"agent_ticking_enabled\", \"projects\".\"default_agent_executor\" FROM \"projects\" WHERE \"projects\".\"id\" = '5b0b2a20207446339e06bacc13f0dbba'::uuid LIMIT 21",
+        "SELECT \"issue_assignees\".\"assignee_id\" FROM \"issue_assignees\" WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = 'ede1990061f041679065acaafc76d943'::uuid) ORDER BY \"issue_assignees\".\"created_at\" DESC",
+        "SELECT 1 AS \"a\" FROM \"runner\" WHERE (\"runner\".\"owner_id\" IN ('ce755a5b0c644e838f276218e639df62'::uuid) AND \"runner\".\"pod_id\" = 'c63d5b13d56745de932a6e5e28568cfb'::uuid AND NOT (\"runner\".\"status\" = 'revoked') AND NOT (\"runner\".\"provisioning\" = 'desktop_bundled')) LIMIT 1"
+      ]
+    }
+  }
+}
