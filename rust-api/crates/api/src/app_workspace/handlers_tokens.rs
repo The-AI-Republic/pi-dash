@@ -87,7 +87,7 @@ use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Offset as _, TimeZone, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Offset as _, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::Serialize;
 use sqlx::Row;
@@ -1117,9 +1117,26 @@ fn length_or_dirty(len_chars: usize, max_length: Option<usize>) -> Result<CleanT
     Ok(CleanText::Dirty)
 }
 
-/// `BooleanField.to_internal_value` (`is_service`): exact set
-/// membership, no strip; `1`/`1.0` true, `0`/`0.0` false, everything
-/// else invalid.
+/// PATCH value of a file input for a char field: the upload object is
+/// not a string (`CharField.to_internal_value` rejects it); only a
+/// whitespace-only name reaches the blank rule via `str()`.
+fn char_file_outcome(allow_blank: bool, filename: &str) -> Result<String, String> {
+    if python_strip(filename).is_empty() {
+        if allow_blank {
+            Ok(String::new())
+        } else {
+            Err("This field may not be blank.".to_owned())
+        }
+    } else {
+        Err("Not a valid string.".to_owned())
+    }
+}
+
+/// `BooleanField.to_internal_value` (`is_service`): strings lowercase
+/// before set membership (`_lower_if_str`, so `tRUE`/`yEs`/`oFf` are
+/// valid — ASCII-lowering is exact since every set member is ASCII),
+/// no strip; `1`/`1.0` true, `0`/`-0`/`0.0` false, everything else
+/// invalid.
 fn validate_bool(value: &JVal) -> Result<bool, String> {
     const INVALID: &str = "Must be a valid boolean.";
     match value {
@@ -1143,37 +1160,40 @@ fn validate_bool(value: &JVal) -> Result<bool, String> {
                 }
             }
         }
-        JVal::Str(text) => match text.to_clean_string().as_deref() {
-            Some(
-                "1" | "t" | "T" | "y" | "Y" | "yes" | "Yes" | "YES" | "true" | "True" | "TRUE"
-                | "on" | "On" | "ON",
-            ) => Ok(true),
-            Some(
-                "0" | "f" | "F" | "n" | "N" | "no" | "No" | "NO" | "false" | "False" | "FALSE"
-                | "off" | "Off" | "OFF",
-            ) => Ok(false),
-            _ => Err(INVALID.to_owned()),
-        },
+        JVal::Str(text) => {
+            let lowered = text
+                .to_clean_string()
+                .map(|clean| clean.to_ascii_lowercase());
+            match lowered.as_deref() {
+                Some("1" | "t" | "y" | "yes" | "true" | "on") => Ok(true),
+                Some("0" | "f" | "n" | "no" | "false" | "off") => Ok(false),
+                _ => Err(INVALID.to_owned()),
+            }
+        }
         JVal::Array(_) | JVal::Object(_) => Err(INVALID.to_owned()),
     }
+}
+
+/// The `DateTimeField` wrong-format message (also the file-input
+/// outcome — an upload is not a datetime).
+fn datetime_invalid_message() -> String {
+    format!("Datetime has wrong format. Use one of these formats instead: {DATETIME_FORMAT_HINT}.")
 }
 
 /// DRF `DateTimeField.to_internal_value` (`deleted_at`): ISO-8601 only
 /// (`parse_datetime` — no date fallback); naive input is made aware in
 /// the REQUEST zone (`enforce_timezone`); a DST-gap wall time fails
-/// with the `make_aware` message; ambiguous takes the first fold.
-/// Empty-string HTML input was nulled by `get_value` before this runs.
+/// with the `make_aware` message; ambiguous takes the first fold;
+/// aware input whose request-zone rendering leaves years 1-9999 fails
+/// with the `overflow` message. Empty-string HTML input was nulled by
+/// `get_value` before this runs.
 fn validate_datetime(
     value: &JVal,
     zone: &Tz,
     zone_name: &str,
     is_html: bool,
 ) -> Result<Option<DateTime<Utc>>, String> {
-    let invalid = || {
-        format!(
-            "Datetime has wrong format. Use one of these formats instead: {DATETIME_FORMAT_HINT}."
-        )
-    };
+    let invalid = datetime_invalid_message;
     match value {
         JVal::Null => Ok(None),
         JVal::Str(text) => {
@@ -1188,7 +1208,12 @@ fn validate_datetime(
             }
             match parse_django_datetime(&clean) {
                 None => Err(invalid()),
-                Some(ParsedInput::Aware(instant)) => Ok(Some(instant)),
+                Some(ParsedInput::Aware(instant)) => {
+                    if !(1..=9999).contains(&instant.with_timezone(zone).year()) {
+                        return Err("Datetime value out of range.".to_owned());
+                    }
+                    Ok(Some(instant))
+                }
                 Some(ParsedInput::Naive(naive)) => {
                     use chrono::MappedLocalTime;
                     match zone.from_local_datetime(&naive) {
@@ -1222,10 +1247,14 @@ enum FkError {
 /// curly-quote message (surfaced per-field by DRF's
 /// `DjangoValidationError` catch). Returns the raw echo for the
 /// `does_not_exist` message plus the parsed UUID.
+/// The curly-quote UUID message (also the file-input outcome —
+/// `%s` renders the upload as its filename).
+fn fk_curly_message(rendered: &str) -> String {
+    format!("\u{201c}{rendered}\u{201d} is not a valid UUID.")
+}
+
 fn validate_fk(value: &JVal) -> Result<Option<(String, uuid::Uuid)>, FkError> {
-    let curly = |rendered: &str| {
-        FkError::Message(format!("\u{201c}{rendered}\u{201d} is not a valid UUID."))
-    };
+    let curly = |rendered: &str| FkError::Message(fk_curly_message(rendered));
     match value {
         JVal::Null => Ok(None),
         JVal::Bool(_) => Err(FkError::Message(
@@ -1234,6 +1263,11 @@ fn validate_fk(value: &JVal) -> Result<Option<(String, uuid::Uuid)>, FkError> {
         JVal::Num(number) => {
             if number.is_float() {
                 return Err(curly(&number.py_string()));
+            }
+            // `-0` parses to int `0` (`UUID(int=0)` probes; the echo is
+            // the int, `"0"`).
+            if number.text() == "-0" {
+                return Ok(Some(("0".to_owned(), uuid::Uuid::nil())));
             }
             match number.to_u128() {
                 Some(int) => Ok(Some((number.text().to_owned(), uuid::Uuid::from_u128(int)))),
@@ -1430,6 +1464,31 @@ fn authed_gate(
     actor_user_id(extension).map_err(|denial| denial.into_response())
 }
 
+/// Django `<uuid:pk>` converter strictness (`converters.py:25-29`):
+/// lowercase-hex hyphenated only — uppercase, unhyphenated, braced
+/// and `urn:` forms never reach the view (resolver 404), so they
+/// proxy like garbage.
+fn parse_detail_pk(raw: &str) -> Option<uuid::Uuid> {
+    let bytes = raw.as_bytes();
+    if bytes.len() != 36
+        || bytes[8] != b'-'
+        || bytes[13] != b'-'
+        || bytes[18] != b'-'
+        || bytes[23] != b'-'
+    {
+        return None;
+    }
+    let hex = |b: &u8| matches!(b, b'0'..=b'9' | b'a'..=b'f');
+    if !bytes
+        .iter()
+        .enumerate()
+        .all(|(index, b)| matches!(index, 8 | 13 | 18 | 23) || hex(b))
+    {
+        return None;
+    }
+    raw.parse::<uuid::Uuid>().ok()
+}
+
 /// Forward a detail request Django's `<uuid:pk>` converter would 404
 /// (non-UUID segment): the 404 HTML is byte-exact only from Django.
 async fn proxy_detail_request(
@@ -1495,11 +1554,8 @@ async fn token_detail(
     uri: Uri,
     body: axum::body::Bytes,
 ) -> Response {
-    let pk = match pk_raw.parse::<uuid::Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => {
-            return proxy_detail_request(state, method, uri, headers, body).await;
-        }
+    let Some(pk) = parse_detail_pk(&pk_raw) else {
+        return proxy_detail_request(state, method, uri, headers, body).await;
     };
     let user_id = match authed_gate("GET", "users/api-tokens/<pk>/", extension) {
         Ok(id) => id,
@@ -1547,11 +1603,8 @@ async fn token_delete(
     uri: Uri,
     body: axum::body::Bytes,
 ) -> Response {
-    let pk = match pk_raw.parse::<uuid::Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => {
-            return proxy_detail_request(state, method, uri, headers, body).await;
-        }
+    let Some(pk) = parse_detail_pk(&pk_raw) else {
+        return proxy_detail_request(state, method, uri, headers, body).await;
     };
     let user_id = match authed_gate("DELETE", "users/api-tokens/<pk>/", extension) {
         Ok(id) => id,
@@ -1581,6 +1634,18 @@ async fn token_delete(
     if sqlx::query(&write)
         .bind(Utc::now())
         .bind(Utc::now())
+        .bind(pk)
+        .execute(&pool)
+        .await
+        .is_err()
+    {
+        return Denial::ServerError.into_response();
+    }
+    // `delete()` saves the instance, so `BaseModel.save` stamps
+    // `updated_by` too (second statement — the services text is owned;
+    // same handler sequencing as the PATCH save).
+    if sqlx::query("UPDATE api_tokens SET updated_by_id = $1 WHERE id = $2")
+        .bind(user_id)
         .bind(pk)
         .execute(&pool)
         .await
@@ -1659,18 +1724,13 @@ async fn token_create(
         },
     };
     // `expired_at`: absent/null → `None`; strings validate through the
-    // model field (invalid → 400) and echo verbatim; anything else
-    // `TypeError`s → 500.
+    // model field (invalid → 400) and echo verbatim; an upload hits
+    // `to_python` as the file object (`parse_datetime` raises
+    // `TypeError`, uncaught) → 500, like every other non-string.
     let mut expired_echo: Option<String> = None;
     let expired_at: Option<DateTime<Utc>> = match data_get(&data, object, "expired_at") {
         None | Some(DataValue::Json(JVal::Null)) => None,
-        Some(DataValue::File(name)) => match model_expired_at(name) {
-            Ok(instant) => {
-                expired_echo = Some((*name).to_owned());
-                instant
-            }
-            Err(response) => return response,
-        },
+        Some(DataValue::File(_)) => return Denial::ServerError.into_response(),
         Some(DataValue::Json(JVal::Str(text))) => {
             let Some(clean) = text.to_clean_string() else {
                 return Denial::BadError("Please provide valid detail".to_owned()).into_response();
@@ -1782,11 +1842,8 @@ async fn token_patch(
     uri: Uri,
     body: axum::body::Bytes,
 ) -> Response {
-    let pk = match pk_raw.parse::<uuid::Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => {
-            return proxy_detail_request(state, method, uri, headers, body).await;
-        }
+    let Some(pk) = parse_detail_pk(&pk_raw) else {
+        return proxy_detail_request(state, method, uri, headers, body).await;
     };
     let user_id = match authed_gate("PATCH", "users/api-tokens/<pk>/", extension) {
         Ok(id) => id,
@@ -1877,45 +1934,73 @@ async fn token_patch(
     let mut allowed_rate_limit = token.allowed_rate_limit.clone();
     let mut deleted_at = token.deleted_at;
     let mut created_by = token.created_by;
-    // File uploads read as their filename (`str(UploadedFile)`).
-    let as_jval = |input: Option<DataValue>| -> Option<JVal> {
+    // File uploads validate as the upload OBJECT (unlike POST's
+    // `str()` coercion): every field type rejects it with its own
+    // `invalid` message — only char blank rules peek at the name.
+    if let Some(input) = data_get(&data, object, "deleted_at") {
         match input {
-            None => None,
-            Some(DataValue::Json(value)) => Some(value.clone()),
-            Some(DataValue::File(name)) => Some(JVal::Str(JStr::from_clean((*name).to_owned()))),
-        }
-    };
-    if let Some(value) = as_jval(data_get(&data, object, "deleted_at")) {
-        match validate_datetime(&value, &zone, &zone_name, data.is_html) {
-            Ok(instant) => deleted_at = instant,
-            Err(message) => errors.push(("deleted_at".to_owned(), message)),
-        }
-    }
-    if let Some(value) = as_jval(data_get(&data, object, "label")) {
-        match validate_char(&value, false, Some(MAX_CHAR_LEN)) {
-            Ok(CleanText::Clean(text)) => label = text,
-            Ok(CleanText::Dirty) => dirty_save = true,
-            Err(message) => errors.push(("label".to_owned(), message)),
+            DataValue::File(_) => {
+                errors.push(("deleted_at".to_owned(), datetime_invalid_message()));
+            }
+            DataValue::Json(value) => {
+                match validate_datetime(value, &zone, &zone_name, data.is_html) {
+                    Ok(instant) => deleted_at = instant,
+                    Err(message) => errors.push(("deleted_at".to_owned(), message)),
+                }
+            }
         }
     }
-    if let Some(value) = as_jval(data_get(&data, object, "description")) {
-        match validate_char(&value, true, None) {
-            Ok(CleanText::Clean(text)) => description = text,
-            Ok(CleanText::Dirty) => dirty_save = true,
-            Err(message) => errors.push(("description".to_owned(), message)),
+    if let Some(input) = data_get(&data, object, "label") {
+        match input {
+            DataValue::File(name) => match char_file_outcome(false, name) {
+                Ok(_) => unreachable!("label file never stores"),
+                Err(message) => errors.push(("label".to_owned(), message)),
+            },
+            DataValue::Json(value) => match validate_char(value, false, Some(MAX_CHAR_LEN)) {
+                Ok(CleanText::Clean(text)) => label = text,
+                Ok(CleanText::Dirty) => dirty_save = true,
+                Err(message) => errors.push(("label".to_owned(), message)),
+            },
         }
     }
-    if let Some(value) = as_jval(data_get(&data, object, "is_service")) {
-        match validate_bool(&value) {
-            Ok(flag) => is_service = flag,
-            Err(message) => errors.push(("is_service".to_owned(), message)),
+    if let Some(input) = data_get(&data, object, "description") {
+        match input {
+            DataValue::File(name) => match char_file_outcome(true, name) {
+                Ok(text) => description = text,
+                Err(message) => errors.push(("description".to_owned(), message)),
+            },
+            DataValue::Json(value) => match validate_char(value, true, None) {
+                Ok(CleanText::Clean(text)) => description = text,
+                Ok(CleanText::Dirty) => dirty_save = true,
+                Err(message) => errors.push(("description".to_owned(), message)),
+            },
         }
     }
-    if let Some(value) = as_jval(data_get(&data, object, "allowed_rate_limit")) {
-        match validate_char(&value, false, Some(MAX_CHAR_LEN)) {
-            Ok(CleanText::Clean(text)) => allowed_rate_limit = text,
-            Ok(CleanText::Dirty) => dirty_save = true,
-            Err(message) => errors.push(("allowed_rate_limit".to_owned(), message)),
+    if let Some(input) = data_get(&data, object, "is_service") {
+        match input {
+            DataValue::File(_) => {
+                errors.push((
+                    "is_service".to_owned(),
+                    "Must be a valid boolean.".to_owned(),
+                ));
+            }
+            DataValue::Json(value) => match validate_bool(value) {
+                Ok(flag) => is_service = flag,
+                Err(message) => errors.push(("is_service".to_owned(), message)),
+            },
+        }
+    }
+    if let Some(input) = data_get(&data, object, "allowed_rate_limit") {
+        match input {
+            DataValue::File(name) => match char_file_outcome(false, name) {
+                Ok(_) => unreachable!("rate file never stores"),
+                Err(message) => errors.push(("allowed_rate_limit".to_owned(), message)),
+            },
+            DataValue::Json(value) => match validate_char(value, false, Some(MAX_CHAR_LEN)) {
+                Ok(CleanText::Clean(text)) => allowed_rate_limit = text,
+                Ok(CleanText::Dirty) => dirty_save = true,
+                Err(message) => errors.push(("allowed_rate_limit".to_owned(), message)),
+            },
         }
     }
     // The FK existence probes (`queryset.get`): a miss formats the RAW
@@ -1924,25 +2009,36 @@ async fn token_patch(
     // every field's error before answering).
     let mut created_by_echo: Option<(String, uuid::Uuid)> = None;
     let mut updated_by_echo: Option<(String, uuid::Uuid)> = None;
-    if let Some(value) = as_jval(data_get(&data, object, "created_by")) {
-        match validate_fk(&value) {
-            Ok(parsed) => {
-                created_by = parsed.as_ref().map(|(_, id)| *id);
-                created_by_echo = parsed;
+    if let Some(input) = data_get(&data, object, "created_by") {
+        match input {
+            // The queryset lookup renders the upload as its name.
+            DataValue::File(name) => {
+                errors.push(("created_by".to_owned(), fk_curly_message(name)));
             }
-            Err(FkError::Message(message)) => {
-                errors.push(("created_by".to_owned(), message));
-            }
-            Err(FkError::Dirty) => return Denial::ServerError.into_response(),
+            DataValue::Json(value) => match validate_fk(value) {
+                Ok(parsed) => {
+                    created_by = parsed.as_ref().map(|(_, id)| *id);
+                    created_by_echo = parsed;
+                }
+                Err(FkError::Message(message)) => {
+                    errors.push(("created_by".to_owned(), message));
+                }
+                Err(FkError::Dirty) => return Denial::ServerError.into_response(),
+            },
         }
     }
-    if let Some(value) = as_jval(data_get(&data, object, "updated_by")) {
-        match validate_fk(&value) {
-            Ok(parsed) => updated_by_echo = parsed,
-            Err(FkError::Message(message)) => {
-                errors.push(("updated_by".to_owned(), message));
+    if let Some(input) = data_get(&data, object, "updated_by") {
+        match input {
+            DataValue::File(name) => {
+                errors.push(("updated_by".to_owned(), fk_curly_message(name)));
             }
-            Err(FkError::Dirty) => return Denial::ServerError.into_response(),
+            DataValue::Json(value) => match validate_fk(value) {
+                Ok(parsed) => updated_by_echo = parsed,
+                Err(FkError::Message(message)) => {
+                    errors.push(("updated_by".to_owned(), message));
+                }
+                Err(FkError::Dirty) => return Denial::ServerError.into_response(),
+            },
         }
     }
     for (field, echo) in [
@@ -2895,12 +2991,16 @@ mod tests {
             jstr("yes"),
             jstr("Yes"),
             jstr("YES"),
+            jstr("yEs"),
             jstr("true"),
             jstr("True"),
             jstr("TRUE"),
+            jstr("tRUE"),
+            jstr("TrUe"),
             jstr("on"),
             jstr("On"),
             jstr("ON"),
+            jstr("oN"),
         ];
         for value in truthy {
             assert_eq!(validate_bool(&value), Ok(true), "{value:?}");
@@ -2918,12 +3018,15 @@ mod tests {
             jstr("no"),
             jstr("No"),
             jstr("NO"),
+            jstr("nO"),
             jstr("false"),
             jstr("False"),
             jstr("FALSE"),
+            jstr("fAlSe"),
             jstr("off"),
             jstr("Off"),
             jstr("OFF"),
+            jstr("oFf"),
         ];
         for value in falsy {
             assert_eq!(validate_bool(&value), Ok(false), "{value:?}");
@@ -3041,6 +3144,10 @@ mod tests {
         let (echo, parsed) = validate_fk(&jint("5")).unwrap().expect("int");
         assert_eq!(echo, "5");
         assert_eq!(parsed, uuid::Uuid::from_u128(5));
+        // `-0` is int `0` (probes; the echo is the int, `"0"`).
+        let (echo, parsed) = validate_fk(&jint("-0")).unwrap().expect("neg zero");
+        assert_eq!(echo, "0");
+        assert_eq!(parsed, uuid::Uuid::nil());
         assert!(matches!(
             validate_fk(&jint("-5")).unwrap_err(),
             FkError::Message(_)
@@ -3141,5 +3248,76 @@ mod tests {
         ] {
             assert_eq!(parse_python_uuid(raw), None, "{raw:?}");
         }
+    }
+
+    #[test]
+    fn detail_pk_matches_uuid_converter() {
+        let id = "8a206f51-243d-4442-9503-ac289d116d0d";
+        assert_eq!(
+            parse_detail_pk(id).as_ref().map(ToString::to_string),
+            Some(id.to_owned())
+        );
+        // Every other `Uuid::parse` form misses the converter (resolver
+        // 404) and must proxy.
+        for raw in [
+            "8A206F51-243D-4442-9503-AC289D116D0D",
+            "8a206f51243d44429503ac289d116d0d",
+            "{8a206f51-243d-4442-9503-ac289d116d0d}",
+            "urn:uuid:8a206f51-243d-4442-9503-ac289d116d0d",
+            "8a206f51_243d_4442_9503_ac289d116d0d",
+            "not-a-uuid",
+            "",
+        ] {
+            assert_eq!(parse_detail_pk(raw), None, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn patch_file_outcome_vectors() {
+        // Uploads validate as the object, never the filename.
+        assert_eq!(
+            char_file_outcome(false, "hello.txt"),
+            Err("Not a valid string.".to_owned())
+        );
+        assert_eq!(
+            char_file_outcome(false, "  "),
+            Err("This field may not be blank.".to_owned())
+        );
+        assert_eq!(
+            char_file_outcome(true, "d.txt"),
+            Err("Not a valid string.".to_owned())
+        );
+        assert_eq!(char_file_outcome(true, "  "), Ok(String::new()));
+        assert_eq!(
+            fk_curly_message("nope.txt"),
+            "\u{201c}nope.txt\u{201d} is not a valid UUID."
+        );
+        assert!(datetime_invalid_message().starts_with("Datetime has wrong format."));
+    }
+
+    #[test]
+    fn datetime_overflow_vectors() {
+        let kiritimati: Tz = "Pacific/Kiritimati".parse().unwrap();
+        let utc: Tz = "UTC".parse().unwrap();
+        // Renders past year 9999 in +14 → `overflow`.
+        assert_eq!(
+            validate_datetime(
+                &jstr("9999-12-31T23:30:00Z"),
+                &kiritimati,
+                "Pacific/Kiritimati",
+                false
+            ),
+            Err("Datetime value out of range.".to_owned())
+        );
+        // The same instant is fine in UTC.
+        assert!(validate_datetime(&jstr("9999-12-31T23:30:00Z"), &utc, "UTC", false).is_ok());
+        // Naive input never overflows (zone attach is infallible).
+        assert!(validate_datetime(
+            &jstr("9999-12-31T23:30:00"),
+            &kiritimati,
+            "Pacific/Kiritimati",
+            false
+        )
+        .is_ok());
     }
 }
