@@ -5,6 +5,7 @@
 //! Ports `apps/api/pi_dash/app/serializers/{workspace,user,api,favorite}.py`
 //! (this module) for the services layer, bottom-up:
 //!
+//! * [`ser_workspace`] — workspace + member serializers (PIDASHCONV-600).
 //! * [`ser_invite`] — invite + join-request + theme/props serializers
 //!   (`workspace.py:110-194`, PIDASHCONV-601).
 //! * [`ser_account_token`] — profile + account + API-token + favorite
@@ -21,15 +22,15 @@
 //!   query builders (PIDASHCONV-609).
 //!
 //! Wiring note: the crate root declares `pub mod app_workspace;`.
-//! Sibling issues add their own siblings to this file (`ser_workspace`
-//! PIDASHCONV-600, `ser_invite` PIDASHCONV-601, `ser_extras`
-//! PIDASHCONV-602, `ser_user` PIDASHCONV-603, `models_workspace`
-//! PIDASHCONV-605, `models_prefs` PIDASHCONV-606, `models_user`
-//! PIDASHCONV-607); on rebase keep both sides.
+//! Sibling issues add their own siblings to this file (`ser_invite`
+//! PIDASHCONV-601, `ser_extras` PIDASHCONV-602, `ser_user`
+//! PIDASHCONV-603, `models_workspace` PIDASHCONV-605, `models_prefs`
+//! PIDASHCONV-606, `models_user` PIDASHCONV-607); on rebase keep both sides.
 //!
-//! Fixture input: F-W24-02
+//! Fixture input: F-W24-01 (`rust-api/fixtures/app_workspace/`
+//! `serializers/workspace_core.golden.json` + `TRACE.md`), F-W24-02
 //! (`rust-api/fixtures/app_workspace/serializers/invites.golden.json` +
-//! `TRACE.md`), F-W24-05 (`rust-api/fixtures/app_workspace/`
+//! `TRACE.md`), F-W24-05 (`rust-api/fixtures/app_workspace/
 //! `serializers/account_token_fav.golden.json` + `TRACE.md`), F-W24-03
 //! (`rust-api/fixtures/app_workspace/` `serializers/extras.golden.json` +
 //! `TRACE.md`), F-W24-07 (`models/workspace_prefs.columns.json`, incl. the
@@ -48,3 +49,4 @@ pub mod queries_membership;
 pub mod ser_account_token;
 pub mod ser_extras;
 pub mod ser_invite;
+pub mod ser_workspace;
