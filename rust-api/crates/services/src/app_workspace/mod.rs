@@ -19,6 +19,9 @@
 //!   recent visits models (PIDASHCONV-606).
 //! * [`models_user`] — user / profile / account / API-token / favorite
 //!   table models (PIDASHCONV-607).
+//! * [`models_workspace`] — workspace core table models: `Workspace`,
+//!   `WorkspaceMember`, `WorkspaceMemberInvite`, `WorkspaceJoinRequest`,
+//!   `WorkspaceTheme` (PIDASHCONV-605).
 //!
 //! * [`queries_membership`] — workspace member / invite / join-request
 //!   query builders (PIDASHCONV-609).
@@ -60,7 +63,8 @@
 //! and F-W24-14 (`tasks/enqueue.golden.json`), and F-W24-12, user
 //! part (`queries/extras_user.sql` R13-R14 +
 //! `queries/extras_user.rows.json` `user_account` / `api_tokens`
-//! cases); the goldens are the Done-when oracles for this layer.
+//! cases), and F-W24-06 (`models/workspace_core.columns.json`);
+//! the goldens are the Done-when oracles for this layer.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 //!
@@ -69,6 +73,7 @@
 
 pub mod models_prefs;
 pub mod models_user;
+pub mod models_workspace;
 pub mod queries_core;
 pub mod queries_extras;
 pub mod queries_membership;
