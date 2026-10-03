@@ -5,7 +5,9 @@ edition = "2021"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+# float_roundtrip: correctly-rounded float parsing (CPython parity) in every
+# build graph; pidash-types sits at the bottom of the dep stack (PIDASHCONV-705).
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 uuid = { version = "1", features = ["serde"] }
 thiserror = "2"
