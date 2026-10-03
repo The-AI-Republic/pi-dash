@@ -1275,20 +1275,53 @@ export class WebDriver implements ParityDriver {
     const buttons = this.boardSwitcherButtons();
     await buttons.first().waitFor({ timeout: WebDriver.BOARD_FIRST_WAIT_MS });
     const index = WebDriver.BOARD_ORDER.indexOf(layout);
-    // Re-click while the layout is wrong: a click that lands mid-hydration
-    // can be swallowed, leaving the previous layout active.
+    // Re-click while the layout is wrong — but only once it is STABLY wrong.
+    // Clicking mid-load is destructive: the app persists its current (still
+    // default) grouping over the preferences the scenario just patched, and
+    // a swallowed click leaves the previous layout active. So the first
+    // seconds only observe, and afterwards a click needs the same wrong
+    // layout twice in a row (a loading switcher flips between values).
     const deadline = Date.now() + WebDriver.BOARD_SETTLE_WAIT_MS;
+    const graceUntil = Date.now() + 12_000;
+    let lastActive: BoardLayoutKey | null = null;
+    let stableWrong = 0;
     for (;;) {
-      if ((await this.boardActiveLayout()) === layout) {
+      const active = await this.boardActiveLayout();
+      if (active === layout) {
         if (layout === "kanban" && (await this.kanbanBoardVisible())) return;
         if (layout === "gantt" && (await this.ganttTimelineVisible())) return;
         if (layout !== "kanban" && layout !== "gantt") return;
       }
       if (Date.now() > deadline) throw new Error(`[parity] timed out waiting for the ${layout} layout to render.`);
-      await buttons
-        .nth(index)
-        .click({ timeout: WebDriver.BOARD_FIRST_WAIT_MS })
-        .catch(() => undefined);
+      // No active marker anywhere means the switcher is still loading (the
+      // reader defaults that to list): never click, only wait.
+      let anyActive = false;
+      const buttonCount = await buttons.count();
+      for (let buttonIndex = 0; buttonIndex < buttonCount; buttonIndex += 1) {
+        const cls =
+          (await buttons
+            .nth(buttonIndex)
+            .getAttribute("class")
+            .catch(() => null)) ?? "";
+        if (cls.includes("bg-layer-transparent-active")) {
+          anyActive = true;
+          break;
+        }
+      }
+      if (!anyActive) {
+        stableWrong = 0;
+        lastActive = null;
+      } else {
+        stableWrong = active === lastActive ? stableWrong + 1 : 0;
+        lastActive = active;
+        if (Date.now() > graceUntil && stableWrong >= 2) {
+          await buttons
+            .nth(index)
+            .click({ timeout: WebDriver.BOARD_FIRST_WAIT_MS })
+            .catch(() => undefined);
+          stableWrong = 0;
+        }
+      }
       await this.page.waitForTimeout(WebDriver.BOARD_POLL_STEP_MS);
     }
   }
@@ -1333,8 +1366,12 @@ export class WebDriver implements ParityDriver {
   }
 
   private static splitHeaderCount(text: string): { name: string; count: number } {
+    // An open header menu appends its entries to the header text, so the
+    // count is the last number followed by a space or the end — not
+    // necessarily trailing. Greedy name keeps digits inside names (cycle
+    // suffixes) attached to the name.
     const clean = text.trim().replace(/\s+/g, " ");
-    const match = /^(.*)\s+(\d+)$/.exec(clean);
+    const match = /^(.*)\s+(\d+)(?:\s|$)/.exec(clean);
     if (!match || match[1] === undefined || match[1].length === 0) {
       throw new Error(`[parity] header text carried no trailing count: ${JSON.stringify(clean)}.`);
     }
@@ -1681,24 +1718,46 @@ export class WebDriver implements ParityDriver {
   async kanbanHeaderCreate(columnName: string): Promise<void> {
     const outer = await this.boardFlatColumnOuterByName(columnName);
     const header = outer.locator(":scope > div.sticky").first();
-    if ((await this.boardHeaderButtons(outer).count()) > 1) {
-      await this.boardHeaderButtons(outer).nth(1).click({ timeout: WebDriver.WAIT_MS });
-    } else {
-      await header.locator("span.cursor-pointer").first().click({ timeout: WebDriver.WAIT_MS });
-    }
+    const clickEntry = async (): Promise<void> => {
+      if ((await this.boardHeaderButtons(outer).count()) > 1) {
+        await this.boardHeaderButtons(outer)
+          .nth(1)
+          .click({ timeout: WebDriver.WAIT_MS })
+          .catch(() => undefined);
+      } else {
+        await header
+          .locator("span.cursor-pointer")
+          .first()
+          .click({ timeout: WebDriver.WAIT_MS })
+          .catch(() => undefined);
+      }
+    };
+    await clickEntry();
+    // Re-click while nothing opened: a click that lands mid-hydration can be
+    // swallowed, and a board re-render can close the menu under us. Clicks
+    // are spaced so an open-but-undetected menu is never toggled shut.
     const deadline = Date.now() + WebDriver.BOARD_FIRST_WAIT_MS;
+    let lastClick = Date.now();
     for (;;) {
       if (await this.kanbanCreateModalVisible()) return;
-      const items = header.locator('[role="menuitem"], [role="menu"] button, ul button');
+      const { items } = await this.boardHeaderMenuScope(columnName);
       if ((await items.count()) > 0) return;
+      const headerText = await header.innerText().catch(() => "");
+      if (headerText.includes("Add an existing work item")) return;
       if (Date.now() > deadline) throw new Error("[parity] header create opened neither a modal nor a menu.");
+      if (Date.now() - lastClick > 4_000) {
+        await clickEntry();
+        lastClick = Date.now();
+      }
       await this.page.waitForTimeout(500);
     }
   }
 
   async kanbanCreateModalVisible(): Promise<boolean> {
-    // The create modal is the only surface pairing the assignee picker
-    // placeholder with a dialog; peek labels the same control differently.
+    // The modal title is the stable signal; the assignee placeholder covers
+    // variants that render the picker before the title paints.
+    const title = this.page.getByText("Create new work item", { exact: true });
+    if ((await title.count()) > 0 && (await title.first().isVisible())) return true;
     const field = this.page.getByPlaceholder("Assignees");
     if ((await field.count()) === 0) return false;
     return await field.first().isVisible();
