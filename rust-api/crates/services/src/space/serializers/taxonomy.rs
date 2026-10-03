@@ -9,8 +9,10 @@
 //!
 //! These are pure output shapes: each `to_representation` takes a row borrowed
 //! from the caller and returns a `serde::Serialize` view whose fields are the
-//! live DRF wire fields in DRF order (declared fields first, then model
-//! definition order). UUID and FK primary keys render as strings
+//! live DRF wire fields in live-DRF order: `[pk] + declared(base-first) +
+//! concrete columns + forward relations` (`ModelSerializer.
+//! get_default_field_names`, DRF 3.15.2) — every FK and M2M trails after the
+//! last concrete column. UUID and FK primary keys render as strings
 //! (`PrimaryKeyRelatedField`, read-only); a null FK renders `null`. Datetimes
 //! and dates cross this boundary already rendered as DRF `iso-8601` strings —
 //! formatting owns to the DB edge, so rendering here is a byte-exact
@@ -27,25 +29,20 @@ use serde::Serialize;
 
 use super::lite::{ProjectLiteView, WorkspaceLiteView};
 
-/// The `CycleBaseSerializer` `fields = "__all__"` key set (`cycle.py:10-21`):
-/// every concrete model field — `id` (`BaseModel`), audit columns
-/// (`AuditModel`, `db/mixins.py:16-85`), FKs (`ProjectBaseModel`,
-/// `db/models/project.py:302-304`: `project`, then `workspace`), then
-/// `Cycle`'s own columns in definition order (`db/models/cycle.py:60-80`).
+/// The `CycleBaseSerializer` `fields = "__all__"` wire keys (`cycle.py:10-21`),
+/// in live-DRF order (probed `CycleBaseSerializer().fields`): `id`, the
+/// concrete columns (`created_at`, `updated_at`, `deleted_at`, then `Cycle`'s
+/// own columns, `db/models/cycle.py:60-80`), then the forward relations
+/// trailing (`created_by`, `updated_by`, `project`, `workspace`, `owned_by`).
 pub const CYCLE_ALL_FIELDS: [&str; 22] = [
     "id",
     "created_at",
     "updated_at",
-    "created_by",
-    "updated_by",
     "deleted_at",
-    "project",
-    "workspace",
     "name",
     "description",
     "start_date",
     "end_date",
-    "owned_by",
     "view_props",
     "sort_order",
     "external_source",
@@ -55,6 +52,11 @@ pub const CYCLE_ALL_FIELDS: [&str; 22] = [
     "logo_props",
     "timezone",
     "version",
+    "created_by",
+    "updated_by",
+    "project",
+    "workspace",
+    "owned_by",
 ];
 
 /// A database row for `Cycle` rendering. Datetimes are pre-rendered DRF
@@ -66,16 +68,11 @@ pub struct CycleRow<'a> {
     pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
     pub name: &'a str,
     pub description: &'a str,
     pub start_date: Option<&'a str>,
     pub end_date: Option<&'a str>,
-    pub owned_by: &'a str,
     pub view_props: &'a serde_json::Value,
     pub sort_order: f64,
     pub external_source: Option<&'a str>,
@@ -85,25 +82,25 @@ pub struct CycleRow<'a> {
     pub logo_props: &'a serde_json::Value,
     pub timezone: &'a str,
     pub version: i32,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub owned_by: &'a str,
 }
 
 /// `CycleBaseSerializer.to_representation` output (`cycle.py:10-21`,
-/// `fields = "__all__"`).
+/// `fields = "__all__"`), in live-DRF wire order.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CycleView<'a> {
     pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
     pub name: &'a str,
     pub description: &'a str,
     pub start_date: Option<&'a str>,
     pub end_date: Option<&'a str>,
-    pub owned_by: &'a str,
     pub view_props: &'a serde_json::Value,
     pub sort_order: f64,
     pub external_source: Option<&'a str>,
@@ -113,6 +110,11 @@ pub struct CycleView<'a> {
     pub logo_props: &'a serde_json::Value,
     pub timezone: &'a str,
     pub version: i32,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub owned_by: &'a str,
 }
 
 /// Port of `CycleBaseSerializer` (`cycle.py:10-21`). Field-for-field copy.
@@ -121,16 +123,11 @@ pub fn cycle_to_representation<'a>(row: &'a CycleRow<'a>) -> CycleView<'a> {
         id: row.id,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        created_by: row.created_by,
-        updated_by: row.updated_by,
         deleted_at: row.deleted_at,
-        project: row.project,
-        workspace: row.workspace,
         name: row.name,
         description: row.description,
         start_date: row.start_date,
         end_date: row.end_date,
-        owned_by: row.owned_by,
         view_props: row.view_props,
         sort_order: row.sort_order,
         external_source: row.external_source,
@@ -140,23 +137,25 @@ pub fn cycle_to_representation<'a>(row: &'a CycleRow<'a>) -> CycleView<'a> {
         logo_props: row.logo_props,
         timezone: row.timezone,
         version: row.version,
+        created_by: row.created_by,
+        updated_by: row.updated_by,
+        project: row.project,
+        workspace: row.workspace,
+        owned_by: row.owned_by,
     }
 }
 
-/// The `ModuleBaseSerializer` `fields = "__all__"` key set
-/// (`module.py:10-21`): `id` + audit columns + `project`/`workspace`, then
-/// `Module`'s own columns in definition order (`db/models/module.py:67-99`),
-/// including the nullable `lead` FK and the `members` M2M PK list (DRF
-/// `__all__` renders M2M as primary-key lists).
+/// The `ModuleBaseSerializer` `fields = "__all__"` wire keys
+/// (`module.py:10-21`), in live-DRF order (probed
+/// `ModuleBaseSerializer().fields`): `id`, the concrete columns, then the
+/// forward relations trailing — `created_by`, `updated_by`, `project`,
+/// `workspace`, the nullable `lead` FK and the `members` M2M PK list last
+/// (DRF `__all__` renders M2M as primary-key lists).
 pub const MODULE_ALL_FIELDS: [&str; 23] = [
     "id",
     "created_at",
     "updated_at",
-    "created_by",
-    "updated_by",
     "deleted_at",
-    "project",
-    "workspace",
     "name",
     "description",
     "description_text",
@@ -164,14 +163,18 @@ pub const MODULE_ALL_FIELDS: [&str; 23] = [
     "start_date",
     "target_date",
     "status",
-    "lead",
-    "members",
     "view_props",
     "sort_order",
     "external_source",
     "external_id",
     "archived_at",
     "logo_props",
+    "created_by",
+    "updated_by",
+    "project",
+    "workspace",
+    "lead",
+    "members",
 ];
 
 /// A database row for `Module` rendering. `lead` is a nullable FK
@@ -181,11 +184,7 @@ pub struct ModuleRow<'a> {
     pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
     pub name: &'a str,
     pub description: &'a str,
     pub description_text: Option<&'a serde_json::Value>,
@@ -193,28 +192,28 @@ pub struct ModuleRow<'a> {
     pub start_date: Option<&'a str>,
     pub target_date: Option<&'a str>,
     pub status: &'a str,
-    pub lead: Option<&'a str>,
-    pub members: Vec<&'a str>,
     pub view_props: &'a serde_json::Value,
     pub sort_order: f64,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
     pub archived_at: Option<&'a str>,
     pub logo_props: &'a serde_json::Value,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub lead: Option<&'a str>,
+    pub members: Vec<&'a str>,
 }
 
 /// `ModuleBaseSerializer.to_representation` output (`module.py:10-21`,
-/// `fields = "__all__"`).
+/// `fields = "__all__"`), in live-DRF wire order.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ModuleView<'a> {
     pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
     pub name: &'a str,
     pub description: &'a str,
     pub description_text: Option<&'a serde_json::Value>,
@@ -222,14 +221,18 @@ pub struct ModuleView<'a> {
     pub start_date: Option<&'a str>,
     pub target_date: Option<&'a str>,
     pub status: &'a str,
-    pub lead: Option<&'a str>,
-    pub members: Vec<&'a str>,
     pub view_props: &'a serde_json::Value,
     pub sort_order: f64,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
     pub archived_at: Option<&'a str>,
     pub logo_props: &'a serde_json::Value,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub lead: Option<&'a str>,
+    pub members: Vec<&'a str>,
 }
 
 /// Port of `ModuleBaseSerializer` (`module.py:10-21`). Field-for-field copy.
@@ -238,11 +241,7 @@ pub fn module_to_representation<'a>(row: &'a ModuleRow<'a>) -> ModuleView<'a> {
         id: row.id,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        created_by: row.created_by,
-        updated_by: row.updated_by,
         deleted_at: row.deleted_at,
-        project: row.project,
-        workspace: row.workspace,
         name: row.name,
         description: row.description,
         description_text: row.description_text,
@@ -250,37 +249,44 @@ pub fn module_to_representation<'a>(row: &'a ModuleRow<'a>) -> ModuleView<'a> {
         start_date: row.start_date,
         target_date: row.target_date,
         status: row.status,
-        lead: row.lead,
-        members: row.members.clone(),
         view_props: row.view_props,
         sort_order: row.sort_order,
         external_source: row.external_source,
         external_id: row.external_id,
         archived_at: row.archived_at,
         logo_props: row.logo_props,
+        created_by: row.created_by,
+        updated_by: row.updated_by,
+        project: row.project,
+        workspace: row.workspace,
+        lead: row.lead,
+        members: row.members.clone(),
     }
 }
 
-/// The `Label` model field set (`db/models/label.py:11-24` over
-/// `WorkspaceBaseModel`: `workspace`, then `project`,
-/// `db/models/workspace.py:185-187`): the `fields = "__all__"` body of
-/// `LabelSerializer` before its two declared nests.
+/// The `Label` model `fields = "__all__"` body of `LabelSerializer`
+/// (`issue.py:50-57`), in live-DRF wire order (probed
+/// `LabelSerializer().fields` minus the two declared nests): `id`, the
+/// concrete columns, then the forward relations trailing (`created_by`,
+/// `updated_by`, `workspace`, `project`, the self-FK `parent` —
+/// `WorkspaceBaseModel` order is `workspace` then `project`,
+/// `db/models/workspace.py:185-187`).
 pub const LABEL_ALL_FIELDS: [&str; 15] = [
     "id",
     "created_at",
     "updated_at",
-    "created_by",
-    "updated_by",
     "deleted_at",
-    "workspace",
-    "project",
-    "parent",
     "name",
     "description",
     "color",
     "sort_order",
     "external_source",
     "external_id",
+    "created_by",
+    "updated_by",
+    "workspace",
+    "project",
+    "parent",
 ];
 
 /// A database row for `Label` rendering. `workspace` is required;
@@ -289,69 +295,71 @@ pub const LABEL_ALL_FIELDS: [&str; 15] = [
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabelRow<'a> {
     pub id: &'a str,
+    pub workspace_detail: WorkspaceLiteView<'a>,
+    pub project_detail: Option<ProjectLiteView<'a>>,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub workspace: &'a str,
-    pub project: Option<&'a str>,
-    pub parent: Option<&'a str>,
     pub name: &'a str,
     pub description: &'a str,
     pub color: &'a str,
     pub sort_order: f64,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
-    pub workspace_detail: WorkspaceLiteView<'a>,
-    pub project_detail: Option<ProjectLiteView<'a>>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub workspace: &'a str,
+    pub project: Option<&'a str>,
+    pub parent: Option<&'a str>,
 }
 
-/// `LabelSerializer.to_representation` output (`issue.py:50-57`): the two
-/// declared nests first (DRF `__all__` order), then every `Label` column.
-/// `project` is nullable (`workspace.py:187`), so `project_detail` is
-/// `None` when it is — DRF renders `None` for a null nest source.
+/// `LabelSerializer.to_representation` output (`issue.py:50-57`), in
+/// live-DRF wire order (probed): `id`, then the two declared nests (DRF
+/// `[pk] + declared + fields + relations`), then the concrete columns,
+/// then the trailing relations. `project` is nullable
+/// (`workspace.py:187`), so `project_detail` is `None` when it is — DRF
+/// renders `None` for a null nest source.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LabelView<'a> {
+    pub id: &'a str,
     pub workspace_detail: WorkspaceLiteView<'a>,
     pub project_detail: Option<ProjectLiteView<'a>>,
-    pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub workspace: &'a str,
-    pub project: Option<&'a str>,
-    pub parent: Option<&'a str>,
     pub name: &'a str,
     pub description: &'a str,
     pub color: &'a str,
     pub sort_order: f64,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub workspace: &'a str,
+    pub project: Option<&'a str>,
+    pub parent: Option<&'a str>,
 }
 
 /// Port of `LabelSerializer` (`issue.py:50-57`). Field-for-field copy.
 pub fn label_to_representation<'a>(row: &'a LabelRow<'a>) -> LabelView<'a> {
     LabelView {
+        id: row.id,
         workspace_detail: row.workspace_detail.clone(),
         project_detail: row.project_detail.clone(),
-        id: row.id,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        created_by: row.created_by,
-        updated_by: row.updated_by,
         deleted_at: row.deleted_at,
-        workspace: row.workspace,
-        project: row.project,
-        parent: row.parent,
         name: row.name,
         description: row.description,
         color: row.color,
         sort_order: row.sort_order,
         external_source: row.external_source,
         external_id: row.external_id,
+        created_by: row.created_by,
+        updated_by: row.updated_by,
+        workspace: row.workspace,
+        project: row.project,
+        parent: row.parent,
     }
 }
 
@@ -420,10 +428,43 @@ mod tests {
         }
     }
 
-    fn object_keys(value: &Value) -> Vec<String> {
-        let mut keys: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
-        keys.sort();
+    /// Top-level JSON key order of a view's serialization, read off the
+    /// serialized string: struct serialization always emits declaration
+    /// order, while `Value` objects iterate alphabetically.
+    fn serialized_keys<T: serde::Serialize>(value: &T) -> Vec<String> {
+        let rendered = serde_json::to_string(value).expect("serializes");
+        let mut keys = Vec::new();
+        let mut depth = 0usize;
+        let mut chars = rendered.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '{' => {
+                    depth += 1;
+                }
+                '}' => {
+                    depth -= 1;
+                }
+                '"' if depth == 1 => {
+                    let mut key = String::new();
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next == '"' {
+                            break;
+                        }
+                        key.push(next);
+                    }
+                    if chars.peek() == Some(&':') {
+                        keys.push(key);
+                    }
+                }
+                _ => {}
+            }
+        }
         keys
+    }
+
+    fn const_keys<const N: usize>(fields: &[&str; N]) -> Vec<String> {
+        fields.iter().map(|key| key.to_string()).collect()
     }
 
     #[test]
@@ -463,34 +504,30 @@ mod tests {
             timezone: "UTC",
             version: 1,
         };
-        let produced = serde_json::to_value(cycle_to_representation(&row)).expect("serializes");
+        let view = cycle_to_representation(&row);
+        let produced = serde_json::to_value(&view).expect("serializes");
         for (key, value) in output.as_object().expect("output object") {
             assert_eq!(produced.get(key), Some(value), "cycle key {key}");
         }
+        assert_eq!(serialized_keys(&view), const_keys(&CYCLE_ALL_FIELDS));
     }
 
     #[test]
     fn cycle_all_key_set_matches_model() {
-        // cycle.py:10-21 fields=__all__ over Cycle(ProjectBaseModel):
-        // id + AuditModel columns (mixins.py:16-85) + project/workspace
-        // (project.py:302-304) + own columns in definition order
-        // (cycle.py:61-80).
+        // cycle.py:10-21 fields=__all__ over Cycle(ProjectBaseModel), in
+        // live-DRF order (probed): id, concrete columns, trailing
+        // relations.
         assert_eq!(
             CYCLE_ALL_FIELDS,
             [
                 "id",
                 "created_at",
                 "updated_at",
-                "created_by",
-                "updated_by",
                 "deleted_at",
-                "project",
-                "workspace",
                 "name",
                 "description",
                 "start_date",
                 "end_date",
-                "owned_by",
                 "view_props",
                 "sort_order",
                 "external_source",
@@ -500,6 +537,11 @@ mod tests {
                 "logo_props",
                 "timezone",
                 "version",
+                "created_by",
+                "updated_by",
+                "project",
+                "workspace",
+                "owned_by",
             ]
         );
         let empty = serde_json::json!({});
@@ -527,11 +569,8 @@ mod tests {
             timezone: "UTC",
             version: 1,
         };
-        let produced = serde_json::to_value(cycle_to_representation(&row)).expect("serializes");
-        let mut expected: Vec<String> =
-            CYCLE_ALL_FIELDS.iter().map(|key| key.to_string()).collect();
-        expected.sort();
-        assert_eq!(object_keys(&produced), expected);
+        let view = cycle_to_representation(&row);
+        assert_eq!(serialized_keys(&view), const_keys(&CYCLE_ALL_FIELDS));
     }
 
     #[test]
@@ -569,29 +608,27 @@ mod tests {
             archived_at: None,
             logo_props: &empty,
         };
-        let produced = serde_json::to_value(module_to_representation(&row)).expect("serializes");
+        let view = module_to_representation(&row);
+        let produced = serde_json::to_value(&view).expect("serializes");
         for (key, value) in output.as_object().expect("output object") {
             assert_eq!(produced.get(key), Some(value), "module key {key}");
         }
+        assert_eq!(serialized_keys(&view), const_keys(&MODULE_ALL_FIELDS));
     }
 
     #[test]
     fn module_all_key_set_matches_model() {
-        // module.py:10-21 fields=__all__ over Module(ProjectBaseModel):
-        // id + audit + project/workspace + own columns in definition order
-        // (module.py:68-99), M2M members included (DRF __all__ renders M2M
-        // as PK lists).
+        // module.py:10-21 fields=__all__ over Module(ProjectBaseModel), in
+        // live-DRF order (probed): id, concrete columns, trailing
+        // relations with the members M2M last (DRF __all__ renders M2M as
+        // PK lists).
         assert_eq!(
             MODULE_ALL_FIELDS,
             [
                 "id",
                 "created_at",
                 "updated_at",
-                "created_by",
-                "updated_by",
                 "deleted_at",
-                "project",
-                "workspace",
                 "name",
                 "description",
                 "description_text",
@@ -599,14 +636,18 @@ mod tests {
                 "start_date",
                 "target_date",
                 "status",
-                "lead",
-                "members",
                 "view_props",
                 "sort_order",
                 "external_source",
                 "external_id",
                 "archived_at",
                 "logo_props",
+                "created_by",
+                "updated_by",
+                "project",
+                "workspace",
+                "lead",
+                "members",
             ]
         );
         let empty = serde_json::json!({});
@@ -635,21 +676,18 @@ mod tests {
             archived_at: None,
             logo_props: &empty,
         };
-        let produced = serde_json::to_value(module_to_representation(&row)).expect("serializes");
-        let mut expected: Vec<String> = MODULE_ALL_FIELDS
-            .iter()
-            .map(|key| key.to_string())
-            .collect();
-        expected.sort();
-        assert_eq!(object_keys(&produced), expected);
+        let view = module_to_representation(&row);
+        assert_eq!(serialized_keys(&view), const_keys(&MODULE_ALL_FIELDS));
+        let produced = serde_json::to_value(&view).expect("serializes");
         assert_eq!(produced.get("members"), Some(&Value::Array(Vec::new())));
     }
 
     #[test]
     fn label_view_carries_all_columns_plus_nests() {
         // issue.py:50-57: fields=__all__ (LABEL_ALL_FIELDS, 15 keys) with
-        // the declared workspace_detail/project_detail nests first (DRF
-        // __all__ order); read_only_fields names workspace/project (:57).
+        // id first, then the declared workspace_detail/project_detail
+        // nests (live-DRF [pk]+declared+fields+relations, probed);
+        // read_only_fields names workspace/project (:57).
         let icon = serde_json::json!({"color": "#fff"});
         let row = LabelRow {
             id: "77777777-7777-7777-7777-777777777777",
@@ -682,29 +720,31 @@ mod tests {
                 description: "Ship it",
             }),
         };
-        let produced = serde_json::to_value(label_to_representation(&row)).expect("serializes");
-        let mut expected: Vec<String> =
-            LABEL_ALL_FIELDS.iter().map(|key| key.to_string()).collect();
-        expected.push("workspace_detail".to_owned());
-        expected.push("project_detail".to_owned());
-        expected.sort();
-        assert_eq!(object_keys(&produced), expected);
+        let view = label_to_representation(&row);
+        let mut expected = vec![
+            "id".to_owned(),
+            "workspace_detail".to_owned(),
+            "project_detail".to_owned(),
+        ];
+        expected.extend(LABEL_ALL_FIELDS[1..].iter().map(|key| key.to_string()));
+        assert_eq!(serialized_keys(&view), expected);
         assert_eq!(
-            object_keys(&produced["workspace_detail"]),
-            vec!["id", "name", "slug"]
+            serialized_keys(&view.workspace_detail),
+            vec!["name", "slug", "id"]
         );
         assert_eq!(
-            object_keys(&produced["project_detail"]),
+            serialized_keys(view.project_detail.as_ref().expect("project detail")),
             vec![
-                "cover_image",
-                "description",
-                "emoji",
-                "icon_prop",
                 "id",
                 "identifier",
-                "name"
+                "name",
+                "cover_image",
+                "icon_prop",
+                "emoji",
+                "description"
             ]
         );
+        let produced = serde_json::to_value(&view).expect("serializes");
         assert_eq!(
             produced.get("color").and_then(Value::as_str),
             Some("#ff0000")
@@ -753,8 +793,9 @@ mod tests {
             name: "Bug",
             color: "#ff0000",
         };
-        let produced =
-            serde_json::to_value(label_lite_to_representation(&row)).expect("serializes");
+        let view = label_lite_to_representation(&row);
+        assert_eq!(serialized_keys(&view), vec!["id", "name", "color"]);
+        let produced = serde_json::to_value(&view).expect("serializes");
         assert_eq!(
             produced,
             serde_json::json!({

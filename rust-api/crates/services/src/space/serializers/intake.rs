@@ -11,8 +11,10 @@
 //!
 //! These are pure output shapes: each `to_representation` takes a row borrowed
 //! from the caller and returns a `serde::Serialize` view whose fields are the
-//! live DRF wire fields in DRF order (declared fields first, then model
-//! definition order). UUID and FK primary keys render as strings
+//! live DRF wire fields in live-DRF order: `[pk] + declared(base-first) +
+//! concrete columns + forward relations` (`ModelSerializer.
+//! get_default_field_names`, DRF 3.15.2) — every FK and M2M trails after the
+//! last concrete column. UUID and FK primary keys render as strings
 //! (`PrimaryKeyRelatedField`, read-only); a null FK renders `null`. Datetimes
 //! and dates cross this boundary already rendered as DRF `iso-8601` strings —
 //! formatting owns to the DB edge, so rendering here is a byte-exact
@@ -38,28 +40,32 @@ use serde::Serialize;
 use super::lite::{ProjectLiteView, StateLiteView, UserLiteView};
 use super::taxonomy::LabelLiteView;
 
-/// The `IntakeIssue` model field set (`db/models/intake.py:50-74` over
-/// `ProjectBaseModel`): the `fields = "__all__"` body of
-/// `IntakeIssueSerializer` before its two declared nests.
+/// The `IntakeIssue` `fields = "__all__"` wire keys (`intake.py:17-24`), in
+/// live-DRF order (probed `IntakeIssueSerializer().fields` minus the two
+/// declared nests): `id`, the concrete columns (`created_at`, `updated_at`,
+/// `deleted_at`, `status`, `snoozed_till`, `source`, `source_email`,
+/// `external_source`, `external_id`, `extra`), then the forward relations
+/// trailing (`created_by`, `updated_by`, `project`, `workspace`, `intake`,
+/// `issue`, `duplicate_to`).
 pub const INTAKE_ISSUE_ALL_FIELDS: [&str; 18] = [
     "id",
     "created_at",
     "updated_at",
-    "created_by",
-    "updated_by",
     "deleted_at",
-    "project",
-    "workspace",
-    "intake",
-    "issue",
     "status",
     "snoozed_till",
-    "duplicate_to",
     "source",
     "source_email",
     "external_source",
     "external_id",
     "extra",
+    "created_by",
+    "updated_by",
+    "project",
+    "workspace",
+    "intake",
+    "issue",
+    "duplicate_to",
 ];
 
 /// `IssueFlatSerializer` field list (`space/serializer/issue.py:204-220`):
@@ -133,77 +139,78 @@ pub fn issue_flat_to_representation<'a>(row: &'a IssueFlatRow<'a>) -> IssueFlatV
 #[derive(Debug, Clone, PartialEq)]
 pub struct IntakeIssueRow<'a> {
     pub id: &'a str,
+    pub issue_detail: IssueFlatView<'a>,
+    pub project_detail: ProjectLiteView<'a>,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
-    pub intake: &'a str,
-    pub issue: &'a str,
     pub status: i32,
     pub snoozed_till: Option<&'a str>,
-    pub duplicate_to: Option<&'a str>,
     pub source: Option<&'a str>,
     pub source_email: Option<&'a str>,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
     pub extra: &'a serde_json::Value,
-    pub issue_detail: IssueFlatView<'a>,
-    pub project_detail: ProjectLiteView<'a>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub intake: &'a str,
+    pub issue: &'a str,
+    pub duplicate_to: Option<&'a str>,
 }
 
-/// `IntakeIssueSerializer.to_representation` output (`intake.py:17-24`): the
-/// two declared nests first (DRF `__all__` order), then every `IntakeIssue`
-/// column.
+/// `IntakeIssueSerializer.to_representation` output (`intake.py:17-24`), in
+/// live-DRF wire order (probed): `id`, the two declared nests (DRF `[pk] +
+/// declared + fields + relations`), then the concrete columns, then the
+/// trailing relations.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IntakeIssueView<'a> {
+    pub id: &'a str,
     pub issue_detail: IssueFlatView<'a>,
     pub project_detail: ProjectLiteView<'a>,
-    pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
-    pub intake: &'a str,
-    pub issue: &'a str,
     pub status: i32,
     pub snoozed_till: Option<&'a str>,
-    pub duplicate_to: Option<&'a str>,
     pub source: Option<&'a str>,
     pub source_email: Option<&'a str>,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
     pub extra: &'a serde_json::Value,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub intake: &'a str,
+    pub issue: &'a str,
+    pub duplicate_to: Option<&'a str>,
 }
 
 /// Port of `IntakeIssueSerializer` (`intake.py:17-24`). Field-for-field copy.
 pub fn intake_issue_to_representation<'a>(row: &'a IntakeIssueRow<'a>) -> IntakeIssueView<'a> {
     IntakeIssueView {
+        id: row.id,
         issue_detail: row.issue_detail.clone(),
         project_detail: row.project_detail.clone(),
-        id: row.id,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        created_by: row.created_by,
-        updated_by: row.updated_by,
         deleted_at: row.deleted_at,
-        project: row.project,
-        workspace: row.workspace,
-        intake: row.intake,
-        issue: row.issue,
         status: row.status,
         snoozed_till: row.snoozed_till,
-        duplicate_to: row.duplicate_to,
         source: row.source,
         source_email: row.source_email,
         external_source: row.external_source,
         external_id: row.external_id,
         extra: row.extra,
+        created_by: row.created_by,
+        updated_by: row.updated_by,
+        project: row.project,
+        workspace: row.workspace,
+        intake: row.intake,
+        issue: row.issue,
+        duplicate_to: row.duplicate_to,
     }
 }
 
@@ -241,24 +248,21 @@ pub fn intake_issue_lite_to_representation<'a>(
     }
 }
 
-/// The `Issue` model field set minus `workpad`
-/// (`db/models/issue.py:107-227` over `ProjectBaseModel`): the
-/// `exclude = ["workpad"]` body of `IssueStateIntakeSerializer`. `workpad`
-/// (the agent's per-issue scratchpad, `issue.py:198`) must never leak into
-/// the public/guest Space app (`intake.py:45-46`), so it has no view field.
+/// The `Issue` model `exclude = ["workpad"]` wire keys
+/// (`db/models/issue.py:107-227` over `ProjectBaseModel`), in live-DRF
+/// order (probed `IssueStateIntakeSerializer().fields` minus the declared
+/// nests): `id`, the concrete columns, then the forward relations trailing
+/// (`created_by`, `updated_by`, `project`, `workspace`, `parent`, `state`,
+/// `estimate_point`, `type`, `assigned_pod`, the `assignees`/`labels` M2Ms).
+/// `workpad` (the agent's per-issue scratchpad, `issue.py:198`) must never
+/// leak into the public/guest Space app (`intake.py:45-46`), so it has no
+/// view field.
 pub const ISSUE_STATE_INTAKE_MODEL_FIELDS: [&str; 35] = [
     "id",
     "created_at",
     "updated_at",
-    "created_by",
-    "updated_by",
     "deleted_at",
-    "project",
-    "workspace",
-    "parent",
-    "state",
     "point",
-    "estimate_point",
     "name",
     "description_json",
     "description_html",
@@ -268,20 +272,27 @@ pub const ISSUE_STATE_INTAKE_MODEL_FIELDS: [&str; 35] = [
     "complexity_score",
     "start_date",
     "target_date",
-    "assignees",
     "sequence_id",
-    "labels",
     "sort_order",
     "completed_at",
     "archived_at",
     "is_draft",
     "external_source",
     "external_id",
-    "type",
     "git_work_branch",
     "created_via",
-    "assigned_pod",
     "agent_executor",
+    "created_by",
+    "updated_by",
+    "project",
+    "workspace",
+    "parent",
+    "state",
+    "estimate_point",
+    "type",
+    "assigned_pod",
+    "assignees",
+    "labels",
 ];
 
 /// A database row for the inbox serializer. `sub_issues_count` is an
@@ -296,17 +307,17 @@ pub const ISSUE_STATE_INTAKE_MODEL_FIELDS: [&str; 35] = [
 #[derive(Debug, Clone, PartialEq)]
 pub struct IssueStateIntakeRow<'a> {
     pub id: &'a str,
+    pub state_detail: Option<StateLiteView<'a>>,
+    pub project_detail: ProjectLiteView<'a>,
+    pub label_details: Vec<LabelLiteView<'a>>,
+    pub assignee_details: Vec<UserLiteView<'a>>,
+    pub sub_issues_count: i64,
+    pub bridge_id: &'a str,
+    pub issue_intake: Vec<IntakeIssueLiteView<'a>>,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
-    pub parent: Option<&'a str>,
-    pub state: Option<&'a str>,
     pub point: Option<i32>,
-    pub estimate_point: Option<&'a str>,
     pub name: &'a str,
     pub description_json: &'a serde_json::Value,
     pub description_html: &'a str,
@@ -316,36 +327,38 @@ pub struct IssueStateIntakeRow<'a> {
     pub complexity_score: i32,
     pub start_date: Option<&'a str>,
     pub target_date: Option<&'a str>,
-    pub assignees: Vec<&'a str>,
     pub sequence_id: i32,
-    pub labels: Vec<&'a str>,
     pub sort_order: f64,
     pub completed_at: Option<&'a str>,
     pub archived_at: Option<&'a str>,
     pub is_draft: bool,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
-    pub r#type: Option<&'a str>,
     pub git_work_branch: &'a str,
     pub created_via: Option<&'a str>,
-    pub assigned_pod: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
-    pub state_detail: Option<StateLiteView<'a>>,
-    pub project_detail: ProjectLiteView<'a>,
-    pub label_details: Vec<LabelLiteView<'a>>,
-    pub assignee_details: Vec<UserLiteView<'a>>,
-    pub sub_issues_count: i64,
-    pub bridge_id: &'a str,
-    pub issue_intake: Vec<IntakeIssueLiteView<'a>>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub parent: Option<&'a str>,
+    pub state: Option<&'a str>,
+    pub estimate_point: Option<&'a str>,
+    pub r#type: Option<&'a str>,
+    pub assigned_pod: Option<&'a str>,
+    pub assignees: Vec<&'a str>,
+    pub labels: Vec<&'a str>,
 }
 
 /// `IssueStateIntakeSerializer.to_representation` output
-/// (`intake.py:34-47`): the seven declared fields first (DRF `exclude`
-/// order), then every `Issue` column except `workpad`. `state` is nullable
-/// (`issue.py:119-125`), so `state_detail` is `None` when it is — DRF
-/// renders `None` for a null nest source.
+/// (`intake.py:34-47`), in live-DRF wire order (probed): `id`, the seven
+/// declared fields (DRF `[pk] + declared + fields + relations`), then the
+/// concrete `Issue` columns, then the trailing relations. `state` is
+/// nullable (`issue.py:119-125`), so `state_detail` is `None` when it is —
+/// DRF renders `None` for a null nest source.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IssueStateIntakeView<'a> {
+    pub id: &'a str,
     pub state_detail: Option<StateLiteView<'a>>,
     pub project_detail: ProjectLiteView<'a>,
     pub label_details: Vec<LabelLiteView<'a>>,
@@ -353,18 +366,10 @@ pub struct IssueStateIntakeView<'a> {
     pub sub_issues_count: i64,
     pub bridge_id: &'a str,
     pub issue_intake: Vec<IntakeIssueLiteView<'a>>,
-    pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
-    pub parent: Option<&'a str>,
-    pub state: Option<&'a str>,
     pub point: Option<i32>,
-    pub estimate_point: Option<&'a str>,
     pub name: &'a str,
     pub description_json: &'a serde_json::Value,
     pub description_html: &'a str,
@@ -374,20 +379,27 @@ pub struct IssueStateIntakeView<'a> {
     pub complexity_score: i32,
     pub start_date: Option<&'a str>,
     pub target_date: Option<&'a str>,
-    pub assignees: Vec<&'a str>,
     pub sequence_id: i32,
-    pub labels: Vec<&'a str>,
     pub sort_order: f64,
     pub completed_at: Option<&'a str>,
     pub archived_at: Option<&'a str>,
     pub is_draft: bool,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
-    pub r#type: Option<&'a str>,
     pub git_work_branch: &'a str,
     pub created_via: Option<&'a str>,
-    pub assigned_pod: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub parent: Option<&'a str>,
+    pub state: Option<&'a str>,
+    pub estimate_point: Option<&'a str>,
+    pub r#type: Option<&'a str>,
+    pub assigned_pod: Option<&'a str>,
+    pub assignees: Vec<&'a str>,
+    pub labels: Vec<&'a str>,
 }
 
 /// Port of `IssueStateIntakeSerializer` (`intake.py:34-47`).
@@ -396,6 +408,7 @@ pub fn issue_state_intake_to_representation<'a>(
     row: &'a IssueStateIntakeRow<'a>,
 ) -> IssueStateIntakeView<'a> {
     IssueStateIntakeView {
+        id: row.id,
         state_detail: row.state_detail.clone(),
         project_detail: row.project_detail.clone(),
         label_details: row.label_details.clone(),
@@ -403,18 +416,10 @@ pub fn issue_state_intake_to_representation<'a>(
         sub_issues_count: row.sub_issues_count,
         bridge_id: row.bridge_id,
         issue_intake: row.issue_intake.clone(),
-        id: row.id,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        created_by: row.created_by,
-        updated_by: row.updated_by,
         deleted_at: row.deleted_at,
-        project: row.project,
-        workspace: row.workspace,
-        parent: row.parent,
-        state: row.state,
         point: row.point,
-        estimate_point: row.estimate_point,
         name: row.name,
         description_json: row.description_json,
         description_html: row.description_html,
@@ -424,20 +429,27 @@ pub fn issue_state_intake_to_representation<'a>(
         complexity_score: row.complexity_score,
         start_date: row.start_date,
         target_date: row.target_date,
-        assignees: row.assignees.clone(),
         sequence_id: row.sequence_id,
-        labels: row.labels.clone(),
         sort_order: row.sort_order,
         completed_at: row.completed_at,
         archived_at: row.archived_at,
         is_draft: row.is_draft,
         external_source: row.external_source,
         external_id: row.external_id,
-        r#type: row.r#type,
         git_work_branch: row.git_work_branch,
         created_via: row.created_via,
-        assigned_pod: row.assigned_pod,
         agent_executor: row.agent_executor,
+        created_by: row.created_by,
+        updated_by: row.updated_by,
+        project: row.project,
+        workspace: row.workspace,
+        parent: row.parent,
+        state: row.state,
+        estimate_point: row.estimate_point,
+        r#type: row.r#type,
+        assigned_pod: row.assigned_pod,
+        assignees: row.assignees.clone(),
+        labels: row.labels.clone(),
     }
 }
 
@@ -473,10 +485,52 @@ mod tests {
         }
     }
 
-    fn object_keys(value: &Value) -> Vec<String> {
-        let mut keys: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
-        keys.sort();
+    /// Top-level JSON key order of a view's serialization, read off the
+    /// serialized string: struct serialization always emits declaration
+    /// order, while `Value` objects iterate alphabetically.
+    fn serialized_keys<T: serde::Serialize>(value: &T) -> Vec<String> {
+        let rendered = serde_json::to_string(value).expect("serializes");
+        let mut keys = Vec::new();
+        let mut depth = 0usize;
+        let mut chars = rendered.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '{' => {
+                    depth += 1;
+                }
+                '}' => {
+                    depth -= 1;
+                }
+                '"' if depth == 1 => {
+                    let mut key = String::new();
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next == '"' {
+                            break;
+                        }
+                        key.push(next);
+                    }
+                    if chars.peek() == Some(&':') {
+                        keys.push(key);
+                    }
+                }
+                _ => {}
+            }
+        }
         keys
+    }
+
+    fn const_keys<const N: usize>(fields: &[&str; N]) -> Vec<String> {
+        fields.iter().map(|key| key.to_string()).collect()
+    }
+
+    /// Wire order for an `__all__`/`exclude` view: `id`, the declared
+    /// nests, then the model body after `id`.
+    fn wire_order<const N: usize>(nests: &[&str], body: &[&str; N]) -> Vec<String> {
+        let mut expected = vec!["id".to_owned()];
+        expected.extend(nests.iter().map(|key| key.to_string()));
+        expected.extend(body[1..].iter().map(|key| key.to_string()));
+        expected
     }
 
     /// Canonical form: objects with recursively sorted keys (same kernel as
@@ -545,18 +599,23 @@ mod tests {
             snoozed_till: snoozed_till.as_deref(),
             source: source.as_deref(),
         };
-        let produced =
-            serde_json::to_value(intake_issue_lite_to_representation(&row)).expect("serializes");
+        let view = intake_issue_lite_to_representation(&row);
+        assert_eq!(
+            serialized_keys(&view),
+            vec!["id", "status", "duplicate_to", "snoozed_till", "source"]
+        );
+        let produced = serde_json::to_value(&view).expect("serializes");
         assert_replay(&produced, output);
     }
 
     #[test]
     fn intake_view_carries_all_columns_plus_nests() {
         // intake.py:17-24: fields=__all__ (INTAKE_ISSUE_ALL_FIELDS, 18 keys)
-        // with the declared issue_detail/project_detail nests first (DRF
-        // __all__ order); read_only_fields names project/workspace (:24).
-        // The golden pins the output_keys/output_shape (case 1), so this
-        // pins the full 20-key set plus the nested 10-key flat / 7-key lite.
+        // with id first, then the declared issue_detail/project_detail
+        // nests (live-DRF [pk]+declared+fields+relations, probed);
+        // read_only_fields names project/workspace (:24). The golden pins
+        // the output_keys/output_shape (case 1), so this pins the full
+        // 20-key wire order plus the nested 10-key flat / 7-key lite.
         let icon = serde_json::json!({"color": "#fff"});
         let description = serde_json::json!({});
         let extra = serde_json::json!({});
@@ -593,22 +652,19 @@ mod tests {
             },
             project_detail: project_detail_view("33333333-3333-3333-3333-333333333333", &icon),
         };
-        let produced =
-            serde_json::to_value(intake_issue_to_representation(&row)).expect("serializes");
-        let mut expected: Vec<String> = INTAKE_ISSUE_ALL_FIELDS
-            .iter()
-            .map(|key| key.to_string())
-            .collect();
-        expected.push("issue_detail".to_owned());
-        expected.push("project_detail".to_owned());
-        expected.sort();
-        assert_eq!(object_keys(&produced), expected);
-        let mut flat_expected: Vec<String> = ISSUE_FLAT_FIELDS
-            .iter()
-            .map(|key| key.to_string())
-            .collect();
-        flat_expected.sort();
-        assert_eq!(object_keys(&produced["issue_detail"]), flat_expected);
+        let view = intake_issue_to_representation(&row);
+        assert_eq!(
+            serialized_keys(&view),
+            wire_order(
+                &["issue_detail", "project_detail"],
+                &INTAKE_ISSUE_ALL_FIELDS
+            )
+        );
+        assert_eq!(
+            serialized_keys(&view.issue_detail),
+            const_keys(&ISSUE_FLAT_FIELDS)
+        );
+        let produced = serde_json::to_value(&view).expect("serializes");
         assert_eq!(produced["issue_detail"]["id"], produced["issue"]);
         assert_eq!(produced["project_detail"]["id"], produced["project"]);
     }
@@ -617,29 +673,27 @@ mod tests {
     fn issue_state_intake_excludes_workpad() {
         // intake.py:47 Meta.exclude=["workpad"]: the agent workpad must never
         // leak to guest/public Space readers. The view has no workpad field
-        // by construction; this pins the full 42-key set and the absence.
-        let produced = serde_json::to_value(issue_state_intake_to_representation(
-            &sample_issue_state_intake_row(),
-        ))
-        .expect("serializes");
+        // by construction; this pins the full 42-key wire order and the
+        // absence.
+        let row = sample_issue_state_intake_row();
+        let view = issue_state_intake_to_representation(&row);
+        assert_eq!(
+            serialized_keys(&view),
+            wire_order(
+                &[
+                    "state_detail",
+                    "project_detail",
+                    "label_details",
+                    "assignee_details",
+                    "sub_issues_count",
+                    "bridge_id",
+                    "issue_intake",
+                ],
+                &ISSUE_STATE_INTAKE_MODEL_FIELDS
+            )
+        );
+        let produced = serde_json::to_value(&view).expect("serializes");
         assert_eq!(produced.get("workpad"), None, "workpad MUST NOT render");
-        let mut expected: Vec<String> = ISSUE_STATE_INTAKE_MODEL_FIELDS
-            .iter()
-            .map(|key| key.to_string())
-            .collect();
-        for key in [
-            "state_detail",
-            "project_detail",
-            "label_details",
-            "assignee_details",
-            "sub_issues_count",
-            "bridge_id",
-            "issue_intake",
-        ] {
-            expected.push(key.to_owned());
-        }
-        expected.sort();
-        assert_eq!(object_keys(&produced), expected);
     }
 
     #[test]
@@ -648,10 +702,36 @@ mod tests {
         // (annotated F(issue_intake__id) UUID, views/intake.py:72),
         // issue_intake ([IntakeIssueLite] reverse relation); :35-38 the
         // state/project/label/assignee detail nests.
-        let produced = serde_json::to_value(issue_state_intake_to_representation(
-            &sample_issue_state_intake_row(),
-        ))
-        .expect("serializes");
+        let row = sample_issue_state_intake_row();
+        let view = issue_state_intake_to_representation(&row);
+        assert_eq!(
+            serialized_keys(view.state_detail.as_ref().expect("state detail")),
+            vec!["id", "name", "color", "group"]
+        );
+        assert_eq!(view.label_details.len(), 1);
+        assert_eq!(
+            serialized_keys(&view.label_details[0]),
+            vec!["id", "name", "color"]
+        );
+        assert_eq!(view.assignee_details.len(), 1);
+        assert_eq!(
+            serialized_keys(&view.assignee_details[0]),
+            vec![
+                "id",
+                "first_name",
+                "last_name",
+                "avatar",
+                "avatar_url",
+                "is_bot",
+                "display_name"
+            ]
+        );
+        assert_eq!(view.issue_intake.len(), 1);
+        assert_eq!(
+            serialized_keys(&view.issue_intake[0]),
+            vec!["id", "status", "duplicate_to", "snoozed_till", "source"]
+        );
+        let produced = serde_json::to_value(&view).expect("serializes");
         assert_eq!(
             produced.get("bridge_id").and_then(Value::as_str),
             Some("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
@@ -659,43 +739,6 @@ mod tests {
         assert_eq!(
             produced.get("sub_issues_count").and_then(Value::as_i64),
             Some(2)
-        );
-        assert_eq!(
-            object_keys(&produced["state_detail"]),
-            vec!["color", "group", "id", "name"]
-        );
-        assert_eq!(
-            produced["label_details"].as_array().expect("array").len(),
-            1
-        );
-        assert_eq!(
-            object_keys(&produced["label_details"][0]),
-            vec!["color", "id", "name"]
-        );
-        assert_eq!(
-            produced["assignee_details"]
-                .as_array()
-                .expect("array")
-                .len(),
-            1
-        );
-        assert_eq!(
-            object_keys(&produced["assignee_details"][0]),
-            vec![
-                "avatar",
-                "avatar_url",
-                "display_name",
-                "first_name",
-                "id",
-                "is_bot",
-                "last_name"
-            ]
-        );
-        let intake = produced["issue_intake"].as_array().expect("array");
-        assert_eq!(intake.len(), 1);
-        assert_eq!(
-            object_keys(&intake[0]),
-            vec!["duplicate_to", "id", "snoozed_till", "source", "status"]
         );
         // Raw M2M PK lists still render (exclude drops only workpad).
         assert_eq!(
