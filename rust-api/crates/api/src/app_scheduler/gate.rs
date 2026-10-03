@@ -44,7 +44,7 @@
 //! matrix has one home):
 //!
 //! * Anonymous on any scheduler route: 401 [`UNAUTHENTICATED_BODY`] —
-//!   DRF's `exception_handler` capital-`Detail` rendering of
+//!   DRF 3.15.2 `exception_handler`'s lowercase-`detail` rendering of
 //!   `NotAuthenticated` (pinned by every contract suite's `ANON`).
 //! * Denied member: 403
 //!   [`crate::permissions::PERMISSION_DENIED_BODY`] (reused by reference).
@@ -60,7 +60,7 @@
 //!   `BaseAPIView.initial`, before the gate, and is a per-handler-file
 //!   `resolve_project_id` helper (the `app_analytics`/`app_assets`/
 //!   `app_cycles` precedent). [`resolve_gate`] takes the resolved
-//!   [`uuid::Uuid`]; the rewrite's 404 `{"Detail":"Project not found"}`
+//!   [`uuid::Uuid`]; the rewrite's 404 `{"detail":"Project not found"}`
 //!   belongs to the handlers issues (PIDASHCONV-634/635).
 //! * Object-lookup 404s (`get_object_or_404` in the handler bodies) run
 //!   after the gate; the gate itself never 404s (except the flag guard).
@@ -91,11 +91,11 @@ use crate::state::AppState;
 
 /// Exact bytes of the DRF `IsAuthenticated` denial (401): what anonymous
 /// callers on every scheduler route receive before any gate runs.
-/// Capital-`Detail` is DRF `exception_handler`'s rendering of a raised
-/// `NotAuthenticated` (pinned by `test_permissions.py::ANON` and F36-09
-/// `bodies.401_anonymous`).
+/// Lowercase `detail` is DRF 3.15.2 `exception_handler`'s rendering of a
+/// raised `NotAuthenticated` (pinned by every contract suite's `ANON`
+/// and F36-09 `bodies.401_anonymous`).
 pub const UNAUTHENTICATED_BODY: &str =
-    r#"{"Detail":"Authentication credentials were not provided."}"#;
+    r#"{"detail":"Authentication credentials were not provided."}"#;
 /// Exact bytes of `_disabled_response` (404, `views.py:36-40`): what the
 /// 4 CRUD routes answer when `SCHEDULER_ENABLED` is false. The
 /// occurrences route has no flag check (ported quirk) and never renders
@@ -374,9 +374,9 @@ impl IntoResponse for Denial {
 /// `_rewrite_project_kwarg` half lives in each handler file, per the
 /// `app_cycles` precedent): `Some` on the three project-level routes,
 /// `None` on the two workspace-level routes (ignored there). A Project
-/// gate with `None` is a caller bug — the Django analog
-/// (`kwargs["project_id"]` raising `KeyError`) is a 500 — so it fails
-/// as [`Denial::ServerError`].
+/// gate with `None` is a caller bug with no Django analog (the URL
+/// always supplies `project_id` on PROJECT routes), so it fails as
+/// [`Denial::ServerError`].
 ///
 /// The flag guard is NOT part of this function: CRUD handlers call
 /// [`ensure_feature_enabled`] after it; the occurrences handler must
@@ -954,7 +954,7 @@ mod tests {
     fn denial_bodies_match_contract_goldens() {
         assert_eq!(
             UNAUTHENTICATED_BODY,
-            r#"{"Detail":"Authentication credentials were not provided."}"#
+            r#"{"detail":"Authentication credentials were not provided."}"#
         );
         assert_eq!(
             crate::permissions::PERMISSION_DENIED_BODY,
