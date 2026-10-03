@@ -99,6 +99,7 @@
 
 pub mod chat;
 pub mod run_endpoints;
+pub mod sse;
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
@@ -224,10 +225,13 @@ pub fn py_truthy(value: &Value) -> bool {
         Value::Null => false,
         Value::Bool(b) => *b,
         Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                i != 0
-            } else if let Some(u) = n.as_u64() {
-                u != 0
+            // Discriminate on the stored representation: `as_i64`
+            // casts representable floats (`0.5` -> `Some(0)`), which
+            // would wrongly falsify them — only a true zero is falsy.
+            if n.is_i64() {
+                n.as_i64() != Some(0)
+            } else if n.is_u64() {
+                n.as_u64() != Some(0)
             } else {
                 n.as_f64().map(|f| f != 0.0).unwrap_or(false)
             }
@@ -304,6 +308,9 @@ mod body_tests {
         for truthy in [
             serde_json::json!(true),
             serde_json::json!(1),
+            serde_json::json!(0.5),
+            serde_json::json!(-0.5),
+            serde_json::json!(9.9),
             serde_json::json!(" "),
             serde_json::json!([0]),
             serde_json::json!({"a": 0}),
@@ -323,10 +330,7 @@ mod body_tests {
     #[test]
     fn frame_text_gates_and_truncates() {
         assert_eq!(frame_text(&Value::Null, 4).expect("null"), "");
-        assert_eq!(
-            frame_text(&serde_json::json!(""), 4).expect("empty"),
-            ""
-        );
+        assert_eq!(frame_text(&serde_json::json!(""), 4).expect("empty"), "");
         assert_eq!(
             frame_text(&serde_json::json!("abcdef"), 4).expect("str"),
             "abcd"
@@ -631,12 +635,13 @@ async fn authenticate_legacy_jwt(
     if payload.rtg < i64::from(row.refresh_token_generation) - 1 {
         return Err(auth_failed("access_token_stale_rtg"));
     }
-    let min_rtg: Option<i32> =
-        sqlx::query_scalar(r#"SELECT "min_rtg" FROM "runner_force_refresh" WHERE "runner_id" = $1"#)
-            .bind(row.id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
+    let min_rtg: Option<i32> = sqlx::query_scalar(
+        r#"SELECT "min_rtg" FROM "runner_force_refresh" WHERE "runner_id" = $1"#,
+    )
+    .bind(row.id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| server_error())?;
     if let Some(floor) = min_rtg {
         if payload.rtg < i64::from(floor) {
             return Err(auth_failed("force_refresh_required"));
@@ -671,11 +676,13 @@ async fn authenticate_machine_token(
     if !member {
         // `token.revoke()` then deny (`authentication.py:130-132`).
         let now = chrono::Utc::now();
-        let _ = sqlx::query(r#"UPDATE "machine_token" SET "revoked_at" = $1 WHERE "machine_token"."id" = $2"#)
-            .bind(now)
-            .bind(token.id)
-            .execute(pool)
-            .await;
+        let _ = sqlx::query(
+            r#"UPDATE "machine_token" SET "revoked_at" = $1 WHERE "machine_token"."id" = $2"#,
+        )
+        .bind(now)
+        .bind(token.id)
+        .execute(pool)
+        .await;
         return Err(auth_failed("membership_revoked"));
     }
     let Some(runner_raw) = request_runner_id(headers) else {
@@ -712,11 +719,13 @@ async fn authenticate_machine_token(
     // `last_used_at` bump (`authentication.py:153`): `QuerySet.update`
     // touches no `updated_at`.
     let now = chrono::Utc::now();
-    let _ = sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = $1 WHERE "machine_token"."id" = $2"#)
-        .bind(now)
-        .bind(token.id)
-        .execute(pool)
-        .await;
+    let _ = sqlx::query(
+        r#"UPDATE "machine_token" SET "last_used_at" = $1 WHERE "machine_token"."id" = $2"#,
+    )
+    .bind(now)
+    .bind(token.id)
+    .execute(pool)
+    .await;
     Ok(Some(DaemonRunner::from(&row)))
 }
 
@@ -724,7 +733,10 @@ async fn authenticate_machine_token(
 /// owned by the authenticated runner. `None` (no credential) and a
 /// runnerless run both resolve `False` — the endpoint answers
 /// `run_not_owned_by_runner` (403), never 401.
-pub fn resolve_runner_for_run(run_runner_id: Option<uuid::Uuid>, runner: Option<&DaemonRunner>) -> bool {
+pub fn resolve_runner_for_run(
+    run_runner_id: Option<uuid::Uuid>,
+    runner: Option<&DaemonRunner>,
+) -> bool {
     let (Some(runner_id), Some(runner)) = (run_runner_id, runner) else {
         return false;
     };
@@ -772,7 +784,10 @@ mod auth_tests {
         let response = auth_failed("machine_token_invalid");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
-            response.headers().get(header::WWW_AUTHENTICATE).expect("challenge"),
+            response
+                .headers()
+                .get(header::WWW_AUTHENTICATE)
+                .expect("challenge"),
             "Bearer"
         );
     }
@@ -1046,11 +1061,7 @@ const OFFLINE_STREAM_MAXLEN: usize = 1000;
 const OFFLINE_STREAM_TTL_SECS: u64 = 86400;
 
 impl RunnerPorts for LivePorts {
-    async fn send_to_runner(
-        &self,
-        runner_id: uuid::Uuid,
-        message: Value,
-    ) -> Result<(), PortError> {
+    async fn send_to_runner(&self, runner_id: uuid::Uuid, message: Value) -> Result<(), PortError> {
         let msg_type = message
             .get("type")
             .and_then(Value::as_str)
@@ -1122,13 +1133,12 @@ impl RunnerPorts for LivePorts {
         // `get_agent_system_user` (`orchestration/workpad.py:44-71`):
         // get-or-create on the unique username, refusing a
         // non-bot collision. Real: pause/failure comments need the row.
-        let row: Option<(uuid::Uuid, bool)> = sqlx::query_as(
-            r#"SELECT "id", "is_bot" FROM "users" WHERE "username" = $1"#,
-        )
-        .bind(AGENT_USERNAME)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| PortError::Transport(error.to_string()))?;
+        let row: Option<(uuid::Uuid, bool)> =
+            sqlx::query_as(r#"SELECT "id", "is_bot" FROM "users" WHERE "username" = $1"#)
+                .bind(AGENT_USERNAME)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| PortError::Transport(error.to_string()))?;
         if let Some((id, is_bot)) = row {
             if !is_bot {
                 return Err(PortError::Transport(format!(
@@ -1157,19 +1167,20 @@ impl RunnerPorts for LivePorts {
             Ok(Some((id,))) => Ok(id),
             _ => {
                 // Lost the get-or-create race: re-read the winner.
-                let row: Option<(uuid::Uuid, bool)> = sqlx::query_as(
-                    r#"SELECT "id", "is_bot" FROM "users" WHERE "username" = $1"#,
-                )
-                .bind(AGENT_USERNAME)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| PortError::Transport(error.to_string()))?;
+                let row: Option<(uuid::Uuid, bool)> =
+                    sqlx::query_as(r#"SELECT "id", "is_bot" FROM "users" WHERE "username" = $1"#)
+                        .bind(AGENT_USERNAME)
+                        .fetch_optional(&self.pool)
+                        .await
+                        .map_err(|error| PortError::Transport(error.to_string()))?;
                 match row {
                     Some((id, true)) => Ok(id),
                     Some(_) => Err(PortError::Transport(format!(
                         "User {AGENT_USERNAME:?} exists but is not a bot"
                     ))),
-                    None => Err(PortError::Transport("agent user missing after race".to_owned())),
+                    None => Err(PortError::Transport(
+                        "agent user missing after race".to_owned(),
+                    )),
                 }
             }
         }
@@ -1184,9 +1195,12 @@ impl RunnerPorts for LivePorts {
     }
 
     async fn emit_terminal_effects(&self, run_id: uuid::Uuid) -> Result<(), PortError> {
-        emit_celery(TERMINAL_EFFECTS_TASK, vec![Value::String(run_id.to_string())])
-            .await
-            .map_err(PortError::Transport)
+        emit_celery(
+            TERMINAL_EFFECTS_TASK,
+            vec![Value::String(run_id.to_string())],
+        )
+        .await
+        .map_err(PortError::Transport)
     }
 
     async fn emit_fire_tick(&self, ticker_id: uuid::Uuid) -> Result<(), PortError> {
@@ -1296,7 +1310,9 @@ async fn xadd_offline(
         .arg("payload")
         .arg(&payload);
     let _: String = xadd.query_async(&mut connection).await?;
-    let _: () = connection.expire(&key, OFFLINE_STREAM_TTL_SECS as i64).await?;
+    let _: () = connection
+        .expire(&key, OFFLINE_STREAM_TTL_SECS as i64)
+        .await?;
     Ok(())
 }
 
@@ -1329,7 +1345,9 @@ mod ports_tests {
 
     #[test]
     fn outbox_keys_match_python_builders() {
-        let runner: uuid::Uuid = "0192d3b4-8c1c-7a2e-9f4b-6d5c8b7a6e5d".parse().expect("uuid");
+        let runner: uuid::Uuid = "0192d3b4-8c1c-7a2e-9f4b-6d5c8b7a6e5d"
+            .parse()
+            .expect("uuid");
         assert_eq!(
             outbox_stream_key(&runner),
             "runner_stream:0192d3b4-8c1c-7a2e-9f4b-6d5c8b7a6e5d"
@@ -1376,7 +1394,10 @@ mod ports_tests {
             "chat_decide",
         ] {
             assert!(OUTBOX_VALID_TYPES.contains(&msg_type), "{msg_type} valid");
-            assert!(OUTBOX_OFFLINE_REJECT.contains(&msg_type), "{msg_type} rejects");
+            assert!(
+                OUTBOX_OFFLINE_REJECT.contains(&msg_type),
+                "{msg_type} rejects"
+            );
         }
         // Queueable survivors keep the offline path.
         assert!(!OUTBOX_OFFLINE_REJECT.contains(&"welcome"));
@@ -1390,7 +1411,10 @@ mod ports_tests {
         assert_eq!(AGENT_USER_EMAIL, "agent@example.com");
         assert_eq!(AGENT_USER_FIRST_NAME, "Pi Dash");
         assert_eq!(AGENT_USER_LAST_NAME, "Agent");
-        assert_eq!(TERMINAL_EFFECTS_TASK, "runner.apply_agent_run_terminal_effects");
+        assert_eq!(
+            TERMINAL_EFFECTS_TASK,
+            "runner.apply_agent_run_terminal_effects"
+        );
         assert_eq!(FIRE_TICK_TASK, "pi_dash.bgtasks.agent_ticker.fire_tick");
     }
 }
