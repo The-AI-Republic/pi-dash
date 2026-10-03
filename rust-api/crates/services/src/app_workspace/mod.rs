@@ -10,20 +10,27 @@
 //! * [`ser_extras`] — user links, recent visits, home/user preferences,
 //!   stickies (PIDASHCONV-602).
 //!
+//! * [`models_prefs`] — per-user prefs/links + home/sidebar prefs +
+//!   recent visits models (PIDASHCONV-606).
+//!
 //! Wiring note: the crate root declares `pub mod app_workspace;`.
 //! Sibling issues add their own siblings to this file (`ser_workspace`
 //! PIDASHCONV-600, `ser_invite` PIDASHCONV-601, `ser_extras`
-//! PIDASHCONV-602, `ser_user` PIDASHCONV-603); on rebase keep both sides.
+//! PIDASHCONV-602, `ser_user` PIDASHCONV-603, `models_workspace`
+//! PIDASHCONV-605, `models_user` PIDASHCONV-607); on rebase keep both
+//! sides.
 //!
 //! Fixture input: F-W24-05 (`rust-api/fixtures/app_workspace/`
-//! `serializers/account_token_fav.golden.json` + `TRACE.md`) and F-W24-03
+//! `serializers/account_token_fav.golden.json` + `TRACE.md`), F-W24-03
 //! (`rust-api/fixtures/app_workspace/` `serializers/extras.golden.json` +
-//! `TRACE.md`); the goldens are the Done-when oracles for this layer.
+//! `TRACE.md`), and F-W24-07 (`models/workspace_prefs.columns.json`);
+//! the goldens are the Done-when oracles for this layer.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 //!
 //! Pages read: Porting guide `4496e321-dd24-40f7-bfdf-f771e45fac0c`
 //! (updated_at 2026-09-28T03:51:35.921141Z); PIDASHCONV-1 rulebook.
 
+pub mod models_prefs;
 pub mod ser_account_token;
 pub mod ser_extras;
