@@ -15,6 +15,7 @@ pub mod gates;
 pub mod handlers_prefs;
 pub mod handlers_tokens;
 pub mod handlers_user_extras;
+pub mod handlers_workspace;
 
 use axum::Router;
 
@@ -27,4 +28,5 @@ pub fn routes() -> Router<AppState> {
     handlers_prefs::routes()
         .merge(handlers_tokens::routes())
         .merge(handlers_user_extras::routes())
+        .merge(handlers_workspace::routes())
 }
