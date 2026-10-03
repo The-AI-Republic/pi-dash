@@ -60,3 +60,19 @@ jobs:
 
       - name: Test
         run: cargo test --all-targets --locked
+
+  install-ps1:
+    # install.ps1 is documented as `irm .../install.ps1 | iex`, which runs it
+    # inside the user's own session: a bare `exit` there closes their window
+    # and hides the installer's error. Drive it the way users do, against a
+    # fake installer and a fake pidash.exe, under both Windows PowerShell 5.1
+    # and PowerShell 7.
+    name: install.ps1 (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Test install.ps1 under irm | iex
+        shell: pwsh
+        run: ./runner/tests/install_ps1_test.ps1
