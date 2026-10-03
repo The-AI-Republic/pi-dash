@@ -28,6 +28,7 @@ pub mod integrations;
 pub mod license;
 pub mod r#loop;
 pub mod prompting;
+pub mod runner_enroll;
 pub mod scheduler;
 pub mod space;
 pub mod tasks_cleanup;
