@@ -12,6 +12,7 @@ pub mod health;
 pub mod ids;
 pub mod integrations;
 pub mod license;
+pub mod runner_runs;
 pub mod tasks_cleanup;
 pub mod v1_assets;
 pub mod v1_cycles_modules;
