@@ -32,12 +32,22 @@
 
 pub mod ordering;
 pub mod params;
+pub mod serializers_engage;
 pub mod serializers_links;
 pub mod serializers_refs;
 pub mod shape;
 
 pub use ordering::{order_sql, priority_case_sql, state_case_sql, OrderSpec};
 pub use params::{parse_per_page, raw_group_mismatch, ListParams, ParamError, ParseOptions};
+pub use serializers_engage::{
+    app_issue_flat_to_representation, comment_is_actively_synced, issue_activity_to_representation,
+    issue_is_actively_synced, issue_reaction_lite_to_representation,
+    issue_subscriber_to_representation, ActivitySourceData, AppIssueFlatRow, AppIssueFlatView,
+    IssueActivityRow, IssueActivityView, IssueReactionLiteRow, IssueReactionLiteView,
+    IssueSubscriberRow, IssueSubscriberView, APP_ISSUE_FLAT_FIELDS, GITHUB_COMMENT_SYNC_PROBE_SQL,
+    GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_COMMENT_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL,
+    ISSUE_ACTIVITY_ALL_FIELDS, ISSUE_REACTION_LITE_FIELDS, ISSUE_SUBSCRIBER_ALL_FIELDS,
+};
 pub use serializers_links::{
     git_code_review_link_to_representation, github_pull_request_link_to_representation,
     issue_attachment_lite_to_representation, issue_link_lite_to_representation,
