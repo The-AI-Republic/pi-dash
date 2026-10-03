@@ -4794,6 +4794,1165 @@ export class WebDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
   }
 
+  // --- Sidebar + workspace navigation (NEWFRONT-125, SHELL-046..062). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+  private static readonly actionTimeout = 15_000;
+  async activateHelpEntry(name: string): Promise<string | null> {
+    const menus = this.page.getByRole("menu");
+    for (let index = 0; index < (await menus.count()); index += 1) {
+      const content = (
+        (await menus
+          .nth(index)
+          .textContent({ timeout: WebDriver.itemTimeout })
+          .catch(() => null)) ?? ""
+      ).replace(/\s+/g, " ");
+      if (!content.includes("Documentation")) continue;
+      // Deepest match wins: some entries nest an actionable button inside
+      // a menu item wrapper, and clicking the wrapper misses the handler.
+      const item = menus.nth(index).locator("button, a, [role='menuitem']").filter({ hasText: name }).last();
+      const [popup] = await Promise.all([
+        this.page.waitForEvent("popup", { timeout: 10_000 }).catch(() => null),
+        item.click({ timeout: WebDriver.actionTimeout }),
+      ]);
+      await this.page.waitForTimeout(1000);
+      if (popup === null) return null;
+      // A fresh popup reports about:blank until its first commit; wait for
+      // the committed URL (bounded) instead of reading the blank.
+      await popup.waitForFunction(() => window.location.href !== "about:blank", { timeout: 10_000 }).catch(() => {});
+      return popup.url();
+    }
+    throw new Error(`[parity] help menu holding ${name} is not open.`);
+  }
+  async activateUserMenuItem(name: string): Promise<void> {
+    // The item wrapper carries the activation (it reacts to the press
+    // itself, which a bare synthetic click never produces), so it takes a
+    // real pointer click on the outermost match. The menu holding the
+    // entry is located by content: another open menu must never receive
+    // the activation.
+    const menus = this.page.getByRole("menu");
+    const count = await menus.count();
+    for (let index = 0; index < count; index += 1) {
+      const item = menus.nth(index).locator("button, a, [role='menuitem']").filter({ hasText: name }).first();
+      if ((await item.count()) === 0) continue;
+      await item.click({ timeout: WebDriver.actionTimeout });
+      return;
+    }
+    throw new Error(`[parity] user menu entry ${name} is not open.`);
+  }
+  private static clean(texts: string[]): string[] {
+    return texts.map((t) => t.trim().replace(/\s+/g, " ")).filter((t) => t.length > 0);
+  }
+  async clickMainContent(): Promise<void> {
+    await this.page
+      .getByRole("main")
+      .first()
+      .click({ position: { x: 20, y: 20 }, timeout: WebDriver.actionTimeout });
+  }
+  private async controlledPanel(aside: Locator, toggle: Locator): Promise<Locator> {
+    const controls = await toggle.getAttribute("aria-controls", { timeout: WebDriver.actionTimeout }).catch(() => null);
+    if (controls === null) return aside;
+    return aside.locator(`div[id="${controls}"]`);
+  }
+  async dismissTopmost(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+  }
+  async dragSidebarProjectBefore(sourceName: string, targetName: string): Promise<void> {
+    // Pragmatic drag-and-drop starts from a handle that only reveals while
+    // its own row is hovered. Handles are row-scoped: hovering one row
+    // never reveals another row's handle, so the handle lookup stays
+    // inside the source row's container.
+    // One retry on a fresh lookup: a remount between resolve and hover
+    // leaves a detached handle that burns the whole hover timeout.
+    let container: Locator | null = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const aside = await this.readyAside();
+        const sourceRow = aside.getByRole("button").filter({ hasText: sourceName }).first();
+        await sourceRow.waitFor({ state: "visible", timeout: 30_000 });
+        container = sourceRow.locator("xpath=ancestor::*[contains(@class,'group/project-item')][1]");
+        await container.hover({ timeout: WebDriver.actionTimeout });
+        break;
+      } catch (error) {
+        if (attempt === 2) throw error;
+        container = null;
+      }
+    }
+    if (container === null) throw new Error(`[parity] drag source ${sourceName} never settled.`);
+    const handle = container.locator("button.cursor-grab:visible").first();
+    await handle.waitFor({ state: "visible", timeout: WebDriver.actionTimeout });
+    const from = (await handle.boundingBox({ timeout: WebDriver.actionTimeout }).catch(() => null)) ?? {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+    };
+    const aside = await this.readyAside();
+    const targetRow = aside.getByRole("button").filter({ hasText: targetName }).first();
+    await targetRow.waitFor({ state: "visible", timeout: 30_000 });
+    const to = (await targetRow.boundingBox({ timeout: WebDriver.actionTimeout }).catch(() => null)) ?? {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+    };
+    await this.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await this.page.mouse.down();
+    await this.page.mouse.move(to.x + to.width / 2, to.y + 2, { steps: 25 });
+    await this.page.mouse.up();
+  }
+  async favoriteEntryNames(): Promise<string[]> {
+    // Folders render as buttons and entries as links inside the favorites
+    // group; header chrome (the toggle, the folder-create button) is
+    // excluded so only entries come back.
+    if (!(await this.isFavoritesOpen())) return [];
+    const aside = await this.screenAside();
+    const heading = aside.getByText("Favorites", { exact: true }).first();
+    const group = heading.locator("xpath=ancestor::div[2]");
+    const names = WebDriver.clean(await group.locator("a, button").allTextContents());
+    const chrome = new Set(["Favorites", "Open favorites menu", "Close favorites menu", "Create favorites folder"]);
+    return names.filter((name) => !chrome.has(name));
+  }
+  private async favoritesToggle(): Promise<Locator> {
+    const aside = await this.screenAside();
+    return aside.getByRole("button", { name: /favorites menu/i }).first();
+  }
+  private async folderNameField(): Promise<Locator> {
+    const aside = await this.screenAside();
+    return aside.getByPlaceholder("New folder").first();
+  }
+  private async hasPageShell(timeout: number): Promise<boolean> {
+    try {
+      await this.page.waitForFunction(() => document.querySelectorAll("aside, main").length > 0, { timeout });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async helpMenuTexts(): Promise<string[]> {
+    const menus = this.page.getByRole("menu");
+    for (let index = 0; index < (await menus.count()); index += 1) {
+      const content = (
+        (await menus
+          .nth(index)
+          .textContent({ timeout: WebDriver.itemTimeout })
+          .catch(() => null)) ?? ""
+      ).replace(/\s+/g, " ");
+      if (content.includes("Documentation")) {
+        // The version footer is not a button, so include the whole menu
+        // text alongside the actionable items.
+        const full = content.length > 0 ? [content] : [];
+        const items = WebDriver.clean(await menus.nth(index).locator("button, a, [role='menuitem']").allTextContents());
+        return [...full, ...items];
+      }
+    }
+    return [];
+  }
+  async isCreateProjectVisible(): Promise<boolean> {
+    const aside = await this.screenAside();
+    // The creation button reveals on group hover, so hover the group header
+    // before reading it, exactly like a user would.
+    await aside
+      .getByRole("button", { name: /projects menu/i })
+      .first()
+      .hover()
+      .catch(() => {});
+    const button = aside.getByRole("button", { name: "Create new project" });
+    return (await button.count()) > 0 && (await button.first().isVisible());
+  }
+  async isDialogWithTextVisible(text: string): Promise<boolean> {
+    const dialog = this.page.getByRole("dialog").filter({ hasText: text });
+    if ((await dialog.count()) === 0) return false;
+    return this.isTextVisibleInDialog(dialog.first(), text);
+  }
+  async isFavoritesFolderDialogOpen(): Promise<boolean> {
+    // The folder form renders inline in the sidebar, not as a dialog: its
+    // name field is the presence marker.
+    const field = await this.folderNameField();
+    if ((await field.count()) === 0) return false;
+    return field
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+  async isFavoritesOpen(): Promise<boolean> {
+    if (!(await this.sidebarSectionNames()).includes("Favorites")) return false;
+    const toggle = await this.favoritesToggle();
+    if ((await toggle.count()) === 0) return false;
+    const label = await toggle
+      .first()
+      .getAttribute("aria-label", { timeout: WebDriver.actionTimeout })
+      .catch(() => null);
+    return (label ?? "").startsWith("Close");
+  }
+  async isMoreSectionOpen(): Promise<boolean> {
+    // Two open paths exist on the running old app: the toggle flips the
+    // disclosure (aria-expanded follows), while landing on a member route
+    // flips the stored flag behind its back — the panel renders with no
+    // aria change. Either one counts as open.
+    const aside = await this.screenAside();
+    const toggle = await this.moreToggle();
+    if ((await toggle.count()) === 0) return false;
+    const expanded = await toggle
+      .first()
+      .getAttribute("aria-expanded", { timeout: WebDriver.actionTimeout })
+      .catch(() => null);
+    if ((expanded ?? "") === "true") return true;
+    const panel = await this.controlledPanel(aside, toggle.first());
+    if (panel === aside) return false;
+    return (await panel.locator("a").count()) > 0;
+  }
+  async isOverflowCreateVisible(): Promise<boolean> {
+    // Buttons outside the sidebar belong to slide-overs and dialogs; the
+    // top bar carries no creation button.
+    const candidates = this.page.getByRole("button", { name: /create/i });
+    const count = await candidates.count();
+    for (let index = 0; index < count; index += 1) {
+      const outside = await candidates.nth(index).evaluate((el) => el.closest("aside") === null);
+      if (outside && (await candidates.nth(index).isVisible())) return true;
+    }
+    return false;
+  }
+  async isOverflowEmptyStateVisible(): Promise<boolean> {
+    const empty = this.page.getByText("No matching results.", { exact: false });
+    return (await empty.count()) > 0 && (await empty.first().isVisible());
+  }
+  private async isPageSettled(timeout: number): Promise<boolean> {
+    try {
+      await this.page.waitForFunction(
+        () =>
+          document.querySelectorAll("aside a").length > 0 ||
+          document.querySelectorAll("main p, main h1, main a, main button").length > 0,
+        { timeout }
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async isProjectRowInViewport(projectName: string): Promise<boolean> {
+    const aside = await this.screenAside();
+    const link = aside.locator("a").filter({ hasText: projectName }).first();
+    if ((await link.count()) === 0) return false;
+    const box = await link.boundingBox({ timeout: WebDriver.actionTimeout }).catch(() => null);
+    if (box === null) return false;
+    const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
+    return box.y >= 0 && box.y + box.height <= viewport.height && box.x >= 0 && box.x + box.width <= viewport.width;
+  }
+  async isProjectRowOpen(projectName: string): Promise<boolean> {
+    // Two expansion paths exist on the running old app: the toggle sets
+    // aria-expanded, while landing on a project route renders the
+    // sub-navigation without flipping the toggle, so either one counts.
+    // The sub-navigation renders as siblings AFTER the row container (which
+    // holds only the bare row link), so the fallback resolves the row's
+    // project id from its own link and looks for that project's subnav
+    // hrefs across the sidebar — never inside the row container alone.
+    const toggle = await this.projectRowToggle(projectName);
+    if ((await toggle.count()) === 0) return false;
+    const expanded =
+      ((await toggle
+        .first()
+        .getAttribute("aria-expanded", { timeout: WebDriver.actionTimeout })
+        .catch(() => null)) ?? "") === "true";
+    if (expanded) return true;
+    const rowHref = await this.projectRowHref(projectName);
+    const idMatch = rowHref === null ? null : /\/projects\/([^/]+)\//.exec(`${rowHref}/`);
+    if (idMatch === null) return false;
+    const prefix = `/projects/${idMatch[1]}/`;
+    const aside = await this.screenAside();
+    const links = aside.locator("a");
+    const count = await links.count();
+    for (let index = 0; index < count; index += 1) {
+      const href = await links
+        .nth(index)
+        .getAttribute("href", { timeout: WebDriver.itemTimeout })
+        .catch(() => null);
+      if (
+        href !== null &&
+        href.startsWith(prefix) &&
+        /\/projects\/[^/]+\/(issues|pages|intake|schedulers|runners|cycles|modules|views)\//.test(href)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+  async isProjectsGroupOpen(): Promise<boolean> {
+    const toggle = await this.projectsGroupToggle();
+    if ((await toggle.count()) === 0) return false;
+    const label = await toggle
+      .first()
+      .getAttribute("aria-label", { timeout: WebDriver.actionTimeout })
+      .catch(() => null);
+    return (label ?? "").startsWith("Close");
+  }
+  async isProjectsOverflowOpen(): Promise<boolean> {
+    const toggle = await this.overflowToggle();
+    if ((await toggle.count()) === 0) return false;
+    const label = await toggle
+      .first()
+      .getAttribute("aria-label", { timeout: WebDriver.actionTimeout })
+      .catch(() => null);
+    return (label ?? "").startsWith("Close");
+  }
+  async isProjectsOverflowVisible(): Promise<boolean> {
+    const toggle = await this.overflowToggle();
+    return (await toggle.count()) > 0 && (await toggle.first().isVisible());
+  }
+  async isQuickCreateDialogOpen(): Promise<boolean> {
+    const dialog = this.page.getByRole("dialog").filter({ hasText: "Create new work item" });
+    if ((await dialog.count()) === 0) return false;
+    return this.isTextVisibleInDialog(dialog.first(), "Create new work item");
+  }
+  async isQuickCreateEnabled(): Promise<boolean> {
+    const aside = await this.screenAside();
+    const button = aside.getByRole("button", { name: "New work item" }).first();
+    if ((await button.count()) === 0) return false;
+    return button.isEnabled({ timeout: WebDriver.actionTimeout }).catch(() => false);
+  }
+  async isSidebarOnScreen(): Promise<boolean> {
+    await this.page
+      .getByRole("main")
+      .first()
+      .waitFor({ state: "attached", timeout: 60_000 })
+      .catch(() => {});
+    const boxes = await this.page
+      .locator("aside")
+      .evaluateAll((elements) =>
+        elements.map((element) => {
+          const box = element.getBoundingClientRect();
+          return [box.x, box.width, box.height];
+        })
+      )
+      .catch((): number[][] => []);
+    return boxes.some(([x, width, height]) => x >= 0 && width > 50 && height > 50);
+  }
+  private async isTextVisibleInDialog(dialog: Locator, text: string): Promise<boolean> {
+    // The dialog root is a zero-height positioning wrapper even while the
+    // modal shows, so visibility is read off the content, not the wrapper
+    // (proven against the running old app). Any visible match counts: a
+    // hidden duplicate (inactive tab, a11y copy) must not shadow it.
+    const matches = dialog.getByText(text);
+    const count = await matches.count();
+    for (let index = 0; index < count; index += 1) {
+      if (
+        await matches
+          .nth(index)
+          .isVisible()
+          .catch(() => false)
+      )
+        return true;
+    }
+    return false;
+  }
+  async isToastVisible(text: string): Promise<boolean> {
+    const toast = this.page.getByText(text, { exact: false });
+    return (await toast.count()) > 0 && (await toast.first().isVisible());
+  }
+  private static readonly itemTimeout = 5_000;
+  async moreSectionLinks(): Promise<{ text: string; href: string | null }[]> {
+    const aside = await this.screenAside();
+    const panel = await this.controlledPanel(aside, await this.moreToggle());
+    const links = panel.locator("a");
+    const texts = WebDriver.clean(await links.allTextContents());
+    const hrefs: (string | null)[] = [];
+    for (let index = 0; index < (await links.count()); index += 1) {
+      hrefs.push(
+        await links
+          .nth(index)
+          .getAttribute("href", { timeout: WebDriver.itemTimeout })
+          .catch(() => null)
+      );
+    }
+    return texts.map((text, index) => ({ text, href: hrefs[index] ?? null }));
+  }
+  private async moreToggle(): Promise<Locator> {
+    const aside = await this.screenAside();
+    return aside.getByRole("button", { name: "More" }).first();
+  }
+  async openFavoriteEntry(name: string): Promise<void> {
+    const aside = await this.readyAside();
+    const entry = aside.locator("a").filter({ hasText: name }).first();
+    await entry.waitFor({ state: "visible", timeout: 30_000 });
+    await entry.click({ timeout: WebDriver.actionTimeout });
+  }
+  async openFavoritesFolder(name: string): Promise<void> {
+    const aside = await this.readyAside();
+    await aside.getByRole("button", { name }).first().click({ timeout: WebDriver.actionTimeout });
+  }
+  async openFavoritesFolderDialog(): Promise<void> {
+    // The create button reveals on group hover, so hover the header first
+    // like a user, then open from the keyboard exactly like one. Retry
+    // once: the hover-reveal can miss on a slow first paint.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const aside = await this.readyAside();
+      const header = aside.getByRole("button", { name: /favorites menu/i }).first();
+      await header.hover({ timeout: WebDriver.actionTimeout }).catch(() => {});
+      const button = aside.getByRole("button", { name: "Create favorites folder" }).first();
+      await button.focus({ timeout: WebDriver.actionTimeout }).catch(() => {});
+      await this.page.keyboard.press("Enter");
+      await this.page.waitForTimeout(1500);
+      if (await this.isFavoritesFolderDialogOpen()) return;
+    }
+  }
+  async openHelpMenu(): Promise<void> {
+    // Observed on the running old app: the help entry is an icon-only
+    // top-bar button with no accessible name, so try each icon-only
+    // top-bar button until the help menu opens. Rightmost first: the help
+    // entry sits at the far end, while the leftmost candidate is the
+    // sidebar collapse toggle, which must not be disturbed.
+    const buttons = this.page.locator("button");
+    const count = await buttons.count();
+    const candidates: { index: number; x: number }[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const box = await buttons
+        .nth(index)
+        .boundingBox({ timeout: WebDriver.itemTimeout })
+        .catch(() => null);
+      if (box === null || box.width === 0 || box.y >= 41 || box.x < 0) continue;
+      const aria = await buttons
+        .nth(index)
+        .getAttribute("aria-label", { timeout: WebDriver.itemTimeout })
+        .catch(() => null);
+      if (aria !== null && aria.length > 0) continue;
+      const text = (
+        (await buttons
+          .nth(index)
+          .textContent({ timeout: WebDriver.itemTimeout })
+          .catch(() => null)) ?? ""
+      ).trim();
+      if (text.length > 0) continue;
+      candidates.push({ index, x: box.x });
+    }
+    candidates.sort((left, right) => right.x - left.x);
+    for (const { index } of candidates) {
+      await buttons
+        .nth(index)
+        .click({ timeout: WebDriver.actionTimeout })
+        .catch(() => {});
+      await this.page.waitForTimeout(800);
+      const menus = this.page.getByRole("menu");
+      for (let mi = 0; mi < (await menus.count()); mi += 1) {
+        const content = (
+          (await menus
+            .nth(mi)
+            .textContent({ timeout: WebDriver.itemTimeout })
+            .catch(() => null)) ?? ""
+        ).replace(/\s+/g, " ");
+        if (content.includes("Documentation")) return;
+      }
+      await this.dismissTopmost();
+    }
+    throw new Error("[parity] help menu button not found in the top bar.");
+  }
+  async openProjectQuickMenu(projectName: string): Promise<void> {
+    // The toggle is hover-revealed per row: hovering the row exposes its
+    // own menu toggle, and a plain click opens the menu (a keyboard Enter
+    // demonstrably does nothing). Verify and drive once more when a remount
+    // swallows the click. Accordion rows expose the name on a disclosure
+    // button; tabbed rows render it in a div inside the row link — hover
+    // whichever shape is present.
+    const aside = await this.readyAside();
+    const rowButton = aside.getByRole("button").filter({ hasText: projectName }).first();
+    const rowLink = aside.locator("a").filter({ hasText: projectName }).first();
+    let row = rowLink;
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      if ((await rowButton.count()) > 0) {
+        row = rowButton;
+        break;
+      }
+      if ((await rowLink.count()) > 0) {
+        row = rowLink;
+        break;
+      }
+      if (Date.now() > deadline) break;
+      await this.page.waitForTimeout(500);
+    }
+    await row.waitFor({ state: "visible", timeout: 30_000 });
+    const container = row.locator("xpath=ancestor::*[contains(@class,'group/project-item')][1]");
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await row.hover({ timeout: WebDriver.actionTimeout }).catch(() => {});
+      const toggle = container.getByRole("button", { name: "Toggle quick actions menu" }).first();
+      await toggle.click({ timeout: WebDriver.actionTimeout }).catch(() => {});
+      await this.page.waitForTimeout(2000);
+      if ((await this.projectQuickMenuTexts()).length > 0) return;
+    }
+  }
+  async openSidebarLink(text: string): Promise<void> {
+    const aside = await this.readyAside();
+    await aside.locator("a").filter({ hasText: text }).first().click({ timeout: WebDriver.actionTimeout });
+  }
+  async openUserMenu(): Promise<void> {
+    const aside = await this.readyAside();
+    const email = (await aside.textContent({ timeout: WebDriver.actionTimeout }).catch(() => null))?.match(
+      /[\w.+-]+@[\w-]+\.[\w.]+/
+    );
+    if (email === null || email === undefined) throw new Error("[parity] user card email not found in sidebar.");
+    await aside.getByRole("button").filter({ hasText: email[0] }).first().click({ timeout: WebDriver.actionTimeout });
+  }
+  async openWorkspacePath(path: string): Promise<void> {
+    // The oracle is a dev server: under sibling load a navigation can stay
+    // half-loaded for a minute (the document arrives but the app hydrates
+    // slowly), or never hydrate at all after a rebuild. Slow pages keep
+    // their progress and get more time; only a page with no shell at all
+    // earns a reload, exactly like a user refreshing a blank page.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await this.page.goto(path, { timeout: 60_000 });
+        await this.page.waitForLoadState("domcontentloaded", { timeout: 60_000 });
+      } catch (error) {
+        if (attempt === 2) throw error;
+        continue;
+      }
+      if (await this.isPageSettled(45_000)) return;
+      if (await this.hasPageShell(10_000)) {
+        await this.isPageSettled(45_000);
+        return;
+      }
+      await this.page.reload({ timeout: 60_000 }).catch(() => {});
+      await this.isPageSettled(20_000);
+      return;
+    }
+  }
+  async openWorkspaceSwitcher(): Promise<void> {
+    // Observed on the running old app: the switcher button lives in the
+    // top bar and carries the workspace identity mark.
+    await this.page
+      .getByRole("button", { name: "Open workspace switcher" })
+      .first()
+      .click({ timeout: WebDriver.actionTimeout });
+  }
+  private async overflowPanelData(): Promise<{ names: string[]; text: string }> {
+    return this.page.evaluate(() => {
+      const clean = (value: string): string => value.trim().replace(/\s+/g, " ");
+      const inputs = Array.from(document.querySelectorAll("input[placeholder='Search']"));
+      let best: Element | null = null;
+      let bestArea = Number.POSITIVE_INFINITY;
+      for (const input of inputs) {
+        let el: Element | null = input.parentElement;
+        while (el !== null) {
+          const box = el.getBoundingClientRect();
+          if (box.x >= 200 && box.width > 100 && box.height > 100) {
+            const area = box.width * box.height;
+            if (area < bestArea) {
+              bestArea = area;
+              best = el;
+            }
+            break;
+          }
+          el = el.parentElement;
+        }
+      }
+      if (best === null) return { names: [], text: "" };
+      const names = Array.from(best.querySelectorAll("a"))
+        .map((anchor) => clean(anchor.textContent ?? ""))
+        .filter((name) => name.length > 0);
+      return { names, text: clean(best.textContent ?? "") };
+    });
+  }
+  async overflowProjectNames(): Promise<string[]> {
+    return (await this.overflowPanelData()).names;
+  }
+  private async overflowToggle(): Promise<Locator> {
+    const aside = await this.screenAside();
+    return aside.locator("#extended-project-sidebar-toggle");
+  }
+  async projectQuickMenuTexts(): Promise<string[]> {
+    const texts: string[] = [];
+    for (const role of ["menu", "menuitem", "dialog"] as const) {
+      const els = this.page.getByRole(role);
+      const count = Math.min(await els.count(), 4);
+      for (let index = 0; index < count; index += 1) {
+        texts.push(
+          (
+            (await els
+              .nth(index)
+              .textContent({ timeout: WebDriver.itemTimeout })
+              .catch(() => null)) ?? ""
+          )
+            .trim()
+            .replace(/\s+/g, " ")
+        );
+      }
+    }
+    const portals = this.page.locator("div[data-headlessui-portal]");
+    if ((await portals.count()) > 0) {
+      texts.push(...WebDriver.clean(await portals.first().locator("button").allTextContents()));
+    }
+    return texts.filter((t) => t.length > 0);
+  }
+  async projectRowHref(projectName: string): Promise<string | null> {
+    const aside = await this.screenAside();
+    const link = aside.locator("a").filter({ hasText: projectName }).first();
+    if ((await link.count()) === 0) return null;
+    return link.getAttribute("href", { timeout: WebDriver.actionTimeout }).catch(() => null);
+  }
+  private async projectRowToggle(projectName: string): Promise<Locator> {
+    const aside = await this.screenAside();
+    return aside.getByRole("button").filter({ hasText: projectName }).first();
+  }
+  async projectSubnavLinks(): Promise<{ text: string; href: string | null }[]> {
+    // Sub-navigation entries point at a single project's feature routes,
+    // which aggregate rows never do; dedupe the group/project nesting.
+    const aside = await this.screenAside();
+    const links = aside.locator("a");
+    const count = await links.count();
+    const rows: { text: string; href: string | null }[] = [];
+    const seen = new Set<string>();
+    for (let index = 0; index < count; index += 1) {
+      const href = await links
+        .nth(index)
+        .getAttribute("href", { timeout: WebDriver.itemTimeout })
+        .catch(() => null);
+      // The trailing slash separates sub-navigation entries from the bare
+      // project-row link, which ends at the feature without one.
+      if (
+        href === null ||
+        !/\/projects\/[^/]+\/(issues|pages|intake|schedulers|runners|cycles|modules|views)\//.test(href)
+      ) {
+        continue;
+      }
+      if (seen.has(href)) continue;
+      seen.add(href);
+      const text = (
+        (await links
+          .nth(index)
+          .textContent({ timeout: WebDriver.itemTimeout })
+          .catch(() => null)) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text.length > 0) rows.push({ text, href });
+    }
+    return rows;
+  }
+  private async projectsGroupToggle(): Promise<Locator> {
+    const aside = await this.screenAside();
+    return aside.getByRole("button", { name: /projects menu/i }).first();
+  }
+  private async readyAside(): Promise<Locator> {
+    try {
+      await this.page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("aside")).some((el) => {
+            const box = el.getBoundingClientRect();
+            return box.x >= 0 && box.width > 50 && box.height > 50;
+          }),
+        { timeout: 12_000 }
+      );
+    } catch {
+      // Fall through to whatever the page has; the click timeout decides.
+    }
+    return this.screenAside();
+  }
+  async resetSession(): Promise<void> {
+    await this.page.context().clearCookies();
+    await this.page.goto("/", { waitUntil: "domcontentloaded", timeout: 60_000 });
+  }
+  private async screenAside(): Promise<Locator> {
+    // A single non-waiting read: boundingBox performs actionability waits
+    // that serialize every sidebar read under remount churn, so measure
+    // with getBoundingClientRect instead, which never waits.
+    const asides = this.page.locator("aside");
+    const boxes = await asides
+      .evaluateAll((elements) =>
+        elements.map((element) => {
+          const box = element.getBoundingClientRect();
+          return [box.x, box.width, box.height];
+        })
+      )
+      .catch((): number[][] => []);
+    for (let index = 0; index < boxes.length; index += 1) {
+      const [x, width, height] = boxes[index];
+      if (x >= 0 && width > 50 && height > 50) return asides.nth(index);
+    }
+    return asides.first();
+  }
+  async searchOverflowProjects(query: string): Promise<void> {
+    // Exact match: the top bar carries a longer "Search commands…" sibling.
+    await this.page
+      .getByPlaceholder("Search", { exact: true })
+      .first()
+      .fill(query, { timeout: WebDriver.actionTimeout });
+  }
+  async setFavoritesOpen(open: boolean): Promise<void> {
+    if ((await this.isFavoritesOpen()) !== open) {
+      const aside = await this.readyAside();
+      await aside
+        .getByRole("button", { name: /favorites menu/i })
+        .first()
+        .click({ timeout: WebDriver.actionTimeout });
+    }
+  }
+  async setMoreSectionOpen(open: boolean): Promise<void> {
+    // The panel mounts asynchronously after the click: returning early lets
+    // the next panel read race the render (no toggle association yet) and
+    // fall back to the whole sidebar. Verify the end state and re-drive.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if ((await this.isMoreSectionOpen()) !== open) {
+        const aside = await this.readyAside();
+        await aside.getByRole("button", { name: "More" }).first().click({ timeout: WebDriver.actionTimeout });
+        continue;
+      }
+      if (!open) return;
+      const toggle = await this.moreToggle();
+      const expanded = await toggle
+        .first()
+        .getAttribute("aria-expanded", { timeout: WebDriver.actionTimeout })
+        .catch(() => null);
+      // Route-driven opens render the panel with no toggle change: panel
+      // reads already resolve, nothing to wait for.
+      if ((expanded ?? "") !== "true") return;
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const controls = await toggle
+          .first()
+          .getAttribute("aria-controls", { timeout: WebDriver.itemTimeout })
+          .catch(() => null);
+        if (controls !== null) return;
+        if (Date.now() > deadline) break;
+        await this.page.waitForTimeout(200);
+      }
+    }
+  }
+  async setProjectRowOpen(projectName: string, open: boolean): Promise<void> {
+    // A dev-server rebuild can remount the sidebar between the state read
+    // and the click, swallowing it; verify and drive once more instead of
+    // leaving the row shut for the caller's whole poll budget.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      if ((await this.isProjectRowOpen(projectName)) === open) return;
+      await this.toggleProjectRow(projectName);
+      await this.page.waitForTimeout(2000);
+    }
+  }
+  async setProjectsGroupOpen(open: boolean): Promise<void> {
+    if ((await this.isProjectsGroupOpen()) !== open) {
+      const aside = await this.readyAside();
+      await aside
+        .getByRole("button", { name: /projects menu/i })
+        .first()
+        .click({ timeout: WebDriver.actionTimeout });
+    }
+  }
+  async setProjectsOverflowOpen(open: boolean): Promise<void> {
+    if ((await this.isProjectsOverflowOpen()) !== open) {
+      const aside = await this.readyAside();
+      await aside.locator("#extended-project-sidebar-toggle").first().click({ timeout: WebDriver.actionTimeout });
+    }
+  }
+  async sidebarLinkTexts(): Promise<string[]> {
+    const aside = await this.screenAside();
+    return WebDriver.clean(await aside.locator("a").allTextContents());
+  }
+  async sidebarRowTone(linkText: string): Promise<{ background: string; color: string }> {
+    const aside = await this.screenAside();
+    const link = aside.locator("a").filter({ hasText: linkText }).first();
+    if ((await link.count()) === 0) return { background: "", color: "" };
+    // Simple rows carry the active tone inside the link, but project rows
+    // paint it on the outer container: return the innermost non-transparent
+    // background from the link outward, stopping two levels up so the read
+    // never escapes to the sidebar panel itself.
+    return link
+      .evaluate(
+        (el: Element) => {
+          const inner = el.querySelector("div");
+          const style = getComputedStyle(inner ?? el);
+          const chain: (Element | null)[] = [
+            inner ?? el,
+            el,
+            el.parentElement,
+            el.parentElement?.parentElement ?? null,
+          ];
+          let background = "rgba(0, 0, 0, 0)";
+          for (const node of chain) {
+            if (node === null || node.tagName === "ASIDE") break;
+            const painted = getComputedStyle(node).backgroundColor;
+            if (painted !== "" && painted !== "rgba(0, 0, 0, 0)" && painted !== "transparent") {
+              background = painted;
+              break;
+            }
+          }
+          return { background, color: style.color };
+        },
+        undefined,
+        { timeout: WebDriver.actionTimeout }
+      )
+      .catch(() => ({ background: "", color: "" }));
+  }
+  async sidebarSectionNames(): Promise<string[]> {
+    const aside = await this.screenAside();
+    const text = ((await aside.textContent({ timeout: WebDriver.actionTimeout }).catch(() => null)) ?? "").replace(
+      /\s+/g,
+      " "
+    );
+    return ["Projects", "More", "Favorites"].filter((name) => text.includes(name));
+  }
+  async submitFavoritesFolderName(name: string): Promise<void> {
+    // The form is inline (no submit button): filling plus Enter submits it.
+    const field = await this.folderNameField();
+    await field.fill(name, { timeout: WebDriver.actionTimeout });
+    await this.page.keyboard.press("Enter");
+  }
+  async switchWorkspace(name: string): Promise<void> {
+    // Outermost match wins here: the menu item wrapper carries the
+    // selection handler (proven against the running old app).
+    const menu = this.page.getByRole("menu").first();
+    await menu.locator("button, a, [role='menuitem']").filter({ hasText: name }).first().click({
+      timeout: WebDriver.actionTimeout,
+    });
+  }
+  async toggleProjectRow(projectName: string): Promise<void> {
+    // One retry on a fresh lookup: a remount between resolve and click
+    // leaves a detached handle that burns the whole click timeout. The
+    // button is also waited for first: after a row-limit change the rows
+    // re-render without toggles until the fresh limit arrives, and the
+    // name link alone must never count as ready.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const aside = await this.readyAside();
+        const button = aside.getByRole("button").filter({ hasText: projectName }).first();
+        await button.waitFor({ state: "visible", timeout: 30_000 });
+        await button.click({ timeout: WebDriver.actionTimeout });
+        return;
+      } catch (error) {
+        if (attempt === 2) throw error;
+      }
+    }
+  }
+  async userMenuTexts(): Promise<string[]> {
+    // The identity block is not a button, so read the whole menu text plus
+    // the actionable items.
+    const menu = this.page.getByRole("menu").first();
+    const full = ((await menu.textContent({ timeout: WebDriver.actionTimeout }).catch(() => null)) ?? "")
+      .trim()
+      .replace(/\s+/g, " ");
+    const items = WebDriver.clean(await menu.locator("button, a, [role='menuitem']").allTextContents());
+    return [...(full.length > 0 ? [full] : []), ...items];
+  }
+  async workspaceLogoState(): Promise<{ hasImage: boolean; label: string | null; initial: string | null }> {
+    // Observed on the running old app: the top-bar switcher button carries
+    // the identity mark — an image when a logo is uploaded, otherwise the
+    // workspace initial.
+    const switcher = this.page.getByRole("button", { name: "Open workspace switcher" }).first();
+    if ((await switcher.count()) === 0) return { hasImage: false, label: null, initial: null };
+    // Real image elements only: decorative svgs also carry an img role.
+    const images = switcher.locator("img");
+    if ((await images.count()) > 0 && (await images.first().isVisible())) {
+      return {
+        hasImage: true,
+        label: await images
+          .first()
+          .getAttribute("alt", { timeout: WebDriver.actionTimeout })
+          .catch(() => null),
+        initial: null,
+      };
+    }
+    const text = ((await switcher.textContent({ timeout: WebDriver.actionTimeout }).catch(() => null)) ?? "")
+      .trim()
+      .replace(/\s+/g, " ");
+    return {
+      hasImage: false,
+      label: await switcher.getAttribute("aria-label", { timeout: WebDriver.actionTimeout }).catch(() => null),
+      initial: text.slice(0, 1),
+    };
+  }
+  async workspaceSwitcherTexts(): Promise<string[]> {
+    const texts: string[] = [];
+    for (const role of ["menu", "dialog"] as const) {
+      const els = this.page.getByRole(role);
+      for (let index = 0; index < (await els.count()); index += 1) {
+        texts.push(
+          (
+            (await els
+              .nth(index)
+              .textContent({ timeout: WebDriver.itemTimeout })
+              .catch(() => null)) ?? ""
+          )
+            .trim()
+            .replace(/\s+/g, " ")
+        );
+      }
+    }
+    return texts.filter((t) => t.length > 0);
+  }
+  async openQuickCreate(): Promise<void> {
+    // A dev-server rebuild can swallow a click mid-remount, so click and
+    // re-click once when the dialog stays closed, like a user would.
+    const aside = await this.readyAside();
+    const button = aside.getByRole("button", { name: "New work item" }).first();
+    await button.click({ timeout: WebDriver.actionTimeout });
+    if (await this.isQuickCreateDialogOpen()) return;
+    await this.page.waitForTimeout(2000);
+    if (await this.isQuickCreateDialogOpen()) return;
+    await button.click({ timeout: WebDriver.actionTimeout }).catch(() => {});
+  }
+
+  // --- NEWFRONT-125 review fixes. Appended; existing methods above are
+  // --- untouched per the shared driver contract.
+
+  async activateProjectQuickMenuItem(name: string): Promise<void> {
+    // The quick menu renders through a headless portal; deepest match wins
+    // because entries nest actionable buttons inside menuitem wrappers.
+    const portals = this.page.locator("div[data-headlessui-portal]");
+    if ((await portals.count()) > 0) {
+      const item = portals.first().locator("button, a, [role='menuitem']").filter({ hasText: name }).last();
+      if ((await item.count()) > 0) {
+        await item.click({ timeout: WebDriver.actionTimeout });
+        return;
+      }
+    }
+    for (const role of ["menu", "menuitem", "dialog"] as const) {
+      const els = this.page.getByRole(role);
+      for (let index = 0; index < Math.min(await els.count(), 4); index += 1) {
+        const item = els.nth(index).locator("button, a, [role='menuitem']").filter({ hasText: name }).last();
+        if ((await item.count()) > 0) {
+          await item.click({ timeout: WebDriver.actionTimeout });
+          return;
+        }
+      }
+    }
+    throw new Error(`[parity] project quick menu entry ${name} is not open.`);
+  }
+
+  async dragFavoriteBefore(sourceName: string, targetName: string): Promise<void> {
+    // Favorite rows share the project rows' hover-revealed grab handle
+    // inside a row container, so the drag mirrors the project drag: hover
+    // the source row, drag from its revealed handle above the target row.
+    // One retry on a fresh lookup: a remount between resolve and hover
+    // leaves a detached handle that burns the whole hover timeout.
+    let from = { x: 0, y: 0, width: 0, height: 0 };
+    let settled = false;
+    for (let attempt = 1; attempt <= 2 && !settled; attempt += 1) {
+      try {
+        const aside = await this.readyAside();
+        const group = aside.getByText("Favorites", { exact: true }).first().locator("xpath=ancestor::div[2]");
+        const sourceRow = group.locator("a, button").filter({ hasText: sourceName }).first();
+        await sourceRow.waitFor({ state: "visible", timeout: 30_000 });
+        const container = sourceRow.locator("xpath=ancestor::*[contains(@class,'group/project-item')][1]");
+        await container.hover({ timeout: WebDriver.actionTimeout });
+        const handle = container.locator(".cursor-grab:visible").first();
+        await handle.waitFor({ state: "visible", timeout: WebDriver.actionTimeout });
+        from = (await handle.boundingBox({ timeout: WebDriver.actionTimeout }).catch(() => null)) ?? from;
+        settled = true;
+      } catch (error) {
+        if (attempt === 2) throw error;
+      }
+    }
+    const aside = await this.readyAside();
+    const group = aside.getByText("Favorites", { exact: true }).first().locator("xpath=ancestor::div[2]");
+    const targetRow = group.locator("a, button").filter({ hasText: targetName }).first();
+    await targetRow.waitFor({ state: "visible", timeout: 30_000 });
+    const to = (await targetRow.boundingBox({ timeout: WebDriver.actionTimeout }).catch(() => null)) ?? {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+    };
+    await this.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await this.page.mouse.down();
+    await this.page.mouse.move(to.x + to.width / 2, to.y + 2, { steps: 25 });
+    await this.page.mouse.up();
+  }
+
+  async openFavoriteQuickMenu(name: string): Promise<void> {
+    // The toggle is hover-revealed per row and scoped to the row container,
+    // exactly like the project quick menu. Verify and drive once more when
+    // a remount swallows the click.
+    const aside = await this.readyAside();
+    const group = aside.getByText("Favorites", { exact: true }).first().locator("xpath=ancestor::div[2]");
+    const row = group.locator("a, button").filter({ hasText: name }).first();
+    await row.waitFor({ state: "visible", timeout: 30_000 });
+    const container = row.locator("xpath=ancestor::*[contains(@class,'group/project-item')][1]");
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await row.hover({ timeout: WebDriver.actionTimeout }).catch(() => {});
+      const toggle = container.getByRole("button", { name: "Toggle quick actions menu" }).first();
+      await toggle.click({ timeout: WebDriver.actionTimeout }).catch(() => {});
+      await this.page.waitForTimeout(2000);
+      if ((await this.favoriteQuickMenuTexts()).length > 0) return;
+    }
+  }
+
+  async favoriteQuickMenuTexts(): Promise<string[]> {
+    // Same menu surface as the project quick menu: role menus plus the
+    // headless portal the entries render through.
+    const texts: string[] = [];
+    for (const role of ["menu", "menuitem", "dialog"] as const) {
+      const els = this.page.getByRole(role);
+      const count = Math.min(await els.count(), 4);
+      for (let index = 0; index < count; index += 1) {
+        texts.push(
+          (
+            (await els
+              .nth(index)
+              .textContent({ timeout: WebDriver.itemTimeout })
+              .catch(() => null)) ?? ""
+          )
+            .trim()
+            .replace(/\s+/g, " ")
+        );
+      }
+    }
+    const portals = this.page.locator("div[data-headlessui-portal]");
+    if ((await portals.count()) > 0) {
+      texts.push(...WebDriver.clean(await portals.first().locator("button").allTextContents()));
+    }
+    return texts.filter((t) => t.length > 0);
+  }
+
+  async activateFavoriteQuickMenuItem(name: string): Promise<void> {
+    const portals = this.page.locator("div[data-headlessui-portal]");
+    if ((await portals.count()) > 0) {
+      const item = portals.first().locator("button, a, [role='menuitem']").filter({ hasText: name }).last();
+      if ((await item.count()) > 0) {
+        await item.click({ timeout: WebDriver.actionTimeout });
+        return;
+      }
+    }
+    for (const role of ["menu", "menuitem", "dialog"] as const) {
+      const els = this.page.getByRole(role);
+      for (let index = 0; index < Math.min(await els.count(), 4); index += 1) {
+        const item = els.nth(index).locator("button, a, [role='menuitem']").filter({ hasText: name }).last();
+        if ((await item.count()) > 0) {
+          await item.click({ timeout: WebDriver.actionTimeout });
+          return;
+        }
+      }
+    }
+    throw new Error(`[parity] favorites quick menu entry ${name} is not open.`);
+  }
+
+  async setSidebarCollapsed(collapsed: boolean): Promise<void> {
+    // The collapsed flag persists in browser-local storage and the shell
+    // reads it on mount, so writing it plus a reload applies the state
+    // without depending on the icon-only toggle's probe order.
+    await this.page.evaluate((value) => {
+      localStorage.setItem("app_sidebar_collapsed", value ? "true" : "false");
+    }, collapsed);
+    await this.page.reload({ timeout: 60_000 }).catch(() => {});
+    await this.isPageSettled(45_000);
+  }
+
+  async isSidebarCollapsed(): Promise<boolean> {
+    const bar = this.page.locator("#main-sidebar").first();
+    if ((await bar.count()) === 0) return false;
+    const box = await bar.boundingBox({ timeout: WebDriver.itemTimeout }).catch(() => null);
+    if (box === null) return true;
+    // Collapsed keeps a 1px border: the live width reads 1, not 0.
+    return box.width <= 1;
+  }
+
+  async dismissDialogByOverlayClick(): Promise<void> {
+    // Some dialogs (product updates) ignore Escape: the observed close path
+    // is clicking the overlay outside the centered panel. A raw viewport
+    // click lands on the overlay without tripping actionability waits on
+    // the covered page beneath.
+    await this.page.mouse.click(5, 200);
+  }
+
+  async openCompactUserMenu(): Promise<void> {
+    // The compact trigger is the avatar button in the top bar, mounted
+    // outside the sidebar only while it is collapsed or unmounted. Probe
+    // the top strip rightmost-first (the trigger sits at the far end) and
+    // verify by the opened menu: only the user menu carries the Community
+    // entry with the identity (the switcher shares Sign out and the
+    // email, so those alone would false-positive). Skip just the known
+    // switcher label; after each miss confirm the sidebar is still
+    // collapsed in case a probe click disturbed the toggle.
+    const buttons = this.page.locator("button");
+    const count = await buttons.count();
+    const candidates: { index: number; x: number }[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const candidate = buttons.nth(index);
+      const outside = await candidate.evaluate((el) => el.closest("aside") === null).catch(() => false);
+      if (!outside) continue;
+      const box = await candidate.boundingBox({ timeout: WebDriver.itemTimeout }).catch(() => null);
+      if (box === null || box.width === 0 || box.y >= 60 || box.x < 0) continue;
+      const aria = await candidate.getAttribute("aria-label", { timeout: WebDriver.itemTimeout }).catch(() => null);
+      if (aria === "Open workspace switcher") continue;
+      candidates.push({ index, x: box.x });
+    }
+    candidates.sort((left, right) => right.x - left.x);
+    for (const { index } of candidates.slice(0, 15)) {
+      await buttons
+        .nth(index)
+        .click({ timeout: WebDriver.actionTimeout })
+        .catch(() => {});
+      await this.page.waitForTimeout(800);
+      // Skip the menu read when the click opened nothing: the text read
+      // would burn its full timeout on an empty locator.
+      if ((await this.page.getByRole("menu").count()) === 0) continue;
+      const texts = (await this.userMenuTexts()).join(" ");
+      if (texts.includes("Community") && texts.includes("Sign out") && texts.includes("@")) return;
+      await this.dismissTopmost();
+      if (!(await this.isSidebarCollapsed())) await this.setSidebarCollapsed(true);
+    }
+    throw new Error("[parity] compact user menu trigger not found in the top bar.");
+  }
+
+  async profileSettingsActiveTab(): Promise<string | null> {
+    // The settings dialog marks its active tab by tone only (no aria
+    // marker), so read every known tab label's computed background and
+    // return the odd one out.
+    const known = new Set([
+      "Profile",
+      "Security",
+      "Activity",
+      "Preferences",
+      "AI Assistant",
+      "Auto Project Management",
+      "Notifications",
+      "Integrations",
+      "Personal Access Tokens",
+    ]);
+    const dialog = this.page.getByRole("dialog").filter({ hasText: "Your profile" }).first();
+    if ((await dialog.count()) === 0) return null;
+    const buttons = dialog.getByRole("button");
+    const count = await buttons.count();
+    const tones: { label: string; background: string }[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const label = (
+        (await buttons
+          .nth(index)
+          .textContent({ timeout: WebDriver.itemTimeout })
+          .catch(() => null)) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (!known.has(label)) continue;
+      const background = await buttons
+        .nth(index)
+        .evaluate((el) => getComputedStyle(el).backgroundColor)
+        .catch(() => "");
+      tones.push({ label, background });
+    }
+    if (tones.length === 0) return null;
+    const tally = new Map<string, number>();
+    for (const tone of tones) tally.set(tone.background, (tally.get(tone.background) ?? 0) + 1);
+    let common = "";
+    let commonCount = -1;
+    for (const [background, n] of tally) {
+      if (n > commonCount) {
+        common = background;
+        commonCount = n;
+      }
+    }
+    const odd = tones.filter((tone) => tone.background !== common);
+    return odd.length === 1 ? odd[0].label : null;
+  }
+
+  async isSidebarPeekVisible(): Promise<boolean> {
+    // The peek panel keeps an inline width while hidden (translated away
+    // at opacity 0), so Playwright visibility always reads true: the shown
+    // state is opacity 1, read off the computed style instead.
+    const peek = this.page.getByRole("complementary", { name: "Sidebar peek view" });
+    if ((await peek.count()) === 0) return false;
+    const opacity = await peek
+      .first()
+      .evaluate((el) => getComputedStyle(el).opacity)
+      .catch(() => "0");
+    return Number.parseFloat(opacity) > 0;
+  }
+
   // Activity feed (NEWFRONT-114). All reads scope from the user-visible
   // "Activity" heading: its parent is the header row (title plus the
   // worklog/sort/filter icon buttons, in that DOM order) and its
@@ -6820,5 +7979,20 @@ export class WebDriver implements ParityDriver {
   async errorNoticeVisible(): Promise<boolean> {
     const notice = this.page.getByText("Something went wrong");
     return (await notice.count()) > 0 && (await notice.first().isVisible());
+  }
+
+  // --- NEWFRONT-125 re-review fix (049 placeholders). Appended; existing
+  // --- methods above are untouched per the shared driver contract.
+  async sidebarProjectPlaceholderCount(): Promise<number> {
+    // While the project collection resolves, the projects group shows a
+    // loading-status region with one block per placeholder row; the region
+    // unmounts once rows render. Scoped to the on-screen aside: the
+    // off-screen mirror and out-of-sidebar live regions carry their own
+    // status nodes that must not count.
+    const aside = await this.screenAside();
+    return aside
+      .getByRole("status")
+      .evaluateAll((regions) => regions.reduce((total, region) => total + region.children.length, 0))
+      .catch(() => 0);
   }
 }
