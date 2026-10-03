@@ -46,6 +46,7 @@ pub mod paginator;
 pub mod permissions;
 pub mod prompting;
 pub mod routes;
+pub mod runner_enroll;
 pub mod runner_runs;
 pub mod serializer;
 pub mod space;
