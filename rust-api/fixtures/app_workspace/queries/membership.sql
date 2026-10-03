@@ -1,0 +1,143 @@
+-- queries/membership.sql
+-- Workspace membership/invite/join-request queries.
+-- Sources: app/views/workspace/member.py:30-265, invite.py:37-305,
+--   join_request.py:32-255. Roles base.py:13-16 (ADMIN=20,MEMBER=15,GUEST=5).
+--   Join-request partial unique db/models/workspace.py:306-313
+--   (requester+workspace WHERE deleted_at NULL AND status PENDING).
+--
+-- R1 member get_queryset (member.py:37-43): filter workspace__slug=:slug;
+--   select_related(member, member__avatar_asset); NO is_active filter —
+--   inactive rows ARE listed — PORT.
+-- R2 list (:45-55): requester = .get(member=:user, slug, active) (:47:
+--   DoesNotExist -> 500 if non-member — PORT); role>5 LITERAL (:51) ->
+--   Admin serializer else member serializer; fields (id,member,role).
+-- R3 retrieve (:57-74): same requester .get (:59); target .get(pk) (:63)
+--   with DoesNotExist->404 (:64-68); branch role > ROLE.GUEST.value (:70:
+--   same threshold as R2 but enum spelling — PORT both spellings).
+-- R4 partial_update guest-demote cascade (:76-96): target .get(pk, slug,
+--   member__is_bot=false, active) (:78-80); self-update ->400 (:81-85);
+--   if role==5 LITERAL (:88): UPDATE project_members SET role=5 WHERE
+--   workspace__slug=:slug AND member_id=:target (:89, NO is_active filter —
+--   touches inactive rows too — PORT).
+-- R5 destroy (:98-150): target .get (:101-103); requester .get (:106-108);
+--   self-remove ->400 (:110-114); requester.role < target.role ->400 (:116:
+--   strict less — equal roles CAN remove — PORT); sole-project-admin guard
+--   (:122-135): annotate total=Count(members), with_role=Count(filter
+--   member_id=X AND role=20), EXISTS(total=1 AND with_role=1) ->400.
+--   BUG-PORT (:128): filter uses member_id=workspace_member.id — the
+--   WorkspaceMember PK compared against the User FK — always false unless
+--   UUIDs collide, so the guard NEVER fires — PORT AS-IS (leave R6 uses
+--   request.user.id :182 and works).
+--   deactivate project rows (:144-146: is_active=false, updated_at=now);
+--   workspace_member.is_active=false (:148-149) ->204.
+-- R6 leave (:160-205): requester .get (:162); sole-workspace-admin guard
+--   (:165-168: role==20 AND NOT(count(role=20,active)>1) i.e. count<=1
+--   ->400 — PORT the `not count > 1` spelling); sole-project-admin guard
+--   (:176-189, same shape but member_id=request.user.id :182 — CORRECT,
+--   inconsistent with R5 — PORT both); deactivate (:198-204) ->204.
+-- R7 me (member.py:217-234): draft_issue_count = Coalesce(Subquery(
+--   DraftIssue WHERE created_by=:user AND workspace_id=OuterRef(workspace_id)
+--   GROUP BY workspace_id, Count) , 0) (:221-230); filter member+slug+active
+--   .first() with NO order_by (:229-231) — PORT.
+-- R8 project-members dict (:243-265): Q1 project_ids DISTINCT WHERE
+--   member=:user AND active (:245-249, NO slug filter — all workspaces —
+--   PORT); Q2 members WHERE slug AND project IN ids AND active,
+--   select_related(project,member,workspace) (:252-254); group into dict
+--   keyed str(project_id), popping "project" per row (:257-264).
+-- R9 invite list get_queryset (invite.py:45-51): slug filter;
+--   select_related(workspace, workspace__owner, created_by).
+-- R10 invite create (:53-142): emails required (:56-57); requesting_user .get
+--   (:60, 500 if non-member); role cap (:63: int(role default 5) >
+--   requester.role ->400 — equal OK — PORT); workspace .get (:70);
+--   already-member check (:73-77) + `if queryset:` (:79: truthiness fetches
+--   ALL rows, not exists() — PORT); per-email validate_email (:91),
+--   email.strip().lower() (:94), jwt token (:96-100:
+--   BUG-PORT payload {"email": <whole email DICT incl role>, "timestamp"} —
+--   encodes the dict, not the address — PORT); role default 5 (:101);
+--   bulk_create(batch 10, ignore_conflicts) (:113-115: dup
+--   (email,workspace) rows SILENTLY skipped yet success returned — PORT).
+-- R11 invite destroy (:144-147): .get(pk, slug) + delete, no responded check.
+-- R12 join post (:163-236, AllowAny :151): invite .get (:164, plain .get ->
+--   500 on missing — PORT); token equality, empty->403 (:166-173);
+--   responded_at None guard (:176, else "already responded" 400 :233-236);
+--   save accepted+responded_at (:177-179); if accepted: user lookup by email
+--   (:183); reactivate (:188-194: is_active, role=invite.role) OR create
+--   (:197-201: NO created_by — inconsistent with R14 bulk path which sets
+--   it — PORT); user.last_workspace_id=workspace.id on USER model (:204-205
+--   — vs R18 Profile path — PORT both); track; invite.delete() (:220).
+--   BUG-PORT: when user is None or rejected, invite is kept BUT responded_at
+--   is set -> permanently stuck "already responded" (:222-231) — PORT.
+-- R13 join get (:238-241): invite readable unauthenticated (AllowAny) — PORT.
+-- R14 my-invitations (invite.py:244-305): get_queryset (:248-251):
+--   email=request.user.email + select_related(workspace) (stale if user
+--   changed email — PORT); accept create (:255-304): filter pk__in + email,
+--   ORDER BY -created_at (:257-259; other users' pks silently ignored —
+--   PORT); per-invite member update active+role (:270-272), then bulk_create
+--   ignore_conflicts with created_by=request.user (:289-300), then
+--   invitations.delete() (:303) ->204 (update-then-create covers
+--   reactivate+new — PORT the double-write shape).
+-- R15 join-request user get_queryset (join_request.py:43-46):
+--   requester=:user + select_related("requester") (self-join, useless — PORT).
+-- R16 join-request create (:48-153): admin_email strip.lower (:49); validate
+--   (:53-58); self-email ->400 (:62-66); targets = active ADMIN (role=20
+--   literal ADMIN_ROLE :29) members' workspaces (:70-74) UNION owner
+--   workspaces (:75); minus already-member (:78-83); all-already ->200 with
+--   earliest-created slug (:90-100: order created_at, first); per target:
+--   pending exists() skip (:105-111), atomic create swallowing IntegrityError
+--   (:115-125: partial unique makes concurrent loser idempotent); unresolved
+--   branch workspace=NULL (:137-150: partial unique does NOT cover NULL —
+--   exists() is the only guard, concurrent dupes possible, de-duped on read
+--   — PORT); ALWAYS neutral 201 "Request sent" (:152-153, anti-enumeration).
+-- R17 admin get_queryset (:168-177): slug + status=PENDING +
+--   select_related(workspace, requester); non-pending rows invisible here so
+--   approve/deny fetch via direct get_object_or_404 (:188/:242) — PORT.
+-- R18 approve txn (:187-239): 404 (:188); non-pending ->400 (:190-194);
+--   transaction.atomic (:202): reactivate-or-create (:204-215,
+--   role=join_request.role default 15); Profile.last_workspace_id update
+--   (:219 — PROFILE model, vs R12 User path — PORT both); APPROVED +
+--   responded_at + responded_by (:221-224); track USER_JOINED (:226-237)
+--   ->200 "Request approved".
+-- R19 deny (:241-255): same fetch/guard (:242-248); DENIED + stamps (:250-253)
+--   single save, NO transaction (one row) — PORT; ->200.
+--
+-- Representative SQL (placeholders :user, :slug, :target, :email, :pk):
+-- R1-R3 member list/retrieve:
+SELECT wm.*, u.*, a.* FROM workspace_members wm JOIN users u ON u.id = wm.member_id
+  LEFT JOIN file_assets a ON a.id = u.avatar_asset_id
+WHERE wm.workspace_id = (SELECT id FROM workspaces WHERE slug = :slug);
+--   requester: ... AND wm.member_id = :user AND wm.is_active LIMIT 1;
+--   retrieve target: ... AND wm.id = :pk LIMIT 1 (404 if none).
+-- R4 demote cascade: UPDATE project_members SET role = 5 WHERE workspace_id =
+--   (SELECT id FROM workspaces WHERE slug = :slug) AND member_id = :target;
+-- R5 destroy guard (BUG: :wm_pk is the WorkspaceMember PK, never a user id):
+SELECT EXISTS(SELECT 1 FROM (SELECT p.id FROM projects p
+  LEFT JOIN project_members pm ON pm.project_id = p.id
+  GROUP BY p.id HAVING COUNT(pm.id) = 1
+  AND COUNT(CASE WHEN pm.member_id = :wm_pk AND pm.role = 20 THEN 1 END) = 1
+) t WHERE p.workspace_slug = :slug);
+-- R7 me draft count: SELECT wm.*, COALESCE((SELECT COUNT(*) FROM draft_issues d
+--   WHERE d.created_by_id = :user AND d.workspace_id = wm.workspace_id), 0)
+--   AS draft_issue_count FROM workspace_members wm WHERE wm.member_id = :user
+--   AND wm.workspace_id = (SELECT id FROM workspaces WHERE slug = :slug)
+--   AND wm.is_active LIMIT 1;
+-- R10 already-member: SELECT * FROM workspace_members WHERE workspace_id = :ws
+--   AND member_id IN (SELECT id FROM users WHERE email IN (:emails))
+--   AND is_active; R10 insert: INSERT INTO workspace_member_invites
+--   (email, workspace_id, token, role, created_by_id) VALUES (...) ON CONFLICT DO NOTHING;
+-- R12/R18 reactivate-or-create: SELECT * FROM workspace_members WHERE
+--   workspace_id = :ws AND member_id = :user LIMIT 1; -- if row: UPDATE SET
+--   is_active = true, role = :role; else: INSERT INTO workspace_members ...;
+-- R14 accept: SELECT * FROM workspace_member_invites WHERE id = ANY(:pks) AND
+--   email = :email ORDER BY created_at DESC; then UPDATE workspace_members SET
+--   is_active = true, role = :role WHERE workspace_id = :ws AND member_id = :user;
+--   then bulk INSERT ... ON CONFLICT DO NOTHING; then DELETE FROM invites WHERE ...;
+-- R16 targets: SELECT workspace_id FROM workspace_members wm JOIN users u ON
+--   u.id = wm.member_id WHERE u.email = :email AND wm.role = 20 AND wm.is_active
+--   UNION SELECT id FROM workspaces WHERE owner_id IN
+--   (SELECT id FROM users WHERE email = :email);
+--   pending guard: SELECT EXISTS(SELECT 1 FROM workspace_join_requests WHERE
+--   requester_id = :user AND workspace_id = :ws AND status = 'PENDING');
+-- R18 approve (atomic): <reactivate-or-create role=:role>; UPDATE profiles SET
+--   last_workspace_id = :ws WHERE user_id = :requester; UPDATE
+--   workspace_join_requests SET status='APPROVED', responded_at = NOW(),
+--   responded_by_id = :user WHERE id = :pk;
