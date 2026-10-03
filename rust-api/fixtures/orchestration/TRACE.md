@@ -247,3 +247,85 @@ D-10/`bgtasks` infra, never recorded).
   stored-reversed row normalised, self-edge and cross-workspace
   rows excluded, visibility narrowing (`FX4B` target dropped for
   the `FX4A`-only member), and the 101-target cap (100 items).
+
+## FX-ORCH-05 clock (DB)
+
+Generator `/tmp/fx_orch_05.py` against scratch database
+`pidash_524_scratch` (workspace `fx5-ws`, projects `FX5` pool 10 /
+`FX5B` ticking-disabled / `FX5I` infinite pool; project `FX5`
+intervals impl/review/test = 10800/3600/7200s so retime cadence
+resolution is visible; clock frozen at 2026-06-01T12:00Z,
+`random.seed(52405)` before every event call so the jitter draw is
+deterministic — verified byte-identical across two runs; states set
+via queryset `update` with the orchestration Issue pre/post_save
+receivers disconnected, since signals are FX-07 scope).
+
+- `fx05_clock/reconcile.enter_move.before_after.json` —
+  `orchestration/scheduling.py:400-448` (`_on_enter_or_move`):
+  human enter with no ticker (`dispatch-now`, created + armed),
+  human enter while busy (free entry queued with actor +
+  `state_transition` trigger memory), human move with
+  `want_run=False` (`retimed`), human move into a spent pool
+  (`dispatch-now` + `POOL_SPENT` stop), user-disabled
+  (`dispatch-now` + `USER_DISABLED` stop), project-disabled
+  (`dispatch-now` + stopped with the empty reason), agent move
+  with budget (counting entry queued, no actor/trigger memory),
+  agent move with pool spent (`pool-spent` park), agent move
+  while disabled (`ticking-disabled`), and resume-parent
+  capture on a cross-stage move.
+- `fx05_clock/reconcile.left_bucket.before_after.json` —
+  `orchestration/scheduling.py:451-459` (`_on_left_bucket`):
+  dormant with the pool kept (`used`/`granted` survive,
+  `next_run_at` cleared, pending cleared,
+  `LEFT_TICKING_STATE`), and the no-ticker no-op.
+- `fx05_clock/reconcile.run_ended.before_after.json` —
+  `orchestration/scheduling.py:462-518` (`_on_run_ended`):
+  stopping outcomes × 3 (`done`/`blocked`/`waiting_on_human`
+  → `TERMINAL_SIGNAL` stop, `next_run_at` kept), continuing
+  outcomes × 2 (re-armed when `next_run_at` was `None`,
+  untouched when set), the kind guard (`stage-moved-on`,
+  queued next-stage entry survives), no-yield defaults
+  (completed coding-task → `progressed`, completed review →
+  `done`, `paused_awaiting_input` → `waiting_on_human`,
+  failed → `progressed`), pending-entry-kept, prior
+  `cap_hit` preserved (`already-stopped`), `not-in-bucket`,
+  and no-ticker. (`kind_for` is the identity on the template
+  name — `prompting/recipes.py:142-152`, out of scope.)
+- `fx05_clock/reconcile.human_retick.before_after.json` —
+  `orchestration/scheduling.py:521-534`
+  (`_on_human_run_requested`; free → `dispatch-now` + re-arm,
+  busy → free entry with actor + explicit-trigger memory,
+  `want_run=False` → `retimed`) and `:537-580` (`_on_retick`):
+  grant of one fresh pool (`granted` 0 → 10) + dispatch, the
+  `no_ticker` / `not_ticking_state` / `budget_not_exhausted`
+  guards, the infinite-pool case (returns via the budget
+  guard — the `:560-563` sentinel check is unreachable by
+  construction), grant + free-entry queue while busy, and
+  `granted-from-paused` (grant lands, clock otherwise
+  untouched; the move back is `re_tick_ticker`, FX-08).
+- `fx05_clock/clock_primitives.golden.json` —
+  `orchestration/scheduling.py:231-251` (`_lock_ticker`:
+  create-shape is disabled + unarmed with zero budget,
+  no-create miss → `None`, existing row rebound),
+  `:254-265` (`_TICKER_CLOCK_FIELDS`; also in FX-01),
+  `:285-303` (`_queue_entry`: free remembers actor +
+  trigger, counting clears both, `next_run_at = now`),
+  `:306-310` (`_stop_for_switch`), `:313-330`
+  (`_retime_clock`: per-stage cadence resolution,
+  spent pool → `POOL_SPENT`, user-disabled →
+  `USER_DISABLED`, project-disabled → empty reason),
+  `:279-282` (`_stop_clock`: reason stamped, pending
+  cleared, `next_run_at` kept), and `:220-222`
+  (`_compute_next_run_at` with the seeded jitter draw).
+- `fx05_clock/thin_senders.golden.json` —
+  `orchestration/scheduling.py:598-606` (`arm_ticker`:
+  re-timed, `used` untouched), `:609-629` (`disarm_ticker`:
+  default stamps `LEFT_TICKING_STATE` and clears
+  `next_run_at`, custom reason keeps it, no ticker →
+  `None`, `TERMINAL_SIGNAL` refused with the `ValueError`
+  string verbatim), `:632-637`
+  (`maybe_disarm_on_terminal_signal`: `True` iff the
+  reason ends with `:stopped`, `False` for a run with no
+  work item), and `:640-647`
+  (`reset_ticker_after_comment_and_run`: re-timed with
+  budget, `POOL_SPENT` when spent).
