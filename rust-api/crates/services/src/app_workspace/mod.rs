@@ -26,6 +26,10 @@
 //! * [`queries_core`] — workspace core querysets: lists, dashboard
 //!   bundle, themes, export-CSV (PIDASHCONV-608).
 //!
+//! * [`queries_user`] — user / account / profile / API-token query
+//!   builders: settings + session reads, email-change + cache,
+//!   deactivate bundle, account/profile/token CRUD (PIDASHCONV-612).
+//!
 //! * [`tasks`] — Celery publishers: `workspace_seed` + `track_event` (6
 //!   sites) + `workspace_invitation` + `issue_activity` (3 draft shapes)
 //!   + user mail (PIDASHCONV-614, F-W24-14).
@@ -49,8 +53,10 @@
 //! F-W24-09 (`queries/core.sql` + `queries/core.rows.json`), and
 //! F-W24-10 (`queries/membership.sql` + `.rows.json`), and F-W24-04
 //! (`rust-api/fixtures/app_workspace/` `serializers/user.golden.json`),
-//! and F-W24-14 (`tasks/enqueue.golden.json`); the goldens are the
-//! Done-when oracles for this layer.
+//! and F-W24-14 (`tasks/enqueue.golden.json`), and F-W24-12, user
+//! part (`queries/extras_user.sql` R13-R14 +
+//! `queries/extras_user.rows.json` `user_account` / `api_tokens`
+//! cases); the goldens are the Done-when oracles for this layer.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 //!
@@ -61,6 +67,7 @@ pub mod models_prefs;
 pub mod models_user;
 pub mod queries_core;
 pub mod queries_membership;
+pub mod queries_user;
 pub mod ser_account_token;
 pub mod ser_extras;
 pub mod ser_invite;
