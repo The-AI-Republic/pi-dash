@@ -151,3 +151,45 @@ post_save transition handler takes the no-dispatch path.
   at-least-member; inactive/outsider/anonymous/`None` are all
   false/`None`) and the 9 `check_project_role` verdicts (allowed
   hit, bypass grant/deny, no-membership, anonymous/`None`).
+
+## FX-ORCH-03 blockers (DB)
+
+Generator `/tmp/fx_orch_03.py` against scratch database
+`pidash_524_scratch` (shared with FX-ORCH-02; separate workspace
+`fx3-workspace`, projects `FX3A`/`FX3B`, `FX3X` in `fx3-other`).
+Issues are created in `Todo` and moved by queryset `update` (bypasses
+signals, so no orchestration side effects); state moves that must hit
+the no-dispatch path use the same trick. Dependent `D` is `FX3A-1`.
+
+- `fx03_blockers/edges.sql` —
+  `orchestration/blockers.py:60-61` (`_live_relations`), `:64-84`
+  (`_blocked_by_edges`), `:87-106` (`_blocking_edges`), `:113-126`
+  (row querysets), `:129-130` (`_ordered`): executed `SELECT`s for
+  `blockers` / `open_blockers` / `has_open_blockers` /
+  `dependents` on `D`.
+- `fx03_blockers/edges.rows.json` — the 14 seeded relation rows
+  around `D` with included/excluded + why: forward + stored-reversed
+  (open and resolved), self-edge exclusion, soft-deleted exclusion,
+  cross-workspace exclusion, cross-project inclusion, archived /
+  draft / triage / soft-deleted target exclusion (live-work-item
+  filter), no-state blocker.
+- `fx03_blockers/blockers.golden.json` —
+  `orchestration/blockers.py:47-48` (`BLOCKED_BY`/`BLOCKING`),
+  `:50-51` (`CLOSED_STATE_GROUPS`), `:109-110` (`_open`),
+  `:133-149` (row form): `blockers` (7, ordered by project
+  identifier then `sequence_id`), `open_blockers` (5),
+  `has_open_blockers`, `dependents` (any state, incl. a completed
+  one); all-resolved `D2` (`has` false, `open` empty, `blockers`
+  lists the resolved row); relation-less `D3`; open-rule matrix
+  (review/test/no-state open, completed/cancelled closed).
+- `fx03_blockers/open_blockers_q.sql` —
+  `orchestration/blockers.py:152-160` (`open_blockers_q`): bulk-scan
+  `SELECT` with `EXISTS` × 2 (forward + stored-reversed); scan over
+  `D`/`D2`/`D3`/plain-blocker flags only `D`.
+- `fx03_blockers/relations_summary.golden.json` —
+  `orchestration/blockers.py:57` (`SUMMARY_LIMIT`), `:163-181`
+  (`_summary_item`/`_summary_list`), `:184-198`
+  (`relations_summary`): full summary for `D` (open-first in both
+  lists) plus the cap case — 101 blockers (1 open + 100 completed)
+  yield a 100-item list headed by the open one while
+  `has_open_blockers` stays true over the full set.
