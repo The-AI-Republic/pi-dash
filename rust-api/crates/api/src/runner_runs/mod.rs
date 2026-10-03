@@ -159,6 +159,14 @@ pub fn server_error() -> Response {
 /// 400s with CPython's `Expecting value` position; unparsable JSON
 /// 400s `{"Detail": "JSON parse error"}`. The `app_scheduler`
 /// `read_request_data` precedent, shared by every POST here.
+///
+/// Ordering approximation (gate note): the source parses
+/// `request.data` lazily at its first touch, after the
+/// resolve/dedupe/idempotency guards; the preambles parse up front.
+/// Well-formed bodies (dict or not) answer identically — the
+/// `as_object` gates sit past the same guards. Only unparseable bytes
+/// combined with a firing guard diverge: 400/500 here vs the guard's
+/// 404/`duplicate`/`idempotency_key_required` there.
 pub async fn read_request_data(
     state: &AppState,
     req: axum::http::Request<axum::body::Body>,
@@ -1321,9 +1329,10 @@ async fn xadd_offline(
 // ---------------------------------------------------------------------------
 
 /// `publish_event`: PUBLISH the serialized event on the session channel.
-/// A missing client is a no-op (`redis_instance()` returning `None`);
-/// every other failure propagates — the publish sits in `on_commit`
-/// unisolated, so the source 500s after commit too. The caller passes
+/// A missing client is a no-op (`redis_instance()` returning `None`).
+/// The caller swallows every publish failure with a log line — the
+/// source's `except Exception: logger.exception(...)`
+/// (`services/chat.py:140-147`) never 500s. The caller passes
 /// [`RunnerPorts::redis_client`].
 pub async fn publish_chat_event(
     client: Option<&redis::Client>,
