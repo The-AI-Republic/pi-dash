@@ -55,11 +55,12 @@
 //! `space::columns::{issue_link, issue_relation}` (D-02, columns only),
 //! `integrations::github_models::github_pull_request_link` and
 //! `integrations::git_models::git_code_review_link` (D-05, columns +
-//! row structs, but no `__str__` ports, no `Meta` names, no max-length,
-//! choice or audit-FK consts). This module still ports all four units in
-//! full: D-26 owns the relations/links/PR/review endpoints (PIDASHCONV-653)
-//! and their querysets (PIDASHCONV-648/650), and the fixture records these
-//! four as first-class units. Cross-domain column duplication is
+//! row structs, but no `__str__` ports, no verbose `Meta` names, no
+//! max-length, choice or audit-FK consts). This module still ports
+//! all four units in full: D-26 owns the relations/links/PR/review
+//! endpoints (PIDASHCONV-653) and their querysets (PIDASHCONV-648/650),
+//! and the fixture records these four as first-class units.
+//! Cross-domain column duplication is
 //! established practice (`v1_assets` and `app_assets` carry identical
 //! `file_assets` `COLUMNS`); each domain's models layer is the contract
 //! its own queries layer builds against.
@@ -354,10 +355,10 @@ pub mod github_pull_request_link {
     pub const VERBOSE_NAME_PLURAL: &str = "Github Pull Request Links";
 
     /// Columns in fixture FX-ISS-09 order: 8 inherited audit/project
-    /// columns, then `issue_id` (`github.py:232`), `repo_owner` (`:231`),
-    /// `repo_name` (`:232`), `pr_number` (`:233`), `url` (`:234`),
-    /// `title` (`:236`), `state` (`:237`), `merged` (`:238`), `draft`
-    /// (`:239`) and `pr_updated_at` (`:242`). FK columns use the Django
+    /// columns, then `issue_id` (`github.py:232`), `repo_owner` (`:233`),
+    /// `repo_name` (`:234`), `pr_number` (`:235`), `url` (`:236`),
+    /// `title` (`:238`), `state` (`:239`), `merged` (`:240`), `draft`
+    /// (`:241`) and `pr_updated_at` (`:242`). FK columns use the Django
     /// attnames.
     pub const COLUMNS: &[&str] = &[
         "id",
@@ -498,12 +499,12 @@ pub mod git_code_review_link {
     pub const VERBOSE_NAME_PLURAL: &str = "Git Code Review Links";
 
     /// Columns in fixture FX-ISS-09 order: 8 inherited audit/project
-    /// columns, then `issue_id` (`git.py:230`), `provider` (`:232`),
-    /// `host_url` (`:233`), `namespace` (`:234`), `repo_name` (`:235`),
-    /// `repo_external_id` (`:236`), `external_id` (`:237`),
-    /// `external_iid` (`:238`), `url` (`:239`), `title` (`:240`),
-    /// `state` (`:241`), `merged` (`:242`), `draft` (`:243`),
-    /// `remote_updated_at` (`:244`) and `metadata` (`:245`). FK columns
+    /// columns, then `issue_id` (`git.py:230`), `provider` (`:231`),
+    /// `host_url` (`:232`), `namespace` (`:233`), `repo_name` (`:234`),
+    /// `repo_external_id` (`:235`), `external_id` (`:236`),
+    /// `external_iid` (`:237`), `url` (`:238`), `title` (`:239`),
+    /// `state` (`:240`), `merged` (`:241`), `draft` (`:242`),
+    /// `remote_updated_at` (`:243`) and `metadata` (`:244`). FK columns
     /// use the Django attnames.
     pub const COLUMNS: &[&str] = &[
         "id",
