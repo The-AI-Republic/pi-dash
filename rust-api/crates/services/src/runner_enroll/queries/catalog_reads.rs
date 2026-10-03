@@ -808,15 +808,18 @@ pub fn machine_token_insert_sql() -> String {
 /// means all machines. No ids → 204 immediately, no tx (handlers map).
 ///
 /// Without host label — `$1` owner_id, `$2` provisioning
-/// (`'desktop_bundled'`). With host label — `$1` host_label, `$2`
-/// owner_id, `$3` provisioning (`Q`-sorted first).
+/// (`'desktop_bundled'`). With host label — `$1` owner_id, `$2`
+/// provisioning, `$3` host_label: `Q`-sort applies within ONE
+/// `.filter()` call, so the chained `.filter(host_label=…)` (`:176`)
+/// appends AFTER the base filter's conjuncts (verified against
+/// Django 4.2.30 in review).
 pub fn bundled_machine_ids_sql(with_host_label: bool) -> String {
     if with_host_label {
         "SELECT \"dev_machine\".\"id\" FROM \"dev_machine\" \
-         WHERE (\"dev_machine\".\"host_label\" = $1 \
-         AND \"dev_machine\".\"owner_id\" = $2 \
-         AND \"dev_machine\".\"provisioning\" = $3 \
-         AND \"dev_machine\".\"revoked_at\" IS NULL) \
+         WHERE (\"dev_machine\".\"owner_id\" = $1 \
+         AND \"dev_machine\".\"provisioning\" = $2 \
+         AND \"dev_machine\".\"revoked_at\" IS NULL \
+         AND \"dev_machine\".\"host_label\" = $3) \
          ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC"
             .to_string()
     } else {
@@ -1575,7 +1578,7 @@ mod tests {
     // -- K3 --
 
     #[test]
-    fn bundled_ids_keep_ordering_with_optional_host_first() {
+    fn bundled_ids_keep_ordering_with_host_appended_last() {
         let plain = bundled_machine_ids_sql(false);
         assert_eq!(
             squashed(&plain),
@@ -1589,10 +1592,10 @@ mod tests {
         assert_eq!(
             squashed(&hosted),
             "SELECT \"dev_machine\".\"id\" FROM \"dev_machine\" \
-             WHERE (\"dev_machine\".\"host_label\" = $1 \
-             AND \"dev_machine\".\"owner_id\" = $2 \
-             AND \"dev_machine\".\"provisioning\" = $3 \
-             AND \"dev_machine\".\"revoked_at\" IS NULL) \
+             WHERE (\"dev_machine\".\"owner_id\" = $1 \
+             AND \"dev_machine\".\"provisioning\" = $2 \
+             AND \"dev_machine\".\"revoked_at\" IS NULL \
+             AND \"dev_machine\".\"host_label\" = $3) \
              ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC"
         );
         for fragment in [
