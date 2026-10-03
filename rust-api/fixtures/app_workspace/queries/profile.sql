@@ -16,7 +16,8 @@
 --   link_count (:113-117), attachment_count (:119-126: FileAsset WHERE
 --   issue_id=OuterRef(id) AND entity_type=ISSUE_ATTACHMENT), sub_issues_count
 --   (:128-132: Issue WHERE parent=OuterRef(id)) — each .order_by() cleared +
---   Func Count scalar subquery (NULL when zero — PORT);
+--   Func Count scalar subquery — 0 when empty, never NULL (Func is not an
+--   Aggregate, so no GROUP BY: scalar COUNT always returns one row — PORT);
 --   prefetch assignees, labels, issue_module__module (:133).
 -- R2 profile-issues pipeline (:136-250): legacy filters (:137); order_by
 --   default "-created_at" (:139); base (:140-148): id IN (SELECT id WHERE
@@ -28,6 +29,9 @@
 --   grouped (:218-242) / sub-grouped (:184-215) / plain (:244-250) paginate,
 --   grouped counts filtered intake (status 1|-1|2 OR NULL) + unarchived +
 --   not draft (:207-214 / :234-241).
+--   group_by_fields=issue_group_values (utils/grouper.py:146-219): state_id
+--   branch (:153-157) filters is_triage=False BUT State.objects=StateManager
+--   (db/models/state.py:79-83) adds NOT ("group" = 'triage') on top — PORT.
 -- R3 profile read, WorkspaceUserProfileEndpoint.get (:281-368):
 --   user = User.objects.get(pk=:uid) (:283: missing -> 404 {"error": "The
 --   required object does not exist."} via BaseAPIView.handle_exception — PORT);
@@ -71,12 +75,19 @@
 -- R6 activity graph, UserActivityGraphEndpoint.get (:524-538): actor=:user,
 --   slug, created_at__date >= today-6mo (:530: SIX months vs dashboard Q1
 --   THREE months — PORT); Cast+GROUP+COUNT+ORDER same shape as dashboard Q1.
+--   TZ asymmetry (USE_TZ, TIME_ZONE="UTC", settings/common.py:361-362 —
+--   PORT): created_at__date__gte compiles to (created_at AT TIME ZONE
+--   UTC)::date, but the Cast annotation stays a plain cast
+--   (created_at)::date.
 -- R7 completed graph (:541-559): month default 1 (:543: same January-default
 --   quirk as dashboard Q2 — PORT); ExtractWeek(completed_at) AS
 --   completed_week (:552) then week = completed_week % 4 (:553: mod-4 buckets
 --   0-3 — vs dashboard WeekInMonth buckets 1-5 — PORT); GROUP BY week,
 --   COUNT(completed_week) (:555: counts non-null weeks ~= rows — PORT);
 --   ORDER BY week.
+--   TZ (USE_TZ, TIME_ZONE="UTC" — PORT): all three EXTRACTs convert —
+--   EXTRACT(WEEK|MONTH FROM completed_at AT TIME ZONE UTC) in the select
+--   week, the COUNT(week) and the month filter.
 -- R8 dashboard-graph cross-ref (base.py:257-290): WeekInMonth custom Func
 --   (:257-259: FLOOR(((day-1)/7)+1)::INT); dashboard completed (:278-290)
 --   buckets 1-5 vs R7 mod-4 buckets 0-3 — same family, different buckets;
@@ -115,8 +126,8 @@ SELECT priority, COUNT(*) AS priority_count,
   WHEN 'low' THEN 3 WHEN 'none' THEN 4 ELSE 5 END AS priority_order
 FROM issues WHERE ... GROUP BY priority HAVING COUNT(*) >= 1 ORDER BY priority_order;
 -- R7 completed graph (mod-4 buckets 0-3):
-SELECT (EXTRACT(WEEK FROM completed_at)::INT % 4) AS week, COUNT(*) AS completed_count
+SELECT (EXTRACT(WEEK FROM completed_at AT TIME ZONE UTC)::INT % 4) AS week, COUNT(*) AS completed_count
 FROM issues WHERE workspace_id = (SELECT id FROM workspaces WHERE slug = :slug)
   AND :user IN (SELECT user_id FROM issue_assignees WHERE issue_id = issues.id)
-  AND EXTRACT(MONTH FROM completed_at) = :month AND completed_at IS NOT NULL
+  AND EXTRACT(MONTH FROM completed_at AT TIME ZONE UTC) = :month AND completed_at IS NOT NULL
 GROUP BY 1 ORDER BY 1;
