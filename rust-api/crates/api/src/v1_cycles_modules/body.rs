@@ -947,7 +947,7 @@ fn decode_oneshot_utf16(body: &[u8], big_endian: Option<bool>) -> Option<String>
         return None;
     }
     let mut units = Vec::with_capacity(body.len() / 2);
-    for pair in body.chunks_exact(2) {
+    for pair in body.as_chunks::<2>().0 {
         let value = if big_endian {
             u16::from_be_bytes([pair[0], pair[1]])
         } else {
@@ -997,7 +997,7 @@ fn decode_oneshot_utf32(body: &[u8], big_endian: Option<bool>) -> Option<String>
         return None;
     }
     let mut out = String::new();
-    for word in body.chunks_exact(4) {
+    for word in body.as_chunks::<4>().0 {
         let value = if big_endian {
             u32::from_be_bytes([word[0], word[1], word[2], word[3]])
         } else {
