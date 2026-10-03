@@ -804,11 +804,20 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
 
+/// Python `str.strip()` parity: Python strips `str.isspace()`
+/// characters — Unicode `White_Space` plus U+001C-U+001F and U+0085 —
+/// while Rust `trim()` strips `White_Space` only. (In-domain precedent:
+/// `runner_enroll::serializers::shapes` documents the same gap for its
+/// `py_trim`; this also covers U+0085, which Python strips too.)
+fn py_strip(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c))
+}
+
 /// D-path host label (`_get_or_create_dev_machine:78`,
 /// `_touch_dev_machine:58`): `(host_label or "").strip()[:255]`.
 /// The caller passes `""` for a missing label (the `or ""`).
 pub fn normalize_host_label(raw: &str) -> String {
-    truncate_chars(raw.trim(), 255)
+    truncate_chars(py_strip(raw), 255)
 }
 
 /// Enroll-path request label (`RunnerEnrollEndpoint.post:281`):
@@ -822,7 +831,7 @@ pub fn slice_host_label(raw: &str) -> String {
 /// `(data.get("name") or "").strip()[:128]`. Empty result → the E2
 /// `name` slot stays out (`if body_name:`, `:345`).
 pub fn normalize_body_name(raw: &str) -> String {
-    truncate_chars(raw.trim(), 128)
+    truncate_chars(py_strip(raw), 128)
 }
 
 /// B2/B3-rot label (`:166`, `:200`): `f"machine: {host_label[:96]}"`.
@@ -1593,6 +1602,12 @@ mod tests {
         assert_eq!(normalize_body_name("  r1  "), "r1");
         assert_eq!(normalize_body_name("   "), "");
         assert_eq!(normalize_body_name(&"y".repeat(200)).len(), 128);
+        // Python strip() also strips U+001C-U+001F and U+0085, which Rust
+        // trim() leaves behind (probe-verified against CPython).
+        assert_eq!(normalize_host_label("\u{1c}mbp\u{1f}"), "mbp");
+        assert_eq!(normalize_host_label(" \u{85}mbp\u{85} "), "mbp");
+        assert_eq!(normalize_body_name("\u{85}r1\u{1c}"), "r1");
+        assert_eq!(normalize_host_label(" \u{1c} "), "");
     }
 
     #[test]
@@ -1648,6 +1663,14 @@ mod tests {
         // Blank request (after strip) writes timestamps only.
         assert_eq!(
             touch_selection("   ", "old", ""),
+            TouchSelection {
+                update_host_label: false,
+                update_label: false
+            },
+        );
+        // Python-strip-only whitespace also normalizes to blank.
+        assert_eq!(
+            touch_selection("\u{85} \u{1c}", "old", ""),
             TouchSelection {
                 update_host_label: false,
                 update_label: false
