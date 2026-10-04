@@ -555,6 +555,25 @@ def reset(conn=None):
                 f"DELETE FROM cycle_issues WHERE project_id IN {_in(SEED_PROJECT_IDS)}",
                 list(SEED_PROJECT_IDS),
             )
+            # Module/cycle bridges precede their parents: tests that post
+            # members leave module_members rows behind, which FK-block the
+            # modules delete below (PIDASHCONV-695).
+            cur.execute(
+                f"DELETE FROM module_members WHERE project_id IN {_in(SEED_PROJECT_IDS)}",
+                list(SEED_PROJECT_IDS),
+            )
+            cur.execute(
+                f"DELETE FROM module_links WHERE project_id IN {_in(SEED_PROJECT_IDS)}",
+                list(SEED_PROJECT_IDS),
+            )
+            cur.execute(
+                f"DELETE FROM module_user_properties WHERE project_id IN {_in(SEED_PROJECT_IDS)}",
+                list(SEED_PROJECT_IDS),
+            )
+            cur.execute(
+                f"DELETE FROM cycle_user_properties WHERE project_id IN {_in(SEED_PROJECT_IDS)}",
+                list(SEED_PROJECT_IDS),
+            )
             cur.execute(
                 f"DELETE FROM issues WHERE project_id IN {_in(SEED_PROJECT_IDS)}",
                 list(SEED_PROJECT_IDS),
