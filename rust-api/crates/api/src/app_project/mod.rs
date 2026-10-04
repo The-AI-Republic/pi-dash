@@ -18,6 +18,10 @@
 //! handler family (PIDASHCONV-573); [`routes`] merges its routes —
 //! sibling handler issues extend the merge; merges keep both sides.
 //!
+//! [`handlers_project`] ports the project-core handlers
+//! (`ProjectViewSet`, the archive/identifier/user-views endpoints,
+//! FX-APROJ-09, PIDASHCONV-571).
+//!
 //! [`handlers_workflow`] ports the state + estimate handler family
 //! (`StateViewSet`, `IntakeStateEndpoint`,
 //! `ProjectEstimatePointEndpoint`, `BulkEstimatePointEndpoint`,
@@ -30,6 +34,7 @@
 
 pub mod gates;
 pub mod handlers_invites;
+pub mod handlers_project;
 pub mod handlers_workflow;
 
 use axum::Router;
@@ -40,5 +45,7 @@ use crate::state::AppState;
 /// (sibling D-25 handler issues extend this merge; merges keep both
 /// sides), merged here for the F-10 overlay seam.
 pub fn routes() -> Router<AppState> {
-    handlers_invites::routes().merge(handlers_workflow::routes())
+    handlers_invites::routes()
+        .merge(handlers_project::routes())
+        .merge(handlers_workflow::routes())
 }
