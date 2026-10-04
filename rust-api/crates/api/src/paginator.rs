@@ -200,21 +200,219 @@ impl std::fmt::Display for Cursor {
     }
 }
 
+/// Longest digit run `int()` accepts: `sys.get_int_max_str_digits()` is 4300
+/// on the backend (Python 3.12, no override anywhere in the repo), so a
+/// longer digit run raises `ValueError` exactly like a misspelling. Only
+/// digit characters count — sign, `_` separators and surrounding whitespace
+/// do not (all probed). `float()` has no cap.
+const MAX_INT_DIGITS: usize = 4300;
+
+/// Starts of the Unicode decimal-digit runs `int()`/`float()` accept: every
+/// code point `c` with `start <= c < start + 10` reads as digit `c - start`.
+/// Generated from CPython `unicodedata.decimal` (Unicode 15.0.0, the tables
+/// backend Python 3.12 ships): each run verified a contiguous 0-9 block.
+/// ASCII `0-9` is the first run; the lookup keeps an ASCII fast path.
+const DECIMAL_DIGIT_RUN_STARTS: &[u32] = &[
+    0x00030, // U+0030..U+0039 DIGIT
+    0x00660, // U+0660..U+0669 ARABIC-INDIC DIGIT
+    0x006F0, // U+06F0..U+06F9 EXTENDED ARABIC-INDIC DIGIT
+    0x007C0, // U+07C0..U+07C9 NKO DIGIT
+    0x00966, // U+0966..U+096F DEVANAGARI DIGIT
+    0x009E6, // U+09E6..U+09EF BENGALI DIGIT
+    0x00A66, // U+0A66..U+0A6F GURMUKHI DIGIT
+    0x00AE6, // U+0AE6..U+0AEF GUJARATI DIGIT
+    0x00B66, // U+0B66..U+0B6F ORIYA DIGIT
+    0x00BE6, // U+0BE6..U+0BEF TAMIL DIGIT
+    0x00C66, // U+0C66..U+0C6F TELUGU DIGIT
+    0x00CE6, // U+0CE6..U+0CEF KANNADA DIGIT
+    0x00D66, // U+0D66..U+0D6F MALAYALAM DIGIT
+    0x00DE6, // U+0DE6..U+0DEF SINHALA LITH DIGIT
+    0x00E50, // U+0E50..U+0E59 THAI DIGIT
+    0x00ED0, // U+0ED0..U+0ED9 LAO DIGIT
+    0x00F20, // U+0F20..U+0F29 TIBETAN DIGIT
+    0x01040, // U+1040..U+1049 MYANMAR DIGIT
+    0x01090, // U+1090..U+1099 MYANMAR SHAN DIGIT
+    0x017E0, // U+17E0..U+17E9 KHMER DIGIT
+    0x01810, // U+1810..U+1819 MONGOLIAN DIGIT
+    0x01946, // U+1946..U+194F LIMBU DIGIT
+    0x019D0, // U+19D0..U+19D9 NEW TAI LUE DIGIT
+    0x01A80, // U+1A80..U+1A89 TAI THAM HORA DIGIT
+    0x01A90, // U+1A90..U+1A99 TAI THAM THAM DIGIT
+    0x01B50, // U+1B50..U+1B59 BALINESE DIGIT
+    0x01BB0, // U+1BB0..U+1BB9 SUNDANESE DIGIT
+    0x01C40, // U+1C40..U+1C49 LEPCHA DIGIT
+    0x01C50, // U+1C50..U+1C59 OL CHIKI DIGIT
+    0x0A620, // U+A620..U+A629 VAI DIGIT
+    0x0A8D0, // U+A8D0..U+A8D9 SAURASHTRA DIGIT
+    0x0A900, // U+A900..U+A909 KAYAH LI DIGIT
+    0x0A9D0, // U+A9D0..U+A9D9 JAVANESE DIGIT
+    0x0A9F0, // U+A9F0..U+A9F9 MYANMAR TAI LAING DIGIT
+    0x0AA50, // U+AA50..U+AA59 CHAM DIGIT
+    0x0ABF0, // U+ABF0..U+ABF9 MEETEI MAYEK DIGIT
+    0x0FF10, // U+FF10..U+FF19 FULLWIDTH DIGIT
+    0x104A0, // U+104A0..U+104A9 OSMANYA DIGIT
+    0x10D30, // U+10D30..U+10D39 HANIFI ROHINGYA DIGIT
+    0x11066, // U+11066..U+1106F BRAHMI DIGIT
+    0x110F0, // U+110F0..U+110F9 SORA SOMPENG DIGIT
+    0x11136, // U+11136..U+1113F CHAKMA DIGIT
+    0x111D0, // U+111D0..U+111D9 SHARADA DIGIT
+    0x112F0, // U+112F0..U+112F9 KHUDAWADI DIGIT
+    0x11450, // U+11450..U+11459 NEWA DIGIT
+    0x114D0, // U+114D0..U+114D9 TIRHUTA DIGIT
+    0x11650, // U+11650..U+11659 MODI DIGIT
+    0x116C0, // U+116C0..U+116C9 TAKRI DIGIT
+    0x11730, // U+11730..U+11739 AHOM DIGIT
+    0x118E0, // U+118E0..U+118E9 WARANG CITI DIGIT
+    0x11950, // U+11950..U+11959 DIVES AKURU DIGIT
+    0x11C50, // U+11C50..U+11C59 BHAIKSUKI DIGIT
+    0x11D50, // U+11D50..U+11D59 MASARAM GONDI DIGIT
+    0x11DA0, // U+11DA0..U+11DA9 GUNJALA GONDI DIGIT
+    0x11F50, // U+11F50..U+11F59 KAWI DIGIT
+    0x16A60, // U+16A60..U+16A69 MRO DIGIT
+    0x16AC0, // U+16AC0..U+16AC9 TANGSA DIGIT
+    0x16B50, // U+16B50..U+16B59 PAHAWH HMONG DIGIT
+    0x1D7CE, // U+1D7CE..U+1D7D7 MATHEMATICAL BOLD DIGIT
+    0x1D7D8, // U+1D7D8..U+1D7E1 MATHEMATICAL DOUBLE-STRUCK DIGIT
+    0x1D7E2, // U+1D7E2..U+1D7EB MATHEMATICAL SANS-SERIF DIGIT
+    0x1D7EC, // U+1D7EC..U+1D7F5 MATHEMATICAL SANS-SERIF BOLD DIGIT
+    0x1D7F6, // U+1D7F6..U+1D7FF MATHEMATICAL MONOSPACE DIGIT
+    0x1E140, // U+1E140..U+1E149 NYIAKENG PUACHUE HMONG DIGIT
+    0x1E2F0, // U+1E2F0..U+1E2F9 WANCHO DIGIT
+    0x1E4F0, // U+1E4F0..U+1E4F9 NAG MUNDARI DIGIT
+    0x1E950, // U+1E950..U+1E959 ADLAM DIGIT
+    0x1FBF0, // U+1FBF0..U+1FBF9 SEGMENTED DIGIT
+];
+
+/// The decimal value of `c` when CPython reads it as a digit in `int()` /
+/// `float()`, else `None`. Covers ASCII `0-9` plus every Unicode decimal run
+/// (`١٠`, `１０`, `१०`, ...); other numerics (`²`, `½`, `Ⅻ`) are `None`.
+fn decimal_digit_value(c: char) -> Option<u32> {
+    if c.is_ascii_digit() {
+        return Some(c as u32 - '0' as u32);
+    }
+    let cp = c as u32;
+    DECIMAL_DIGIT_RUN_STARTS
+        .iter()
+        .find(|start| cp >= **start && cp - **start < 10)
+        .map(|start| cp - *start)
+}
+
+/// A successfully spelled `int()`: the exact value when it fits `i128`, else
+/// its overflow class. Python ints are unbounded; the callers map the classes
+/// (`parse_per_page` trips the ceiling on huge positives and clamps huge
+/// negatives; cursor parts saturate both ways).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PyInt {
+    Small(i128),
+    HugePositive,
+    HugeNegative,
+}
+
+/// CPython `int(text)`: surrounding `White_Space` stripped (exactly Rust
+/// `trim()`), one optional ASCII sign, PEP-515 `_` separators strictly
+/// between digits, ASCII + Unicode decimal digits, at most [`MAX_INT_DIGITS`]
+/// digit characters. Any `ValueError` spelling is `None` (callers map it to
+/// their own `Invalid*` detail).
+fn parse_py_int_value(raw: &str) -> Option<PyInt> {
+    let trimmed = raw.trim();
+    let (negative, body) = match trimmed.strip_prefix(['+', '-']) {
+        Some(rest) => (trimmed.starts_with('-'), rest),
+        None => (false, trimmed),
+    };
+    if body.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = body.chars().collect();
+    let mut digits: Vec<u32> = Vec::with_capacity(chars.len());
+    let mut prev_is_digit = false;
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch == '_' {
+            // PEP 515: `_` only between two digits (`1_0` ok; `1_`, `_1`,
+            // `1__0` raise). Either neighbor may be a Unicode decimal digit.
+            let next_is_digit = chars
+                .get(index + 1)
+                .is_some_and(|next| decimal_digit_value(*next).is_some());
+            if !prev_is_digit || !next_is_digit {
+                return None;
+            }
+            prev_is_digit = false;
+            continue;
+        }
+        let digit = decimal_digit_value(*ch)?;
+        digits.push(digit);
+        prev_is_digit = true;
+    }
+    if digits.is_empty() || digits.len() > MAX_INT_DIGITS {
+        return None;
+    }
+    let mut magnitude: i128 = 0;
+    for digit in digits {
+        match magnitude
+            .checked_mul(10)
+            .and_then(|scaled| scaled.checked_add(digit as i128))
+        {
+            Some(value) => magnitude = value,
+            None => {
+                return Some(if negative {
+                    PyInt::HugeNegative
+                } else {
+                    PyInt::HugePositive
+                });
+            }
+        }
+    }
+    Some(PyInt::Small(if negative { -magnitude } else { magnitude }))
+}
+
 /// Python `int()`: unbounded, so magnitudes past `i64` saturate instead of
 /// erroring (a huge cursor offset reads an empty page, exactly like slicing
-/// past the end in Python). Surrounding whitespace and `_` separators are
-/// accepted, like `int()`.
+/// past the end in Python). Surrounding whitespace, one sign and PEP-515 `_`
+/// separators are accepted, like `int()`; past [`MAX_INT_DIGITS`] digits
+/// `int()` itself raises.
 fn parse_py_int(raw: &str) -> Result<i64, PageError> {
-    match raw.trim().replace('_', "").parse::<i128>() {
-        Ok(value) => Ok(value.clamp(i64::MIN as i128, i64::MAX as i128) as i64),
-        Err(_) => Err(PageError::InvalidCursor),
+    match parse_py_int_value(raw) {
+        Some(PyInt::Small(value)) => Ok(value.clamp(i64::MIN as i128, i64::MAX as i128) as i64),
+        Some(PyInt::HugePositive) => Ok(i64::MAX),
+        Some(PyInt::HugeNegative) => Ok(i64::MIN),
+        None => Err(PageError::InvalidCursor),
     }
 }
 
-/// Python `float()`: surrounding whitespace and `_` separators are accepted.
+/// CPython `float(text)`: surrounding `White_Space` stripped, one sign,
+/// PEP-515 `_` strictly between digits anywhere in the grammar (`1_0e1_0`
+/// ok; `1_.5`, `1._5`, `1_e5`, `1e_5` raise), ASCII + Unicode decimal digits
+/// (mapped to ASCII first, even in the exponent), then the grammar
+/// `f64::from_str` parses — verified identical to CPython on the full matrix
+/// (`inf`/`infinity`/`nan` case-insensitive, overflow to `inf`, no digit cap).
 fn parse_py_float(raw: &str) -> Result<f64, PageError> {
-    raw.trim()
-        .replace('_', "")
+    let trimmed = raw.trim();
+    if trimmed.is_ascii() && !trimmed.contains('_') {
+        // Fast path: pure-ASCII `f64` grammar, no separators to validate.
+        return trimmed.parse::<f64>().map_err(|_| PageError::InvalidCursor);
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut prev_is_digit = false;
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch == '_' {
+            let next_is_digit = chars
+                .get(index + 1)
+                .is_some_and(|next| decimal_digit_value(*next).is_some());
+            if !prev_is_digit || !next_is_digit {
+                return Err(PageError::InvalidCursor);
+            }
+            prev_is_digit = false;
+            continue;
+        }
+        if let Some(digit) = decimal_digit_value(*ch) {
+            normalized.push((b'0' + digit as u8) as char);
+            prev_is_digit = true;
+        } else {
+            normalized.push(*ch);
+            prev_is_digit = false;
+        }
+    }
+    normalized
         .parse::<f64>()
         .map_err(|_| PageError::InvalidCursor)
 }
@@ -262,8 +460,10 @@ impl PageError {
 
 /// `BasePaginator.get_per_page`: unparsable input is an error, the ceiling is
 /// `max(max_per_page, default_per_page)`, and negatives pass through.
-/// Python's `int()` is unbounded, so a huge magnitude parses fine and then
-/// trips the ceiling (`PerPageTooLarge`), instead of failing to parse.
+/// Python's `int()` reads at most [`MAX_INT_DIGITS`] digits (`ValueError`
+/// past that, like any misspelling); below the cap it is unbounded, so a
+/// huge magnitude parses fine and then trips the ceiling (`PerPageTooLarge`),
+/// instead of failing to parse.
 pub fn parse_per_page(
     raw: Option<&str>,
     default_per_page: i64,
@@ -272,16 +472,21 @@ pub fn parse_per_page(
     let Some(text) = raw else {
         return Ok(default_per_page);
     };
-    let per_page = text
-        .trim()
-        .replace('_', "")
-        .parse::<i128>()
-        .map_err(|_| PageError::InvalidPerPage)?;
     let ceiling = max_per_page.max(default_per_page);
-    if per_page > ceiling as i128 {
-        return Err(PageError::PerPageTooLarge(ceiling));
+    match parse_py_int_value(text) {
+        None => Err(PageError::InvalidPerPage),
+        // A huge positive is past every `i64` ceiling.
+        Some(PyInt::HugePositive) => Err(PageError::PerPageTooLarge(ceiling)),
+        // A huge negative is not over the ceiling: it falls through to the
+        // `i64` clamp, like any negative.
+        Some(PyInt::HugeNegative) => Ok(i64::MIN),
+        Some(PyInt::Small(per_page)) => {
+            if per_page > ceiling as i128 {
+                return Err(PageError::PerPageTooLarge(ceiling));
+            }
+            Ok(per_page.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
+        }
     }
-    Ok(per_page.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
 }
 
 /// `limit = min(limit, max_limit)`.
@@ -1054,6 +1259,106 @@ mod tests {
     }
 
     #[test]
+    fn cursor_int_underscores_follow_pep_515() {
+        // `int()` takes `_` only strictly between digits.
+        for bad in ["1_:0:0", "1__0:0:0", "_1:0:0", "10:1_:0", "10:0:1__"] {
+            assert_eq!(
+                Cursor::from_string(bad),
+                Err(PageError::InvalidCursor),
+                "{bad}"
+            );
+        }
+        let cursor = Cursor::from_string("1_0:2_0:1").unwrap();
+        assert_eq!(cursor.value, CursorValue::Int(10));
+        assert_eq!(cursor.offset, 20);
+        assert!(cursor.is_prev);
+    }
+
+    #[test]
+    fn cursor_accepts_unicode_decimal_digits() {
+        // `int()` reads every Unicode decimal run; other numerics raise.
+        let cursor = Cursor::from_string("١٠:0:0").unwrap();
+        assert_eq!(cursor.value, CursorValue::Int(10));
+        let cursor = Cursor::from_string("１０:１:０").unwrap();
+        assert_eq!(cursor.value, CursorValue::Int(10));
+        assert_eq!(cursor.offset, 1);
+        assert!(!cursor.is_prev);
+        let cursor = Cursor::from_string("1_١:0:0").unwrap();
+        assert_eq!(cursor.value, CursorValue::Int(11));
+        for bad in ["²:0:0", "½:0:0", "Ⅻ:0:0"] {
+            assert_eq!(
+                Cursor::from_string(bad),
+                Err(PageError::InvalidCursor),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_int_digit_cap_matches_backend_limit() {
+        // The backend (Python 3.12, no override) caps `int(str)` at 4300
+        // digits; below the cap huge magnitudes saturate to empty-page
+        // bounds instead of rejecting the cursor.
+        let ok = Cursor::from_string(&format!("{}:0:0", "9".repeat(4300))).unwrap();
+        assert_eq!(ok.value, CursorValue::Int(i64::MAX));
+        assert_eq!(
+            Cursor::from_string(&format!("{}:0:0", "9".repeat(4301))),
+            Err(PageError::InvalidCursor)
+        );
+        assert_eq!(
+            Cursor::from_string(&format!("10:{}:0", "9".repeat(4301))),
+            Err(PageError::InvalidCursor)
+        );
+        // Signs and separators are not digit characters.
+        let ok = Cursor::from_string(&format!("+{}:0:0", "9".repeat(4300))).unwrap();
+        assert_eq!(ok.value, CursorValue::Int(i64::MAX));
+        let mid = format!("{}:0:0", "1".repeat(2150) + "_" + &"1".repeat(2150));
+        let ok = Cursor::from_string(&mid).unwrap();
+        assert_eq!(ok.value, CursorValue::Int(i64::MAX));
+    }
+
+    #[test]
+    fn cursor_float_spelling_matches_cpython() {
+        // `_` only between digits, anywhere in the float grammar.
+        for bad in [
+            "1_.5:0:0",
+            "1._5:0:0",
+            "1.5_:0:0",
+            "1__0.5:0:0",
+            "1.5e_5:0:0",
+            "1_e5.0:0:0",
+        ] {
+            assert_eq!(
+                Cursor::from_string(bad),
+                Err(PageError::InvalidCursor),
+                "{bad}"
+            );
+        }
+        // Dotless exponent/special spellings take the `int()` path and raise.
+        for bad in ["inf:0:0", "nan:0:0", "1e5:0:0", "Infinity:0:0"] {
+            assert_eq!(
+                Cursor::from_string(bad),
+                Err(PageError::InvalidCursor),
+                "{bad}"
+            );
+        }
+        let float = Cursor::from_string("1_0.5:0:0").unwrap();
+        assert_eq!(float.value, CursorValue::Float(10.5));
+        let float = Cursor::from_string("١.٥:0:0").unwrap();
+        assert_eq!(float.value, CursorValue::Float(1.5));
+        let float = Cursor::from_string("1.5e1_0:0:0").unwrap();
+        assert_eq!(float.value, CursorValue::Float(1.5e10));
+        // `float()` has no digit cap: a dotted 5000-digit mantissa overflows
+        // to `inf`, while the dotless twin hits the `int()` cap.
+        assert_eq!(
+            Cursor::from_string(&format!("{}:0:0", "9".repeat(5000))),
+            Err(PageError::InvalidCursor)
+        );
+        let float = Cursor::from_string(&format!("{}.0:0:0", "9".repeat(5000))).unwrap();
+        assert_eq!(float.value, CursorValue::Float(f64::INFINITY));
+    }
+
+    #[test]
     fn cursor_default_uses_per_page_as_value() {
         let cursor = Cursor::default_for(100);
         assert_eq!(cursor.to_string(), "100:0:0");
@@ -1097,6 +1402,77 @@ mod tests {
             "Invalid cursor parameter."
         );
         assert_eq!(PageError::OffsetTooLarge.detail(), "Error in parsing");
+    }
+
+    #[test]
+    fn per_page_underscore_spelling_matches_cpython() {
+        assert_eq!(parse_per_page(Some("1_0"), 100, 1000), Ok(10));
+        for bad in ["1_", "_1", "1__0", "+_1", "100_"] {
+            assert_eq!(
+                parse_per_page(Some(bad), 100, 1000),
+                Err(PageError::InvalidPerPage),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn per_page_accepts_unicode_decimal_digits() {
+        assert_eq!(parse_per_page(Some("١٠"), 100, 1000), Ok(10));
+        assert_eq!(parse_per_page(Some("１２"), 100, 1000), Ok(12));
+        assert_eq!(parse_per_page(Some("१०"), 100, 1000), Ok(10));
+        assert_eq!(parse_per_page(Some("١_٠"), 100, 1000), Ok(10));
+    }
+
+    #[test]
+    fn per_page_huge_magnitude_classification_matches_backend() {
+        // Below the 4300-digit `int()` cap a huge magnitude parses, then
+        // trips the ceiling; past the cap `int()` itself raises.
+        assert_eq!(
+            parse_per_page(Some(&"9".repeat(39)), 100, 1000),
+            Err(PageError::PerPageTooLarge(1000))
+        );
+        assert_eq!(
+            parse_per_page(Some("170141183460469231731687303715884105727"), 100, 1000),
+            Err(PageError::PerPageTooLarge(1000))
+        );
+        assert_eq!(
+            parse_per_page(Some(&"9".repeat(4300)), 100, 1000),
+            Err(PageError::PerPageTooLarge(1000))
+        );
+        assert_eq!(
+            parse_per_page(Some(&"9".repeat(4301)), 100, 1000),
+            Err(PageError::InvalidPerPage)
+        );
+        assert_eq!(
+            parse_per_page(Some(&"9".repeat(5000)), 100, 1000),
+            Err(PageError::InvalidPerPage)
+        );
+        // Huge negatives fall through to the clamp, like any negative.
+        assert_eq!(
+            parse_per_page(Some(&format!("-{}", "9".repeat(100))), 100, 1000),
+            Ok(i64::MIN)
+        );
+        assert_eq!(
+            parse_per_page(Some(&format!("-{}", "9".repeat(5000))), 100, 1000),
+            Err(PageError::InvalidPerPage)
+        );
+    }
+
+    #[test]
+    fn cursor_and_per_page_strip_unicode_whitespace() {
+        // `int()` strips `White_Space` (exactly Rust `trim()`), not just ASCII.
+        let cursor = Cursor::from_string("\u{a0}10\u{a0}:\u{2003}0:\u{3000}0\u{3000}").unwrap();
+        assert_eq!(cursor.value, CursorValue::Int(10));
+        assert_eq!(parse_per_page(Some("\u{a0}20\u{2003}"), 100, 1000), Ok(20));
+        // ... but U+180E, U+FEFF and NUL are not whitespace to either.
+        for bad in ["\u{180e}20", "\u{feff}20", "\u{0}20"] {
+            assert_eq!(
+                parse_per_page(Some(bad), 100, 1000),
+                Err(PageError::InvalidPerPage),
+                "{bad:?}"
+            );
+        }
     }
 
     // -- offset window -----------------------------------------------------
