@@ -17,9 +17,20 @@
 //! [`handlers_invites`] ports the invite / join / favorite / deploy-board
 //! handler family (PIDASHCONV-573); [`routes`] merges its routes —
 //! sibling handler issues extend the merge; merges keep both sides.
+//!
+//! [`handlers_workflow`] ports the state + estimate handler family
+//! (`StateViewSet`, `IntakeStateEndpoint`,
+//! `ProjectEstimatePointEndpoint`, `BulkEstimatePointEndpoint`,
+//! `EstimatePointEndpoint`, FX-APROJ-10, PIDASHCONV-574); [`routes`]
+//! merges its routes — sibling handler issues extend the merge; merges
+//! keep both sides.
+//!
+//! Cutover into the serving router stays with the domain gate
+//! (PIDASHCONV-575), so [`routes`] is additive only.
 
 pub mod gates;
 pub mod handlers_invites;
+pub mod handlers_workflow;
 
 use axum::Router;
 
@@ -29,5 +40,5 @@ use crate::state::AppState;
 /// (sibling D-25 handler issues extend this merge; merges keep both
 /// sides), merged here for the F-10 overlay seam.
 pub fn routes() -> Router<AppState> {
-    handlers_invites::routes()
+    handlers_invites::routes().merge(handlers_workflow::routes())
 }
