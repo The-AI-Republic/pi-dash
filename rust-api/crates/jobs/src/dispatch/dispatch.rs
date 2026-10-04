@@ -633,7 +633,7 @@ pub async fn execution_fields<C, F, E, P>(
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
     cache: &C,
-    on_commit: &mut dyn FnMut(DeferredConsume),
+    on_commit: &mut (dyn FnMut(DeferredConsume) + Send),
     seams: ExecutionSeams<F, E, P>,
 ) -> Result<ExecutionFields, ExecutionFieldsError>
 where
@@ -668,7 +668,7 @@ async fn execution_fields_cloud<C, F, E, P>(
     inputs: &ExecutionInputs<'_>,
     cloud: &CloudAgentSettings,
     cache: &C,
-    on_commit: &mut dyn FnMut(DeferredConsume),
+    on_commit: &mut (dyn FnMut(DeferredConsume) + Send),
     seams: ExecutionSeams<F, E, P>,
 ) -> Result<ExecutionFields, ExecutionFieldsError>
 where
