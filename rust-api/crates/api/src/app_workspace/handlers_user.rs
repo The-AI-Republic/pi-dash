@@ -48,13 +48,14 @@
 //!   Python's `str()` would compare and answer the mismatch 400.
 //! * `partial_update` silently drops read-only keys (email included) and
 //!   unknown keys, and a non-object body is the DRF non-mapping 400
-//!   (`non_field_errors`); for `avatar_asset`/`cover_image_asset` a
-//!   bool answers a field error, `0` queries the nil UUID (field
-//!   error), and unparseable strings, negative ints, floats, and
-//!   composites answer the whole-body 400 `{"error": "Please provide
-//!   valid detail"}` (Django `ValidationError` branch —
-//!   `UUIDField.get_prep_value` wraps the `ValueError`/`AttributeError`)
-//!   — straight from `PrimaryKeyRelatedField.to_internal_value`.
+//!   (`non_field_errors`); for `avatar_asset`/`cover_image_asset`
+//!   `null`/`""` clear, a bool answers the `incorrect_type` field
+//!   error, `0` queries the nil UUID (the `does_not_exist` field
+//!   error), and unparseable strings, negative/`>u128` ints, floats,
+//!   and composites answer the per-field `“…” is not a valid UUID.`
+//!   message — `Serializer.to_internal_value` catches the Django
+//!   `ValidationError` per field, never a whole-request branch
+//!   (the `handlers_prefs` precedent).
 //! * `generate_email_verification_code` consumes throttle quota even when
 //!   the email fails validation (throttles run in `initial()`).
 //! * `retrieve_instance_admin` binds `instance_id IS NULL` when no
@@ -72,10 +73,10 @@
 //!   choice as the `app_pages`/`app_scheduler` precedents).
 //! * `DateTimeField` inputs accept RFC 3339, the naive `T`/space forms
 //!   (unpadded parts included, like Django's `\d{1,2}` arm), padded
-//!   date-only, comma/dot fractions truncated to six digits, and a
-//!   bare trailing dot. Still rejected where 3.12 `fromisoformat`
-//!   parses: lowercase-`t` separators, week dates, basic-format
-//!   `T103045`, and surrounding whitespace.
+//!   date-only, and comma/dot fractions truncated to six digits; a
+//!   bare trailing dot/comma is invalid. Still rejected where 3.12
+//!   `fromisoformat` parses: lowercase-`t` separators, week dates,
+//!   basic-format `T103045`, and surrounding whitespace.
 //! * The email cache round-trip uses the raw
 //!   `magic_email_update_{user}_{email}` key with a plain-JSON value
 //!   (the `queries_user` contract): no Django `:1:` key prefix, no
@@ -106,6 +107,7 @@ use pidash_services::auth_session::{guards as throttle_kernel, shapes as auth_sh
 
 use super::gates;
 use crate::middleware::SessionHandle;
+use crate::paginator::py_float_str;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -168,8 +170,7 @@ pub enum Denial {
     /// 400, `{"detail": ...}` (body parse errors).
     BadDetail(String),
     /// 400, [`INVALID_DETAIL_BODY`] (Django `ValidationError`
-    /// branch: invalid-UUID asset pks, uncoercible onboard/tour
-    /// flags).
+    /// branch: uncoercible onboard/tour flags).
     InvalidDetail,
     /// 400, `{"error": ...}` (view-inline / `IntegrityError` /
     /// Django-`ValidationError` branches).
@@ -648,7 +649,8 @@ fn naive_shape_ok(raw: &str) -> bool {
 /// 3.12 runtime). Fractions of any length truncate to six digits
 /// (Django's `\d{1,6}\d{0,6}`; 3.12 `fromisoformat` truncates longer
 /// runs the same way); comma fractions normalize to dots; a bare
-/// trailing dot carries no fraction.
+/// trailing dot/comma is invalid (neither `fromisoformat` nor the
+/// regex accepts it — probed on Django 4.2 `parse_datetime`).
 fn parse_naive_datetime(raw: &str) -> Option<chrono::NaiveDateTime> {
     if !naive_shape_ok(raw) {
         return None;
@@ -661,9 +663,7 @@ fn parse_naive_datetime(raw: &str) -> Option<chrono::NaiveDateTime> {
             let rest: String = tail.chars().skip_while(|c| c.is_ascii_digit()).collect();
             let head = owned[..dot + 1].to_owned();
             if digits.is_empty() && rest.is_empty() {
-                if raw.as_bytes()[dot] == b'.' {
-                    owned = head[..head.len() - 1].to_owned();
-                }
+                return None;
             } else {
                 let kept = if digits.len() > 6 {
                     &digits[..6]
@@ -1295,23 +1295,127 @@ fn choice_timezone(value: &Value) -> Result<String, Vec<String>> {
 
 /// Outcome of one asset-FK validation beyond the field error.
 enum PkOutcome {
-    /// Django `ValidationError` (unparseable UUID): the whole-body 400
-    /// [`INVALID_DETAIL_BODY`].
-    WholeBody,
     /// Exists-check DB failure: 500.
     ServerError,
 }
 
+/// A JSON number split by syntax: plain integers keep their digits
+/// (arbitrary precision survives the parse), float syntax goes through
+/// `repr` — including overflowing exponents (`1e1000` → `inf`, which
+/// Python accepts). (The `handlers_prefs` shape.)
+enum JsonNum {
+    Int(String),
+    Float(f64),
+}
+
+fn split_json_number(number: &serde_json::Number) -> JsonNum {
+    if let Some(int) = number.as_i64() {
+        return JsonNum::Int(int.to_string());
+    }
+    if let Some(uint) = number.as_u64() {
+        return JsonNum::Int(uint.to_string());
+    }
+    let text = number.to_string();
+    if text.chars().any(|c| c == '.' || c == 'e' || c == 'E') {
+        // Float syntax from parsed JSON always parses (`NaN` fallback is
+        // unreachable).
+        JsonNum::Float(text.parse::<f64>().unwrap_or(f64::NAN))
+    } else {
+        JsonNum::Int(text)
+    }
+}
+
+/// Django `ValidationError` per-field message `“…” is not a valid UUID.`
+/// (curly quotes; `UUIDField` `invalid`). (The `handlers_prefs`
+/// precedent.)
+fn invalid_uuid_msg(rendered: &str) -> String {
+    format!("\u{201c}{rendered}\u{201d} is not a valid UUID.")
+}
+
+/// Python `str(value)` over a JSON value for `%(value)s` interpolation
+/// (the `handlers_prefs` shape): strings pass through, numbers render
+/// plainly, composites use single quotes with minimal escaping.
+fn py_str(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_owned(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::Number(number) => match split_json_number(number) {
+            JsonNum::Int(digits) => digits,
+            JsonNum::Float(float) => py_float_str(float),
+        },
+        Value::String(text) => text.clone(),
+        Value::Array(items) => {
+            let inner: Vec<String> = items.iter().map(py_repr).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        Value::Object(map) => {
+            let inner: Vec<String> = map
+                .iter()
+                .map(|(key, val)| {
+                    format!("{}: {}", py_repr(&Value::String(key.clone())), py_repr(val))
+                })
+                .collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+    }
+}
+
+/// Python `repr()` over a JSON value (same shape as [`py_str`]).
+fn py_repr(value: &Value) -> String {
+    match value {
+        Value::String(text) => py_repr_string(text),
+        Value::Array(_) | Value::Object(_) => py_str(value),
+        _ => py_str(value),
+    }
+}
+
+fn py_repr_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    let use_double = text.contains('\'') && !text.contains('"');
+    let quote = if use_double { '"' } else { '\'' };
+    out.push(quote);
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
 /// Pure input half of the asset-FK check (DB-free, unit-tested):
-/// `null` clears; bools fail `incorrect_type`; ints bind through
-/// `uuid(int=...)` (`0` is the nil UUID, negatives fail); unparseable
-/// strings, negative ints, floats, >u64 ints, and composites raise
-/// Django `ValidationError` (`UUIDField.get_prep_value` wraps the
-/// `ValueError`/`AttributeError` — probed on Django 4.2), which the
-/// view answers with the whole-body 400.
+/// `null` and `""` clear (`RelatedField.run_validation` forces empty
+/// strings to `None`); bools fail `incorrect_type`; ints bind through
+/// `uuid(int=...)` (`0` is the nil UUID; negatives and `>u128` fail the
+/// parse); every other miss — malformed strings, floats, composites,
+/// out-of-range ints — is the Django `ValidationError` per-field
+/// message `“…” is not a valid UUID.`, which
+/// `Serializer.to_internal_value` catches per field (never a
+/// whole-request branch).
 fn asset_pk_input(value: &Value) -> Result<Option<uuid::Uuid>, Result<String, PkOutcome>> {
     if value.is_null() {
         return Ok(None);
+    }
+    if let Value::String(text) = value {
+        if text.is_empty() {
+            return Ok(None);
+        }
+        match text.parse::<uuid::Uuid>() {
+            Ok(id) => return Ok(Some(id)),
+            Err(_) => return Err(Ok(invalid_uuid_msg(text))),
+        }
     }
     if let Value::Bool(_) = value {
         return Err(Ok(
@@ -1319,23 +1423,14 @@ fn asset_pk_input(value: &Value) -> Result<Option<uuid::Uuid>, Result<String, Pk
         ));
     }
     match value {
-        Value::String(raw) => match raw.parse::<uuid::Uuid>() {
-            Ok(id) => Ok(Some(id)),
-            Err(_) => Err(Err(PkOutcome::WholeBody)),
+        Value::Number(number) => match split_json_number(number) {
+            JsonNum::Int(digits) => match digits.parse::<u128>().map(uuid::Uuid::from_u128) {
+                Ok(id) => Ok(Some(id)),
+                Err(_) => Err(Ok(invalid_uuid_msg(&digits))),
+            },
+            JsonNum::Float(float) => Err(Ok(invalid_uuid_msg(&py_float_str(float)))),
         },
-        Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                if int < 0 {
-                    return Err(Err(PkOutcome::WholeBody));
-                }
-                Ok(Some(uuid::Uuid::from_u128(int as u128)))
-            } else if let Some(uint) = number.as_u64() {
-                Ok(Some(uuid::Uuid::from_u128(u128::from(uint))))
-            } else {
-                Err(Err(PkOutcome::WholeBody))
-            }
-        }
-        _ => Err(Err(PkOutcome::WholeBody)),
+        _ => Err(Ok(invalid_uuid_msg(&py_str(value)))),
     }
 }
 
@@ -2367,7 +2462,6 @@ pub async fn me_partial_update(
     let patch = match validate_patch_body(pool, map, &actor.timezone, &row.user_timezone).await {
         Ok(patch) => patch,
         Err(Ok(errors)) => return Denial::BadJson(errors).into_response(),
-        Err(Err(PkOutcome::WholeBody)) => return Denial::InvalidDetail.into_response(),
         Err(Err(PkOutcome::ServerError)) => return Denial::ServerError.into_response(),
     };
     // Merge over the current row, then `User.save()`.
@@ -4015,37 +4109,48 @@ mod tests {
 
     #[test]
     fn asset_pk_input_branches_match_django_prep() {
-        // Null clears.
+        // Null and "" clear (RelatedField.run_validation forces "" to None).
         assert_eq!(asset_pk_input(&json!(null)).unwrap(), None);
+        assert_eq!(asset_pk_input(&json!("")).unwrap(), None);
         // Bools fail incorrect_type (DRF raises TypeError first).
         assert!(matches!(
             asset_pk_input(&json!(true)),
             Err(Ok(message)) if message == "Incorrect type. Expected pk value, received bool."
         ));
-        // Zero binds the nil UUID (Django queries it; the miss is a
-        // field error, not a 500).
+        // Zero binds the nil UUID (Django queries it; the miss is the
+        // does_not_exist field error, not a 500).
         assert_eq!(asset_pk_input(&json!(0)).unwrap(), Some(uuid::Uuid::nil()));
         assert_eq!(
             asset_pk_input(&json!(5)).unwrap(),
             Some(uuid::Uuid::from_u128(5))
         );
+        // The u128 range converts, including magnitudes above u64.
+        let big: Value = serde_json::from_str("340282366920938463463374607431768211455")
+            .expect("u128 max parses");
+        assert_eq!(
+            asset_pk_input(&big).unwrap(),
+            Some(uuid::Uuid::from_u128(u128::MAX))
+        );
         let id = uuid::Uuid::new_v4();
         assert_eq!(asset_pk_input(&json!(id.to_string())).unwrap(), Some(id));
-        // Unparseable strings, negative ints, floats, composites, and
-        // >u64 ints raise Django ValidationError (whole-body 400).
-        let huge: Value = serde_json::from_str("340282366920938463463374607431768211457")
+        // Unparseable strings, negative and >u128 ints, floats, and
+        // composites are the per-field "not a valid UUID" message
+        // (Serializer.to_internal_value catches the Django
+        // ValidationError per field — never a whole-request branch).
+        let huge: Value = serde_json::from_str("340282366920938463463374607431768211456")
             .expect("huge int parses");
-        for value in [
-            json!("not-a-uuid"),
-            json!(-5),
-            json!(1.5),
-            json!(2.0),
-            json!({"a": 1}),
-            json!([1]),
-            huge,
+        for (value, rendered) in [
+            (json!("not-a-uuid"), "not-a-uuid"),
+            (json!(-5), "-5"),
+            (json!(1.5), "1.5"),
+            (json!(2.0), "2.0"),
+            (json!({"a": 1}), "{'a': 1}"),
+            (json!([1]), "[1]"),
+            (huge, "340282366920938463463374607431768211456"),
         ] {
+            let expected = format!("\u{201c}{rendered}\u{201d} is not a valid UUID.");
             assert!(
-                matches!(asset_pk_input(&value), Err(Err(PkOutcome::WholeBody))),
+                matches!(asset_pk_input(&value), Err(Ok(message)) if message == expected),
                 "{value}"
             );
         }
@@ -4146,9 +4251,15 @@ mod tests {
                 "{raw}"
             );
         }
-        // A bare trailing dot carries no fraction.
-        let dot = parse_drf_datetime(&json!("2024-01-15T10:30:45."), &tz, "UTC").unwrap();
-        assert_eq!(dot.to_rfc3339(), "2024-01-15T10:30:45+00:00");
+        // A bare trailing dot/comma is invalid (Django 4.2
+        // parse_datetime answers None — probed live).
+        for raw in ["2024-01-15T10:30:45.", "2024-01-15T10:30:45,"] {
+            assert_eq!(
+                parse_drf_datetime(&json!(raw), &tz, "UTC").unwrap_err(),
+                DATETIME_INVALID_MESSAGE,
+                "{raw}"
+            );
+        }
         // Date-only must be padded; the year must be four digits.
         for value in [
             json!("2024-1-5"),
