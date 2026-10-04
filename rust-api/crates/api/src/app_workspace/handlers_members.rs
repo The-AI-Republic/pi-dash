@@ -968,7 +968,8 @@ fn py_float_repr(float: f64) -> String {
 }
 
 /// Python `int(value)`: bools as 0/1, floats truncated toward zero,
-/// strings stripped with single internal underscores, ints as-is.
+/// strings stripped (minus `\x1c`-`\x1f`) with Unicode decimal digits
+/// and single internal underscores, ints as-is.
 /// `None` arms the caller's 500 (`TypeError`/`ValueError` through
 /// `handle_exception`).
 fn python_int(value: &Value) -> Option<i64> {
@@ -1003,10 +1004,43 @@ fn python_int(value: &Value) -> Option<i64> {
     }
 }
 
-/// Python `int(s, 10)`: surrounding whitespace stripped, one optional
-/// sign, digits with single internal underscores.
+/// `int()`'s strip class: Python whitespace except `\x1c`-`\x1f`
+/// (probed exhaustively over the scalar range: `int()` strips the
+/// other 25 `str.strip` chars but raises on the four controls).
+fn py_int_is_space(ch: char) -> bool {
+    py_is_space(ch) && !('\x1c'..='\x1f').contains(&ch)
+}
+
+/// Unicode decimal value (`unicodedata.decimal`, general category Nd),
+/// the digit set `int()` accepts: 63 single decades plus the
+/// mathematical block (`U+1D7CE..U+1D7FF`, five packed decades, hence
+/// the remainder). Table generated from CPython's `unicodedata` and
+/// verified value by value; numbering/letter numerics (`No`/`Nl`,
+/// e.g. `²`) are rejected, like `int()`.
+fn nd_value(ch: char) -> Option<u32> {
+    let cp = ch as u32;
+    if (0x1D7CE..=0x1D7FF).contains(&cp) {
+        return Some((cp - 0x1D7CE) % 10);
+    }
+    const DECADES: &[u32] = &[
+        0x0030, 0x0660, 0x06F0, 0x07C0, 0x0966, 0x09E6, 0x0A66, 0x0AE6, 0x0B66, 0x0BE6, 0x0C66,
+        0x0CE6, 0x0D66, 0x0DE6, 0x0E50, 0x0ED0, 0x0F20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946,
+        0x19D0, 0x1A80, 0x1A90, 0x1B50, 0x1BB0, 0x1C40, 0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0,
+        0xA9F0, 0xAA50, 0xABF0, 0xFF10, 0x104A0, 0x10D30, 0x11066, 0x110F0, 0x11136, 0x111D0,
+        0x112F0, 0x11450, 0x114D0, 0x11650, 0x116C0, 0x11730, 0x118E0, 0x11950, 0x11C50, 0x11D50,
+        0x11DA0, 0x11F50, 0x16A60, 0x16AC0, 0x16B50, 0x1E140, 0x1E2F0, 0x1E4F0, 0x1E950, 0x1FBF0,
+    ];
+    DECADES
+        .iter()
+        .find(|start| (**start..**start + 10).contains(&cp))
+        .map(|start| cp - start)
+}
+
+/// Python `int(s, 10)`: surrounding whitespace stripped (minus
+/// `\x1c`-`\x1f`), one optional ASCII sign, Unicode decimal digits
+/// with single internal underscores.
 fn py_int_str(text: &str) -> Option<i64> {
-    let text = py_strip(text);
+    let text = text.trim_matches(py_int_is_space);
     let (negative, digits) = match text.strip_prefix(['+', '-']) {
         Some(rest) => (text.starts_with('-'), rest),
         None => (false, text),
@@ -1022,11 +1056,10 @@ fn py_int_str(text: &str) -> Option<i64> {
                 return None;
             }
             prev_underscore = true;
-        } else if ch.is_ascii_digit() {
-            cleaned.push(ch);
-            prev_underscore = false;
         } else {
-            return None;
+            let digit = nd_value(ch)?;
+            cleaned.push(char::from_digit(digit, 10).expect("decimal digit"));
+            prev_underscore = false;
         }
     }
     if prev_underscore {
@@ -1553,10 +1586,9 @@ fn validate_json_prop(value: &Value, slot: &mut Vec<String>) -> Option<Value> {
 /// `UUIDField.to_python` raises `ValidationError`, which
 /// `Serializer.to_internal_value` catches per-field
 /// (`serializers.py:502-504`), so nothing escapes to `handle_exception`.
-/// Note: serde stores int-text past `u64::MAX` as f64, indistinguishable
-/// from float-text, so that range renders the float repr instead of the
-/// full digits (and misses `does_not_exist` below 2^128) — vanishingly
-/// rare, the same bucket as the sibling ports.
+/// Note: `arbitrary_precision` keeps big-int text exact, so past-`u64`
+/// inputs render their full digits (probed: 2**128 shows all 39
+/// digits) — there is no float-repr residual here.
 enum FkValue {
     /// Field error already pushed.
     Invalid,
@@ -1795,11 +1827,16 @@ fn member_rows_builder<'q>(
     qb.push_bind(slug);
     qb.push(") AND wm.deleted_at IS NULL ");
     for term in terms {
-        qb.push("AND (u.display_name ILIKE ");
+        // `icontains` is `UPPER(col::text) LIKE UPPER($N)` on Postgres
+        // (`backends/postgresql/base.py` + `lookups.py`), not `ILIKE`:
+        // upper- and lower-case folding disagree on Turkic-I and
+        // Greek-sigma pairs, so only the `UPPER` form matches row for
+        // row (the `app_pages` search precedent).
+        qb.push("AND (UPPER(u.display_name::text) LIKE UPPER(");
         qb.push_bind(like_param(term));
-        qb.push(" OR u.first_name ILIKE ");
+        qb.push(") OR UPPER(u.first_name::text) LIKE UPPER(");
         qb.push_bind(like_param(term));
-        qb.push(") ");
+        qb.push(")) ");
     }
     if let Some(id) = target {
         qb.push("AND wm.id = ");
@@ -3457,6 +3494,29 @@ mod tests {
         assert_eq!(case("\"-99999999999999999999999\""), Some(i64::MIN));
         assert_eq!(case("18446744073709551615"), Some(i64::MAX));
         assert_eq!(case("1e3"), Some(1000));
+        // `int()` strips every `str.strip` char except `\x1c`-`\x1f`
+        // (probed exhaustively): the four controls raise.
+        assert_eq!(case("\"\\u001c5\""), None);
+        assert_eq!(case("\"5\\u001f\""), None);
+        assert_eq!(case("\" \\u001c5\\u001f \""), None);
+        assert_eq!(case("\"\u{85}5\""), Some(5));
+        assert_eq!(case("\"\u{a0}5\""), Some(5));
+        assert_eq!(case("\"\u{2003}5\""), Some(5));
+        // `int()` accepts the full Unicode decimal set (general
+        // category Nd), with the same underscore and sign rules.
+        assert_eq!(case("\"５\""), Some(5));
+        assert_eq!(case("\"５５５\""), Some(555));
+        assert_eq!(case("\"5５5\""), Some(555));
+        assert_eq!(case("\"+٥\""), Some(5));
+        assert_eq!(case("\"-٥\""), Some(-5));
+        assert_eq!(case("\"٥_٦\""), Some(56));
+        assert_eq!(case("\"５_５\""), Some(55));
+        assert_eq!(case("\"_５\""), None);
+        assert_eq!(case("\"５_\""), None);
+        assert_eq!(case("\"＋5\""), None);
+        assert_eq!(case("\"²\""), None);
+        assert_eq!(case("\"\u{1d7ce}\""), Some(0));
+        assert_eq!(case("\"\u{1d7d8}\""), Some(0));
     }
 
     #[test]
@@ -3654,7 +3714,7 @@ mod tests {
         // Garbage is the fancy-quote field error (Django's
         // `ValidationError`, caught per-field by
         // `Serializer.to_internal_value`), never an escaping branch —
-        // proven on the real serializer class, all six displays.
+        // proven on the real serializer class, all seven displays.
         for (json, display) in [
             ("\"abc\"", "abc"),
             ("\"5\"", "5"),
@@ -3662,6 +3722,12 @@ mod tests {
             ("5.5", "5.5"),
             ("[1]", "[1]"),
             ("{\"a\":1}", "{'a': 1}"),
+            // Past-`u64` int text keeps its full digits
+            // (`arbitrary_precision`): 2**128 shows all 39, like Django.
+            (
+                "340282366920938463463374607431768211456",
+                "340282366920938463463374607431768211456",
+            ),
         ] {
             let (outcome, errors) = case(json, false);
             assert!(matches!(outcome, FkValue::Invalid), "{json}");
@@ -4066,13 +4132,14 @@ mod tests {
             format!("{MEMBER_SELECT}$1) AND wm.deleted_at IS NULL ORDER BY wm.created_at DESC")
         );
         // Terms AND after the guard, each binding two LIKEs.
+        // `icontains` is the `UPPER` form, not `ILIKE`.
         let terms = member_rows_builder("acme", &["ada".to_owned()], None, false)
             .sql()
             .to_owned();
         assert_eq!(
             terms,
             format!(
-                "{MEMBER_SELECT}$1) AND wm.deleted_at IS NULL AND (u.display_name ILIKE $2 OR u.first_name ILIKE $3) ORDER BY wm.created_at DESC"
+                "{MEMBER_SELECT}$1) AND wm.deleted_at IS NULL AND (UPPER(u.display_name::text) LIKE UPPER($2) OR UPPER(u.first_name::text) LIKE UPPER($3)) ORDER BY wm.created_at DESC"
             )
         );
         // Target + LIMIT 1 (retrieve): the id binds after the term LIKEs.
@@ -4083,7 +4150,7 @@ mod tests {
         assert_eq!(
             detail,
             format!(
-                "{MEMBER_SELECT}$1) AND wm.deleted_at IS NULL AND (u.display_name ILIKE $2 OR u.first_name ILIKE $3) AND wm.id = $4 ORDER BY wm.created_at DESC LIMIT 1"
+                "{MEMBER_SELECT}$1) AND wm.deleted_at IS NULL AND (UPPER(u.display_name::text) LIKE UPPER($2) OR UPPER(u.first_name::text) LIKE UPPER($3)) AND wm.id = $4 ORDER BY wm.created_at DESC LIMIT 1"
             )
         );
     }
