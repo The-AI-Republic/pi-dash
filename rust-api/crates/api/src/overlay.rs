@@ -247,14 +247,16 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // member/invite/user, PIDASHCONV-371, plus states/estimates,
         // PIDASHCONV-372, via `v1_projects::routes`; D-20 cycle routes,
         // PIDASHCONV-362, plus module routes, PIDASHCONV-406, via
-        // `v1_cycles_modules::routes`; sibling handler issues extend the
-        // merge; merges keep both sides;
+        // `v1_cycles_modules::routes`; D-22 runner delete,
+        // PIDASHCONV-538, via `v1_cli_auth::routes`; sibling handler
+        // issues extend the merge; merges keep both sides;
         // `auth_oauth::routes` already covers the device flow.
         // Registration is the cutover granularity — sibling paths have no
         // Rust route and keep proxying to Django through the fallback.
         RouteGroup::ApiV1 => crate::auth_oauth::routes()
             .merge(crate::v1_projects::routes())
-            .merge(crate::v1_cycles_modules::routes()),
+            .merge(crate::v1_cycles_modules::routes())
+            .merge(crate::v1_cli_auth::routes()),
         // Auth handlers merge their routers here (D-17 Gitea OAuth
         // initiate/callback, PIDASHCONV-341; GitHub OAuth initiate/callback,
         // PIDASHCONV-336; GitLab OAuth initiate/callback, PIDASHCONV-339;
