@@ -12,6 +12,8 @@
 //! * [`shape_relations`] — relation shapes (`IssueRelationResponse` /
 //!   `Create` / `Remove` / `Show`, `RelatedIssue`;
 //!   `api/serializers/issue.py:729-906`, PIDASHCONV-663).
+//! * [`shape_pages`] — page serializers (`api/serializers/page.py:27-112`,
+//!   PIDASHCONV-666).
 //! * Sibling issues extend this file with their own `pub mod shape_*;` /
 //!   `queries_*` lines (PIDASHCONV-661…672); on rebase keep both sides,
 //!   never fork a helper.
@@ -28,6 +30,7 @@
 
 pub mod shape_issue;
 pub mod shape_relations;
+pub mod shape_pages;
 
 /// One entry of a DRF `fields=` argument (`base.py:19-30,41-60`): either a
 /// plain field name or a `{name: sub-fields}` dict entry. Query-string
