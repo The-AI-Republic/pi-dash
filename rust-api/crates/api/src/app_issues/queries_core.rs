@@ -881,7 +881,7 @@ mod tests {
     fn shared_fragments_match_pilot2_helper() {
         // The reused texts stay byte-identical to pilot-2's shared helper;
         // any drift in either direction fails here, not in a gate run.
-        let helper = super::super::annotation_selects(true, None, true, true);
+        let helper = super::super::annotation_selects(true, None, true, true, false);
         for fragment in [
             CYCLE_ID_SELECT,
             &link_count_select(false),
