@@ -43,6 +43,7 @@
 //!   (`NOT (group = 'triage')` over a left join, three-valued logic).
 
 pub mod queries_core;
+pub mod queries_engage;
 pub mod render;
 
 use std::collections::HashMap;
