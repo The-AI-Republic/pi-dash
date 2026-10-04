@@ -15,8 +15,13 @@
 //! profile, user issues, stats, user activity, me activities
 //! (PIDASHCONV-618); [`routes`] merges its routes — sibling handler
 //! issues extend the merge; merges keep both sides.
+//!
+//! [`handlers_members`] serves the member family (list/retrieve,
+//! partial_update/destroy/leave, views-post, me-get, project-members,
+//! last-visited — PIDASHCONV-616).
 
 pub mod gates;
+pub mod handlers_members;
 pub mod handlers_prefs;
 pub mod handlers_profile;
 pub mod handlers_tokens;
@@ -31,7 +36,8 @@ use crate::state::AppState;
 /// (sibling D-24 handler issues extend this merge; merges keep both
 /// sides), merged here for the F-10 overlay seam.
 pub fn routes() -> Router<AppState> {
-    handlers_prefs::routes()
+    handlers_members::routes()
+        .merge(handlers_prefs::routes())
         .merge(handlers_profile::routes())
         .merge(handlers_tokens::routes())
         .merge(handlers_user_extras::routes())
