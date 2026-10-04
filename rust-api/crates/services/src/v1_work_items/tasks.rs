@@ -73,9 +73,10 @@
 //!   identical; only the informational repr headers differ.
 //! * QUIRK-crawl-arg-types: link create passes a UUID object (`:1635`)
 //!   while link patch passes serializer-data strings (`:1749`).
-//! * QUIRK-patch-model-data (`views/issue.py:853`): the issue-patch
-//!   `model_activity` carries the *normalized* `data` (converted HTML),
-//!   while create and both put branches pass raw `request.data`.
+//! * QUIRK-patch-model-data (`views/issue.py:533,853`): the issue create
+//!   and patch `model_activity` emits carry the *normalized* `data`
+//!   (converted HTML), while both put branches pass raw `request.data`
+//!   (`:693,751`).
 //! * QUIRK-comment/link-create-actor (`:1926-1944`, `:1636-1647`): the
 //!   `issue_activity` actor is the (possibly `request.data`-overridden)
 //!   `created_by_id`, while the sibling `model_activity` on comment
@@ -315,8 +316,8 @@ pub fn link_create_activity_kwargs(
 }
 
 /// The issue `model_activity.delay(...)` calls (`:530,693,751,853`):
-/// `model_name="issue"`, `requested_data` the raw `request.data` object on
-/// create/put but the normalized `data` on patch
+/// `model_name="issue"`, `requested_data` the normalized `data` on
+/// create/patch but the raw `request.data` object on both put branches
 /// (QUIRK-patch-model-data), `current_instance` the before-image text or
 /// `None`. Delegates to the shared
 /// [`crate::v1_projects::tasks::model_activity_kwargs`] kernel.
