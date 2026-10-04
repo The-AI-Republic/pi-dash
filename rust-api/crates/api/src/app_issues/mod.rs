@@ -42,6 +42,7 @@
 //! - the manager's triage exclusion drops NULL-state rows with it
 //!   (`NOT (group = 'triage')` over a left join, three-valued logic).
 
+pub mod handlers_engage;
 pub mod handlers_labels_attachments;
 pub mod queries_core;
 pub mod queries_engage;
@@ -71,8 +72,9 @@ use pidash_services::app_issues::{
 
 use render::v2_page;
 
-/// Register the five list-family GET routes. Nothing else: sibling paths
-/// stay unmatched and proxy to Django.
+/// Register the five list-family GET routes plus the engage-handler
+/// routes. Nothing else: sibling paths stay unmatched and proxy to
+/// Django.
 ///
 /// Non-GET methods on owned paths proxy too. DRF authenticates before it
 /// checks the method, and `POST issues/` is the create endpoint other
@@ -181,6 +183,7 @@ pub fn routes() -> Router<AppState> {
                 .trace(proxy)
                 .fallback(proxy),
         )
+        .merge(handlers_engage::routes())
 }
 
 /// A list-family path: the GET handler owns reads, everything else falls
