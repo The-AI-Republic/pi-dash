@@ -447,8 +447,18 @@ test(
       await expect
         .poll(async () => (await driver.ganttSidebarRows()).map((row) => row.name), { timeout: 60_000 })
         .toEqual([third, first, second]);
-      const moved = await serverIssueDetails(seed.workspaceSlug, seed.projectId, ids[2] ?? "", owner.cookie);
-      expect(moved.sortOrder).toBeLessThan(ranks[0] ?? 0);
+      // The sidebar reorder applies optimistically in the UI while the rank
+      // PATCH lands asynchronously: a single immediate server read can catch
+      // the pre-persist value (the run-10 sweep read 35000 here, and the
+      // retry's leaked order proved the PATCH landed moments later). Poll
+      // until the new rank persists instead of reading once.
+      await expect
+        .poll(
+          async () =>
+            (await serverIssueDetails(seed.workspaceSlug, seed.projectId, ids[2] ?? "", owner.cookie)).sortOrder,
+          { timeout: 60_000 }
+        )
+        .toBeLessThan(ranks[0] ?? 0);
     });
 
     await test.step("a sorted timeline suppresses the reorder", async () => {
