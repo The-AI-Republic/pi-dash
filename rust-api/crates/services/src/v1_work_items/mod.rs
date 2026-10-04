@@ -24,6 +24,8 @@
 //!   PIDASHCONV-666).
 //! * [`shape_social`] — comment/attachment/activity shapes
 //!   (`api/serializers/issue.py:907-1032` + `:1119-1138`, PIDASHCONV-664).
+//! * [`columns`] — models layer: F18-05 column-verification record +
+//!   nullable-column consts (PIDASHCONV-667; D-18 owns no tables).
 //! * Sibling issues extend this file with their own `pub mod shape_*;` /
 //!   `queries_*` lines (PIDASHCONV-661…663,665…672); on rebase keep both sides,
 //!   never fork a helper.
@@ -38,6 +40,7 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
+pub mod columns;
 pub mod queries_core;
 pub mod queries_sub;
 pub mod shape_expand_search;
