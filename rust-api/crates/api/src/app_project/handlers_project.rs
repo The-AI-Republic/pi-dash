@@ -84,7 +84,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc, Weekday};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
 use sqlx::Row;
@@ -226,6 +226,10 @@ pub const USER_VIEWS_FORBIDDEN_BODY: &str = r#"{"error":"Forbidden"}"#;
 /// DRF `DateTimeField` invalid-input message (verified against DRF 3.15.2
 /// `fields.py:1129`): answers unparseable `archived_at` / `deleted_at`.
 pub const INVALID_DATETIME_MESSAGE: &str = "Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z].";
+/// DRF `DateTimeField` `overflow` message (`fields.py:1132`): an aware
+/// input whose `astimezone` crosses the `0001..=9999` years (probed:
+/// `9999-12-31T23:00:00-14:00` and `0001-01-01T00:00:00+14:00`).
+pub const OVERFLOW_DATETIME_MESSAGE: &str = "Datetime value out of range.";
 /// `BasePaginator.get_per_page` ceiling (`default_per_page=1000`,
 /// `max_per_page=1000`, `paginator.py:643-654`).
 pub const MAX_PER_PAGE: i64 = 1000;
@@ -744,6 +748,15 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
+/// DRF `JSONRenderer.render`: after dumping, `\\u2028`/`\\u2029` are
+/// always escaped (lowercase hex) so the output is a strict JavaScript
+/// subset — `serde_json` emits them raw, so every rendered HTTP body
+/// passes through here.
+fn escape_u2028(body: String) -> String {
+    body.replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
 fn json_response(status: StatusCode, body: String) -> Response {
     Response::builder()
         .status(status)
@@ -753,11 +766,11 @@ fn json_response(status: StatusCode, body: String) -> Response {
 }
 
 fn json_ok(body: String) -> Response {
-    json_response(StatusCode::OK, body)
+    json_response(StatusCode::OK, escape_u2028(body))
 }
 
 fn json_created(body: String) -> Response {
-    json_response(StatusCode::CREATED, body)
+    json_response(StatusCode::CREATED, escape_u2028(body))
 }
 
 fn no_content() -> Response {
@@ -834,7 +847,7 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Denial> {
 }
 
 /// `_rewrite_project_kwarg` (`app/views/base.py:49-81`): UUID-looking input
-/// passes through unverified (the body 404s it as before — the L6
+/// passes through unverified (the handlers scope it — the L6
 /// `is_uuid_like` rule, same spellings as `uuid.UUID()`); anything else
 /// matches `UPPER(identifier)` in the workspace; a miss answers the
 /// resolve 404. The doubled `deleted_at` guard (`Project.objects` manager
@@ -986,12 +999,13 @@ fn check_gate(
 /// `APP_BASE_URL` when set, else `WEB_URL`, else `ImproperlyConfigured`
 /// → 500. (The value feeds task kwargs only, never HTTP bytes.)
 fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .app_base_url
+    // `base_host` uses `or`: an empty string means unset (each level
+    // falls through independently).
+    let urls = &state.settings().urls;
+    urls.app_base_url
         .clone()
-        .or_else(|| state.settings().urls.web_url.clone())
+        .filter(|url| !url.is_empty())
+        .or_else(|| urls.web_url.clone().filter(|url| !url.is_empty()))
         .ok_or(Denial::ServerError)
 }
 
@@ -1295,12 +1309,18 @@ impl ProjectRow {
 /// the no-op filter backends (`filterset_fields=[]`, `search_fields=[]`).
 /// The scoping probes run before the fetch in the handlers, exactly as
 /// Python evaluates them before appending the filters.
+///
+/// Two shapes: [`fetch_project_row_scoped`] (retrieve/PUT/destroy/PATCH
+/// re-fetch — the scoped queryset or `.get(pk, workspace__slug=slug)`)
+/// and the bare [`fetch_project_row`] (PATCH main fetch `.get(pk)`,
+/// PUT re-render, create re-fetch, `current_instance`).
 async fn fetch_project_row(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
+    slug: &str,
 ) -> Result<Option<ProjectRow>, Denial> {
-    fetch_project_row_opts(pool, project_id, user_id, true).await
+    fetch_project_row_opts(pool, project_id, user_id, slug, true, false).await
 }
 
 /// `fetch_project_row` with the soft-delete filter optional: PUT
@@ -1310,10 +1330,17 @@ async fn fetch_project_row_opts(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
+    slug: &str,
     live_only: bool,
+    scoped: bool,
 ) -> Result<Option<ProjectRow>, Denial> {
     let deleted = if live_only {
         "AND p.deleted_at IS NULL"
+    } else {
+        ""
+    };
+    let scope = if scoped {
+        "JOIN workspaces w ON w.id = p.workspace_id AND w.slug = $3"
     } else {
         ""
     };
@@ -1342,21 +1369,36 @@ async fn fetch_project_row_opts(
               (SELECT pm.role FROM project_members pm
                WHERE pm.deleted_at IS NULL AND pm.is_active AND pm.member_id = $2
                  AND pm.project_id = p.id ORDER BY pm.created_at DESC) AS member_role,
-              (SELECT board.anchor FROM deploy_boards board
-               WHERE board.deleted_at IS NULL AND board.project_id = p.id
-                 AND board.workspace_id = p.workspace_id) AS anchor
-           FROM projects p
+              {anchor} AS anchor
+           FROM projects p {scope}
            WHERE p.id = $1 {deleted}"#,
         deleted = deleted,
+        scope = scope,
+        anchor = anchor_sql("$3"),
     );
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
         .bind(project_id)
         .bind(user_id)
+        .bind(slug)
         .fetch_optional(pool)
         .await
         .map_err(db_denial)?;
     row.map(|row| ProjectRow::from_row(&row).map_err(|_| Denial::ServerError))
         .transpose()
+}
+
+/// [`fetch_project_row`] scoped to the workspace slug (live rows): the
+/// retrieve/PUT `get_queryset` fetches, the destroy
+/// `.get(pk, workspace__slug=slug)`, and the PATCH re-fetch
+/// (`base.py:367` uses the scoped queryset — a miss there is the 500
+/// `AttributeError` branch).
+async fn fetch_project_row_scoped(
+    pool: &sqlx::PgPool,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    slug: &str,
+) -> Result<Option<ProjectRow>, Denial> {
+    fetch_project_row_opts(pool, project_id, user_id, slug, true, true).await
 }
 
 /// One `members_list` prefetch row (`base.py:71-81`): active memberships
@@ -1429,6 +1471,94 @@ async fn next_sequence(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<i
     Ok(pidash_services::app_project::ser_project::next_work_item_sequence(row.0))
 }
 
+/// `FileAsset.asset_url` (`db/models/asset.py:80-103`) for one attached
+/// asset id. Forward-FK reads use the plain `_base_manager`
+/// (`related_descriptors.py:153`), so the read is unfiltered even
+/// though `FileAsset.objects` is the filtering `SoftDeletionManager`:
+/// a soft-deleted asset still answers its URL (live-probed 200), and
+/// a dangling id raises `DoesNotExist` → unhandled 500 (unreachable —
+/// the `projects_cover_image_asset_id` FK forbids dangling ids).
+/// Static kinds answer the static path; `ISSUE_ATTACHMENT` and the four
+/// `*_DESCRIPTION` kinds answer workspace-scoped URLs (the workspace
+/// slug traverses the same unfiltered manager — a NULL workspace is
+/// the `AttributeError` 500); anything else (including a NULL or
+/// unrecognized entity type) is `None`.
+/// One `file_assets` cover row: entity type plus the nullable owner
+/// columns the entity-URL table reads.
+type CoverAssetRow = (
+    Option<String>,
+    Option<uuid::Uuid>,
+    Option<uuid::Uuid>,
+    Option<uuid::Uuid>,
+);
+
+async fn file_asset_url(
+    pool: &sqlx::PgPool,
+    asset_id: &uuid::Uuid,
+) -> Result<Option<String>, Denial> {
+    let row: Option<CoverAssetRow> = sqlx::query_as(
+        r#"SELECT entity_type, workspace_id, project_id, issue_id
+               FROM file_assets WHERE id = $1"#,
+    )
+    .bind(asset_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_denial)?;
+    let Some((entity_type, workspace_id, project_id, issue_id)) = row else {
+        return Err(Denial::ServerError);
+    };
+    match entity_type.as_deref() {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+            Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
+        }
+        Some("ISSUE_ATTACHMENT") => {
+            let slug = asset_workspace_slug(pool, workspace_id).await?;
+            Ok(Some(format!(
+                "/api/assets/v2/workspaces/{slug}/projects/{}/issues/{}/attachments/{asset_id}/",
+                opt_uuid_py(project_id),
+                opt_uuid_py(issue_id),
+            )))
+        }
+        Some(
+            "ISSUE_DESCRIPTION"
+            | "COMMENT_DESCRIPTION"
+            | "PAGE_DESCRIPTION"
+            | "DRAFT_ISSUE_DESCRIPTION",
+        ) => {
+            let slug = asset_workspace_slug(pool, workspace_id).await?;
+            Ok(Some(format!(
+                "/api/assets/v2/workspaces/{slug}/projects/{}/{asset_id}/",
+                opt_uuid_py(project_id),
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `asset.workspace.slug`: a NULL workspace is the `AttributeError` 500;
+/// the forward-FK read uses the plain `_base_manager`, so the lookup
+/// is unfiltered (miss → `DoesNotExist` 500 — unreachable via the FK).
+async fn asset_workspace_slug(
+    pool: &sqlx::PgPool,
+    workspace_id: Option<uuid::Uuid>,
+) -> Result<String, Denial> {
+    let Some(id) = workspace_id else {
+        return Err(Denial::ServerError);
+    };
+    let row: Option<(String,)> = sqlx::query_as(r#"SELECT slug FROM workspaces WHERE id = $1"#)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(db_denial)?;
+    row.map(|row| row.0).ok_or(Denial::ServerError)
+}
+
+/// f-string rendering of a nullable UUID FK (`None` → `"None"`).
+fn opt_uuid_py(id: Option<uuid::Uuid>) -> String {
+    id.map(|id| id.to_string())
+        .unwrap_or_else(|| "None".to_owned())
+}
+
 /// `Project.cover_image_url` (`db/models/project.py:175-185`, L5
 /// `cover_image_url`): an attached asset answers its `asset_url` as-is —
 /// even `None` for an unrecognized entity, with NO fallback to the legacy
@@ -1442,23 +1572,7 @@ async fn cover_image_url(
     let has_asset = asset_id.is_some();
     let asset_url: Option<String> = match asset_id {
         None => None,
-        Some(id) => {
-            let row: Option<(String,)> =
-                sqlx::query_as(r#"SELECT entity_type FROM file_assets WHERE id = $1"#)
-                    .bind(id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(db_denial)?;
-            // A dangling FK raises `DoesNotExist` in Python → 500.
-            let row = row.ok_or(Denial::ServerError)?;
-            // `FileAsset.asset_url` (`db/models/asset.py:97-106`):
-            // `PROJECT_COVER` answers the static path, anything else None.
-            if row.0 == "PROJECT_COVER" {
-                Some(format!("/api/assets/v2/static/{id}/"))
-            } else {
-                None
-            }
-        }
+        Some(id) => file_asset_url(pool, &id).await?,
     };
     Ok(pick(has_asset, asset_url.as_deref(), cover_image).map(str::to_owned))
 }
@@ -1599,6 +1713,11 @@ async fn render_list_row(
     user: &ExecutorUser,
 ) -> Result<String, Denial> {
     use pidash_services::app_project::ser_project::ProjectListRead;
+    if row.sort_order.is_some_and(|float| !float.is_finite()) {
+        // DRF `STRICT_JSON`: non-finite floats 500 at render, never
+        // `null` (see the compact-list site).
+        return Err(Denial::ServerError);
+    }
     let members = fetch_members(pool, &row.id, slug).await?;
     let rendered_members = render_members(&members)?;
     let sequence = next_sequence(pool, &row.id).await?;
@@ -1684,21 +1803,7 @@ async fn workspace_detail(pool: &sqlx::PgPool, workspace_id: &uuid::Uuid) -> Res
         return Err(Denial::ServerError);
     };
     let logo_url: Option<String> = match logo_asset_id {
-        Some(id) => {
-            let asset: Option<(String,)> =
-                sqlx::query_as(r#"SELECT entity_type FROM file_assets WHERE id = $1"#)
-                    .bind(id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(db_denial)?;
-            let asset = asset.ok_or(Denial::ServerError)?;
-            // `WORKSPACE_LOGO` answers the static path; anything else None.
-            if asset.0 == "WORKSPACE_LOGO" {
-                Some(format!("/api/assets/v2/static/{id}/"))
-            } else {
-                None
-            }
-        }
+        Some(id) => file_asset_url(pool, &id).await?,
         None => logo.filter(|text| !text.is_empty()),
     };
     let id = workspace_id.to_string();
@@ -1722,9 +1827,10 @@ async fn render_current_instance(
     project_id: &uuid::Uuid,
     actor: &Actor,
     user: &ExecutorUser,
+    slug: &str,
 ) -> Result<String, Denial> {
     use pidash_services::app_project::ser_project::ProjectRead;
-    let row = fetch_project_row(pool, project_id, &actor.id)
+    let row = fetch_project_row(pool, project_id, &actor.id, slug)
         .await?
         .ok_or(Denial::ServerError)?;
     let detail = workspace_detail(pool, &row.workspace_id).await?;
@@ -1794,6 +1900,39 @@ async fn render_current_instance(
 /// → the DRF non-dictionary 400, malformed → the `ParseError` 400 (the v1
 /// `parse_body` precedent; serde's message stands in for CPython's, as in
 /// every merged port — no fixture pins parser-error bytes).
+/// DRF `ParseError` reason for JSON-whitespace-only input (CPython
+/// `json.load` skips ` \t\n\r`, then fails `Expecting value` at the
+/// true line/column — live-probed, including multi-line blanks).
+/// Returns `None` when the input is not all JSON whitespace.
+fn blank_json_reason(raw: &[u8]) -> Option<String> {
+    if raw.is_empty()
+        || !raw
+            .iter()
+            .all(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+    {
+        return None;
+    }
+    let text = std::str::from_utf8(raw).ok()?;
+    let line = text.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = text.rsplit('\n').next().map_or(1, str::len) + 1;
+    Some(format!(
+        "JSON parse error - Expecting value: line {line} column {column} (char {})",
+        text.len()
+    ))
+}
+
+/// Map a body-parse failure to DRF's `ParseError` shape: blank input
+/// is byte-exact (see [`blank_json_reason`]); anything else carries
+/// the parser reason after the same prefix (the analytics
+/// `json_parse_denial` precedent).
+fn json_parse_denial(raw: &[u8], error: &serde_json::Error) -> Denial {
+    let reason = blank_json_reason(raw).unwrap_or_else(|| format!("JSON parse error - {error}"));
+    Denial::Raw(
+        StatusCode::BAD_REQUEST,
+        format!("{{\"detail\":{}}}", json_string(&reason)),
+    )
+}
+
 pub fn parse_body(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
     if raw.is_empty() {
         return Ok(Map::new());
@@ -1822,13 +1961,7 @@ pub fn parse_body(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
                 ),
             ))
         }
-        Err(error) => Err(Denial::Raw(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "{{\"detail\":{}}}",
-                json_string(&format!("JSON parse error - {error}"))
-            ),
-        )),
+        Err(error) => Err(json_parse_denial(raw, &error)),
     }
 }
 
@@ -1843,59 +1976,185 @@ fn parse_get_body(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
     match serde_json::from_slice::<Value>(raw) {
         Ok(Value::Object(map)) => Ok(map),
         Ok(_) => Err(Denial::ServerError),
-        Err(error) => Err(Denial::Raw(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "{{\"detail\":{}}}",
-                json_string(&format!("JSON parse error - {error}"))
-            ),
-        )),
+        Err(error) => Err(json_parse_denial(raw, &error)),
     }
 }
+
+/// Python `str.strip()` membership: Rust `White_Space` plus U+001C-U+001F
+/// (verified by exhaustively diffing `str.strip` against
+/// `char::is_whitespace` over all code points — those four are the only
+/// differences). Used by `CharField` (strip + blank check) and the
+/// identifier `name.strip()` lookups.
+fn is_py_strip_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
+/// Python `str.strip()` (see [`is_py_strip_ws`]).
+fn strip_py(text: &str) -> String {
+    text.trim_matches(is_py_strip_ws).to_owned()
+}
+
+/// Python `re` `\s` membership (str patterns): same set as
+/// [`is_py_strip_ws`] (verified by the same exhaustive diff). Used by
+/// DRF's `re_decimal` (`IntegerField`) and the `parse_datetime` regex
+/// fallback — NOT by `int()`/`float()`, which accept exactly Rust
+/// `White_Space` (U+001C-U+001F raise there; probed).
+fn is_re_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
+/// Unicode decimal-digit (`Nd`) runs as `(start, end)` code points,
+/// generated from `unicodedata.decimal` (64 runs; every run is one or
+/// more `0-9` decades, so the value is `(cp - start) % 10`). Python
+/// `int()`/`float()` and the `parse_datetime` regex fallback accept all
+/// of these; Rust `char::to_digit` is ASCII-only.
+const ND_RANGES: &[(u32, u32)] = &[
+    (0x0030, 0x0039),
+    (0x0660, 0x0669),
+    (0x06F0, 0x06F9),
+    (0x07C0, 0x07C9),
+    (0x0966, 0x096F),
+    (0x09E6, 0x09EF),
+    (0x0A66, 0x0A6F),
+    (0x0AE6, 0x0AEF),
+    (0x0B66, 0x0B6F),
+    (0x0BE6, 0x0BEF),
+    (0x0C66, 0x0C6F),
+    (0x0CE6, 0x0CEF),
+    (0x0D66, 0x0D6F),
+    (0x0DE6, 0x0DEF),
+    (0x0E50, 0x0E59),
+    (0x0ED0, 0x0ED9),
+    (0x0F20, 0x0F29),
+    (0x1040, 0x1049),
+    (0x1090, 0x1099),
+    (0x17E0, 0x17E9),
+    (0x1810, 0x1819),
+    (0x1946, 0x194F),
+    (0x19D0, 0x19D9),
+    (0x1A80, 0x1A89),
+    (0x1A90, 0x1A99),
+    (0x1B50, 0x1B59),
+    (0x1BB0, 0x1BB9),
+    (0x1C40, 0x1C49),
+    (0x1C50, 0x1C59),
+    (0xA620, 0xA629),
+    (0xA8D0, 0xA8D9),
+    (0xA900, 0xA909),
+    (0xA9D0, 0xA9D9),
+    (0xA9F0, 0xA9F9),
+    (0xAA50, 0xAA59),
+    (0xABF0, 0xABF9),
+    (0xFF10, 0xFF19),
+    (0x104A0, 0x104A9),
+    (0x10D30, 0x10D39),
+    (0x11066, 0x1106F),
+    (0x110F0, 0x110F9),
+    (0x11136, 0x1113F),
+    (0x111D0, 0x111D9),
+    (0x112F0, 0x112F9),
+    (0x11450, 0x11459),
+    (0x114D0, 0x114D9),
+    (0x11650, 0x11659),
+    (0x116C0, 0x116C9),
+    (0x11730, 0x11739),
+    (0x118E0, 0x118E9),
+    (0x11950, 0x11959),
+    (0x11C50, 0x11C59),
+    (0x11D50, 0x11D59),
+    (0x11DA0, 0x11DA9),
+    (0x11F50, 0x11F59),
+    (0x16A60, 0x16A69),
+    (0x16AC0, 0x16AC9),
+    (0x16B50, 0x16B59),
+    (0x1D7CE, 0x1D7FF),
+    (0x1E140, 0x1E149),
+    (0x1E2F0, 0x1E2F9),
+    (0x1E4F0, 0x1E4F9),
+    (0x1E950, 0x1E959),
+    (0x1FBF0, 0x1FBF9),
+];
+
+/// Python decimal-digit value (`unicodedata.decimal`), or `None`.
+fn nd_value(ch: char) -> Option<u32> {
+    let cp = ch as u32;
+    // ASCII fast path (also what `char::to_digit` covers).
+    if ch.is_ascii_digit() {
+        return Some(cp - 0x30);
+    }
+    for &(start, end) in ND_RANGES {
+        if cp >= start && cp <= end {
+            return Some((cp - start) % 10);
+        }
+    }
+    None
+}
+
+/// Django `ProhibitNullCharactersValidator` message (appended to every
+/// `CharField` after the length validators).
+const NULL_CHARACTERS_MESSAGE: &str = "Null characters are not allowed.";
 
 /// DRF `CharField` (`fields.py`): null → the null error (nullable fields
 /// check null *before* calling, via [`opt_char`]); blank (`""`, or
 /// whitespace-only — `trim_whitespace` only affects this check) → the blank
 /// error unless allowed, else `""`; bool/dict/list → invalid; numbers
-/// stringify; over `max_length` (code points) → the length error.
+/// stringify. The value is STRIPPED (`to_internal_value` returns
+/// `value.strip()`), and the validators run on the stripped value,
+/// collecting every failure in order: `max_length`, then the
+/// `ProhibitNullCharactersValidator` 400. (The third validator,
+/// `ProhibitSurrogateCharactersValidator`, cannot fire: `serde_json`
+/// rejects lone surrogates at parse, so they surface as the `ParseError`
+/// 400 instead — same status, accepted parser-bytes gap.)
 fn validate_char(
     value: &Value,
     max_length: Option<usize>,
     allow_blank: bool,
-) -> Result<String, String> {
+) -> Result<String, Vec<String>> {
+    let stripped = char_to_string(value, allow_blank)?;
+    let mut errors = char_length_errors(&stripped, max_length);
+    if stripped.contains('\0') {
+        errors.push(NULL_CHARACTERS_MESSAGE.to_owned());
+    }
+    if errors.is_empty() {
+        Ok(stripped)
+    } else {
+        Err(errors)
+    }
+}
+
+/// `CharField` coercion without the length/content validators: null →
+/// the null error, blank → the blank error (or `""` when allowed),
+/// bool/dict/list → invalid, else the stripped string.
+fn char_to_string(value: &Value, allow_blank: bool) -> Result<String, Vec<String>> {
     if value.is_null() {
-        return Err("This field may not be null.".to_owned());
+        return Err(vec!["This field may not be null.".to_owned()]);
     }
     match value {
         Value::String(text) => {
-            if text.is_empty() || text.trim().is_empty() {
+            if text.is_empty() || strip_py(text).is_empty() {
                 if allow_blank {
                     return Ok(String::new());
                 }
-                return Err("This field may not be blank.".to_owned());
+                return Err(vec!["This field may not be blank.".to_owned()]);
             }
-            if let Some(max) = max_length {
-                if text.chars().count() > max {
-                    return Err(format!(
-                        "Ensure this field has no more than {max} characters."
-                    ));
-                }
-            }
-            Ok(text.clone())
+            Ok(strip_py(text))
         }
-        Value::Number(number) => {
-            let text = number.to_string();
-            if let Some(max) = max_length {
-                if text.chars().count() > max {
-                    return Err(format!(
-                        "Ensure this field has no more than {max} characters."
-                    ));
-                }
-            }
-            Ok(text)
-        }
-        _ => Err("Not a valid string.".to_owned()),
+        Value::Number(number) => Ok(number.to_string()),
+        _ => Err(vec!["Not a valid string.".to_owned()]),
     }
+}
+
+/// `MaxLengthValidator` on the stripped value (code points), collecting.
+fn char_length_errors(stripped: &str, max_length: Option<usize>) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Some(max) = max_length {
+        if stripped.chars().count() > max {
+            errors.push(format!(
+                "Ensure this field has no more than {max} characters."
+            ));
+        }
+    }
+    errors
 }
 
 /// Nullable `CharField`: null → `None`, else `validate_char`.
@@ -1903,22 +2162,23 @@ fn opt_char(
     value: &Value,
     max_length: Option<usize>,
     allow_blank: bool,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, Vec<String>> {
     if value.is_null() {
         return Ok(None);
     }
     validate_char(value, max_length, allow_blank).map(Some)
 }
 
-/// DRF `BooleanField`: the case-insensitive true/false sets (note `1`/`0`
-/// but only `0.0`, not `1.0); unhashables → invalid.
+/// DRF `BooleanField`: membership in the true/false sets — `1.0 == 1`
+/// is a member of `TRUE_VALUES` (probed), `-0.0 == 0` of `FALSE_VALUES`;
+/// anything else (including `2`, `0.5`, dicts/lists) → invalid.
 fn validate_bool(value: &Value) -> Result<bool, String> {
     const INVALID: &str = "Must be a valid boolean.";
     match value {
         Value::Null => Err("This field may not be null.".to_owned()),
         Value::Bool(flag) => Ok(*flag),
         Value::Number(number) => {
-            if number.as_i64() == Some(1) {
+            if number.as_i64() == Some(1) || number.as_f64() == Some(1.0) {
                 Ok(true)
             } else if number.as_i64() == Some(0) || number.as_f64() == Some(0.0) {
                 Ok(false)
@@ -1935,46 +2195,191 @@ fn validate_bool(value: &Value) -> Result<bool, String> {
     }
 }
 
-/// DRF `IntegerField`: strings over 1000 chars → the size error; then
-/// `int(<trailing-.0*-stripped> str(data))` — bools, floats with a
-/// fraction, and non-numerics → invalid. (Huge ints parse to `i64` here;
-/// out-of-`int4` values die at the column like Python's `DataError` 500 —
-/// class `22`, not the `IntegrityError` branch.)
-fn validate_int(value: &Value) -> Result<i64, String> {
-    const INVALID: &str = "A valid integer is required.";
-    if value.is_null() {
-        return Err("This field may not be null.".to_owned());
-    }
-    if let Value::String(text) = value {
-        if text.len() > 1000 {
-            return Err("String value too large.".to_owned());
-        }
-    }
-    // `str(data)` for JSON inputs, then DRF's `re_decimal` (trailing `.0*`).
-    let text = match value {
-        Value::String(text) => text.clone(),
-        Value::Number(number) => number.to_string(),
-        Value::Bool(_) | Value::Array(_) | Value::Object(_) => {
-            return Err(INVALID.to_owned());
-        }
-        Value::Null => unreachable!("checked above"),
-    };
-    let stripped = strip_decimal_zeros(&text);
-    stripped.parse::<i64>().map_err(|_| INVALID.to_owned())
+/// DRF `IntegerField` failure: a 400 message, or a valid spelling
+/// outside `i64` (Python `int()` is unbounded, so it still runs the
+/// min/max validators — `TooLarge` always fails the bound on its
+/// sign's side, live-probed as a 400, never the column 500).
+#[derive(Debug, PartialEq, Eq)]
+enum IntError {
+    Invalid(String),
+    TooLarge { negative: bool },
 }
 
-/// DRF `re_decimal = re.compile(r'\.0*$')` substitution.
-fn strip_decimal_zeros(text: &str) -> String {
-    if let Some(prefix) = text.strip_suffix('0') {
-        let mut out = prefix;
-        while out.ends_with('0') {
-            out = &out[..out.len() - 1];
+/// Narrow a validated `IntegerField` (`i64`) to its `int4` column.
+/// Unreachable in practice — every arm range-checks to `i32` first
+/// (live-probed 400s) — but never wrap: `try_from`, not `as`.
+fn i32_or_500(value: i64) -> Result<i32, Denial> {
+    i32::try_from(value).map_err(|_| Denial::ServerError)
+}
+
+/// DRF `MinValueValidator`/`MaxValueValidator` on an `IntegerField`
+/// (the model field's tightest limits — live-probed: a plain model
+/// `IntegerField` enforces ±2³¹, `archive_in`/`close_in` enforce
+/// 0..12, one message each; `TooLarge` spellings fail the bound on
+/// their sign's side). Returns the value or the 400 message.
+fn check_int_range(result: Result<i64, IntError>, min: i64, max: i64) -> Result<i64, String> {
+    match result {
+        Ok(number) => {
+            if number < min {
+                Err(format!(
+                    "Ensure this value is greater than or equal to {min}."
+                ))
+            } else if number > max {
+                Err(format!("Ensure this value is less than or equal to {max}."))
+            } else {
+                Ok(number)
+            }
         }
-        if let Some(stripped) = out.strip_suffix('.') {
-            return stripped.to_owned();
+        Err(IntError::Invalid(message)) => Err(message),
+        Err(IntError::TooLarge { negative }) => Err(if negative {
+            format!("Ensure this value is greater than or equal to {min}.")
+        } else {
+            format!("Ensure this value is less than or equal to {max}.")
+        }),
+    }
+}
+
+/// DRF `IntegerField` (`fields.py`): `int(re_decimal.sub('', str(data)))`
+/// with `re_decimal = re.compile(r'\.0*\s*$')` — the `\s` is Python-`re`
+/// whitespace (see [`is_re_ws`]). Strings over 1000 *characters* → the
+/// size error. `str(data)`: JSON strings verbatim; JSON ints render
+/// exactly; JSON floats render like CPython `str(float)` (no exponent
+/// below `1e16`, so integral floats there validate — `1e3` → `1000` —
+/// while fractional or huge ones fail); bools/dicts/lists → invalid.
+/// `int()` accepts an optional sign, single underscores between digits,
+/// surrounding Rust-`White_Space` (exactly — U+001C-U+001F raise), and
+/// Unicode decimal digits ([`nd_value`]); a valid spelling outside `i64`
+/// is [`IntError::TooLarge`] (fails the min/max bound on its side).
+fn validate_int(value: &Value) -> Result<i64, IntError> {
+    const INVALID: &str = "A valid integer is required.";
+    let invalid = || IntError::Invalid(INVALID.to_owned());
+    if value.is_null() {
+        return Err(IntError::Invalid("This field may not be null.".to_owned()));
+    }
+    if let Value::String(text) = value {
+        if text.chars().count() > 1000 {
+            return Err(IntError::Invalid("String value too large.".to_owned()));
         }
     }
-    text.to_owned()
+    match value {
+        Value::String(text) => {
+            let stripped = strip_re_decimal(text);
+            match parse_python_int(&stripped) {
+                IntParse::Value(int) => Ok(int),
+                IntParse::TooLarge { negative } => Err(IntError::TooLarge { negative }),
+                IntParse::Invalid => Err(invalid()),
+            }
+        }
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                return Ok(int);
+            }
+            if let Some(uint) = number.as_u64() {
+                // Valid spelling (`str` is pure digits, non-negative).
+                return i64::try_from(uint).map_err(|_| IntError::TooLarge { negative: false });
+            }
+            let Some(float) = number.as_f64() else {
+                return Err(invalid());
+            };
+            // CPython `str(float)`: integral floats below `1e16` render
+            // `"<digits>.0"` (never an exponent — probed); anything else
+            // renders a fraction or an exponent, which `int()` rejects.
+            if float.fract() != 0.0 || !float.is_finite() || float.abs() >= 1e16 {
+                return Err(invalid());
+            }
+            let rendered = format!("{float:.1}");
+            let stripped = strip_re_decimal(&rendered);
+            // Well-formed by construction (`<digits>.0` below `1e16`);
+            // `None` is unreachable, mapped invalid defensively.
+            match parse_python_int(&stripped) {
+                IntParse::Value(int) => Ok(int),
+                _ => Err(invalid()),
+            }
+        }
+        Value::Bool(_) | Value::Array(_) | Value::Object(_) => Err(invalid()),
+        Value::Null => unreachable!("checked above"),
+    }
+}
+
+/// DRF `re_decimal.sub('', text)`: remove one trailing `\.0*` plus
+/// trailing `re`-whitespace. When no dot-pattern matches, the ORIGINAL
+/// text is returned (so trailing U+001C-U+001F still fail `int()`).
+fn strip_re_decimal(text: &str) -> String {
+    let trimmed = text.trim_end_matches(is_re_ws);
+    if let Some(prefix) = trimmed.strip_suffix('0') {
+        let zeros = prefix.trim_end_matches('0');
+        if let Some(stripped) = zeros.strip_suffix('.') {
+            return stripped.to_owned();
+        }
+        return text.to_owned();
+    }
+    trimmed.strip_suffix('.').unwrap_or(text).to_owned()
+}
+
+/// Python `int(text)` outcome: a value, an invalid spelling (400),
+/// or a valid spelling outside `i64` (runs the min/max validators —
+/// the sign decides which bound fails).
+enum IntParse {
+    Value(i64),
+    Invalid,
+    TooLarge { negative: bool },
+}
+
+/// Python `int(text)` (base 10): surrounding Rust-`White_Space`, one
+/// optional ASCII sign, then decimal digits ([`nd_value`]) with single
+/// underscores allowed only between two digits. Any 20+-digit magnitude
+/// exceeds `i64` ([`IntParse::TooLarge`]).
+fn parse_python_int(text: &str) -> IntParse {
+    let text = text.trim_matches(|ch: char| ch.is_whitespace());
+    let (negative, digits) = match text.strip_prefix(['+', '-']) {
+        Some(rest) => (text.starts_with('-'), rest),
+        None => (false, text),
+    };
+    if digits.is_empty() {
+        return IntParse::Invalid;
+    }
+    // Collect digit values; `_` must sit between two digits.
+    let chars: Vec<char> = digits.chars().collect();
+    let mut values: Vec<u32> = Vec::with_capacity(chars.len());
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch == '_' {
+            let prev_ok =
+                index > 0 && chars[index - 1] != '_' && nd_value(chars[index - 1]).is_some();
+            let next_ok = index + 1 < chars.len() && nd_value(chars[index + 1]).is_some();
+            if !(prev_ok && next_ok) {
+                return IntParse::Invalid;
+            }
+            continue;
+        }
+        let Some(digit) = nd_value(*ch) else {
+            return IntParse::Invalid;
+        };
+        values.push(digit);
+    }
+    if values.is_empty() {
+        return IntParse::Invalid;
+    }
+    // Magnitude check before narrowing: skip leading zeros; more than
+    // 19 significant digits always exceeds `i64`.
+    let significant = values.iter().skip_while(|digit| **digit == 0).count();
+    if significant > 19 {
+        return IntParse::TooLarge { negative };
+    }
+    let mut magnitude: i128 = 0;
+    for digit in &values {
+        magnitude = magnitude * 10 + i128::from(*digit);
+    }
+    if negative {
+        if magnitude > i128::from(i64::MAX) + 1 {
+            return IntParse::TooLarge { negative: true };
+        }
+        IntParse::Value(-(magnitude as i64))
+    } else {
+        if magnitude > i128::from(i64::MAX) {
+            return IntParse::TooLarge { negative: false };
+        }
+        IntParse::Value(magnitude as i64)
+    }
 }
 
 /// DRF `ChoiceField` over string choices: the input is `str()`-coerced
@@ -2021,10 +2426,12 @@ fn validate_network(value: &Value) -> Result<i32, String> {
 }
 
 /// DRF `DateTimeField` (default `iso-8601` input formats): null → `None`
-/// when allowed; RFC 3339 / `Z` / offset inputs → the instant; naive
-/// `YYYY-MM-DD[T ]hh:mm[:ss[.f]]` read in the request user's zone (DRF
-/// `enforce_timezone` over `get_current_timezone`); anything else → the
-/// exact 400 message.
+/// when allowed; only strings parse (numbers/bools → invalid — DRF
+/// passes non-`date`/`datetime` objects to `parse_datetime`, which
+/// needs `str`); `parse_datetime` ([`parse_iso_core`] then
+/// [`parse_iso_regex`]) decides acceptance; naive inputs resolve
+/// `fold=0` in the request user's zone; anything else → the exact 400
+/// message.
 fn validate_datetime(
     value: &Value,
     timezone: Tz,
@@ -2039,40 +2446,753 @@ fn validate_datetime(
     let Value::String(text) = value else {
         return Err(INVALID_DATETIME_MESSAGE.to_owned());
     };
-    parse_drf_datetime(text, timezone)
-        .map(Some)
-        .ok_or_else(|| INVALID_DATETIME_MESSAGE.to_owned())
+    match parse_drf_datetime(text, timezone) {
+        DttmParse::Ok(when) => Ok(Some(when)),
+        DttmParse::Invalid => Err(INVALID_DATETIME_MESSAGE.to_owned()),
+        DttmParse::Overflow => Err(OVERFLOW_DATETIME_MESSAGE.to_owned()),
+    }
 }
 
-fn parse_drf_datetime(text: &str, timezone: Tz) -> Option<DateTime<Utc>> {
-    // Offset / `Z` forms first (Django `parse_datetime` accepts both `T`
-    // and space separators, optional seconds, 1-6 digit fractions).
-    let normalized = text.trim().replace(['Z', 'z'], "+00:00");
-    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&normalized) {
-        return Some(parsed.with_timezone(&Utc));
-    }
-    if let Ok(parsed) = chrono::DateTime::parse_from_str(&normalized, "%Y-%m-%d %H:%M:%S%.f %:z") {
-        return Some(parsed.with_timezone(&Utc));
-    }
-    if let Ok(parsed) = chrono::DateTime::parse_from_str(&normalized, "%Y-%m-%dT%H:%M:%S%.f%:z") {
-        return Some(parsed.with_timezone(&Utc));
-    }
-    // Naive forms read in the request user's zone.
-    for format in [
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y-%m-%d %H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M",
-        "%Y-%m-%d %H:%M",
-    ] {
-        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(text.trim(), format) {
-            use chrono::TimeZone;
-            if let chrono::LocalResult::Single(local) = timezone.from_local_datetime(&naive) {
-                return Some(local.with_timezone(&Utc));
-            }
-            return None;
+/// One `parse_drf_datetime` outcome: DRF distinguishes the unparseable
+/// `invalid` 400 from the `astimezone` `overflow` 400.
+enum DttmParse {
+    Ok(DateTime<Utc>),
+    Invalid,
+    Overflow,
+}
+
+impl DttmParse {
+    #[cfg(test)]
+    fn ok(self) -> Option<DateTime<Utc>> {
+        match self {
+            DttmParse::Ok(when) => Some(when),
+            DttmParse::Invalid | DttmParse::Overflow => None,
         }
     }
-    None
+}
+
+fn parse_drf_datetime(text: &str, timezone: Tz) -> DttmParse {
+    let Some(parsed) = parse_iso_core(text).or_else(|| parse_iso_regex(text)) else {
+        return DttmParse::Invalid;
+    };
+    match parsed.offset_micros {
+        // DRF `enforce_timezone`: aware values convert via
+        // `value.astimezone(request_zone)`, which raises `OverflowError`
+        // (the `overflow` 400) iff EITHER the UTC intermediate or the
+        // zone-local wall time leaves `0001..=9999` (CPython checks
+        // both conversions; fuzz-found:
+        // `9999-12-31T10:00:00-14:00` overflows in New York although
+        // the local wall time is in range). `chrono` represents wider
+        // years, so both bounds are checked explicitly.
+        Some(offset) => match parsed
+            .naive
+            .checked_sub_signed(Duration::microseconds(offset))
+        {
+            Some(naive) => {
+                if !(1..=9999).contains(&naive.date().year()) {
+                    return DttmParse::Overflow;
+                }
+                let utc = naive.and_utc();
+                if (1..=9999).contains(&utc.with_timezone(&timezone).year()) {
+                    DttmParse::Ok(utc)
+                } else {
+                    DttmParse::Overflow
+                }
+            }
+            None => DttmParse::Overflow,
+        },
+        None => match resolve_naive_fold_zero(&parsed.naive, timezone) {
+            Some(when) => DttmParse::Ok(when),
+            None => DttmParse::Invalid,
+        },
+    }
+}
+
+/// DRF `enforce_timezone` over the request user's `ZoneInfo`
+/// (`TimezoneMixin` activates `zoneinfo`, never `pytz`): naive wall
+/// times attach with `fold=0` and are ALWAYS accepted (probed:
+/// `valid_datetime` is true for ambiguous and nonexistent times alike,
+/// so the `make_aware` 400 is dead with `ZoneInfo`). Ambiguous resolves
+/// to the first occurrence; a nonexistent (gap) wall time resolves with
+/// the pre-transition offset, found by scanning back in 15-minute steps
+/// (real-zone gaps are under 125h — dateline skips included).
+fn resolve_naive_fold_zero(naive: &NaiveDateTime, timezone: Tz) -> Option<DateTime<Utc>> {
+    use chrono::{LocalResult, TimeZone};
+    match timezone.from_local_datetime(naive) {
+        LocalResult::Single(local) => Some(local.with_timezone(&Utc)),
+        LocalResult::Ambiguous(first, _) => Some(first.with_timezone(&Utc)),
+        LocalResult::None => {
+            let mut probe = *naive;
+            for _ in 0..500 {
+                probe = probe.checked_sub_signed(Duration::minutes(15))?;
+                if let LocalResult::Single(local) = timezone.from_local_datetime(&probe) {
+                    let offset = probe.signed_duration_since(local.naive_utc());
+                    return naive.checked_sub_signed(offset).map(|utc| utc.and_utc());
+                }
+            }
+            None
+        }
+    }
+}
+
+/// One `parse_datetime` result: the wall time (fractions truncated to
+/// micros) plus a fixed UTC offset in micros (`None` = naive, read in
+/// the request user's zone).
+struct ParsedDateTime {
+    naive: NaiveDateTime,
+    offset_micros: Option<i64>,
+}
+
+/// ASCII digit pair, or `None`.
+fn ascii2(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() == 2 && bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit() {
+        Some(u32::from(bytes[0] - b'0') * 10 + u32::from(bytes[1] - b'0'))
+    } else {
+        None
+    }
+}
+
+/// Exactly two ASCII digits, or `false` (short slices included).
+fn two_ascii_digits(bytes: Option<&[u8]>) -> bool {
+    matches!(bytes, Some(pair) if pair.len() == 2 && pair[0].is_ascii_digit() && pair[1].is_ascii_digit())
+}
+
+/// Post-offset end: empty, or exactly one trailing NUL (probed:
+/// `+00:00\x00` reads, `+00:00\x00\x00` fails).
+fn is_end_or_nul(rest: &str) -> bool {
+    rest.is_empty() || rest.as_bytes() == b"\0"
+}
+
+/// ASCII 4-digit group, or `None`.
+fn ascii4(bytes: &[u8]) -> Option<i32> {
+    if bytes.len() == 4 && bytes.iter().all(|byte| byte.is_ascii_digit()) {
+        Some(
+            bytes
+                .iter()
+                .fold(0i32, |acc, byte| acc * 10 + i32::from(byte - b'0')),
+        )
+    } else {
+        None
+    }
+}
+
+/// `datetime.fromisoformat` (Python 3.12) as Django's `parse_datetime`
+/// calls it: strict-ASCII extended/basic/week dates, any single char
+/// separator, extended/basic times with fraction-after-any-component
+/// (always a fraction of a second, truncated to micros), `Z` or numeric
+/// offsets (offset seconds and sub-second fractions allowed). Every rule
+/// below was verified by probing; anything else falls through to
+/// [`parse_iso_regex`]. (`ValueError` and `None` both become the 400
+/// `invalid` message in DRF, so both are `None` here.)
+fn parse_iso_core(text: &str) -> Option<ParsedDateTime> {
+    let bytes = text.as_bytes();
+    let (first, second) = parse_iso_core_date_opts(bytes)?;
+    parse_iso_core_rest(text, first)
+        .or_else(|| second.and_then(|opt| parse_iso_core_rest(text, opt)))
+}
+
+/// One week-date reading: taken vs untaken weekday (calendar dates
+/// have a single option). `ban_digit_sep` forbids an ASCII-digit
+/// separator after a taken extended-week day (probed:
+/// `2024-W01-1200:00` is invalid while `2024W011200` reads).
+#[derive(Clone, Copy)]
+struct DateOption {
+    date: NaiveDate,
+    pos: usize,
+    ban_digit_sep: bool,
+}
+
+fn parse_iso_core_rest(text: &str, opt: DateOption) -> Option<ParsedDateTime> {
+    let DateOption {
+        date,
+        mut pos,
+        ban_digit_sep,
+    } = opt;
+    if pos == text.len() {
+        // Date-only: midnight, naive (3.11+ `fromisoformat`).
+        return Some(ParsedDateTime {
+            naive: date.and_hms_opt(0, 0, 0)?,
+            offset_micros: None,
+        });
+    }
+    // Separator: any single char (probed: `T`, `t`, space, tab,
+    // newline, `x`, `_`, digits, `+`/`-`, `Z`, non-ASCII — so
+    // `2024-01-01+05:30` is 05:30 naive, and `2024-01-01Z` is an
+    // empty time → invalid).
+    let sep = text[pos..].chars().next()?;
+    if ban_digit_sep && sep.is_ascii_digit() {
+        return None;
+    }
+    pos += sep.len_utf8();
+    if pos >= text.len() {
+        return None;
+    }
+    let (time, frac_len, rest) = parse_iso_core_time(&text[pos..])?;
+    let offset_micros = parse_iso_core_tz(rest, frac_len)?;
+    Some(ParsedDateTime {
+        naive: NaiveDateTime::new(date, time),
+        offset_micros,
+    })
+}
+
+/// ISO weekday from a `1..=7` day digit.
+fn isoweekday(day: u32) -> Weekday {
+    match day {
+        1 => Weekday::Mon,
+        2 => Weekday::Tue,
+        3 => Weekday::Wed,
+        4 => Weekday::Thu,
+        5 => Weekday::Fri,
+        6 => Weekday::Sat,
+        _ => Weekday::Sun,
+    }
+}
+
+/// ISO week date bounded to the `0001..=9999` years: week dates can
+/// resolve outside the week-year (probed: `2020-W53-7` is
+/// 2021-01-03); past `9999` Python raises, which Django cannot
+/// regex-rescue (probed: `9999-W52-7` is invalid). `chrono`
+/// represents wider years, so the bound is checked explicitly.
+fn isoywd_bounded(year: i32, week: u32, weekday: Weekday) -> Option<NaiveDate> {
+    let date = NaiveDate::from_isoywd_opt(year, week, weekday)?;
+    if (1..=9999).contains(&date.year()) {
+        Some(date)
+    } else {
+        None
+    }
+}
+
+/// Core date readings: extended `YYYY-MM-DD`, basic `YYYYMMDD`, week
+/// `YYYY-Www[-d]`, or basic week `YYYYWww[d]`. Calendar dates yield
+/// one reading; week dates yield two — weekday taken first, untaken
+/// (Monday) as the backtrack when the taken reading fails anywhere
+/// downstream (probed: `2024W011200` reads Monday 00:00 via the
+/// taken day, `2024W013000000` falls back to Monday 00:00:00,
+/// `2024-W01-7x00:00` falls back to Sunday 00:00). After a taken
+/// extended-week day an ASCII-digit separator fails the reading
+/// (probed: `2024-W01-1200:00` is invalid, while `2024W011200`
+/// reads and a non-ASCII digit separator reads).
+fn parse_iso_core_date_opts(bytes: &[u8]) -> Option<(DateOption, Option<DateOption>)> {
+    if bytes.len() >= 8 && bytes[4] == b'-' {
+        if bytes[5] == b'W' {
+            let year = ascii4(bytes.get(0..4)?)?;
+            if year < 1 {
+                return None;
+            }
+            let week = ascii2(bytes.get(6..8)?)?;
+            if !(1..=53).contains(&week) {
+                return None;
+            }
+            let monday = isoywd_bounded(year, week, Weekday::Mon)?;
+            let backtrack = DateOption {
+                date: monday,
+                pos: 8,
+                ban_digit_sep: false,
+            };
+            if bytes.get(8) == Some(&b'-') {
+                if let Some(day) = bytes
+                    .get(9)
+                    .and_then(|byte| (b'1'..=b'7').contains(byte).then(|| u32::from(byte - b'0')))
+                {
+                    if let Some(date) = isoywd_bounded(year, week, isoweekday(day)) {
+                        let taken = DateOption {
+                            date,
+                            pos: 10,
+                            ban_digit_sep: true,
+                        };
+                        return Some((taken, Some(backtrack)));
+                    }
+                }
+            }
+            return Some((backtrack, None));
+        }
+        let year = ascii4(bytes.get(0..4)?)?;
+        if year < 1 || bytes[7] != b'-' {
+            return None;
+        }
+        let month = ascii2(bytes.get(5..7)?)?;
+        let day = ascii2(bytes.get(8..10)?)?;
+        let date = NaiveDate::from_ymd_opt(year, month, day)?;
+        return Some((
+            DateOption {
+                date,
+                pos: 10,
+                ban_digit_sep: false,
+            },
+            None,
+        ));
+    }
+    if bytes.len() >= 7 && bytes[4] == b'W' {
+        let year = ascii4(bytes.get(0..4)?)?;
+        if year < 1 {
+            return None;
+        }
+        let week = ascii2(bytes.get(5..7)?)?;
+        if !(1..=53).contains(&week) {
+            return None;
+        }
+        let monday = isoywd_bounded(year, week, Weekday::Mon)?;
+        let backtrack = DateOption {
+            date: monday,
+            pos: 7,
+            ban_digit_sep: false,
+        };
+        if let Some(day) = bytes
+            .get(7)
+            .and_then(|byte| (b'1'..=b'7').contains(byte).then(|| u32::from(byte - b'0')))
+        {
+            if let Some(date) = isoywd_bounded(year, week, isoweekday(day)) {
+                let taken = DateOption {
+                    date,
+                    pos: 8,
+                    ban_digit_sep: false,
+                };
+                return Some((taken, Some(backtrack)));
+            }
+        }
+        return Some((backtrack, None));
+    }
+    if bytes.len() < 8 {
+        return None;
+    }
+    let year = ascii4(bytes.get(0..4)?)?;
+    if year < 1 {
+        return None;
+    }
+    let month = ascii2(bytes.get(4..6)?)?;
+    let day = ascii2(bytes.get(6..8)?)?;
+    let date = NaiveDate::from_ymd_opt(year, month, day)?;
+    Some((
+        DateOption {
+            date,
+            pos: 8,
+            ban_digit_sep: false,
+        },
+        None,
+    ))
+}
+
+/// Core time: extended `HH[:MM[:SS]]` (strict 2-digit components) or
+/// basic `HH[MM[SS]]` (2/4/6 digits), plus an optional fraction after
+/// any component — always a fraction of a second. Basic `HHMMSS` also
+/// takes a dot-less fraction (2+ digits, like the offset grammar).
+/// Returns the time, the fraction digit count (0 when none — the tail
+/// rule depends on it), and the unparsed rest.
+fn parse_iso_core_time(text: &str) -> Option<(NaiveTime, usize, &str)> {
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 && bytes.get(2) == Some(&b':') {
+        let hour = ascii2(bytes.get(0..2)?)?;
+        if hour > 23 {
+            return None;
+        }
+        // A colon NOT followed by two ASCII digits ends the time at
+        // the shorter component (the colon re-enters the tail rule —
+        // probed: `T00:+00:00` and `T00:00:+00:00` read midnight UTC).
+        if !two_ascii_digits(bytes.get(3..5)) {
+            let time = NaiveTime::from_hms_opt(hour, 0, 0)?;
+            return Some((time, 0, &text[2..]));
+        }
+        let minute = ascii2(bytes.get(3..5)?)?;
+        if minute > 59 {
+            return None;
+        }
+        let mut pos = 5;
+        let mut second = 0;
+        if bytes.get(5) == Some(&b':') {
+            if !two_ascii_digits(bytes.get(6..8)) {
+                let time = NaiveTime::from_hms_micro_opt(hour, minute, 0, 0)?;
+                return Some((time, 0, &text[5..]));
+            }
+            second = ascii2(bytes.get(6..8)?)?;
+            if second > 59 {
+                return None;
+            }
+            pos = 8;
+        }
+        let (micros, frac_len, rest) = split_core_fraction(&text[pos..]);
+        let time = NaiveTime::from_hms_micro_opt(hour, minute, second, micros)?;
+        return Some((time, frac_len, rest));
+    }
+    let run = bytes
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    // Odd runs leave one digit for the pre-tz skip (`T000+00:00`
+    // reads midnight); a lone digit is no time at all.
+    let (hour, minute, second, mut pos) = match run {
+        0 | 1 => return None,
+        2 | 3 => (ascii2(bytes.get(0..2)?)?, 0, 0, 2),
+        4 | 5 => (ascii2(bytes.get(0..2)?)?, ascii2(bytes.get(2..4)?)?, 0, 4),
+        _ => (
+            ascii2(bytes.get(0..2)?)?,
+            ascii2(bytes.get(2..4)?)?,
+            ascii2(bytes.get(4..6)?)?,
+            6,
+        ),
+    };
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    // Dot-less fraction after `HHMMSS` only (2+ digits, truncated to
+    // micros); a single trailing digit is left for the pre-tz skip.
+    let mut micros = 0;
+    let mut frac_len = 0;
+    if pos == 6 && run - pos >= 2 {
+        frac_len = run - pos;
+        micros = frac_micros_of(&text[pos..pos + frac_len]);
+        pos = run;
+    }
+    if frac_len == 0 {
+        let (dot_micros, dot_len, rest) = split_core_fraction(&text[pos..]);
+        micros = dot_micros;
+        frac_len = dot_len;
+        let time = NaiveTime::from_hms_micro_opt(hour, minute, second, micros)?;
+        return Some((time, frac_len, rest));
+    }
+    let time = NaiveTime::from_hms_micro_opt(hour, minute, second, micros)?;
+    Some((time, frac_len, &text[pos..]))
+}
+
+/// Core fraction: `[.,]` plus 1+ ASCII digits (any count), truncated to
+/// micros (first 6, padded right). Returns the micros, the digit count
+/// (the tail rule depends on it: 6+ digits scan for the tz), and the
+/// rest. No fraction → `(0, 0, text)`.
+fn split_core_fraction(text: &str) -> (u32, usize, &str) {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some('.') | Some(',') => {}
+        _ => return (0, 0, text),
+    }
+    let digits: String = chars.take_while(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return (0, 0, text);
+    }
+    let rest = &text[1 + digits.len()..];
+    (frac_micros_of(&digits), digits.len(), rest)
+}
+
+/// Fraction digits to micros: truncate to 6, pad right with zeros.
+fn frac_micros_of(digits: &str) -> u32 {
+    let mut micros = digits.to_owned();
+    micros.truncate(6);
+    while micros.len() < 6 {
+        micros.push('0');
+    }
+    micros.parse::<u32>().unwrap_or(0)
+}
+
+/// Core timezone: end (naive), `Z`, or a numeric offset; the whole rest
+/// must be consumed. Returns the offset in micros (`None` = naive).
+/// The pre-tz gap depends on the fraction length (all probed): without
+/// a fraction, exactly one ASCII byte (any except the tz starts
+/// `Z`/`+`/`-` — digits, letters, dots, spaces, controls alike;
+/// multi-byte chars fail) may precede an immediate tz
+/// (`00:00:005+00:00`, `00:00.+00:00`, `000000 +00:00` all read); after
+/// a short (1-5 digit) fraction only an immediate tz or the end
+/// follows; after a long (6+ digit) fraction any text (any length, any
+/// charset — digits, NUL, non-ASCII, newlines) is skipped until the
+/// first tz start (`Z`/`+`/`-` — lowercase `z` is skipped, not a
+/// start), which must then parse strictly with nothing after
+/// (`.123456xyz+00:00` reads; `.123456++00:00` and `.123456x` fail).
+/// NUL quirks (all probed): a lone trailing NUL ends the time in the
+/// no-fraction tail (`T00:00:00\x00` reads naive); the long-fraction
+/// scan with no tz start reads naive iff the rest starts with NUL
+/// (`.123456\x00x` reads, `.123456x\x00` fails — the tz search itself
+/// passes NULs); after `Z` anything starting with NUL is ignored
+/// (`Z\x00x` reads UTC); after a numeric offset exactly one trailing
+/// NUL is allowed (`+00:00\x00` reads, `+00:00\x00\x00` fails).
+/// Short fractions and bare dates take no NUL (`.5\x00` fails).
+fn parse_iso_core_tz(rest: &str, frac_len: usize) -> Option<Option<i64>> {
+    if rest.is_empty() {
+        return Some(None);
+    }
+    let mut rest = rest;
+    if frac_len >= 6 {
+        // Scan to the first tz start (passing NULs and all); with no
+        // tz start the rest reads naive iff it starts with NUL.
+        let mut offset = None;
+        for (index, ch) in rest.char_indices() {
+            if matches!(ch, 'Z' | '+' | '-') {
+                offset = Some(index);
+                break;
+            }
+        }
+        match offset {
+            Some(index) => rest = &rest[index..],
+            None => {
+                if rest.as_bytes().first() == Some(&b'\0') {
+                    return Some(None);
+                }
+                return None;
+            }
+        }
+    } else if frac_len == 0 {
+        if rest.as_bytes() == b"\0" {
+            return Some(None);
+        }
+        match rest.as_bytes().first() {
+            // Tz starts never skip (a malformed offset fails outright).
+            Some(b'Z' | b'+' | b'-') => {}
+            Some(byte) if byte.is_ascii() => {
+                rest = &rest[1..];
+                if rest.is_empty() {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    if rest.as_bytes() == b"Z"
+        || rest.len() > 1 && rest.as_bytes()[0] == b'Z' && rest.as_bytes()[1] == b'\0'
+    {
+        return Some(Some(0));
+    }
+    let bytes = rest.as_bytes();
+    let (negative, digits) = match bytes.first() {
+        Some(b'+') => (false, &rest[1..]),
+        Some(b'-') => (true, &rest[1..]),
+        _ => return None,
+    };
+    let dbytes = digits.as_bytes();
+    // Sequential: `HH`, optional `:MM`, optional `:SS`, optional
+    // fraction — or an all-digit basic run (`HH[MM[SS[frac]]]`) when no
+    // colon or fraction separator follows `HH`.
+    let hour = ascii2(dbytes.get(0..2)?)? as i64;
+    match dbytes.get(2) {
+        None => offset_micros(negative, hour, 0, 0, 0),
+        Some(b':') => {
+            let minute = ascii2(dbytes.get(3..5)?)? as i64;
+            let mut pos = 5;
+            let mut second = 0i64;
+            if dbytes.get(5) == Some(&b':') {
+                second = ascii2(dbytes.get(6..8)?)? as i64;
+                pos = 8;
+            }
+            let (frac_micros, frac_len, rest) = split_core_fraction(&digits[pos..]);
+            // A trailing NUL is allowed only without a fraction
+            // (probed: `+00:00\x00` reads, `+00:00:00.5\x00` fails).
+            let end_ok = if frac_len == 0 {
+                is_end_or_nul(rest)
+            } else {
+                rest.is_empty()
+            };
+            if !end_ok {
+                return None;
+            }
+            offset_micros(negative, hour, minute, second, frac_micros)
+        }
+        Some(b'.') | Some(b',') => {
+            let (frac_micros, frac_len, rest) = split_core_fraction(&digits[2..]);
+            let end_ok = if frac_len == 0 {
+                is_end_or_nul(rest)
+            } else {
+                rest.is_empty()
+            };
+            if !end_ok {
+                return None;
+            }
+            offset_micros(negative, hour, 0, 0, frac_micros)
+        }
+        _ => {
+            // Basic run: all remaining bytes must be digits (plus one
+            // optional trailing NUL on the fraction-less lengths —
+            // probed: `+0000\x00` reads, `+00000001\x00` fails);
+            // lengths 2/4/6, or 8+ (a 1-digit fraction is invalid —
+            // probed). `HHMM`/`HHMMSS` also take a dotted fraction
+            // (probed: `+0000.0` reads, `+0100.5` is 3600.5s).
+            let run = dbytes.iter().take_while(|b| b.is_ascii_digit()).count();
+            if (run == 4 || run == 6) && matches!(dbytes.get(run), Some(b'.') | Some(b',')) {
+                let minute = ascii2(dbytes.get(2..4)?)? as i64;
+                let second = if run == 6 {
+                    ascii2(dbytes.get(4..6)?)? as i64
+                } else {
+                    0
+                };
+                let (frac_micros, frac_len, rest) = split_core_fraction(&digits[run..]);
+                if frac_len == 0 || !rest.is_empty() {
+                    return None;
+                }
+                return offset_micros(negative, hour, minute, second, frac_micros);
+            }
+            let nul_end = run <= 6 && run + 1 == dbytes.len() && dbytes[run] == b'\0';
+            if run != dbytes.len() && !nul_end {
+                return None;
+            }
+            match run {
+                2 => offset_micros(negative, hour, 0, 0, 0),
+                4 => {
+                    let minute = ascii2(dbytes.get(2..4)?)? as i64;
+                    offset_micros(negative, hour, minute, 0, 0)
+                }
+                6 => {
+                    let minute = ascii2(dbytes.get(2..4)?)? as i64;
+                    let second = ascii2(dbytes.get(4..6)?)? as i64;
+                    offset_micros(negative, hour, minute, second, 0)
+                }
+                _ if run >= 8 => {
+                    let minute = ascii2(dbytes.get(2..4)?)? as i64;
+                    let second = ascii2(dbytes.get(4..6)?)? as i64;
+                    let frac = core::str::from_utf8(&dbytes[6..]).ok()?;
+                    offset_micros(negative, hour, minute, second, frac_micros_of(frac))
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Fixed-offset total in micros: no per-field range checks (probed:
+/// `+00:60` is valid); the total must be strictly under 24h. Quirk
+/// (probed): a zero `HH:MM:SS` triple drops the fraction
+/// (`+00:00:00.5` is UTC).
+fn offset_micros(
+    negative: bool,
+    hour: i64,
+    minute: i64,
+    second: i64,
+    frac_micros: u32,
+) -> Option<Option<i64>> {
+    let whole = hour * 3_600 + minute * 60 + second;
+    let micros = if whole == 0 {
+        0
+    } else {
+        whole * 1_000_000 + i64::from(frac_micros)
+    };
+    if micros.abs() >= 86_400_000_000 {
+        return None;
+    }
+    Some(Some(if negative { -micros } else { micros }))
+}
+
+/// Django `parse_datetime`'s regex fallback (`dateparse.py`), used when
+/// `fromisoformat` fails: extended date with 1-2-digit fields, `[T ]`
+/// separator, `HH:MM` with optional `:SS` and fraction, optional
+/// whitespace, optional short offset. `\d` is Unicode-aware here
+/// (probed: fullwidth digits accepted on this path only).
+fn parse_iso_regex(text: &str) -> Option<ParsedDateTime> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut pos = 0;
+    // `\d{4}-\d{1,2}-\d{1,2}`.
+    let year = take_nd(&chars, &mut pos, 4, 4)? as i32;
+    if year < 1 || take_char(&chars, &mut pos) != Some('-') {
+        return None;
+    }
+    let month = take_nd(&chars, &mut pos, 1, 2)?;
+    if take_char(&chars, &mut pos) != Some('-') {
+        return None;
+    }
+    let day = take_nd(&chars, &mut pos, 1, 2)?;
+    // `[T ]`.
+    if !matches!(take_char(&chars, &mut pos), Some('T' | ' ')) {
+        return None;
+    }
+    // `\d{1,2}:\d{1,2}`.
+    let hour = take_nd(&chars, &mut pos, 1, 2)?;
+    if hour > 23 || take_char(&chars, &mut pos) != Some(':') {
+        return None;
+    }
+    let minute = take_nd(&chars, &mut pos, 1, 2)?;
+    if minute > 59 {
+        return None;
+    }
+    // Optional `:SS` plus optional fraction (1-6 captured, up to 6
+    // ignored — 13+ fraction digits fail the whole match).
+    let mut second = 0;
+    let mut micros = 0;
+    if chars.get(pos) == Some(&':') {
+        pos += 1;
+        second = take_nd(&chars, &mut pos, 1, 2)?;
+        if second > 59 {
+            return None;
+        }
+        if matches!(chars.get(pos), Some('.') | Some(',')) {
+            pos += 1;
+            let start = pos;
+            let mut digits = 0u32;
+            let mut count = 0usize;
+            while count < 12 {
+                match chars.get(pos).and_then(|ch| nd_value(*ch)) {
+                    Some(digit) => {
+                        if count < 6 {
+                            digits = digits * 10 + digit;
+                        }
+                        count += 1;
+                        pos += 1;
+                    }
+                    None => break,
+                }
+            }
+            if pos == start {
+                return None;
+            }
+            for _ in count.min(6)..6 {
+                digits *= 10;
+            }
+            micros = digits;
+        }
+    }
+    // `\s*` then optional `Z|[+-]\d{2}(?::?\d{2})?`, then end.
+    while chars.get(pos).is_some_and(|ch| is_re_ws(*ch)) {
+        pos += 1;
+    }
+    let mut offset_micros = None;
+    if chars.get(pos) == Some(&'Z') {
+        pos += 1;
+        offset_micros = Some(0);
+    } else if matches!(chars.get(pos), Some('+') | Some('-')) {
+        let negative = chars[pos] == '-';
+        pos += 1;
+        let hour = take_nd(&chars, &mut pos, 2, 2)? as i64;
+        let mut minute = 0i64;
+        if chars.get(pos) == Some(&':') {
+            pos += 1;
+            minute = take_nd(&chars, &mut pos, 2, 2)? as i64;
+        } else if chars.get(pos).is_some_and(|ch| nd_value(*ch).is_some()) {
+            minute = take_nd(&chars, &mut pos, 2, 2)? as i64;
+        }
+        let total_minutes = hour * 60 + minute;
+        if total_minutes * 60 >= 86_400 {
+            return None;
+        }
+        let total = total_minutes * 60_000_000;
+        offset_micros = Some(if negative { -total } else { total });
+    }
+    if pos != chars.len() {
+        return None;
+    }
+    let date = NaiveDate::from_ymd_opt(year, month, day)?;
+    let time = NaiveTime::from_hms_micro_opt(hour, minute, second, micros)?;
+    Some(ParsedDateTime {
+        naive: NaiveDateTime::new(date, time),
+        offset_micros,
+    })
+}
+
+/// Take `min..=max` [`nd_value`] digits, accumulating their value.
+fn take_nd(chars: &[char], pos: &mut usize, min: usize, max: usize) -> Option<u32> {
+    let mut value = 0u32;
+    let mut count = 0usize;
+    while count < max {
+        match chars.get(*pos).and_then(|ch| nd_value(*ch)) {
+            Some(digit) => {
+                value = value * 10 + digit;
+                count += 1;
+                *pos += 1;
+            }
+            None => break,
+        }
+    }
+    if count < min {
+        return None;
+    }
+    Some(value)
+}
+
+/// Take one char, advancing.
+fn take_char(chars: &[char], pos: &mut usize) -> Option<char> {
+    let ch = *chars.get(*pos)?;
+    *pos += 1;
+    Some(ch)
 }
 
 /// `base_branch` `RegexValidator("^[A-Za-z0-9._/-]*$")`: the pattern is
@@ -2155,12 +3275,20 @@ async fn validate_fk(
     Ok(Some(id))
 }
 
-/// FK target tables with their default-manager filters.
+/// FK target tables with their default-manager filters. DRF builds auto
+/// `PrimaryKeyRelatedField` querysets from `_default_manager`
+/// (`field_mapping.py:256`): `AuditModel` inherits `SoftDeleteModel`
+/// (`db/mixins.py:85`), so `FileAsset`/`Estimate`/`Workspace` reject
+/// soft-deleted ids with 400 (`State` additionally excludes triage via
+/// `StateManager`); only `User` (Django's plain `UserManager`) is
+/// unfiltered. (Forward-FK *reads* use the plain `_base_manager`
+/// instead — see [`file_asset_url`] — so the read path stays
+/// unfiltered. Both halves live-probed.)
 const FK_USERS_SQL: &str = r#"SELECT 1 FROM users WHERE id = $1"#;
 const FK_FILE_ASSETS_SQL: &str =
     r#"SELECT 1 FROM file_assets WHERE id = $1 AND deleted_at IS NULL"#;
 const FK_ESTIMATES_SQL: &str = r#"SELECT 1 FROM estimates WHERE id = $1 AND deleted_at IS NULL"#;
-/// `StateManager` excludes triage (`db/models/state.py:25-32`) as well as
+/// `StateManager` excludes triage (`db/models/state.py:79-83`) as well as
 /// soft-deleted rows.
 const FK_STATES_SQL: &str =
     r#"SELECT 1 FROM states WHERE id = $1 AND deleted_at IS NULL AND "group" <> 'triage'"#;
@@ -2228,7 +3356,9 @@ struct Validated {
     agent_ticking_enabled: Option<bool>,
     default_agent_executor: Option<String>,
     members_can_edit_states: Option<bool>,
-    /// Validated, then overwritten by crum (`BaseModel.save`) — like Python.
+    /// Writable on update (`update()` persists it; `save()` overwrites
+    /// only `updated_by` — `models/base.py`). On create the crum
+    /// `save()` overwrites it with the actor, like Python.
     created_by: Option<Option<uuid::Uuid>>,
     updated_by: Option<Option<uuid::Uuid>>,
     /// PUT-only writable (`ProjectSerializer.read_only_fields` otherwise).
@@ -2242,24 +3372,35 @@ struct Validated {
 type FieldErrors = Map<String, Value>;
 
 fn push_error(errors: &mut FieldErrors, field: &str, message: String) {
-    errors.insert(field.to_owned(), Value::Array(vec![Value::String(message)]));
+    push_errors(errors, field, vec![message]);
+}
+
+/// A field error list: DRF's `run_validators` collects every validator
+/// failure (e.g. `base_branch` reports `[regex, max_length]`).
+fn push_errors(errors: &mut FieldErrors, field: &str, messages: Vec<String>) {
+    let list: Vec<Value> = messages.into_iter().map(Value::String).collect();
+    errors.insert(field.to_owned(), Value::Array(list));
 }
 
 fn render_field_errors(errors: &FieldErrors) -> String {
-    serde_json::to_string(&Value::Object(errors.clone())).expect("field errors")
+    let body = serde_json::to_string(&Value::Object(errors.clone())).expect("field errors");
+    escape_u2028(body)
 }
 
-/// The writable model fields in `_meta` order (the error-dict order):
-/// `created_at`/`updated_at` are auto (read-only), `id` is read-only.
+/// The writable model fields in DRF serializer order (the error-dict
+/// order): `[pk] + declared + concrete + forward_relations`
+/// (`serializers.py::get_default_field_names`, verified by a live
+/// `ProjectListSerializer` field probe — `PUT {}` reports
+/// `[deleted_at, name, identifier, workspace]`). `created_at` /
+/// `updated_at` are auto (read-only), `id` is read-only.
 const WRITE_FIELDS: &[&str] = &[
+    "deleted_at",
     "name",
     "description",
     "description_text",
     "description_html",
     "network",
     "identifier",
-    "default_assignee",
-    "project_lead",
     "emoji",
     "icon_prop",
     "module_view",
@@ -2269,16 +3410,14 @@ const WRITE_FIELDS: &[&str] = &[
     "intake_view",
     "is_time_tracking_enabled",
     "is_issue_type_enabled",
+    "is_default",
     "guest_view_all_features",
+    "members_can_edit_states",
     "cover_image",
-    "cover_image_asset",
-    "estimate",
     "archive_in",
     "close_in",
     "logo_props",
-    "default_state",
     "archived_at",
-    "is_default",
     "timezone",
     "external_source",
     "external_id",
@@ -2290,11 +3429,14 @@ const WRITE_FIELDS: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
-    "members_can_edit_states",
     "created_by",
     "updated_by",
-    "deleted_at",
     "workspace",
+    "default_assignee",
+    "project_lead",
+    "cover_image_asset",
+    "estimate",
+    "default_state",
 ];
 
 /// Validate one body field-by-field. `instance` is the row being updated
@@ -2347,7 +3489,7 @@ async fn validate_project_input(
         .await
         {
             match denial {
-                Ok(message) => push_error(&mut errors, field, message),
+                Ok(messages) => push_errors(&mut errors, field, messages),
                 Err(denial) => return Err(Err(denial)),
             }
         }
@@ -2358,7 +3500,8 @@ async fn validate_project_input(
     Ok(out)
 }
 
-/// Validate one provided value into `out`. `Ok(message)` is a field error;
+/// Validate one provided value into `out`. `Ok(messages)` is a field
+/// error list (DRF collects per-field validator failures);
 /// `Err(denial)` a DB failure.
 #[allow(clippy::too_many_arguments)]
 async fn validate_one_field(
@@ -2370,8 +3513,10 @@ async fn validate_one_field(
     field: &str,
     value: &Value,
     out: &mut Validated,
-) -> Result<(), Result<String, Denial>> {
-    let fail = |message: String| Err(Ok(message));
+) -> Result<(), Result<Vec<String>, Denial>> {
+    let fail = |message: String| Err(Ok(vec![message]));
+    let fail_many = |messages: Vec<String>| Err(Ok(messages));
+    let fail_fk = |error: Result<String, Denial>| Err(error.map(|message| vec![message]));
     match field {
         // `name`/`identifier` parse (L1) then run the `validate_*`
         // dup probes inline, like DRF's per-field `validate_<name>`
@@ -2415,7 +3560,7 @@ async fn validate_one_field(
         }
         "description" => match validate_char(value, None, true) {
             Ok(text) => out.description = Some(text),
-            Err(message) => return fail(message),
+            Err(messages) => return fail_many(messages),
         },
         "description_text" => {
             if value.is_null() {
@@ -2437,15 +3582,15 @@ async fn validate_one_field(
         },
         "default_assignee" => match validate_fk(pool, value, true, FK_USERS_SQL).await {
             Ok(id) => out.default_assignee = Some(id),
-            Err(error) => return Err(error),
+            Err(error) => return fail_fk(error),
         },
         "project_lead" => match validate_fk(pool, value, true, FK_USERS_SQL).await {
             Ok(id) => out.project_lead = Some(id),
-            Err(error) => return Err(error),
+            Err(error) => return fail_fk(error),
         },
         "emoji" => match opt_char(value, Some(255), true) {
             Ok(text) => out.emoji = Some(text),
-            Err(message) => return fail(message),
+            Err(messages) => return fail_many(messages),
         },
         "icon_prop" => {
             if value.is_null() {
@@ -2488,38 +3633,22 @@ async fn validate_one_field(
         },
         "cover_image" => match opt_char(value, None, true) {
             Ok(text) => out.cover_image = Some(text),
-            Err(message) => return fail(message),
+            Err(messages) => return fail_many(messages),
         },
         "cover_image_asset" => match validate_fk(pool, value, true, FK_FILE_ASSETS_SQL).await {
             Ok(id) => out.cover_image_asset = Some(id),
-            Err(error) => return Err(error),
+            Err(error) => return fail_fk(error),
         },
         "estimate" => match validate_fk(pool, value, true, FK_ESTIMATES_SQL).await {
             Ok(id) => out.estimate = Some(id),
-            Err(error) => return Err(error),
+            Err(error) => return fail_fk(error),
         },
-        "archive_in" => match validate_int(value) {
-            Ok(number) => {
-                if number < 0 {
-                    return fail("Ensure this value is greater than or equal to 0.".to_owned());
-                }
-                if number > 12 {
-                    return fail("Ensure this value is less than or equal to 12.".to_owned());
-                }
-                out.archive_in = Some(number);
-            }
+        "archive_in" => match check_int_range(validate_int(value), 0, 12) {
+            Ok(number) => out.archive_in = Some(number),
             Err(message) => return fail(message),
         },
-        "close_in" => match validate_int(value) {
-            Ok(number) => {
-                if number < 0 {
-                    return fail("Ensure this value is greater than or equal to 0.".to_owned());
-                }
-                if number > 12 {
-                    return fail("Ensure this value is less than or equal to 12.".to_owned());
-                }
-                out.close_in = Some(number);
-            }
+        "close_in" => match check_int_range(validate_int(value), 0, 12) {
+            Ok(number) => out.close_in = Some(number),
             Err(message) => return fail(message),
         },
         "logo_props" => {
@@ -2530,7 +3659,7 @@ async fn validate_one_field(
         }
         "default_state" => match validate_fk(pool, value, true, FK_STATES_SQL).await {
             Ok(id) => out.default_state = Some(id),
-            Err(error) => return Err(error),
+            Err(error) => return fail_fk(error),
         },
         "archived_at" => match validate_datetime(value, timezone, true) {
             Ok(when) => out.archived_at = Some(when),
@@ -2546,39 +3675,78 @@ async fn validate_one_field(
         },
         "external_source" => match opt_char(value, Some(255), true) {
             Ok(text) => out.external_source = Some(text),
-            Err(message) => return fail(message),
+            Err(messages) => return fail_many(messages),
         },
         "external_id" => match opt_char(value, Some(255), true) {
             Ok(text) => out.external_id = Some(text),
-            Err(message) => return fail(message),
+            Err(messages) => return fail_many(messages),
         },
         "repo_url" => match validate_char(value, Some(512), true) {
             Ok(text) => out.repo_url = Some(text),
-            Err(message) => return fail(message),
+            Err(messages) => return fail_many(messages),
         },
-        "base_branch" => match validate_char(value, Some(128), true) {
-            Ok(text) => match validate_base_branch(&text) {
-                Ok(text) => out.base_branch = Some(text),
+        // Model `RegexValidator` runs before the `CharField`
+        // validators (`field.validators` comes first in
+        // `ModelSerializer` assembly — probed order `[regex,
+        // max_length]`), collecting every failure.
+        "base_branch" => match char_to_string(value, true) {
+            Ok(text) => {
+                let mut errors = Vec::new();
+                if let Err(message) = validate_base_branch(&text) {
+                    errors.push(message);
+                }
+                errors.extend(char_length_errors(&text, Some(128)));
+                if text.contains('\0') {
+                    errors.push(NULL_CHARACTERS_MESSAGE.to_owned());
+                }
+                if errors.is_empty() {
+                    out.base_branch = Some(text);
+                } else {
+                    return fail_many(errors);
+                }
+            }
+            Err(messages) => return fail_many(messages),
+        },
+        "agent_default_interval_seconds" => {
+            match check_int_range(
+                validate_int(value),
+                i64::from(i32::MIN),
+                i64::from(i32::MAX),
+            ) {
+                Ok(number) => out.agent_default_interval_seconds = Some(number),
                 Err(message) => return fail(message),
-            },
-            Err(message) => return fail(message),
-        },
-        "agent_default_interval_seconds" => match validate_int(value) {
-            Ok(number) => out.agent_default_interval_seconds = Some(number),
-            Err(message) => return fail(message),
-        },
-        "agent_default_max_ticks" => match validate_int(value) {
-            Ok(number) => out.agent_default_max_ticks = Some(number),
-            Err(message) => return fail(message),
-        },
-        "agent_review_default_interval_seconds" => match validate_int(value) {
-            Ok(number) => out.agent_review_default_interval_seconds = Some(number),
-            Err(message) => return fail(message),
-        },
-        "agent_test_default_interval_seconds" => match validate_int(value) {
-            Ok(number) => out.agent_test_default_interval_seconds = Some(number),
-            Err(message) => return fail(message),
-        },
+            }
+        }
+        "agent_default_max_ticks" => {
+            match check_int_range(
+                validate_int(value),
+                i64::from(i32::MIN),
+                i64::from(i32::MAX),
+            ) {
+                Ok(number) => out.agent_default_max_ticks = Some(number),
+                Err(message) => return fail(message),
+            }
+        }
+        "agent_review_default_interval_seconds" => {
+            match check_int_range(
+                validate_int(value),
+                i64::from(i32::MIN),
+                i64::from(i32::MAX),
+            ) {
+                Ok(number) => out.agent_review_default_interval_seconds = Some(number),
+                Err(message) => return fail(message),
+            }
+        }
+        "agent_test_default_interval_seconds" => {
+            match check_int_range(
+                validate_int(value),
+                i64::from(i32::MIN),
+                i64::from(i32::MAX),
+            ) {
+                Ok(number) => out.agent_test_default_interval_seconds = Some(number),
+                Err(message) => return fail(message),
+            }
+        }
         "agent_ticking_enabled" => match validate_bool(value) {
             Ok(flag) => out.agent_ticking_enabled = Some(flag),
             Err(message) => return fail(message),
@@ -2595,11 +3763,11 @@ async fn validate_one_field(
         },
         "created_by" => match validate_fk(pool, value, true, FK_USERS_SQL).await {
             Ok(id) => out.created_by = Some(id),
-            Err(error) => return Err(error),
+            Err(error) => return fail_fk(error),
         },
         "updated_by" => match validate_fk(pool, value, true, FK_USERS_SQL).await {
             Ok(id) => out.updated_by = Some(id),
-            Err(error) => return Err(error),
+            Err(error) => return fail_fk(error),
         },
         "deleted_at" => match validate_datetime(value, timezone, true) {
             Ok(when) => out.deleted_at = Some(when),
@@ -2607,7 +3775,7 @@ async fn validate_one_field(
         },
         "workspace" => match validate_fk(pool, value, false, FK_WORKSPACES_SQL).await {
             Ok(id) => out.workspace = id,
-            Err(error) => return Err(error),
+            Err(error) => return fail_fk(error),
         },
         _ => unreachable!("WRITE_FIELDS is exhaustive"),
     }
@@ -2735,13 +3903,19 @@ fn run_serializer_validate(
 
 /// The four PUT unique validators (`ProjectListSerializer`, DRF
 /// `UniqueTogetherValidator` × 4 — the two `unique_together` sets plus the
-/// two multi-field `UniqueConstraint`s, each on the live manager with the
-/// instance excluded): a set fires only when every one of its fields is
-/// present in the validated attrs; `None` is a checked value (`IS NULL`),
-/// not a skip. Raw values (the identifier is still un-uppercased —
-/// `save()` normalizes later). Every conflict appends, in validator order,
-/// to one `non_field_errors` list. Runs only after all field validation
-/// passed (`to_internal_value` raising skips validators entirely).
+/// two multi-field `UniqueConstraint`s, each on the live-only default
+/// manager with the instance excluded). On update a set fires only when
+/// every one of its fields is present in the validated attrs AND at
+/// least one field changed AND no changed value is `None`
+/// (`validators.py::UniqueTogetherValidator.__call__` — the
+/// `checked_values` gating; the identifier compares raw-vs-instance, as
+/// DRF does, since `save()` uppercases later). A set whose filter
+/// matches appends, in validator order, to one `non_field_errors` list.
+/// The triple probes carry the live-manager `deleted_at IS NULL` base,
+/// so a triple with a null `deleted_at` coincides with its pair probe
+/// (both messages kept, exactly as in DRF) while a non-null one can
+/// never match. Runs only after all field validation passed
+/// (`to_internal_value` raising skips validators entirely).
 async fn run_put_unique_validators(
     pool: &sqlx::PgPool,
     validated: &Validated,
@@ -2751,8 +3925,32 @@ async fn run_put_unique_validators(
     let name = validated.name.clone();
     let workspace = validated.workspace;
     let deleted_at = validated.deleted_at;
+    // Changed-vs-instance per field (raw validated values, as DRF
+    // compares `attrs[field] != getattr(instance, field)`).
+    let changed = |field: &str| -> bool {
+        match field {
+            "identifier" => identifier.as_deref() != Some(instance.identifier.as_str()),
+            "name" => name.as_deref() != Some(instance.name.as_str()),
+            "workspace" => workspace != Some(instance.workspace_id),
+            "deleted_at" => deleted_at != Some(instance.deleted_at),
+            _ => false,
+        }
+    };
+    // A changed value that is `None` vetoes its set.
+    let changed_to_none = |field: &str| -> bool {
+        if !changed(field) {
+            return false;
+        }
+        match field {
+            "identifier" => identifier.is_none(),
+            "name" => name.is_none(),
+            "workspace" => workspace.is_none(),
+            "deleted_at" => deleted_at == Some(None),
+            _ => false,
+        }
+    };
     let mut messages: Vec<String> = Vec::new();
-    // (fields, needs-deleted-at): presence-gated exactly like DRF.
+    // (fields, probe column): presence- then changed/None-gated like DRF.
     for (fields, column) in [
         (
             ["identifier", "workspace", "deleted_at"].as_slice(),
@@ -2772,6 +3970,12 @@ async fn run_put_unique_validators(
         if !fields.iter().all(|field| have(field)) {
             continue;
         }
+        if !fields.iter().any(|field| changed(field)) {
+            continue;
+        }
+        if fields.iter().any(|field| changed_to_none(field)) {
+            continue;
+        }
         let value = if column == "identifier" {
             identifier.clone().expect("present")
         } else {
@@ -2780,7 +3984,7 @@ async fn run_put_unique_validators(
         let conflict: Option<(i32,)> = if fields.len() == 3 {
             sqlx::query_as(&format!(
                 "SELECT 1 FROM projects WHERE workspace_id = $1 AND {column} = $2 \
-                 AND deleted_at IS NOT DISTINCT FROM $3 AND id <> $4"
+                 AND deleted_at IS NULL AND deleted_at IS NOT DISTINCT FROM $3 AND id <> $4"
             ))
             .bind(workspace.expect("present"))
             .bind(value)
@@ -2985,6 +4189,22 @@ async fn insert_project(
     };
     let id = uuid::Uuid::new_v4();
     let name = validated.name.as_deref().expect("required on create");
+    // `int4` columns: out-of-range `IntegerField` values 500 at the
+    // column (`archive_in`/`close_in` are already fenced by 0..12).
+    let archive_in = i32_or_500(validated.archive_in.unwrap_or(0))?;
+    let close_in = i32_or_500(validated.close_in.unwrap_or(0))?;
+    let agent_interval = i32_or_500(validated.agent_default_interval_seconds.unwrap_or(10800))?;
+    let agent_max_ticks = i32_or_500(validated.agent_default_max_ticks.unwrap_or(10))?;
+    let agent_review = i32_or_500(
+        validated
+            .agent_review_default_interval_seconds
+            .unwrap_or(10800),
+    )?;
+    let agent_test = i32_or_500(
+        validated
+            .agent_test_default_interval_seconds
+            .unwrap_or(10800),
+    )?;
     // `save()` runs inside `transaction.atomic()`, clearing the previous
     // default *before* the insert — the partial unique index forbids two
     // live defaults even momentarily.
@@ -3048,8 +4268,8 @@ async fn insert_project(
     .bind(validated.cover_image.clone().unwrap_or(None))
     .bind(validated.cover_image_asset.unwrap_or(None))
     .bind(validated.estimate.unwrap_or(None))
-    .bind(validated.archive_in.unwrap_or(0) as i32)
-    .bind(validated.close_in.unwrap_or(0) as i32)
+    .bind(archive_in)
+    .bind(close_in)
     .bind(validated.logo_props.clone().unwrap_or(Value::Object(Map::new())))
     .bind(validated.default_state.unwrap_or(None))
     .bind(validated.archived_at.unwrap_or(None))
@@ -3059,10 +4279,10 @@ async fn insert_project(
     .bind(validated.external_id.clone().unwrap_or(None))
     .bind(validated.repo_url.as_deref().unwrap_or(""))
     .bind(validated.base_branch.as_deref().unwrap_or("main"))
-    .bind(validated.agent_default_interval_seconds.unwrap_or(10800) as i32)
-    .bind(validated.agent_default_max_ticks.unwrap_or(10) as i32)
-    .bind(validated.agent_review_default_interval_seconds.unwrap_or(10800) as i32)
-    .bind(validated.agent_test_default_interval_seconds.unwrap_or(10800) as i32)
+    .bind(agent_interval)
+    .bind(agent_max_ticks)
+    .bind(agent_review)
+    .bind(agent_test)
     .bind(validated.agent_ticking_enabled.unwrap_or(true))
     .bind(default_executor)
     .bind(validated.members_can_edit_states.unwrap_or(true))
@@ -3256,6 +4476,28 @@ async fn apply_update(
         Some(raw) => m::normalize_identifier(raw),
         None => instance.identifier.clone(),
     };
+    let archive_in = i32_or_500(validated.archive_in.unwrap_or(instance.archive_in as i64))?;
+    let close_in = i32_or_500(validated.close_in.unwrap_or(instance.close_in as i64))?;
+    let agent_interval = i32_or_500(
+        validated
+            .agent_default_interval_seconds
+            .unwrap_or(instance.agent_default_interval_seconds as i64),
+    )?;
+    let agent_max_ticks = i32_or_500(
+        validated
+            .agent_default_max_ticks
+            .unwrap_or(instance.agent_default_max_ticks as i64),
+    )?;
+    let agent_review = i32_or_500(
+        validated
+            .agent_review_default_interval_seconds
+            .unwrap_or(instance.agent_review_default_interval_seconds as i64),
+    )?;
+    let agent_test = i32_or_500(
+        validated
+            .agent_test_default_interval_seconds
+            .unwrap_or(instance.agent_test_default_interval_seconds as i64),
+    )?;
     sqlx::query(
         r#"UPDATE projects SET
              name = $1, description = $2, description_text = $3, description_html = $4,
@@ -3273,8 +4515,8 @@ async fn apply_update(
              agent_ticking_enabled = $37, default_agent_executor = $38,
              members_can_edit_states = $39,
              workspace_id = $40, deleted_at = $41,
-             updated_at = $42, updated_by_id = $43
-           WHERE id = $44"#,
+             updated_at = $42, updated_by_id = $43, created_by_id = $44
+           WHERE id = $45"#,
     )
     .bind(validated.name.as_deref().unwrap_or(&instance.name))
     .bind(
@@ -3346,8 +4588,8 @@ async fn apply_update(
             .unwrap_or(instance.cover_image_asset_id),
     )
     .bind(validated.estimate.unwrap_or(instance.estimate_id))
-    .bind(validated.archive_in.unwrap_or(instance.archive_in as i64) as i32)
-    .bind(validated.close_in.unwrap_or(instance.close_in as i64) as i32)
+    .bind(archive_in)
+    .bind(close_in)
     .bind(
         validated
             .logo_props
@@ -3377,26 +4619,10 @@ async fn apply_update(
             .as_deref()
             .unwrap_or(&instance.base_branch),
     )
-    .bind(
-        validated
-            .agent_default_interval_seconds
-            .unwrap_or(instance.agent_default_interval_seconds as i64) as i32,
-    )
-    .bind(
-        validated
-            .agent_default_max_ticks
-            .unwrap_or(instance.agent_default_max_ticks as i64) as i32,
-    )
-    .bind(
-        validated
-            .agent_review_default_interval_seconds
-            .unwrap_or(instance.agent_review_default_interval_seconds as i64) as i32,
-    )
-    .bind(
-        validated
-            .agent_test_default_interval_seconds
-            .unwrap_or(instance.agent_test_default_interval_seconds as i64) as i32,
-    )
+    .bind(agent_interval)
+    .bind(agent_max_ticks)
+    .bind(agent_review)
+    .bind(agent_test)
     .bind(
         validated
             .agent_ticking_enabled
@@ -3417,6 +4643,9 @@ async fn apply_update(
     .bind(validated.deleted_at.unwrap_or(None))
     .bind(now)
     .bind(actor_id)
+    // `created_by` is writable on both serializers (`update()` persists
+    // it; `save()` overwrites only `updated_by` — `models/base.py`).
+    .bind(validated.created_by.unwrap_or(instance.created_by_id))
     .bind(instance.id)
     .execute(&mut *tx)
     .await
@@ -3536,7 +4765,8 @@ async fn project_list(
     let pool = pool_of(&state)?.clone();
     let role = workspace_role(&pool, &actor.id, &slug).await?;
     check_gate("GET", PATH_PROJECTS, &slug, role, None)?;
-    let (_workspace_id, _) = workspace_or_404(&pool, &slug).await?;
+    // No `Workspace` fetch here (`base.py:145-223` never fetches it —
+    // the queryset filters `workspace__slug`).
     let (is_guest, is_member) = scope_flags(&pool, &slug, &actor.id).await?;
     // The `COUNT` annotation turns the queryset into `GROUP BY
     // projects.id`, which drops the `-created_at` Meta ordering: Django
@@ -3707,6 +4937,12 @@ fn list_row_value(row: &sqlx::postgres::PgRow, timezone: Tz) -> Result<Value, De
     let inbox_view: bool = row.try_get("inbox_view").map_err(|_| Denial::ServerError)?;
     map.insert("inbox_view".to_owned(), Value::Bool(inbox_view));
     let sort_order: Option<f64> = row.try_get("sort_order").map_err(|_| Denial::ServerError)?;
+    if sort_order.is_some_and(|float| !float.is_finite()) {
+        // DRF `STRICT_JSON` (`allow_nan=False`): a non-finite float
+        // 500s at render (`ValueError`) — never `null`. (Reachable via
+        // user-views `"nan"` then GET.)
+        return Err(Denial::ServerError);
+    }
     map.insert(
         "sort_order".to_owned(),
         sort_order
@@ -3731,37 +4967,30 @@ async fn project_list_detail(
     let pool = pool_of(&state)?.clone();
     let role = workspace_role(&pool, &actor.id, &slug).await?;
     check_gate("GET", PATH_PROJECTS_DETAILS, &slug, role, None)?;
-    let (workspace_id, _) = workspace_or_404(&pool, &slug).await?;
+    // No `Workspace` fetch here (`base.py:101-142` never fetches it —
+    // the queryset filters `workspace__slug`, so a soft-deleted
+    // workspace with a live membership still answers 200).
     let (is_guest, is_member) = scope_flags(&pool, &slug, &actor.id).await?;
     if query_truthy(&query, "per_page") && query_truthy(&query, "cursor") {
-        return paginate_list_detail(
-            &state,
-            &pool,
-            &actor,
-            &slug,
-            &workspace_id,
-            &query,
-            is_guest,
-            is_member,
-        )
-        .await;
+        return paginate_list_detail(&state, &pool, &actor, &slug, &query, is_guest, is_member)
+            .await;
     }
     let query_sql = format!(
         "SELECT DISTINCT {cols}, {fav} AS is_favorite, {sort_} AS sort_order, \
          {role} AS member_role, {anchor} AS anchor \
-         FROM projects p {scope_join} \
-         WHERE p.deleted_at IS NULL AND p.workspace_id = $1 AND ({scope_where}) \
+         FROM projects p INNER JOIN workspaces w ON (p.workspace_id = w.id) {scope_join} \
+         WHERE p.deleted_at IS NULL AND w.slug = $1 AND ({scope_where}) \
          ORDER BY sort_order, p.name",
         cols = project_columns(),
         fav = favorite_sql(),
         sort_ = sort_order_sql(),
         role = member_role_sql(),
-        anchor = anchor_sql(),
+        anchor = anchor_sql("$1"),
         scope_join = scope_join(is_guest, is_member),
         scope_where = scope_where(is_guest, is_member),
     );
     let rows = sqlx::query(&query_sql)
-        .bind(workspace_id)
+        .bind(&slug)
         .bind(actor.id)
         .fetch_all(&pool)
         .await
@@ -3810,10 +5039,17 @@ fn member_role_sql() -> &'static str {
      ORDER BY pm.created_at DESC)"
 }
 
-fn anchor_sql() -> &'static str {
-    "(SELECT board.anchor FROM deploy_boards board \
-     WHERE board.deleted_at IS NULL AND board.project_id = p.id \
-     AND board.workspace_id = p.workspace_id)"
+/// The `anchor` annotation (`base.py:80-86`): `DeployBoard` rows for
+/// `entity_name="project"`, this project id, in the request workspace
+/// (slug) — the exact predicate, not the `(project_id, workspace_id)`
+/// shorthand. `slug_bind` is the `$N` placeholder carrying the slug.
+fn anchor_sql(slug_bind: &str) -> String {
+    format!(
+        "(SELECT board.anchor FROM deploy_boards board \
+         JOIN workspaces bw ON bw.id = board.workspace_id \
+         WHERE board.deleted_at IS NULL AND board.entity_name = 'project' \
+         AND board.entity_identifier = p.id AND bw.slug = {slug_bind})"
+    )
 }
 
 /// Map the `paginate` `order_by` key onto a project column or annotation
@@ -3880,7 +5116,6 @@ async fn paginate_list_detail(
     pool: &sqlx::PgPool,
     actor: &Actor,
     slug: &str,
-    workspace_id: &uuid::Uuid,
     query: &QueryMap,
     is_guest: bool,
     is_member: bool,
@@ -3912,15 +5147,15 @@ async fn paginate_list_detail(
         Some(key) => (key, true),
         None => (order_raw.as_str(), false),
     };
-    let column = order_column(key)?;
     let direction = if descending { "DESC" } else { "ASC" };
     let scope_join = scope_join(is_guest, is_member);
     let scope_where = scope_where(is_guest, is_member);
     let count: (i64,) = sqlx::query_as(&format!(
-        "SELECT COUNT(DISTINCT p.id) FROM projects p {scope_join} \
-         WHERE p.deleted_at IS NULL AND p.workspace_id = $1 AND ({scope_where})"
+        "SELECT COUNT(DISTINCT p.id) FROM projects p \
+         INNER JOIN workspaces w ON (p.workspace_id = w.id) {scope_join} \
+         WHERE p.deleted_at IS NULL AND w.slug = $1 AND ({scope_where})"
     ))
-    .bind(workspace_id)
+    .bind(slug)
     .bind(actor.id)
     .fetch_one(pool)
     .await
@@ -3930,24 +5165,27 @@ async fn paginate_list_detail(
     let limit = paginator::clamp_limit(per_page, crate::paginator::MAX_LIMIT);
     let window = paginator::offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
         .map_err(page_denial)?;
+    // `order_by` is lazy in Python: offset errors raise before the
+    // `FieldError`, so the key validates only after the window.
+    let column = order_column(key)?;
     let fetch = format!(
         "SELECT DISTINCT {cols}, {fav} AS is_favorite, {sort_} AS sort_order, \
          {role} AS member_role, {anchor} AS anchor \
-         FROM projects p {scope_join} \
-         WHERE p.deleted_at IS NULL AND p.workspace_id = $1 AND ({scope_where}) \
-         ORDER BY {column} {direction}, p.created_at DESC LIMIT $3 OFFSET $4",
+         FROM projects p INNER JOIN workspaces w ON (p.workspace_id = w.id) {scope_join} \
+         WHERE p.deleted_at IS NULL AND w.slug = $1 AND ({scope_where}) \
+         ORDER BY {column} {direction} NULLS LAST, p.created_at DESC LIMIT $3 OFFSET $4",
         cols = project_columns(),
         fav = favorite_sql(),
         sort_ = sort_order_sql(),
         role = member_role_sql(),
-        anchor = anchor_sql(),
+        anchor = anchor_sql("$1"),
         scope_join = scope_join,
         scope_where = scope_where,
         column = column,
         direction = direction,
     );
     let fetched = sqlx::query(&fetch)
-        .bind(workspace_id)
+        .bind(slug)
         .bind(actor.id)
         .bind(window.stop - window.offset)
         .bind(window.offset)
@@ -4001,18 +5239,22 @@ async fn project_retrieve(
     let project_id = resolve_project_id(&pool, &slug, &pk).await?;
     let role = workspace_role(&pool, &actor.id, &slug).await?;
     check_gate("GET", PATH_PROJECT_DETAIL, &slug, role, None)?;
+    // Scoped by the slug (`get_queryset`): a UUID from another
+    // workspace is the view 404, never 403/409.
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(&format!(
         "SELECT DISTINCT {cols}, {fav} AS is_favorite, {sort_} AS sort_order, \
          {role} AS member_role, {anchor} AS anchor \
-         FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL AND p.archived_at IS NULL",
+         FROM projects p JOIN workspaces w ON w.id = p.workspace_id \
+         WHERE p.id = $1 AND p.deleted_at IS NULL AND p.archived_at IS NULL AND w.slug = $3",
         cols = project_columns(),
         fav = favorite_sql(),
         sort_ = sort_order_sql(),
         role = member_role_sql(),
-        anchor = anchor_sql(),
+        anchor = anchor_sql("$3"),
     ))
     .bind(project_id)
     .bind(actor.id)
+    .bind(&slug)
     .fetch_optional(&pool)
     .await
     .map_err(db_denial)?;
@@ -4104,7 +5346,7 @@ async fn project_create(
         }
     }
     insert_default_states(&pool, &project_id, &workspace_id, &actor.id, now).await?;
-    let project = fetch_project_row(&pool, &project_id, &actor.id)
+    let project = fetch_project_row(&pool, &project_id, &actor.id, &slug)
         .await?
         .ok_or(Denial::ServerError)?;
     let origin = request_origin(&state)?;
@@ -4133,7 +5375,7 @@ async fn project_put(
     let pool = pool_of(&state)?.clone();
     let project_id = resolve_project_id(&pool, &slug, &pk).await?;
     check_gate("PUT", PATH_PROJECT_DETAIL, &slug, None, None)?;
-    let instance = fetch_project_row(&pool, &project_id, &actor.id)
+    let instance = fetch_project_row_scoped(&pool, &project_id, &actor.id, &slug)
         .await?
         .ok_or(Denial::Raw(
             StatusCode::NOT_FOUND,
@@ -4161,12 +5403,35 @@ async fn project_put(
     }
     let now = utc_now_micros();
     apply_update(&pool, &validated, &instance, &actor.id, now).await?;
-    let project = fetch_project_row_opts(&pool, &project_id, &actor.id, false)
+    let project = fetch_project_row_opts(&pool, &project_id, &actor.id, &slug, false, false)
         .await?
         .ok_or(Denial::ServerError)?;
     let user = executor_user(&pool, &actor.id).await?;
     let body = render_list_row(&pool, &state, &project, &slug, &actor, &user).await?;
     Ok(json_ok(body))
+}
+
+/// Python truthiness for a JSON body value (`if intake_view:`):
+/// null/false/0/`""`/`[]`/`{}` are falsy, everything else truthy.
+/// (`"false"` coerces to `False` yet is truthy — the gate runs on the
+/// raw value, not the validated bool.)
+fn python_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                int != 0
+            } else if let Some(uint) = number.as_u64() {
+                uint != 0
+            } else {
+                number.as_f64().is_some_and(|float| float != 0.0)
+            }
+        }
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+    }
 }
 
 /// `PATCH projects/<pk>/` (`base.py:314-380`): the admin-guard matrix
@@ -4196,28 +5461,30 @@ async fn project_patch(
     let (workspace_id, _) = workspace_or_404(&pool, &slug).await?;
     // Bare `.get(pk)` — no workspace, no archived filter (a miss is the
     // `ObjectDoesNotExist` branch, not the view 404).
-    let instance = fetch_project_row(&pool, &project_id, &actor.id)
+    let instance = fetch_project_row(&pool, &project_id, &actor.id, &slug)
         .await?
         .ok_or(Denial::ObjectNotFound)?;
+    // `request.data` is touched (`:341`) before the archived check
+    // (`:343`): archived + malformed JSON answers the `ParseError` 400.
+    let data = parse_body(&body)?;
     let user = executor_user(&pool, &actor.id).await?;
     let current_instance =
-        render_current_instance(&pool, &state, &project_id, &actor, &user).await?;
+        render_current_instance(&pool, &state, &project_id, &actor, &user, &slug).await?;
     if instance.archived_at.is_some() {
         return Err(Denial::Raw(
             StatusCode::BAD_REQUEST,
             ARCHIVED_UPDATE_BODY.to_owned(),
         ));
     }
-    let data = parse_body(&body)?;
     // `intake_view = request.data.get("inbox_view", project.intake_view)`,
-    // forced over any explicit `intake_view` key (`:348-350`).
+    // forced over any explicit `intake_view` key (`:348-350`); the
+    // intake gate below tests this RAW value's truthiness (`:358`).
+    let intake_raw = data
+        .get("inbox_view")
+        .cloned()
+        .unwrap_or(Value::Bool(instance.intake_view));
     let mut aliased = data.clone();
-    aliased.insert(
-        "intake_view".to_owned(),
-        data.get("inbox_view")
-            .cloned()
-            .unwrap_or(Value::Bool(instance.intake_view)),
-    );
+    aliased.insert("intake_view".to_owned(), intake_raw.clone());
     let mut validated = match validate_project_input(
         &pool,
         &aliased,
@@ -4239,11 +5506,13 @@ async fn project_patch(
     }
     let now = utc_now_micros();
     apply_update(&pool, &validated, &instance, &actor.id, now).await?;
-    // The intake check reads the *updated* row's name (`:355-364`).
-    let updated = fetch_project_row(&pool, &project_id, &actor.id)
+    // The intake check reads the *updated* row's name (`:355-364`);
+    // the re-fetch uses the scoped queryset, so a miss is the 500
+    // `AttributeError` branch (`str(project.id)` on `None`).
+    let updated = fetch_project_row_scoped(&pool, &project_id, &actor.id, &slug)
         .await?
         .ok_or(Denial::ServerError)?;
-    if validated.intake_view.unwrap_or(updated.intake_view) {
+    if python_truthy(&intake_raw) {
         ensure_default_intake(
             &pool,
             &project_id,
@@ -4292,7 +5561,7 @@ async fn project_destroy(
             ADMIN_REQUIRED_BODY.to_owned(),
         ));
     }
-    let instance = fetch_project_row(&pool, &project_id, &actor.id)
+    let instance = fetch_project_row_scoped(&pool, &project_id, &actor.id, &slug)
         .await?
         .ok_or(Denial::ObjectNotFound)?;
     if instance.is_default {
@@ -4461,7 +5730,7 @@ async fn identifiers_get(
     let role = workspace_role(&pool, &actor.id, &slug).await?;
     check_gate("GET", PATH_IDENTIFIERS, &slug, role, None)?;
     let name = query_last(&query, "name").unwrap_or_default();
-    let name = name.trim().to_uppercase();
+    let name = strip_py(&name).to_uppercase();
     if name.is_empty() {
         return Err(Denial::Raw(
             StatusCode::BAD_REQUEST,
@@ -4514,7 +5783,7 @@ async fn identifiers_delete(
     let data = parse_get_body(&body)?;
     let name = match data.get("name") {
         None => String::new(),
-        Some(Value::String(text)) => text.trim().to_uppercase(),
+        Some(Value::String(text)) => strip_py(text).to_uppercase(),
         // `.strip()` on a non-string → `AttributeError` → 500.
         Some(_) => return Err(Denial::ServerError),
     };
@@ -4594,11 +5863,21 @@ async fn user_views_post(
         ));
     };
     let data = parse_get_body(&body)?;
+    // Explicit null writes NULL into the `NOT NULL` JSON columns → the
+    // `IntegrityError` 400 (`save()` assigns before any validation).
+    for key in ["view_props", "default_props", "preferences"] {
+        if data.get(key).is_some_and(Value::is_null) {
+            return Err(Denial::IntegrityFailed);
+        }
+    }
     let view_props = data.get("view_props").cloned().unwrap_or(view_props);
     let default_props = data.get("default_props").cloned().unwrap_or(default_props);
     let preferences = data.get("preferences").cloned().unwrap_or(preferences);
     let sort_order = match data.get("sort_order") {
         None => sort_order,
+        // Explicit null → NULL into the `NOT NULL` float column → the
+        // `IntegrityError` 400 (`get_prep_value(None)` is `None`).
+        Some(Value::Null) => return Err(Denial::IntegrityFailed),
         // `float(value)` on save: bools/numbers pass, strings parse
         // (Python `float()` spellings), anything else raises → 500.
         Some(value) => python_float(value).ok_or(Denial::ServerError)?,
@@ -4622,9 +5901,14 @@ async fn user_views_post(
 }
 
 /// Python `float(value)` for the `sort_order` write: bools → 1.0/0.0,
-/// numbers verbatim, strings stripped and parsed (`nan`/`inf` spellings
-/// included, underscores between digits), everything else `None`
-/// (→ 500, like the `TypeError`/`ValueError` from `get_prep_value`).
+/// numbers verbatim, strings stripped (exactly Rust `White_Space` —
+/// U+001C-U+001F raise) and parsed, everything else `None` (→ 500,
+/// like the `TypeError`/`ValueError` from `get_prep_value`). Digits
+/// are Unicode decimal ([`nd_value`]); the sign, `.`, and exponent
+/// marker are ASCII-only; `_` is allowed only between two digits
+/// (`"1_"`, `"_1"`, `"1__0"`, `"1_.0"`, `"1e_1"` all raise — probed).
+/// `inf`/`infinity`/`nan` spellings are ASCII case-insensitive with an
+/// optional ASCII sign.
 fn python_float(value: &Value) -> Option<f64> {
     match value {
         Value::Null | Value::Array(_) | Value::Object(_) => None,
@@ -4632,27 +5916,122 @@ fn python_float(value: &Value) -> Option<f64> {
         Value::Bool(false) => Some(0.0),
         Value::Number(number) => number.as_f64(),
         Value::String(text) => {
-            let text = text.trim().replace('_', "");
+            let text = text.trim_matches(|ch: char| ch.is_whitespace());
             if text.is_empty() {
                 return None;
             }
-            match text.to_ascii_lowercase().as_str() {
-                "nan" | "+nan" | "-nan" => {
-                    Some(f64::NAN.copysign(if text.starts_with('-') { -1.0 } else { 1.0 }))
+            // Every `_` must join two digits (verified before removal,
+            // so `inf_inity` fails instead of parsing as `infinity`).
+            if text.contains('_') {
+                let chars: Vec<char> = text.chars().collect();
+                for (index, ch) in chars.iter().enumerate() {
+                    if *ch == '_' {
+                        let prev_ok = index > 0 && nd_value(chars[index - 1]).is_some();
+                        let next_ok =
+                            index + 1 < chars.len() && nd_value(chars[index + 1]).is_some();
+                        if !(prev_ok && next_ok) {
+                            return None;
+                        }
+                    }
                 }
-                "inf" | "+inf" | "-inf" | "infinity" | "+infinity" | "-infinity" => {
-                    Some(f64::INFINITY.copysign(if text.starts_with('-') { -1.0 } else { 1.0 }))
-                }
-                _ => text.parse::<f64>().ok(),
+                let clean: String = text.chars().filter(|ch| *ch != '_').collect();
+                return parse_float_spelling(&clean);
+            }
+            parse_float_spelling(text)
+        }
+    }
+}
+
+/// One stripped, underscore-free `float()` spelling: the `inf`/`nan`
+/// words, or the float grammar over Unicode decimal digits (mapped to
+/// ASCII before parsing — `f64::from_str` is ASCII-only).
+fn parse_float_spelling(text: &str) -> Option<f64> {
+    let body = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if matches!(
+        body.to_ascii_lowercase().as_str(),
+        "inf" | "infinity" | "nan"
+    ) {
+        return text.parse::<f64>().ok();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    if matches!(chars.peek(), Some('+') | Some('-')) {
+        out.push(chars.next().expect("peeked sign"));
+    }
+    let mut int_digits = 0;
+    while let Some(&ch) = chars.peek() {
+        if let Some(digit) = nd_value(ch) {
+            out.push(char::from_digit(digit, 10).expect("decimal digit"));
+            chars.next();
+            int_digits += 1;
+        } else {
+            break;
+        }
+    }
+    let mut frac_digits = 0;
+    if chars.peek() == Some(&'.') {
+        out.push('.');
+        chars.next();
+        while let Some(&ch) = chars.peek() {
+            if let Some(digit) = nd_value(ch) {
+                out.push(char::from_digit(digit, 10).expect("decimal digit"));
+                chars.next();
+                frac_digits += 1;
+            } else {
+                break;
             }
         }
     }
+    if int_digits == 0 && frac_digits == 0 {
+        return None;
+    }
+    if matches!(chars.peek(), Some('e') | Some('E')) {
+        out.push(chars.next().expect("peeked exponent"));
+        if matches!(chars.peek(), Some('+') | Some('-')) {
+            out.push(chars.next().expect("peeked exponent sign"));
+        }
+        let mut exp_digits = 0;
+        while let Some(&ch) = chars.peek() {
+            if let Some(digit) = nd_value(ch) {
+                out.push(char::from_digit(digit, 10).expect("decimal digit"));
+                chars.next();
+                exp_digits += 1;
+            } else {
+                break;
+            }
+        }
+        if exp_digits == 0 {
+            return None;
+        }
+    }
+    if chars.next().is_some() {
+        return None;
+    }
+    out.parse::<f64>().ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Blank bodies reproduce CPython's `Expecting value` line/column
+    /// (live-probed against Django, incl. multi-line blanks).
+    #[test]
+    fn blank_body_reason_matches_cpython() {
+        assert_eq!(blank_json_reason(b""), None);
+        assert_eq!(
+            blank_json_reason(b"  ").as_deref(),
+            Some("JSON parse error - Expecting value: line 1 column 3 (char 2)")
+        );
+        assert_eq!(
+            blank_json_reason(b"\n\t ").as_deref(),
+            Some("JSON parse error - Expecting value: line 2 column 3 (char 3)")
+        );
+        // `\x0b` is not JSON whitespace: not a blank.
+        assert_eq!(blank_json_reason(b"\x0b"), None);
+        assert_eq!(blank_json_reason(b"{oops"), None);
+    }
 
     /// Every owned method+path row resolves in the gate table, and the
     /// `PATH_*` consts stay in sync with it.
@@ -4813,29 +6192,51 @@ mod tests {
 
     #[test]
     fn char_validation_matches_drf() {
-        assert_eq!(
-            validate_char(&Value::Null, None, true),
-            Err("This field may not be null.".to_owned())
-        );
-        assert_eq!(
-            validate_char(&json!(""), None, false),
-            Err("This field may not be blank.".to_owned())
-        );
+        let null = || vec!["This field may not be null.".to_owned()];
+        let blank = || vec!["This field may not be blank.".to_owned()];
+        assert_eq!(validate_char(&Value::Null, None, true), Err(null()));
+        assert_eq!(validate_char(&json!(""), None, false), Err(blank()));
         assert_eq!(validate_char(&json!(""), None, true), Ok(String::new()));
-        assert_eq!(
-            validate_char(&json!("   "), None, false),
-            Err("This field may not be blank.".to_owned())
-        );
+        assert_eq!(validate_char(&json!("   "), None, false), Err(blank()));
         assert_eq!(
             validate_char(&json!(true), None, true),
-            Err("Not a valid string.".to_owned())
+            Err(vec!["Not a valid string.".to_owned()])
         );
         assert_eq!(validate_char(&json!(12), None, true), Ok("12".to_owned()));
         assert_eq!(
             validate_char(&json!("abcdef"), Some(5), true),
-            Err("Ensure this field has no more than 5 characters.".to_owned())
+            Err(vec![
+                "Ensure this field has no more than 5 characters.".to_owned()
+            ])
         );
         assert_eq!(opt_char(&Value::Null, Some(255), true), Ok(None));
+        // The stored value is STRIPPED, and `max_length` runs on the
+        // stripped value.
+        assert_eq!(
+            validate_char(&json!("  padded  "), None, true),
+            Ok("padded".to_owned())
+        );
+        assert_eq!(
+            validate_char(&json!("  ab  "), Some(3), true),
+            Ok("ab".to_owned())
+        );
+        // U+001C strips (Python `str.strip`, not Rust `trim`).
+        assert_eq!(
+            validate_char(&json!("\u{1c}ab\u{1c}"), None, true),
+            Ok("ab".to_owned())
+        );
+        // NUL content 400s, collecting after `max_length`.
+        assert_eq!(
+            validate_char(&json!("a\0b"), None, true),
+            Err(vec![NULL_CHARACTERS_MESSAGE.to_owned()])
+        );
+        assert_eq!(
+            validate_char(&json!("abcdef\0"), Some(5), true),
+            Err(vec![
+                "Ensure this field has no more than 5 characters.".to_owned(),
+                NULL_CHARACTERS_MESSAGE.to_owned(),
+            ])
+        );
     }
 
     #[test]
@@ -4843,12 +6244,16 @@ mod tests {
         assert_eq!(validate_bool(&json!(true)), Ok(true));
         assert_eq!(validate_bool(&json!("YES")), Ok(true));
         assert_eq!(validate_bool(&json!(1)), Ok(true));
+        assert_eq!(validate_bool(&json!(1.0)), Ok(true));
         assert_eq!(validate_bool(&json!(0)), Ok(false));
         assert_eq!(validate_bool(&json!(0.0)), Ok(false));
-        assert_eq!(
-            validate_bool(&json!(1.0)),
-            Err("Must be a valid boolean.".to_owned())
-        );
+        assert_eq!(validate_bool(&json!(-0.0)), Ok(false));
+        for bad in [json!(2), json!(2.0), json!(0.5), json!(" true")] {
+            assert_eq!(
+                validate_bool(&bad),
+                Err("Must be a valid boolean.".to_owned())
+            );
+        }
         assert_eq!(
             validate_bool(&json!("yes please")),
             Err("Must be a valid boolean.".to_owned())
@@ -4861,20 +6266,73 @@ mod tests {
 
     #[test]
     fn int_validation_matches_drf() {
+        let invalid = || IntError::Invalid("A valid integer is required.".to_owned());
         assert_eq!(validate_int(&json!(12)), Ok(12));
         assert_eq!(validate_int(&json!("12")), Ok(12));
         assert_eq!(validate_int(&json!(1.0)), Ok(1));
+        assert_eq!(validate_int(&json!(1.5)), Err(invalid()));
+        assert_eq!(validate_int(&json!(true)), Err(invalid()));
+        // `str(float)` spellings: `1e3` → `1000.0` → `1000`.
+        assert_eq!(validate_int(&json!(1000.0)), Ok(1000));
+        assert_eq!(validate_int(&json!(1e16)), Err(invalid()));
+        // `int()` spellings: padding, trailing dot, underscores,
+        // Unicode decimal digits.
+        assert_eq!(validate_int(&json!(" 5")), Ok(5));
+        assert_eq!(validate_int(&json!("5.")), Ok(5));
+        assert_eq!(validate_int(&json!("1_0")), Ok(10));
+        assert_eq!(validate_int(&json!("５")), Ok(5));
+        assert_eq!(validate_int(&json!("１２３")), Ok(123));
+        for bad in ["1_", "_1", "1__0", "0x1", "1e3", "１_２_"] {
+            assert_eq!(validate_int(&json!(bad)), Err(invalid()), "{bad:?}");
+        }
+        // The 1000-char limit counts characters, not bytes.
         assert_eq!(
-            validate_int(&json!(1.5)),
-            Err("A valid integer is required.".to_owned())
+            validate_int(&json!("é".repeat(1001))),
+            Err(IntError::Invalid("String value too large.".to_owned()))
+        );
+        assert_eq!(validate_int(&json!("é".repeat(1000))), Err(invalid()));
+        // Valid spellings outside `i64` carry their sign (the
+        // min/max range check turns them into the bound 400).
+        assert_eq!(
+            validate_int(&json!("9".repeat(50))),
+            Err(IntError::TooLarge { negative: false })
         );
         assert_eq!(
-            validate_int(&json!(true)),
-            Err("A valid integer is required.".to_owned())
+            validate_int(&json!(format!("-{}", "9".repeat(50)))),
+            Err(IntError::TooLarge { negative: true })
         );
-        assert_eq!(strip_decimal_zeros("1.000"), "1");
-        assert_eq!(strip_decimal_zeros("1.5"), "1.5");
-        assert_eq!(strip_decimal_zeros("100"), "100");
+        assert_eq!(
+            validate_int(&json!(u64::MAX)),
+            Err(IntError::TooLarge { negative: false })
+        );
+        // Range checks: the live-probed min/max 400s.
+        assert_eq!(
+            check_int_range(validate_int(&json!(2i64.pow(40))), -2147483648, 2147483647),
+            Err("Ensure this value is less than or equal to 2147483647.".to_owned())
+        );
+        assert_eq!(
+            check_int_range(validate_int(&json!(-2i64.pow(40))), -2147483648, 2147483647),
+            Err("Ensure this value is greater than or equal to -2147483648.".to_owned())
+        );
+        assert_eq!(
+            check_int_range(validate_int(&json!("9".repeat(50))), 0, 12),
+            Err("Ensure this value is less than or equal to 12.".to_owned())
+        );
+        assert_eq!(check_int_range(validate_int(&json!(12)), 0, 12), Ok(12));
+        assert_eq!(validate_int(&json!(1e19)), Err(invalid()));
+        assert_eq!(validate_int(&json!(-1e19)), Err(invalid()));
+        // `re_decimal`: trailing `.0*` plus `re`-whitespace; no match
+        // returns the original (so `int()` still rejects `\u{1c}`).
+        assert_eq!(strip_re_decimal("1.000"), "1");
+        assert_eq!(strip_re_decimal("1.5"), "1.5");
+        assert_eq!(strip_re_decimal("100"), "100");
+        assert_eq!(strip_re_decimal("5."), "5");
+        assert_eq!(strip_re_decimal("5. "), "5");
+        assert_eq!(strip_re_decimal("5.0\u{a0}"), "5");
+        assert_eq!(strip_re_decimal("5.0\u{1c}"), "5");
+        assert_eq!(strip_re_decimal("50\u{1c}"), "50\u{1c}");
+        assert_eq!(strip_re_decimal("5.0.0"), "5.0");
+        assert_eq!(validate_int(&json!("5\u{1c}")), Err(invalid()));
     }
 
     #[test]
@@ -4905,20 +6363,160 @@ mod tests {
     #[test]
     fn datetime_parsing_matches_drf_iso8601() {
         let utc = chrono_tz::UTC;
-        let parsed = parse_drf_datetime("2026-10-02T22:22:38.379224Z", utc).unwrap();
+        let parsed = parse_drf_datetime("2026-10-02T22:22:38.379224Z", utc)
+            .ok()
+            .unwrap();
         assert_eq!(parsed.to_string(), "2026-10-02 22:22:38.379224 UTC");
-        let parsed = parse_drf_datetime("2026-10-02T22:22:38+00:00", utc).unwrap();
+        let parsed = parse_drf_datetime("2026-10-02T22:22:38+00:00", utc)
+            .ok()
+            .unwrap();
         assert_eq!(parsed.timestamp(), 1790979758);
         // Naive reads in the request user's zone.
         let eastern: Tz = "America/New_York".parse().unwrap();
-        let parsed = parse_drf_datetime("2026-10-02 22:22:38", eastern).unwrap();
+        let parsed = parse_drf_datetime("2026-10-02 22:22:38", eastern)
+            .ok()
+            .unwrap();
         assert_eq!(parsed.to_string(), "2026-10-03 02:22:38 UTC");
-        assert!(parse_drf_datetime("2026-10-02", utc).is_none());
-        assert!(parse_drf_datetime("not-a-date", utc).is_none());
+        // Date-only: midnight, naive → user zone.
+        let parsed = parse_drf_datetime("2026-10-02", eastern).ok().unwrap();
+        assert_eq!(parsed.to_string(), "2026-10-02 04:00:00 UTC");
+        // Lowercase `z` rejected; lowercase `t` accepted.
+        assert!(parse_drf_datetime("2026-10-02T22:22:38z", utc)
+            .ok()
+            .is_none());
+        assert!(parse_drf_datetime("2026-10-02t22:22:38", utc)
+            .ok()
+            .is_some());
+        // Leading whitespace rejected; trailing (no tz) accepted.
+        assert!(parse_drf_datetime(" 2026-10-02T22:22:38", utc)
+            .ok()
+            .is_none());
+        assert!(parse_drf_datetime("2026-10-02T22:22:38 ", utc)
+            .ok()
+            .is_some());
+        assert!(parse_drf_datetime("2026-10-02T22:22:38+00:00 ", utc)
+            .ok()
+            .is_none());
+        // Fractions truncate to micros (never round).
+        let parsed = parse_drf_datetime("2026-10-02T22:22:38.123456789Z", utc)
+            .ok()
+            .unwrap();
+        assert_eq!(parsed.to_string(), "2026-10-02 22:22:38.123456 UTC");
+        // Offset shapes: `+HHMM`, `+HH`, seconds, space separator
+        // without seconds, comma fractions, single-digit fields.
+        assert_eq!(
+            parse_drf_datetime("2026-10-02T22:22:38+0000", utc)
+                .ok()
+                .unwrap()
+                .to_string(),
+            "2026-10-02 22:22:38 UTC"
+        );
+        assert_eq!(
+            parse_drf_datetime("2026-10-02T22:22:38+00", utc)
+                .ok()
+                .unwrap()
+                .to_string(),
+            "2026-10-02 22:22:38 UTC"
+        );
+        assert_eq!(
+            parse_drf_datetime("2026-10-02T22:22:38+01:02:03", utc)
+                .ok()
+                .unwrap()
+                .to_string(),
+            "2026-10-02 21:20:35 UTC"
+        );
+        assert_eq!(
+            parse_drf_datetime("2026-10-02 22:22+00:00", utc)
+                .ok()
+                .unwrap()
+                .to_string(),
+            "2026-10-02 22:22:00 UTC"
+        );
+        let parsed = parse_drf_datetime("2026-10-02T22:22:38,5Z", utc)
+            .ok()
+            .unwrap();
+        assert_eq!(parsed.to_string(), "2026-10-02 22:22:38.500 UTC");
+        assert!(parse_drf_datetime("2026-1-2T1:2:3", utc).ok().is_some());
+        // Basic and week dates; any single-char separator.
+        assert!(parse_drf_datetime("20261002T222238Z", utc).ok().is_some());
+        assert_eq!(
+            parse_drf_datetime("2024-W01-1", utc)
+                .ok()
+                .unwrap()
+                .to_string(),
+            "2024-01-01 00:00:00 UTC"
+        );
+        assert_eq!(
+            parse_drf_datetime("2026-10-02x22:22:38", utc)
+                .ok()
+                .unwrap()
+                .to_string(),
+            "2026-10-02 22:22:38 UTC"
+        );
+        // `+`/`-` in separator position separate (05:30 naive).
+        assert_eq!(
+            parse_drf_datetime("2026-10-02+05:30", utc)
+                .ok()
+                .unwrap()
+                .to_string(),
+            "2026-10-02 05:30:00 UTC"
+        );
+        // DST: ambiguous and nonexistent wall times resolve `fold=0`
+        // (first occurrence / pre-transition offset), never 400.
+        assert_eq!(
+            parse_drf_datetime("2024-11-03T01:30:00", eastern)
+                .ok()
+                .unwrap()
+                .to_string(),
+            "2024-11-03 05:30:00 UTC"
+        );
+        assert_eq!(
+            parse_drf_datetime("2024-03-10T02:30:00", eastern)
+                .ok()
+                .unwrap()
+                .to_string(),
+            "2024-03-10 07:30:00 UTC"
+        );
+        // Rejects.
+        for bad in [
+            "not-a-date",
+            "",
+            "2024-13-01",
+            "2026-10-02T24:00:00",
+            "2026-10-02T00:00:00+99:99",
+            "2026-10-02T00:00:00+05:30x",
+            "20240101000000",
+            "2026-10-02T",
+        ] {
+            assert!(parse_drf_datetime(bad, utc).ok().is_none(), "{bad:?}");
+        }
         assert_eq!(
             validate_datetime(&json!("nope"), utc, true),
             Err(INVALID_DATETIME_MESSAGE.to_owned())
         );
+        // `astimezone` overflow is its own 400, not `invalid`.
+        assert_eq!(
+            validate_datetime(&json!("9999-12-31T23:00:00-14:00"), utc, true),
+            Err(OVERFLOW_DATETIME_MESSAGE.to_owned())
+        );
+        assert_eq!(
+            validate_datetime(&json!("0001-01-01T00:00:00+14:00"), utc, true),
+            Err(OVERFLOW_DATETIME_MESSAGE.to_owned())
+        );
+        // Long fractions scan to the tz; short ones stay strict.
+        assert_eq!(
+            parse_drf_datetime("2026-10-02T22:22:38.123456xyz+00:00", utc)
+                .ok()
+                .unwrap()
+                .to_string(),
+            "2026-10-02 22:22:38.123456 UTC"
+        );
+        assert!(parse_drf_datetime("2026-10-02T22:22:38.12345x+00:00", utc)
+            .ok()
+            .is_none());
+        // Week dates resolving past `9999` are invalid.
+        assert!(parse_drf_datetime("9999-W52-7", utc).ok().is_none());
+        assert!(parse_drf_datetime("9999-W52-1", utc).ok().is_some());
     }
 
     #[test]
@@ -4950,12 +6548,17 @@ mod tests {
 
     #[test]
     fn write_field_order_pins_put_required_positions() {
-        // Error-dict order is `_meta` order; PUT requires the last two
-        // plus name/identifier — `deleted_at` errors before `workspace`.
-        assert_eq!(WRITE_FIELDS[0], "name");
-        assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 2], "deleted_at");
-        assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 1], "workspace");
-        assert!(WRITE_FIELDS.contains(&"identifier"));
+        // Error-dict order is DRF serializer order (`PUT {}` reports
+        // `[deleted_at, name, identifier, workspace]`); relations sort
+        // last, `default_state` final.
+        let position = |field: &str| WRITE_FIELDS.iter().position(|name| *name == field).unwrap();
+        assert_eq!(WRITE_FIELDS[0], "deleted_at");
+        assert!(position("deleted_at") < position("name"));
+        assert!(position("name") < position("identifier"));
+        assert!(position("identifier") < position("workspace"));
+        assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 1], "default_state");
+        assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 6], "workspace");
+        assert_eq!(WRITE_FIELDS.len(), 43);
     }
 
     #[test]
@@ -4997,6 +6600,51 @@ mod tests {
         assert!(python_float(&json!("abc")).is_none());
         assert!(python_float(&Value::Null).is_none());
         assert!(python_float(&json!([1])).is_none());
+        // Underscores only between digits; never in `inf`/`nan`.
+        assert_eq!(python_float(&json!("1_0e1_0")), Some(1e11));
+        assert_eq!(python_float(&json!("1.0_0")), Some(1.0));
+        for bad in [
+            "1_",
+            "_1",
+            "1__0",
+            "1_.0",
+            "1._0",
+            "1e_1",
+            "inf_inity",
+            "nan_1",
+        ] {
+            assert!(python_float(&json!(bad)).is_none(), "{bad:?}");
+        }
+        // Unicode decimal digits (but U+001C padding raises).
+        assert_eq!(python_float(&json!("５")), Some(5.0));
+        assert_eq!(python_float(&json!("１_２")), Some(12.0));
+        assert!(python_float(&json!("\u{1c}1.5")).is_none());
+        assert_eq!(python_float(&json!("\u{85}1.5")), Some(1.5));
+    }
+
+    #[test]
+    fn python_text_and_render_helpers_match() {
+        assert_eq!(strip_py("\u{1c}a\u{1c}"), "a");
+        assert_eq!(nd_value('５'), Some(5));
+        assert_eq!(nd_value('²'), None);
+        assert_eq!(nd_value('7'), Some(7));
+        assert_eq!(
+            escape_u2028("a\u{2028}b\u{2029}c".to_owned()),
+            "a\\u2028b\\u2029c"
+        );
+        assert_eq!(escape_u2028("plain".to_owned()), "plain");
+        assert_eq!(i32_or_500(12).unwrap(), 12);
+        assert!(matches!(i32_or_500(1 << 40), Err(Denial::ServerError)));
+        assert!(matches!(i32_or_500(i64::MIN), Err(Denial::ServerError)));
+        // Raw `if intake_view:` truthiness (validated-bool independent).
+        assert!(python_truthy(&json!("false")));
+        assert!(python_truthy(&json!(1)));
+        assert!(!python_truthy(&json!(0)));
+        assert!(!python_truthy(&json!(0.0)));
+        assert!(!python_truthy(&json!("")));
+        assert!(!python_truthy(&Value::Null));
+        assert!(!python_truthy(&json!([])));
+        assert!(!python_truthy(&json!({})));
     }
 
     #[test]
