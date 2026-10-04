@@ -59,15 +59,23 @@
 //!   raising through `handle_exception`) and never reaches the 400 arm,
 //!   while a truncated float such as `5.9` demotes and *then* 400s.
 //!   `role` validates as a DRF `ChoiceField` over `[20, 15, 5]` (the model
-//!   carries `choices`), and the two uniqueness validators (the plain
-//!   `(workspace, member, deleted_at)` trio plus the conditional
-//!   `(workspace, member)` pair) both fire on a workspace collision.
+//!   carries `choices`). DRF runs *no* uniqueness validators here:
+//!   `get_unique_together_validators` only sees writable fields and
+//!   `member` is read-only, so both the `(workspace, member, deleted_at)`
+//!   trio and the conditional `(workspace, member)` pair are skipped — a
+//!   workspace collision saves, hits the unique constraint, and 400s
+//!   through the `IntegrityError` branch instead.
 //! - `destroy`'s sole-project-admin guard compares `member_id` (a User FK)
 //!   against the WorkspaceMember PK, so it never fires; `leave` uses
 //!   `request.user.id` and works. Both shapes are kept, never unified.
 //! - `leave` invalidations run after auth but before the gate: anonymous
 //!   callers 401 without invalidating, while an authenticated 403 still
-//!   deletes the three keys (one slash-less, matching nothing).
+//!   deletes the three keys (one missing its leading slash — harmless
+//!   inside the `*…*` glob, which still matches the stored keys).
+//! - Detail routes carry `<uuid:pk>`, which only matches
+//!   lowercase-hyphenated UUIDs; anything else misses the route and 404s
+//!   through `custom_404_view` (`JsonResponse` bytes, with the space
+//!   after the colon) before auth ever runs.
 //! - The me-get serializes a missing row (`None`) to a 14-key all-null
 //!   object with `company_role: ""` and `is_active: false` (verified
 //!   against live DRF, not derived): read-only fields skip, the rest
@@ -90,7 +98,7 @@
 //! - B3: destroy's sole-project-admin guard never fires (`member.py:128`
 //!   compares the User FK against the WorkspaceMember PK).
 //! - B4: the leave invalidate path `api/users/me/workspaces/` misses its
-//!   leading slash, so the glob matches nothing (`member.py:159`).
+//!   leading slash (harmless inside the `*…*` glob) (`member.py:159`).
 //! - B5: member list has no `is_active` filter — inactive rows are listed
 //!   (`member.py:37-43`).
 //! - B6: the guest-demote cascade has no `is_active` filter — inactive
@@ -254,11 +262,17 @@ pub const MEMBER_NOT_FOUND_BODY: &str = r#"{"error":"Workspace member not found"
 /// `handle_exception`'s `ObjectDoesNotExist` branch (`app/views/base.py`):
 /// the bare-`.get` misses (write targets, requesters, views-post).
 pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
+/// Resolver 404 for a `<uuid:pk>` segment that misses the converter
+/// (global `handler404`, `pi_dash/urls.py:15` → `custom_404_view`):
+/// `JsonResponse` bytes, i.e. `json.dumps` defaults with the space after
+/// the colon.
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// `handle_exception`'s `ValidationError` branch: garbage UUIDs (pk path
 /// param, UUID FK input) and the like.
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `handle_exception`'s `IntegrityError` branch: constraint races behind
-/// the PATCH validators.
+/// `handle_exception`'s `IntegrityError` branch: unique-constraint
+/// collisions at save (DRF runs no uniqueness validators for this
+/// serializer, so the database is the only guard).
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 /// `handle_exception`'s generic 500 branch — and the last-visited body.
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
@@ -290,6 +304,8 @@ pub enum Denial {
     MemberNotFound,
     /// 404, `ObjectDoesNotExist` branch.
     ObjectNotFound,
+    /// 404, the URL resolver (`<uuid:pk>` converter miss → `handler404`).
+    PageNotFound,
     /// 400, `ValidationError` branch.
     BadValidation,
     /// 400, `IntegrityError` branch.
@@ -314,6 +330,7 @@ impl Denial {
             Denial::Forbidden(body) => (StatusCode::FORBIDDEN, (*body).to_owned()),
             Denial::MemberNotFound => (StatusCode::NOT_FOUND, MEMBER_NOT_FOUND_BODY.to_owned()),
             Denial::ObjectNotFound => (StatusCode::NOT_FOUND, OBJECT_NOT_FOUND_BODY.to_owned()),
+            Denial::PageNotFound => (StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned()),
             Denial::BadValidation => (StatusCode::BAD_REQUEST, INVALID_DETAIL_BODY.to_owned()),
             Denial::BadPayload => (StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY.to_owned()),
             Denial::BadJson(detail) => (
@@ -499,8 +516,20 @@ async fn gated_actor(
 }
 
 fn parse_pk(raw: &str) -> Result<Uuid, Denial> {
-    // `get_queryset().get(pk=<raw>)`: garbage is a `ValidationError`.
-    Uuid::parse_str(raw).map_err(|_| Denial::BadValidation)
+    // Django's `<uuid:pk>` converter (`[0-9a-f]{8}-…`, lowercase-only,
+    // case-sensitive match): anything else misses the route and 404s
+    // through `custom_404_view` before auth ever runs.
+    const HYPHENS: [usize; 4] = [8, 13, 18, 23];
+    let bytes = raw.as_bytes();
+    let valid = bytes.len() == 36
+        && HYPHENS.iter().all(|&i| bytes[i] == b'-')
+        && bytes.iter().enumerate().all(|(i, &b)| {
+            HYPHENS.contains(&i) || (b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        });
+    if !valid {
+        return Err(Denial::PageNotFound);
+    }
+    Uuid::parse_str(raw).map_err(|_| Denial::PageNotFound)
 }
 
 /// Map a body-parse failure to DRF's `ParseError` shape. Blank input is
@@ -1534,7 +1563,10 @@ struct MemberFullRow {
 /// `is_active` filter (ported bug B5); the avatar join is `LEFT` (the FK
 /// is nullable) with the asset manager scope, and the asset-workspace
 /// join carries the workspace manager scope (a soft-deleted asset
-/// workspace 404s through the FK descriptor, like Python).
+/// workspace 404s through the FK descriptor, like Python). The head ends
+/// right after `slug = ` so [`member_rows_builder`] can bind the slug as
+/// `$1` itself — a literal `$1` here would duplicate the bind and 500
+/// every list/retrieve.
 const MEMBER_SELECT: &str = "SELECT wm.id AS id, wm.created_at AS created_at, \
      wm.updated_at AS updated_at, wm.deleted_at AS deleted_at, wm.role AS role, \
      wm.company_role AS company_role, wm.view_props AS view_props, \
@@ -1553,22 +1585,23 @@ const MEMBER_SELECT: &str = "SELECT wm.id AS id, wm.created_at AS created_at, \
      JOIN users u ON u.id = wm.member_id \
      LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id AND fa.deleted_at IS NULL \
      LEFT JOIN workspaces faw ON faw.id = fa.workspace_id AND faw.deleted_at IS NULL \
-     WHERE wm.workspace_id = (SELECT id FROM workspaces WHERE slug = $1) \
-     AND wm.deleted_at IS NULL";
+     WHERE wm.workspace_id = (SELECT id FROM workspaces WHERE slug = ";
 
-/// Fetch list/retrieve rows: scope + optional `?search=` terms (ANDed,
-/// `icontains` over display/first name) + optional target + `-created_at`
-/// ordering. Ported bug B5: no `is_active` filter.
-async fn fetch_member_rows(
-    pool: &sqlx::PgPool,
-    slug: &str,
+/// Build the list/retrieve statement: the slug binds as `$1`, then the
+/// soft-delete guard, the optional `?search=` terms (ANDed, `icontains`
+/// over display/first name), the optional target, and the `-created_at`
+/// ordering. Ported bug B5: no `is_active` filter. Split from execution
+/// so tests can assert the exact statement + placeholder numbering via
+/// `.sql()`.
+fn member_rows_builder<'q>(
+    slug: &'q str,
     terms: &[String],
     target: Option<&Uuid>,
     one: bool,
-) -> Result<Vec<MemberFullRow>, Denial> {
+) -> sqlx::QueryBuilder<'q, sqlx::Postgres> {
     let mut qb = sqlx::QueryBuilder::new(MEMBER_SELECT);
-    qb.push(" ");
     qb.push_bind(slug);
+    qb.push(" AND wm.deleted_at IS NULL ");
     for term in terms {
         qb.push("AND (u.display_name ILIKE ");
         qb.push_bind(like_param(term));
@@ -1585,7 +1618,19 @@ async fn fetch_member_rows(
     if one {
         qb.push(" LIMIT 1");
     }
-    qb.build_query_as::<MemberFullRow>()
+    qb
+}
+
+/// Fetch list/retrieve rows through [`member_rows_builder`].
+async fn fetch_member_rows(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    terms: &[String],
+    target: Option<&Uuid>,
+    one: bool,
+) -> Result<Vec<MemberFullRow>, Denial> {
+    member_rows_builder(slug, terms, target, one)
+        .build_query_as::<MemberFullRow>()
         .fetch_all(pool)
         .await
         .map_err(|_| Denial::ServerError)
@@ -1678,13 +1723,12 @@ async fn fetch_me_row(
 }
 
 /// One write-target row (partial_update/destroy): the PK, the user id,
-/// the role, and the workspace id.
+/// and the role.
 #[derive(Debug, Clone, Copy, sqlx::FromRow)]
 struct WriteTarget {
     id: Uuid,
     member_id: Uuid,
     role: i16,
-    workspace_id: Uuid,
 }
 
 /// The R4/R5 write-target lookup: `.get(pk, slug, member__is_bot=False,
@@ -1695,8 +1739,8 @@ async fn fetch_write_target(
     pk: &Uuid,
 ) -> Result<Option<WriteTarget>, Denial> {
     sqlx::query_as(
-        "SELECT wm.id AS id, wm.member_id AS member_id, wm.role AS role, \
-         wm.workspace_id AS workspace_id FROM workspace_members wm \
+        "SELECT wm.id AS id, wm.member_id AS member_id, wm.role AS role \
+         FROM workspace_members wm \
          JOIN users u ON u.id = wm.member_id AND u.is_bot = FALSE \
          WHERE wm.id = $1 AND wm.workspace_id = (SELECT id FROM workspaces WHERE slug = $2) \
          AND wm.is_active AND wm.deleted_at IS NULL LIMIT 1",
@@ -2206,37 +2250,17 @@ async fn user_exists(pool: &sqlx::PgPool, id: &Uuid) -> Result<bool, Denial> {
         .map_err(|_| Denial::ServerError)
 }
 
-/// The conditional `(workspace, member)` conflict probe behind both PATCH
-/// uniqueness validators (over the non-deleted scope, excluding the row
-/// itself).
-async fn unique_pair_conflict(
-    pool: &sqlx::PgPool,
-    workspace_id: &Uuid,
-    member_id: &Uuid,
-    exclude: &Uuid,
-) -> Result<bool, Denial> {
-    sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = $1 \
-         AND member_id = $2 AND deleted_at IS NULL AND id <> $3)",
-    )
-    .bind(workspace_id)
-    .bind(member_id)
-    .bind(exclude)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
-}
-
-/// Validate one PATCH body in wire order: fields first (all collected),
-/// then the object validators, then nothing — the caller saves. Unknown
-/// and read-only keys (`id`, `member`, `created_at`, `updated_at`) are
-/// silently ignored, like DRF.
+/// Validate one PATCH body in wire order: every field is collected, then
+/// the caller saves. There are no object validators — DRF skips both
+/// uniqueness validators (`member` is read-only), so a workspace
+/// collision surfaces as `IntegrityError` → `BadPayload` at save.
+/// Unknown and read-only keys (`id`, `member`, `created_at`,
+/// `updated_at`) are silently ignored, like DRF.
 #[allow(clippy::result_large_err)]
 async fn validate_patch(
     pool: &sqlx::PgPool,
     fields: &Map<String, Value>,
     timezone: &chrono_tz::Tz,
-    target: &WriteTarget,
 ) -> Result<PatchSets, Response> {
     let mut errors = FieldErrors::default();
     let mut sets = PatchSets::default();
@@ -2299,7 +2323,6 @@ async fn validate_patch(
         }
     }
     // FKs (existence is field-level; garbage escapes as `ValidationError`).
-    let mut workspace_id: Option<Uuid> = None;
     if let Some(value) = fields.get("created_by") {
         match validate_fk_uuid(value, true, &mut errors.created_by) {
             FkValue::Id(id) => {
@@ -2339,10 +2362,7 @@ async fn validate_patch(
             FkValue::Id(id) => {
                 let display = python_str(value);
                 match workspace_exists(pool, &id).await {
-                    Ok(true) => {
-                        workspace_id = Some(id);
-                        sets.workspace = Some(id);
-                    }
+                    Ok(true) => sets.workspace = Some(id),
                     Ok(false) => errors
                         .workspace
                         .push(format!("Invalid pk \"{display}\" - object does not exist.")),
@@ -2356,39 +2376,6 @@ async fn validate_patch(
     }
     if bad_input {
         return Err(Denial::BadValidation.into_response());
-    }
-    if !errors.is_empty() {
-        return Err(Denial::BadFields(errors.into_value()).into_response());
-    }
-    // Object validators: the `(workspace, member, deleted_at)` trio and
-    // the conditional `(workspace, member)` pair. `member` never changes
-    // (read-only), and the target is never deleted (the lookup requires
-    // it), so the trio fires exactly when the pair does with an
-    // all-`None` deleted side.
-    let ws_changed = workspace_id.is_some_and(|id| id != target.workspace_id);
-    let dt_new = sets.deleted_at.unwrap_or(None);
-    let dt_changed = sets.deleted_at.is_some_and(|assigned| assigned.is_some());
-    if ws_changed {
-        let new_ws = workspace_id.expect("changed workspace");
-        match unique_pair_conflict(pool, &new_ws, &target.member_id, &target.id).await {
-            Ok(true) => {
-                if dt_new.is_none() {
-                    errors.non_field_errors.push(
-                        "The fields workspace, member, deleted_at must make a unique set."
-                            .to_owned(),
-                    );
-                }
-                errors
-                    .non_field_errors
-                    .push("The fields workspace, member must make a unique set.".to_owned());
-            }
-            Ok(false) => {}
-            Err(denial) => return Err(denial.into_response()),
-        }
-    } else if dt_changed {
-        // The pair skips (workspace unchanged); the trio filters on a
-        // non-null `deleted_at` under the non-deleted scope — empty by
-        // construction, no query needed.
     }
     if !errors.is_empty() {
         return Err(Denial::BadFields(errors.into_value()).into_response());
@@ -2530,16 +2517,17 @@ async fn retrieve_member(
     Path((slug, pk)): Path<(String, String)>,
     axum::extract::Query(query): axum::extract::Query<QueryMap>,
 ) -> Response {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let id = match parse_pk(&pk) {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
     let actor = match gated_actor(&state, extension, "GET", MEMBER_DETAIL_PATH, &slug).await {
         Ok(actor) => actor,
         Err(denied) => return denied,
     };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
-        Err(denial) => return denial.into_response(),
-    };
-    let id = match parse_pk(&pk) {
-        Ok(id) => id,
         Err(denial) => return denial.into_response(),
     };
     let requester = match requester_lookup(pool, &actor.id, &slug).await {
@@ -2577,16 +2565,17 @@ async fn partial_update_member(
     Path((slug, pk)): Path<(String, String)>,
     body: Bytes,
 ) -> Response {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let id = match parse_pk(&pk) {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
     let actor = match gated_actor(&state, extension, "PATCH", MEMBER_DETAIL_PATH, &slug).await {
         Ok(actor) => actor,
         Err(denied) => return denied,
     };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
-        Err(denial) => return denial.into_response(),
-    };
-    let id = match parse_pk(&pk) {
-        Ok(id) => id,
         Err(denial) => return denial.into_response(),
     };
     let target = match fetch_write_target(pool, &slug, &id).await {
@@ -2616,7 +2605,7 @@ async fn partial_update_member(
             None => return Denial::ServerError.into_response(),
         }
     }
-    let sets = match validate_patch(pool, &fields, &actor.timezone, &target).await {
+    let sets = match validate_patch(pool, &fields, &actor.timezone).await {
         Ok(sets) => sets,
         Err(invalid) => return invalid,
     };
@@ -2648,16 +2637,17 @@ async fn destroy_member(
     extension: Option<axum::Extension<SessionHandle>>,
     Path((slug, pk)): Path<(String, String)>,
 ) -> Response {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let id = match parse_pk(&pk) {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
     let actor = match gated_actor(&state, extension, "DELETE", MEMBER_DETAIL_PATH, &slug).await {
         Ok(actor) => actor,
         Err(denied) => return denied,
     };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
-        Err(denial) => return denial.into_response(),
-    };
-    let id = match parse_pk(&pk) {
-        Ok(id) => id,
         Err(denial) => return denial.into_response(),
     };
     let target = match fetch_write_target(pool, &slug, &id).await {
@@ -3049,6 +3039,7 @@ mod tests {
         );
         assert_eq!(status_of(&Denial::MemberNotFound), StatusCode::NOT_FOUND);
         assert_eq!(status_of(&Denial::ObjectNotFound), StatusCode::NOT_FOUND);
+        assert_eq!(status_of(&Denial::PageNotFound), StatusCode::NOT_FOUND);
         assert_eq!(status_of(&Denial::BadValidation), StatusCode::BAD_REQUEST);
         assert_eq!(status_of(&Denial::BadPayload), StatusCode::BAD_REQUEST);
         assert_eq!(
@@ -3071,6 +3062,32 @@ mod tests {
         // `exception_handler`.
         let (_, body) = Denial::BadJson("JSON parse error - e".to_owned()).status_and_body();
         assert_eq!(body, "{\"detail\":\"JSON parse error - e\"}");
+        // The resolver 404 carries `JsonResponse` bytes (space after the
+        // colon), unlike every compact DRF body above.
+        assert_eq!(PAGE_NOT_FOUND_BODY, "{\"error\": \"Page not found.\"}");
+        let (_, body) = Denial::PageNotFound.status_and_body();
+        assert_eq!(body, PAGE_NOT_FOUND_BODY);
+    }
+
+    #[test]
+    fn detail_pks_mirror_the_uuid_converter() {
+        let good = "12345678-1234-5678-1234-567812345678";
+        assert_eq!(parse_pk(good).expect("converter match").to_string(), good);
+        for bad in [
+            "not-a-uuid",
+            "",
+            "12345678-1234-5678-1234-567812345678-extra",
+            "12345678123456781234567812345678",
+            "12345678-1234-5678-1234-56781234567G",
+            "12345678-1234-5678-1234-56781234567A",
+            "12345678-1234-5678-1234-567812345678 ",
+            "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
+        ] {
+            let denial = parse_pk(bad).unwrap_err();
+            let (status, body) = denial.status_and_body();
+            assert_eq!(status, StatusCode::NOT_FOUND, "{bad}");
+            assert_eq!(body, "{\"error\": \"Page not found.\"}", "{bad}");
+        }
     }
 
     #[test]
@@ -3371,13 +3388,31 @@ mod tests {
 
     #[test]
     fn field_errors_serialize_in_wire_order() {
+        // Full writable order, proven against the real serializer on DRF
+        // 3.15.2 (relations sort after concrete fields): deleted_at, role,
+        // company_role, view_props, default_props, issue_props, is_active,
+        // getting_started_checklist, tips, explored_features, created_by,
+        // updated_by, workspace, then non_field_errors.
         let mut errors = FieldErrors::default();
         errors.workspace.push("w".to_owned());
         errors.role.push("r".to_owned());
         errors.non_field_errors.push("n".to_owned());
         errors.deleted_at.push("d".to_owned());
+        errors.created_by.push("c".to_owned());
+        errors.updated_by.push("u".to_owned());
+        errors.company_role.push("cr".to_owned());
+        errors.view_props.push("v".to_owned());
+        errors.default_props.push("df".to_owned());
+        errors.issue_props.push("i".to_owned());
+        errors.is_active.push("a".to_owned());
+        errors.getting_started_checklist.push("g".to_owned());
+        errors.tips.push("t".to_owned());
+        errors.explored_features.push("e".to_owned());
         let text = serde_json::to_string(&errors.into_value()).expect("errors");
-        assert_eq!(text, "{\"deleted_at\":[\"d\"],\"role\":[\"r\"],\"workspace\":[\"w\"],\"non_field_errors\":[\"n\"]}");
+        assert_eq!(
+            text,
+            "{\"deleted_at\":[\"d\"],\"role\":[\"r\"],\"company_role\":[\"cr\"],\"view_props\":[\"v\"],\"default_props\":[\"df\"],\"issue_props\":[\"i\"],\"is_active\":[\"a\"],\"getting_started_checklist\":[\"g\"],\"tips\":[\"t\"],\"explored_features\":[\"e\"],\"created_by\":[\"c\"],\"updated_by\":[\"u\"],\"workspace\":[\"w\"],\"non_field_errors\":[\"n\"]}"
+        );
     }
 
     #[test]
@@ -3634,21 +3669,65 @@ mod tests {
 
     #[test]
     fn member_select_carries_scope_without_active_filter() {
-        // R1 shape: the slug subselect, the soft-delete guard, the
-        // `-created_at` fallback ordering — and no `is_active` (B5).
-        assert!(MEMBER_SELECT.contains("(SELECT id FROM workspaces WHERE slug = $1)"));
-        assert!(MEMBER_SELECT.contains("wm.deleted_at IS NULL"));
-        assert!(MEMBER_SELECT.contains("JOIN users u ON u.id = wm.member_id"));
-        assert!(MEMBER_SELECT.contains(
+        // R1 shape via the built statement: the slug subselect bound as
+        // `$1`, the soft-delete guard, the `-created_at` ordering — and
+        // no `is_active` filter (B5).
+        let sql = member_rows_builder("acme", &[], None, false)
+            .sql()
+            .to_owned();
+        assert!(
+            sql.contains("(SELECT id FROM workspaces WHERE slug = $1)"),
+            "{sql}"
+        );
+        assert!(sql.contains("wm.deleted_at IS NULL"));
+        assert!(sql.contains("JOIN users u ON u.id = wm.member_id"));
+        assert!(sql.contains(
             "LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id AND fa.deleted_at IS NULL"
         ));
         // B5 pins the *filter*, not the column: `is_active` is selected
         // (the serializer renders it) but never filtered on.
-        let where_clause = MEMBER_SELECT
+        let where_clause = sql
             .split_once("WHERE")
             .expect("member select filters in where")
             .1;
         assert!(!where_clause.contains("is_active"));
+        // The slug binds exactly once: a literal `$1` in the head plus
+        // `push_bind` would emit it twice and 500 every list/retrieve.
+        assert_eq!(sql.matches("$1").count(), 1, "{sql}");
+    }
+
+    #[test]
+    fn member_statement_numbers_placeholders() {
+        // No terms, no target: the slug binds `$1`, then the guard and
+        // the ordering follow with no gap or duplicated bind.
+        let plain = member_rows_builder("acme", &[], None, false)
+            .sql()
+            .to_owned();
+        assert_eq!(
+            plain,
+            format!("{MEMBER_SELECT}$1 AND wm.deleted_at IS NULL ORDER BY wm.created_at DESC")
+        );
+        // Terms AND after the guard, each binding two LIKEs.
+        let terms = member_rows_builder("acme", &["ada".to_owned()], None, false)
+            .sql()
+            .to_owned();
+        assert_eq!(
+            terms,
+            format!(
+                "{MEMBER_SELECT}$1 AND wm.deleted_at IS NULL AND (u.display_name ILIKE $2 OR u.first_name ILIKE $3) ORDER BY wm.created_at DESC"
+            )
+        );
+        // Target + LIMIT 1 (retrieve): the id binds after the term LIKEs.
+        let id = Uuid::parse_str("12345678-1234-5678-1234-567812345678").expect("uuid");
+        let detail = member_rows_builder("acme", &["ada".to_owned()], Some(&id), true)
+            .sql()
+            .to_owned();
+        assert_eq!(
+            detail,
+            format!(
+                "{MEMBER_SELECT}$1 AND wm.deleted_at IS NULL AND (u.display_name ILIKE $2 OR u.first_name ILIKE $3) AND wm.id = $4 ORDER BY wm.created_at DESC LIMIT 1"
+            )
+        );
     }
 
     #[test]
@@ -3691,7 +3770,7 @@ mod tests {
             )
         );
         assert_eq!(keys[1], (format!("/api/users/me/settings/:{user}"), false));
-        // The slash-less key (ported bug B4) matches nothing.
+        // The slash-less key (ported bug B4): harmless inside the glob.
         assert_eq!(keys[2], ("api/users/me/workspaces/".to_owned(), true));
         // Single deletes need Django's stored-key prefix.
         assert_eq!(
