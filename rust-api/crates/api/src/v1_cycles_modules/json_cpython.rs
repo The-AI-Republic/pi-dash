@@ -2697,6 +2697,13 @@ mod tests {
             Err(JsonFail::Message(detail))
             if detail == "Expecting value: line 1 column 1 (char 0)"
         ));
+        // The bytes path (negotiated JSON text, PIDASHCONV-693) has no
+        // empty shortcut: decoded-empty is the same EOF error.
+        assert!(matches!(
+            parse_request_bytes(b""),
+            Err(JsonFail::Message(detail))
+            if detail == "Expecting value: line 1 column 1 (char 0)"
+        ));
         // Impossible bytes still fail, even at end of input.
         assert!(matches!(
             parse_request_data(b"\xf5"),

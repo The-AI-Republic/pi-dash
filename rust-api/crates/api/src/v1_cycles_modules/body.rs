@@ -1175,6 +1175,14 @@ fn percent_decode_str(
     charset: &SupportedCharset,
     incoming: &[(usize, u16)],
 ) -> Result<(String, Vec<(usize, u16)>), BodyError> {
+    // `unquote` fast path (`urllib/parse.py`): no `%` anywhere means the
+    // value passes through untouched — the charset decoder never runs.
+    // Without this, `idna` and the bytes transforms (which reject plain
+    // ASCII under `replace`) 500 on %-less values, and punycode mangles
+    // %-less keys (`name` -> controls); verified live against Django.
+    if !raw.contains('%') {
+        return Ok((raw.to_owned(), incoming.to_vec()));
+    }
     let mut out = String::new();
     let mut surr = Vec::new();
     let mut run = Vec::new();
@@ -2305,6 +2313,45 @@ mod codec_tests {
         assert_eq!(map["name"], Value::String(String::new()));
         assert_eq!(map["description"], Value::String(String::new()));
         assert_eq!(map["owned_by"], Value::String(String::new()));
+    }
+
+    #[test]
+    fn form_unquote_fast_path() {
+        // `unquote` never runs the charset decoder on %-less values
+        // (PIDASHCONV-693): `idna` accepts plain ASCII, and punycode
+        // falls non-ASCII bodies back to latin-1 without mangling the
+        // `name` key (contract TestCharsetExotic693 pins the 201s).
+        let form = |ct: &str, body: &[u8]| match negotiate(ct, body, &CYCLE_BODY_SPEC).unwrap() {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
+                assert!(files.is_empty());
+                map
+            }
+            other => panic!("expected form, got {other:?}"),
+        };
+        let map = form(
+            "application/x-www-form-urlencoded; charset=idna",
+            b"name=FIDNA693",
+        );
+        assert_eq!(map["name"], Value::String("FIDNA693".to_owned()));
+        let map = form(
+            "application/x-www-form-urlencoded; charset=punycode",
+            b"name=\xff",
+        );
+        assert_eq!(map["name"], Value::String("ÿ".to_owned()));
+        // With a `%` present the decoder runs, and `idna` rejects.
+        assert_eq!(
+            negotiate(
+                "application/x-www-form-urlencoded; charset=idna",
+                b"a%20=b",
+                &CYCLE_BODY_SPEC,
+            )
+            .unwrap_err(),
+            BodyError::ServerError,
+        );
     }
 
     #[test]

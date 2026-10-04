@@ -2597,6 +2597,21 @@ pub fn parse_body_value_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal,
     })
 }
 
+/// [`parse_body_value_spans`] over already-negotiated JSON text: no
+/// empty shortcut. CL>0 with empty decoded text (a bytes transform or
+/// tail-drop that yields `""`, e.g. base64 `!!!` or BOM + `\xe4`) is
+/// the EOF `ParseError`, never `{}` — the module path (`parse_json_map`)
+/// already works this way; verified live against Django.
+pub fn parse_body_value_text_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal, Denial> {
+    super::json_cpython::parse_request_bytes_spans(raw, surr).map_err(|fail| match fail {
+        JsonFail::Message(detail) => Denial::BadDetail(format!(
+            "{}{detail}",
+            super::json_cpython::JSON_PARSE_PREFIX
+        )),
+        JsonFail::Recursion => Denial::ServerError,
+    })
+}
+
 /// Raw `request.data` object for the serializer-free views (create/add/
 /// transfer): empty is `{}`, unparseable is the DRF `ParseError`, and a
 /// non-object body 500s on `.get` (`AttributeError` — verified live for
@@ -2728,7 +2743,7 @@ fn parse_body_value_ct(
             Ok((JVal::Object(JObject::new()), BTreeMap::new(), false))
         }
         super::body::NegotiatedBody::JsonText { text, surr } => {
-            parse_body_value_spans(text.as_bytes(), &surr)
+            parse_body_value_text_spans(text.as_bytes(), &surr)
                 .map(|value| (value, BTreeMap::new(), false))
         }
         super::body::NegotiatedBody::Form { map, files, surr } => Ok((
@@ -2751,7 +2766,9 @@ fn parse_object_or_500_ct(
     {
         super::body::NegotiatedBody::Empty => Ok((JObject::new(), BTreeMap::new(), false)),
         super::body::NegotiatedBody::JsonText { text, surr } => {
-            parse_object_or_500_spans(text.as_bytes(), &surr)
+            parse_body_value_text_spans(text.as_bytes(), &surr)?
+                .into_object()
+                .ok_or(Denial::ServerError)
                 .map(|object| (object, BTreeMap::new(), false))
         }
         super::body::NegotiatedBody::Form { map, files, surr } => {
@@ -7955,6 +7972,20 @@ mod tests {
             Denial::BadDetail(message) => assert_eq!(
                 message,
                 "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+            ),
+            denial => panic!("expected BadDetail, got {denial:?}"),
+        }
+    }
+
+    /// Negotiated JSON text (PIDASHCONV-693): CL>0 with empty decoded
+    /// text is the EOF `ParseError`, never `{}` (raw `parse_body(b"")`
+    /// keeps the empty shortcut — that is the CL:0 path).
+    #[test]
+    fn negotiated_json_text_empty_is_eof() {
+        match parse_body_value_text_spans(b"", &[]).expect_err("decoded-empty 400s") {
+            Denial::BadDetail(message) => assert_eq!(
+                message,
+                "JSON parse error - Expecting value: line 1 column 1 (char 0)"
             ),
             denial => panic!("expected BadDetail, got {denial:?}"),
         }
