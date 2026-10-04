@@ -314,9 +314,13 @@ pub fn triage_insert_sql() -> String {
 /// `Coalesce(ArrayAgg("labels__id", distinct=True,
 /// filter=~Q(labels__id__isnull=True) &
 /// Q(label_issue__deleted_at__isnull=True)), [])`.
+/// Django never joins `labels` here: it aggregates the through-table
+/// FK (`"issue_labels"."label_id"`) directly, so rows with dangling
+/// FKs are still included. `'{}'` is the Postgres empty-array literal
+/// for Django's `Value([])` (shown as `[]` in `str(queryset.query)`).
 /// Labels drop deleted links only — no active check.
 pub fn label_ids_fragment() -> String {
-    r#"COALESCE(ARRAY_AGG(DISTINCT "labels"."id") FILTER (WHERE (NOT ("labels"."id" IS NULL) AND "issue_labels"."deleted_at" IS NULL)), '{}')"#.to_owned()
+    r#"COALESCE(ARRAY_AGG(DISTINCT "issue_labels"."label_id") FILTER (WHERE (NOT ("issue_labels"."label_id" IS NULL) AND "issue_labels"."deleted_at" IS NULL)), '{}')"#.to_owned()
 }
 
 /// `assignee_ids` annotation (`:359-370`):
@@ -324,23 +328,32 @@ pub fn label_ids_fragment() -> String {
 /// filter=~Q(assignees__id__isnull=True) &
 /// Q(assignees__member_project__is_active=True) &
 /// Q(issue_assignee__deleted_at__isnull=True)), [])`.
+/// Django aggregates the through-table FK
+/// (`"issue_assignees"."assignee_id"`) directly; `users` /
+/// `project_members` are joined only for the `is_active` filter.
 /// Assignees drop inactive members AND deleted links.
 pub fn patch_assignee_ids_fragment() -> String {
-    r#"COALESCE(ARRAY_AGG(DISTINCT "users"."id") FILTER (WHERE (NOT ("users"."id" IS NULL) AND "project_members"."is_active" AND "issue_assignees"."deleted_at" IS NULL)), '{}')"#.to_owned()
+    r#"COALESCE(ARRAY_AGG(DISTINCT "issue_assignees"."assignee_id") FILTER (WHERE (NOT ("issue_assignees"."assignee_id" IS NULL) AND "project_members"."is_active" AND "issue_assignees"."deleted_at" IS NULL)), '{}')"#.to_owned()
 }
 
 /// `Issue.objects.annotate(label_ids=..., assignees...).get(
 /// pk=$1, workspace__slug=$2, project_id=$3)` (`:350-371`) as SQL
 /// text. Django groups an aggregate-over-join read by the selected
-/// PK (`GROUP BY "issues"."id"`).
+/// PK (`GROUP BY "issues"."id"`). The four `LEFT OUTER JOIN`s and
+/// the `WHERE` predicate order below are Django's exact rendering
+/// (captured via `str(queryset.query)` under Django 4.2.30).
 ///
 /// Bind contract: `$1` issue id, `$2` workspace slug,
 /// `$3` project id.
 pub fn patch_issue_lookup_sql() -> String {
     format!(
-        r#"SELECT "{i}".*, {labels} AS "label_ids", {assignees} AS "assignee_ids" FROM "{i}" INNER JOIN "{w}" ON ("{i}"."workspace_id" = "{w}"."id") WHERE ("{i}"."deleted_at" IS NULL AND "{i}"."id" = $1 AND "{w}"."slug" = $2 AND "{i}"."project_id" = $3) GROUP BY "{i}"."id""#,
+        r#"SELECT "{i}".*, {labels} AS "label_ids", {assignees} AS "assignee_ids" FROM "{i}" LEFT OUTER JOIN "{il}" ON ("{i}"."id" = "{il}"."issue_id") LEFT OUTER JOIN "{ia}" ON ("{i}"."id" = "{ia}"."issue_id") LEFT OUTER JOIN "{u}" ON ("{ia}"."assignee_id" = "{u}"."id") LEFT OUTER JOIN "{pm}" ON ("{u}"."id" = "{pm}"."member_id") INNER JOIN "{w}" ON ("{i}"."workspace_id" = "{w}"."id") WHERE ("{i}"."deleted_at" IS NULL AND "{i}"."id" = $1 AND "{i}"."project_id" = $3 AND "{w}"."slug" = $2) GROUP BY "{i}"."id""#,
         i = ISSUE_TABLE,
         w = WORKSPACE_TABLE,
+        il = ISSUE_LABEL_TABLE,
+        ia = ISSUE_ASSIGNEE_TABLE,
+        u = USER_TABLE,
+        pm = PROJECT_MEMBER_TABLE,
         labels = label_ids_fragment(),
         assignees = patch_assignee_ids_fragment(),
     )
@@ -480,13 +493,15 @@ mod tests {
     fn patch_fragments_match_fixture_guards() {
         // fx-q-intake patch_issue_annotations
         // (`views/intake.py:350-371`). Exact fixture strings.
+        // Django aggregates the through-table FKs directly and never
+        // joins `labels` / the `users` id here.
         assert_eq!(
             label_ids_fragment(),
-            r#"COALESCE(ARRAY_AGG(DISTINCT "labels"."id") FILTER (WHERE (NOT ("labels"."id" IS NULL) AND "issue_labels"."deleted_at" IS NULL)), '{}')"#
+            r#"COALESCE(ARRAY_AGG(DISTINCT "issue_labels"."label_id") FILTER (WHERE (NOT ("issue_labels"."label_id" IS NULL) AND "issue_labels"."deleted_at" IS NULL)), '{}')"#
         );
         assert_eq!(
             patch_assignee_ids_fragment(),
-            r#"COALESCE(ARRAY_AGG(DISTINCT "users"."id") FILTER (WHERE (NOT ("users"."id" IS NULL) AND "project_members"."is_active" AND "issue_assignees"."deleted_at" IS NULL)), '{}')"#
+            r#"COALESCE(ARRAY_AGG(DISTINCT "issue_assignees"."assignee_id") FILTER (WHERE (NOT ("issue_assignees"."assignee_id" IS NULL) AND "project_members"."is_active" AND "issue_assignees"."deleted_at" IS NULL)), '{}')"#
         );
         // Labels drop deleted links only (no active check);
         // assignees check both.
@@ -511,5 +526,56 @@ mod tests {
         assert!(sql.contains(r#"AS "label_ids""#), "{sql}");
         assert!(sql.contains(r#"AS "assignee_ids""#), "{sql}");
         assert!(sql.contains(r#"GROUP BY "issues"."id""#), "{sql}");
+        // Django never joins `labels` on this path; every other
+        // annotation table must have its JOIN (42P01 regression).
+        assert!(!sql.contains(r#""labels"."#), "{sql}");
+        for table in [
+            "issue_labels",
+            "issue_assignees",
+            "users",
+            "project_members",
+        ] {
+            assert!(
+                sql.contains(&format!(r#"JOIN "{table}" ON"#)),
+                "missing JOIN for {table} in {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn patch_lookup_carries_django_joins_in_order() {
+        // fx-q-intake patch_issue_annotations
+        // (`views/intake.py:350-371`). The port once dropped these
+        // JOINs, so every intake PATCH 500d with 42P01 (missing
+        // FROM-clause entry for table "labels"); this pins Django's
+        // exact JOIN text and order, not just `contains`.
+        let sql = patch_issue_lookup_sql();
+        let joins = [
+            r#"LEFT OUTER JOIN "issue_labels" ON ("issues"."id" = "issue_labels"."issue_id")"#,
+            r#"LEFT OUTER JOIN "issue_assignees" ON ("issues"."id" = "issue_assignees"."issue_id")"#,
+            r#"LEFT OUTER JOIN "users" ON ("issue_assignees"."assignee_id" = "users"."id")"#,
+            r#"LEFT OUTER JOIN "project_members" ON ("users"."id" = "project_members"."member_id")"#,
+            r#"INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id")"#,
+        ];
+        let mut cursor = 0;
+        for join in joins {
+            let rel = sql[cursor..]
+                .find(join)
+                .unwrap_or_else(|| panic!("missing or misordered {join} in {sql}"));
+            cursor += rel + join.len();
+        }
+        // Django's WHERE predicate order: deleted, id, project, slug.
+        let pos = |frag: &str| {
+            sql.find(frag)
+                .unwrap_or_else(|| panic!("missing {frag} in {sql}"))
+        };
+        let deleted = pos(r#""issues"."deleted_at" IS NULL"#);
+        let id = pos(r#""issues"."id" = $1"#);
+        let project = pos(r#""issues"."project_id" = $3"#);
+        let slug = pos(r#""workspaces"."slug" = $2"#);
+        assert!(
+            deleted < id && id < project && project < slug,
+            "WHERE out of Django order in {sql}"
+        );
     }
 }
