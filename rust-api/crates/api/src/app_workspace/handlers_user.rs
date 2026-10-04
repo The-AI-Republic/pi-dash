@@ -35,8 +35,11 @@
 //! * `bulk_update` stamps no `updated_at` and filters no `deleted_at`
 //!   (bug 5); an empty collection issues no statement.
 //! * Onboard/tour bind the raw `request.data.get(flag, False)` value with
-//!   no validation (bug 6) — including `null` (→ 400 payload-invalid via
-//!   the `IntegrityError` branch) and non-scalars (→ 500).
+//!   no serializer validation (bug 6), but the column's
+//!   `BooleanField.to_python` still coerces (`1`/`0`, `"t"`/`"f"`,
+//!   `"True"`/`"False"`, `"1"`/`"0"`) or rejects anything else with
+//!   the whole-body 400 — including `null` (→ 400 payload-invalid via
+//!   the `IntegrityError` branch) and composites (→ 400, not 500).
 //! * `update_email` compares `str(stored_token) != str(code)`, so a
 //!   missing stored token renders `"None"` and can only match the
 //!   literal code `"None"`. A composite stored token (array/object —
@@ -44,11 +47,14 @@
 //!   `{"token": "<6 digits>"}`) answers the failed-verify 400 where
 //!   Python's `str()` would compare and answer the mismatch 400.
 //! * `partial_update` silently drops read-only keys (email included) and
-//!   unknown keys; an invalid UUID for `avatar_asset`/`cover_image_asset`
-//!   answers the whole-body 400 `{"error": "Please provide valid
-//!   detail"}` (Django `ValidationError` branch), while a bool answers a
-//!   field error and a float/dict answers 500 — straight from
-//!   `PrimaryKeyRelatedField.to_internal_value` + `UUIDField.to_python`.
+//!   unknown keys, and a non-object body is the DRF non-mapping 400
+//!   (`non_field_errors`); for `avatar_asset`/`cover_image_asset` a
+//!   bool answers a field error, `0` queries the nil UUID (field
+//!   error), and unparseable strings, negative ints, floats, and
+//!   composites answer the whole-body 400 `{"error": "Please provide
+//!   valid detail"}` (Django `ValidationError` branch —
+//!   `UUIDField.get_prep_value` wraps the `ValueError`/`AttributeError`)
+//!   — straight from `PrimaryKeyRelatedField.to_internal_value`.
 //! * `generate_email_verification_code` consumes throttle quota even when
 //!   the email fails validation (throttles run in `initial()`).
 //! * `retrieve_instance_admin` binds `instance_id IS NULL` when no
@@ -64,10 +70,12 @@
 //! * Non-string JSON scalars coerce via Rust number formatting, which
 //!   differs from Python `repr` for scientific-notation floats (same
 //!   choice as the `app_pages`/`app_scheduler` precedents).
-//! * `DateTimeField` inputs accept RFC 3339, the naive `T`/space forms,
-//!   and date-only; single-digit parts, comma fractions, and
-//!   week-date/ordinal forms answer the invalid-format 400 where Django
-//!   parses them.
+//! * `DateTimeField` inputs accept RFC 3339, the naive `T`/space forms
+//!   (unpadded parts included, like Django's `\d{1,2}` arm), padded
+//!   date-only, comma/dot fractions truncated to six digits, and a
+//!   bare trailing dot. Still rejected where 3.12 `fromisoformat`
+//!   parses: lowercase-`t` separators, week dates, basic-format
+//!   `T103045`, and surrounding whitespace.
 //! * The email cache round-trip uses the raw
 //!   `magic_email_update_{user}_{email}` key with a plain-JSON value
 //!   (the `queries_user` contract): no Django `:1:` key prefix, no
@@ -141,8 +149,9 @@ pub const DEACTIVATE_SOLE_WORKSPACE_ADMIN_BODY: &str =
 
 /// DRF `ParseError` prefix (`rest_framework/parsers.py`); the
 /// `serde_json` suffix is backend-specific and not ported (the
-/// `app_scheduler` precedent). Capital `Detail`: installed DRF 3.15.2
-/// renders `{'Detail': ...}`.
+/// `app_scheduler` precedent). Lowercase `detail`: DRF 3.15.2
+/// `exception_handler` renders `{'detail': ...}` (ord-verified in the
+/// installed source; PIDASHCONV-724).
 const JSON_PARSE_ERROR: &str = "JSON parse error";
 
 // ---------------------------------------------------------------------------
@@ -156,8 +165,12 @@ pub enum Denial {
     Unauthorized,
     /// Bare `.get()` miss: 404 [`OBJECT_NOT_FOUND_BODY`].
     ObjectNotFound,
-    /// 400, `{"Detail": ...}` (body parse errors).
+    /// 400, `{"detail": ...}` (body parse errors).
     BadDetail(String),
+    /// 400, [`INVALID_DETAIL_BODY`] (Django `ValidationError`
+    /// branch: invalid-UUID asset pks, uncoercible onboard/tour
+    /// flags).
+    InvalidDetail,
     /// 400, `{"error": ...}` (view-inline / `IntegrityError` /
     /// Django-`ValidationError` branches).
     BadError(String),
@@ -170,11 +183,11 @@ pub enum Denial {
     ServerError,
 }
 
-/// `{"Detail": message}` envelope (DRF `exception_handler` shape for
-/// scalar details; capital `D` per installed DRF 3.15.2).
+/// `{"detail": message}` envelope (DRF `exception_handler` shape for
+/// scalar details; lowercase per installed DRF 3.15.2).
 fn detail_envelope(message: String) -> Value {
     let mut body = Map::new();
-    body.insert("Detail".to_owned(), Value::String(message));
+    body.insert("detail".to_owned(), Value::String(message));
     Value::Object(body)
 }
 
@@ -201,6 +214,7 @@ impl IntoResponse for Denial {
             Denial::BadDetail(message) => {
                 (StatusCode::BAD_REQUEST, Json(detail_envelope(message))).into_response()
             }
+            Denial::InvalidDetail => json_response(StatusCode::BAD_REQUEST, INVALID_DETAIL_BODY),
             Denial::BadError(message) => {
                 (StatusCode::BAD_REQUEST, Json(error_envelope(message))).into_response()
             }
@@ -565,7 +579,7 @@ fn datetime_make_aware_message(timezone: &str) -> String {
 /// Strip a trailing `Z`/`±HH:MM`/`±HHMM`/`±HH` offset, returning the
 /// naive part and the offset in seconds east of UTC.
 fn split_datetime_offset(raw: &str) -> Option<(&str, i32)> {
-    if let Some(naive) = raw.strip_suffix(['Z', 'z']) {
+    if let Some(naive) = raw.strip_suffix('Z') {
         return Some((naive, 0));
     }
     if raw.len() < 3 {
@@ -609,11 +623,36 @@ const NAIVE_DATETIME_FORMATS: &[&str] = &[
     "%Y-%m-%d %H:%M",
 ];
 
+/// Whether the naive part has Django's shape: a 4-digit year on
+/// every path (`\d{4}`), and a fully padded date when no time part
+/// follows (date-only takes the strict `fromisoformat` path, which
+/// rejects `2024-1-5`; with a time part the `\d{1,2}` regex arm
+/// accepts unpadded parts, like chrono).
+fn naive_shape_ok(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    if bytes.len() < 4 || !bytes[..4].iter().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    if raw.contains(['T', ' ']) {
+        return true;
+    }
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[5..7].iter().all(|b| b.is_ascii_digit())
+        && bytes[8..10].iter().all(|b| b.is_ascii_digit())
+}
+
 /// Parse one naive datetime: the `T`/space forms plus date-only
-/// (`datetime.fromisoformat` accepts date-only — probed live).
-/// Over-long fractions are truncated like Django's regex (which keeps
-/// six digits and drops the rest); comma fractions normalize to dots.
+/// (`fromisoformat` accepts padded date-only — probed live on the
+/// 3.12 runtime). Fractions of any length truncate to six digits
+/// (Django's `\d{1,6}\d{0,6}`; 3.12 `fromisoformat` truncates longer
+/// runs the same way); comma fractions normalize to dots; a bare
+/// trailing dot carries no fraction.
 fn parse_naive_datetime(raw: &str) -> Option<chrono::NaiveDateTime> {
+    if !naive_shape_ok(raw) {
+        return None;
+    }
     let mut owned = raw.to_owned();
     if let Some(dot) = owned.rfind(['.', ',']) {
         if owned[..dot].matches(':').count() >= 2 {
@@ -621,12 +660,22 @@ fn parse_naive_datetime(raw: &str) -> Option<chrono::NaiveDateTime> {
             let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
             let rest: String = tail.chars().skip_while(|c| c.is_ascii_digit()).collect();
             let head = owned[..dot + 1].to_owned();
-            if digits.len() > 9 {
-                owned = format!("{head}{}", &digits[..9]);
-                owned.push_str(&rest);
-            }
-            if raw.as_bytes()[dot] == b',' && digits.len() == tail.len() {
-                owned = format!("{}.{}", &head[..head.len() - 1], digits);
+            if digits.is_empty() && rest.is_empty() {
+                if raw.as_bytes()[dot] == b'.' {
+                    owned = head[..head.len() - 1].to_owned();
+                }
+            } else {
+                let kept = if digits.len() > 6 {
+                    &digits[..6]
+                } else {
+                    digits.as_str()
+                };
+                if raw.as_bytes()[dot] == b',' && digits.len() == tail.len() {
+                    owned = format!("{}.{}", &head[..head.len() - 1], kept);
+                } else if digits.len() > 6 {
+                    owned = format!("{head}{kept}");
+                    owned.push_str(&rest);
+                }
             }
         }
     }
@@ -655,6 +704,11 @@ fn parse_drf_datetime(
     let Value::String(raw) = value else {
         return Err(invalid());
     };
+    // Django's tz arm is `Z` or a numeric offset only; a lowercase
+    // `z` matches neither `fromisoformat` nor the regex.
+    if raw.ends_with('z') {
+        return Err(invalid());
+    }
     if let Ok(aware) = DateTime::parse_from_rfc3339(raw) {
         return Ok(aware.with_timezone(&Utc));
     }
@@ -1244,21 +1298,18 @@ enum PkOutcome {
     /// Django `ValidationError` (unparseable UUID): the whole-body 400
     /// [`INVALID_DETAIL_BODY`].
     WholeBody,
-    /// `AttributeError`/DB failure: 500.
+    /// Exists-check DB failure: 500.
     ServerError,
 }
 
-/// DRF `PrimaryKeyRelatedField` over `FileAsset._default_manager`
-/// (scoped `deleted_at IS NULL`): `null` clears; bools fail
-/// `incorrect_type`; unparseable UUIDs raise Django `ValidationError`
-/// (whole-body 400); ints bind through `uuid(int=...)` (`0` is falsy
-/// and dies in Postgres → 500); floats/dicts/lists raise
-/// `AttributeError` inside `uuid.UUID(hex=...)` (→ 500); missing rows
-/// fail `does_not_exist` with the original input echoed.
-async fn validate_asset_pk(
-    pool: &PgPool,
-    value: &Value,
-) -> Result<Option<uuid::Uuid>, Result<String, PkOutcome>> {
+/// Pure input half of the asset-FK check (DB-free, unit-tested):
+/// `null` clears; bools fail `incorrect_type`; ints bind through
+/// `uuid(int=...)` (`0` is the nil UUID, negatives fail); unparseable
+/// strings, negative ints, floats, >u64 ints, and composites raise
+/// Django `ValidationError` (`UUIDField.get_prep_value` wraps the
+/// `ValueError`/`AttributeError` — probed on Django 4.2), which the
+/// view answers with the whole-body 400.
+fn asset_pk_input(value: &Value) -> Result<Option<uuid::Uuid>, Result<String, PkOutcome>> {
     if value.is_null() {
         return Ok(None);
     }
@@ -1267,30 +1318,41 @@ async fn validate_asset_pk(
             "Incorrect type. Expected pk value, received bool.".to_owned()
         ));
     }
-    let id = match value {
+    match value {
         Value::String(raw) => match raw.parse::<uuid::Uuid>() {
-            Ok(id) => id,
-            Err(_) => return Err(Err(PkOutcome::WholeBody)),
+            Ok(id) => Ok(Some(id)),
+            Err(_) => Err(Err(PkOutcome::WholeBody)),
         },
         Value::Number(number) => {
             if let Some(int) = number.as_i64() {
-                if int == 0 {
-                    return Err(Err(PkOutcome::ServerError));
-                }
                 if int < 0 {
                     return Err(Err(PkOutcome::WholeBody));
                 }
-                uuid::Uuid::from_u128(int as u128)
+                Ok(Some(uuid::Uuid::from_u128(int as u128)))
             } else if let Some(uint) = number.as_u64() {
-                if uint == 0 {
-                    return Err(Err(PkOutcome::ServerError));
-                }
-                uuid::Uuid::from_u128(u128::from(uint))
+                Ok(Some(uuid::Uuid::from_u128(u128::from(uint))))
             } else {
-                return Err(Err(PkOutcome::ServerError));
+                Err(Err(PkOutcome::WholeBody))
             }
         }
-        _ => return Err(Err(PkOutcome::ServerError)),
+        _ => Err(Err(PkOutcome::WholeBody)),
+    }
+}
+
+/// DRF `PrimaryKeyRelatedField` over `FileAsset._default_manager`
+/// (scoped `deleted_at IS NULL`): the input classifies through
+/// [`asset_pk_input`], then the row must exist — a miss fails
+/// `does_not_exist` with the original input echoed.
+async fn validate_asset_pk(
+    pool: &PgPool,
+    value: &Value,
+) -> Result<Option<uuid::Uuid>, Result<String, PkOutcome>> {
+    let id = match asset_pk_input(value) {
+        Ok(inner) => match inner {
+            Some(id) => id,
+            None => return Ok(None),
+        },
+        Err(outcome) => return Err(outcome),
     };
     let exists: Option<(uuid::Uuid,)> = sqlx::query_as(
         "SELECT id FROM file_assets WHERE file_assets.id = $1 AND file_assets.deleted_at IS NULL",
@@ -1315,6 +1377,35 @@ async fn validate_asset_pk(
 /// One `{"field": ["message"]}` entry, the serializer-errors shape.
 fn field_error(message: String) -> Value {
     Value::Array(vec![Value::String(message)])
+}
+
+/// DRF `Serializer.to_internal_value` non-mapping branch
+/// (`serializers.py`): a non-object body is a 400
+/// `{"non_field_errors": ["Invalid data. Expected a dictionary, but
+/// got {Type}."]}` with CPython type names — never a 500.
+fn non_mapping_body(body: &Value) -> Value {
+    let datatype = match body {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) => {
+            if number.is_i64() || number.is_u64() {
+                "int"
+            } else {
+                "float"
+            }
+        }
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    };
+    let mut errors = Map::new();
+    errors.insert(
+        "non_field_errors".to_owned(),
+        Value::Array(vec![Value::String(format!(
+            "Invalid data. Expected a dictionary, but got {datatype}."
+        ))]),
+    );
+    Value::Object(errors)
 }
 
 /// A validated `PATCH users/me/` body: `None` per field means absent
@@ -2263,10 +2354,11 @@ pub async fn me_partial_update(
         Ok(body) => body,
         Err(denial) => return denial.into_response(),
     };
-    // `serializer(data=request.data)`: a non-object body dies in
-    // DRF's mapping access (500).
-    let Value::Object(map) = &body else {
-        return Denial::ServerError.into_response();
+    // `serializer(data=request.data)`: a non-object body is the
+    // DRF non-mapping 400 (`non_field_errors`).
+    let map = match &body {
+        Value::Object(map) => map,
+        other => return Denial::BadJson(non_mapping_body(other)).into_response(),
     };
     let row = match fetch_user(pool, actor.id).await {
         Ok(row) => row,
@@ -2275,9 +2367,7 @@ pub async fn me_partial_update(
     let patch = match validate_patch_body(pool, map, &actor.timezone, &row.user_timezone).await {
         Ok(patch) => patch,
         Err(Ok(errors)) => return Denial::BadJson(errors).into_response(),
-        Err(Err(PkOutcome::WholeBody)) => {
-            return json_response(StatusCode::BAD_REQUEST, INVALID_DETAIL_BODY);
-        }
+        Err(Err(PkOutcome::WholeBody)) => return Denial::InvalidDetail.into_response(),
         Err(Err(PkOutcome::ServerError)) => return Denial::ServerError.into_response(),
     };
     // Merge over the current row, then `User.save()`.
@@ -2455,6 +2545,45 @@ fn py_token_str(value: &Value) -> Option<String> {
     }
 }
 
+/// Outcome of the cache-verification step (`user/base.py:198-222`).
+#[derive(Debug, PartialEq)]
+enum VerifyOutcome {
+    Match,
+    Expired,
+    Failed,
+    Mismatch,
+}
+
+/// Pure verify step (DB/cache-free, unit-tested): a missing or empty
+/// cache value reads as expired (`if not cached_data`); unparseable
+/// JSON, non-object JSON, or a composite token reads as
+/// failed-verify; a missing `token` key reads as `None`
+/// (`data.get("token")` → `None`, and `str(None) == "None"` can
+/// still match the literal code).
+fn verify_cached_code(cached: Option<&str>, code: &str) -> VerifyOutcome {
+    let Some(cached) = cached else {
+        return VerifyOutcome::Expired;
+    };
+    if cached.is_empty() {
+        return VerifyOutcome::Expired;
+    }
+    let Ok(data) = serde_json::from_str::<Value>(cached) else {
+        return VerifyOutcome::Failed;
+    };
+    if !data.is_object() {
+        return VerifyOutcome::Failed;
+    }
+    let token = data.get("token").unwrap_or(&Value::Null);
+    let Some(stored) = py_token_str(token) else {
+        return VerifyOutcome::Failed;
+    };
+    if stored == code {
+        VerifyOutcome::Match
+    } else {
+        VerifyOutcome::Mismatch
+    }
+}
+
 /// `PATCH /api/users/me/email/` (`user/base.py:176-250`): validation,
 /// the code-required 400, cache verification (expired/invalid/mismatch
 /// bodies), the availability re-check, the save
@@ -2505,19 +2634,17 @@ pub async fn email_update(
         Ok(cached) => cached,
         Err(()) => return json_response(StatusCode::BAD_REQUEST, CODE_FAILED_BODY),
     };
-    let Some(cached) = cached else {
-        return json_response(StatusCode::BAD_REQUEST, CODE_EXPIRED_BODY);
-    };
-    let stored_token = (|| -> Option<String> {
-        let data: Value = serde_json::from_str(&cached).ok()?;
-        let token = data.get("token")?;
-        py_token_str(token)
-    })();
-    let Some(stored_token) = stored_token else {
-        return json_response(StatusCode::BAD_REQUEST, CODE_FAILED_BODY);
-    };
-    if stored_token != code {
-        return json_response(StatusCode::BAD_REQUEST, CODE_INVALID_BODY);
+    match verify_cached_code(cached.as_deref(), &code) {
+        VerifyOutcome::Match => {}
+        VerifyOutcome::Expired => {
+            return json_response(StatusCode::BAD_REQUEST, CODE_EXPIRED_BODY);
+        }
+        VerifyOutcome::Failed => {
+            return json_response(StatusCode::BAD_REQUEST, CODE_FAILED_BODY);
+        }
+        VerifyOutcome::Mismatch => {
+            return json_response(StatusCode::BAD_REQUEST, CODE_INVALID_BODY);
+        }
     }
     // Final availability re-check (`:225-229`), then the save.
     let recheck_sql = positional(
@@ -2980,11 +3107,39 @@ pub async fn session_get(
     (StatusCode::OK, Json(Value::Object(body))).into_response()
 }
 
-/// Bind one raw onboard/tour flag value (bug 6: no validation or
-/// coercion — whatever JSON the client sent). Returns the statement
-/// outcome directly: bools/strings/numbers bind and let Postgres
-/// decide (bad spellings 500, `null` 400s through the `IntegrityError`
-/// branch); composites cannot bind and 500 outright.
+/// Coerce one raw onboard/tour flag value the way Django's
+/// `BooleanField.get_prep_value` does (DB-free, unit-tested): it
+/// runs `to_python`, so `True`/`False` (and `1`/`0`/`1.0`/`0.0`,
+/// which compare equal) bind as bools, the `"t"`/`"True"`/`"1"` and
+/// `"f"`/`"False"`/`"0"` spellings coerce, `null` binds NULL (the
+/// NOT NULL column then 400s through `IntegrityError`), and
+/// everything else raises Django `ValidationError` — the whole-body
+/// 400, answered before any SQL runs.
+fn profile_flag_value(value: &Value) -> Result<Option<bool>, Denial> {
+    match value {
+        Value::Bool(flag) => Ok(Some(*flag)),
+        Value::Number(number) => {
+            if number.as_i64() == Some(1) || number.as_f64() == Some(1.0) {
+                Ok(Some(true))
+            } else if number.as_i64() == Some(0) || number.as_f64() == Some(0.0) {
+                Ok(Some(false))
+            } else {
+                Err(Denial::InvalidDetail)
+            }
+        }
+        Value::String(text) => match text.as_str() {
+            "t" | "True" | "1" => Ok(Some(true)),
+            "f" | "False" | "0" => Ok(Some(false)),
+            _ => Err(Denial::InvalidDetail),
+        },
+        Value::Null => Ok(None),
+        Value::Array(_) | Value::Object(_) => Err(Denial::InvalidDetail),
+    }
+}
+
+/// Write one raw onboard/tour flag value (bug 6: no serializer
+/// validation — whatever JSON the client sent — but the column's
+/// `to_python` still coerces or rejects before the save).
 async fn write_profile_flag(
     pool: &PgPool,
     profile_id: uuid::Uuid,
@@ -2992,58 +3147,15 @@ async fn write_profile_flag(
     value: &Value,
     now: DateTime<Utc>,
 ) -> Result<(), Denial> {
-    let outcome = match value {
-        Value::Bool(flag) => {
-            sqlx::query(sql)
-                .bind(*flag)
-                .bind(now)
-                .bind(profile_id)
-                .execute(pool)
-                .await
-        }
-        Value::String(text) => {
-            sqlx::query(sql)
-                .bind(text.as_str())
-                .bind(now)
-                .bind(profile_id)
-                .execute(pool)
-                .await
-        }
-        Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                sqlx::query(sql)
-                    .bind(int)
-                    .bind(now)
-                    .bind(profile_id)
-                    .execute(pool)
-                    .await
-            } else if let Some(uint) = number.as_u64() {
-                sqlx::query(sql)
-                    .bind(i64::try_from(uint).unwrap_or(i64::MAX))
-                    .bind(now)
-                    .bind(profile_id)
-                    .execute(pool)
-                    .await
-            } else {
-                sqlx::query(sql)
-                    .bind(number.as_f64().unwrap_or(f64::NAN))
-                    .bind(now)
-                    .bind(profile_id)
-                    .execute(pool)
-                    .await
-            }
-        }
-        Value::Null => {
-            sqlx::query(sql)
-                .bind(None::<bool>)
-                .bind(now)
-                .bind(profile_id)
-                .execute(pool)
-                .await
-        }
-        Value::Array(_) | Value::Object(_) => return Err(Denial::ServerError),
-    };
-    outcome.map(|_| ()).map_err(write_denial)
+    let flag = profile_flag_value(value)?;
+    sqlx::query(sql)
+        .bind(flag)
+        .bind(now)
+        .bind(profile_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(write_denial)
 }
 
 /// Shared onboard/tour PATCH (`user/base.py:373-389`):
@@ -3348,20 +3460,32 @@ mod tests {
         );
     }
 
-    /// The `BadDetail` envelope key is capital `Detail`: DRF's
-    /// `exception_handler` renders `{'Detail': ...}` (installed
-    /// `rest_framework/views.py:97`), the project's custom handler
-    /// (`authentication/adapter/exception.py`) passes 401 data through
-    /// untouched, and fixtures pin capital-D bodies
-    /// (`quick_link.py:43`, `home.py:79`). Deliberately NOT tied to
-    /// `gates::ANON_BODY`, whose lowercase key contradicts DRF
-    /// (PIDASHCONV-724 tracks the gate fix); the handlers still
-    /// delegate the 401 to the shared constant and follow it once
-    /// fixed.
+    /// The `BadDetail` envelope key is lowercase `detail`: DRF 3.15.2
+    /// `exception_handler` renders `{'detail': ...}` (ord-verified in
+    /// the installed `rest_framework/views.py`; PIDASHCONV-724), the
+    /// merged fixtures pin lowercase (`routes.golden.json`: 2
+    /// lowercase, 0 uppercase), and the live-Django contract tests pin
+    /// the lowercase 401 (`test_user.py:175`). Tied to
+    /// `gates::ANON_BODY` so the two cannot drift apart again.
     #[test]
-    fn bad_detail_key_is_the_drf_capital_detail() {
+    fn bad_detail_key_is_the_drf_lowercase_detail() {
         let mine = detail_envelope("probe".to_owned());
-        assert_eq!(mine, json!({"Detail": "probe"}));
+        assert_eq!(mine, json!({"detail": "probe"}));
+        let gate: Value = serde_json::from_str(gates::ANON_BODY).expect("gate body JSON");
+        let gate_key = gate
+            .as_object()
+            .expect("gate object")
+            .keys()
+            .next()
+            .expect("one key");
+        let mine_key = mine
+            .as_object()
+            .expect("mine object")
+            .keys()
+            .next()
+            .expect("one key");
+        assert_eq!(mine_key, gate_key);
+        assert_eq!(mine_key.as_bytes()[0], 100);
     }
 
     #[test]
@@ -3599,6 +3723,81 @@ mod tests {
     }
 
     #[test]
+    fn verify_cached_code_edges_match_python() {
+        assert_eq!(verify_cached_code(None, "1"), VerifyOutcome::Expired);
+        assert_eq!(verify_cached_code(Some(""), "1"), VerifyOutcome::Expired);
+        assert_eq!(
+            verify_cached_code(Some(r#"{"token": "123456"}"#), "123456"),
+            VerifyOutcome::Match
+        );
+        assert_eq!(
+            verify_cached_code(Some(r#"{"token": "123456"}"#), "654321"),
+            VerifyOutcome::Mismatch
+        );
+        assert_eq!(
+            verify_cached_code(Some("not json"), "1"),
+            VerifyOutcome::Failed
+        );
+        assert_eq!(verify_cached_code(Some("[1]"), "1"), VerifyOutcome::Failed);
+        assert_eq!(
+            verify_cached_code(Some(r#"{"token": [1]}"#), "1"),
+            VerifyOutcome::Failed
+        );
+        // A missing key reads as None: only the literal "None" matches.
+        assert_eq!(verify_cached_code(Some("{}"), "None"), VerifyOutcome::Match);
+        assert_eq!(
+            verify_cached_code(Some("{}"), "123456"),
+            VerifyOutcome::Mismatch
+        );
+        assert_eq!(
+            verify_cached_code(Some(r#"{"token": null}"#), "None"),
+            VerifyOutcome::Match
+        );
+    }
+
+    #[test]
+    fn profile_flag_value_follows_boolean_to_python() {
+        for value in [
+            json!(true),
+            json!(1),
+            json!(1.0),
+            json!("t"),
+            json!("True"),
+            json!("1"),
+        ] {
+            assert_eq!(profile_flag_value(&value).unwrap(), Some(true), "{value}");
+        }
+        for value in [
+            json!(false),
+            json!(0),
+            json!(0.0),
+            json!("f"),
+            json!("False"),
+            json!("0"),
+        ] {
+            assert_eq!(profile_flag_value(&value).unwrap(), Some(false), "{value}");
+        }
+        assert_eq!(profile_flag_value(&json!(null)).unwrap(), None);
+        for value in [
+            json!("true"),
+            json!("false"),
+            json!("yes"),
+            json!("on"),
+            json!(""),
+            json!(2),
+            json!(-1),
+            json!(1.5),
+            json!([1]),
+            json!({"a": 1}),
+        ] {
+            assert!(
+                matches!(profile_flag_value(&value), Err(Denial::InvalidDetail)),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
     fn email_format_check_matches_django_validator() {
         use crate::v1_projects::handlers_members::is_valid_email;
         assert!(is_valid_email("a@x.io"));
@@ -3694,7 +3893,7 @@ mod tests {
             json!("ON"),
             json!("1"),
         ] {
-            assert_eq!(bool_field(&value).unwrap(), true, "{value}");
+            assert!(bool_field(&value).unwrap(), "{value}");
         }
         for value in [
             json!(false),
@@ -3704,7 +3903,7 @@ mod tests {
             json!("F"),
             json!("0"),
         ] {
-            assert_eq!(bool_field(&value).unwrap(), false, "{value}");
+            assert!(!bool_field(&value).unwrap(), "{value}");
         }
         for value in [
             json!("x"),
@@ -3797,6 +3996,61 @@ mod tests {
         assert!(ser_extras::validate_user_link_url("not a url").is_err());
     }
 
+    #[test]
+    fn non_object_patch_body_is_the_drf_mapping_400() {
+        for (value, datatype) in [
+            (json!(null), "NoneType"),
+            (json!(true), "bool"),
+            (json!(7), "int"),
+            (json!(1.5), "float"),
+            (json!("x"), "str"),
+            (json!([1]), "list"),
+        ] {
+            assert_eq!(
+                non_mapping_body(&value),
+                json!({"non_field_errors": [format!("Invalid data. Expected a dictionary, but got {datatype}.")]})
+            );
+        }
+    }
+
+    #[test]
+    fn asset_pk_input_branches_match_django_prep() {
+        // Null clears.
+        assert_eq!(asset_pk_input(&json!(null)).unwrap(), None);
+        // Bools fail incorrect_type (DRF raises TypeError first).
+        assert!(matches!(
+            asset_pk_input(&json!(true)),
+            Err(Ok(message)) if message == "Incorrect type. Expected pk value, received bool."
+        ));
+        // Zero binds the nil UUID (Django queries it; the miss is a
+        // field error, not a 500).
+        assert_eq!(asset_pk_input(&json!(0)).unwrap(), Some(uuid::Uuid::nil()));
+        assert_eq!(
+            asset_pk_input(&json!(5)).unwrap(),
+            Some(uuid::Uuid::from_u128(5))
+        );
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(asset_pk_input(&json!(id.to_string())).unwrap(), Some(id));
+        // Unparseable strings, negative ints, floats, composites, and
+        // >u64 ints raise Django ValidationError (whole-body 400).
+        let huge: Value = serde_json::from_str("340282366920938463463374607431768211457")
+            .expect("huge int parses");
+        for value in [
+            json!("not-a-uuid"),
+            json!(-5),
+            json!(1.5),
+            json!(2.0),
+            json!({"a": 1}),
+            json!([1]),
+            huge,
+        ] {
+            assert!(
+                matches!(asset_pk_input(&value), Err(Err(PkOutcome::WholeBody))),
+                "{value}"
+            );
+        }
+    }
+
     // -- Datetimes -----------------------------------------------------------------
 
     #[test]
@@ -3869,6 +4123,47 @@ mod tests {
         );
         assert_eq!(split_datetime_offset("2024-01-01T00:00:00"), None);
         assert_eq!(split_datetime_offset("2024-01-01"), None);
+    }
+
+    #[test]
+    fn drf_datetime_edges_match_live_django() {
+        let tz: chrono_tz::Tz = "UTC".parse().unwrap();
+        // A lowercase zulu is not a tz arm.
+        assert_eq!(
+            parse_drf_datetime(&json!("2024-01-15T10:30:45z"), &tz, "UTC").unwrap_err(),
+            DATETIME_INVALID_MESSAGE
+        );
+        // Fractions of any length truncate to six digits.
+        for raw in [
+            "2024-01-15T10:30:45.1234567",
+            "2024-01-15T10:30:45.123456789012",
+            "2024-01-15T10:30:45.1234567890123",
+        ] {
+            let parsed = parse_drf_datetime(&json!(raw), &tz, "UTC").unwrap();
+            assert_eq!(
+                parsed.to_rfc3339_opts(chrono::SecondsFormat::Micros, false),
+                "2024-01-15T10:30:45.123456+00:00",
+                "{raw}"
+            );
+        }
+        // A bare trailing dot carries no fraction.
+        let dot = parse_drf_datetime(&json!("2024-01-15T10:30:45."), &tz, "UTC").unwrap();
+        assert_eq!(dot.to_rfc3339(), "2024-01-15T10:30:45+00:00");
+        // Date-only must be padded; the year must be four digits.
+        for value in [
+            json!("2024-1-5"),
+            json!("999-01-15T10:00:00"),
+            json!("24-01-15"),
+        ] {
+            assert_eq!(
+                parse_drf_datetime(&value, &tz, "UTC").unwrap_err(),
+                DATETIME_INVALID_MESSAGE,
+                "{value}"
+            );
+        }
+        // Unpadded parts with a time part parse (Django's \d{1,2} arm).
+        let loose = parse_drf_datetime(&json!("2024-1-5T1:2"), &tz, "UTC").unwrap();
+        assert_eq!(loose.to_rfc3339(), "2024-01-05T01:02:00+00:00");
     }
 
     // -- Save derivation ---------------------------------------------------------------
