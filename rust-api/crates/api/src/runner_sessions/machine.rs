@@ -52,10 +52,12 @@
 //! * A 500 body is the shared runner JSON; Django renders its HTML
 //!   error page on these paths. Contract tests pin the 500 status
 //!   only.
-//! * `bool`/`float` ack ids render via CPython `str()` spelling for
-//!   the common cases (`True`/`False`, integers); exotic float
-//!   spellings (`1e+100`) and nested ack items 500 like the source's
-//!   `DataError`.
+//! * Integer/float ack ids render via CPython `repr()` spelling
+//!   (`XACK` arg bytes may differ for exotic magnitudes like `1e100`
+//!   vs `1e+100`; the status never does — both sides `XACK` and 200).
+//!   A `true` item and nested items 500 like the source's redis-py
+//!   `DataError` (`redis==5.0.4` rejects `bool` explicitly); `false`
+//!   items drop out via the `if sid` filter on both sides.
 //! * A nested `NaN`/`Infinity` inside an otherwise-valid poll body
 //!   400s; only a top-level one takes the source's ignore-as-non-dict
 //!   path (`serde_json` has no lenient mode).
@@ -181,9 +183,11 @@ fn py_truthy(value: &Value) -> bool {
 }
 
 /// One ack-list item to its `XACK` id: strings verbatim, numbers via
-/// `str()`, `True`/`False` via CPython spelling; falsy items drop out
-/// (the `if sid` filter in `ack_for_session`), nested values fail like
-/// the source's redis-py `DataError` (unhandled → 500).
+/// `repr()`; `false`/`null`/empty items drop out (the `if sid` filter
+/// in `ack_for_session`); `true` and nested values fail like the
+/// source's redis-py `DataError` (unhandled → 500 — `redis==5.0.4`
+/// rejects `bool` explicitly, and the truthy `true` survives the
+/// `if sid` filter to reach the encoder).
 fn ack_item(value: &Value) -> Result<Option<String>, ()> {
     match value {
         Value::String(text) => {
@@ -194,9 +198,8 @@ fn ack_item(value: &Value) -> Result<Option<String>, ()> {
             }
         }
         Value::Number(number) => Ok(Some(number.to_string())),
-        Value::Bool(true) => Ok(Some("True".to_owned())),
         Value::Bool(false) | Value::Null => Ok(None),
-        Value::Array(_) | Value::Object(_) => Err(()),
+        Value::Bool(true) | Value::Array(_) | Value::Object(_) => Err(()),
     }
 }
 
@@ -868,14 +871,10 @@ mod tests {
                 Value::String("1790985779555-0".to_owned()),
                 Value::String(String::new()),
                 Value::from(7),
-                Value::Bool(true),
+                Value::Bool(false),
                 Value::Null,
             ]))),
-            Ok(vec![
-                "1790985779555-0".to_owned(),
-                "7".to_owned(),
-                "True".to_owned()
-            ])
+            Ok(vec!["1790985779555-0".to_owned(), "7".to_owned()])
         );
         // Truthy string splits into chars; truthy dict into keys.
         assert_eq!(
@@ -894,7 +893,13 @@ mod tests {
             ack_ids_from_body(&body_with_ack(Value::Bool(true))),
             Err(())
         );
-        // … as are nested ack items (the redis-py `DataError`).
+        // … as are `true` items and nested ack items (the redis-py
+        // `DataError`: `redis==5.0.4` rejects `bool`, and the truthy
+        // `true` survives the `if sid` filter to reach the encoder).
+        assert_eq!(
+            ack_ids_from_body(&body_with_ack(Value::Array(vec![Value::Bool(true)]))),
+            Err(())
+        );
         assert_eq!(
             ack_ids_from_body(&body_with_ack(Value::Array(vec![Value::Array(vec![])]))),
             Err(())
