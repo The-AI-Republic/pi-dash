@@ -35,8 +35,8 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-pub mod shape_expand_search;
 pub mod queries_core;
+pub mod shape_expand_search;
 pub mod shape_issue;
 pub mod shape_pages;
 pub mod shape_relations;

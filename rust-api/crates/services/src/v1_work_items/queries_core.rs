@@ -86,6 +86,10 @@
 //!     the annotation; multi-level `__` paths needing new joins are
 //!     unsupported (Django fans out; the port 500s — documented in
 //!     [`OrderSpec::Unsupported`]).
+//! 13. A parent token whose sequence is Unicode-but-not-ASCII digits
+//!     (`PROJ-²`: `isdigit()` true, `int()` raising) is an uncaught 500 in
+//!     Python; the port answers 400 `Invalid parent` (review finding:
+//!     same error class family, saner code — listed, not replicated).
 //!
 //! Out of scope (sibling issues): serializer shaping (660-666), subresource
 //! / search / page reads (669, 670), guards (671), task enqueues (672),
@@ -405,7 +409,8 @@ pub fn resolve_labels(
 /// `rpartition("-")` with a non-empty identifier and an ASCII-digit
 /// sequence. Python's `sequence.isdigit()` is Unicode-aware and `int()`
 /// then raises on non-ASCII digits (an uncaught 500); the port answers 400
-/// there — unreachable from real identifiers, and a one-line divergence.
+/// there — unreachable from real identifiers, and a one-line divergence
+/// (ported quirk 13).
 /// Overflowing magnitudes stay valid-but-unknown: Postgres widens the
 /// comparison and matches nothing, so Python reports "Unknown parent".
 fn split_parent_token(token: &str) -> Result<Option<(&str, i64)>, WorkItemFilterError> {
@@ -698,11 +703,12 @@ pub fn states_lookup_sql() -> String {
 /// `Label.objects.filter(Q(project_id=...) | Q(project__isnull=True,
 /// workspace__slug=...)).values_list("id", "name")` (`:528-529`):
 /// project labels plus workspace-level labels (null project) attachable in
-/// every project. The `OR` keeps the `workspaces` join `LEFT OUTER`;
-/// `labels.project_id IS NULL` needs no `projects` join. Newest first
-/// (`Meta.ordering`, `db/models/label.py:44`).
+/// every project. The `workspaces` join stays `INNER` — the workspace FK is
+/// non-nullable, so Django never promotes it (verified by rendering through
+/// Django 4.2.30); `labels.project_id IS NULL` needs no `projects` join.
+/// Newest first (`Meta.ordering`, `db/models/label.py:44`).
 pub fn labels_lookup_sql() -> String {
-    "SELECT \"labels\".\"id\", \"labels\".\"name\" FROM \"labels\" LEFT OUTER JOIN \"workspaces\" ON (\"labels\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"labels\".\"deleted_at\" IS NULL AND (\"labels\".\"project_id\" = :project_id OR (\"labels\".\"project_id\" IS NULL AND \"workspaces\".\"slug\" = :workspace_slug))) ORDER BY \"labels\".\"created_at\" DESC".to_owned()
+    "SELECT \"labels\".\"id\", \"labels\".\"name\" FROM \"labels\" INNER JOIN \"workspaces\" ON (\"labels\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"labels\".\"deleted_at\" IS NULL AND (\"labels\".\"project_id\" = :project_id OR (\"labels\".\"project_id\" IS NULL AND \"workspaces\".\"slug\" = :workspace_slug))) ORDER BY \"labels\".\"created_at\" DESC".to_owned()
 }
 
 /// `Issue.issue_objects.filter(workspace__slug=..., project__identifier
@@ -940,7 +946,9 @@ fn default_order_spec(param: &str) -> OrderSpec {
         requires_grouping: false,
     };
     if column == "?" && !descending {
-        return ordered("RANDOM()".to_owned());
+        // Django appends the direction even to `?` (`ORDER BY RANDOM()
+        // ASC`, verified by rendering through Django 4.2.30).
+        return ordered("RANDOM() ASC".to_owned());
     }
     if ORDERABLE_ANNOTATIONS.contains(&column) {
         return ordered(format!("\"{column}\" {direction}"));
@@ -1630,7 +1638,7 @@ mod tests {
         assert_eq!(ordered("-link_count"), "\"link_count\" DESC");
         assert_eq!(ordered("state__sequence"), "\"states\".\"sequence\" ASC");
         assert_eq!(ordered("-project__name"), "\"projects\".\"name\" DESC");
-        assert_eq!(ordered("?"), "RANDOM()");
+        assert_eq!(ordered("?"), "RANDOM() ASC");
         // Unknown bare names splice qualified (the database 500s, as
         // Django's FieldError does) without injection surface.
         assert_eq!(ordered("nope"), "\"issues\".\"nope\" ASC");
@@ -2214,7 +2222,7 @@ mod tests {
     fn labels_lookup_covers_project_and_workspace_scope() {
         assert_eq!(
             labels_lookup_sql(),
-            "SELECT \"labels\".\"id\", \"labels\".\"name\" FROM \"labels\" LEFT OUTER JOIN \"workspaces\" ON (\"labels\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"labels\".\"deleted_at\" IS NULL AND (\"labels\".\"project_id\" = :project_id OR (\"labels\".\"project_id\" IS NULL AND \"workspaces\".\"slug\" = :workspace_slug))) ORDER BY \"labels\".\"created_at\" DESC"
+            "SELECT \"labels\".\"id\", \"labels\".\"name\" FROM \"labels\" INNER JOIN \"workspaces\" ON (\"labels\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"labels\".\"deleted_at\" IS NULL AND (\"labels\".\"project_id\" = :project_id OR (\"labels\".\"project_id\" IS NULL AND \"workspaces\".\"slug\" = :workspace_slug))) ORDER BY \"labels\".\"created_at\" DESC"
         );
     }
 
