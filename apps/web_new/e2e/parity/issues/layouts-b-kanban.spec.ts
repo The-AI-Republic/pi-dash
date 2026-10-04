@@ -73,8 +73,24 @@ async function openBoard(
     display_properties: { ...before.displayProperties, ...properties },
   });
   await driver.openAuthenticated(`/${seed.workspaceSlug}/projects/${projectId}/issues`, browserCookies(user));
-  await driver.kanbanOpenBoard();
+  await kanbanOpenWithRetry(driver);
   return { user, beforeFilters: before.displayFilters, beforeProperties: before.displayProperties };
+}
+
+/**
+ * Open the board, retrying once through a reload. Under host contention
+ * the issues page occasionally never renders its switcher inside the
+ * driver's long wait (the same load stall the timeline helper retries).
+ * The retry only absorbs that stall: a genuinely broken board still
+ * fails its second wait.
+ */
+async function kanbanOpenWithRetry(driver: ParityDriver): Promise<void> {
+  try {
+    await driver.kanbanOpenBoard();
+  } catch {
+    await driver.boardReloadIssues();
+    await driver.kanbanOpenBoard();
+  }
 }
 
 /** Restore the exact preferences an opened board started with. */
@@ -98,7 +114,7 @@ async function setBoardFilters(
     display_filters: { ...current.displayFilters, ...filters },
   });
   await driver.boardReloadIssues();
-  await driver.kanbanOpenBoard();
+  await kanbanOpenWithRetry(driver);
 }
 
 /** Server-side UUID of an issue looked up by its name. */
@@ -267,7 +283,7 @@ test(
     await test.step("empty lanes hide when show-empty is off", async () => {
       await serverCreateLabel(seed.workspaceSlug, projectId, owner.cookie, `KB empty ${suffix}`);
       await driver.boardReloadIssues();
-      await driver.kanbanOpenBoard();
+      await kanbanOpenWithRetry(driver);
       await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(3);
       await setBoardFilters(driver, seed, projectId, ctx, { show_empty_groups: false });
       await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(2);
@@ -300,7 +316,7 @@ test(
 
     await test.step("the collapsed state survives a reload", async () => {
       await driver.boardReloadIssues();
-      await driver.kanbanOpenBoard();
+      await kanbanOpenWithRetry(driver);
       await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(1);
       expect(await driver.kanbanColumnCollapsed(name)).toBe(true);
       await driver.kanbanToggleColumn(name);
@@ -349,7 +365,7 @@ test(
 
     await test.step("the lane state survives a reload", async () => {
       await driver.boardReloadIssues();
-      await driver.kanbanOpenBoard();
+      await kanbanOpenWithRetry(driver);
       await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(2);
       expect(await driver.kanbanSwimlaneCollapsed(label.name)).toBe(true);
       await driver.kanbanToggleSwimlane(label.name);
@@ -538,7 +554,7 @@ test(
           `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
           browserCookies(guest)
         );
-        await driver.kanbanOpenBoard();
+        await kanbanOpenWithRetry(driver);
         await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).not.toHaveLength(0);
         for (const column of await driver.kanbanColumns()) {
           expect(await driver.kanbanColumnHasQuickAdd(column.name)).toBe(false);
@@ -591,7 +607,7 @@ test(
         `/${seed.workspaceSlug}/projects/${seed.projectId}/cycles/${cycle.id}`,
         browserCookies(ctx.user)
       );
-      await driver.kanbanOpenBoard();
+      await kanbanOpenWithRetry(driver);
       await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(1);
       const column = (await driver.kanbanColumns())[0]?.name ?? "";
       expect(await driver.kanbanHeaderCreateVisible(column)).toBe(true);
@@ -1186,7 +1202,7 @@ test(
     await test.step("dragging near the bottom edge auto-scrolls the column", async () => {
       // A reload resets the column to its top so the downward hold has room.
       await driver.boardReloadIssues();
-      await driver.kanbanOpenBoard();
+      await kanbanOpenWithRetry(driver);
       await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(8);
       const contentful = (await driver.kanbanColumnCards(home.name)).filter((name) => name !== "");
       const held = contentful[Math.floor(contentful.length / 2)] ?? "";
