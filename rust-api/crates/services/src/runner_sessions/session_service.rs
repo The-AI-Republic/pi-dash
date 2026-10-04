@@ -402,9 +402,12 @@ pub fn merge_dev_metadata(current: &Value, body: &Map<String, Value>) -> Map<Str
 /// `agent_kind` charset (`_AGENT_KIND_RE`, `:92`):
 /// `^[a-z][a-z0-9_]{0,31}$` — a lowercase lead plus up to 31 tail
 /// chars (32 total). Checked by hand; the shape is exactly the
-/// regex (ASCII-only, anchored both ends).
+/// regex (ASCII-only, anchored both ends), including `$` matching
+/// before one trailing newline (`x\n` validates; the raw value,
+/// newline included, is what persists).
 fn is_valid_agent_kind(raw: &str) -> bool {
-    let mut chars = raw.chars();
+    let body = raw.strip_suffix('\n').unwrap_or(raw);
+    let mut chars = body.chars();
     match chars.next() {
         Some(c) if c.is_ascii_lowercase() => {}
         _ => return false,
@@ -553,11 +556,15 @@ pub enum HeartbeatError {
 /// `TypeError` in the `min()` comparison instead of falling back.
 /// The grammar ports `fromisoformat`'s calendar shapes exactly
 /// (verified against CPython 3.12 probes): extended and basic
-/// dates/times freely mixed, any single-char separator, `.`
-/// (empty ok) or `,` (digits required) fractions truncated to
-/// microseconds, and `±HH[:MM[:SS]]` / `±HHMM[SS]` / `±HH`
-/// offsets strictly under 24h. Week dates and ordinal dates fall
-/// back to `now` instead of parsing — no JSON clock emits them.
+/// dates/times freely mixed (never mixed *within* the time), any
+/// single-char separator, `HH[:MM[:SS]]` / `HH[MM[SS]]` with a
+/// `[.,]` fraction (digits required at end of string, empty only
+/// before an offset) truncated to microseconds, years 1-9999, and
+/// `±HH[:MM[:SS]]` / `±HHMM[SS]` / `±HH` offsets strictly under
+/// 24h. Residual fallbacks to `now`: week dates (naive in Python)
+/// and separator-less basic fractions (`T12305900`, with CPython's
+/// length-7 hole — deliberately not replicated). No JSON clock
+/// emits any of these; ordinal dates fail in CPython too.
 pub fn parse_heartbeat_ts(
     ts: Option<&Value>,
     now: DateTime<Utc>,
@@ -612,6 +619,10 @@ fn parse_iso_timestamp(text: &str) -> IsoTimestamp {
     } else {
         return IsoTimestamp::Garbage;
     };
+    // `datetime` years start at 1; chrono would accept year 0.
+    if year == 0 {
+        return IsoTimestamp::Garbage;
+    }
     if pos == chars.len() {
         // Bare date (extended or basic): parses, naive.
         return match NaiveDate::from_ymd_opt(year as i32, month, day) {
@@ -621,45 +632,46 @@ fn parse_iso_timestamp(text: &str) -> IsoTimestamp {
     }
     // Separator: any single char (positional, even a digit).
     pos += 1;
-    // Time: `\d{6}` basic or `\d{2}:\d{2}:\d{2}` extended.
-    let (hour, minute, second) = if let (Some(h), Some(m), Some(s)) = (
-        digits_at(pos, 2),
-        digits_at(pos + 2, 2),
-        digits_at(pos + 4, 2),
-    ) {
-        pos += 6;
-        (h, m, s)
-    } else if let (Some(h), Some(m), Some(s)) = (
-        digits_at(pos, 2),
-        digits_at(pos + 3, 2),
-        digits_at(pos + 6, 2),
-    ) {
-        if chars.get(pos + 2) != Some(&':') || chars.get(pos + 5) != Some(&':') {
-            return IsoTimestamp::Garbage;
-        }
-        pos += 8;
-        (h, m, s)
-    } else {
+    // Time: `HH[:MM[:SS]]` extended or `HH[MM[SS]]` basic. The two
+    // never mix within one time (`T12:3059` and `T1230:59` both
+    // fail); a fraction or offset may follow HH, MM or SS alike.
+    let Some(hour) = digits_at(pos, 2) else {
         return IsoTimestamp::Garbage;
     };
-    // Fraction: `.` + zero or more digits, or `,` + one or more.
-    let mut micros: u32 = 0;
-    if chars.get(pos) == Some(&'.') {
+    pos += 2;
+    let mut minute: u32 = 0;
+    let mut second: u32 = 0;
+    if chars.get(pos) == Some(&':') {
+        // Extended: each `:` commits to the next component.
         pos += 1;
-        let mut count = 0;
-        while chars.get(pos).is_some_and(|c| c.is_ascii_digit()) {
-            if count < 6 {
-                micros = micros * 10 + chars[pos].to_digit(10).unwrap_or(0);
-                count += 1;
-            }
-            pos += 1;
-        }
-        micros *= 10u32.pow(6 - count);
-    } else if chars.get(pos) == Some(&',') {
-        pos += 1;
-        if !chars.get(pos).is_some_and(|c| c.is_ascii_digit()) {
+        let Some(m) = digits_at(pos, 2) else {
             return IsoTimestamp::Garbage;
+        };
+        minute = m;
+        pos += 2;
+        if chars.get(pos) == Some(&':') {
+            pos += 1;
+            let Some(s) = digits_at(pos, 2) else {
+                return IsoTimestamp::Garbage;
+            };
+            second = s;
+            pos += 2;
         }
+    } else if let Some(m) = digits_at(pos, 2) {
+        // Basic: digit pairs extend to MM, then SS.
+        minute = m;
+        pos += 2;
+        if let Some(s) = digits_at(pos, 2) {
+            second = s;
+            pos += 2;
+        }
+    }
+    // Fraction: `[.,]` + digits after HH, MM or SS alike. Empty
+    // digits parse only before an offset (`T09.+00:00` is aware; a
+    // trailing separator at end of string is garbage).
+    let mut micros: u32 = 0;
+    if chars.get(pos) == Some(&'.') || chars.get(pos) == Some(&',') {
+        pos += 1;
         let mut count = 0;
         while chars.get(pos).is_some_and(|c| c.is_ascii_digit()) {
             if count < 6 {
@@ -667,6 +679,9 @@ fn parse_iso_timestamp(text: &str) -> IsoTimestamp {
                 count += 1;
             }
             pos += 1;
+        }
+        if count == 0 && !matches!(chars.get(pos), Some('+') | Some('-')) {
+            return IsoTimestamp::Garbage;
         }
         micros *= 10u32.pow(6 - count);
     }
@@ -735,7 +750,10 @@ fn parse_iso_timestamp(text: &str) -> IsoTimestamp {
 
 /// The reaper assignment cutoff (`:194-195`): `min(heartbeat_ts,
 /// now - ASSIGN_DELIVERY_GRACE_SECS)` — a run is stale only when
-/// `assigned_at` predates *both* bounds.
+/// `assigned_at` predates *both* bounds. Note both grace constants
+/// are 60s, so with the clamped heartbeat this is always `now -
+/// 60s`: the `ts` value never moves the cutoff (only a naive `ts`
+/// 500s); the `min()` is kept exactly as the source computes it.
 pub fn effective_cutoff(now: DateTime<Utc>, heartbeat_ts: DateTime<Utc>) -> DateTime<Utc> {
     heartbeat_ts.min(now - Duration::seconds(ASSIGN_DELIVERY_GRACE_SECS))
 }
@@ -1376,13 +1394,12 @@ fn agent_run_projection() -> String {
 /// Normalize the redeliver skip id (`:417-422`):
 /// `str(UUID(str(in_flight_run_id)))` for truthy values, `None`
 /// for missing/empty/malformed ones (a bad skip silently disables
-/// the exclusion — `redeliver_bad_skip`).
-pub fn parse_skip_id(in_flight_run_id: Option<&str>) -> Option<String> {
-    let raw = in_flight_run_id?;
-    if raw.is_empty() {
-        return None;
-    }
-    parse_uuid_arg(raw).map(|id| id.to_string())
+/// the exclusion — `redeliver_bad_skip`). The Python block is
+/// identical to the in-flight one, so this delegates to
+/// [`parse_in_flight_id`] — non-string JSON values go through
+/// `str()` there, exactly as the source does.
+pub fn parse_skip_id(in_flight_run_id: Option<&Value>) -> Option<String> {
+    parse_in_flight_id(in_flight_run_id)
 }
 
 /// Cancel-first redeliver scan (`:424-430`): the oldest
@@ -1678,6 +1695,17 @@ mod tests {
             empty.clone(),
             "max_32_ok",
         );
+        // Python `$` matches before one trailing newline: `x\n`
+        // validates and persists verbatim (verified via stdlib); a
+        // second newline cannot match.
+        let (caps, changed) =
+            agent_capabilities(&str_body(vec![("agent_kind", "muse_code\n")]), &empty);
+        assert_eq!(caps, serde_json::json!(["agent:muse_code\n"]));
+        assert!(changed);
+        let (caps, changed) =
+            agent_capabilities(&str_body(vec![("agent_kind", "muse_code\n\n")]), &empty);
+        assert_eq!(caps, Value::Array(Vec::new()));
+        assert!(!changed);
     }
 
     #[test]
@@ -1957,6 +1985,35 @@ mod tests {
             parse("2026-10-03T00:29:09.+00:00"),
             Ok(utc(2026, 10, 3, 0, 29, 9))
         );
+        // Empty fractions parse only before an offset.
+        assert_eq!(
+            parse("2026-10-03T00:29,+00:00"),
+            Ok(utc(2026, 10, 3, 0, 29, 0))
+        );
+        // Short times (HH, HHMM, extended or basic) parse, with a
+        // fraction or offset after any component.
+        assert_eq!(
+            parse("2026-10-03T00:29+00:00"),
+            Ok(utc(2026, 10, 3, 0, 29, 0))
+        );
+        assert_eq!(
+            parse("2026-10-03T0029+00:00"),
+            Ok(utc(2026, 10, 3, 0, 29, 0))
+        );
+        assert_eq!(
+            parse("2026-10-03T00:29.5+00:00"),
+            Ok(utc(2026, 10, 3, 0, 29, 0) + Duration::milliseconds(500))
+        );
+        assert_eq!(
+            parse("2026-10-03T0029,5+00:00"),
+            Ok(utc(2026, 10, 3, 0, 29, 0) + Duration::milliseconds(500))
+        );
+        // Hour-only is aware this far back, so it clamps to the
+        // floor (garbage would fall back to `now` instead).
+        assert_eq!(
+            parse("2026-10-03T00+00:00"),
+            Ok(now - Duration::seconds(60))
+        );
         // 9-digit fractions truncate to microseconds.
         let micros =
             Utc.with_ymd_and_hms(2026, 10, 3, 0, 29, 9).unwrap() + Duration::microseconds(123_456);
@@ -1980,6 +2037,11 @@ mod tests {
             "20261003",
             "2026-10-03 00:29:09",
             "2026-10-03T00:29:09,5",
+            "2026-10-03T00:29",
+            "2026-10-03T0029",
+            "2026-10-03T00",
+            "2026-10-03T00:29.5",
+            "20261003T0029",
         ] {
             assert_eq!(parse(naive), Err(HeartbeatError::NaiveTimestamp), "{naive}");
         }
@@ -1997,11 +2059,22 @@ mod tests {
             "2026-10-03T00:29:09+24:00",
             "2026-10-03T00:29:09+23:59:60",
             "2026-10-03T00:29:09,",
+            "2026-10-03T00:29:09.",      // trailing separator, no offset
             "2026-W40-3T00:29:09+00:00", // week dates: residual
             "2026-10-03T00:29:09+00:00:0",
             " 2026-10-03T00:29:09+00:00",
             "2026-02-30T00:00:00+00:00",
             "2026-10-03T00:20:60+00:00",
+            "0000-01-01T00:00:00+00:00", // year 0 rejected
+            "0000-01-01",                // …bare too
+            "2026-10-03T12:3059",        // time shapes never mix
+            "2026-10-03T1230:59",
+            "2026-10-03T123", // odd basic lengths
+            "2026-10-03T12345",
+            "2026-10-03T1230591",  // the length-7 hole
+            "2026-10-03T12:",      // `:` commits to MM
+            "2026-10-03T12:30:",   // …and to SS
+            "2026-10-03T12305900", // separator-less fraction: residual
         ] {
             assert_eq!(parse(garbage), Ok(now), "{garbage}");
         }
@@ -2063,7 +2136,7 @@ mod tests {
         }
         // Same parser behind the skip id and the live-state uuid.
         assert_eq!(
-            parse_skip_id(Some("66ea9c4def41-4d9a-9819-51e0e22d12c6")),
+            parse_skip_id(Some(&Value::from("66ea9c4def41-4d9a-9819-51e0e22d12c6"))),
             Some(canon.to_string())
         );
         assert!(parse_optional_uuid(Some(&Value::from("URN:UUID:".to_string() + plain))).is_err());
@@ -2775,12 +2848,17 @@ mod tests {
     #[test]
     fn skip_id_parses_or_disables() {
         assert_eq!(parse_skip_id(None), None);
-        assert_eq!(parse_skip_id(Some("")), None);
+        assert_eq!(parse_skip_id(Some(&Value::from(""))), None);
         assert_eq!(
-            parse_skip_id(Some("5235E198-6AF1-40F2-A1E4-9E00A14EC2A0")),
+            parse_skip_id(Some(&Value::from("5235E198-6AF1-40F2-A1E4-9E00A14EC2A0"))),
             Some("5235e198-6af1-40f2-a1e4-9e00a14ec2a0".to_string())
         );
-        assert_eq!(parse_skip_id(Some("bogus")), None);
+        assert_eq!(parse_skip_id(Some(&Value::from("bogus"))), None);
+        // Non-string JSON goes through `str()`, exactly like the
+        // in-flight id (no JSON scalar's `str()` is a UUID spelling).
+        assert_eq!(parse_skip_id(Some(&Value::from(7))), None);
+        assert_eq!(parse_skip_id(Some(&Value::Bool(true))), None);
+        assert_eq!(parse_skip_id(Some(&Value::Null)), None);
     }
 
     #[test]
