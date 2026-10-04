@@ -48,6 +48,7 @@ pub mod prompting;
 pub mod routes;
 pub mod runner_enroll;
 pub mod runner_runs;
+pub mod runner_sessions;
 pub mod serializer;
 pub mod space;
 pub mod sse_body;
