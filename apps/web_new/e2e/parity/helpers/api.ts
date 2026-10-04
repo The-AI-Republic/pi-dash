@@ -6903,6 +6903,27 @@ export async function serverAddIssuesToCycle(
   if (!res.ok) throw new Error(`[parity] cycle-issues add failed with HTTP ${res.status}.`);
 }
 
+/**
+ * Remove one issue from a cycle; throws unless the server accepts.
+ * Cycle cleanup must call this before deleting the cycle: deleting a
+ * non-empty cycle leaves its members pointing at the deleted id, and
+ * those issues then vanish from cycle-grouped boards.
+ */
+export async function serverRemoveIssueFromCycle(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/cycle-issues/${issueId}/`,
+    { method: "DELETE", headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle-issues remove failed with HTTP ${res.status}.`);
+}
+
 /** Attach issues to a module; throws unless the server accepts. */
 export async function serverAddIssuesToModule(
   workspaceSlug: string,

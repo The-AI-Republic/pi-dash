@@ -34,6 +34,7 @@ import {
   serverPatchProject,
   serverPatchProjectUserProperties,
   serverProjectUserProperties,
+  serverRemoveIssueFromCycle,
   signInFreshUser,
   uniqueSuffix,
   type FreshUser,
@@ -627,6 +628,9 @@ test(
     });
 
     await test.step("cleanup removes the cycle and restores preferences", async () => {
+      // Remove the member first: deleting a non-empty cycle orphans its
+      // members' cycle pointer, hiding them from cycle-grouped boards.
+      await serverRemoveIssueFromCycle(seed.workspaceSlug, seed.projectId, cycleId, firstId, owner.cookie);
       await serverDeleteCycle(seed.workspaceSlug, seed.projectId, cycleId, owner.cookie);
       await restoreBoard(seed, seed.projectId, ctx);
     });
