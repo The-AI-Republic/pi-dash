@@ -32,6 +32,7 @@ pub mod orchestration;
 pub mod prompting;
 pub mod runner_enroll;
 pub mod runner_runs;
+pub mod runner_sessions;
 pub mod scheduler;
 pub mod space;
 pub mod tasks_cleanup;
