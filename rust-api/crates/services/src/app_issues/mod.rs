@@ -33,6 +33,7 @@
 pub mod ordering;
 pub mod params;
 pub mod serializers_assoc;
+pub mod serializers_detail;
 pub mod serializers_engage;
 pub mod serializers_label;
 pub mod serializers_links;
@@ -41,6 +42,22 @@ pub mod shape;
 
 pub use ordering::{order_sql, priority_case_sql, state_case_sql, OrderSpec};
 pub use params::{parse_per_page, raw_group_mismatch, ListParams, ParamError, ParseOptions};
+pub use serializers_detail::{
+    agent_live_state_to_representation, agent_run_to_representation,
+    agent_status_to_representation, agent_ticker_to_representation,
+    app_issue_reaction_to_representation, app_issue_vote_to_representation,
+    has_open_blockers_field, issue_detail_base_to_representation, issue_detail_to_representation,
+    issue_lite_to_representation, issue_public_to_representation, relations_summary_field,
+    serialize_drf_datetime, serialize_iso_datetime, AgentLiveStateRow, AgentLiveStateView,
+    AgentRunDetailRow, AgentRunView, AgentStatusView, AgentTickerInput, AgentTickerView,
+    AppIssueReactionRow, AppIssueReactionView, AppIssueVoteRow, AppIssueVoteView,
+    IssueDetailBaseRow, IssueDetailBaseView, IssueDetailRow, IssueDetailView, IssueLiteRow,
+    IssueLiteView, IssuePublicRow, IssuePublicView, ACTIVE_AGENT_RUN_SQL, ACTIVE_RUN_STATUSES,
+    AGENT_LIVE_STATE_FIELDS, AGENT_RUN_COUNT_SQL, AGENT_RUN_FIELDS, AGENT_STATUS_FIELDS,
+    AGENT_TICKER_FIELDS, APP_ISSUE_REACTION_FIELDS, APP_ISSUE_VOTE_FIELDS, ERROR_DIAGNOSTIC_FIELDS,
+    ISSUE_DETAIL_BASE_FIELDS, ISSUE_DETAIL_FIELDS, ISSUE_DETAIL_RETRIEVE_FIELDS, ISSUE_LITE_FIELDS,
+    ISSUE_PUBLIC_FIELDS, LATEST_AGENT_RUN_SQL,
+};
 pub use serializers_engage::{
     app_issue_flat_to_representation, comment_is_actively_synced, issue_activity_to_representation,
     issue_is_actively_synced, issue_reaction_lite_to_representation,
