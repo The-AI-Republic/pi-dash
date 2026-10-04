@@ -11,9 +11,10 @@
 //! - `GET projects/details/` — full-serializer list (`base.py:101-142`)
 //! - `GET projects/<pk>/` — retrieve (`base.py:226-255`)
 //! - `PUT projects/<pk>/` — no override: DRF default full update through
-//!   `ProjectListSerializer`, which demands the read-only-on-`ProjectSerializer`
-//!   `deleted_at`/`workspace` keys, so it always 400s in practice
-//!   (pinned by `contract-tests/app_project/test_project.py:175-182`)
+//!   `ProjectListSerializer` with the four required keys (`deleted_at`,
+//!   `name`, `identifier`, `workspace`) and the four gated unique
+//!   validators (Q-PUT-400); valid PUTs 200, including soft-delete via
+//!   `deleted_at`
 //! - `PATCH projects/<pk>/` — partial update (`base.py:314-380`)
 //! - `DELETE projects/<pk>/` — destroy (`base.py:382-429`)
 //! - `POST`/`DELETE projects/<project_id>/archive/` —
@@ -53,9 +54,11 @@
 //!   (the space intake precedent).
 //!
 //! Ported quirks (translate, don't redesign):
-//! - Q-PUT-400: PUT runs the `ProjectListSerializer` write path, whose
-//!   `unique_together` validators force `deleted_at`/`workspace` required,
-//!   so realistic PUTs 400 with exactly those two keys.
+//! - Q-PUT-400: PUT runs the `ProjectListSerializer` full-update path:
+//!   `deleted_at`/`name`/`identifier`/`workspace` are all required, and
+//!   the four `unique_together` validators skip unchanged/None values
+//!   (`enforce_uniqueness` gating) with the triples probing the live
+//!   base — PUTs missing keys 400, valid ones 200.
 //! - Q-identifier-case: `validate_identifier` matches the raw stripped value
 //!   case-sensitively while `save()` uppercases, so a lowercase dup passes
 //!   validation and dies at the unique index (`IntegrityError` → 400
@@ -1896,10 +1899,14 @@ async fn render_current_instance(
 // Body parsing + DRF field validation
 // ---------------------------------------------------------------------------
 
-/// Parse a serializer body: empty → `{}`, object → its map, any other JSON
-/// → the DRF non-dictionary 400, malformed → the `ParseError` 400 (the v1
-/// `parse_body` precedent; serde's message stands in for CPython's, as in
-/// every merged port — no fixture pins parser-error bytes).
+/// Parse a PUT serializer body: empty → `{}`, object → its map, `null`
+/// → the `No data provided` 400 (DRF `serializers.py:580`, probed), any
+/// other JSON → the DRF non-dictionary 400, malformed → the `ParseError`
+/// 400 (the v1 `parse_body` precedent; serde's message stands in for
+/// CPython's, as in every merged port — no fixture pins parser-error
+/// bytes). PUT-only: the mixin passes `data` straight to the
+/// serializer, while create/PATCH consume `request.data` as a mapping
+/// first (`{**...}` / `.get` → 500 on non-dicts — [`parse_get_body`]).
 /// DRF `ParseError` reason for JSON-whitespace-only input (CPython
 /// `json.load` skips ` \t\n\r`, then fails `Expecting value` at the
 /// true line/column — live-probed, including multi-line blanks).
@@ -1939,6 +1946,10 @@ pub fn parse_body(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
     }
     match serde_json::from_slice::<Value>(raw) {
         Ok(Value::Object(map)) => Ok(map),
+        Ok(Value::Null) => Err(Denial::Raw(
+            StatusCode::BAD_REQUEST,
+            "{\"non_field_errors\":[\"No data provided\"]}".to_owned(),
+        )),
         Ok(other) => {
             let kind = match &other {
                 Value::Array(_) => "list",
@@ -1951,8 +1962,7 @@ pub fn parse_body(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
                     }
                 }
                 Value::Bool(_) => "bool",
-                Value::Null => "NoneType",
-                Value::Object(_) => unreachable!("matched above"),
+                Value::Null | Value::Object(_) => unreachable!("matched above"),
             };
             Err(Denial::Raw(
                 StatusCode::BAD_REQUEST,
@@ -1965,9 +1975,14 @@ pub fn parse_body(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
     }
 }
 
-/// Parse a `.get()`-style body (`identifiers_delete`, `user_views_post`):
-/// empty → `{}`, object → its map, malformed → `ParseError` 400, any other
-/// JSON → 500 (the view calls `.get` on it → `AttributeError` — the
+/// Parse a body the view consumes as a mapping (`identifiers_delete`,
+/// `user_views_post`, create, PATCH): empty → `{}`, object → its map,
+/// malformed → `ParseError` 400, any other JSON → 500. The `.get()` call
+/// sites (`identifiers_delete`, `user_views_post`, PATCH's
+/// `request.data.get` at `base.py:341`) raise `AttributeError`; the
+/// `{**request.data, ...}` spreads (create at `base.py:261`, PATCH at
+/// `base.py:349-354`) raise `TypeError` — both map to the generic 500
+/// via `handle_exception` (probed for all five non-dict shapes — the
 /// notifications `parse_body` precedent).
 fn parse_get_body(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
     if raw.is_empty() {
@@ -3156,6 +3171,12 @@ fn parse_iso_regex(text: &str) -> Option<ParsedDateTime> {
         }
         let total = total_minutes * 60_000_000;
         offset_micros = Some(if negative { -total } else { total });
+    }
+    // `re` `$` matches before one trailing newline (`dateparse.py`
+    // `datetime_re`), so `…Z\n` / `…+00:00\n` are valid on this regex
+    // path only (never the `fromisoformat` path).
+    if chars.get(pos) == Some(&'\n') {
+        pos += 1;
     }
     if pos != chars.len() {
         return None;
@@ -5055,8 +5076,13 @@ fn anchor_sql(slug_bind: &str) -> String {
 /// Map the `paginate` `order_by` key onto a project column or annotation
 /// expression (`OffsetPaginator.get_result` re-orders by `(key dir,
 /// -created_at)`). Unknown keys raise Django's `FieldError` → 500.
+/// `pk` is Django's primary-key alias (`F("pk")` resolves — no key
+/// allowlist in `paginator.py`); `workspace__slug` spans the `w` join
+/// (`F("workspace__slug")` 200s — general dunder spans stay 500 here).
 fn order_column(key: &str) -> Result<&'static str, Denial> {
     match key {
+        "pk" => Ok("p.id"),
+        "workspace__slug" => Ok("w.slug"),
         "created_at" => Ok("p.created_at"),
         "updated_at" => Ok("p.updated_at"),
         "archived_at" => Ok("p.archived_at"),
@@ -5304,7 +5330,7 @@ async fn project_create(
     let role = workspace_role(&pool, &actor.id, &slug).await?;
     check_gate("POST", PATH_PROJECTS, &slug, role, None)?;
     let (workspace_id, workspace_tz) = workspace_or_404(&pool, &slug).await?;
-    let data = parse_body(&body)?;
+    let data = parse_get_body(&body)?;
     let mut validated = match validate_project_input(
         &pool,
         &data,
@@ -5465,8 +5491,9 @@ async fn project_patch(
         .await?
         .ok_or(Denial::ObjectNotFound)?;
     // `request.data` is touched (`:341`) before the archived check
-    // (`:343`): archived + malformed JSON answers the `ParseError` 400.
-    let data = parse_body(&body)?;
+    // (`:343`): archived + malformed JSON answers the `ParseError` 400,
+    // archived + non-dict JSON answers the `.get` 500.
+    let data = parse_get_body(&body)?;
     let user = executor_user(&pool, &actor.id).await?;
     let current_instance =
         render_current_instance(&pool, &state, &project_id, &actor, &user, &slug).await?;
@@ -6397,6 +6424,20 @@ mod tests {
         assert!(parse_drf_datetime("2026-10-02T22:22:38+00:00 ", utc)
             .ok()
             .is_none());
+        // `re` `$` matches before one trailing newline (regex path
+        // only): `…Z\n` / `…+00:00\n` valid, double newline not.
+        assert!(parse_drf_datetime("2026-10-02T22:22:38Z\n", utc)
+            .ok()
+            .is_some());
+        assert!(parse_drf_datetime("2026-10-02T22:22:38+00:00\n", utc)
+            .ok()
+            .is_some());
+        assert!(parse_drf_datetime("2026-10-02T22:22:38Z\n\n", utc)
+            .ok()
+            .is_none());
+        assert!(parse_drf_datetime("2026-10-02T22:22:38+00:00\r", utc)
+            .ok()
+            .is_none());
         // Fractions truncate to micros (never round).
         let parsed = parse_drf_datetime("2026-10-02T22:22:38.123456789Z", utc)
             .ok()
@@ -6570,12 +6611,25 @@ mod tests {
         };
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("but got list"));
+        // PUT `null` carries the `errors`-property message, not the
+        // non-dictionary branch (DRF `serializers.py:580`).
+        let Err(Denial::Raw(status, body)) = parse_body(b"null") else {
+            panic!("expected raw 400");
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, "{\"non_field_errors\":[\"No data provided\"]}");
         let Err(Denial::Raw(status, _)) = parse_body(b"{oops") else {
             panic!("expected raw 400");
         };
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        // `.get()`-style bodies 500 on non-objects (`AttributeError`).
-        assert!(matches!(parse_get_body(b"[1]"), Err(Denial::ServerError)));
+        // Mapping-style bodies (create/PATCH/identifiers/user-views)
+        // 500 on every non-dict shape (`AttributeError` / `TypeError`).
+        for raw in [b"[1]".as_slice(), b"\"x\"", b"5", b"null", b"true"] {
+            assert!(
+                matches!(parse_get_body(raw), Err(Denial::ServerError)),
+                "shape {raw:?} must 500"
+            );
+        }
     }
 
     #[test]
@@ -6659,6 +6713,8 @@ mod tests {
         assert_eq!(order_column("created_at").unwrap(), "p.created_at");
         assert_eq!(order_column("workspace").unwrap(), "p.workspace_id");
         assert_eq!(order_column("sort_order").unwrap(), "sort_order");
+        assert_eq!(order_column("pk").unwrap(), "p.id");
+        assert_eq!(order_column("workspace__slug").unwrap(), "w.slug");
         assert!(matches!(order_column("nope"), Err(Denial::ServerError)));
     }
 
