@@ -1601,7 +1601,7 @@ fn member_rows_builder<'q>(
 ) -> sqlx::QueryBuilder<'q, sqlx::Postgres> {
     let mut qb = sqlx::QueryBuilder::new(MEMBER_SELECT);
     qb.push_bind(slug);
-    qb.push(" AND wm.deleted_at IS NULL ");
+    qb.push(") AND wm.deleted_at IS NULL ");
     for term in terms {
         qb.push("AND (u.display_name ILIKE ");
         qb.push_bind(like_param(term));
@@ -3705,7 +3705,7 @@ mod tests {
             .to_owned();
         assert_eq!(
             plain,
-            format!("{MEMBER_SELECT}$1 AND wm.deleted_at IS NULL ORDER BY wm.created_at DESC")
+            format!("{MEMBER_SELECT}$1) AND wm.deleted_at IS NULL ORDER BY wm.created_at DESC")
         );
         // Terms AND after the guard, each binding two LIKEs.
         let terms = member_rows_builder("acme", &["ada".to_owned()], None, false)
@@ -3714,7 +3714,7 @@ mod tests {
         assert_eq!(
             terms,
             format!(
-                "{MEMBER_SELECT}$1 AND wm.deleted_at IS NULL AND (u.display_name ILIKE $2 OR u.first_name ILIKE $3) ORDER BY wm.created_at DESC"
+                "{MEMBER_SELECT}$1) AND wm.deleted_at IS NULL AND (u.display_name ILIKE $2 OR u.first_name ILIKE $3) ORDER BY wm.created_at DESC"
             )
         );
         // Target + LIMIT 1 (retrieve): the id binds after the term LIKEs.
@@ -3725,7 +3725,7 @@ mod tests {
         assert_eq!(
             detail,
             format!(
-                "{MEMBER_SELECT}$1 AND wm.deleted_at IS NULL AND (u.display_name ILIKE $2 OR u.first_name ILIKE $3) AND wm.id = $4 ORDER BY wm.created_at DESC LIMIT 1"
+                "{MEMBER_SELECT}$1) AND wm.deleted_at IS NULL AND (u.display_name ILIKE $2 OR u.first_name ILIKE $3) AND wm.id = $4 ORDER BY wm.created_at DESC LIMIT 1"
             )
         );
     }
