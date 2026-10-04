@@ -38,12 +38,11 @@
 //! - `start` never reads the request body (Django never touches
 //!   `request.data` there), so no body extractor is taken and even
 //!   malformed JSON still answers 200.
-//! - `approve`'s anonymous denial is 403, not 401: DRF's
-//!   `IsAuthenticated` raises `NotAuthenticated`, and with
-//!   `BaseSessionAuthentication` (a plain `SessionAuthentication` with
-//!   CSRF disabled) there is no `WWW-Authenticate` header, so DRF's
-//!   exception handler renders 403
-//!   `{"detail":"Authentication credentials were not provided."}`.
+//! - `approve`'s anonymous denial is 401: DRF's
+//!   `IsAuthenticated` raises `NotAuthenticated`, which live Django
+//!   renders as 401
+//!   `{"detail":"Authentication credentials were not provided."}`
+//!   (probed; no `WWW-Authenticate` header on the wire).
 //! - `approve` stamps `updated_at` alongside `user`/`workspace`/`approved`
 //!   (`auto_now`); `token` stamps `last_polled_at` + `updated_at` on the
 //!   pending path and `consumed` + `last_polled_at` + `updated_at` on mint.
@@ -134,9 +133,9 @@ fn owned_token() -> axum::routing::MethodRouter<AppState> {
 // Fixed bodies
 // ---------------------------------------------------------------------------
 
-/// DRF `IsAuthenticated` denial with no `WWW-Authenticate` header: 403,
-/// not 401 (see module docs).
-pub const FORBIDDEN_DETAIL_BODY: &str =
+/// DRF `NotAuthenticated` denial: 401 (probed live; the
+/// `IsAuthenticated` gate, no `WWW-Authenticate` header).
+pub const UNAUTHENTICATED_DETAIL_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
 /// `handle_exception`'s generic 500 branch.
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
@@ -145,12 +144,12 @@ pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try
 // Denial / error mapping
 // ---------------------------------------------------------------------------
 
-/// Handler-level failure: the approve 403, the DRF `ParseError` branch,
+/// Handler-level failure: the approve 401, the DRF `ParseError` branch,
 /// view-inline `{"error"}` bodies with explicit statuses, and the generic
 /// 500 for unexpected database failures.
 enum Denial {
-    /// 403, anonymous on `approve`.
-    ForbiddenDetail,
+    /// 401, anonymous on `approve`.
+    UnauthorizedDetail,
     /// `{"error": message}` (or a two-key error body) with an explicit
     /// status — every view-inline branch.
     Error(StatusCode, String),
@@ -161,7 +160,10 @@ enum Denial {
 impl Denial {
     fn status_and_body(&self) -> (StatusCode, String) {
         match self {
-            Denial::ForbiddenDetail => (StatusCode::FORBIDDEN, FORBIDDEN_DETAIL_BODY.to_owned()),
+            Denial::UnauthorizedDetail => (
+                StatusCode::UNAUTHORIZED,
+                UNAUTHENTICATED_DETAIL_BODY.to_owned(),
+            ),
             Denial::Error(status, body) => (*status, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -228,7 +230,7 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
 // ---------------------------------------------------------------------------
 
 /// `request.user` from the Django session (`_auth_user_id`). No session,
-/// no key, or a non-UUID id means anonymous → 403. (Django PKs are UUIDs;
+/// no key, or a non-UUID id means anonymous → 401. (Django PKs are UUIDs;
 /// a session id that is not a UUID cannot be a user.)
 fn session_actor_id(extension: Option<Extension<SessionHandle>>) -> Option<uuid::Uuid> {
     let handle = extension?.0;
@@ -419,7 +421,7 @@ async fn post_approve(
         Err(denial) => return denial.into_response(),
     };
     let Some(actor_id) = session_actor_id(extension) else {
-        return Denial::ForbiddenDetail.into_response();
+        return Denial::UnauthorizedDetail.into_response();
     };
     let data = match parse_body(&body) {
         Ok(data) => data,
@@ -444,7 +446,7 @@ async fn post_approve(
     };
 
     // The approver's email for the 200 shape; an unknown or inactive id
-    // is anonymous in Django's session auth, hence the same 403.
+    // is anonymous in Django's session auth, hence the same 401.
     let email: Option<(Option<String>,)> =
         sqlx::query_as(r#"SELECT email FROM users WHERE id = $1 AND is_active"#)
             .bind(actor_id)
@@ -452,7 +454,7 @@ async fn post_approve(
             .await
             .unwrap_or(None);
     let Some((email,)) = email else {
-        return Denial::ForbiddenDetail.into_response();
+        return Denial::UnauthorizedDetail.into_response();
     };
 
     let mut tx = match pool.begin().await {
@@ -942,6 +944,20 @@ mod tests {
             .find(|b| b["in"].as_str().unwrap() == "valid, no membership")
             .unwrap()["out"]["body"];
         assert_eq!(lonely["workspace_slug"], serde_json::Value::Null);
+    }
+
+    // -- approve anonymous denial (PIDASHCONV-734) ---------------------------
+
+    #[test]
+    fn approve_anonymous_denial_is_401_with_drf_body() {
+        // Live Django renders the `IsAuthenticated` gate as 401 with the
+        // `NotAuthenticated` body (probed, no `WWW-Authenticate` header).
+        let (status, body) = Denial::UnauthorizedDetail.status_and_body();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body,
+            r#"{"detail":"Authentication credentials were not provided."}"#
+        );
     }
 
     /// Compare a fixture `out.body` (with `<...>` placeholders) against a
