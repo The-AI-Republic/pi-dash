@@ -9,6 +9,9 @@
 //! * [`shape_issue`] — `IssueSerializer` core
 //!   (`api/serializers/issue.py:54-108` helpers + `:109-496`, PIDASHCONV-660,
 //!   this issue; owns this `mod.rs` as the first D-18 serializer to merge).
+//! * [`shape_relations`] — relation shapes (`IssueRelationResponse` /
+//!   `Create` / `Remove` / `Show`, `RelatedIssue`;
+//!   `api/serializers/issue.py:729-906`, PIDASHCONV-663).
 //! * Sibling issues extend this file with their own `pub mod shape_*;` /
 //!   `queries_*` lines (PIDASHCONV-661…672); on rebase keep both sides,
 //!   never fork a helper.
@@ -24,6 +27,7 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod shape_issue;
+pub mod shape_relations;
 
 /// One entry of a DRF `fields=` argument (`base.py:19-30,41-60`): either a
 /// plain field name or a `{name: sub-fields}` dict entry. Query-string
