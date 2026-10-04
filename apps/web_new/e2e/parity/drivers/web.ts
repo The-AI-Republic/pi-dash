@@ -15,8 +15,9 @@
 // back to structural reads (icon glyph, header position) proven
 // element-identical on the oracle. Tab reads scope to the nested
 // workspace main so sidebar rows and issue rows never leak in.
-import { expect, type Locator, type Page } from "@playwright/test";
+import { expect, type ElementHandle, type Locator, type Page } from "@playwright/test";
 import type {
+  LayoutsLayoutKey,
   ParityBrowserCookie,
   ParityDriver,
   ParityTarget,
@@ -981,7 +982,19 @@ export class WebDriver implements ParityDriver {
 
   async openAuthenticated(path: string, cookies: ParityBrowserCookie[]): Promise<void> {
     await this.page.context().addCookies(cookies);
-    await this.page.goto(path);
+    // Phone viewports only: start with the navigation drawer collapsed.
+    // The app auto-collapses it below 768px through an effect that the
+    // dev oracle double-invokes (StrictMode), toggling it back open, so
+    // without this the drawer covers the compact header's controls. The
+    // seeded flag is exactly what a returning phone user carries, and
+    // desktop contexts never take this branch.
+    if ((this.page.viewportSize()?.width ?? 1280) < 768) {
+      await this.page.addInitScript(() => window.localStorage.setItem("app_sidebar_collapsed", "true"));
+    }
+    // domcontentloaded, not load: the dev oracle serves hundreds of
+    // unbundled modules, so the load event lands minutes after the app
+    // is interactive; every scenario waits explicitly for its own chrome.
+    await this.page.goto(path, { waitUntil: "domcontentloaded" });
     await this.page.waitForLoadState("domcontentloaded");
     await this.awaitAppBoot(path);
   }
@@ -9695,5 +9708,2371 @@ export class WebDriver implements ParityDriver {
       .filter({ has: this.page.locator("svg") })
       .first()
       .click();
+  }
+
+  // --- NEWFRONT-117 (layouts A): shared layout switching, list rows, quick
+  // --- actions. Selectors observed on the running old app (seeded stack):
+  // --- the header switcher is a five-button segmented control in fixed
+  // --- order (list, board, calendar, spreadsheet, timeline) with an active
+  // --- background marker; list sections hang group headers over anchors
+  // --- with id="issue-<uuid>"; the row quick-actions trigger is a hover
+  // --- control with an accessible toggle name; the peek panel is the
+  // --- absolute right-side panel plus a peekIssueId URL param.
+
+  private static readonly LAYOUTS_ORDER: LayoutsLayoutKey[] = [
+    "list",
+    "kanban",
+    "calendar",
+    "spreadsheet",
+    "gantt_chart",
+  ];
+
+  // First contact with a freshly loaded issues page waits longer than the
+  // shared budget: route compile plus the filter/issue fetch chains take
+  // 90-180s on the loaded shared host (8GB box, ~25 containers, several
+  // dev servers), and header chrome plus rows appear together only after
+  // both settle. Sized for failure latency, not pass time: passes resolve
+  // as soon as the chrome renders.
+  private static readonly LAYOUTS_FIRST_WAIT_MS = 300_000;
+  // Body reads (rows, group headers, tiles) share the same budget: the
+  // chrome the first wait settles on can precede the body paint by ~150s
+  // on the loaded host (blank page, then chrome, then rows), so a 120s
+  // body wait expires just as content arrives.
+  private static readonly LAYOUTS_BODY_WAIT_MS = 300_000;
+
+  private layoutsSwitcherButtons(): Locator {
+    return this.page.locator("div.flex.items-center.gap-1.rounded-md.bg-layer-3.p-1 > button");
+  }
+
+  private layoutsIssueRow(issueName: string): Locator {
+    return this.page.locator('a[id^="issue-"]', { hasText: issueName }).first();
+  }
+
+  private layoutsGroupHeaders(): Locator {
+    return this.page.locator('div[class*="group/list-header"]');
+  }
+
+  private layoutsPeekPanel(): Locator {
+    return this.page.locator("div.absolute.top-0.right-0.bottom-0").first();
+  }
+
+  private static layoutsHeaderTitle(headerText: string): string {
+    // Headers render "Title <count>"; the count is a trailing bare number.
+    return headerText
+      .trim()
+      .replace(/\s+/g, " ")
+      .replace(/\s+\d+$/, "");
+  }
+
+  async layoutsOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
+    const buttons = this.layoutsSwitcherButtons();
+    await buttons.first().waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const count = await buttons.count();
+    if (count !== WebDriver.LAYOUTS_ORDER.length) {
+      throw new Error(`[parity] layout switcher offers ${count} layouts, expected ${WebDriver.LAYOUTS_ORDER.length}.`);
+    }
+    return [...WebDriver.LAYOUTS_ORDER];
+  }
+
+  async layoutsActiveLayout(): Promise<LayoutsLayoutKey> {
+    const buttons = this.layoutsSwitcherButtons();
+    // Phone viewports hide the desktop switcher entirely; derive the
+    // active layout from the rendered layout container instead. The
+    // probe is short so desktop runs keep the marker path.
+    const switcherPresent = await buttons
+      .first()
+      .waitFor({ timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!switcherPresent) return this.layoutsActiveLayoutFromContainers();
+    await buttons.first().waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    // The buttons render before the stored selection applies (filters
+    // still fetching), so the marker scan polls instead of reading once.
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      const count = await buttons.count();
+      for (let i = 0; i < count; i++) {
+        const cls = (await buttons.nth(i).getAttribute("class")) ?? "";
+        if (cls.includes("bg-layer-transparent-active")) {
+          const key = WebDriver.LAYOUTS_ORDER[i];
+          if (key === undefined) throw new Error(`[parity] switcher has no layout key at index ${i}.`);
+          return key;
+        }
+      }
+      if (Date.now() >= deadline) throw new Error("[parity] no switcher button carries the active marker.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private async layoutsActiveLayoutFromContainers(): Promise<LayoutsLayoutKey> {
+    // Exactly one layout container renders at a time; poll until one
+    // reports visible. Mid-transition doubles resolve to the first hit,
+    // and callers polling for a target (SwitchTo) self-heal.
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (await this.layoutsListVisible()) return "list";
+      if (await this.layoutsKanbanVisible()) return "kanban";
+      if (await this.layoutsCalendarVisible()) return "calendar";
+      if (await this.layoutsSpreadsheetVisible()) return "spreadsheet";
+      if (await this.layoutsGanttVisible()) return "gantt_chart";
+      if (Date.now() >= deadline) throw new Error("[parity] no layout container became visible.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private async layoutsWaitForLayout(layout: LayoutsLayoutKey): Promise<void> {
+    // Layout switches refetch and re-render heavy views; the timeline
+    // compiles a heavy chart bundle on first load and needs ~150s on the
+    // loaded shared host, so every switch gets a long leash.
+    const deadline = Date.now() + 300_000;
+    for (;;) {
+      const visible =
+        layout === "list"
+          ? await this.layoutsListVisible()
+          : layout === "kanban"
+            ? await this.layoutsKanbanVisible()
+            : layout === "calendar"
+              ? await this.layoutsCalendarVisible()
+              : layout === "spreadsheet"
+                ? await this.layoutsSpreadsheetVisible()
+                : await this.layoutsGanttVisible();
+      if (visible) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] ${layout} layout never rendered after switching.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
+    const index = WebDriver.LAYOUTS_ORDER.indexOf(layout);
+    const buttons = this.layoutsSwitcherButtons();
+    await buttons.nth(index).waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await buttons.nth(index).scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await buttons.nth(index).click();
+    // Clicking the active layout is a specified no-op; the marker is
+    // already visible then, so this wait resolves immediately.
+    await this.layoutsWaitForLayout(layout);
+  }
+
+  async layoutsReloadIssues(): Promise<void> {
+    // domcontentloaded (see openAuthenticated): the load event is minutes
+    // out on the dev oracle; the switcher wait below is the real gate.
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    // Phone viewports hide the desktop switcher entirely, so gate on
+    // any layout container there; desktop keeps the switcher path.
+    if ((this.page.viewportSize()?.width ?? 1280) < 768) {
+      await this.layoutsActiveLayoutFromContainers();
+      return;
+    }
+    await this.layoutsSwitcherButtons().first().waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+  }
+
+  async layoutsListVisible(): Promise<boolean> {
+    // Immediate read, no waiting: switch assertions poll through
+    // layoutsSwitchTo, and absence must read fast.
+    return (await this.layoutsGroupHeaders().count()) > 0;
+  }
+
+  async layoutsCalendarVisible(): Promise<boolean> {
+    // The Options trigger is icon-only (nameless) on phones, so the
+    // mobile read falls back to Today-plus-tiles; desktop keeps the
+    // Options read and satisfies the fallback identically.
+    if ((await this.page.getByRole("button", { name: "Options" }).count()) > 0) return true;
+    return (
+      (await this.page.getByRole("button", { name: "Today" }).count()) > 0 && (await this.layoutsCalTiles().count()) > 0
+    );
+  }
+
+  async layoutsSpreadsheetVisible(): Promise<boolean> {
+    // The sheet's first-column header reads "Work items" (lowercase i);
+    // the breadcrumb elsewhere reads "Work Items", so the exact match is
+    // unambiguous.
+    return (await this.page.getByText("Work items", { exact: true }).count()) > 0;
+  }
+
+  async layoutsKanbanVisible(): Promise<boolean> {
+    // The board carries no exclusive text on the seed: it renders issue
+    // cards but none of the other layouts' markers. A fully collapsed
+    // board shows no cards, so the desktop switcher's active marker
+    // confirms it (the switch scenario separately proves cards render
+    // when expanded). The marker is scanned directly — never through
+    // layoutsActiveLayout, which recurses here through its container
+    // fallback on switcher-less pages and spins to the test timeout.
+    const otherMarkers =
+      (await this.page.getByText("All work items", { exact: true }).count()) +
+      (await this.page.getByRole("button", { name: "Options" }).count()) +
+      (await this.page.getByText("Work items", { exact: true }).count()) +
+      (await this.page.getByText("Quarter", { exact: true }).count());
+    if (otherMarkers > 0) return false;
+    if ((await this.page.locator('a[id^="issue-"]').count()) > 0) return true;
+    const buttons = this.layoutsSwitcherButtons();
+    if (
+      !(await buttons
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return false;
+    const count = await buttons.count();
+    for (let i = 0; i < count; i++) {
+      if (((await buttons.nth(i).getAttribute("class")) ?? "").includes("bg-layer-transparent-active")) {
+        return WebDriver.LAYOUTS_ORDER[i] === "kanban";
+      }
+    }
+    return false;
+  }
+
+  async layoutsGanttVisible(): Promise<boolean> {
+    // The zoom control ("Week / Month / Quarter / Today") is a row of
+    // role-less divs, so the marker is the Quarter label as plain text.
+    return (await this.page.getByText("Quarter", { exact: true }).count()) > 0;
+  }
+
+  async layoutsListGroups(): Promise<string[]> {
+    const headers = this.layoutsGroupHeaders();
+    const count = await headers.count();
+    const titles: string[] = [];
+    for (let i = 0; i < count; i++) {
+      titles.push(WebDriver.layoutsHeaderTitle((await headers.nth(i).innerText()) ?? ""));
+    }
+    return titles;
+  }
+
+  private async layoutsGroupSectionFast(title: string): Promise<Locator | null> {
+    const sections = this.page.locator('div[data-drop-target-for-element="true"]');
+    const count = await sections.count();
+    for (let i = 0; i < count; i++) {
+      const header = sections.nth(i).locator('div[class*="group/list-header"]').first();
+      if ((await header.count()) === 0) continue;
+      // Bounded like the row reads: a re-render mid-scan must not hang
+      // the caller to the test timeout.
+      const text = await header.innerText({ timeout: 10_000 }).catch(() => "");
+      if (text !== "" && WebDriver.layoutsHeaderTitle(text) === title) return sections.nth(i);
+    }
+    return null;
+  }
+
+  private async layoutsGroupSection(title: string): Promise<Locator> {
+    // The list body (sections) renders after the header chrome the page
+    // waits settle on, so a fresh open/reload needs a bounded wait here
+    // instead of an immediate throw. The returned locator is anchored to
+    // the header text, not a section index: the list re-renders (and
+    // reorders sections) as groups fetch, so a positional nth() goes stale
+    // between discovery and use. State names in parity specs are distinct
+    // non-substrings, so the substring filter is unambiguous in practice.
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      const found = await this.layoutsGroupSectionFast(title);
+      if (found) {
+        return this.page.locator('div[data-drop-target-for-element="true"]').filter({
+          has: this.page.locator('div[class*="group/list-header"]', { hasText: title }),
+        });
+      }
+      if (Date.now() >= deadline) throw new Error(`[parity] list group "${title}" not found.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsListGroupExpanded(title: string): Promise<boolean> {
+    // A collapsed section hides its rows and its quick-add; the sticky
+    // quick-add is present exactly when expanded (member+ view).
+    const section = await this.layoutsGroupSection(title);
+    return (await section.locator("div.sticky.bottom-0").count()) > 0;
+  }
+
+  async layoutsListToggleGroup(title: string): Promise<void> {
+    const section = await this.layoutsGroupSection(title);
+    const before = await this.layoutsListGroupExpanded(title);
+    await section.locator('div[class*="group/list-header"]').first().click();
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await this.layoutsListGroupExpanded(title)) !== before) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] list group "${title}" never toggled.`);
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async layoutsListGroupIssueNames(title: string): Promise<string[]> {
+    const section = await this.layoutsGroupSection(title);
+    const rows = section.locator('a[id^="issue-"]');
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      // A row mid-virtualization can detach between count() and the
+      // read; an unbounded read would hang to the test timeout, so a
+      // stuck row is skipped and the caller's poll re-reads instead.
+      const text = await rows
+        .nth(i)
+        .locator("p")
+        .first()
+        .innerText({ timeout: 10_000 })
+        .catch(() => "");
+      if (text.trim() !== "") names.push(text.trim());
+    }
+    return names;
+  }
+
+  async layoutsListGroupHasLoadMore(title: string): Promise<boolean> {
+    // Absence-tolerant: a missing group reads as no row (callers polling
+    // for true still converge; callers asserting false pair it with a
+    // positive read so a slow load cannot pass vacuously).
+    const section = await this.layoutsGroupSectionFast(title);
+    if (!section) return false;
+    return (await section.getByText("Load more").count()) > 0;
+  }
+
+  async layoutsListGroupLoadMore(title: string): Promise<void> {
+    const section = await this.layoutsGroupSection(title);
+    const before = await this.layoutsListGroupIssueNames(title);
+    // Fail fast when the row is absent: an unbounded click would hang to
+    // the test timeout (720s) with no actionable error.
+    const more = section.getByText("Load more").first();
+    await more.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await more.click({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      const after = await this.layoutsListGroupIssueNames(title);
+      if (after.length > before.length || !(await this.layoutsListGroupHasLoadMore(title))) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] group "${title}" never loaded more.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsListScrollEnd(): Promise<void> {
+    const rows = this.page.locator('a[id^="issue-"]');
+    const count = await rows.count();
+    if (count === 0) throw new Error("[parity] no list rows to scroll to.");
+    await rows.nth(count - 1).scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+  }
+
+  async layoutsListQuickAdd(title: string, groupTitle?: string): Promise<void> {
+    const scope = groupTitle === undefined ? this.page : await this.layoutsGroupSection(groupTitle);
+    const trigger = scope.locator("div.sticky.bottom-0", { hasText: "New work item" }).first();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await trigger.click();
+    const field = this.page.getByPlaceholder("Work item title");
+    await field.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await field.fill(title);
+    await field.press("Enter");
+    // The row appearing proves the save landed; the title is unique per
+    // scenario run, so this cannot match a stale row.
+    await this.page
+      .locator('a[id^="issue-"]', { hasText: title })
+      .first()
+      .waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+  }
+
+  async layoutsRowCanEditState(issueName: string): Promise<boolean> {
+    // Read-only viewers (guests) render the chip disabled; members get an
+    // enabled chip that opens the state dropdown. The flag is the whole
+    // signal — opening the dropdown to probe it leaves shared menu state
+    // behind (a toggle-close race hung RowSetState for 300s), so no click.
+    const chip = this.layoutsRowStateButton(issueName);
+    await chip.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return !(await chip.isDisabled());
+  }
+
+  async layoutsRowHref(issueName: string): Promise<string | null> {
+    const row = this.layoutsIssueRow(issueName);
+    await row.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return row.getAttribute("href");
+  }
+
+  async layoutsRowOpenPeek(issueName: string): Promise<void> {
+    const row = this.layoutsIssueRow(issueName);
+    await row.locator("p").first().click();
+    await this.page.waitForURL((url) => url.href.includes("peekIssueId"), { timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await this.layoutsPeekPanel().waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+  }
+
+  async layoutsPeekVisible(): Promise<boolean> {
+    if (!this.page.url().includes("peekIssueId")) return false;
+    const panel = this.layoutsPeekPanel();
+    return (await panel.count()) > 0 && (await panel.isVisible());
+  }
+
+  async layoutsPeekTitle(): Promise<string | null> {
+    // The peek title is an editable textarea (a char counter like 18/255
+    // sits beside it, which a text read would mistake for the title), so
+    // the read takes the field value, falling back to the legacy line
+    // scan when the field is absent. The panel shell renders before its
+    // issue fetch lands, so the read waits for content first.
+    const panel = this.layoutsPeekPanel();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await panel.count()) > 0) {
+        const field = panel.locator("textarea").first();
+        if ((await field.count()) > 0) return ((await field.inputValue()) ?? "").trim() || null;
+        if (/[A-Z]+-\d+/.test((await panel.innerText().catch(() => "")) ?? "")) break;
+      }
+      if (Date.now() >= deadline) return null;
+      await this.page.waitForTimeout(500);
+    }
+    const field = panel.locator("textarea").first();
+    if ((await field.count()) > 0) return ((await field.inputValue()) ?? "").trim() || null;
+    const lines = ((await panel.innerText()) ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const at = lines.findIndex((line) => /^[A-Z]+-\d+$/.test(line));
+    if (at < 0 || at + 1 >= lines.length) return null;
+    return lines[at + 1] ?? null;
+  }
+
+  async layoutsPeekClose(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if (!this.page.url().includes("peekIssueId")) return;
+      if (Date.now() >= deadline) throw new Error("[parity] peek panel never closed.");
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async layoutsRowHasSubIssueToggle(issueName: string): Promise<boolean> {
+    // The leading cell is an empty grid slot without children and carries
+    // the expander button once sub-issues exist.
+    const row = this.layoutsIssueRow(issueName);
+    await row.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const slot = row.locator("div.grid.size-4").first();
+    if ((await slot.count()) === 0) return false;
+    return (await slot.locator("button").count()) > 0;
+  }
+
+  async layoutsRowExpandSubIssues(issueName: string): Promise<void> {
+    const row = this.layoutsIssueRow(issueName);
+    const toggle = row.locator("div.grid.size-4 button").first();
+    await toggle.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await toggle.click();
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      if ((await this.layoutsRowSubIssueNames(issueName)).length > 0) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] sub-issues of "${issueName}" never rendered.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsRowSubIssueNames(issueName: string): Promise<string[]> {
+    // Expanded children render as sibling blocks inside the parent's own
+    // block container (an ancestor div carrying an issue_ id; the row
+    // link itself carries issue-<id>), after the parent's own link.
+    const row = this.layoutsIssueRow(issueName);
+    await row.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const block = row.locator('xpath=ancestor::div[starts-with(@id, "issue_")][1]');
+    const nested = block.locator('a[id^="issue-"]');
+    const count = await nested.count();
+    const names: string[] = [];
+    for (let i = 1; i < count; i++) {
+      names.push(((await nested.nth(i).locator("p").first().innerText()) ?? "").trim());
+    }
+    return names;
+  }
+
+  private layoutsRowStateButton(issueName: string): Locator {
+    // The state chip is the row's span-carrying button (the identifier is
+    // a bare button, the icon controls carry no span).
+    return this.layoutsIssueRow(issueName).locator("button:has(span)").first();
+  }
+
+  async layoutsRowState(issueName: string): Promise<string> {
+    const chip = this.layoutsRowStateButton(issueName);
+    await chip.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    return ((await chip.innerText()) ?? "").trim();
+  }
+
+  async layoutsRowSetState(issueName: string, stateName: string): Promise<void> {
+    const chip = this.layoutsRowStateButton(issueName);
+    await chip.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await chip.click();
+    // The state menu is a listbox: its options carry the option role
+    // (the row chip keeps the button role, so no disambiguation needed).
+    const option = this.page.getByRole("option", { name: stateName, exact: true }).first();
+    await option.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await option.click();
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      if ((await this.layoutsRowState(issueName)) === stateName) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] row "${issueName}" never showed state "${stateName}".`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private async layoutsRowPriorityControl(issueName: string): Promise<Locator> {
+    // Priority is the first visible icon-only control in the strip: the
+    // identifier is disabled, the state chip carries a span, the menu
+    // triggers carry the toggle name, and the mobile trigger is hidden on
+    // desktop, so what remains first is the priority control. The span
+    // check is explicit per candidate (a locator-level exclusion proved
+    // unreliable across engine versions and matched the state chip).
+    const row = this.layoutsIssueRow(issueName);
+    await row.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const candidates = row.locator("button:not([disabled])");
+    const count = await candidates.count();
+    for (let i = 0; i < count; i++) {
+      const candidate = candidates.nth(i);
+      if ((await candidate.getAttribute("aria-label")) === "Toggle quick actions menu") continue;
+      if (!(await candidate.isVisible())) continue;
+      if ((await candidate.locator("span").count()) > 0) continue;
+      return candidate;
+    }
+    throw new Error(`[parity] no priority control found on row "${issueName}".`);
+  }
+
+  async layoutsRowPriority(issueName: string): Promise<string> {
+    // The control is icon-only (no text, title, or label); the value is
+    // encoded in a border-priority-<value> marker class on its inner
+    // element. Absent marker (or a text render) reads as its fallback.
+    const control = await this.layoutsRowPriorityControl(issueName);
+    await control.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const html = (await control.innerHTML().catch(() => "")) ?? "";
+    const marker = html.match(/border-priority-([a-z]+)/)?.[1];
+    if (marker) return marker.charAt(0).toUpperCase() + marker.slice(1);
+    const text = ((await control.innerText()) ?? "").trim();
+    return text === "" ? "None" : text;
+  }
+
+  async layoutsRowSetPriority(issueName: string, priorityName: string): Promise<void> {
+    const control = await this.layoutsRowPriorityControl(issueName);
+    await control.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await control.click();
+    // Same listbox family as the state menu: options carry option role.
+    const option = this.page.getByRole("option", { name: priorityName, exact: true }).first();
+    await option.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await option.click();
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      const current = await this.layoutsRowPriority(issueName);
+      if (current === priorityName || (priorityName === "None" && current === "None")) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] row "${issueName}" never showed priority "${priorityName}".`);
+      }
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private async layoutsDismissDetailRail(): Promise<void> {
+    // Cycle/module pages float a detail rail over the list's right edge,
+    // covering row triggers and group-header controls; its leading
+    // text-less button dismisses it (the same control a user reaches
+    // for). Absent everywhere else, where this is a no-op. Matched by
+    // scrollbar + edge placement, not width: the cycle rail is wider
+    // than the module rail.
+    const rail = this.page.locator("div.vertical-scrollbar.absolute.right-0");
+    if ((await rail.count()) === 0) return;
+    const close = rail.first().locator("button").first();
+    await close.waitFor({ timeout: 10_000 }).catch(() => {});
+    if ((await close.count()) === 0) return;
+    await close.click({ timeout: 10_000 }).catch(() => {});
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await rail.count()) === 0) return;
+      if (Date.now() >= deadline) return;
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  private async layoutsOpenRowMenu(issueName: string): Promise<void> {
+    // List rows are anchors; the all-issues sheet renders rows as table
+    // cells instead, whose trigger is likewise the last button. Either
+    // shape can take minutes to arrive on a cold body, so the wait
+    // polls for both rather than timing one out into the other.
+    let row = this.layoutsIssueRow(issueName);
+    const deadline = Date.now() + WebDriver.LAYOUTS_FIRST_WAIT_MS;
+    for (;;) {
+      if ((await row.count()) > 0) break;
+      const cell = this.page.locator("td", { hasText: issueName }).first();
+      if ((await cell.count()) > 0) {
+        row = cell;
+        break;
+      }
+      if (Date.now() >= deadline) throw new Error(`[parity] issue row "${issueName}" not found.`);
+      await this.page.waitForTimeout(500);
+    }
+    // The rail loads with the body, so dismiss it only once the row has
+    // resolved — any earlier the dismiss is a no-op on an empty page.
+    await this.layoutsDismissDetailRail();
+    // The trigger is the row's last button: an icon-only ellipsis with no
+    // accessible name (a breakpoint duplicate renders first, hidden). It
+    // sits under the property strip for automation clicks, so hover it
+    // into its clickable state first — but neither hover nor click may
+    // hang: when the detail rail (or a slow re-render) still covers the
+    // trigger, a forced dispatch opens the menu the click cannot reach.
+    const trigger = row.locator("button").last();
+    await trigger.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await trigger.hover({ timeout: 10_000 }).catch(() => {});
+    await trigger.click({ timeout: 10_000 }).catch(async () => {
+      await trigger.click({ force: true }).catch(async () => {
+        await trigger.focus();
+        await this.page.keyboard.press("Enter");
+      });
+    });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+  }
+
+  private async layoutsReadOpenMenuItems(): Promise<string[]> {
+    // Row menus render the title in an h5 with an optional description
+    // paragraph (Archive's gating note); plain-text menus (calendar day
+    // add) have no h5, so those fall back to the full item text.
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    const texts: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const heading = items.nth(i).locator("h5").first();
+      const raw = (await heading.count()) > 0 ? await heading.innerText() : await items.nth(i).innerText();
+      texts.push((raw ?? "").trim().replace(/\s+/g, " "));
+    }
+    return texts;
+  }
+
+  async layoutsRowMenuItems(issueName: string): Promise<string[]> {
+    await this.layoutsOpenRowMenu(issueName);
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  async layoutsRowMenuChoose(issueName: string, item: string): Promise<void> {
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the pick.
+    if (item === "Copy link") await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.layoutsOpenRowMenu(issueName);
+    // Click by h5 title like layoutsOpenRowMenuItem: the accessible name
+    // covers the whole item (title plus the Archive gating note), so an
+    // exact name match cannot address a noted item.
+    const entries = this.page.getByRole("menuitem");
+    const count = await entries.count();
+    let clicked = false;
+    for (let i = 0; i < count; i++) {
+      const heading = entries.nth(i).locator("h5").first();
+      const title = (await heading.count()) > 0 ? await heading.innerText() : await entries.nth(i).innerText();
+      if ((title ?? "").trim().replace(/\s+/g, " ") === item) {
+        await entries.nth(i).click();
+        clicked = true;
+        break;
+      }
+    }
+    if (!clicked) throw new Error(`[parity] row menu has no item "${item}".`);
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await this.page.getByRole("menuitem").count()) === 0) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] row menu never closed after choosing "${item}".`);
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async layoutsRowContextMenuItems(issueName: string): Promise<string[]> {
+    const row = this.layoutsIssueRow(issueName);
+    await row.locator("p").first().click({ button: "right" });
+    // The context menu is custom markup (buttons with h5 titles inside a
+    // data-context-menu box), not menuitem roles; every row renders two
+    // boxes (one per breakpoint slot) and both open at the same spot on a
+    // right-click, so the read takes the first opaque one.
+    const box = this.page.locator("div.opacity-100", { has: this.page.locator("div[data-context-menu]") }).first();
+    await box.waitFor({ timeout: 15_000 });
+    try {
+      const headings = box.locator("div[data-context-menu] button h5");
+      const count = await headings.count();
+      const texts: string[] = [];
+      for (let i = 0; i < count; i++) {
+        texts.push(((await headings.nth(i).innerText()) ?? "").trim().replace(/\s+/g, " "));
+      }
+      return texts;
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  // --- NEWFRONT-117 round 2 (spreadsheet, calendar, row actions, empty
+  // --- states, mobile/loaders): landing as throwing stubs first so the
+  // --- extended interface compiles; each wave replaces its stubs with
+  // --- observed-app implementations.
+  private layoutsTodo(target: string): never {
+    throw new Error(`[parity] layouts driver ${target} not implemented yet.`);
+  }
+
+  async layoutsSheetQuickAdd(title: string): Promise<void> {
+    // Two "Add work item" buttons render; the trailing (bottom-of-table)
+    // one opens the title form, the leading one does nothing observable.
+    const trigger = this.page.getByRole("button", { name: "Add work item", exact: true }).last();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await trigger.click({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const field = this.page.getByPlaceholder("Work item title");
+    await field.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await field.fill(title);
+    await field.press("Enter");
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsSheetRowNames()).includes(title)) return;
+      if (Date.now() >= deadline) throw new Error("[parity] sheet quick-add never rendered its row.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private layoutsSheetToggleButtons(issueName: string): Locator {
+    // The cell's buttons are indistinguishable by attributes: the
+    // identifier is disabled, and the sub-issue chevron (leading, only
+    // with children) and the hover trigger (trailing, always) are
+    // enabled icon-only twins. Settled cells (menus closed) therefore
+    // carry exactly one enabled button without children and two with,
+    // the chevron first — which is what this locator narrows to.
+    return this.layoutsSheetFirstCell(issueName).locator("button:not([disabled])").first();
+  }
+
+  async layoutsSheetHasSubIssueToggle(issueName: string): Promise<boolean> {
+    const first = this.layoutsSheetFirstCell(issueName);
+    await first.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return (await first.locator("button:not([disabled])").count()) >= 2;
+  }
+
+  async layoutsSheetExpandSubIssues(issueName: string): Promise<void> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const cells = table.locator('td[id^="issue-"]');
+    const before = await cells.count();
+    const first = this.layoutsSheetFirstCell(issueName);
+    await first.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await this.layoutsSheetToggleButtons(issueName).first().click({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    // Expansion fetches the children, so new rows arrive asynchronously.
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await cells.count()) > before) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] sub-issues of "${issueName}" never rendered in the sheet.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSheetSubIssueNames(issueName: string): Promise<string[]> {
+    // Children render as the rows directly after the parent; each level
+    // indents with a wider spacer (inline width), so names are collected
+    // while the spacer stays wider than the parent's own.
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const cells = table.locator('tbody td[id^="issue-"]');
+    const count = await cells.count();
+    const names: string[] = [];
+    const depths: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const cell = cells.nth(i);
+      names.push(await this.layoutsSheetFirstCellName(cell));
+      const spacer = cell.locator('div[style*="width"]').first();
+      const width =
+        (await spacer.count()) > 0 ? await spacer.evaluate((node) => (node as HTMLElement).style.width) : "";
+      depths.push(Number.parseFloat(width) || 0);
+    }
+    const parent = names.indexOf(issueName);
+    if (parent < 0) throw new Error(`[parity] no sheet row "${issueName}".`);
+    const parentDepth = depths[parent] ?? 0;
+    const out: string[] = [];
+    for (let i = parent + 1; i < count; i++) {
+      if ((depths[i] ?? 0) <= parentDepth) break;
+      const name = names[i] ?? "";
+      if (name !== "") out.push(name);
+    }
+    return out;
+  }
+
+  async layoutsSheetOpenSubIssueCount(issueName: string): Promise<void> {
+    // The sub-issues column cell carries a "N sub-work item(s)" label that
+    // navigates to the issue's detail; the click landing is proven by the
+    // URL changing underneath it.
+    const first = this.layoutsSheetFirstCell(issueName);
+    await first.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const row = first.locator("xpath=ancestor::tr[1]");
+    const label = row.getByText(/sub-work items?/).first();
+    await label.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const before = this.page.url();
+    await label.click({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (this.page.url() !== before) return;
+      if (Date.now() >= deadline) throw new Error("[parity] sub-issue count never navigated.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  // --- Calendar layout (ISS-021..026). Day tiles are a static month
+  // --- grid: positional reads are stable here (unlike list sections,
+  // --- which reorder as groups fetch), and every read scopes to the
+  // --- tile so the duplicated mobile blocks never leak in.
+  private layoutsCalTiles(): Locator {
+    return this.page.locator("div.group.relative.flex.h-full.w-full.flex-col");
+  }
+
+  private async layoutsCalTile(dayNumber: number): Promise<Locator> {
+    // The desktop header shows the bare day number (today's sits in a
+    // badge span); day-1 tiles carry a month prefix ("Oct 1"), and
+    // adjacent-month filler tiles share numbers but render tertiary —
+    // current-month tiles are font-medium. Parity specs only use days
+    // strictly inside the month, so the exact+medium match is unique.
+    const label = String(dayNumber);
+    const tiles = this.layoutsCalTiles();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      const count = await tiles.count();
+      for (let i = 0; i < count; i++) {
+        const header = tiles.nth(i).locator("div.hidden.flex-shrink-0.justify-end").first();
+        if ((await header.count()) === 0) continue;
+        // textContent, not innerText: the header hides below the md
+        // breakpoint, where rendered text reads empty but the content
+        // stays put. Desktop headers read identically either way.
+        const text = ((await header.textContent()) ?? "").trim().replace(/\s+/g, " ");
+        if (text !== label) continue;
+        if (!((await header.getAttribute("class")) ?? "").includes("font-medium")) continue;
+        return tiles.nth(i);
+      }
+      if (Date.now() >= deadline) throw new Error(`[parity] calendar tile for day ${label} not found.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private layoutsCalTitleButton(): Locator {
+    return this.page.locator("button.text-18.font-semibold").first();
+  }
+
+  private layoutsCalStepButtons(): Locator {
+    // Prev/next are the two buttons beside the title popover in the
+    // header bar: the nearest gap-1.5 ancestor of the title button is
+    // that bar's left group, whose button children are prev then next.
+    return this.layoutsCalTitleButton().locator("xpath=ancestor::div[contains(@class, 'gap-1.5')][1]/button");
+  }
+
+  private layoutsCalWeekHeaderCells(): Locator {
+    return this.page.locator("div.sticky.top-0").locator("div.flex.h-11");
+  }
+
+  async layoutsCalMode(): Promise<"month" | "week"> {
+    // A month grid holds 28-35 tiles, a week row 5-7; the rows render
+    // together once the calendar payload lands, so the count separates
+    // the modes cleanly after the first tile appears.
+    await this.layoutsCalTiles().first().waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return (await this.layoutsCalTiles().count()) > 10 ? "month" : "week";
+  }
+
+  async layoutsCalTitle(): Promise<string> {
+    const title = this.layoutsCalTitleButton();
+    await title.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return ((await title.innerText()) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  async layoutsCalPrev(): Promise<void> {
+    const before = await this.layoutsCalTitle();
+    await this.layoutsCalStepButtons().nth(0).click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalTitle()) !== before) return;
+      if (Date.now() >= deadline) throw new Error("[parity] calendar prev never changed the title.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsCalNext(): Promise<void> {
+    const before = await this.layoutsCalTitle();
+    await this.layoutsCalStepButtons().nth(1).click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalTitle()) !== before) return;
+      if (Date.now() >= deadline) throw new Error("[parity] calendar next never changed the title.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsCalToday(): Promise<void> {
+    await this.page.getByRole("button", { name: "Today", exact: true }).click();
+  }
+
+  private async layoutsCalOpenMonthPicker(): Promise<Locator> {
+    await this.layoutsCalTitleButton().click();
+    const panel = this.page.locator("div.w-56");
+    await panel.waitFor({ timeout: 15_000 });
+    return panel;
+  }
+
+  async layoutsCalMonthPickerMonths(): Promise<string[]> {
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const buttons = panel.locator("div.grid.grid-cols-4 > button");
+      const count = await buttons.count();
+      const months: string[] = [];
+      for (let i = 0; i < count; i++) months.push(((await buttons.nth(i).innerText()) ?? "").trim());
+      return months;
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  async layoutsCalMonthPickerYear(): Promise<number> {
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const year = panel.locator("span.text-11").first();
+      await year.waitFor({ timeout: 15_000 });
+      return Number.parseInt(((await year.innerText()) ?? "").trim(), 10);
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  async layoutsCalMonthPickerYearStep(direction: "prev" | "next"): Promise<void> {
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const year = panel.locator("span.text-11").first();
+      const before = ((await year.innerText()) ?? "").trim();
+      const header = year.locator("xpath=..");
+      const buttons = header.locator("button");
+      if (direction === "prev") await buttons.first().click();
+      else await buttons.last().click();
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        if (((await year.innerText()) ?? "").trim() !== before) return;
+        if (Date.now() >= deadline) throw new Error("[parity] month picker year never stepped.");
+        await this.page.waitForTimeout(300);
+      }
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  async layoutsCalMonthPickerChoose(month: string): Promise<void> {
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const before = await this.layoutsCalTitle();
+      await panel.locator("div.grid.grid-cols-4 > button", { hasText: month }).first().click();
+      const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+      for (;;) {
+        if ((await this.layoutsCalTitle()) !== before) return;
+        if (Date.now() >= deadline) throw new Error(`[parity] month picker never applied "${month}".`);
+        await this.page.waitForTimeout(500);
+      }
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  async layoutsCalMonthPickerEnabled(): Promise<boolean> {
+    return await this.layoutsCalTitleButton().isEnabled();
+  }
+
+  private async layoutsCalOpenOptions(): Promise<Locator> {
+    // Desktop names the trigger "Options"; on phones the same popover
+    // trigger is an icon-only button right after Today. The panel is
+    // content-selected (the sidebar's row-menu twins share its shape).
+    // Both branches wait for the header first: cold calendar paints are
+    // minutes late on the loaded host.
+    const options = this.page.getByRole("button", { name: "Options" });
+    const today = this.page.getByRole("button", { name: "Today" });
+    const header = await this.layoutsWaitForCount(
+      async () => (await options.count()) + (await today.count()),
+      1,
+      WebDriver.LAYOUTS_BODY_WAIT_MS
+    );
+    if (header === 0) throw new Error("[parity] calendar header never rendered.");
+    if ((await options.count()) > 0) {
+      await options.first().click({ timeout: 30_000 });
+    } else {
+      const trigger = today.first().locator("xpath=following-sibling::*[1]//button");
+      await trigger.first().click({ timeout: 30_000 });
+    }
+    const panels = this.page.locator("div.min-w-\\[12rem\\]");
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const count = await panels.count();
+      for (let i = 0; i < count; i++) {
+        const text = (
+          (await panels
+            .nth(i)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).replace(/\s+/g, " ");
+        if (text.includes("Month layout")) return panels.nth(i);
+      }
+      if (Date.now() >= deadline) throw new Error("[parity] calendar options panel never opened.");
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async layoutsCalSetMode(mode: "month" | "week"): Promise<void> {
+    const panel = await this.layoutsCalOpenOptions();
+    try {
+      await panel
+        .locator("button", { hasText: mode === "month" ? "Month layout" : "Week layout" })
+        .first()
+        .click();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalMode()) === mode) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] calendar never switched to ${mode} mode.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsCalWeekendsVisible(): Promise<boolean> {
+    await this.layoutsCalWeekHeaderCells().first().waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const cells = this.layoutsCalWeekHeaderCells();
+    const count = await cells.count();
+    for (let i = 0; i < count; i++) {
+      if (((await cells.nth(i).innerText()) ?? "").trim() === "Sat") return true;
+    }
+    return false;
+  }
+
+  async layoutsCalSetWeekends(show: boolean): Promise<void> {
+    if ((await this.layoutsCalWeekendsVisible()) === show) return;
+    const panel = await this.layoutsCalOpenOptions();
+    try {
+      await panel.locator("button", { hasText: "Show weekends" }).first().click();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalWeekendsVisible()) === show) return;
+      if (Date.now() >= deadline) throw new Error("[parity] calendar weekends toggle never applied.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsCalColumnCount(): Promise<number> {
+    await this.layoutsCalWeekHeaderCells().first().waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return await this.layoutsCalWeekHeaderCells().count();
+  }
+
+  private layoutsCalBlockName(block: Locator): Locator {
+    // The identifier chip carries no truncate class, so the truncate
+    // div inside a block is exactly the issue name.
+    return block.locator("div.truncate.text-13").first();
+  }
+
+  async layoutsCalDayIssueNames(dayNumber: number): Promise<string[]> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    const blocks = tile.locator('a[id^="issue-"]');
+    const count = await blocks.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      names.push(((await this.layoutsCalBlockName(blocks.nth(i)).innerText()) ?? "").trim());
+    }
+    return names;
+  }
+
+  async layoutsCalDayIsToday(dayNumber: number): Promise<boolean> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    const header = tile.locator("div.hidden.flex-shrink-0.justify-end").first();
+    return (await header.locator("span.rounded-full").count()) > 0;
+  }
+
+  async layoutsCalDayHasLoadMore(dayNumber: number): Promise<boolean> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    return (await tile.getByRole("button", { name: "Load more", exact: true }).count()) > 0;
+  }
+
+  async layoutsCalDayLoadMore(dayNumber: number): Promise<void> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    await tile.getByRole("button", { name: "Load more", exact: true }).click();
+  }
+
+  async layoutsCalDragBlock(issueName: string, toDayNumber: number): Promise<void> {
+    // Pragmatic drag-and-drop listens to pointer events, so a stepped
+    // mouse path (not dragTo) drives the drop target the app registers
+    // on the destination tile. The press lands on the block's first
+    // button, not its center: the block is a link, and pressing its
+    // text starts a native link-drag that hijacks the pointer flow
+    // (dragstart/dragend, no drop), while a button press stays a pure
+    // pointer gesture the drop target answers.
+    const block = this.layoutsIssueRow(issueName);
+    await block.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await block.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const tile = await this.layoutsCalTile(toDayNumber);
+    await tile.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const press = block.locator("button").first();
+    const from = (await press.boundingBox()) ?? (await block.boundingBox());
+    const to = await tile.boundingBox();
+    if (!from || !to) throw new Error("[parity] calendar drag endpoints have no bounding box.");
+    const mouse = this.page.mouse;
+    // An open hover preview blinds the drop lookup: while any preview
+    // card is mounted the app shell carries pointer-events none, so the
+    // tile under the pointer is unhittable and the drop silently no-drops
+    // (proven by bisection: the flip tracks the card, not the drag, and
+    // clears when the card closes). Parking closes any open card; the
+    // poll below makes that a precondition, and the press-travel runs
+    // with no stops so the pointer leaves the block inside the card's
+    // 100ms hover delay and the card never reopens mid-drag.
+    await mouse.move(8, 8);
+    const popGoneBy = Date.now() + 10_000;
+    for (;;) {
+      const pops = await this.page.locator("div.w-72").count();
+      if (pops === 0) break;
+      if (Date.now() >= popGoneBy) throw new Error("[parity] calendar hover preview never closed before drag.");
+      await this.page.waitForTimeout(250);
+    }
+    const fromX = from.x + from.width / 2;
+    const fromY = from.y + from.height / 2;
+    await mouse.move(fromX, fromY);
+    await mouse.down();
+    // The exit is a single step: a stepped exit hovers the block's
+    // midpoint, dwelling past the 100ms hover delay and reopening the
+    // card mid-drag. Three travel steps still drive the drop target.
+    await mouse.move(fromX, fromY - 30, { steps: 1 });
+    await mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 3 });
+    await mouse.up();
+  }
+
+  async layoutsCalTileDrag(fromDayNumber: number, toDayNumber: number): Promise<void> {
+    // Mobile day tiles render no block anchors (dots only), so there is
+    // no draggable source: pressing the tile face and traveling to
+    // another tile must move nothing. The gesture mirrors the desktop
+    // drag's stepped travel so a future draggable would answer it.
+    const from = await this.layoutsCalTile(fromDayNumber);
+    await from.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const to = await this.layoutsCalTile(toDayNumber);
+    await to.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const fromBox = await from.boundingBox();
+    const toBox = await to.boundingBox();
+    if (!fromBox || !toBox) throw new Error("[parity] calendar tile drag endpoints have no bounding box.");
+    const mouse = this.page.mouse;
+    const fromX = fromBox.x + fromBox.width / 2;
+    const fromY = fromBox.y + fromBox.height / 2;
+    await mouse.move(fromX, fromY);
+    await mouse.down();
+    await mouse.move(fromX, fromY - 30, { steps: 1 });
+    await mouse.move(toBox.x + toBox.width / 2, toBox.y + toBox.height / 2, { steps: 3 });
+    await mouse.up();
+  }
+
+  async layoutsCalBlockText(issueName: string): Promise<string> {
+    const block = this.layoutsIssueRow(issueName);
+    await block.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return ((await block.innerText()) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  async layoutsCalBlockHoverPreview(issueName: string): Promise<boolean> {
+    const block = this.layoutsIssueRow(issueName);
+    await block.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await block.hover();
+    const card = this.page.locator("div.w-72.space-y-2");
+    try {
+      await card.waitFor({ timeout: 15_000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async layoutsCalBlockOpenPeek(issueName: string): Promise<void> {
+    // A block is a peek-link anchor with no paragraph (the list row's
+    // opener clicks a <p>), so the block itself is the click target;
+    // the peek wait below mirrors the row opener's.
+    const block = this.layoutsIssueRow(issueName);
+    await block.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await block.click({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await this.page.waitForURL((url) => url.href.includes("peekIssueId"), {
+      timeout: WebDriver.LAYOUTS_BODY_WAIT_MS,
+    });
+    await this.layoutsPeekPanel().waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+  }
+
+  async layoutsCalBlockQuickActions(issueName: string): Promise<string[]> {
+    const block = this.layoutsIssueRow(issueName);
+    await block.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await block.hover();
+    await block.locator("div.cursor-pointer").first().click();
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  private async layoutsCalOpenDayAddMenu(dayNumber: number): Promise<void> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    await tile.hover();
+    // The tile-level add control is hover-revealed (opacity-0 until the
+    // tile hovers), so the tile hover above precedes the click.
+    await tile.locator("div.flex.w-full.items-center", { hasText: "Add work item" }).first().click();
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+  }
+
+  async layoutsCalDayQuickAdd(dayNumber: number, title: string): Promise<void> {
+    await this.layoutsCalOpenDayAddMenu(dayNumber);
+    await this.page.getByRole("menuitem", { name: "Add work item", exact: true }).first().click();
+    const field = this.page.getByPlaceholder("Work item Title");
+    await field.waitFor({ timeout: 15_000 });
+    await field.fill(title);
+    await field.press("Enter");
+    await this.page.keyboard.press("Escape");
+  }
+
+  async layoutsCalDayAddMenu(dayNumber: number): Promise<string[]> {
+    await this.layoutsCalOpenDayAddMenu(dayNumber);
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  async layoutsCalTapDay(dayNumber: number): Promise<void> {
+    // The mobile tile face (hidden on desktop) selects the day whose
+    // blocks the mobile detail list below the grid renders.
+    const tile = await this.layoutsCalTile(dayNumber);
+    await tile.locator("div.mx-auto.cursor-pointer").first().click();
+  }
+
+  async layoutsCalDayDetailNames(): Promise<string[]> {
+    // Day-detail rows are generic pointer rows, not anchors: a disabled
+    // identifier chip in a wrapper div, with the name in the wrapper's
+    // next sibling (a truncate div). The list renders multiplied, so the
+    // read dedupes; other disabled buttons (context-menu Archive twins)
+    // fail the chip pattern. Calendar layout renders no other
+    // identifier chips, so the page scope is exact.
+    const chips = this.page.locator("button[disabled]");
+    const count = await chips.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const chipText = (
+        (await chips
+          .nth(i)
+          .textContent()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (!/^[A-Z]+-\d+$/.test(chipText)) continue;
+      const nameEl = chips.nth(i).locator("xpath=../following-sibling::div[contains(@class, 'truncate')][1]");
+      if ((await nameEl.count()) === 0) continue;
+      names.push(
+        (
+          ((await nameEl
+            .first()
+            .textContent()
+            .catch(() => "")) ?? "") as string
+        ).trim()
+      );
+    }
+    return [...new Set(names)];
+  }
+
+  private async layoutsOpenRowMenuItem(issueName: string, item: string): Promise<Locator> {
+    // Items are located by their h5 title: the accessible name covers
+    // the whole item (title plus the Archive gating note), so an exact
+    // name match cannot address a noted item.
+    await this.layoutsOpenRowMenu(issueName);
+    const entries = this.page.getByRole("menuitem");
+    const count = await entries.count();
+    for (let i = 0; i < count; i++) {
+      const heading = entries.nth(i).locator("h5").first();
+      if ((await heading.count()) > 0 && ((await heading.innerText()) ?? "").trim() === item) {
+        return entries.nth(i);
+      }
+    }
+    throw new Error(`[parity] row menu has no item "${item}".`);
+  }
+
+  async layoutsRowMenuItemDisabled(issueName: string, item: string): Promise<boolean> {
+    const entry = await this.layoutsOpenRowMenuItem(issueName, item);
+    try {
+      if (((await entry.getAttribute("aria-disabled")) ?? "") === "true") return true;
+      return ((await entry.getAttribute("class")) ?? "").includes("text-placeholder");
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  async layoutsRowMenuItemNote(issueName: string, item: string): Promise<string | null> {
+    const entry = await this.layoutsOpenRowMenuItem(issueName, item);
+    try {
+      const note = entry.locator("p").first();
+      if ((await note.count()) === 0) return null;
+      return ((await note.innerText()) ?? "").trim().replace(/\s+/g, " ");
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  private layoutsWorkItemModalTitleHeading(): Locator {
+    return this.page.getByRole("dialog").locator("h3.text-h4-medium").first();
+  }
+
+  async layoutsWorkItemModalVisible(): Promise<boolean> {
+    return (await this.layoutsWorkItemModalTitleHeading().count()) > 0;
+  }
+
+  async layoutsWorkItemModalTitle(): Promise<string | null> {
+    const heading = this.layoutsWorkItemModalTitleHeading();
+    if ((await heading.count()) === 0) return null;
+    return ((await heading.innerText()) ?? "").trim();
+  }
+
+  async layoutsWorkItemModalClose(): Promise<void> {
+    // The modal has no dedicated close control; Escape dismisses it via
+    // the dialog shell. Parity specs never dirty the form first, so no
+    // draft prompt intervenes.
+    await this.page.keyboard.press("Escape");
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (!(await this.layoutsWorkItemModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error("[parity] work-item modal never closed.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsWorkItemModalSetTitle(title: string): Promise<void> {
+    // The title field carries its placeholder; the modal shows exactly
+    // one text field, so the first match is unambiguous.
+    const field = this.page.getByRole("dialog").getByPlaceholder("Title").first();
+    await field.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await field.fill(title);
+  }
+
+  async layoutsWorkItemModalSubmit(): Promise<void> {
+    // The primary button reads Save on create and Update on edit.
+    const dialog = this.page.getByRole("dialog");
+    const save = dialog.getByRole("button", { name: "Save", exact: true });
+    const update = dialog.getByRole("button", { name: "Update", exact: true });
+    if ((await save.count()) > 0) await save.first().click();
+    else if ((await update.count()) > 0) await update.first().click();
+    else throw new Error("[parity] work-item modal has no Save/Update button.");
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (!(await this.layoutsWorkItemModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error("[parity] work-item modal never closed after submit.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsDeleteModalVisible(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: "Delete Work item", exact: true }).count()) > 0;
+  }
+
+  async layoutsDeleteModalConfirm(): Promise<void> {
+    // Scoped to the dialog: every row's closed context box carries its own
+    // Delete button, so a page-wide match is ambiguous.
+    await this.page.getByRole("dialog").getByRole("button", { name: "Delete", exact: true }).click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (!(await this.layoutsDeleteModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error("[parity] delete modal never closed after confirm.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsArchiveModalVisible(): Promise<boolean> {
+    // The heading carries the identifier suffix ("Archive Work item PAR
+    // 12"), so the marker is a heading containing the fixed prefix.
+    return (await this.page.locator("h3", { hasText: "Archive Work item" }).count()) > 0;
+  }
+
+  async layoutsArchiveModalConfirm(): Promise<void> {
+    // Scoped to the dialog: closed context boxes carry their own Archive
+    // buttons, so a page-wide match is ambiguous.
+    await this.page.getByRole("dialog").getByRole("button", { name: "Archive", exact: true }).click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (!(await this.layoutsArchiveModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error("[parity] archive modal never closed after confirm.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsMoveModalVisible(): Promise<boolean> {
+    // Scoped to the dialog: row menus carry a same-titled h5, and the
+    // post-move detail page renders headings that would read as open.
+    return (
+      (await this.page.getByRole("dialog").getByRole("heading", { name: "Move to project", exact: true }).count()) > 0
+    );
+  }
+
+  async layoutsMoveModalChoose(projectName: string): Promise<void> {
+    // Project buttons move immediately on click and the view navigates
+    // to the moved issue, so the wait is for the modal to disappear.
+    const dialog = this.page.getByRole("dialog");
+    await dialog.locator("button", { hasText: projectName }).first().click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (!(await this.layoutsMoveModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] move modal never applied "${projectName}".`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsAddExistingModalVisible(): Promise<boolean> {
+    // The submit button ("Add selected work items") exists only while
+    // the modal is open; the search input placeholder is shared with
+    // other pickers, so the submit button is the marker.
+    return (await this.page.getByRole("button", { name: "Add selected work items", exact: true }).count()) > 0;
+  }
+
+  async layoutsAddExistingModalChoose(issueName: string): Promise<void> {
+    // Each option is a label (htmlFor issue-<id>) whose truncate span
+    // carries the name; clicking toggles selection, then submit dates
+    // every selected issue onto the tile and closes the modal.
+    const option = this.page.locator('label[for^="issue-"]', { hasText: issueName }).first();
+    await option.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await option.click();
+    // The label wraps the checkbox (its `for` dangles), so the click
+    // selects — but React commits asynchronously, and submitting first
+    // dates nothing and just closes the modal. Wait for the check.
+    const box = option.locator('input[type="checkbox"]').first();
+    const checkedBy = Date.now() + 30_000;
+    for (;;) {
+      if (await box.isChecked().catch(() => false)) break;
+      if (Date.now() >= checkedBy) throw new Error(`[parity] add-existing option never checked "${issueName}".`);
+      await this.page.waitForTimeout(250);
+    }
+    await this.page.getByRole("button", { name: "Add selected work items", exact: true }).click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (!(await this.layoutsAddExistingModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error("[parity] add-existing modal never closed after submit.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private async layoutsOpenDetailMenu(): Promise<void> {
+    // The detail trigger wraps its ellipsis IconButton in the menu
+    // button, so it is the button containing a button; row triggers
+    // wrap a div instead and never match. Both the browse header and
+    // the peek header pack other nested buttons around it (help,
+    // breadcrumb, collapse, emoji), so the search additionally
+    // requires the CustomMenu wrapper (which stamps data-main-menu)
+    // and takes the rightmost match in the header band.
+    const panel = this.page.locator("div.absolute.top-0.right-0.bottom-0").first();
+    const scope = (await panel.count()) > 0 ? panel : this.page;
+    // The header renders after navigation, so poll for a banded
+    // trigger rather than scanning the empty page once.
+    const all = scope.locator("xpath=.//button[.//button and ancestor::div[@data-main-menu='true']]");
+    const deadline = Date.now() + WebDriver.LAYOUTS_FIRST_WAIT_MS;
+    let trigger: Locator | null = null;
+    for (;;) {
+      const count = await all.count();
+      let bestX = -1;
+      for (let i = 0; i < count; i++) {
+        const box = await all
+          .nth(i)
+          .boundingBox()
+          .catch(() => null);
+        if (box && box.width > 0 && box.height > 0 && box.y > 30 && box.y < 120 && box.x > bestX) {
+          trigger = all.nth(i);
+          bestX = box.x;
+        }
+      }
+      if (trigger) break;
+      if (Date.now() >= deadline) throw new Error("[parity] detail header menu trigger not found.");
+      await this.page.waitForTimeout(500);
+    }
+    // Center the trigger before clicking: at the viewport edge a
+    // scrolled-under comment card can cover the click point. When a
+    // stable overlay still wins the hit test, a forced dispatch opens
+    // the menu the click cannot reach.
+    const found: Locator = trigger;
+    await found.evaluate((el) => el.scrollIntoView({ block: "center", inline: "center" })).catch(() => {});
+    await found.click({ timeout: 10_000 }).catch(async () => found.click({ force: true }));
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+  }
+
+  async layoutsDetailMenuItems(): Promise<string[]> {
+    await this.layoutsOpenDetailMenu();
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  async layoutsDetailMenuChoose(_item: string): Promise<void> {
+    return this.layoutsTodo("layoutsDetailMenuChoose");
+  }
+
+  async layoutsPeekCopyLinkVisible(): Promise<boolean> {
+    // Scoped to the peek panel (absent on the browse page): inside the
+    // header action group the copy control is the text-less plain
+    // button — the menu trigger nests a button, the subscribe control
+    // carries text, and both live outside the menu container.
+    const panel = this.page.locator("div.absolute.top-0.right-0.bottom-0").first();
+    if ((await panel.count()) === 0) return false;
+    const trigger = panel.locator("button:has(button)").first();
+    if ((await trigger.count()) === 0) return false;
+    const group = trigger.locator("xpath=ancestor::div[contains(@class, 'gap-2')][1]");
+    const copy = group.locator(
+      "xpath=.//button[not(.//button) and not(ancestor::div[@data-main-menu='true']) and normalize-space(string(.))='']"
+    );
+    return (await copy.count()) > 0;
+  }
+
+  private layoutsListPageMenuTrigger(): Locator {
+    // The whole-list ellipsis pins its own size in its classes (the
+    // project page carries no such button; the entry point is a view
+    // page, where exactly one renders).
+    return this.page.locator("button.size-\\[26px\\]").first();
+  }
+
+  async layoutsListPageMenuItems(): Promise<string[]> {
+    const trigger = this.layoutsListPageMenuTrigger();
+    await trigger.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await trigger.click();
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  private async layoutsGroupHeaderAddControl(groupTitle: string): Promise<{ menu: boolean; control: Locator }> {
+    // Cycle/module headers wrap the plus in a menu button (span); plain
+    // project headers render the plus as a bare div that opens the
+    // create modal directly.
+    const section = await this.layoutsGroupSection(groupTitle);
+    // The rail loads with the body, so dismiss it only once the section
+    // has resolved — any earlier the dismiss is a no-op on an empty page.
+    await this.layoutsDismissDetailRail();
+    const header = section.locator('div[class*="group/list-header"]').first();
+    const menuPlus = header.locator("span.h-5.w-5").first();
+    if ((await menuPlus.count()) > 0) return { menu: true, control: menuPlus };
+    return { menu: false, control: header.locator("div.h-5.w-5").first() };
+  }
+
+  async layoutsGroupHeaderAddMenu(groupTitle: string): Promise<string[] | null> {
+    const { menu, control } = await this.layoutsGroupHeaderAddControl(groupTitle);
+    if (!menu) return null;
+    // Bounded like the row trigger: when the detail rail still covers
+    // the plus, a forced dispatch opens the menu the click cannot reach.
+    await control.click({ timeout: 10_000 }).catch(async () => control.click({ force: true }));
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  private layoutsEmptyScope(): Locator {
+    // Every empty state renders through the detailed empty-state card,
+    // whose copy column pins its width; scoping to it keeps list chrome
+    // (group headers, switcher) out of title/action reads. The read is
+    // visible-only: some pages (all-issues, profile) mount a hidden
+    // "No matching results." twin ahead of the real card in DOM order.
+    return this.page.locator("div.max-w-\\[25rem\\]:visible").first();
+  }
+
+  async layoutsEmptyTitle(): Promise<string | null> {
+    const scope = this.layoutsEmptyScope();
+    if ((await scope.count()) === 0) return null;
+    const heading = scope.locator("h3").first();
+    if ((await heading.count()) === 0) return null;
+    return ((await heading.innerText()) ?? "").trim();
+  }
+
+  async layoutsEmptyActions(): Promise<Array<{ label: string; disabled: boolean }>> {
+    const scope = this.layoutsEmptyScope();
+    if ((await scope.count()) === 0) return [];
+    const buttons = scope.locator("button");
+    const count = await buttons.count();
+    const actions: Array<{ label: string; disabled: boolean }> = [];
+    for (let i = 0; i < count; i++) {
+      actions.push({
+        label: ((await buttons.nth(i).innerText()) ?? "").trim().replace(/\s+/g, " "),
+        disabled: await buttons.nth(i).isDisabled(),
+      });
+    }
+    return actions;
+  }
+
+  async layoutsEmptyChoose(label: string): Promise<void> {
+    await this.layoutsEmptyScope().locator("button", { hasText: label }).first().click();
+  }
+
+  private layoutsFilterPills(): Locator {
+    return this.page.getByRole("button", { name: "Remove filter" });
+  }
+
+  /** Deadline loop for counts, which locators cannot waitFor directly. */
+  private async layoutsWaitForCount(read: () => Promise<number>, atLeast: number, timeoutMs: number): Promise<number> {
+    const deadline = Date.now() + timeoutMs;
+    let count = 0;
+    for (;;) {
+      count = await read();
+      if (count >= atLeast || Date.now() > deadline) return count;
+      await this.page.waitForTimeout(1000);
+    }
+  }
+
+  private async layoutsFilterPickMenuItem(label: string): Promise<void> {
+    // Property and value menus render as menuitem or option roles
+    // depending on the surface; wait for the ENTRY itself, never the
+    // menu container — the open listbox container is Playwright-hidden
+    // (zero-height, options overflowing visible, same as the due-date
+    // picker) while its options are fully visible, so a container wait
+    // never resolves even with the menu open on screen. The hidden
+    // headlessui twin carries no options, so a page-scoped entry read
+    // cannot match it.
+    const item = this.page.getByRole("menuitem", { name: label }).first();
+    const option = this.page.getByRole("option", { name: label }).first();
+    const found = await this.layoutsWaitForCount(
+      async () => (await item.count()) + (await option.count()),
+      1,
+      WebDriver.LAYOUTS_BODY_WAIT_MS
+    );
+    if (found === 0) throw new Error(`[parity] no filter menu entry ${label}.`);
+    if ((await item.count()) > 0) await item.click({ timeout: 60_000 });
+    else await option.click({ timeout: 60_000 });
+  }
+
+  async layoutsFilterAddConditionViaRow(propertyLabel: string, valueLabel: string): Promise<void> {
+    // The row must be visible (seeded pill present): its add control sits
+    // immediately right of the last pill, in the same band.
+    const before = await this.layoutsWaitForCount(
+      async () => this.layoutsFilterPills().count(),
+      1,
+      WebDriver.LAYOUTS_BODY_WAIT_MS
+    );
+    if (before === 0) throw new Error("[parity] no filter pill: seed one before adding a condition.");
+    const pillBox = await this.layoutsFilterPills().first().boundingBox();
+    if (!pillBox) throw new Error("[parity] filter pill has no box.");
+    const buttons = this.page.locator("main button");
+    const total = await buttons.count();
+    let plus = -1;
+    let bestX = Infinity;
+    for (let i = 0; i < total; i++) {
+      const box = await buttons
+        .nth(i)
+        .boundingBox()
+        .catch(() => null);
+      if (!box) continue;
+      if (Math.abs(box.y - pillBox.y) > 25) continue;
+      if (box.x <= pillBox.x + pillBox.width - 4) continue;
+      const name = (
+        (await buttons.nth(i).getAttribute("aria-label")) ??
+        (await buttons
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ??
+        ""
+      ).trim();
+      if (name) continue;
+      if (box.x < bestX) {
+        bestX = box.x;
+        plus = i;
+      }
+    }
+    if (plus < 0) throw new Error("[parity] filter row add control not found.");
+    await buttons.nth(plus).click({ timeout: 30_000 });
+    await this.layoutsFilterPickMenuItem(propertyLabel);
+    await this.page.waitForTimeout(2000);
+    await this.layoutsFilterPickMenuItem(valueLabel);
+    // Settle proof: the new pill renders (past a server round-trip, so
+    // this gets the same contention-grade budget as the menu render).
+    const after = await this.layoutsWaitForCount(async () => this.layoutsFilterPills().count(), before + 1, 120_000);
+    if (after <= before) throw new Error("[parity] filter pill count did not grow.");
+  }
+
+  async layoutsSeedArchivedLocalFilter(workspaceSlug: string, projectId: string, expression: unknown): Promise<void> {
+    // The archived page loads its filter instance from window-local
+    // storage only, and reads the camel-case richFilters member — the
+    // shape below mirrors what the read path expects so the row renders
+    // with a live pill, exactly as if persisted filters had loaded.
+    await this.page.evaluate(
+      ({ slug, pid, rich }) => {
+        window.localStorage.setItem(
+          "issue_local_filters",
+          JSON.stringify([{ key: "ARCHIVED", workspaceSlug: slug, viewId: pid, filters: { richFilters: rich } }])
+        );
+      },
+      { slug: workspaceSlug, pid: projectId, rich: expression }
+    );
+    // layoutsReloadIssues waits for the layout switcher, which the
+    // archived page has none of — reload bare and poll the pill instead.
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    const pills = await this.layoutsWaitForCount(
+      async () => this.layoutsFilterPills().count(),
+      1,
+      WebDriver.LAYOUTS_BODY_WAIT_MS
+    );
+    if (pills === 0) throw new Error("[parity] archived pill never rendered after local seed.");
+  }
+
+  async layoutsProfileActivityVisible(): Promise<boolean> {
+    // Immediate read; specs poll it. The activity tab renders chrome
+    // (Recent activity) with an empty list and no empty-state card.
+    return (await this.page.getByRole("heading", { name: "Recent activity" }).count()) > 0;
+  }
+
+  /** The compact header bar, resolved through its Analytics button. */
+  private layoutsMobileBar(): Locator {
+    return this.page.getByRole("button", { name: "Analytics", exact: true }).locator("xpath=..");
+  }
+
+  private layoutsMobileLayoutTrigger(): Locator {
+    // The bar holds the layout menu, the Display dropdown, then
+    // Analytics: its first button opens the layout menu.
+    return this.layoutsMobileBar().locator("button").first();
+  }
+
+  private static readonly LAYOUTS_MOBILE_LABELS: Record<LayoutsLayoutKey, string> = {
+    list: "List",
+    kanban: "Board",
+    calendar: "Calendar",
+    spreadsheet: "Table",
+    gantt_chart: "Timeline",
+  };
+
+  async layoutsMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
+    await this.layoutsMobileLayoutTrigger().click();
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    const labels: string[] = [];
+    for (let i = 0; i < count; i++) {
+      labels.push(((await items.nth(i).innerText()) ?? "").trim().replace(/\s+/g, " "));
+    }
+    await this.page.keyboard.press("Escape");
+    const entries = Object.entries(WebDriver.LAYOUTS_MOBILE_LABELS) as Array<[LayoutsLayoutKey, string]>;
+    return labels.map((label) => {
+      const found = entries.find(([, text]) => text === label);
+      if (!found) throw new Error(`[parity] unknown mobile layout label "${label}".`);
+      return found[0];
+    });
+  }
+
+  async layoutsMobileDisplayVisible(): Promise<boolean> {
+    const trigger = this.page.getByRole("button", { name: "Display", exact: true });
+    return (await trigger.count()) > 0 && (await trigger.first().isVisible());
+  }
+
+  async layoutsMobileAnalyticsVisible(): Promise<boolean> {
+    const trigger = this.page.getByRole("button", { name: "Analytics", exact: true });
+    return (await trigger.count()) > 0 && (await trigger.first().isVisible());
+  }
+
+  async layoutsSkeletonVisible(): Promise<boolean> {
+    // Skeleton rows render as dozens of pulsing placeholder spans (the
+    // full loader paints three sections; group pagination paints rows).
+    // A lone pulsing overlay is the optimistic temp row instead, so the
+    // read thresholds well above one.
+    return (await this.page.locator('[class*="animate-pulse"]').count()) >= 5;
+  }
+
+  private async layoutsVisibleBox(
+    element: Locator,
+    timeoutMs: number
+  ): Promise<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null> {
+    // boundingBox() has no timeout knob and hangs while the loaded
+    // renderer is wedged; race it so polled reads resolve instead of
+    // eating the caller's whole budget in one hung call.
+    return await Promise.race([
+      element.boundingBox().catch(() => null),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+    ]);
+  }
+
+  async layoutsMutationSpinnerVisible(): Promise<boolean> {
+    // While the list loader reads "mutation" (a filter/display refetch
+    // in flight) the app floats a small fixed square docked top-right
+    // holding a status spinner. Role plus geometry only — no copied
+    // classes: toasts dock bottom-right and context twins carry no
+    // status role, so the quadrant-plus-size gate is exact.
+    const boxes = this.page.locator("div.fixed", { has: this.page.locator('[role="status"]') });
+    const viewport = this.page.viewportSize() ?? { width: 1280, height: 800 };
+    const count = await boxes.count();
+    for (let i = 0; i < count; i++) {
+      const box = await this.layoutsVisibleBox(boxes.nth(i), 10_000);
+      if (!box) continue;
+      if (box.width < 30 || box.width > 64 || box.height < 30 || box.height > 64) continue;
+      if (box.x < viewport.width / 2 || box.y > viewport.height / 2) continue;
+      return true;
+    }
+    return false;
+  }
+
+  async layoutsRowHighlighted(issueName: string): Promise<boolean> {
+    // Drops add the highlight class to the block anchor (id issue-<id>)
+    // ~200ms after release; poll briefly since callers read right after
+    // the drop lands.
+    const block = this.layoutsIssueRow(issueName);
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await block.count()) > 0 && ((await block.first().getAttribute("class")) ?? "").includes("highlight"))
+        return true;
+      if (Date.now() >= deadline) return false;
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async layoutsTempRowVisible(): Promise<boolean> {
+    // An unconfirmed quick-add paints its row link with a pulsing
+    // overlay until the server confirms; skeleton placeholders are bare
+    // divs, never row links, so scoping to links disambiguates.
+    const rows = this.page.locator('a[id^="issue-"]', { has: this.page.locator('[class*="animate-pulse"]') });
+    const count = await rows.count();
+    for (let i = 0; i < count; i++) {
+      if (
+        await rows
+          .nth(i)
+          .isVisible()
+          .catch(() => false)
+      )
+        return true;
+    }
+    return false;
+  }
+
+  async layoutsSheetCellSetDueDate(issueName: string, isoDate: string): Promise<void> {
+    // The due-date cell opens a month calendar in a "Due date" listbox:
+    // month/year comboboxes (native selects) plus a day grid. Day
+    // buttons are named "Weekday, Month D<suffix>, Year" ("Today, ..."
+    // when the day is today); the grid also renders neighbouring-month
+    // days, so the click matches the full date stamp, not the number.
+    const cell = await this.layoutsSheetCell(issueName, "Due date");
+    const trigger = cell.locator("button:not([disabled])").first();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await trigger.click({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const [year, month, day] = isoDate.split("-").map((part) => Number.parseInt(part, 10));
+    const monthNames = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+    const monthName = monthNames[(month ?? 1) - 1] ?? "";
+    // The picker root is a zero-height listbox container (Playwright
+    // sees it as hidden), so the driver addresses its visible children
+    // directly: native month/year selects plus the day grid.
+    const monthCombo = this.page.getByRole("combobox", { name: "Choose the Month" }).first();
+    await monthCombo.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await monthCombo.selectOption({ label: monthName });
+    const yearCombo = this.page.getByRole("combobox", { name: "Choose the Year" }).first();
+    await yearCombo.selectOption({ label: String(year) });
+    const weekday = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][
+      new Date(Date.UTC(year ?? 0, (month ?? 1) - 1, day ?? 0)).getUTCDay()
+    ];
+    const suffix =
+      day === 1 || day === 21 || day === 31
+        ? "st"
+        : day === 2 || day === 22
+          ? "nd"
+          : day === 3 || day === 23
+            ? "rd"
+            : "th";
+    const dayButton = this.page
+      .getByRole("button", { name: `${weekday}, ${monthName} ${day}${suffix}, ${year}`, exact: false })
+      .first();
+    await dayButton.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await dayButton.click({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsSheetCellText(issueName, "Due date")).includes(String(day))) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] sheet cell never showed due day "${day}".`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSheetCellSetAssignee(issueName: string, memberName: string): Promise<void> {
+    const cell = await this.layoutsSheetCell(issueName, "Assignees");
+    const trigger = cell.locator("button:not([disabled])").first();
+    await this.layoutsSheetPickOption(trigger, memberName, issueName, false);
+    // The assignee picker is multi-select: unlike the single-select
+    // pickers it stays open after a pick, so Escape dismisses it. The
+    // spec asserts the server-side assignees right after, which proves
+    // the dismissal kept the selection.
+    await this.page.keyboard.press("Escape");
+    // The assignee cell renders avatars, not the name, so the menu
+    // closing (the option leaving the document) proves the pick landed.
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      const option = this.page.getByRole("option", { name: memberName, exact: false });
+      if ((await option.count()) === 0) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] assignee menu never closed on "${memberName}".`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsCalDayAddExisting(dayNumber: number): Promise<void> {
+    await this.layoutsCalOpenDayAddMenu(dayNumber);
+    await this.page.getByRole("menuitem", { name: "Add existing work item", exact: true }).first().click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (await this.layoutsAddExistingModalVisible()) return;
+      if (Date.now() >= deadline) throw new Error("[parity] add-existing modal never opened.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsAddExistingModalIssueNames(): Promise<string[]> {
+    // The search fetch lands after the modal opens, so an empty list
+    // waits for options (or the empty state) instead of reading once.
+    const options = this.page.locator('label[for^="issue-"]');
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await options.count()) > 0) break;
+      if ((await this.page.getByText("No work items found").count()) > 0) return [];
+      if (!(await this.layoutsAddExistingModalVisible())) return [];
+      if (Date.now() >= deadline) throw new Error("[parity] add-existing modal never listed issues.");
+      await this.page.waitForTimeout(500);
+    }
+    const names: string[] = [];
+    const count = await options.count();
+    for (let i = 0; i < count; i++) {
+      names.push(((await options.nth(i).locator("span.truncate").first().innerText()) ?? "").trim());
+    }
+    return names;
+  }
+
+  async layoutsMobileSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
+    // The compact selector offers list/kanban/calendar only; anything
+    // else is a spec bug, failed loudly instead of hanging on a missing
+    // menu item.
+    if (layout !== "list" && layout !== "kanban" && layout !== "calendar") {
+      throw new Error(`[parity] the mobile selector offers no "${layout}" layout.`);
+    }
+    await this.layoutsMobileLayoutTrigger().click();
+    const item = this.page.getByRole("menuitem", { name: WebDriver.LAYOUTS_MOBILE_LABELS[layout], exact: false });
+    await item.first().click();
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      if ((await this.layoutsActiveLayout()) === layout) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] mobile switch to "${layout}" never applied.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsMobileDisplayCycleModuleDisabled(): Promise<{ cycleDisabled: boolean; moduleDisabled: boolean }> {
+    // Disabled here means absent: the Display popover filters the
+    // cycle/modules property buttons out when their features are off.
+    await this.page.getByRole("button", { name: "Display", exact: true }).click();
+    await this.page.getByText("Display Properties", { exact: true }).waitFor({ timeout: 15_000 });
+    const cycle = await this.page.getByRole("button", { name: "Cycle", exact: true }).count();
+    const module = await this.page.getByRole("button", { name: "Module", exact: true }).count();
+    await this.page.keyboard.press("Escape");
+    return { cycleDisabled: cycle === 0, moduleDisabled: module === 0 };
+  }
+
+  async layoutsRowMenuOpenNewTabUrl(issueName: string): Promise<string> {
+    // window.open lands in a popup page: read its URL without waiting
+    // for the app to boot there, then close it again.
+    await this.layoutsOpenRowMenu(issueName);
+    const [popup] = await Promise.all([
+      this.page.context().waitForEvent("page", { timeout: 15_000 }),
+      this.page.getByRole("menuitem", { name: "Open in new tab", exact: true }).first().click(),
+    ]);
+    const url = popup.url();
+    await popup.close();
+    return url;
+  }
+
+  async layoutsWorkItemModalHasText(text: string): Promise<boolean> {
+    // Scoped to the dialog: the list behind the modal shows the same
+    // names. Prefilled names sit in inputs (display value) or select
+    // chips (text) depending on the field.
+    const dialog = this.page.getByRole("dialog");
+    if ((await dialog.count()) === 0) return false;
+    if ((await dialog.getByText(text, { exact: false }).count()) > 0) return true;
+    return dialog.first().evaluate((node, want) => {
+      const fields = node.querySelectorAll("input, textarea, select");
+      return Array.from(fields).some((field) => ((field as HTMLInputElement).value ?? "").includes(want));
+    }, text);
+  }
+
+  async layoutsListPageMenuChoose(item: string): Promise<void> {
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the pick.
+    if (item === "Copy link") await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.layoutsListPageMenuTrigger().click();
+    await this.page.getByRole("menuitem", { name: item, exact: true }).first().click();
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await this.page.getByRole("menuitem").count()) === 0) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] list page menu never closed after "${item}".`);
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async layoutsGroupHeaderAddChoose(groupTitle: string, item: string | null): Promise<void> {
+    const { menu, control } = await this.layoutsGroupHeaderAddControl(groupTitle);
+    // Bounded like the row trigger: when the detail rail still covers
+    // the plus, a forced dispatch opens the menu the click cannot reach.
+    const press = async (): Promise<void> => {
+      await control.click({ timeout: 10_000 }).catch(async () => control.click({ force: true }));
+    };
+    if (!menu || item === null) {
+      await press();
+    } else {
+      await press();
+      await this.page.getByRole("menuitem", { name: item, exact: true }).first().click();
+    }
+    // Either branch lands in a modal (create/add-existing); wait for one
+    // instead of trusting the click-to-paint gap on the loaded host.
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsWorkItemModalVisible()) || (await this.layoutsAddExistingModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error("[parity] group-header add never opened a modal.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSheetToggleSubIssues(issueName: string): Promise<void> {
+    // Same chevron as expand, but with no row-count expectation: past the
+    // nesting limit the toggle opens peek instead of expanding inline.
+    const first = this.layoutsSheetFirstCell(issueName);
+    await first.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await this.layoutsSheetToggleButtons(issueName).first().click({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+  }
+  // --- NEWFRONT-117 round 2: spreadsheet (ISS-015..020). ---
+
+  private layoutsSheetTable(): Locator {
+    return this.page
+      .locator("table")
+      .filter({ has: this.page.locator('th span:text-is("Work items")') })
+      .first();
+  }
+
+  private async layoutsSheetHeaderCells(): Promise<Locator> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const cells = table.locator("thead th");
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await cells.count()) > 0) return cells;
+      if (Date.now() >= deadline) throw new Error("[parity] sheet header never rendered.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private layoutsSheetFirstCell(issueName: string): Locator {
+    return this.layoutsSheetTable().locator('td[id^="issue-"]', { hasText: issueName }).first();
+  }
+
+  private async layoutsSheetFirstCellName(cell: Locator): Promise<string> {
+    // The leading cell carries no paragraph: its text is the identifier
+    // button plus the name div, so the name is the cell text minus any
+    // button text. Bounded like the list reads so a re-render mid-scan
+    // cannot hang the caller to the test timeout.
+    const text = await cell.innerText({ timeout: 10_000 }).catch(() => "");
+    if (text.trim() === "") return "";
+    const buttons = await cell
+      .locator("button")
+      .allInnerTexts()
+      .catch(() => [] as string[]);
+    const drop = new Set(buttons.map((line) => line.trim()).filter((line) => line !== ""));
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "" && !drop.has(line))
+      .join(" ")
+      .trim();
+  }
+
+  private async layoutsSheetHeaderIndex(column: string): Promise<number> {
+    const headers = await this.layoutsSheetHeaders();
+    const index = headers.indexOf(column);
+    if (index < 0) throw new Error(`[parity] no sheet column "${column}" (have: ${headers.join(", ")}).`);
+    return index;
+  }
+
+  private async layoutsSheetCell(issueName: string, column: string): Promise<Locator> {
+    const index = await this.layoutsSheetHeaderIndex(column);
+    const first = this.layoutsSheetFirstCell(issueName);
+    await first.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return first.locator("xpath=ancestor::tr[1]").locator(":scope > td").nth(index);
+  }
+
+  private async layoutsSheetScroller(): Promise<ElementHandle<HTMLElement>> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const handle = await table.evaluateHandle((node) => {
+      let current = node.parentElement;
+      while (current && current.scrollWidth <= current.clientWidth + 1) current = current.parentElement;
+      return current as HTMLElement | null;
+    });
+    const element = handle.asElement() as ElementHandle<HTMLElement> | null;
+    if (!element) throw new Error("[parity] no horizontal sheet scroller found.");
+    return element;
+  }
+
+  async layoutsSheetHeaders(): Promise<string[]> {
+    const cells = await this.layoutsSheetHeaderCells();
+    const count = await cells.count();
+    const titles: string[] = [];
+    for (let i = 0; i < count; i++) {
+      titles.push((((await cells.nth(i).innerText()) ?? "") as string).trim().replace(/\s+/g, " "));
+    }
+    return titles;
+  }
+
+  async layoutsSheetRowNames(): Promise<string[]> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const cells = table.locator('td[id^="issue-"]');
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await cells.count()) > 0) break;
+      if (Date.now() >= deadline) throw new Error("[parity] sheet rows never rendered.");
+      await this.page.waitForTimeout(500);
+    }
+    const count = await cells.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const name = await this.layoutsSheetFirstCellName(cells.nth(i));
+      if (name !== "") names.push(name);
+    }
+    return names;
+  }
+
+  async layoutsSheetFirstColumnSticky(): Promise<boolean> {
+    const cells = await this.layoutsSheetHeaderCells();
+    const first = cells.first();
+    return (await first.evaluate((node) => getComputedStyle(node).position)) === "sticky";
+  }
+
+  async layoutsSheetHeaderSticky(): Promise<boolean> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const head = table.locator("thead").first();
+    return (await head.evaluate((node) => getComputedStyle(node).position)) === "sticky";
+  }
+
+  async layoutsSheetScrollRight(): Promise<void> {
+    const scroller = await this.layoutsSheetScroller();
+    await scroller.evaluate((node) => node.scrollTo({ left: node.scrollWidth }));
+  }
+
+  async layoutsSheetFirstColumnShadowed(): Promise<boolean> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const first = table.locator('tbody td[id^="issue-"]').first();
+    await first.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const shadow = await first.evaluate((node) => (node as HTMLElement).style.boxShadow);
+    return shadow !== "" && shadow !== "none";
+  }
+
+  async layoutsSheetCellText(issueName: string, column: string): Promise<string> {
+    const cell = await this.layoutsSheetCell(issueName, column);
+    return (((await cell.innerText()) ?? "") as string).trim().replace(/\s+/g, " ");
+  }
+
+  async layoutsSheetCellEditable(issueName: string, column: string): Promise<boolean> {
+    // The trigger is the cell's first button; a second visible button
+    // (present for members and guests alike) is not the dropdown, so
+    // only the first answers.
+    const cell = await this.layoutsSheetCell(issueName, column);
+    const trigger = cell.locator("button").first();
+    if ((await trigger.count()) === 0) return false;
+    return !(await trigger.isDisabled());
+  }
+
+  private async layoutsSheetPickOption(
+    trigger: Locator,
+    optionName: string,
+    _issueName: string,
+    exact = true
+  ): Promise<void> {
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await trigger.click({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    // The property menus are listboxes (same family as the row's state
+    // menu): options carry the option role, not button. Member options
+    // prefix the avatar initial ("P Parity Mention"), so assignees
+    // match by substring while states and priorities stay exact.
+    const option = this.page.getByRole("option", { name: optionName, exact }).first();
+    await option.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await option.click();
+  }
+
+  async layoutsSheetCellSetState(issueName: string, stateName: string): Promise<void> {
+    const cell = await this.layoutsSheetCell(issueName, "State");
+    const trigger = cell.locator("button:not([disabled])").first();
+    await this.layoutsSheetPickOption(trigger, stateName, issueName);
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsSheetCellText(issueName, "State")) === stateName) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] sheet cell never showed state "${stateName}".`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSheetCellSetPriority(issueName: string, priorityName: string): Promise<void> {
+    const cell = await this.layoutsSheetCell(issueName, "Priority");
+    const trigger = cell.locator("button:not([disabled])").first();
+    await this.layoutsSheetPickOption(trigger, priorityName, issueName);
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsSheetCellText(issueName, "Priority")) === priorityName) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] sheet cell never showed priority "${priorityName}".`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSheetFocusCell(issueName: string, column: string): Promise<void> {
+    const cell = await this.layoutsSheetCell(issueName, column);
+    await cell.evaluate((node) => (node as HTMLElement).focus());
+  }
+
+  async layoutsSheetPressArrow(arrow: "up" | "down" | "left" | "right"): Promise<void> {
+    const key = { up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight" }[arrow];
+    await this.page.keyboard.press(key);
+    await this.page.waitForTimeout(500);
+  }
+
+  async layoutsSheetFocusedCell(): Promise<{ issueName: string; column: string } | null> {
+    const headers = await this.layoutsSheetHeaders();
+    const cellIndex = await this.page.evaluate(() => {
+      const active = document.activeElement as HTMLElement | null;
+      const cell = active?.closest?.("td") as HTMLTableCellElement | null;
+      if (!cell) return -1;
+      return cell.cellIndex;
+    });
+    if (cellIndex < 0) return null;
+    // The focused row's leading cell names the issue; resolve it back
+    // through a locator so the shared name reader applies.
+    const row = this.page.locator("td:focus-within").first().locator("xpath=ancestor::tr[1]");
+    if ((await row.count()) === 0) return null;
+    const issueName = await this.layoutsSheetFirstCellName(row.locator("td").first());
+    if (!issueName) return null;
+    const column = headers[cellIndex] ?? "";
+    if (!column) return null;
+    return { issueName, column };
+  }
+
+  private async layoutsSheetOpenSortMenu(column: string): Promise<Locator> {
+    const index = await this.layoutsSheetHeaderIndex(column);
+    const cells = await this.layoutsSheetHeaderCells();
+    const header = cells.nth(index);
+    await header.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await header.click();
+    const menu = this.page.getByRole("menuitem");
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await menu.count()) > 0) return menu;
+      if (Date.now() >= deadline) throw new Error(`[parity] sort menu for "${column}" never opened.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private async layoutsSheetCloseMenu(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      if ((await this.page.getByRole("menuitem").count()) === 0) return;
+      if (Date.now() >= deadline) throw new Error("[parity] menu never closed.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSheetSortMenu(column: string): Promise<string[]> {
+    const menu = await this.layoutsSheetOpenSortMenu(column);
+    const count = await menu.count();
+    const entries: string[] = [];
+    for (let i = 0; i < count; i++) {
+      entries.push((((await menu.nth(i).innerText()) ?? "") as string).trim().replace(/\s+/g, " "));
+    }
+    await this.layoutsSheetCloseMenu();
+    return entries;
+  }
+
+  async layoutsSheetSort(column: string, direction: "ascending" | "descending"): Promise<void> {
+    const menu = await this.layoutsSheetOpenSortMenu(column);
+    await menu.nth(direction === "ascending" ? 0 : 1).click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsSheetSortMarker(column)) !== "none") return;
+      if (Date.now() >= deadline) throw new Error(`[parity] sort marker never appeared on "${column}".`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSheetClearSort(column: string): Promise<void> {
+    const menu = await this.layoutsSheetOpenSortMenu(column);
+    const count = await menu.count();
+    for (let i = 0; i < count; i++) {
+      const text = (((await menu.nth(i).innerText()) ?? "") as string).trim();
+      if (text.includes("Clear sorting")) {
+        await menu.nth(i).click();
+        const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+        for (;;) {
+          if ((await this.layoutsSheetSortMarker(column)) === "none") return;
+          if (Date.now() >= deadline) throw new Error(`[parity] sort marker never cleared on "${column}".`);
+          await this.page.waitForTimeout(500);
+        }
+      }
+    }
+    await this.layoutsSheetCloseMenu();
+    throw new Error(`[parity] no Clear sorting entry on "${column}".`);
+  }
+
+  async layoutsSheetSortMarker(column: string): Promise<"ascending" | "descending" | "none"> {
+    const index = await this.layoutsSheetHeaderIndex(column);
+    const cells = await this.layoutsSheetHeaderCells();
+    const marker = cells.nth(index).locator("div.rounded-full svg").first();
+    if ((await marker.count()) === 0) return "none";
+    const cls = (await marker.getAttribute("class")) ?? "";
+    // The sorted header carries a direction glyph: the wide-to-narrow
+    // arrow marks the ascending key, the narrow-to-wide the descending.
+    if (cls.includes("arrow-down-wide-narrow")) return "ascending";
+    if (cls.includes("arrow-up-narrow-wide")) return "descending";
+    throw new Error(`[parity] unknown sort marker classes "${cls}".`);
+  }
+
+  async layoutsSheetScrollEnd(): Promise<void> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const scroller = await table.evaluateHandle((node) => {
+      let current = node.parentElement;
+      while (current && current.scrollHeight <= current.clientHeight + 1) current = current.parentElement;
+      return current as HTMLElement | null;
+    });
+    const element = scroller.asElement() as ElementHandle<HTMLElement> | null;
+    if (!element) throw new Error("[parity] no vertical sheet scroller found.");
+    await element.evaluate((node) => node.scrollTo({ top: node.scrollHeight }));
+    await this.page.waitForTimeout(1000);
+  }
+
+  async layoutsCurrentUrl(): Promise<string> {
+    return this.page.url();
+  }
+
+  async layoutsStallIssuesGet(delayMs: number): Promise<void> {
+    await this.page.route(/\/issues\//, async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await route.continue();
+    });
+  }
+
+  private layoutsStalledMutations = 0;
+
+  async layoutsStallIssueMutation(delayMs: number): Promise<void> {
+    this.layoutsStalledMutations = 0;
+    await this.page.route(/\/issues\//, async (route) => {
+      const method = route.request().method();
+      if (method !== "POST" && method !== "PATCH" && method !== "PUT") {
+        await route.continue();
+        return;
+      }
+      this.layoutsStalledMutations += 1;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await route.continue();
+    });
+  }
+
+  async layoutsStalledMutationCount(): Promise<number> {
+    return this.layoutsStalledMutations;
+  }
+
+  async layoutsReleaseStalls(): Promise<void> {
+    await this.page.unrouteAll({ behavior: "wait" });
   }
 }
