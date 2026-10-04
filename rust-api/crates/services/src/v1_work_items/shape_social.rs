@@ -739,12 +739,13 @@ fn validate_json(value: Option<&Value>) -> Result<JsonOutcome, JsonError> {
 
 /// Strip DRF `IntegerField.re_decimal` (`\.0*\s*$`): the match — if any — always
 /// starts at the LAST dot (an earlier dot's tail would contain that dot, which
-/// `0*`/`\s*` cannot span), so cut there iff the tail is all `0`/whitespace.
-/// Slice math is safe (`.` is one ASCII byte).
+/// `0*`/`\s*` cannot span), so cut there iff the tail is zeros THEN whitespace
+/// (`"1. 0"` does NOT match — the space precedes the zero). Slice math is safe
+/// (`.` is one ASCII byte).
 fn strip_decimal_suffix(text: &str) -> &str {
     if let Some(dot) = text.rfind('.') {
         let tail = &text[dot + 1..];
-        if tail.chars().all(|c| c == '0' || py_is_space(c)) {
+        if tail.trim_start_matches('0').chars().all(py_is_space) {
             return &text[..dot];
         }
     }
@@ -2199,6 +2200,8 @@ mod tests {
             (serde_json::json!("-12"), -12),
             (serde_json::json!("1_0"), 10),
             (serde_json::json!("0.000"), 0),
+            // Trailing whitespace AFTER the zeros still strips (`0*\s*$`).
+            (serde_json::json!("1.0 "), 1),
             (serde_json::json!("9223372036854775807"), i64::MAX),
             (serde_json::json!("-9223372036854775808"), i64::MIN),
         ] {
@@ -2215,6 +2218,11 @@ mod tests {
             serde_json::json!("--1"),
             serde_json::json!("1.0e3"),
             serde_json::json!("5.0.0"),
+            // Order-mixed tails never match `0*\s*$` (review finding:
+            // whitespace-before-zero must NOT strip).
+            serde_json::json!("1. 0"),
+            serde_json::json!("1.0 0"),
+            serde_json::json!("1.\t0"),
             // Fullwidth digits parse in CPython `int()` but fail here —
             // documented approximation.
             serde_json::json!("１２"),
