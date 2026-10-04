@@ -94,6 +94,27 @@ async function kanbanOpenWithRetry(driver: ParityDriver): Promise<void> {
   }
 }
 
+/**
+ * Reload the issues page, retrying once when the reload itself stalls.
+ * Under host contention the reloaded page occasionally never renders its
+ * switcher inside the driver's long wait; the post-rebase re-verify lost
+ * five attempts to that single unguarded reload. The retry only absorbs
+ * the stall: a genuinely wedged page still fails its second wait.
+ */
+async function boardReloadWithRetry(driver: ParityDriver): Promise<void> {
+  try {
+    await driver.boardReloadIssues();
+  } catch {
+    await driver.boardReloadIssues();
+  }
+}
+
+/** Reload the issues page and wait for the board, absorbing one load stall at each step. */
+async function kanbanReloadWithRetry(driver: ParityDriver): Promise<void> {
+  await boardReloadWithRetry(driver);
+  await kanbanOpenWithRetry(driver);
+}
+
 /** Restore the exact preferences an opened board started with. */
 async function restoreBoard(seed: ParitySeedFacts, projectId: string, ctx: BoardContext): Promise<void> {
   await serverPatchProjectUserProperties(seed.workspaceSlug, projectId, ctx.user.cookie, {
@@ -114,8 +135,7 @@ async function setBoardFilters(
   await serverPatchProjectUserProperties(seed.workspaceSlug, projectId, ctx.user.cookie, {
     display_filters: { ...current.displayFilters, ...filters },
   });
-  await driver.boardReloadIssues();
-  await kanbanOpenWithRetry(driver);
+  await kanbanReloadWithRetry(driver);
 }
 
 /** Server-side UUID of an issue looked up by its name. */
@@ -283,8 +303,7 @@ test(
 
     await test.step("empty lanes hide when show-empty is off", async () => {
       await serverCreateLabel(seed.workspaceSlug, projectId, `KB empty ${suffix}`, "#666666", owner.cookie);
-      await driver.boardReloadIssues();
-      await kanbanOpenWithRetry(driver);
+      await kanbanReloadWithRetry(driver);
       await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(3);
       await setBoardFilters(driver, seed, projectId, ctx, { show_empty_groups: false });
       await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(2);
@@ -316,8 +335,7 @@ test(
     });
 
     await test.step("the collapsed state survives a reload", async () => {
-      await driver.boardReloadIssues();
-      await kanbanOpenWithRetry(driver);
+      await kanbanReloadWithRetry(driver);
       await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(1);
       expect(await driver.kanbanColumnCollapsed(name)).toBe(true);
       await driver.kanbanToggleColumn(name);
@@ -365,8 +383,7 @@ test(
     });
 
     await test.step("the lane state survives a reload", async () => {
-      await driver.boardReloadIssues();
-      await kanbanOpenWithRetry(driver);
+      await kanbanReloadWithRetry(driver);
       await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(2);
       expect(await driver.kanbanSwimlaneCollapsed(label.name)).toBe(true);
       await driver.kanbanToggleSwimlane(label.name);
@@ -402,14 +419,28 @@ test(
       // Intended: the two unlabeled seed issues render here (count 2).
       // Pinned: the labels sub-grouped query drops seed rows without
       // labels, so the lane shows count 0 and no cards (NEWFRONT-158).
+      // The first render can briefly show the flat-grouped rows (None at
+      // count 2 with the seed cards) before the grouped response replaces
+      // them — the post-rebase re-verify read exactly that transient — so
+      // poll until the lane settles instead of reading it once.
       await expect
         .poll(async () => (await driver.kanbanCards()).map((card) => card.name), { timeout: 120_000 })
         .toContain(seed.issueNames[0] ?? "");
-      const lanes = await driver.kanbanSwimlanes();
-      expect(lanes.find((entry) => entry.name === "None")?.count).toBe(0);
-      const cards = await driver.kanbanCards();
-      expect(cards.map((card) => card.name)).not.toContain(seed.issueNames[1] ?? "");
-      expect(cards.map((card) => card.name)).not.toContain(seed.issueNames[2] ?? "");
+      await expect
+        .poll(
+          async () => {
+            const lanes = await driver.kanbanSwimlanes();
+            const names = (await driver.kanbanCards()).map((card) => card.name);
+            return {
+              none: lanes.find((entry) => entry.name === "None")?.count,
+              hasFirst: names.includes(seed.issueNames[0] ?? ""),
+              hasSecond: names.includes(seed.issueNames[1] ?? ""),
+              hasThird: names.includes(seed.issueNames[2] ?? ""),
+            };
+          },
+          { timeout: 120_000 }
+        )
+        .toEqual({ none: 0, hasFirst: true, hasSecond: false, hasThird: false });
       const rows = await serverIssues(seed.workspaceSlug, seed.projectId, owner.cookie);
       expect(rows).toHaveLength(3);
     });
@@ -909,8 +940,20 @@ test(
       // state on the server (NEWFRONT-160).
       await driver.kanbanDragCardToColumnEnd(name, "In Progress");
       await expect.poll(() => driver.kanbanColumnCards("In Progress"), { timeout: 60_000 }).toContain(name);
-      const details = await serverIssueDetails(seed.workspaceSlug, projectId, id, owner.cookie);
-      expect(details.stateId).toBe(home.id);
+      // The server read right after the drop is racy: it can briefly show
+      // the move before settling on the default state (the post-rebase
+      // re-verify read In Progress at assert time, Backlog minutes later).
+      // Poll until two consecutive reads agree, then pin the settled value.
+      let previous = "";
+      let settled = "";
+      for (let attempt = 0; attempt < 24; attempt += 1) {
+        const details = await serverIssueDetails(seed.workspaceSlug, projectId, id, owner.cookie);
+        settled = details.stateId;
+        if (settled === previous) break;
+        previous = settled;
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+      }
+      expect(settled).toBe(home.id);
     });
 
     await test.step("cleanup removes the scratch project", async () => {
@@ -1025,7 +1068,7 @@ test(
       await serverPatchProjectUserProperties(seed.workspaceSlug, projectId, ctx.user.cookie, {
         display_filters: { ...current.displayFilters, sub_group_by: "target_date" },
       });
-      await driver.boardReloadIssues();
+      await boardReloadWithRetry(driver);
       await expect.poll(() => driver.boardActiveLayout(), { timeout: 120_000 }).toBe("kanban");
       let mounted = false;
       try {
@@ -1219,8 +1262,7 @@ test(
 
     await test.step("dragging near the bottom edge auto-scrolls the column", async () => {
       // A reload resets the column to its top so the downward hold has room.
-      await driver.boardReloadIssues();
-      await kanbanOpenWithRetry(driver);
+      await kanbanReloadWithRetry(driver);
       await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(8);
       const contentful = (await driver.kanbanColumnCards(home.name)).filter((name) => name !== "");
       const held = contentful[Math.floor(contentful.length / 2)] ?? "";

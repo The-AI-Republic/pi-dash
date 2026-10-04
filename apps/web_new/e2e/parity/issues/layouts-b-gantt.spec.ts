@@ -86,6 +86,27 @@ async function ganttOpenWithRetry(driver: ParityDriver): Promise<void> {
   }
 }
 
+/**
+ * Reload the issues page, retrying once when the reload itself stalls.
+ * Under host contention the reloaded page occasionally never renders its
+ * switcher inside the driver's long wait; the kanban re-verify lost five
+ * attempts to that single unguarded reload. The retry only absorbs the
+ * stall: a genuinely wedged page still fails its second wait.
+ */
+async function boardReloadWithRetry(driver: ParityDriver): Promise<void> {
+  try {
+    await driver.boardReloadIssues();
+  } catch {
+    await driver.boardReloadIssues();
+  }
+}
+
+/** Reload the issues page and wait for the timeline, absorbing one load stall at each step. */
+async function ganttReloadWithRetry(driver: ParityDriver): Promise<void> {
+  await boardReloadWithRetry(driver);
+  await ganttOpenWithRetry(driver);
+}
+
 /** Restore the exact preferences an opened timeline started with. */
 async function restoreTimeline(seed: ParitySeedFacts, projectId: string, ctx: TimelineContext): Promise<void> {
   await serverPatchProjectUserProperties(seed.workspaceSlug, projectId, ctx.user.cookie, {
@@ -106,8 +127,7 @@ async function setTimelineFilters(
   await serverPatchProjectUserProperties(seed.workspaceSlug, projectId, ctx.user.cookie, {
     display_filters: { ...current.displayFilters, ...filters },
   });
-  await driver.boardReloadIssues();
-  await ganttOpenWithRetry(driver);
+  await ganttReloadWithRetry(driver);
 }
 
 /** Server-side UUID of an issue looked up by its name. */
@@ -246,8 +266,7 @@ test(
 
     await test.step("zoom stays session-local across reloads", async () => {
       await driver.ganttSetZoom("Quarter");
-      await driver.boardReloadIssues();
-      await ganttOpenWithRetry(driver);
+      await ganttReloadWithRetry(driver);
       await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
       expect(await driver.ganttActiveZoom()).toBe("Week");
     });
@@ -597,8 +616,7 @@ test(
 
     await test.step("a half-dated bar gains its missing date", async () => {
       await serverPatchIssue(seed.workspaceSlug, seed.projectId, id, { target_date: null }, owner.cookie);
-      await driver.boardReloadIssues();
-      await ganttOpenWithRetry(driver);
+      await ganttReloadWithRetry(driver);
       await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
       await driver.ganttResizeBar(name, "right", 4);
       await expect
