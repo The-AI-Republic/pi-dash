@@ -2241,30 +2241,103 @@ fn map_body_error(error: super::body::BodyError) -> Denial {
     }
 }
 
+/// First-surrogate per dirty top-level field (PIDASHCONV-712): the
+/// charset decode leaves U+FFFD placeholders in the text while the spans
+/// carry the real surrogate values; coercion needs the value per field
+/// for the `ProhibitSurrogateCharactersValidator` message.
+pub type FieldSurr = BTreeMap<String, u16>;
+
+/// Attribute JSON lone-surrogate spans to top-level fields (PIDASHCONV-712).
+/// Serde stays the authority for structure and error text; this auxiliary
+/// CPython parse only recovers which clean top-level string holds the
+/// first surrogate (dirty keys never match, exactly as in Django, and the
+/// object is last-wins like serde). Anything the auxiliary parse cannot
+/// attribute (failure, non-object) yields no gate — the serde path below
+/// already answered.
+fn json_field_surr(text: &str, surr: &[(usize, u16)]) -> FieldSurr {
+    let mut out = FieldSurr::new();
+    if surr.is_empty() {
+        return out;
+    }
+    let Ok(value) = super::json_cpython::parse_json_text_spans(text, surr) else {
+        return out;
+    };
+    let Some(object) = value.into_object() else {
+        return out;
+    };
+    for (key, value) in object.iter() {
+        let super::json_cpython::JVal::Str(text) = value else {
+            continue;
+        };
+        if let (Some(name), Some(unit)) = (key.to_clean_string(), text.first_surrogate()) {
+            out.insert(name, unit);
+        }
+    }
+    out
+}
+
+/// Attribute form/multipart lone-surrogate spans to top-level fields
+/// (PIDASHCONV-712), mirroring cycle's `jobject_from_form_map`: scalars
+/// read the first span list, arrays (member UUIDs, no `CharField` gate)
+/// are skipped.
+fn form_field_surr(
+    map: &serde_json::Map<String, Value>,
+    surr: &BTreeMap<String, Vec<Vec<(usize, u16)>>>,
+) -> FieldSurr {
+    let mut out = FieldSurr::new();
+    if surr.is_empty() {
+        return out;
+    }
+    for (key, value) in map.iter() {
+        let Value::String(text) = value else {
+            continue;
+        };
+        let spans = surr
+            .get(key)
+            .and_then(|lists| lists.first())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if spans.is_empty() {
+            continue;
+        }
+        if let Some(unit) = super::json_cpython::JStr::from_dirty(text, spans).first_surrogate() {
+            out.insert(key.clone(), unit);
+        }
+    }
+    out
+}
+
 /// Content-negotiated `parse_body` (PIDASHCONV-627): empty is `{}`, form /
 /// multipart arrives as its text map, JSON keeps the existing serde path
 /// over the decoded text (no empty shortcut: CL>0 with empty decoded text
-/// is the EOF `ParseError`). The files map carries uploads per key.
+/// is the EOF `ParseError`). The files map carries uploads per key, the
+/// surr map the first surrogate per dirty field (PIDASHCONV-712).
 /// The trailing flag reports HTML (form/multipart) input for the
 /// `get_value` blank rules in coercion.
 fn parse_body_ct(
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<(super::body::FormMaps, bool), Denial> {
+) -> Result<(super::body::FormMaps, FieldSurr, bool), Denial> {
     match super::body::negotiate_body(headers, body, &super::body::MODULE_BODY_SPEC)
         .map_err(map_body_error)?
     {
-        super::body::NegotiatedBody::Empty => {
-            Ok(((serde_json::Map::new(), BTreeMap::new()), false))
+        super::body::NegotiatedBody::Empty => Ok((
+            (serde_json::Map::new(), BTreeMap::new()),
+            FieldSurr::new(),
+            false,
+        )),
+        super::body::NegotiatedBody::JsonText { text, surr } => {
+            let fields = json_field_surr(&text, &surr);
+            Ok((
+                (parse_json_map(text.as_bytes())?, BTreeMap::new()),
+                fields,
+                false,
+            ))
         }
-        super::body::NegotiatedBody::JsonText { text, surr: _ } => {
-            Ok(((parse_json_map(text.as_bytes())?, BTreeMap::new()), false))
+        super::body::NegotiatedBody::Form { map, files, surr } => {
+            let fields = form_field_surr(&map, &surr);
+            Ok(((map, files), fields, true))
         }
-        super::body::NegotiatedBody::Form {
-            map,
-            files,
-            surr: _,
-        } => Ok(((map, files), true)),
     }
 }
 
@@ -2302,6 +2375,9 @@ fn parse_json_map(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> 
 /// Content-negotiated raw-object parse for the add-issues path
 /// (PIDASHCONV-627): empty is `{}`, form/multipart arrives as its text map,
 /// JSON keeps the full-value serde path (a non-object 500s on `.get`).
+/// Lone-surrogate spans drop here on purpose (PIDASHCONV-712): the path
+/// has no `CharField` gate and invalid UUIDs answer a constant `BadError`
+/// (no echo), so placeholders and surrogates behave identically.
 fn parse_object_or_500_ct(
     headers: &HeaderMap,
     body: &[u8],
@@ -2411,14 +2487,17 @@ fn py_repr_quoted(value: &Value) -> String {
 /// `allow_null`; bools and containers fail `Not a valid string.`; numbers
 /// stringify (`str(data)`); strings strip (`trim_whitespace`, the default —
 /// whitespace counts as blank for `allow_blank=False`) and the stripped value
-/// is stored, length-checked, and null-char guarded (the model
-/// `ProhibitNullCharactersValidator` runs through the `ModelSerializer`).
-/// Returns the validated string, or `None` when explicitly null.
+/// is stored after the validators run in append order — max-length, null
+/// characters, surrogates — collecting every failure (the model validators
+/// run through the `ModelSerializer`; `surr` is the field's first
+/// lone-surrogate value from the charset decode, if any). Returns the
+/// validated string, or `None` when explicitly null.
 pub fn coerce_char(
     value: Option<&Value>,
     allow_blank: bool,
     allow_null: bool,
     max_length: Option<usize>,
+    surr: Option<u16>,
 ) -> Result<Option<String>, CoerceFail> {
     let fail = |body: &str| CoerceFail {
         body: body.to_owned(),
@@ -2450,13 +2529,50 @@ pub fn coerce_char(
                 return Ok(Some(String::new()));
             }
             let trimmed = raw.trim().to_owned();
-            check_max_length(&trimmed, max_length)?;
-            if trimmed.contains('\u{0}') {
-                return Err(fail(r#"["Null characters are not allowed."]"#));
-            }
+            char_validators(&trimmed, max_length, surr)?;
             Ok(Some(trimmed))
         }
     }
+}
+
+/// DRF `CharField` validators in append order, mirroring cycle's gate:
+/// max-length, null characters, surrogates — collecting EVERY failure
+/// (verified live on cycles: a long surrogate-bearing name answers both
+/// messages, compact `["e1","e2"]` separators). Length counts `len(str)`
+/// — a surrogate is one char, exactly like its U+FFFD placeholder here —
+/// and a surrogate always survives the trim (never whitespace), so the
+/// flag computed on the raw value still holds for the trimmed one.
+fn char_validators(
+    trimmed: &str,
+    max_length: Option<usize>,
+    surr: Option<u16>,
+) -> Result<(), CoerceFail> {
+    let mut errors: Vec<String> = Vec::new();
+    if let Some(max) = max_length {
+        if trimmed.chars().count() > max {
+            errors.push(format!(
+                "Ensure this field has no more than {max} characters."
+            ));
+        }
+    }
+    if trimmed.contains('\u{0}') {
+        errors.push("Null characters are not allowed.".to_owned());
+    }
+    if let Some(unit) = surr {
+        errors.push(format!("Surrogate characters are not allowed: U+{unit:X}."));
+    }
+    if errors.is_empty() {
+        return Ok(());
+    }
+    // Fixed texts (digits + uppercase hex only) need no escaping.
+    let body = errors
+        .iter()
+        .map(|message| format!("\"{message}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    Err(CoerceFail {
+        body: format!("[{body}]"),
+    })
 }
 
 fn check_max_length(text: &str, max_length: Option<usize>) -> Result<(), CoerceFail> {
@@ -2825,12 +2941,15 @@ fn parse_week_date(text: &str) -> Option<chrono::NaiveDate> {
 /// `Meta.fields` order; errors keyed the same way). `partial` selects PATCH
 /// semantics (every field optional). Date failures reuse the services
 /// layer's `DRF_DATE_FORMAT_MESSAGE` (verified against DRF's `DateField`).
+/// `field_surr` carries the first surrogate per dirty field for the
+/// `CharField` validator (PIDASHCONV-712).
 pub async fn coerce_write(
     pool: &PgPool,
     body: &serde_json::Map<String, Value>,
     partial: bool,
     files: &super::body::FilesMap,
     html: bool,
+    field_surr: &FieldSurr,
 ) -> Result<ModuleWrite, Denial> {
     use pidash_services::v1_cycles_modules::module_shapes as shapes;
     let mut errors: Vec<(String, String)> = Vec::new();
@@ -2856,7 +2975,7 @@ pub async fn coerce_write(
     let file_marker = Value::Bool(true);
     // name: CharField(max 255, blank=False, null=False); required unless partial.
     if files.contains_key("name") {
-        match coerce_char(Some(&file_marker), false, false, Some(255)) {
+        match coerce_char(Some(&file_marker), false, false, Some(255), None) {
             Err(fail) => errors.push(("name".to_owned(), fail.body)),
             Ok(_) => unreachable!("upload is never a valid string"),
         }
@@ -2865,7 +2984,13 @@ pub async fn coerce_write(
         None if partial => {}
         // Filed keys were shadowed above and their error is already pushed.
         None if files.contains_key("name") => {}
-        value => match coerce_char(value, false, false, Some(255)) {
+        value => match coerce_char(
+            value,
+            false,
+            false,
+            Some(255),
+            field_surr.get("name").copied(),
+        ) {
             Ok(Some(name)) => write.name = Some(name),
             Ok(None) => {}
             Err(fail) => errors.push(("name".to_owned(), fail.body)),
@@ -2873,7 +2998,7 @@ pub async fn coerce_write(
     }
     // description: CharField(blank=True); missing/None handled.
     if files.contains_key("description") {
-        match coerce_char(Some(&file_marker), true, false, None) {
+        match coerce_char(Some(&file_marker), true, false, None, None) {
             Err(fail) => errors.push(("description".to_owned(), fail.body)),
             Ok(_) => unreachable!("upload is never a valid string"),
         }
@@ -2884,7 +3009,13 @@ pub async fn coerce_write(
             "description".to_owned(),
             r#"["This field may not be null."]"#.to_owned(),
         )),
-        value => match coerce_char(value, true, false, None) {
+        value => match coerce_char(
+            value,
+            true,
+            false,
+            None,
+            field_surr.get("description").copied(),
+        ) {
             Ok(Some(description)) => write.description = Some(description),
             Ok(None) => {}
             Err(fail) => errors.push(("description".to_owned(), fail.body)),
@@ -3067,7 +3198,7 @@ pub async fn coerce_write(
     // external_source / external_id: CharField(max 255, blank+null).
     for key in ["external_source", "external_id"] {
         if files.contains_key(key) {
-            match coerce_char(Some(&file_marker), true, true, Some(255)) {
+            match coerce_char(Some(&file_marker), true, true, Some(255), None) {
                 Err(fail) => errors.push((key.to_owned(), fail.body)),
                 Ok(_) => unreachable!("upload is never a valid string"),
             }
@@ -3081,16 +3212,18 @@ pub async fn coerce_write(
                     write.external_id = Some(None);
                 }
             }
-            value => match coerce_char(value, true, true, Some(255)) {
-                Ok(value) => {
-                    if key == "external_source" {
-                        write.external_source = Some(value);
-                    } else {
-                        write.external_id = Some(value);
+            value => {
+                match coerce_char(value, true, true, Some(255), field_surr.get(key).copied()) {
+                    Ok(value) => {
+                        if key == "external_source" {
+                            write.external_source = Some(value);
+                        } else {
+                            write.external_id = Some(value);
+                        }
                     }
+                    Err(fail) => errors.push((key.to_owned(), fail.body)),
                 }
-                Err(fail) => errors.push((key.to_owned(), fail.body)),
-            },
+            }
         }
     }
 
@@ -3654,8 +3787,8 @@ pub async fn create_module_inner(
     )
     .await?;
     let project = fetch_project(&pre.pool, &project_id, &workspace_id).await?;
-    let ((raw, files), html) = parse_body_ct(headers, body)?;
-    let write = coerce_write(&pre.pool, &raw, false, &files, html).await?;
+    let ((raw, files), field_surr, html) = parse_body_ct(headers, body)?;
+    let write = coerce_write(&pre.pool, &raw, false, &files, html, &field_surr).await?;
     // `validate()`: the project gates (the context id is always present
     // and the row was just fetched; `module_view` is the live arm),
     // then the date order, then the members rewrite.
@@ -3904,8 +4037,8 @@ pub async fn patch_module_inner(
             "Archived module cannot be edited".to_owned(),
         ));
     }
-    let ((raw, files), html) = parse_body_ct(headers, body)?;
-    let write = coerce_write(&pre.pool, &raw, true, &files, html).await?;
+    let ((raw, files), field_surr, html) = parse_body_ct(headers, body)?;
+    let write = coerce_write(&pre.pool, &raw, true, &files, html, &field_surr).await?;
     // `validate()`: the project must still be live (its soft-delete
     // between gate and body would 404 here, matching `DoesNotExist`), the
     // module view must be on, the provided dates ordered; the members list
@@ -5382,7 +5515,7 @@ mod tests {
     fn char_coercion_edges() {
         // Required.
         assert_eq!(
-            coerce_char(None, false, false, Some(255))
+            coerce_char(None, false, false, Some(255), None)
                 .expect_err("required")
                 .body,
             r#"["This field is required."]"#
@@ -5393,7 +5526,8 @@ mod tests {
                 Some(&Value::String("   ".to_owned())),
                 false,
                 false,
-                Some(255)
+                Some(255),
+                None
             )
             .expect_err("blank")
             .body,
@@ -5401,17 +5535,23 @@ mod tests {
         );
         // Blank allowed collapses to "".
         assert_eq!(
-            coerce_char(Some(&Value::String("  ".to_owned())), true, false, None)
-                .expect("blank-ok"),
+            coerce_char(
+                Some(&Value::String("  ".to_owned())),
+                true,
+                false,
+                None,
+                None
+            )
+            .expect("blank-ok"),
             Some(String::new())
         );
         // Numbers stringify; bools fail.
         assert_eq!(
-            coerce_char(Some(&serde_json::json!(123)), false, false, Some(255)).expect("int"),
+            coerce_char(Some(&serde_json::json!(123)), false, false, Some(255), None).expect("int"),
             Some("123".to_owned())
         );
         assert_eq!(
-            coerce_char(Some(&Value::Bool(true)), false, false, Some(255))
+            coerce_char(Some(&Value::Bool(true)), false, false, Some(255), None)
                 .expect_err("bool")
                 .body,
             r#"["Not a valid string."]"#
@@ -5422,7 +5562,8 @@ mod tests {
                 Some(&Value::String("n".repeat(256))),
                 false,
                 false,
-                Some(255)
+                Some(255),
+                None
             )
             .expect_err("long")
             .body,
@@ -5434,7 +5575,8 @@ mod tests {
                 Some(&Value::String("  ENG  ".to_owned())),
                 false,
                 false,
-                Some(12)
+                Some(12),
+                None
             )
             .expect("trim"),
             Some("ENG".to_owned())
@@ -5444,7 +5586,8 @@ mod tests {
                 Some(&Value::String(format!("  {}  ", "n".repeat(255)))),
                 false,
                 false,
-                Some(255)
+                Some(255),
+                None
             )
             .expect("trimmed-fits"),
             Some("n".repeat(255))
@@ -5455,12 +5598,93 @@ mod tests {
                 Some(&Value::String("a\u{0}b".to_owned())),
                 false,
                 false,
-                Some(255)
+                Some(255),
+                None
             )
             .expect_err("null-char")
             .body,
             r#"["Null characters are not allowed."]"#
         );
+    }
+
+    #[test]
+    fn char_surrogate_gate_712() {
+        // A lone surrogate from the charset decode fails with its value.
+        assert_eq!(
+            coerce_char(
+                Some(&Value::String("\u{FFFD}693".to_owned())),
+                false,
+                false,
+                Some(255),
+                Some(0xD801)
+            )
+            .expect_err("surrogate")
+            .body,
+            r#"["Surrogate characters are not allowed: U+D801."]"#
+        );
+        // A literal placeholder with no span stays literal text.
+        assert_eq!(
+            coerce_char(
+                Some(&Value::String("\u{FFFD}693".to_owned())),
+                false,
+                false,
+                Some(255),
+                None
+            )
+            .expect("literal-fffd"),
+            Some("\u{FFFD}693".to_owned())
+        );
+        // Validators collect: long + null + surrogate answers all three.
+        assert_eq!(
+            coerce_char(
+                Some(&Value::String(format!("a\u{0}{}", "n".repeat(255)))),
+                false,
+                false,
+                Some(255),
+                Some(0xD801)
+            )
+            .expect_err("collected")
+            .body,
+            r#"["Ensure this field has no more than 255 characters.","Null characters are not allowed.","Surrogate characters are not allowed: U+D801."]"#
+        );
+        // Long + null without surrogate collects both (Django parity).
+        assert_eq!(
+            coerce_char(
+                Some(&Value::String(format!("a\u{0}{}", "n".repeat(255)))),
+                false,
+                false,
+                Some(255),
+                None
+            )
+            .expect_err("collected-pair")
+            .body,
+            r#"["Ensure this field has no more than 255 characters.","Null characters are not allowed."]"#
+        );
+    }
+
+    #[test]
+    fn field_surr_attribution_712() {
+        // JSON: the span lands on the clean top-level key holding it.
+        let fields = json_field_surr("{\"name\": \"�693\"}", &[(10, 0xD801)]);
+        assert_eq!(fields.get("name"), Some(&0xD801));
+        assert_eq!(fields.len(), 1);
+        // A literal placeholder with no spans attributes nothing.
+        assert!(json_field_surr("{\"name\": \"�693\"}", &[]).is_empty());
+        // Malformed JSON attributes nothing (serde already answered).
+        assert!(json_field_surr("{\"name\": ", &[(0, 0xD800)]).is_empty());
+        // Dirty keys never match; clean siblings still attribute.
+        let fields = json_field_surr("{\"�\": 1, \"name\": \"�\"}", &[(2, 0xD800), (20, 0xD801)]);
+        assert_eq!(fields.get("name"), Some(&0xD801));
+        assert_eq!(fields.len(), 1);
+        // Form: scalar spans attribute; arrays are skipped.
+        let map: serde_json::Map<String, Value> =
+            serde_json::from_str("{\"name\": \"�693\", \"members\": [\"�\"]}").expect("form map");
+        let mut surr: BTreeMap<String, Vec<Vec<(usize, u16)>>> = BTreeMap::new();
+        surr.insert("name".to_owned(), vec![vec![(0, 0xD801)]]);
+        surr.insert("members".to_owned(), vec![vec![(0, 0xD800)]]);
+        let fields = form_field_surr(&map, &surr);
+        assert_eq!(fields.get("name"), Some(&0xD801));
+        assert!(!fields.contains_key("members"));
     }
 
     #[test]
