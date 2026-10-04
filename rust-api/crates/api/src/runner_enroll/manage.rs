@@ -300,7 +300,7 @@ async fn read_request_data(state: &AppState, req: Request) -> Result<JVal, Respo
 /// `detail`, the `JSON parse error - ` prefix, CPython's message.
 fn parse_error_body(detail: &str) -> String {
     format!(
-        "{{\"Detail\":{}}}",
+        "{{\"detail\":{}}}",
         serde_json::to_string(&format!("{}{detail}", json_cpython::JSON_PARSE_PREFIX))
             .expect("json string")
     )
@@ -359,9 +359,12 @@ fn py_strip(text: &str) -> &str {
 
 /// `(request.data.get(key) or "").strip()` (`QUIRK-name-500`): falsy
 /// maps to `""`, strings strip, truthy non-strings are the source's
-/// `AttributeError` → 500. Surrogate-carrying strings flow through the
-/// lossy spelling (documented approximation — a surrogate is one
-/// non-whitespace char that fails every downstream check identically).
+/// `AttributeError` → 500. For the pod paths, surrogate-carrying
+/// strings flow through the lossy spelling — the naming validator's
+/// ASCII charset rejects the lossy spelling exactly as it rejects the
+/// surrogate one (400 either way). The runner rename has no validator
+/// between the strip and the store, so it uses
+/// [`or_empty_stripped_clean`] instead.
 fn or_empty_stripped(value: Option<&JVal>) -> Result<String, Response> {
     let Some(value) = value else {
         return Ok(String::new());
@@ -371,6 +374,30 @@ fn or_empty_stripped(value: Option<&JVal>) -> Result<String, Response> {
     }
     match value {
         JVal::Str(text) => Ok(py_strip(&text.to_lossy_string()).to_owned()),
+        JVal::Null | JVal::Bool(_) | JVal::Num(_) | JVal::Array(_) | JVal::Object(_) => {
+            Err(server_error())
+        }
+    }
+}
+
+/// [`or_empty_stripped`] for the runner rename (`runners.py:373`): the
+/// runner PATCH has no naming validator, so a surrogate-carrying name
+/// would reach the store — where Django 500s encoding it for Postgres.
+/// Dirty strings 500 here instead (a surrogate never strips to empty,
+/// so the 500 lands after the empty check exactly as the source's
+/// save-time failure does).
+fn or_empty_stripped_clean(value: Option<&JVal>) -> Result<String, Response> {
+    let Some(value) = value else {
+        return Ok(String::new());
+    };
+    if !j_truthy(value) {
+        return Ok(String::new());
+    }
+    match value {
+        JVal::Str(text) => text
+            .to_clean_string()
+            .map(|clean| py_strip(&clean).to_owned())
+            .ok_or_else(server_error),
         JVal::Null | JVal::Bool(_) | JVal::Num(_) | JVal::Array(_) | JVal::Object(_) => {
             Err(server_error())
         }
@@ -1284,7 +1311,7 @@ pub async fn runner_patch(
                 Ok(raw) => raw,
                 Err(response) => return response,
             };
-            match or_empty_stripped(raw) {
+            match or_empty_stripped_clean(raw) {
                 Ok(stripped) if stripped.is_empty() => {
                     return bad_request(NAME_CANNOT_BE_EMPTY_BODY);
                 }
@@ -2286,6 +2313,28 @@ mod tests {
     }
 
     #[test]
+    fn strip_surrogate_split() {
+        // A lone surrogate (e.g. JSON "\udc00"): the pod path keeps the
+        // lossy spelling for the naming validator (which 400s on the
+        // U+FFFD via its ASCII charset, exactly as Python 400s on the
+        // surrogate); the runner rename — with no validator before the
+        // store — 500s, as Django does encoding the row for Postgres.
+        let mut dirty = JStr::from_text("r");
+        dirty.push_surrogate(0xdc00);
+        let value = JVal::Str(dirty);
+        assert_eq!(or_empty_stripped(Some(&value)).unwrap(), "r\u{fffd}");
+        assert!(or_empty_stripped_clean(Some(&value)).is_err());
+        // Clean inputs behave identically on both helpers.
+        for clean in [None, Some(JVal::Null), Some(jstr("")), Some(jstr("  x  "))] {
+            assert_eq!(
+                or_empty_stripped(clean.as_ref()).unwrap(),
+                or_empty_stripped_clean(clean.as_ref()).unwrap(),
+            );
+        }
+        assert_eq!(or_empty_stripped_clean(Some(&jstr("  x  "))).unwrap(), "x");
+    }
+
+    #[test]
     fn description_matrix() {
         assert_eq!(j_description(None).unwrap(), "");
         assert_eq!(j_description(Some(&JVal::Null)).unwrap(), "");
@@ -2340,9 +2389,12 @@ mod tests {
 
     #[test]
     fn parse_error_body_shape() {
+        // Lowercase `detail`: DRF's default exception handler (the
+        // project's `auth_exception_handler` only re-wraps throttle
+        // denials), same bytes as every other port's `BadDetail`.
         assert_eq!(
             parse_error_body("Expecting value: line 1 column 1 (char 0)"),
-            r#"{"Detail":"JSON parse error - Expecting value: line 1 column 1 (char 0)"}"#
+            r#"{"detail":"JSON parse error - Expecting value: line 1 column 1 (char 0)"}"#
         );
     }
 
