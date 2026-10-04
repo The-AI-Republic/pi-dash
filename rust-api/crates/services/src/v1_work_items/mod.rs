@@ -14,8 +14,10 @@
 //!   `api/serializers/issue.py:729-906`, PIDASHCONV-663).
 //! * [`shape_pages`] — page serializers (`api/serializers/page.py:27-112`,
 //!   PIDASHCONV-666).
+//! * [`shape_social`] — comment/attachment/activity shapes
+//!   (`api/serializers/issue.py:907-1032` + `:1119-1138`, PIDASHCONV-664).
 //! * Sibling issues extend this file with their own `pub mod shape_*;` /
-//!   `queries_*` lines (PIDASHCONV-661…672); on rebase keep both sides,
+//!   `queries_*` lines (PIDASHCONV-661…663,665…672); on rebase keep both sides,
 //!   never fork a helper.
 //!
 //! Shared kernels (used by every shape in this module):
@@ -31,6 +33,7 @@
 pub mod shape_issue;
 pub mod shape_pages;
 pub mod shape_relations;
+pub mod shape_social;
 
 /// One entry of a DRF `fields=` argument (`base.py:19-30,41-60`): either a
 /// plain field name or a `{name: sub-fields}` dict entry. Query-string
