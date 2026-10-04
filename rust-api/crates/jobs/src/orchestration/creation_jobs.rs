@@ -161,6 +161,41 @@ impl<'c, C, H, E, P> LiveCreationStore<'c, C, H, E, P> {
     fn db(error: sqlx::Error) -> CreationError {
         CreationError::Db(error.to_string())
     }
+
+    // -- L8 dispatch sharing -------------------------------------------------
+    // The D-12 L8 dispatch drivers (`fire_tick_seam`) run on the same
+    // insertion transaction the guards read (the single-transaction
+    // grant+dispatch with rollback), so the services `DispatchSeam` is
+    // implemented for this store. These accessors are the whole L6
+    // surface it needs beyond the seam traits; nothing here changes L6
+    // behavior.
+
+    /// Borrow the insertion transaction for the dispatch seam reads and
+    /// writes.
+    pub(crate) fn dispatch_tx(&mut self) -> &mut Transaction<'c> {
+        &mut self.tx
+    }
+
+    /// `has_usable_llm_config(user)` (`agent_execution.py:78-80`).
+    pub(crate) fn dispatch_has_usable_llm_config(&self, user_id: Uuid) -> bool
+    where
+        H: Fn(Uuid) -> bool,
+    {
+        (self.has_usable_llm_config)(user_id)
+    }
+
+    /// `managed_llm_profile(user)` (`managed_runner/policy.py:27-36`).
+    pub(crate) fn dispatch_llm_profile_for(&self, user_id: Uuid) -> LlmProfile
+    where
+        P: Fn(Option<Uuid>) -> LlmProfile,
+    {
+        (self.llm_profile)(Some(user_id))
+    }
+
+    /// The operator kill switch (`managed_runner_is_enabled`, L3).
+    pub(crate) fn dispatch_managed_runner_enabled(&self) -> bool {
+        pidash_services::dispatch::managed_runner_is_enabled(&self.managed)
+    }
 }
 
 /// Every failure the jobs drivers report.

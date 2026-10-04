@@ -17,6 +17,13 @@
 //!   as async drivers over the [`creation::CreationSeam`] /
 //!   [`creation::FinalizeAgentRunSeam`] traits; the jobs-side
 //!   `LiveCreationStore` implements them over live SQL.
+//! * [`dispatch`] — `orchestration/scheduling.py` dispatch remainder
+//!   (preflight + bounce, creator/pod resolvers, continuation, the Run
+//!   AI trio, Re-tick, wait, deferred pause) as async drivers over the
+//!   [`dispatch::DispatchSeam`] trait (which extends the L6 seams) plus
+//!   the [`dispatch::PodRunnerMatcher`] one-method D-14 seam; the
+//!   jobs-side `fire_tick_seam` module implements them and the
+//!   `tasks_ticker::FireTickSeam` shim over live SQL.
 //! * [`entries`] — `orchestration/service.py` entries (state-transition +
 //!   comment + scheduler dispatch) plus `orchestration/signals.py` as
 //!   explicit calls, as async drivers over the [`entries::EntriesSeam`] /
@@ -48,15 +55,42 @@
 //! (`rust-api/fixtures/orchestration/fx06_creation/`) alongside
 //! [`creation`], FX-ORCH-07
 //! (`rust-api/fixtures/orchestration/fx07_entries/`) alongside
-//! [`entries`].
+//! [`entries`], FX-ORCH-08
+//! (`rust-api/fixtures/orchestration/fx08_dispatch/`) alongside
+//! [`dispatch`] (guard/reason/bounce/wait/pause goldens; the
+//! builder-success paths replay live in jobs).
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod blockers;
 pub mod clock;
 pub mod creation;
+pub mod dispatch;
 pub mod entries;
 pub mod relations;
+
+// NOTE: dispatch::REASON_NO_ELIGIBLE_RUNNER (same "no-eligible-runner"
+// value) is re-exported once via `entries` below to avoid a duplicate
+// flat-path import; both module definitions stay authoritative.
+pub use dispatch::{
+    agent_wait_log_line, auto_paused_log_line, bounce_body, bounce_issue_no_eligible_runner,
+    bounce_log_line, cap_hit_leave_log_line, disarmed_log_line, dispatch_continuation_run,
+    dispatch_run_ai_run, dispatch_run_ai_run_with_reason, in_progress_state_for,
+    is_machine_trigger, managed_profile_reason_code, maybe_apply_deferred_pause,
+    no_backlog_target_log_line, no_paused_state_log_line, pause_guard_verdict,
+    preflight_eligibility_or_bounce, re_tick_ticker, resolve_creator_for_trigger, run_ai_for_human,
+    select_cloud_candidate, skip_dispatch_log_line, strip_tags, ticker_lock_by_id_sql,
+    ticker_select_by_issue_sql, wait_activity_comment, wait_rearms, wait_ticker, BounceOutcome,
+    CandidateUser, ContinuationDispatchOutcome, DispatchError, DispatchSeam, HumanRunAiOutcome,
+    LogLine, NewIssueComment, NewWaitActivity, PauseOutcome, PodRunnerMatcher, PreflightOutcome,
+    RetickOutcome, RoleVerdict, RunAiOutcome, ThinRunAiOutcome, WaitOutcome, BACKLOG_TARGET_SQL,
+    BOUNCE_BODY_DEFAULT, BOUNCE_BODY_NO_LLM_CONFIG, COMMENT_DESCRIPTION_UPDATE_SQL,
+    COMMENT_INSERT_SQL, DESCRIPTION_INSERT_SQL, IN_PROGRESS_STATE_SQL, ISSUE_STATE_UPDATE_SQL,
+    LIVE_ASSIGNEE_CANDIDATES_SQL, PAUSED_STATE_SQL, PAUSE_ISSUE_LOCK_SQL, PROJECT_CLOCK_POLICY_SQL,
+    PROJECT_DEFAULT_STATE_SQL, PROJECT_ROLE_FACTS_SQL, REASON_NO_LLM_CONFIG,
+    REASON_NO_MANAGED_RUNNER, RETICK_ISSUE_LOCK_SQL, WAIT_ACTIVITY_INSERT_SQL,
+    WAIT_REARM_UPDATE_SQL, WAIT_UPDATE_SQL, WORKSPACE_SLUG_SQL,
+};
 
 pub use creation::{
     active_run_sql, complete_project_move_handoff, create_and_dispatch_run,
