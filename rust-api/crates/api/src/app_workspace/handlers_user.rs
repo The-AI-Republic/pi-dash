@@ -1294,6 +1294,7 @@ fn choice_timezone(value: &Value) -> Result<String, Vec<String>> {
 }
 
 /// Outcome of one asset-FK validation beyond the field error.
+#[derive(Debug)]
 enum PkOutcome {
     /// Exists-check DB failure: 500.
     ServerError,
