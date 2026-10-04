@@ -560,10 +560,11 @@ fn parse_body_json(raw: &[u8]) -> Result<Value, Denial> {
 /// for scalar bodies (the 500), and a membership hit on a `str`
 /// (substring) or a `list` (element equality) 500s on the `.get`
 /// subscript; a miss skips the cascade and falls through to the
-/// serializer's dict 400. Returns the `role` member for dict bodies.
-fn cascade_role_lookup(value: &Value) -> Result<Option<&Value>, Denial> {
+/// serializer's dict 400. Returns the `role` member for dict bodies,
+/// owned so the caller can move the body into the dict check after.
+fn cascade_role_lookup(value: &Value) -> Result<Option<Value>, Denial> {
     match value {
-        Value::Object(map) => Ok(map.get("role")),
+        Value::Object(map) => Ok(map.get("role").cloned()),
         Value::Array(items) => {
             if items
                 .iter()
@@ -704,13 +705,7 @@ fn smart_token_len(text: &str) -> usize {
     }
     let mut end = pos;
     let mut quoted = 0;
-    loop {
-        let Some(ch) = text[end..].chars().next() else {
-            break;
-        };
-        if ch != '"' && ch != '\'' {
-            break;
-        }
+    while text[end..].starts_with(['"', '\'']) {
         let Some(after) = quoted_len(&text[end..]) else {
             break;
         };
@@ -2772,7 +2767,7 @@ async fn partial_update_member(
     // The cascade pre-check reads the raw body before any dict check:
     // scalar bodies, and `str`/`list` bodies containing `role`, 500.
     let cascade_role: Option<Value> = match cascade_role_lookup(&raw_value) {
-        Ok(role) => role.cloned(),
+        Ok(role) => role,
         Err(denial) => return denial.into_response(),
     };
     let fields = match parse_body_value(raw_value) {
@@ -3321,7 +3316,7 @@ mod tests {
         let case = |raw: &str| cascade_role_lookup(&serde_json::from_str(raw).expect("json"));
         // Dict bodies yield the `role` member, or no cascade.
         assert_eq!(
-            case("{\"role\": 5}").ok().flatten().cloned(),
+            case("{\"role\": 5}").ok().flatten(),
             Some(serde_json::json!(5))
         );
         assert!(matches!(case("{\"a\": 1}"), Ok(None)));
