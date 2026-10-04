@@ -66,8 +66,24 @@ async function openTimeline(
     },
   });
   await driver.openAuthenticated(`/${seed.workspaceSlug}/projects/${projectId}/issues`, browserCookies(user));
-  await driver.ganttOpenTimeline();
+  await ganttOpenWithRetry(driver);
   return { user, beforeFilters: before.displayFilters, beforeProperties: before.displayProperties };
+}
+
+/**
+ * Open the timeline, retrying once through a reload. Under host
+ * contention the issues page occasionally never renders its switcher
+ * inside the driver's long wait (seen 3× in 5 full-file sweeps, always
+ * with sibling suites running alongside). The retry only absorbs that
+ * load stall: a genuinely broken timeline still fails its second wait.
+ */
+async function ganttOpenWithRetry(driver: ParityDriver): Promise<void> {
+  try {
+    await driver.ganttOpenTimeline();
+  } catch {
+    await driver.boardReloadIssues();
+    await driver.ganttOpenTimeline();
+  }
 }
 
 /** Restore the exact preferences an opened timeline started with. */
@@ -91,7 +107,7 @@ async function setTimelineFilters(
     display_filters: { ...current.displayFilters, ...filters },
   });
   await driver.boardReloadIssues();
-  await driver.ganttOpenTimeline();
+  await ganttOpenWithRetry(driver);
 }
 
 /** Server-side UUID of an issue looked up by its name. */
@@ -107,6 +123,21 @@ function isoDay(offset: number): string {
   const at = new Date();
   at.setUTCDate(at.getUTCDate() + offset);
   return at.toISOString().slice(0, 10);
+}
+
+/**
+ * ISO day (YYYY-MM-DD) `offset` days from the local today. The timeline
+ * quick-add seeds browser-local dates (the app's own `new Date()`), so
+ * expectations about seeded values must use the local clock — the
+ * UTC-based isoDay disagrees for part of every day. The spec and the
+ * browser share the host clock (no timezone is configured anywhere in
+ * the parity harness), so the local days agree.
+ */
+function localIsoDay(offset: number): string {
+  const at = new Date();
+  at.setDate(at.getDate() + offset);
+  const pad = (part: number): string => String(part).padStart(2, "0");
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
 }
 
 /**
@@ -216,7 +247,7 @@ test(
     await test.step("zoom stays session-local across reloads", async () => {
       await driver.ganttSetZoom("Quarter");
       await driver.boardReloadIssues();
-      await driver.ganttOpenTimeline();
+      await ganttOpenWithRetry(driver);
       await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
       expect(await driver.ganttActiveZoom()).toBe("Week");
     });
@@ -567,7 +598,7 @@ test(
     await test.step("a half-dated bar gains its missing date", async () => {
       await serverPatchIssue(seed.workspaceSlug, seed.projectId, id, { target_date: null }, owner.cookie);
       await driver.boardReloadIssues();
-      await driver.ganttOpenTimeline();
+      await ganttOpenWithRetry(driver);
       await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
       await driver.ganttResizeBar(name, "right", 4);
       await expect
@@ -656,10 +687,15 @@ test(
       await driver.ganttQuickAdd(title);
       expect(await driver.ganttBarExists(title)).toBe(true);
       const id = await issueIdByName(seed, seed.projectId, owner.cookie, title);
-      const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie);
-      expect(details.startDate).toBe(isoDay(0));
-      expect(details.targetDate).toBe(isoDay(1));
-      await serverDeleteIssue(seed.workspaceSlug, seed.projectId, id, owner.cookie);
+      try {
+        const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie);
+        expect(details.startDate).toBe(localIsoDay(0));
+        expect(details.targetDate).toBe(localIsoDay(1));
+      } finally {
+        // A failed expectation must not leak the row: every later
+        // scenario opens the seed project expecting exactly 3 rows.
+        await serverDeleteIssue(seed.workspaceSlug, seed.projectId, id, owner.cookie);
+      }
     });
 
     await test.step("cleanup restores the seed preferences", async () => {
@@ -792,7 +828,7 @@ test(
           `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
           browserCookies(guest)
         );
-        await driver.ganttOpenTimeline();
+        await ganttOpenWithRetry(driver);
         await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
         expect(await driver.ganttHandlesVisible(dated)).toBe(false);
         expect(await driver.ganttRowAddVisible(plain)).toBe(false);
