@@ -657,10 +657,12 @@ fn run_len(text: &str) -> usize {
 }
 
 /// `datetime.fromisoformat` (CPython 3.12) subset that `datetime_re` cannot
-/// also match. Shapes: `YYYY-MM-DD | YYYYMMDD | YYYY-Www-D | YYYYWwwD`,
+/// also match. Shapes: `YYYY-MM-DD | YYYYMMDD` plus week dates
+/// (`YYYY-Www[-D] | YYYYWww[D]`, weekday optional — Monday when absent),
 /// date-only (midnight), any single-char date/time separator, extended or
 /// basic times (`HH[:MM[:SS]]`, fraction always means fractional seconds),
-/// `Z`/numeric offsets with 0–1 whitespace chars before them, and one
+/// `Z`/numeric offsets with 0–1 whitespace chars before them, one ignored
+/// junk char tolerated immediately before a zone, and one
 /// ignored-or-applied trailing fraction after a numeric offset (quirk 6).
 /// Anything unrecognized returns `None` so the caller falls through to
 /// [`parse_datetimere`] — including out-of-range values, exactly like
@@ -676,46 +678,42 @@ fn parse_fromiso_subset(text: &str) -> Option<CandidateDt> {
     if year < 1 {
         return None;
     }
-    // Date part: extended, basic, or week (extended/basic).
+    // ISO week dates peel off first: their weekday is optional (Monday
+    // when absent) and `-` doubles as the date/time separator.
+    if bytes.len() >= 8 && bytes[4] == b'-' && bytes.get(5) == Some(&b'W') {
+        return parse_extended_week(text, year);
+    }
+    if bytes.len() >= 7 && bytes[4] == b'W' {
+        return parse_basic_week(text, year);
+    }
+    // Date part: extended or basic calendar.
     let (date, rest) = if bytes.len() >= 10 && bytes[4] == b'-' {
-        if bytes[5] == b'W' {
-            // `YYYY-Www-D`.
-            if bytes.get(8) != Some(&b'-') {
-                return None;
-            }
-            let week = take_digits(bytes.get(6..)?, 2)?;
-            let weekday = take_digits(bytes.get(9..)?, 1)? as u8;
-            let date = NaiveDate::from_isoywd_opt(
-                year,
-                week,
-                chrono::Weekday::try_from(weekday.checked_sub(1)?).ok()?,
-            )?;
-            (date, text.get(10..)?)
-        } else {
-            // `YYYY-MM-DD`.
-            if bytes.get(7) != Some(&b'-') {
-                return None;
-            }
-            let month = take_digits(bytes.get(5..)?, 2)?;
-            let day = take_digits(bytes.get(8..)?, 2)?;
-            (NaiveDate::from_ymd_opt(year, month, day)?, text.get(10..)?)
+        // `YYYY-MM-DD`.
+        if bytes.get(7) != Some(&b'-') {
+            return None;
         }
-    } else if bytes.len() >= 8 && bytes[4] == b'W' {
-        // `YYYYWwwD`.
-        let week = take_digits(bytes.get(5..)?, 2)?;
-        let weekday = take_digits(bytes.get(7..)?, 1)? as u8;
-        let date = NaiveDate::from_isoywd_opt(
-            year,
-            week,
-            chrono::Weekday::try_from(weekday.checked_sub(1)?).ok()?,
-        )?;
-        (date, text.get(8..)?)
+        let month = take_digits(bytes.get(5..)?, 2)?;
+        let day = take_digits(bytes.get(8..)?, 2)?;
+        (NaiveDate::from_ymd_opt(year, month, day)?, text.get(10..)?)
     } else {
         // `YYYYMMDD`.
         let month = take_digits(bytes.get(4..)?, 2)?;
         let day = take_digits(bytes.get(6..)?, 2)?;
         (NaiveDate::from_ymd_opt(year, month, day)?, text.get(8..)?)
     };
+    finish_date(date, rest)
+}
+
+/// Monday of an ISO week (`None` for week 0 / week 53 in a short year).
+fn monday_of(year: i32, week: u32) -> Option<NaiveDate> {
+    NaiveDate::from_isoywd_opt(year, week, chrono::Weekday::Mon)
+}
+
+/// Shared tail after a complete date: empty means midnight, else exactly
+/// one separator char — any of them (`T`, `t`, space, `X`, even `+`/`-`,
+/// which is why `2025-01-01+05:30` reads as a time) — then the time.
+/// A consumed separator enables the lone-digit drop in the time parser.
+fn finish_date(date: NaiveDate, rest: &str) -> Option<CandidateDt> {
     if rest.is_empty() {
         // Date-only means midnight.
         return Some(CandidateDt {
@@ -723,18 +721,142 @@ fn parse_fromiso_subset(text: &str) -> Option<CandidateDt> {
             offset_us: None,
         });
     }
-    // Exactly one separator char — any of them (`T`, `t`, space, `X`,
-    // even `+`/`-`, which is why `2025-01-01+05:30` reads as a time).
     let sep_len = rest.chars().next()?.len_utf8();
-    parse_fromiso_time(date, rest.get(sep_len..)?)
+    parse_fromiso_time(date, rest.get(sep_len..)?, true)
 }
 
-/// Time + optional zone after the separator. `HH[:MM[:SS]]` (strict
-/// two-digit components) or basic `HH[MM[SS]]`, an optional `[.,]`
-/// fraction (fractional seconds however much of the time is present),
+/// Extended ISO week date (`YYYY-Www` plus its optional tail). The weekday
+/// defaults to Monday when absent (`2025-W01`, `2025-W01T00`). After `-`,
+/// the weekday digit is taken only when NOT followed by another digit —
+/// otherwise `-` is the date/time separator and the digits from the slot
+/// are basic time (`2025-W01-12` → Mon 12:00, `2025-W01-112` fails).
+/// Without the dash, any first char — even a digit — is the separator
+/// (`2025-W011234+00` → Mon 23:00 via sep `1`). All probed against 3.12
+/// `fromisoformat`.
+fn parse_extended_week(text: &str, year: i32) -> Option<CandidateDt> {
+    let week = take_digits(text.as_bytes().get(6..)?, 2)?;
+    let tail = text.get(8..)?;
+    if tail.is_empty() {
+        let date = monday_of(year, week)?;
+        return Some(CandidateDt {
+            naive: date.and_hms_opt(0, 0, 0)?,
+            offset_us: None,
+        });
+    }
+    if let Some(after_dash) = tail.strip_prefix('-') {
+        let slot = after_dash.as_bytes().first().copied();
+        let slot_next_is_digit = after_dash.as_bytes().get(1).is_some_and(u8::is_ascii_digit);
+        if slot.is_some_and(|byte| byte.is_ascii_digit()) && !slot_next_is_digit {
+            let weekday = slot.unwrap_or(b'0') - b'0';
+            if weekday == 0 || weekday > 7 {
+                return None;
+            }
+            let date = NaiveDate::from_isoywd_opt(
+                year,
+                week,
+                chrono::Weekday::try_from(weekday - 1).ok()?,
+            )?;
+            return finish_date(date, after_dash.get(1..)?);
+        }
+        let date = monday_of(year, week)?;
+        // The `-` counts as the consumed separator (digit drop allowed:
+        // `2025-W01-000+00` → :00).
+        return parse_fromiso_time(date, after_dash, true);
+    }
+    let date = monday_of(year, week)?;
+    finish_date(date, tail)
+}
+
+/// Basic ISO week date (`YYYYWww` plus its optional tail). With no slot
+/// char, or a non-digit one, the weekday defaults to Monday and the
+/// normal separator path applies (`2025W01`, `2025W01T00`). An invalid
+/// weekday digit (0/8/9) is skipped and the rest parses as strict time
+/// (`2025W01005+00` → 05:00). A valid weekday followed by digits tries
+/// separator-less time first, then re-reads the first digit as a
+/// separator (`2025W01112` → 12:00, `2025W01112345+00` → 23:45); both
+/// attempts are strict — no lone-digit drop (`2025W011234+00` fails).
+/// All probed.
+fn parse_basic_week(text: &str, year: i32) -> Option<CandidateDt> {
+    let bytes = text.as_bytes();
+    let week = take_digits(bytes.get(5..)?, 2)?;
+    let Some(slot) = bytes.get(7).copied() else {
+        let date = monday_of(year, week)?;
+        return Some(CandidateDt {
+            naive: date.and_hms_opt(0, 0, 0)?,
+            offset_us: None,
+        });
+    };
+    if !slot.is_ascii_digit() {
+        let date = monday_of(year, week)?;
+        return finish_date(date, text.get(7..)?);
+    }
+    let weekday = slot - b'0';
+    if weekday == 0 || weekday > 7 {
+        // Invalid weekday digit: skip it, strict time on the rest.
+        let date = monday_of(year, week)?;
+        return parse_fromiso_time(date, text.get(8..)?, false);
+    }
+    let date =
+        NaiveDate::from_isoywd_opt(year, week, chrono::Weekday::try_from(weekday - 1).ok()?)?;
+    let rest = text.get(8..)?;
+    if rest.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        // Separator-less time first, then first-digit-as-separator; both
+        // strict (no digit drop — the digit was never a separator).
+        if let Some(found) = parse_fromiso_time(date, rest, false) {
+            return Some(found);
+        }
+        // `rest[0]` is an ASCII digit, so byte 1 is a char boundary.
+        return parse_fromiso_time(date, rest.get(1..)?, false);
+    }
+    finish_date(date, rest)
+}
+
+/// Whether two ASCII digits stand at `bytes[index..]`.
+fn has_2_digits(bytes: &[u8], index: usize) -> bool {
+    bytes
+        .get(index..)
+        .is_some_and(|tail| tail.len() >= 2 && tail[0].is_ascii_digit() && tail[1].is_ascii_digit())
+}
+
+/// Consume a `run` (> 0) digit fraction from the front of `tail`: the
+/// first 6 digits kept (right-padded), the rest dropped. Six or more
+/// digits switch the tail to scan mode — everything up to the first
+/// `Z`/`+`/`-` is ignored, then the zone parses strictly from there
+/// (first leader wins, no leader fails); fewer stay strict. Returns
+/// `(microseconds, rest_after)`.
+fn take_fraction(tail: &str, run: usize) -> Option<(u32, &str)> {
+    let mut padded = tail[..run.min(6)].to_owned();
+    while padded.len() < 6 {
+        padded.push('0');
+    }
+    let micro: u32 = padded.parse().ok()?;
+    let mut rest = tail.get(run..)?;
+    if run >= 6 && !rest.is_empty() {
+        let skip = rest
+            .bytes()
+            .position(|byte| matches!(byte, b'Z' | b'+' | b'-'))?;
+        rest = rest.get(skip..)?;
+    }
+    Some((micro, rest))
+}
+
+/// Time + optional zone after the separator. `HH[:MM[:SS]]` (a `:` not
+/// followed by 2 digits is not a component separator — it falls through
+/// to the skip/zone tail) or basic `HH[MM[SS]]` (trailing digits after a
+/// complete SS are a separator-less fraction). The fraction separators
+/// are `[.,]`, plus `:` after an extended SS only; a bare separator with
+/// no digits is left for the single-char skip. Fractions always mean
+/// fractional *seconds*; 6+ digits switch the tail to scan-to-zone mode.
+/// One ignored junk char is tolerated immediately before a zone, plus
 /// optional single whitespace, then `Z` or a numeric offset with an
-/// optional trailing fraction.
-fn parse_fromiso_time(date: NaiveDate, time_text: &str) -> Option<CandidateDt> {
+/// optional trailing fraction. `allow_digit_drop` is false only for time
+/// reached without consuming a separator (basic-week digit tails), where
+/// a lone digit drops only after a consumed component colon.
+fn parse_fromiso_time(
+    date: NaiveDate,
+    time_text: &str,
+    allow_digit_drop: bool,
+) -> Option<CandidateDt> {
     // Cursor over bytes; every advance is bounds-checked, so non-ASCII
     // bytes fail the shape instead of panicking a slice.
     let bytes = time_text.as_bytes();
@@ -742,13 +864,25 @@ fn parse_fromiso_time(date: NaiveDate, time_text: &str) -> Option<CandidateDt> {
     let mut pos = 2;
     let mut minute: u32 = 0;
     let mut second: u32 = 0;
+    // `:` joins the fraction separators (extended SS consumed).
+    let mut colon_frac = false;
+    // Bare digits are a fraction (basic SS consumed).
+    let mut digit_frac = false;
+    // A consumed component colon also enables the lone-digit drop.
+    let mut colon_seen = false;
     if bytes.get(pos) == Some(&b':') {
-        // Extended `HH:MM[:SS]`.
-        minute = take_digits(bytes.get(pos + 1..)?, 2)?;
-        pos += 3;
-        if bytes.get(pos) == Some(&b':') {
-            second = take_digits(bytes.get(pos + 1..)?, 2)?;
+        // Extended `HH:MM[:SS]` — but a `:` NOT followed by 2 digits is
+        // not a component separator at all (`T00:+00` skips the colon to
+        // the zone, `T00:5+00` fails — probed).
+        if has_2_digits(bytes, pos + 1) {
+            minute = take_digits(bytes.get(pos + 1..)?, 2)?;
             pos += 3;
+            colon_seen = true;
+            if bytes.get(pos) == Some(&b':') && has_2_digits(bytes, pos + 1) {
+                second = take_digits(bytes.get(pos + 1..)?, 2)?;
+                pos += 3;
+                colon_frac = true;
+            }
         }
     } else if let Some(tail) = bytes.get(pos..) {
         // Basic `HHMM[SS]` (or bare `HH` when fewer digits follow).
@@ -759,25 +893,42 @@ fn parse_fromiso_time(date: NaiveDate, time_text: &str) -> Option<CandidateDt> {
                 if tail.len() >= 2 && tail[..2].iter().all(|byte| byte.is_ascii_digit()) {
                     second = take_digits(tail, 2)?;
                     pos += 2;
+                    digit_frac = true;
                 }
             }
         }
     }
     let mut rest = time_text.get(pos..)?;
-    // Fraction: period or comma, any digit run, truncated to microseconds.
-    // It always means fractional *seconds* (`T01.5` → `01:00:00.5`).
+    // A lone digit drops only with a consumed separator behind it — or a
+    // consumed component colon (`T00:005+00` → :00).
+    let drop_allowed = allow_digit_drop || colon_seen;
+    // Fraction: period or comma (always), colon (extended SS only), or
+    // bare digits (basic SS only, 2+ of them — a single digit falls to
+    // the skip rule: `T0000001+00` → :00; without a separator the run
+    // must also be even). It always means fractional *seconds* (`T01.5`
+    // → `01:00:00.5`, `T00:00:00:50` → `.50`).
     let mut micro: u32 = 0;
-    if let Some(tail) = rest.strip_prefix(['.', ',']) {
+    let mut saw_fraction_sep = false;
+    let seps: &[char] = if colon_frac {
+        &['.', ',', ':']
+    } else {
+        &['.', ',']
+    };
+    if let Some(tail) = rest.strip_prefix(seps) {
+        // A bare separator with no digits is left for the single-char
+        // skip below (`,Z` / `:+00` parse with fraction 0; a trailing
+        // `,` fails).
         let run = run_len(tail);
-        if run == 0 {
-            return None;
+        if run > 0 {
+            saw_fraction_sep = true;
+            (micro, rest) = take_fraction(tail, run)?;
         }
-        let mut padded = tail[..run.min(6)].to_owned();
-        while padded.len() < 6 {
-            padded.push('0');
+    } else if digit_frac {
+        let run = run_len(rest);
+        if run >= 2 && (drop_allowed || run % 2 == 0) {
+            saw_fraction_sep = true;
+            (micro, rest) = take_fraction(rest, run)?;
         }
-        micro = padded.parse().ok()?;
-        rest = tail.get(run..)?;
     }
     let naive = date.and_time(NaiveTime::from_hms_micro_opt(hour, minute, second, micro)?);
     if rest.is_empty() {
@@ -786,11 +937,31 @@ fn parse_fromiso_time(date: NaiveDate, time_text: &str) -> Option<CandidateDt> {
             offset_us: None,
         });
     }
-    // Zero or one ASCII-whitespace char before the zone (space and tab
-    // probed; two spaces fail through to `None`).
-    if let Some(first) = rest.chars().next() {
-        if first.is_ascii_whitespace() {
-            rest = rest.get(first.len_utf8()..)?;
+    // A single ASCII char (except the zone leaders `Z`/`+`/`-`)
+    // immediately before a valid zone is ignored (`T234+00` → 23:00,
+    // `T12:30:45x+00`, `T12\x0b+00`, bare `,Z`; non-ASCII, doubled junk,
+    // `++00`, and anything with a gap (`T234 +00`) or a fraction
+    // (`T234.5+00`, `.5x+00`) all fail — all probed). Only without a
+    // fraction, and checked before the whitespace strip so the zone must
+    // abut the skipped char. Digits drop only with a consumed separator
+    // or component colon behind them (`drop_allowed`).
+    if !saw_fraction_sep {
+        if let Some(tail) = rest.strip_prefix(|c: char| {
+            c.is_ascii() && !matches!(c, 'Z' | '+' | '-') && (drop_allowed || !c.is_ascii_digit())
+        }) {
+            if parse_fromiso_zone(tail).is_some() {
+                rest = tail;
+            }
+        }
+        // Zero or one ASCII-whitespace char before the zone (space/tab
+        // probed; two spaces fail through to `None`). With a fraction,
+        // `fromisoformat` goes straight to the zone (`.5 +00:00` fails
+        // there; extended shapes are rescued by the regex layer's `\s*`
+        // instead).
+        if let Some(first) = rest.chars().next() {
+            if first.is_ascii_whitespace() {
+                rest = rest.get(first.len_utf8()..)?;
+            }
         }
     }
     let offset_us = parse_fromiso_zone(rest)?;
@@ -2058,6 +2229,149 @@ mod tests {
                 "2025-01-01T00:00:00+00:99",
                 "2024-12-31T22:21:00.000000+00:00",
             ),
+            // A bare fraction separator with no digits parses (as 0) when
+            // a valid zone follows immediately (review fuzz finding).
+            ("2025-01-01T00:00:00,Z", "2025-01-01T00:00:00.000000+00:00"),
+            ("2025-01-01T00:00:00.Z", "2025-01-01T00:00:00.000000+00:00"),
+            (
+                "2025-01-01T00:00:00,+05:30",
+                "2024-12-31T18:30:00.000000+00:00",
+            ),
+            ("2025-01-01T00:00,Z", "2025-01-01T00:00:00.000000+00:00"),
+            ("2025-01-01T00,Z", "2025-01-01T00:00:00.000000+00:00"),
+            ("20250101T000000,Z", "2025-01-01T00:00:00.000000+00:00"),
+            // Fraction + space + zone fails `fromisoformat` but the regex
+            // layer's `\s*` rescues extended shapes.
+            (
+                "2025-01-01T00:00:00.5 +00:00",
+                "2025-01-01T00:00:00.500000+00:00",
+            ),
+            // A lone digit immediately before a zone is ignored
+            // (value-independent; review fuzz finding).
+            ("2025-01-01T234+00", "2025-01-01T23:00:00.000000+00:00"),
+            ("2025-01-01T234Z", "2025-01-01T23:00:00.000000+00:00"),
+            ("2025-01-01T23456+00", "2025-01-01T23:45:00.000000+00:00"),
+            ("2025-01-01T23:456+00", "2025-01-01T23:45:00.000000+00:00"),
+            (
+                "2025-01-01T23:45:123+00",
+                "2025-01-01T23:45:12.000000+00:00",
+            ),
+            ("2025-01-011234+00", "2025-01-01T23:00:00.000000+00:00"),
+            // Single-digit minute/second after a colon fail `fromisoformat`
+            // but the regex layer accepts them.
+            ("2025-01-01T23:4+00", "2025-01-01T23:04:00.000000+00:00"),
+            ("2025-01-01T23:45:6+00", "2025-01-01T23:45:06.000000+00:00"),
+            ("2025-01-01T00:00:5+00", "2025-01-01T00:00:05.000000+00:00"),
+            // Weekday optional, Monday when absent (review fuzz finding).
+            ("2025-W01", "2024-12-30T00:00:00.000000+00:00"),
+            ("2025W01", "2024-12-30T00:00:00.000000+00:00"),
+            ("2025-W01T00", "2024-12-30T00:00:00.000000+00:00"),
+            ("2025W01T00", "2024-12-30T00:00:00.000000+00:00"),
+            // After `-`, a digit followed by another digit is time, not a
+            // weekday (`-` is the separator).
+            ("2025-W01-12", "2024-12-30T12:00:00.000000+00:00"),
+            ("2025-W01-12:34", "2024-12-30T12:34:00.000000+00:00"),
+            ("2025-W01-12Z", "2024-12-30T12:00:00.000000+00:00"),
+            // Basic week: required weekday, then separator-less time.
+            ("2025W01112", "2024-12-30T12:00:00.000000+00:00"),
+            ("2025W01112:34", "2024-12-30T12:34:00.000000+00:00"),
+            // Dash-less week: even a digit is the separator.
+            ("2025-W011234+00", "2024-12-30T23:00:00.000000+00:00"),
+            ("2025-W01005+00", "2024-12-30T05:00:00.000000+00:00"),
+            ("2025-W0112345", "2024-12-30T23:45:00.000000+00:00"),
+            // Basic week: invalid weekday digit is skipped, strict time.
+            ("2025W01005+00", "2024-12-30T05:00:00.000000+00:00"),
+            ("2025W01805+00", "2024-12-30T05:00:00.000000+00:00"),
+            ("2025W01905+00", "2024-12-30T05:00:00.000000+00:00"),
+            // Basic week: nosep-strict first, then first-digit-as-sep.
+            ("2025W01112345+00", "2024-12-30T23:45:00.000000+00:00"),
+            ("2025W011123+00", "2024-12-30T23:00:00.000000+00:00"),
+            ("2025W01192345+00", "2024-12-30T23:45:00.000000+00:00"),
+            ("2025W0112345+00", "2024-12-30T23:45:00.000000+00:00"),
+            ("2025W01112x+00", "2024-12-30T12:00:00.000000+00:00"),
+            // Drop allowed once a separator was consumed.
+            ("2025W01T234+00", "2024-12-30T23:00:00.000000+00:00"),
+            ("2025-W01-1T234+00", "2024-12-30T23:00:00.000000+00:00"),
+            ("2025W011T2345+00", "2024-12-30T23:45:00.000000+00:00"),
+            // A consumed component colon also enables the drop.
+            ("2025W01100:005+00", "2024-12-30T00:00:00.000000+00:00"),
+            ("2025W01100:00:005+00", "2024-12-30T00:00:00.000000+00:00"),
+            ("2025W01112:305+00", "2024-12-30T12:30:00.000000+00:00"),
+            ("2025W01123:59:595+00", "2024-12-30T23:59:59.000000+00:00"),
+            ("2025-01-01T00:005+00", "2025-01-01T00:00:00.000000+00:00"),
+            ("2025-01-01T00:005Z", "2025-01-01T00:00:00.000000+00:00"),
+            ("2025-01-01T12:345+00", "2025-01-01T12:34:00.000000+00:00"),
+            // Without a separator, bare-digit fractions need an even run.
+            ("2025W01123451212+00", "2024-12-30T23:45:12.120000+00:00"),
+            // One ASCII junk char (not `Z`/`+`/`-`) before a zone.
+            (
+                "2025-01-01T12:30:45x+00",
+                "2025-01-01T12:30:45.000000+00:00",
+            ),
+            (
+                "2025-01-01T12:30:45:+00",
+                "2025-01-01T12:30:45.000000+00:00",
+            ),
+            ("2025-01-01T12z+00", "2025-01-01T12:00:00.000000+00:00"),
+            ("2025-01-01T12\x0b+00", "2025-01-01T12:00:00.000000+00:00"),
+            // Six or more fraction digits: scan to the first zone leader
+            // (review fuzz finding).
+            (
+                "2024-02-29T12:30:45.123456:-05:30",
+                "2024-02-29T18:00:45.123456+00:00",
+            ),
+            (
+                "2025-01-01T12:30:45.123456:+00",
+                "2025-01-01T12:30:45.123456+00:00",
+            ),
+            (
+                "2025-01-01T12:30:45.123456xyz+00",
+                "2025-01-01T12:30:45.123456+00:00",
+            ),
+            (
+                "2025-01-01T12:30:45.123456  +00",
+                "2025-01-01T12:30:45.123456+00:00",
+            ),
+            (
+                "2025-01-01T12:30:45.123456:12-05:30",
+                "2025-01-01T18:00:45.123456+00:00",
+            ),
+            (
+                "2025-01-01T12:30:45.1234567:+00",
+                "2025-01-01T12:30:45.123456+00:00",
+            ),
+            // A `:` not followed by 2 digits is not a component separator
+            // (review fuzz finding).
+            ("2025-01-01T00:+00", "2025-01-01T00:00:00.000000+00:00"),
+            ("2025-01-01T00:00:+00", "2025-01-01T00:00:00.000000+00:00"),
+            ("2025-01-01T12:30:+00", "2025-01-01T12:30:00.000000+00:00"),
+            ("2025-01-01T12:30:Z", "2025-01-01T12:30:00.000000+00:00"),
+            // `:` is a fraction separator after an extended SS.
+            (
+                "2025-01-01T00:00:00:12+00",
+                "2025-01-01T00:00:00.120000+00:00",
+            ),
+            (
+                "2025-01-01T00:00:00:5+00",
+                "2025-01-01T00:00:00.500000+00:00",
+            ),
+            // Bare digits after a basic SS are a fraction (2+ of them; a
+            // single digit is skipped instead).
+            ("2025-01-01T00000012+00", "2025-01-01T00:00:00.120000+00:00"),
+            ("2025-01-01T00000001+00", "2025-01-01T00:00:00.010000+00:00"),
+            (
+                "2025-01-01T000000001+00",
+                "2025-01-01T00:00:00.001000+00:00",
+            ),
+            ("2025-01-01T0000001+00", "2025-01-01T00:00:00.000000+00:00"),
+            ("2025-01-01T12345+00", "2025-01-01T12:34:00.000000+00:00"),
+            ("2025-01-01T000012+00", "2025-01-01T00:00:12.000000+00:00"),
+            // Single-digit components fail `fromisoformat` but the regex
+            // layer accepts them.
+            ("2025-01-01T00:5+00", "2025-01-01T00:05:00.000000+00:00"),
+            ("2025-01-01T00:1+00", "2025-01-01T00:01:00.000000+00:00"),
+            ("2025-01-01T00:00:1+00", "2025-01-01T00:00:01.000000+00:00"),
+            ("2025-01-01T00:00:5+00", "2025-01-01T00:00:05.000000+00:00"),
         ];
         for (input, expected) in cases {
             assert_eq!(
@@ -2104,6 +2418,66 @@ mod tests {
             "10000-01-01T00:00:00",
             "2025-01-01T00:00:00+05:3000",
             "2025-01-01T00:00:00Z\n\n",
+            // Bare separator needs an immediate zone (review fuzz finding).
+            "2025-01-01T00:00:00, Z",
+            "2025-01-01T00:00:00 ,Z",
+            "2025-01-01T00:00:00,x",
+            "2025-01-01T00:00:00,,Z",
+            "2025-01-01T00:00:00,5,Z",
+            // Fraction + space + zone on a basic date: `fromisoformat`
+            // rejects the space and the regex cannot match the shape.
+            "20250101T000000.5 +00:00",
+            // The lone-digit drop needs an abutting zone (review fuzz).
+            "2025-01-01T234",
+            "2025-01-01T234.5+00",
+            "2025-01-01T234 +00",
+            "2025-01-01T23 4+00",
+            "2025-01-01T23:4512+00",
+            "2025-01-01T2345:6+00",
+            "2025-01-01T23:4567+00",
+            // Week shapes without a weekday (review fuzz).
+            "2025-W54",
+            "2025-W0112",
+            "2025-W011",
+            "2025-W01-112",
+            "2025-W01-71",
+            "2025-W01-0",
+            "2025W010",
+            "2025W0112",
+            // Basic week: no digit drop without a separator (review fuzz).
+            "2025W011234+00",
+            "2025W01123456+00",
+            "2025W0111234567+00",
+            "2025W010234+00",
+            "2025W0119234+00",
+            "2025W011934+00",
+            // ... and odd bare-digit runs are not fractions either.
+            "2025W011123456785+00",
+            "2025-01-01T12:3456+00",
+            // The junk-char skip excludes zone leaders, doublings, gaps,
+            // fractions, and non-ASCII (review fuzz).
+            "2025-01-01T12++00",
+            "2025-01-01T12ZZ",
+            "2025-01-01T12:30:45xy+00",
+            "2025-01-01T12:30:45x +00",
+            "2025-01-01T12:30:45.5x+00",
+            "2025-01-01T12é+00",
+            // The 6-digit scan needs a valid zone at the first leader;
+            // short fractions stay strict (review fuzz).
+            "2025-01-01T12:30:45.123456xyz",
+            "2025-01-01T12:30:45.123456a-b+00",
+            "2025-01-01T12:30:45.123456+-05:30",
+            "2025-01-01T12:30:45.123456Z+00",
+            "2025-01-01T12:30:45.123456+00junk",
+            "2025-01-01T12:30:45.5:+00",
+            // No second fraction, and `:` after basic components is not a
+            // fraction separator (review fuzz).
+            "2025-01-01T00:00:00.5:12+00",
+            "2025-01-01T00:00:00:12:34+00",
+            "2025-01-01T00::12+00",
+            "2025-01-01T0000:12+00",
+            "2025-01-01T000000:12+00",
+            "2025-01-01T00:00:0012+00",
         ];
         for input in cases {
             match parse_since(Some(input)) {
