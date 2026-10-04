@@ -74,6 +74,14 @@
 //!   attribute → DRF `SkipField`) while identifier responses include it —
 //!   one serializer, two key sets. Reproduced via `Option<bool>` +
 //!   `skip_serializing_if` ([`IssueDetailRow::is_intake`]).
+//! * Archive retrieve annotates only `is_subscribed`, so the seven
+//!   annotation-driven base fields skip too — a 28-key shape, not the
+//!   35-key retrieve set (FX-ISS-02 repeats the 35-key error; the
+//!   fixture-correction follow-up rides with PIDASHCONV-656, which owns
+//!   the archive handler). Reproduced via the tri-state base fields.
+//! * Retrieve renders the three counts `null` (bare `Subquery`, no
+//!   `Coalesce`) where identifier renders `0` — same field, two values.
+//!   Reproduced via `Some(None)` vs `Some(Some(0))`.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -152,13 +160,17 @@ pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 29] = [
 ];
 
 /// An `Issue` row for the 29-key base shape (`db/models/issue.py:115-229`):
-/// `state_id` / `estimate_point` / `parent_id` / `cycle_id` (annotation) /
-/// `assigned_pod_id` / `created_by` / `updated_by` render FK ids or `None`;
-/// the `*_id` attnames are DRF property-fallback `ReadOnlyField`s (same rule
-/// as the label port); `module_ids` / `label_ids` / `assignee_ids` and the
-/// three counts ride queryset annotations; datetimes are pre-rendered DRF
-/// strings; `archived_at` is a `DateField`; `is_synced` is the merged
-/// `issue_is_actively_synced` verdict, computed caller-side.
+/// `state_id` / `estimate_point` / `parent_id` / `assigned_pod_id` /
+/// `created_by` / `updated_by` render FK ids or `None`; the `*_id` attnames
+/// are DRF property-fallback `ReadOnlyField`s (same rule as the label port);
+/// datetimes are pre-rendered DRF strings; `archived_at` is a `DateField`;
+/// `is_synced` is the merged `issue_is_actively_synced` verdict, computed
+/// caller-side. The seven queryset-annotation fields (`cycle_id`, the three
+/// id lists, the three counts) are tri-state, exactly DRF's three states:
+/// `None` = unannotated → key omitted (`SkipField`, archive retrieve);
+/// `Some(None)` / `Some(list)` = annotated → key present, `null` or the
+/// value (retrieve renders the bare-`Subquery` counts `null`, the
+/// `Coalesce`d id lists `[]`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IssueDetailBaseRow<'a> {
     pub id: &'a str,
@@ -174,19 +186,19 @@ pub struct IssueDetailBaseRow<'a> {
     pub sequence_id: i32,
     pub project_id: &'a str,
     pub parent_id: Option<&'a str>,
-    pub cycle_id: Option<&'a str>,
+    pub cycle_id: Option<Option<&'a str>>,
     pub assigned_pod_id: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
-    pub module_ids: Vec<&'a str>,
-    pub label_ids: Vec<&'a str>,
-    pub assignee_ids: Vec<&'a str>,
-    pub sub_issues_count: i64,
+    pub module_ids: Option<Vec<&'a str>>,
+    pub label_ids: Option<Vec<&'a str>>,
+    pub assignee_ids: Option<Vec<&'a str>>,
+    pub sub_issues_count: Option<Option<i64>>,
     pub created_at: &'a str,
     pub updated_at: &'a str,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
-    pub attachment_count: i64,
-    pub link_count: i64,
+    pub attachment_count: Option<Option<i64>>,
+    pub link_count: Option<Option<i64>>,
     pub is_draft: bool,
     pub archived_at: Option<&'a str>,
     pub is_synced: bool,
@@ -194,7 +206,11 @@ pub struct IssueDetailBaseRow<'a> {
 
 /// App `IssueSerializer.to_representation` output (`issue.py:1039-1113`), in
 /// `Meta.fields` order. `sort_order` goes through `serde` `f64` (same caveat
-/// as the merged space port — exact for realistic orders).
+/// as the merged space port — exact for realistic orders). The seven
+/// annotation-driven fields skip when the row lacks the annotation
+/// (`None`), reproducing DRF's `SkipField` omission on archive retrieve.
+/// (Skip inside the flattened base serializes through the inner impl, so
+/// the outer key set shrinks — pinned by the 28-key test.)
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IssueDetailBaseView<'a> {
     pub id: &'a str,
@@ -210,19 +226,26 @@ pub struct IssueDetailBaseView<'a> {
     pub sequence_id: i32,
     pub project_id: &'a str,
     pub parent_id: Option<&'a str>,
-    pub cycle_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycle_id: Option<Option<&'a str>>,
     pub assigned_pod_id: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
-    pub module_ids: Vec<&'a str>,
-    pub label_ids: Vec<&'a str>,
-    pub assignee_ids: Vec<&'a str>,
-    pub sub_issues_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_ids: Option<Vec<&'a str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_ids: Option<Vec<&'a str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee_ids: Option<Vec<&'a str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub_issues_count: Option<Option<i64>>,
     pub created_at: &'a str,
     pub updated_at: &'a str,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
-    pub attachment_count: i64,
-    pub link_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment_count: Option<Option<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_count: Option<Option<i64>>,
     pub is_draft: bool,
     pub archived_at: Option<&'a str>,
     pub is_synced: bool,
@@ -639,9 +662,10 @@ pub const ISSUE_DETAIL_FIELDS: [&str; 36] = [
     "has_open_blockers",
 ];
 
-/// The retrieve / archive-retrieve key set: [`ISSUE_DETAIL_FIELDS`] minus
-/// `is_intake`, which those views do not annotate, so DRF's `SkipField`
-/// omits the key (`base.py:486-618`, `archive.py:222-255`). 35.
+/// The retrieve key set: [`ISSUE_DETAIL_FIELDS`] minus `is_intake`, which
+/// that view does not annotate, so DRF's `SkipField` omits the key
+/// (`base.py:486-618`). 35. (Archive retrieve is a different, 28-key shape
+/// — see [`ISSUE_DETAIL_ARCHIVE_FIELDS`].)
 pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 35] = [
     "id",
     "name",
@@ -669,6 +693,41 @@ pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 35] = [
     "updated_by",
     "attachment_count",
     "link_count",
+    "is_draft",
+    "archived_at",
+    "is_synced",
+    "description_html",
+    "is_subscribed",
+    "agent_ticker",
+    "agent_status",
+    "relations_summary",
+    "has_open_blockers",
+];
+
+/// The archive-retrieve key set: [`ISSUE_DETAIL_FIELDS`] minus the eight
+/// unannotated keys — the seven annotation-driven base fields plus
+/// `is_intake` — which DRF's `SkipField` omits (`archive.py:222-255`
+/// annotates only `is_subscribed`). 28.
+pub const ISSUE_DETAIL_ARCHIVE_FIELDS: [&str; 28] = [
+    "id",
+    "name",
+    "state_id",
+    "sort_order",
+    "completed_at",
+    "estimate_point",
+    "priority",
+    "complexity_score",
+    "start_date",
+    "target_date",
+    "sequence_id",
+    "project_id",
+    "parent_id",
+    "assigned_pod_id",
+    "agent_executor",
+    "created_at",
+    "updated_at",
+    "created_by",
+    "updated_by",
     "is_draft",
     "archived_at",
     "is_synced",
@@ -929,7 +988,9 @@ pub const ISSUE_PUBLIC_FIELDS: [&str; 13] = [
 
 /// An `Issue` row for public rendering (`issue.py:1415-1440`): scalar
 /// columns (`state` / `target_date` nullable), the state + project lite
-/// nests, and the reaction (`source="issue_reactions"`) + vote nests in
+/// nests (`state_detail` is `None` — rendered `null`, key present — for a
+/// stateless issue, `db/models/issue.py:122-128`; `project` is non-null),
+/// and the reaction (`source="issue_reactions"`) + vote nests in
 /// `Meta.ordering` (`-created_at`) order, caller-side.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IssuePublicRow<'a> {
@@ -938,7 +999,7 @@ pub struct IssuePublicRow<'a> {
     pub description_html: &'a str,
     pub sequence_id: i32,
     pub state: Option<&'a str>,
-    pub state_detail: StateLiteRow<'a>,
+    pub state_detail: Option<StateLiteRow<'a>>,
     pub project: &'a str,
     pub project_detail: ProjectLiteRow<'a>,
     pub workspace: &'a str,
@@ -958,7 +1019,7 @@ pub struct IssuePublicView<'a> {
     pub description_html: &'a str,
     pub sequence_id: i32,
     pub state: Option<&'a str>,
-    pub state_detail: StateLiteView<'a>,
+    pub state_detail: Option<StateLiteView<'a>>,
     pub project: &'a str,
     pub project_detail: ProjectLiteView<'a>,
     pub workspace: &'a str,
@@ -976,7 +1037,7 @@ pub fn issue_public_to_representation<'a>(row: &'a IssuePublicRow<'a>) -> IssueP
         description_html: row.description_html,
         sequence_id: row.sequence_id,
         state: row.state,
-        state_detail: state_lite_to_representation(&row.state_detail),
+        state_detail: row.state_detail.as_ref().map(state_lite_to_representation),
         project: row.project,
         project_detail: project_lite_to_representation(&row.project_detail),
         workspace: row.workspace,
@@ -1020,7 +1081,7 @@ pub const ACTIVE_RUN_STATUSES: [&str; 8] = [
 /// is the issue id. No tiebreak — Django emits none either. No
 /// soft-delete guard — `AgentRun` is a plain `Model`. The projection is
 /// the 16 `agent_run` columns the serializer reads, the joined
-/// `runner.name`, and the 12 `runner_live_state` columns (Django would
+/// `runner.name`, and the 11 `runner_live_state` columns (Django would
 /// select whole rows; this is the serializer-read subset, same rows).
 pub const LATEST_AGENT_RUN_SQL: &str = "SELECT agent_run.id, agent_run.status, agent_run.executor_kind, agent_run.queue_position, agent_run.runner_id, agent_run.created_at, agent_run.assigned_at, agent_run.started_at, agent_run.ended_at, agent_run.done_payload, agent_run.error, agent_run.error_code, agent_run.llm_model, agent_run.input_tokens, agent_run.output_tokens, agent_run.total_tokens, runner.name, runner_live_state.observed_run_id, runner_live_state.last_event_at, runner_live_state.last_event_kind, runner_live_state.last_event_summary, runner_live_state.agent_pid, runner_live_state.agent_subprocess_alive, runner_live_state.approvals_pending, runner_live_state.usage, runner_live_state.llm_model, runner_live_state.turn_count, runner_live_state.updated_at FROM agent_run LEFT JOIN runner ON runner.id = agent_run.runner_id LEFT JOIN runner_live_state ON runner_live_state.runner_id = runner.id WHERE agent_run.work_item_id = $1 ORDER BY agent_run.created_at DESC LIMIT 1";
 
@@ -1097,19 +1158,19 @@ mod tests {
             sequence_id: 639,
             project_id: PROJ,
             parent_id: None,
-            cycle_id: None,
+            cycle_id: Some(None),
             assigned_pod_id: None,
             agent_executor: None,
-            module_ids: vec![],
-            label_ids: vec![],
-            assignee_ids: vec![USER],
-            sub_issues_count: 2,
+            module_ids: Some(vec![]),
+            label_ids: Some(vec![]),
+            assignee_ids: Some(vec![USER]),
+            sub_issues_count: Some(Some(2)),
             created_at: "2026-10-02T21:42:34.824827Z",
             updated_at: "2026-10-04T03:57:29.850339Z",
             created_by: Some(USER),
             updated_by: None,
-            attachment_count: 0,
-            link_count: 1,
+            attachment_count: Some(Some(0)),
+            link_count: Some(Some(1)),
             is_draft: false,
             archived_at: None,
             is_synced: false,
@@ -1257,9 +1318,10 @@ mod tests {
 
     #[test]
     fn detail_retrieve_omits_is_intake() {
-        // TRACE: the ported SkipField bug — retrieve (:486-618) and archive
-        // retrieve (:222-255) do not annotate is_intake, so the key is
-        // absent (35 keys), while identifier renders it (even false).
+        // TRACE: the ported SkipField bug — retrieve (base.py:486-618) does
+        // not annotate is_intake, so the key is absent (35 keys), while
+        // identifier renders it (even false). Archive retrieve omits eight
+        // keys, not one — see detail_archive_has_28_keys.
         let summary = empty_summary();
         let row = IssueDetailRow {
             base: base_row(),
@@ -1281,6 +1343,73 @@ mod tests {
         assert!(!bytes.contains("is_intake"), "{bytes}");
         assert!(bytes.contains("\"agent_ticker\":null"), "{bytes}");
         assert!(bytes.contains("\"agent_status\":null"), "{bytes}");
+    }
+
+    #[test]
+    fn retrieve_counts_replay_null() {
+        // TRACE: base.py:486-618 — retrieve annotates the three counts as
+        // bare Subquery (no Coalesce), so zero renders present-null, not 0.
+        let mut base = base_row();
+        base.sub_issues_count = Some(None);
+        base.attachment_count = Some(None);
+        base.link_count = Some(None);
+        let bytes =
+            serde_json::to_string(&issue_detail_base_to_representation(&base)).expect("serializes");
+        assert!(bytes.contains("\"sub_issues_count\":null"), "{bytes}");
+        assert!(bytes.contains("\"attachment_count\":null"), "{bytes}");
+        assert!(bytes.contains("\"link_count\":null"), "{bytes}");
+        assert_eq!(
+            serialized_keys(&issue_detail_base_to_representation(&base)),
+            const_keys(&ISSUE_DETAIL_BASE_FIELDS)
+        );
+    }
+
+    #[test]
+    fn detail_archive_has_28_keys() {
+        // TRACE: archive.py:222-255 — archive retrieve annotates only
+        // is_subscribed, so the seven annotation-driven base fields plus
+        // is_intake skip (28 keys). Proves skip-inside-flatten shrinks the
+        // outer key set.
+        let summary = empty_summary();
+        let mut base = base_row();
+        base.cycle_id = None;
+        base.module_ids = None;
+        base.label_ids = None;
+        base.assignee_ids = None;
+        base.sub_issues_count = None;
+        base.attachment_count = None;
+        base.link_count = None;
+        let row = IssueDetailRow {
+            base,
+            description_html: "<p></p>",
+            is_subscribed: true,
+            is_intake: None,
+            ticker: None,
+            latest_run: None,
+            active_run: None,
+            run_count: 0,
+            blockers: &summary,
+        };
+        let view = issue_detail_to_representation(&row);
+        assert_eq!(
+            serialized_keys(&view),
+            const_keys(&ISSUE_DETAIL_ARCHIVE_FIELDS)
+        );
+        let bytes = serde_json::to_string(&view).expect("serializes");
+        for key in [
+            "cycle_id",
+            "module_ids",
+            "label_ids",
+            "assignee_ids",
+            "sub_issues_count",
+            "attachment_count",
+            "link_count",
+            "is_intake",
+        ] {
+            let needle = format!("\"{key}\":");
+            assert!(!bytes.contains(&needle), "{bytes}",);
+        }
+        assert!(bytes.contains("\"is_subscribed\":true"), "{bytes}");
     }
 
     #[test]
@@ -1585,12 +1714,12 @@ mod tests {
             description_html: "<p>hi</p>",
             sequence_id: 7,
             state: Some(STATE),
-            state_detail: StateLiteRow {
+            state_detail: Some(StateLiteRow {
                 id: STATE,
                 name: "Todo",
                 color: "#ccc",
                 group: "backlog",
-            },
+            }),
             project: PROJ,
             project_detail: ProjectLiteRow {
                 id: PROJ,
@@ -1625,6 +1754,42 @@ mod tests {
              \"workspace\":\"88888888-8888-8888-8888-888888888888\",\
              \"priority\":\"none\",\"target_date\":null,\"reactions\":[],\"votes\":[]}",
         );
+    }
+
+    #[test]
+    fn public_stateless_renders_null_state_detail() {
+        // TRACE: db/models/issue.py:122-128 — Issue.state is nullable and
+        // the nested StateLiteSerializer renders present-null for None.
+        let logo = serde_json::json!({"icon": "bug"});
+        let row = IssuePublicRow {
+            id: ISSUE,
+            name: "Stateless",
+            description_html: "<p></p>",
+            sequence_id: 8,
+            state: None,
+            state_detail: None,
+            project: PROJ,
+            project_detail: ProjectLiteRow {
+                id: PROJ,
+                identifier: "P",
+                name: "Pi",
+                cover_image: None,
+                cover_image_url: None,
+                logo_props: &logo,
+                description: "",
+                is_default: false,
+            },
+            workspace: "88888888-8888-8888-8888-888888888888",
+            priority: "none",
+            target_date: None,
+            reactions: vec![],
+            votes: vec![],
+        };
+        let view = issue_public_to_representation(&row);
+        assert_eq!(serialized_keys(&view), const_keys(&ISSUE_PUBLIC_FIELDS));
+        let bytes = serde_json::to_string(&view).expect("serializes");
+        assert!(bytes.contains("\"state\":null"), "{bytes}");
+        assert!(bytes.contains("\"state_detail\":null"), "{bytes}");
     }
 
     #[test]
