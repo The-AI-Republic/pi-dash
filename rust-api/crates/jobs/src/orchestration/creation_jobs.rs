@@ -667,7 +667,13 @@ fn db(error: sqlx::Error) -> CreationError {
 /// Python `datetime.isoformat()` for an aware UTC timestamp (`+00:00`,
 /// microseconds only when nonzero — `context.py:322`).
 fn render_isoformat(dt: DateTime<Utc>) -> String {
-    dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
+    // `AutoSi` trims trailing zeros (`.123000` -> `.123`); Python always
+    // prints six digits when microseconds are nonzero.
+    if dt.timestamp_subsec_micros() == 0 {
+        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+    } else {
+        dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+    }
 }
 
 async fn bundle_labels(
@@ -1530,6 +1536,26 @@ mod tests {
         // … while database failures propagate.
         let db = map_execution_error(ExecutionFieldsError::Db(sqlx::Error::RowNotFound));
         assert!(matches!(db, ExecutionError::Store(CreationError::Db(_))));
+    }
+
+    #[test]
+    fn comment_timestamps_use_isoformat_offset() {
+        // Mirrors `prompting::tests::comment_timestamps_use_isoformat_offset`:
+        // this file's `render_isoformat` must not fork the api helper.
+        let dt = DateTime::parse_from_rfc3339("2026-09-28T04:52:20.217834Z")
+            .expect("parse")
+            .with_timezone(&Utc);
+        assert_eq!(render_isoformat(dt), "2026-09-28T04:52:20.217834+00:00");
+        let whole = DateTime::parse_from_rfc3339("2026-09-28T04:52:20Z")
+            .expect("parse")
+            .with_timezone(&Utc);
+        assert_eq!(render_isoformat(whole), "2026-09-28T04:52:20+00:00");
+        // Millisecond-exact micros keep six digits (where chrono AutoSi
+        // would trim to ".123"): Python `isoformat()` always prints six.
+        let millis = DateTime::parse_from_rfc3339("2026-09-28T04:52:20.123Z")
+            .expect("parse")
+            .with_timezone(&Utc);
+        assert_eq!(render_isoformat(millis), "2026-09-28T04:52:20.123000+00:00");
     }
 
     // -- live harness ------------------------------------------------------
