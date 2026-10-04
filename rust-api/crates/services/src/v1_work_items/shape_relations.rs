@@ -43,19 +43,19 @@
 //!   [`validate_relation_remove`] is ported for direct-call parity and
 //!   fixture replay.
 //! * `IssueRelationResponseSerializer` — docs-only: the GET list
-//!   (`views/issue.py:2964-3015`) returns a hand-built dict and never
+//!   (`views/issue.py:2965-3008`) returns a hand-built dict and never
 //!   constructs this serializer (a plain `Serializer`, so no
 //!   `fields=`/`expand=` either). [`render_relation_response`] ports its
 //!   read shape.
 //! * The two Shows render the POST refetch (`many=True`,
-//!   `views/issue.py:3132-3137` — `RelatedIssueSerializer` when
+//!   `views/issue.py:3132-3136` — `RelatedIssueSerializer` when
 //!   `is_reverse`, else `IssueRelationSerializer`) with no
 //!   `fields=`/`expand=` kwargs, and the app-domain nested expansion
 //!   likewise passes none — so [`render_issue_relation`] and
 //!   [`render_related_issue`] take the `fields=`/`expand=` arguments for
 //!   full `BaseSerializer` parity, but `expand` is unreached over HTTP.
 //! * `duplicate`/`relates_to` grouping uses `list(set(...))`
-//!   (`views/issue.py:3008-3009`) — set order is per-process random; the
+//!   (`views/issue.py:3000-3001`) — set order is per-process random; the
 //!   shape renders given lists in given order and the nondeterminism
 //!   stays in the handler/queries layer.
 //!
@@ -69,8 +69,8 @@
 //!   [`VALIDATE_ISSUES_UNREACHABLE_MESSAGE`] (never returned), noted per
 //!   the fixture.
 //! * `IssueRelationSerializer.Meta.fields` lists `updated_at` BEFORE
-//!   `updated_by` (`issue.py:851-860`); `RelatedIssueSerializer` lists
-//!   `updated_by` before `updated_at` (`issue.py:893-905`). Both orders
+//!   `updated_by` (`issue.py:839-851`); `RelatedIssueSerializer` lists
+//!   `updated_by` before `updated_at` (`issue.py:882-896`). Both orders
 //!   ported verbatim.
 //! * `type_id`/`is_epic`/`state_id` vanish — not null — when
 //!   `issue.type`/`issue.state` is `None` (DRF `SkipField` on the
@@ -92,7 +92,7 @@ use super::shape_issue::{field_errors_body, BASE_EXPANSION_NAMES};
 use super::{filter_fields, FieldSpec, FilterError};
 
 /// `IssueRelationResponseSerializer` declared fields
-/// (`serializers/issue.py:738-768`), the GET grouping key order.
+/// (`serializers/issue.py:736-767`), the GET grouping key order.
 pub const RESPONSE_FIELDS: &[&str] = &[
     "blocking",
     "blocked_by",
@@ -105,7 +105,7 @@ pub const RESPONSE_FIELDS: &[&str] = &[
 ];
 
 /// `IssueRelationCreateSerializer.RELATION_TYPE_CHOICES` keys
-/// (`issue.py:776-785`), in source order.
+/// (`issue.py:778-789`), in source order.
 pub const RELATION_TYPE_CHOICES: &[&str] = &[
     "blocking",
     "blocked_by",
@@ -117,11 +117,11 @@ pub const RELATION_TYPE_CHOICES: &[&str] = &[
     "finish_after",
 ];
 
-/// `IssueRelationCreateSerializer` fields in declared order (`:788-799`):
+/// `IssueRelationCreateSerializer` fields in declared order (`:789-799`):
 /// combined field errors follow it (`both_bad` probe).
 pub const RELATION_CREATE_FIELDS: &[&str] = &["relation_type", "issues"];
 
-/// `IssueRelationSerializer.Meta.fields` (`issue.py:851-860`) — note
+/// `IssueRelationSerializer.Meta.fields` (`issue.py:839-851`) — note
 /// `updated_at` BEFORE `updated_by`.
 pub const RELATION_SHOW_FIELDS: &[&str] = &[
     "id",
@@ -137,7 +137,7 @@ pub const RELATION_SHOW_FIELDS: &[&str] = &[
     "updated_by",
 ];
 
-/// `RelatedIssueSerializer.Meta.fields` (`issue.py:893-905`) — note
+/// `RelatedIssueSerializer.Meta.fields` (`issue.py:882-896`) — note
 /// `updated_by` before `updated_at`, the reverse of the Show order.
 pub const RELATED_SHOW_FIELDS: &[&str] = &[
     "id",
@@ -172,7 +172,7 @@ pub const MSG_NO_DATA: &str = "No data provided";
 /// direct-call parity and never returned.
 pub const VALIDATE_ISSUES_UNREACHABLE_MESSAGE: &str = "At least one issue ID is required.";
 
-/// The GET grouping (`views/issue.py:3006-3015`): eight pre-ordered id
+/// The GET grouping (`views/issue.py:2997-3006`): eight pre-ordered id
 /// lists. UUIDs arrive already stringified; datetimes never appear here.
 /// Plain `Serializer`, so no `fields=`/`expand=` (DRF would `TypeError`
 /// on those kwargs).
@@ -488,7 +488,7 @@ impl RelationCreateError {
     }
 }
 
-/// Validates `relation_type` (`ChoiceField`, `issue.py:788-792`):
+/// Validates `relation_type` (`ChoiceField`, `issue.py:789-793`):
 /// absent → `required`, null → `null`, an exact choice key passes
 /// through, anything else → `invalid_choice` with the input rendered by
 /// Python `str()` (`'"{}".format(input)`, verified live for `5`, `True`,
@@ -514,7 +514,7 @@ fn validate_relation_type(raw: Option<&Value>) -> Result<String, Value> {
 }
 
 /// Validates `issues` (`ListField(child=UUIDField(), min_length=1)`,
-/// `issue.py:793-799`): absent → `required`, null → `null`, non-list →
+/// `issue.py:794-799`): absent → `required`, null → `null`, non-list →
 /// `not_a_list` with the Python type name, empty → `min_length`
 /// (a post-child validator in DRF, observably the empty-list error),
 /// else per-item UUID rules with failures collected into the
