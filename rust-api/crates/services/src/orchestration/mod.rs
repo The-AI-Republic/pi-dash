@@ -17,6 +17,10 @@
 //!   as async drivers over the [`creation::CreationSeam`] /
 //!   [`creation::FinalizeAgentRunSeam`] traits; the jobs-side
 //!   `LiveCreationStore` implements them over live SQL.
+//! * [`entries`] — `orchestration/service.py` entries (state-transition +
+//!   comment + scheduler dispatch) plus `orchestration/signals.py` as
+//!   explicit calls, as async drivers over the [`entries::EntriesSeam`] /
+//!   [`entries::PreflightSeam`] traits.
 //!
 //! Read-only queries ([`blockers`]) plus handler-executed write SQL
 //! ([`relations`]: relate `INSERT`, unrelate soft-delete `UPDATE`,
@@ -42,13 +46,16 @@
 //! (`rust-api/fixtures/orchestration/fx05_clock/`) alongside [`clock`],
 //! FX-ORCH-06
 //! (`rust-api/fixtures/orchestration/fx06_creation/`) alongside
-//! [`creation`].
+//! [`creation`], FX-ORCH-07
+//! (`rust-api/fixtures/orchestration/fx07_entries/`) alongside
+//! [`entries`].
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod blockers;
 pub mod clock;
 pub mod creation;
+pub mod entries;
 pub mod relations;
 
 pub use creation::{
@@ -98,6 +105,23 @@ pub use clock::{
     stop_for_switch, ClockError, ClockIssue, ClockOutcome, ClockWrite, ProjectClockPolicy,
     RunEndedRef, CREATE_TICKER_PARAMS, LOCK_TICKER_PARAMS, SAVE_CLOCK_PARAMS, SAVE_CLOCK_SQL,
     TICKER_CLOCK_FIELDS,
+};
+
+pub use entries::{
+    capture_prior_state, dispatch_scheduler_run, fire_error_log_line, fire_state_transition,
+    fire_transition_request, handle_issue_comment, handle_issue_state_transition, is_active_status,
+    is_delegation_trigger, no_default_pod_message, orchestration_error_count, queued_follow_up_sql,
+    scheduler_run_insert_returning_sql, BindingView, CommentRequest, CommentView, EntriesError,
+    EntriesSeam, FireOutcome, FireRequest, NewSchedulerRun, PreflightSeam, SchedulerOutcome,
+    SchedulerRequest, SchedulerView, TransitionRequest, WorkspaceView, BINDING_SELECT_SQL,
+    CLOCK_POLICY_SQL, DISPATCH_IMMEDIATE_ATTR, MOVED_BY_RUN_ATTR, OUTCOME_MODE_CREATE_ISSUE,
+    PREVIOUS_STATE_ATTR, PRIOR_STATE_SELECT_SQL, REASON_ACTIVE_RUN_EXISTS, REASON_BOT_COMMENT,
+    REASON_COALESCED, REASON_DISPATCH_DEFERRED, REASON_ENTRY_QUEUED, REASON_NOT_A_TRIGGER_STATE,
+    REASON_NO_ACTOR, REASON_NO_CREATOR, REASON_NO_DISPATCH, REASON_NO_ELIGIBLE_RUNNER,
+    REASON_NO_POD_AVAILABLE, REASON_NO_PRIOR_RUN, REASON_POOL_SPENT, REASON_PRIOR_RUN_ACTIVE,
+    REASON_STATE_NOT_ELIGIBLE, SCHEDULER_ALLOWED_ROLES, SCHEDULER_NO_CREATOR,
+    SCHEDULER_OUTCOME_MODE_REFUSAL, SCHEDULER_POD_OVERRIDE_SQL, SCHEDULER_RUN_INSERT_SQL,
+    SCHEDULER_SELECT_SQL,
 };
 
 pub use relations::{
