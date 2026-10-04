@@ -673,9 +673,19 @@ test(
       expect(await driver.ganttRowAddVisible(weekTitle)).toBe(true);
       await driver.ganttAddBlock(weekTitle, 2);
       expect(await driver.ganttBarExists(weekTitle)).toBe(true);
+      // The planted bar renders optimistically while the dates PATCH lands
+      // asynchronously (the run-10 re-run read nulls on the quarter step),
+      // so poll until both dates persist instead of reading once.
+      await expect
+        .poll(
+          async () => {
+            const current = await serverIssueDetails(seed.workspaceSlug, seed.projectId, weekId, owner.cookie);
+            return current.startDate !== null && current.targetDate !== null;
+          },
+          { timeout: 60_000 }
+        )
+        .toBe(true);
       const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, weekId, owner.cookie);
-      expect(details.startDate).not.toBeNull();
-      expect(details.targetDate).not.toBeNull();
       // The planted block spans start..start+1 (a one-day difference).
       const span = (Date.parse(details.targetDate ?? "") - Date.parse(details.startDate ?? "")) / 86_400_000;
       expect(span).toBe(1);
@@ -684,9 +694,18 @@ test(
     await test.step("quarter view plants a week-long block", async () => {
       await driver.ganttSetZoom("Quarter");
       await driver.ganttAddBlock(quarterTitle, 8);
+      // Same optimistic-bar race as the week step above: the bar mounts
+      // before the dates PATCH lands (the run-10 re-run read nulls here).
+      await expect
+        .poll(
+          async () => {
+            const current = await serverIssueDetails(seed.workspaceSlug, seed.projectId, quarterId, owner.cookie);
+            return current.startDate !== null && current.targetDate !== null;
+          },
+          { timeout: 60_000 }
+        )
+        .toBe(true);
       const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, quarterId, owner.cookie);
-      expect(details.startDate).not.toBeNull();
-      expect(details.targetDate).not.toBeNull();
       const span = (Date.parse(details.targetDate ?? "") - Date.parse(details.startDate ?? "")) / 86_400_000;
       expect(span).toBe(7);
       await serverDeleteIssue(seed.workspaceSlug, seed.projectId, quarterId, owner.cookie);
@@ -716,6 +735,18 @@ test(
       expect(await driver.ganttBarExists(title)).toBe(true);
       const id = await issueIdByName(seed, seed.projectId, owner.cookie, title);
       try {
+        // The quick-added bar renders optimistically while its dates PATCH
+        // lands asynchronously (same race as the 054 plants), so poll until
+        // both dates persist before asserting their exact values.
+        await expect
+          .poll(
+            async () => {
+              const current = await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie);
+              return current.startDate !== null && current.targetDate !== null;
+            },
+            { timeout: 60_000 }
+          )
+          .toBe(true);
         const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie);
         expect(details.startDate).toBe(localIsoDay(0));
         expect(details.targetDate).toBe(localIsoDay(1));
