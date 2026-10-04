@@ -153,7 +153,7 @@ test(
       thirdName,
       other?.id ?? fallback.id
     );
-    const label = await serverCreateLabel(seed.workspaceSlug, projectId, owner.cookie, `KB label ${suffix}`);
+    const label = await serverCreateLabel(seed.workspaceSlug, projectId, `KB label ${suffix}`, "#666666", owner.cookie);
     await serverPatchIssue(seed.workspaceSlug, projectId, firstId, { label_ids: [label.id] }, owner.cookie);
     const ctx = await openBoard(driver, seed, projectId, { group_by: "state" });
 
@@ -256,7 +256,7 @@ test(
     const states = await serverListStates(seed.workspaceSlug, projectId, owner.cookie);
     const home = states.find((state) => state.isDefault) ?? states[0];
     if (!home) throw new Error("[parity] scratch project has no states.");
-    const label = await serverCreateLabel(seed.workspaceSlug, projectId, owner.cookie, `KB lane ${suffix}`);
+    const label = await serverCreateLabel(seed.workspaceSlug, projectId, `KB lane ${suffix}`, "#666666", owner.cookie);
     const firstId = await serverCreateIssue(
       seed.workspaceSlug,
       projectId,
@@ -281,7 +281,7 @@ test(
     });
 
     await test.step("empty lanes hide when show-empty is off", async () => {
-      await serverCreateLabel(seed.workspaceSlug, projectId, owner.cookie, `KB empty ${suffix}`);
+      await serverCreateLabel(seed.workspaceSlug, projectId, `KB empty ${suffix}`, "#666666", owner.cookie);
       await driver.boardReloadIssues();
       await kanbanOpenWithRetry(driver);
       await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(3);
@@ -343,7 +343,7 @@ test(
     const states = await serverListStates(seed.workspaceSlug, projectId, owner.cookie);
     const home = states.find((state) => state.isDefault) ?? states[0];
     if (!home) throw new Error("[parity] scratch project has no states.");
-    const label = await serverCreateLabel(seed.workspaceSlug, projectId, owner.cookie, `KB fold ${suffix}`);
+    const label = await serverCreateLabel(seed.workspaceSlug, projectId, `KB fold ${suffix}`, "#666666", owner.cookie);
     const firstName = `KB fold a ${suffix}`;
     const firstId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, firstName, home.id);
     await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, `KB fold b ${suffix}`, home.id);
@@ -385,7 +385,13 @@ test(
   async ({ driver, seed }) => {
     const owner = await signInFreshUser(seed.email, seed.password);
     const suffix = uniqueSuffix().slice(0, 6);
-    const label = await serverCreateLabel(seed.workspaceSlug, seed.projectId, owner.cookie, `KB fold ${suffix}`);
+    const label = await serverCreateLabel(
+      seed.workspaceSlug,
+      seed.projectId,
+      `KB fold ${suffix}`,
+      "#666666",
+      owner.cookie
+    );
     const firstId = await issueIdByName(seed, seed.projectId, owner.cookie, seed.issueNames[0] ?? "");
     await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { label_ids: [label.id] }, owner.cookie);
     const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "state", sub_group_by: "labels" });
@@ -422,7 +428,7 @@ test(
     const owner = await signInFreshUser(seed.email, seed.password);
     const suffix = uniqueSuffix().slice(0, 6);
     const emptyName = `KB void ${suffix}`;
-    const emptyId = await serverCreateState(seed.workspaceSlug, seed.projectId, owner.cookie, emptyName, "unstarted");
+    const emptyId = await serverCreateState(seed.workspaceSlug, seed.projectId, emptyName, "unstarted", owner.cookie);
     const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "state" });
 
     await test.step("empty columns show by default and hide when show-empty is off", async () => {
@@ -505,9 +511,9 @@ test(
     const doneId = await serverCreateState(
       seed.workspaceSlug,
       seed.projectId,
-      owner.cookie,
       `Done ${uniqueSuffix().slice(0, 6)}`,
-      "completed"
+      "completed",
+      owner.cookie
     );
     const statesAfter = await serverListStates(seed.workspaceSlug, seed.projectId, owner.cookie);
     const done = statesAfter.find((state) => state.id === doneId);
@@ -580,16 +586,16 @@ test(
     const owner = await signInFreshUser(seed.email, seed.password);
     const suffix = uniqueSuffix().slice(0, 6);
     // An active cycle: membership calls reject completed (past-dated) cycles.
-    const cycle = await serverCreateCycle(
+    const cycleId = await serverCreateCycle(
       seed.workspaceSlug,
       seed.projectId,
-      owner.cookie,
       `KB cycle ${suffix}`,
       "2026-10-20",
-      "2026-11-20"
+      "2026-11-20",
+      owner.cookie
     );
     const firstId = await issueIdByName(seed, seed.projectId, owner.cookie, seed.issueNames[0] ?? "");
-    await serverAddIssuesToCycle(seed.workspaceSlug, seed.projectId, cycle.id, [firstId], owner.cookie);
+    await serverAddIssuesToCycle(seed.workspaceSlug, seed.projectId, cycleId, [firstId], owner.cookie);
     const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "state" });
     await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(1);
     const column = (await driver.kanbanColumns())[0]?.name ?? "";
@@ -604,7 +610,7 @@ test(
       // "Cycle context" is the cycle route, not a cycle grouping: the menu
       // renders only when the board opens with a cycle id in the path.
       await driver.openAuthenticated(
-        `/${seed.workspaceSlug}/projects/${seed.projectId}/cycles/${cycle.id}`,
+        `/${seed.workspaceSlug}/projects/${seed.projectId}/cycles/${cycleId}`,
         browserCookies(ctx.user)
       );
       await kanbanOpenWithRetry(driver);
@@ -621,7 +627,7 @@ test(
     });
 
     await test.step("cleanup removes the cycle and restores preferences", async () => {
-      await serverDeleteCycle(seed.workspaceSlug, seed.projectId, cycle.id, owner.cookie);
+      await serverDeleteCycle(seed.workspaceSlug, seed.projectId, cycleId, owner.cookie);
       await restoreBoard(seed, seed.projectId, ctx);
     });
   }
@@ -737,9 +743,9 @@ test(
     const doneId = await serverCreateState(
       seed.workspaceSlug,
       seed.projectId,
-      owner.cookie,
       `Done ${suffix}`,
-      "completed"
+      "completed",
+      owner.cookie
     );
     const [alpha] = seed.issueNames;
     if (!alpha) throw new Error("[parity] seed names missing.");
@@ -814,16 +820,23 @@ test(
     const states = await serverListStates(seed.workspaceSlug, projectId, owner.cookie);
     const home = states.find((state) => state.isDefault) ?? states[0];
     if (!home) throw new Error("[parity] scratch project has no states.");
-    const label = await serverCreateLabel(seed.workspaceSlug, projectId, owner.cookie, `KB member ${suffix}`);
-    const cycle = await serverCreateCycle(
+    const label = await serverCreateLabel(
       seed.workspaceSlug,
       projectId,
-      owner.cookie,
       `KB member ${suffix}`,
-      "2026-09-15",
-      "2026-11-15"
+      "#666666",
+      owner.cookie
     );
-    const module = await serverCreateModule(seed.workspaceSlug, projectId, owner.cookie, `KB member ${suffix}`);
+    const memberName = `KB member ${suffix}`;
+    const cycleId = await serverCreateCycle(
+      seed.workspaceSlug,
+      projectId,
+      memberName,
+      "2026-09-15",
+      "2026-11-15",
+      owner.cookie
+    );
+    const moduleId = await serverCreateModule(seed.workspaceSlug, projectId, memberName, owner.cookie);
     const alpha = `KB member a ${suffix}`;
     const beta = `KB member b ${suffix}`;
     const gamma = `KB member c ${suffix}`;
@@ -849,19 +862,19 @@ test(
     await test.step("module membership moves through the module call", async () => {
       await setBoardFilters(driver, seed, projectId, ctx, { group_by: "module" });
       await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
-      await driver.kanbanDragCardToColumnEnd(gamma, module.name);
-      await expect.poll(() => driver.kanbanColumnCards(module.name), { timeout: 60_000 }).toContain(gamma);
+      await driver.kanbanDragCardToColumnEnd(gamma, memberName);
+      await expect.poll(() => driver.kanbanColumnCards(memberName), { timeout: 60_000 }).toContain(gamma);
       expect((await serverIssueDetails(seed.workspaceSlug, projectId, gammaId, owner.cookie)).moduleIds).toContain(
-        module.id
+        moduleId
       );
     });
 
     await test.step("cycle membership moves through the cycle call", async () => {
       await setBoardFilters(driver, seed, projectId, ctx, { group_by: "cycle" });
       await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
-      await driver.kanbanDragCardToColumnEnd(alpha, cycle.name);
-      await expect.poll(() => driver.kanbanColumnCards(cycle.name), { timeout: 60_000 }).toContain(alpha);
-      expect((await serverIssueDetails(seed.workspaceSlug, projectId, alphaId, owner.cookie)).cycleId).toBe(cycle.id);
+      await driver.kanbanDragCardToColumnEnd(alpha, memberName);
+      await expect.poll(() => driver.kanbanColumnCards(memberName), { timeout: 60_000 }).toContain(alpha);
+      expect((await serverIssueDetails(seed.workspaceSlug, projectId, alphaId, owner.cookie)).cycleId).toBe(cycleId);
     });
 
     await test.step("cleanup removes the scratch project", async () => {
@@ -923,7 +936,7 @@ test(
       states.find((state) => !state.isDefault);
     if (!dest) throw new Error("[parity] scratch project has no second state.");
     const doneId = dest.id;
-    const label = await serverCreateLabel(seed.workspaceSlug, projectId, owner.cookie, `KB move ${suffix}`);
+    const label = await serverCreateLabel(seed.workspaceSlug, projectId, `KB move ${suffix}`, "#666666", owner.cookie);
     const alpha = `KB move a ${suffix}`;
     const beta = `KB move b ${suffix}`;
     const gamma = `KB move c ${suffix}`;
@@ -1066,21 +1079,22 @@ test(
   async ({ driver, seed }) => {
     const owner = await signInFreshUser(seed.email, seed.password);
     const suffix = uniqueSuffix().slice(0, 6);
-    const cycle = await serverCreateCycle(
+    const cycleName = `KB past ${suffix}`;
+    const cycleId = await serverCreateCycle(
       seed.workspaceSlug,
       seed.projectId,
-      owner.cookie,
-      `KB past ${suffix}`,
+      cycleName,
       "2026-01-05",
-      "2026-01-12"
+      "2026-01-12",
+      owner.cookie
     );
     const name = seed.issueNames[0] ?? "";
     const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "cycle" });
     await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
-    const none = (await driver.kanbanColumns()).find((entry) => entry.name !== cycle.name)?.name ?? "";
+    const none = (await driver.kanbanColumns()).find((entry) => entry.name !== cycleName)?.name ?? "";
 
     await test.step("the completed column overlays and keeps the card", async () => {
-      const { overlay } = await driver.kanbanDragHoldOverColumn(name, cycle.name);
+      const { overlay } = await driver.kanbanDragHoldOverColumn(name, cycleName);
       expect(overlay).not.toBeNull();
       expect(overlay ?? "").toMatch(/complet/i);
       expect(await driver.kanbanColumnCards(none)).toContain(name);
@@ -1089,7 +1103,7 @@ test(
     });
 
     await test.step("cleanup removes the cycle and restores preferences", async () => {
-      await serverDeleteCycle(seed.workspaceSlug, seed.projectId, cycle.id, owner.cookie);
+      await serverDeleteCycle(seed.workspaceSlug, seed.projectId, cycleId, owner.cookie);
       await restoreBoard(seed, seed.projectId, ctx);
     });
   }
@@ -1156,7 +1170,7 @@ test(
     const home = states.find((state) => state.isDefault) ?? states[0];
     if (!home) throw new Error("[parity] scratch project has no states.");
     for (let extra = states.length; extra < 8; extra += 1) {
-      await serverCreateState(seed.workspaceSlug, projectId, owner.cookie, `KB pad ${suffix} ${extra}`, "unstarted");
+      await serverCreateState(seed.workspaceSlug, projectId, `KB pad ${suffix} ${extra}`, "unstarted", owner.cookie);
     }
     // Created sequentially so the server order matches the name order and
     // the last name is deterministically at the column end.
