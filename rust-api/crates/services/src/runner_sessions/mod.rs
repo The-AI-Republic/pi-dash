@@ -5,13 +5,21 @@
 //! * [`guards`] — matcher consts + legacy/dispatch-gate queries
 //!   (`runner/services/matcher.py:44-81` consts, `:338-465`
 //!   legacy/guards; PIDASHCONV-555).
+//! * [`pubsub`] — send/close/revoke/remove verbs
+//!   (`runner/services/pubsub.py:34-176`; PIDASHCONV-553).
 //!
-//! This crate has no database handle, so every entry point is pure:
-//! status-set consts, SQL text in Django shape (quoted identifiers,
-//! `%s` params rendered as Postgres `$N`), and branch predicates
-//! over caller-fetched facts. The executing layer is the drain
-//! sub-issue (PIDASHCONV-552, same module) and the session handlers
-//! (PIDASHCONV-557/558/559).
+//! This crate has no database handle, so the [`guards`] entry points
+//! are pure: status-set consts, SQL text in Django shape (quoted
+//! identifiers, `%s` params rendered as Postgres `$N`), and branch
+//! predicates over caller-fetched facts. The executing layer is the
+//! drain sub-issue (PIDASHCONV-552, same module) and the session
+//! handlers (PIDASHCONV-557/558/559).
+//!
+//! The [`pubsub`] verbs are async drivers over the
+//! [`PubsubStore`](pubsub::PubsubStore) seam instead (the
+//! `RunCreationStore` / `GitStore` precedent): the failure policy
+//! lives here, the Redis + SQL effects land in the api/jobs crates
+//! that implement the seam.
 //!
 //! Reused, never redefined: `AgentRunStatus`
 //! (`pidash_types::runner_runs`), `AgentExecutorKind`
@@ -28,3 +36,10 @@
 //! replayed by the `#[cfg(test)]` suite beside the code.
 
 pub mod guards;
+pub mod pubsub;
+
+pub use pubsub::{
+    close_runner_session, send_connection_revoke, send_runner_remove, send_runner_revoke,
+    send_to_machine, send_to_runner, PubsubStore, SendOutcome, CLOSE_ACTIVE_SESSIONS_SQL,
+    CLOSE_RUNNER_SESSION_DEFAULT_CODE, FORCE_CLOSE_REASON,
+};
