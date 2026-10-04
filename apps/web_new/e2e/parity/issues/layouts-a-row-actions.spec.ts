@@ -490,7 +490,10 @@ test(
     const session = await signInSession(seed.email, seed.password);
     await resetPrefs(seed.workspaceSlug, seed.projectId, session);
     await openPath(driver, projectIssuesPath(seed), session);
-    const first = seed.issueNames[0] ?? "";
+    // The second seed issue: the first is intake-pending, and pending
+    // triage replaces the detail header ellipsis with Accept/Decline,
+    // so the standard header menu is pinned on a triage-free issue.
+    const first = seed.issueNames[1] ?? "";
     const href = await driver.layoutsRowHref(first);
     expect(href).toContain("/browse/");
 

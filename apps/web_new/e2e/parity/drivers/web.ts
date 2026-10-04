@@ -11134,40 +11134,61 @@ export class WebDriver implements ParityDriver {
     // wrap a div instead and never match. Both the browse header and
     // the peek header pack other nested buttons around it (help,
     // breadcrumb, collapse, emoji), so the search additionally
-    // requires the CustomMenu wrapper (which stamps data-main-menu)
-    // and takes the rightmost match in the header band.
+    // requires the CustomMenu wrapper (which stamps data-main-menu).
+    // Comment cards carry their own nested-button ellipses, and on a
+    // short page one can sit inside the header band right of the
+    // detail trigger — so banded candidates are tried right-to-left
+    // and the one whose menu carries the detail marker ("Make a
+    // copy", never present on comment menus) wins.
     const panel = this.page.locator("div.absolute.top-0.right-0.bottom-0").first();
     const scope = (await panel.count()) > 0 ? panel : this.page;
-    // The header renders after navigation, so poll for a banded
-    // trigger rather than scanning the empty page once.
+    // The header renders after navigation, so poll for banded
+    // triggers rather than scanning the empty page once.
     const all = scope.locator("xpath=.//button[.//button and ancestor::div[@data-main-menu='true']]");
     const deadline = Date.now() + WebDriver.LAYOUTS_FIRST_WAIT_MS;
-    let trigger: Locator | null = null;
+    let order: number[] = [];
     for (;;) {
       const count = await all.count();
-      let bestX = -1;
+      const boxed: { index: number; x: number }[] = [];
       for (let i = 0; i < count; i++) {
         const box = await all
           .nth(i)
           .boundingBox()
           .catch(() => null);
-        if (box && box.width > 0 && box.height > 0 && box.y > 30 && box.y < 120 && box.x > bestX) {
-          trigger = all.nth(i);
-          bestX = box.x;
+        if (box && box.width > 0 && box.height > 0 && box.y > 30 && box.y < 120) {
+          boxed.push({ index: i, x: box.x });
         }
       }
-      if (trigger) break;
+      if (boxed.length > 0) {
+        order = boxed.sort((a, b) => b.x - a.x).map((b) => b.index);
+        break;
+      }
       if (Date.now() >= deadline) throw new Error("[parity] detail header menu trigger not found.");
       await this.page.waitForTimeout(500);
     }
-    // Center the trigger before clicking: at the viewport edge a
+    // Center each candidate before clicking: at the viewport edge a
     // scrolled-under comment card can cover the click point. When a
     // stable overlay still wins the hit test, a forced dispatch opens
     // the menu the click cannot reach.
-    const found: Locator = trigger;
-    await found.evaluate((el) => el.scrollIntoView({ block: "center", inline: "center" })).catch(() => {});
-    await found.click({ timeout: 10_000 }).catch(async () => found.click({ force: true }));
-    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+    for (const index of order) {
+      const found = all.nth(index);
+      await found.evaluate((el) => el.scrollIntoView({ block: "center", inline: "center" })).catch(() => {});
+      await found.click({ timeout: 10_000 }).catch(async () => found.click({ force: true }));
+      const opened = await this.page
+        .getByRole("menuitem")
+        .first()
+        .waitFor({ timeout: 15_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!opened) {
+        await this.page.keyboard.press("Escape");
+        continue;
+      }
+      const items = await this.layoutsReadOpenMenuItems();
+      if (items.includes("Make a copy")) return;
+      await this.page.keyboard.press("Escape");
+    }
+    throw new Error("[parity] detail header menu trigger not found.");
   }
 
   async layoutsDetailMenuItems(): Promise<string[]> {
