@@ -782,7 +782,7 @@ fn negotiate_input(
             files: BTreeMap::new(),
             is_html: false,
         }),
-        shared_body::NegotiatedBody::JsonText(text) => {
+        shared_body::NegotiatedBody::JsonText { text, .. } => {
             if !json_allowed {
                 let content_type = headers
                     .get(header::CONTENT_TYPE)
@@ -805,7 +805,7 @@ fn negotiate_input(
                     JsonFail::Recursion => Denial::ServerError.into_response(),
                 })
         }
-        shared_body::NegotiatedBody::Form { map, files } => Ok(RequestData {
+        shared_body::NegotiatedBody::Form { map, files, .. } => Ok(RequestData {
             value: Value::Object(map),
             files,
             is_html: true,

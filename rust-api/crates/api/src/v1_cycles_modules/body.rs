@@ -2967,7 +2967,7 @@ mod codec_tests {
         ]
         .concat();
         match negotiate(ct, &bad, &CYCLE_BODY_SPEC).unwrap() {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form { map, files, .. } => {
                 assert!(map.is_empty());
                 assert!(files.is_empty());
             }

@@ -463,7 +463,7 @@ fn negotiate_data(
             files: BTreeMap::new(),
             is_html: false,
         }),
-        shared_body::NegotiatedBody::JsonText(text) => parse_request_data(text.as_bytes())
+        shared_body::NegotiatedBody::JsonText { text, .. } => parse_request_data(text.as_bytes())
             .map(|value| NegotiatedData {
                 value,
                 files: BTreeMap::new(),
@@ -475,7 +475,7 @@ fn negotiate_data(
                 }
                 JsonFail::Recursion => Denial::ServerError.into_response(),
             }),
-        shared_body::NegotiatedBody::Form { map, files } => {
+        shared_body::NegotiatedBody::Form { map, files, .. } => {
             let mut object = JObject::new();
             for (key, item) in map.iter() {
                 let jval = match item {
