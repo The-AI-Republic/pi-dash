@@ -396,10 +396,14 @@ pub enum Sort {
     Updated,
 }
 
-/// Parse `?sort=`; unknown values 400 with the exact view-inline body.
-/// The echoed value is the lowercased input.
+/// Parse `?sort=` (`(get("sort") or "rank").lower()`, `:2790`): absent
+/// *or empty* means `rank`; unknown values 400 with the exact
+/// view-inline body. The echoed value is the lowercased input.
 pub fn parse_sort(raw: Option<&str>) -> Result<Sort, ParamError> {
-    let sort = raw.unwrap_or("rank").to_lowercase();
+    let sort = raw
+        .filter(|text| !text.is_empty())
+        .unwrap_or("rank")
+        .to_lowercase();
     match sort.as_str() {
         "rank" => Ok(Sort::Rank),
         "-created" => Ok(Sort::Created),
@@ -1675,6 +1679,8 @@ mod tests {
     #[test]
     fn sort_vectors_and_error_body() {
         assert_eq!(parse_sort(None), Ok(Sort::Rank));
+        // `(get("sort") or "rank")`: empty string also defaults to rank.
+        assert_eq!(parse_sort(Some("")), Ok(Sort::Rank));
         assert_eq!(parse_sort(Some("rank")), Ok(Sort::Rank));
         assert_eq!(parse_sort(Some("RANK")), Ok(Sort::Rank));
         assert_eq!(parse_sort(Some("-created")), Ok(Sort::Created));
