@@ -56,9 +56,12 @@
 //!   binding — only a mismatched non-empty id 404s.
 //! * QUIRK-pod-passthrough (`machine_commands.py:134` + F7): `pod` is
 //!   NOT validated — passed to the daemon verbatim.
-//! * QUIRK-close-noop: `close_runner_session` after the nested revoke
-//!   finds no active sessions (S2 revoked them all) and no-ops; the
-//!   call is kept verbatim.
+//! * QUIRK-close-noop: `close_runner_session` after a fresh nested
+//!   revoke finds no active sessions (S2 revoked them all in-tx) and
+//!   no-ops; the store skips the pool close outright for S2'd runners
+//!   (a pool re-select would re-see the uncommitted rows and
+//!   self-deadlock on S2's locks). Already-revoked runners keep the
+//!   real close.
 //!
 //! # Documented approximations
 //!
@@ -82,8 +85,10 @@
 //! * `close_runner_session`'s session-row revokes run on pool checkouts,
 //!   not inside the delete transaction: the merged `PubsubStore` seam
 //!   takes `&self`, so only pool (autocommit) statements fit. The
-//!   success path is identical; only a mid-tail rollback would leave
-//!   already-revoked session rows behind (Python rolls those back too).
+//!   close runs only for already-revoked runners (fresh revokes skip
+//!   it — QUIRK-close-noop); only a mid-tail rollback after such a
+//!   close would leave its revokes committed (Python rolls those back
+//!   too).
 
 // Every handler returns a fully-rendered `Response` by design (the
 // manage.rs precedent, which carries the same allow).
@@ -452,10 +457,13 @@ fn decode_runner_gate(row: &sqlx::postgres::PgRow) -> Result<RunnerGate, Respons
     })
 }
 
-/// The R2 read plus the None-vs-False contract (the manage.rs
-/// `get_runner` precedent): missing row (or present-but-unviewable) →
-/// 404 `not found`, non-member of the runner's workspace → 403
-/// `forbidden`. The member query runs only for a present row.
+/// The R2 read plus the view gate (`runners.py:442-445`): missing
+/// row (or present-but-unviewable) → 404 `not found`. Unlike the
+/// manage.rs `get_runner` twin there is NO membership arm — Python's
+/// `delete` never calls `_get_runner`, whose `is_workspace_member` →
+/// 403 arm is get/patch-only, so a non-member owner still deletes.
+/// The member query runs only for a present row; its role feeds the
+/// manage gate's admin arm.
 async fn get_runner(
     pool: &PgPool,
     user_id: Uuid,
@@ -477,11 +485,10 @@ async fn get_runner(
         visibility: i32::from(runner.visibility),
         owned_by_requester: runner.owner_id == user_id,
     });
-    match manage_reads::detail_outcome(true, membership::is_workspace_member(role), can_view) {
-        manage_reads::DetailOutcome::Found => Ok((runner, role)),
-        manage_reads::DetailOutcome::Missing => Err(not_found()),
-        manage_reads::DetailOutcome::Forbidden => Err(forbidden()),
+    if !can_view {
+        return Err(not_found());
     }
+    Ok((runner, role))
 }
 
 /// `can_manage_runner` (`permissions.py:126-137`) over the resolved
@@ -965,6 +972,13 @@ struct DeleteStore<'t, 'c> {
     /// The runner whose nested revoke is running (set by S1, read by
     /// the handoff collector for its log line).
     current_runner: Option<Uuid>,
+    /// Runners whose S2 ran on this transaction (set by
+    /// [`RevokeStore::revoke_active_sessions`], read by
+    /// [`delete_svc::RunnerDeleteStore::close_runner_session`]): their
+    /// pool close is skipped — Python's in-tx re-select provably finds
+    /// nothing there, while a pool re-select would re-see the
+    /// uncommitted rows and self-deadlock on S2's row locks.
+    s2_revoked: Vec<Uuid>,
     ports: LivePorts,
 }
 
@@ -1022,8 +1036,14 @@ impl RevokeStore for DeleteStore<'_, '_> {
             .bind(runner_id)
             .execute(&mut **self.tx)
             .await
-            .map(|_| ())
-            .map_err(store_err)
+            .map_err(store_err)?;
+        // S2 ran: every active session for this runner is revoked on
+        // the tx, so the driver's later `close_runner_session` must
+        // skip the pool close (see its comment).
+        if !self.s2_revoked.contains(&runner_id) {
+            self.s2_revoked.push(runner_id);
+        }
+        Ok(())
     }
 
     async fn lock_active_runs(
@@ -1225,6 +1245,19 @@ impl delete_svc::RunnerDeleteStore for DeleteStore<'_, '_> {
     }
 
     async fn close_runner_session(&mut self, runner_id: Uuid) -> Result<(), RevokeError> {
+        // S2 already revoked every active session for this runner on
+        // the tx: Python's in-tx re-select (`runner_delete.py:91-94`
+        // tail) finds none and no-ops — reproduced here by skipping.
+        // A pool close would be wrong twice over: its SELECT cannot
+        // see S2's uncommitted revokes, and its per-session UPDATE
+        // would block on S2's row locks while the tx awaits close
+        // (self-deadlock; no lock timeout is configured). Runners
+        // whose nested revoke early-returned (already revoked, no S2)
+        // keep the real close — the tx holds no locks on their
+        // session rows, and Python genuinely processes any actives.
+        if self.s2_revoked.contains(&runner_id) {
+            return Ok(());
+        }
         let shared = PoolPubsub {
             pool: self.pool,
             redis: self.redis,
@@ -1655,6 +1688,7 @@ pub async fn runner_delete(
             runner: &state.settings().runner,
             effects: Vec::new(),
             current_runner: None,
+            s2_revoked: Vec::new(),
             ports: LivePorts::new(pool.clone(), &state),
         };
         match delete_svc::delete_runner(
@@ -1666,7 +1700,14 @@ pub async fn runner_delete(
         )
         .await
         {
-            Ok(_) => {}
+            // Frame/enqueue warnings Python logs (`pubsub.py`
+            // `logger.warning`/`logger.exception`, `models.py`
+            // unknown-reason warning).
+            Ok(outcome) => {
+                for warning in &outcome.warnings {
+                    tracing::warn!(warning = %warning, "delete_runner driver warning");
+                }
+            }
             Err(_) => return server_error(),
         }
         (std::mem::take(&mut store.effects), store.ports)
@@ -1740,6 +1781,7 @@ pub async fn machine_delete(
             runner: &state.settings().runner,
             effects: Vec::new(),
             current_runner: None,
+            s2_revoked: Vec::new(),
             ports: LivePorts::new(pool.clone(), &state),
         };
         // Python evaluates `timezone.now()` per nested `runner.revoke()`.
@@ -1753,7 +1795,13 @@ pub async fn machine_delete(
         )
         .await
         {
-            Ok(_) => {}
+            // Frame/enqueue warnings Python logs (same provenance as
+            // the runner-delete arm above).
+            Ok(outcome) => {
+                for warning in &outcome.warnings {
+                    tracing::warn!(warning = %warning, "delete_dev_machine driver warning");
+                }
+            }
             Err(_) => return server_error(),
         }
         (std::mem::take(&mut store.effects), store.ports)
