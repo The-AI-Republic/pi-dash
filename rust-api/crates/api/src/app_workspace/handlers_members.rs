@@ -3694,9 +3694,9 @@ mod tests {
         assert_eq!(keys, ["role", "workspace"]);
         assert_eq!(
             object["workspace"],
-            Value::Array(vec![Value::String(format!(
-                "\u{201c}abc\u{201d} is not a valid UUID."
-            ))]),
+            Value::Array(vec![Value::String(
+                "\u{201c}abc\u{201d} is not a valid UUID.".to_owned(),
+            )]),
         );
         let (_, errors) = case("true", false);
         assert_eq!(
