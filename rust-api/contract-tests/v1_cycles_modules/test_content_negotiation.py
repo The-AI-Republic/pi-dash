@@ -70,11 +70,6 @@ def _name(prefix):
     return f"{prefix} {uuid.uuid4().hex[:8]}"
 
 
-def _delete_module_members(db_conn, module_id):
-    with db_conn.cursor() as cur:
-        cur.execute("DELETE FROM module_members WHERE module_id = %s", [module_id])
-
-
 def _raw_post(admin_client, path, content_type_bytes, body):
     """POST with a verbatim Content-Type header (httpx cannot emit obs-text)."""
     parts = urllib.parse.urlparse(str(admin_client.base_url))
@@ -257,16 +252,13 @@ class TestFormBodies:
         )
         assert r.status_code == 201
         module_id = r.json()["id"]
-        try:
-            with db_conn.cursor() as cur:
-                cur.execute(
-                    "SELECT member_id FROM module_members WHERE module_id = %s",
-                    [module_id],
-                )
-                rows = cur.fetchall()
-            assert [str(row[0]) for row in rows] == [db.MEMBER_ID]
-        finally:
-            _delete_module_members(db_conn, module_id)
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "SELECT member_id FROM module_members WHERE module_id = %s",
+                [module_id],
+            )
+            rows = cur.fetchall()
+        assert [str(row[0]) for row in rows] == [db.MEMBER_ID]
 
     def test_form_missing_members_201(self, admin_client):
         r = admin_client.post(MODULES, data={"name": _name("CT")})
@@ -367,31 +359,23 @@ class TestIndexedMembers:
     # key is absent (exact-key `getlist` wins); error indexes are list
     # positions; dict-form renders the `MultiValueDict` echo.
 
-    def test_form_indexed_members_sparse_201(self, admin_client, db_conn):
+    def test_form_indexed_members_sparse_201(self, admin_client):
         r = admin_client.post(
             MODULES,
             content=f"name={_name('CT')}&members%5B0%5D={db.MEMBER_ID}&members%5B2%5D={db.MEMBER_ID}".encode(),
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         assert r.status_code == 201
-        module_id = r.json()["id"]
-        try:
-            assert r.json()["members"] == [db.MEMBER_ID]
-        finally:
-            _delete_module_members(db_conn, module_id)
+        assert r.json()["members"] == [db.MEMBER_ID]
 
-    def test_form_indexed_exact_wins(self, admin_client, db_conn):
+    def test_form_indexed_exact_wins(self, admin_client):
         r = admin_client.post(
             MODULES,
             content=f"name={_name('CT')}&members={db.MEMBER_ID}&members%5B0%5D=not-a-uuid".encode(),
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         assert r.status_code == 201
-        module_id = r.json()["id"]
-        try:
-            assert r.json()["members"] == [db.MEMBER_ID]
-        finally:
-            _delete_module_members(db_conn, module_id)
+        assert r.json()["members"] == [db.MEMBER_ID]
 
     def test_form_indexed_bad_uuid_position_zero(self, admin_client):
         r = admin_client.post(
