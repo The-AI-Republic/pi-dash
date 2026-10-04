@@ -14,6 +14,9 @@
 //! * [`queries_core`] — work-item list/detail query builders
 //!   (`api/views/issue.py` get_querysets + `utils/issue_filters.py:485-654`
 //!   + list ordering + paginate surface, PIDASHCONV-668).
+//! * [`queries_sub`] — subresource read query builders
+//!   (`api/views/issue.py` label/link/comment/activity/attachment/relation/
+//!   workpad querysets + `github_pr.py`/`git_code_review.py`, PIDASHCONV-669).
 //! * [`shape_relations`] — relation shapes (`IssueRelationResponse` /
 //!   `Create` / `Remove` / `Show`, `RelatedIssue`;
 //!   `api/serializers/issue.py:729-906`, PIDASHCONV-663).
@@ -36,6 +39,7 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod queries_core;
+pub mod queries_sub;
 pub mod shape_expand_search;
 pub mod shape_issue;
 pub mod shape_pages;
