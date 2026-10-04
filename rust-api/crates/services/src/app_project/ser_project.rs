@@ -82,9 +82,11 @@
 //!   propagates past the serializer as its own 409 response.
 //! * DRF `CharField` input runs before `validate_name` /
 //!   `validate_identifier`: absent → required, explicit `null` → null,
-//!   `""` → blank, bool/dict/list → invalid, int/float → `str()`, strip,
-//!   then `max_length` (code points). The stripped value is what the
-//!   `validate_*` checks and `validated_data` carry.
+//!   bool/dict/list → invalid, int/float → `str()`, Python-strip
+//!   (Rust `char::is_whitespace` plus `\x1c`-`\x1f`), stripped `""` →
+//!   blank, then the collecting validators — over-`max_length` (code
+//!   points) and NUL bytes — in that order. The stripped value is what
+//!   the `validate_*` checks and `validated_data` carry.
 //! * `validate()` runs only when no field errored; inside it the first
 //!   raise wins, in source order (executor gate, is-default guard, html
 //!   branch). Field errors across fields collect (`{"name": [...],
@@ -161,6 +163,10 @@ pub const MSG_INVALID: &str = "Not a valid string.";
 pub const MSG_NAME_MAX_LENGTH: &str = "Ensure this field has no more than 255 characters.";
 /// Over-`max_length` identifier (`max_length=12` from the model).
 pub const MSG_IDENTIFIER_MAX_LENGTH: &str = "Ensure this field has no more than 12 characters.";
+/// NUL bytes anywhere in the value (Django
+/// `ProhibitNullCharactersValidator`, which DRF appends to every
+/// `CharField`; same message for both fields).
+pub const MSG_NULL_CHARACTERS: &str = "Null characters are not allowed.";
 
 /// `validate_name` forbidden-characters detail
 /// (`serializers/project.py:51`).
@@ -187,20 +193,29 @@ pub const EMPTY_REQUIRED_BODY: &str =
     "{\"name\":[\"This field is required.\"],\"identifier\":[\"This field is required.\"]}";
 
 /// Failure of DRF `CharField` input parsing for `name` / `identifier`,
-/// before `validate_*` runs. Variants are in check order (absent, null,
-/// blank, wrong type, over length).
+/// before `validate_*` runs. The parse fns return every failure as a
+/// `Vec`, mirroring DRF's two stages: `Required` / `Null` / `Blank` /
+/// `InvalidType` fail fast and alone (like `run_validation` /
+/// `to_internal_value` raising immediately), while `MaxLength` and
+/// `NullCharacters` collect in validator order (like `run_validators`
+/// running `MaxLengthValidator` then
+/// `ProhibitNullCharactersValidator` and gathering each failure).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldInputError {
     /// The key is absent (DRF `required`).
     Required,
     /// Explicit JSON null (DRF `allow_null=False`).
     Null,
-    /// `""` (DRF `allow_blank=False`).
+    /// `""` after the strip (DRF `allow_blank=False`, checked on
+    /// `str(data).strip()`).
     Blank,
     /// Bool/dict/list (DRF `invalid`).
     InvalidType,
     /// Stripped value over `max_length` (code points).
     MaxLength,
+    /// Stripped value contains NUL (DRF
+    /// `ProhibitNullCharactersValidator`).
+    NullCharacters,
 }
 
 impl FieldInputError {
@@ -212,6 +227,7 @@ impl FieldInputError {
             FieldInputError::Blank => MSG_BLANK,
             FieldInputError::InvalidType => MSG_INVALID,
             FieldInputError::MaxLength => MSG_NAME_MAX_LENGTH,
+            FieldInputError::NullCharacters => MSG_NULL_CHARACTERS,
         }
     }
 
@@ -223,31 +239,36 @@ impl FieldInputError {
             FieldInputError::Blank => MSG_BLANK,
             FieldInputError::InvalidType => MSG_INVALID,
             FieldInputError::MaxLength => MSG_IDENTIFIER_MAX_LENGTH,
+            FieldInputError::NullCharacters => MSG_NULL_CHARACTERS,
         }
     }
 }
 
 /// Ports DRF `CharField` input parsing for `name` (`None` = key absent):
-/// absent → required, null → null, `""` → blank, bool/dict/list →
-/// invalid, int/float → `str()`, strip, over 255 chars → max_length.
-/// Returns the stripped value `validate_name` checks.
-pub fn parse_name_input(value: Option<&Value>) -> Result<String, FieldInputError> {
+/// absent → required, null → null, bool/dict/list → invalid, int/float →
+/// `str()`, Python-strip, stripped `""` → blank, then the collecting
+/// validators (over 255 chars → max_length, NUL bytes → null-characters,
+/// in that order). Returns the stripped value `validate_name` checks.
+pub fn parse_name_input(value: Option<&Value>) -> Result<String, Vec<FieldInputError>> {
     parse_char_input(value, MAX_NAME_CHARS)
 }
 
 /// Ports DRF `CharField` input parsing for `identifier`, same rules with
 /// `max_length=12`. Returns the stripped (NOT uppercased — B-case-dup)
 /// value `validate_identifier` checks.
-pub fn parse_identifier_input(value: Option<&Value>) -> Result<String, FieldInputError> {
+pub fn parse_identifier_input(value: Option<&Value>) -> Result<String, Vec<FieldInputError>> {
     parse_char_input(value, MAX_IDENTIFIER_CHARS)
 }
 
-fn parse_char_input(value: Option<&Value>, max_chars: usize) -> Result<String, FieldInputError> {
+fn parse_char_input(
+    value: Option<&Value>,
+    max_chars: usize,
+) -> Result<String, Vec<FieldInputError>> {
     let Some(value) = value else {
-        return Err(FieldInputError::Required);
+        return Err(vec![FieldInputError::Required]);
     };
     if value.is_null() {
-        return Err(FieldInputError::Null);
+        return Err(vec![FieldInputError::Null]);
     }
     // DRF coerces int/float via str() but rejects bools: `isinstance(data,
     // bool) or not isinstance(data, (str, int, float))` fails 'invalid'.
@@ -256,18 +277,35 @@ fn parse_char_input(value: Option<&Value>, max_chars: usize) -> Result<String, F
     let raw = match value {
         Value::String(s) => s.clone(),
         Value::Number(n) => n.to_string(),
-        _ => return Err(FieldInputError::InvalidType),
+        _ => return Err(vec![FieldInputError::InvalidType]),
     };
-    if raw.is_empty() {
-        return Err(FieldInputError::Blank);
+    // `trim_whitespace=True` (DRF default): Python `str.strip()` (no args),
+    // which is Rust `char::is_whitespace` plus the `Cc` controls
+    // `\x1c`-`\x1f` (`'\x1c'.isspace()` is true in CPython; `"\x1c"` alone
+    // fails blank in DRF). Same predicate as the handler-layer ports.
+    let stripped: String = raw
+        .trim_matches(|c: char| c.is_whitespace() || ('\x1c'..='\x1f').contains(&c))
+        .to_owned();
+    if stripped.is_empty() {
+        return Err(vec![FieldInputError::Blank]);
     }
-    // `trim_whitespace=True` (DRF default); `str::trim` strips Unicode
-    // whitespace like Python's `strip`.
-    let stripped = raw.trim().to_string();
+    // DRF `run_validators` collects every failure in validator order
+    // (`MaxLengthValidator` before `ProhibitNullCharactersValidator`), so
+    // an over-long value with NUL reports both messages. (DRF also appends
+    // `ProhibitSurrogateCharactersValidator`, but lone surrogates never
+    // reach us: `serde_json` rejects them at parse, like the other ports.)
+    let mut errors = Vec::new();
     if stripped.chars().count() > max_chars {
-        return Err(FieldInputError::MaxLength);
+        errors.push(FieldInputError::MaxLength);
     }
-    Ok(stripped)
+    if stripped.contains('\0') {
+        errors.push(FieldInputError::NullCharacters);
+    }
+    if errors.is_empty() {
+        Ok(stripped)
+    } else {
+        Err(errors)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1812,21 +1850,23 @@ mod tests {
 
     #[test]
     fn field_input_parsing_matches_drf() {
-        // Absent → required; null → null; "" → blank.
-        assert_eq!(parse_name_input(None), Err(FieldInputError::Required));
+        // Absent → required; null → null; "" → blank. Each fails fast and
+        // alone, like DRF raising immediately from `run_validation` /
+        // `to_internal_value`.
+        assert_eq!(parse_name_input(None), Err(vec![FieldInputError::Required]));
         assert_eq!(
             parse_name_input(Some(&Value::Null)),
-            Err(FieldInputError::Null)
+            Err(vec![FieldInputError::Null])
         );
         assert_eq!(
             parse_name_input(Some(&json!(""))),
-            Err(FieldInputError::Blank)
+            Err(vec![FieldInputError::Blank])
         );
         // Bool/dict/list → invalid; int/float coerce via str().
         for bad in [json!(true), json!(false), json!({"a": 1}), json!([1])] {
             assert_eq!(
                 parse_name_input(Some(&bad)),
-                Err(FieldInputError::InvalidType),
+                Err(vec![FieldInputError::InvalidType]),
                 "input {bad}"
             );
         }
@@ -1841,12 +1881,12 @@ mod tests {
         assert!(parse_name_input(Some(&json!("x".repeat(255).as_str()))).is_ok());
         assert_eq!(
             parse_name_input(Some(&json!("x".repeat(256).as_str()))),
-            Err(FieldInputError::MaxLength)
+            Err(vec![FieldInputError::MaxLength])
         );
         assert!(parse_identifier_input(Some(&json!("x".repeat(12).as_str()))).is_ok());
         assert_eq!(
             parse_identifier_input(Some(&json!("x".repeat(13).as_str()))),
-            Err(FieldInputError::MaxLength)
+            Err(vec![FieldInputError::MaxLength])
         );
         // Messages (probed against live DRF 3.18.1).
         assert_eq!(
@@ -1872,6 +1912,88 @@ mod tests {
         assert_eq!(
             FieldInputError::MaxLength.identifier_detail(),
             "Ensure this field has no more than 12 characters."
+        );
+        assert_eq!(
+            FieldInputError::NullCharacters.name_detail(),
+            "Null characters are not allowed."
+        );
+        assert_eq!(
+            FieldInputError::NullCharacters.identifier_detail(),
+            "Null characters are not allowed."
+        );
+    }
+
+    #[test]
+    fn field_input_blank_after_strip_and_nul_match_drf() {
+        // Blank is checked on the stripped value (DRF `run_validation`:
+        // `str(data).strip() == ''`), so whitespace-only input fails for
+        // both fields — including the `Cc` controls `\x1c`-`\x1f`, which
+        // CPython's `strip` removes (probed: `"\x1c"` → blank).
+        for blank in ["   ", "\t \n", "\u{1c}", "\u{1c} \u{1f}"] {
+            assert_eq!(
+                parse_name_input(Some(&json!(blank))),
+                Err(vec![FieldInputError::Blank]),
+                "name input {blank:?}"
+            );
+            assert_eq!(
+                parse_identifier_input(Some(&json!(blank))),
+                Err(vec![FieldInputError::Blank]),
+                "identifier input {blank:?}"
+            );
+        }
+        // Interior `\x1c` is not stripped (probed: `"a\x1cb"` passes DRF).
+        assert_eq!(
+            parse_name_input(Some(&json!("a\u{1c}b"))),
+            Ok("a\u{1c}b".to_string())
+        );
+        // NUL bytes fail alone (probed: `"a\x00b"`, `"\x00"`, `"  \x00  "`
+        // each → `['Null characters are not allowed.']`; the padded case
+        // strips to `"\x00"`, which is not blank).
+        for nul in ["a\x00b", "\x00", "  \x00  "] {
+            assert_eq!(
+                parse_name_input(Some(&json!(nul))),
+                Err(vec![FieldInputError::NullCharacters]),
+                "name input {nul:?}"
+            );
+            assert_eq!(
+                parse_identifier_input(Some(&json!(nul))),
+                Err(vec![FieldInputError::NullCharacters]),
+                "identifier input {nul:?}"
+            );
+        }
+        // `run_validators` collects: over-long with NUL reports both, in
+        // max_length-then-NUL order (probed on both `max_length` wordings).
+        let over_nul = format!("{}\x00", "x".repeat(255));
+        let errors = parse_name_input(Some(&json!(over_nul))).expect_err("fails");
+        assert_eq!(
+            errors,
+            vec![FieldInputError::MaxLength, FieldInputError::NullCharacters]
+        );
+        assert_eq!(
+            errors
+                .iter()
+                .map(|error| error.name_detail())
+                .collect::<Vec<_>>(),
+            [
+                "Ensure this field has no more than 255 characters.",
+                "Null characters are not allowed."
+            ]
+        );
+        let over_nul = format!("{}\x00", "x".repeat(12));
+        let errors = parse_identifier_input(Some(&json!(over_nul))).expect_err("fails");
+        assert_eq!(
+            errors,
+            vec![FieldInputError::MaxLength, FieldInputError::NullCharacters]
+        );
+        assert_eq!(
+            errors
+                .iter()
+                .map(|error| error.identifier_detail())
+                .collect::<Vec<_>>(),
+            [
+                "Ensure this field has no more than 12 characters.",
+                "Null characters are not allowed."
+            ]
         );
     }
 
