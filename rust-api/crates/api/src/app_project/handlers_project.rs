@@ -3547,7 +3547,14 @@ async fn validate_one_field(
             let name =
                 match pidash_services::app_project::ser_project::parse_name_input(Some(value)) {
                     Ok(name) => name,
-                    Err(error) => return fail(error.name_detail().to_owned()),
+                    Err(errors) => {
+                        return fail_many(
+                            errors
+                                .iter()
+                                .map(|error| error.name_detail().to_owned())
+                                .collect(),
+                        )
+                    }
                 };
             if mode != ValidateMode::Full {
                 if let Err(error) = validate_name_unique(pool, workspace_id, instance, &name).await
@@ -3565,7 +3572,14 @@ async fn validate_one_field(
                 Some(value),
             ) {
                 Ok(identifier) => identifier,
-                Err(error) => return fail(error.identifier_detail().to_owned()),
+                Err(errors) => {
+                    return fail_many(
+                        errors
+                            .iter()
+                            .map(|error| error.identifier_detail().to_owned())
+                            .collect(),
+                    )
+                }
             };
             if mode != ValidateMode::Full {
                 if let Err(error) =
