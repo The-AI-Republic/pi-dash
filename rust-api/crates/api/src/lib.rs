@@ -57,6 +57,7 @@ pub mod v1_assets;
 pub mod v1_cycles_modules;
 pub mod v1_openapi;
 pub mod v1_projects;
+pub mod v1_work_items;
 pub mod web;
 
 pub use edge::{EdgeFlags, EdgeHandle, Prefix, DEFAULT_UPSTREAM};
