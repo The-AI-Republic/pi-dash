@@ -70,6 +70,9 @@ md-5 = "0.10.6"
 # `CiphertextBlob`/`Plaintext`. Same 0.22 line the db crate builds on, so
 # the lockfile gains no new downloads.
 base64 = "0.22"
+# D-20 exotic charsets (PIDASHCONV-693): `bz2_codec` decode. Pure-Rust
+# default backend (libbz2-rs-sys), no system dependency.
+bzip2 = "0.6"
 # Magic-link sign-in/up views read urlencoded forms via the D-16 email
 # line below (`serde_urlencoded`; same 0.7 line, no new downloads).
 # Assistant config validation (D-06): IDN second pass of the Django

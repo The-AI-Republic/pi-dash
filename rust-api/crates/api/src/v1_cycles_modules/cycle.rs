@@ -2581,7 +2581,29 @@ pub async fn expand_labels(
 /// (DRF's empty-stream default); malformed JSON is the DRF `ParseError`
 /// with CPython's error text; past the depth cap is Django's JSON 500.
 pub fn parse_body_value(raw: &[u8]) -> Result<JVal, Denial> {
-    super::json_cpython::parse_request_data(raw).map_err(|fail| match fail {
+    parse_body_value_spans(raw, &[])
+}
+
+/// [`parse_body_value`] over charset-decoded text carrying lone-surrogate
+/// spans (exotic charsets, PIDASHCONV-693): placeholders become `Sur`
+/// units inside the parsed strings.
+pub fn parse_body_value_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal, Denial> {
+    super::json_cpython::parse_request_data_spans(raw, surr).map_err(|fail| match fail {
+        JsonFail::Message(detail) => Denial::BadDetail(format!(
+            "{}{detail}",
+            super::json_cpython::JSON_PARSE_PREFIX
+        )),
+        JsonFail::Recursion => Denial::ServerError,
+    })
+}
+
+/// [`parse_body_value_spans`] over already-negotiated JSON text: no
+/// empty shortcut. CL>0 with empty decoded text (a bytes transform or
+/// tail-drop that yields `""`, e.g. base64 `!!!` or BOM + `\xe4`) is
+/// the EOF `ParseError`, never `{}` — the module path (`parse_json_map`)
+/// already works this way; verified live against Django.
+pub fn parse_body_value_text_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal, Denial> {
+    super::json_cpython::parse_request_bytes_spans(raw, surr).map_err(|fail| match fail {
         JsonFail::Message(detail) => Denial::BadDetail(format!(
             "{}{detail}",
             super::json_cpython::JSON_PARSE_PREFIX
@@ -2595,7 +2617,13 @@ pub fn parse_body_value(raw: &[u8]) -> Result<JVal, Denial> {
 /// non-object body 500s on `.get` (`AttributeError` — verified live for
 /// `[]`/`null`/`"x"`/`5`/`true` on all three paths).
 pub fn parse_object_or_500(raw: &[u8]) -> Result<JObject, Denial> {
-    parse_body_value(raw)?
+    parse_object_or_500_spans(raw, &[])
+}
+
+/// [`parse_object_or_500`] over charset-decoded text carrying
+/// lone-surrogate spans (exotic charsets, PIDASHCONV-693).
+pub fn parse_object_or_500_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JObject, Denial> {
+    parse_body_value_spans(raw, surr)?
         .into_object()
         .ok_or(Denial::ServerError)
 }
@@ -2655,20 +2683,39 @@ fn map_body_error(error: super::body::BodyError) -> Denial {
 }
 
 /// A form/multipart text map as a [`JObject`]: form producers only emit
-/// strings and arrays of strings, all surrogate-free Rust text.
-fn jobject_from_form_map(map: &serde_json::Map<String, Value>) -> JObject {
+/// strings and arrays of strings; exotic charsets add lone-surrogate
+/// spans (aligned per key: scalars one entry, arrays one per item),
+/// which become dirty units for the coerce layer's surrogate check.
+fn jobject_from_form_map(
+    map: &serde_json::Map<String, Value>,
+    surr: &BTreeMap<String, Vec<Vec<(usize, u16)>>>,
+) -> JObject {
     let mut object = JObject::new();
     for (key, value) in map.iter() {
+        let spans = surr.get(key);
         let jval = match value {
-            Value::String(text) => JVal::Str(JStr::from_clean(text.clone())),
+            Value::String(text) => {
+                let spans = spans
+                    .and_then(|v| v.first())
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                JVal::Str(JStr::from_dirty(text, spans))
+            }
             // Null placeholders (indexed-file members) never occur for
             // cycle (no list fields) but map totally anyway.
             Value::Null => JVal::Null,
             Value::Array(items) => JVal::Array(
                 items
                     .iter()
-                    .map(|item| match item {
-                        Value::String(text) => JVal::Str(JStr::from_clean(text.clone())),
+                    .enumerate()
+                    .map(|(i, item)| match item {
+                        Value::String(text) => {
+                            let spans = spans
+                                .and_then(|v| v.get(i))
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]);
+                            JVal::Str(JStr::from_dirty(text, spans))
+                        }
                         Value::Null => JVal::Null,
                         _ => unreachable!("form lists hold strings and null placeholders"),
                     })
@@ -2695,12 +2742,15 @@ fn parse_body_value_ct(
         super::body::NegotiatedBody::Empty => {
             Ok((JVal::Object(JObject::new()), BTreeMap::new(), false))
         }
-        super::body::NegotiatedBody::JsonText(text) => {
-            parse_body_value(text.as_bytes()).map(|value| (value, BTreeMap::new(), false))
+        super::body::NegotiatedBody::JsonText { text, surr } => {
+            parse_body_value_text_spans(text.as_bytes(), &surr)
+                .map(|value| (value, BTreeMap::new(), false))
         }
-        super::body::NegotiatedBody::Form { map, files } => {
-            Ok((JVal::Object(jobject_from_form_map(&map)), files, true))
-        }
+        super::body::NegotiatedBody::Form { map, files, surr } => Ok((
+            JVal::Object(jobject_from_form_map(&map, &surr)),
+            files,
+            true,
+        )),
     }
 }
 
@@ -2715,11 +2765,14 @@ fn parse_object_or_500_ct(
         .map_err(map_body_error)?
     {
         super::body::NegotiatedBody::Empty => Ok((JObject::new(), BTreeMap::new(), false)),
-        super::body::NegotiatedBody::JsonText(text) => {
-            parse_object_or_500(text.as_bytes()).map(|object| (object, BTreeMap::new(), false))
+        super::body::NegotiatedBody::JsonText { text, surr } => {
+            parse_body_value_text_spans(text.as_bytes(), &surr)?
+                .into_object()
+                .ok_or(Denial::ServerError)
+                .map(|object| (object, BTreeMap::new(), false))
         }
-        super::body::NegotiatedBody::Form { map, files } => {
-            Ok((jobject_from_form_map(&map), files, true))
+        super::body::NegotiatedBody::Form { map, files, surr } => {
+            Ok((jobject_from_form_map(&map, &surr), files, true))
         }
     }
 }
@@ -7919,6 +7972,20 @@ mod tests {
             Denial::BadDetail(message) => assert_eq!(
                 message,
                 "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+            ),
+            denial => panic!("expected BadDetail, got {denial:?}"),
+        }
+    }
+
+    /// Negotiated JSON text (PIDASHCONV-693): CL>0 with empty decoded
+    /// text is the EOF `ParseError`, never `{}` (raw `parse_body(b"")`
+    /// keeps the empty shortcut — that is the CL:0 path).
+    #[test]
+    fn negotiated_json_text_empty_is_eof() {
+        match parse_body_value_text_spans(b"", &[]).expect_err("decoded-empty 400s") {
+            Denial::BadDetail(message) => assert_eq!(
+                message,
+                "JSON parse error - Expecting value: line 1 column 1 (char 0)"
             ),
             denial => panic!("expected BadDetail, got {denial:?}"),
         }

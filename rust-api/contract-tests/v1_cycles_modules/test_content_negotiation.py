@@ -14,6 +14,8 @@ import socket
 import urllib.parse
 import uuid
 
+import pytest
+
 from _harness import api, db
 
 SLUG = db.WS_A_SLUG
@@ -598,3 +600,585 @@ class TestEmptyBodies:
         r = admin_client.send(request)
         assert r.status_code == 400
         assert "name" in r.json()
+
+
+SERVER_ERROR = {"error": "Something went wrong please try again later"}
+
+
+def _cycles_post(admin_client, content_type, body):
+    return admin_client.post(CYCLES, content=body, headers={"Content-Type": content_type})
+
+
+class TestCharsetExotic693:
+    """PIDASHCONV-693: the full CPython codec table via `charset=`."""
+
+    # -- JSON + single-byte -------------------------------------------
+
+    def test_json_cp1252_ok(self, admin_client):
+        body = '{"name": "caf\xe9"}'.encode("cp1252")
+        r = _cycles_post(admin_client, "application/json; charset=cp1252", body)
+        assert r.status_code == 201
+        assert r.json()["name"] == "café"
+
+    def test_json_cp1252_undef(self, admin_client):
+        r = _cycles_post(
+            admin_client, "application/json; charset=cp1252", b'{"name": "a\x81b"}'
+        )
+        assert r.status_code == 400
+        assert r.json() == {
+            "detail": "JSON parse error - 'charmap' codec can't decode byte 0x81 "
+            "in position 11: character maps to <undefined>"
+        }
+
+    @pytest.mark.parametrize(
+        "charset,text",
+        [
+            ("cp1251", "Привет"),
+            ("iso-8859-2", "Zażółć"),
+            ("cp437", "âêî"),
+            ("koi8-r", "Привет"),
+            ("mac-roman", "ﬁ"),
+            ("tis-620", "ก"),
+            ("charmap", "caf\xe9"),
+            ("iso8859-1", "caf\xe9"),
+        ],
+    )
+    def test_json_single_byte_ok(self, admin_client, charset, text):
+        body = ('{"name": "%s"}' % text).encode(charset.replace("-", "_"))
+        r = _cycles_post(admin_client, "application/json; charset=%s" % charset, body)
+        assert r.status_code == 201
+        assert r.json()["name"] == text
+
+    # -- JSON + CJK ----------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "charset,text",
+        [
+            ("shift_jis", "日本語"),
+            ("cp932", "日本語"),
+            ("shift-jis-2004", "日本語"),
+            ("shift-jisx0213", "日本語"),
+            ("euc-jp", "日本語"),
+            ("euc-jis-2004", "日本語"),
+            ("euc-jisx0213", "日本語"),
+            ("euc-kr", "한국어"),
+            ("cp949", "한국어"),
+            ("johab", "한국어"),
+            ("big5", "中文"),
+            ("cp950", "中文"),
+            ("big5hkscs", "中文"),
+            ("gb2312", "中文"),
+            ("gbk", "中文"),
+            ("gb18030", "中文"),
+        ],
+    )
+    def test_json_cjk_ok(self, admin_client, charset, text):
+        body = ('{"name": "%s"}' % text).encode(charset)
+        r = _cycles_post(admin_client, "application/json; charset=%s" % charset, body)
+        assert r.status_code == 201
+        assert r.json()["name"] == text
+
+    def test_json_shift_jis_tail(self, admin_client):
+        r = _cycles_post(
+            admin_client, "application/json; charset=shift_jis", b'{"name": "a\x82"}'
+        )
+        assert r.status_code == 400
+        assert r.json() == {
+            "detail": "JSON parse error - 'shift_jis' codec can't decode byte 0x82 "
+            "in position 11: illegal multibyte sequence"
+        }
+
+    def test_json_euc_jp_illegal(self, admin_client):
+        r = _cycles_post(
+            admin_client, "application/json; charset=euc-jp", b'{"name": "a\x80b"}'
+        )
+        assert r.status_code == 400
+        assert "illegal multibyte sequence" in r.json()["detail"]
+
+    def test_json_cp932_ff_single(self, admin_client):
+        # 0xFF is a mapped single in cp932 (U+F8F3), so the body decodes
+        # and fails only as JSON.
+        r = _cycles_post(admin_client, "application/json; charset=cp932", b"\xff")
+        assert r.status_code == 400
+        assert r.json()["detail"].startswith("JSON parse error - Expecting value")
+
+    def test_json_gb18030_4byte(self, admin_client):
+        body = '{"name": "𐀀"}'.encode("gb18030")
+        r = _cycles_post(admin_client, "application/json; charset=gb18030", body)
+        assert r.status_code == 201
+        assert r.json()["name"] == "𐀀"
+
+    # -- JSON + hz / iso2022 / utf-7 / escapes --------------------------
+
+    def test_json_hz_ok(self, admin_client):
+        body = '{"name": "HZ693"}'.encode("hz")
+        r = _cycles_post(admin_client, "application/json; charset=hz", body)
+        assert r.status_code == 201
+        assert r.json()["name"] == "HZ693"
+
+    def test_json_hz_bad_escape(self, admin_client):
+        r = _cycles_post(admin_client, "application/json; charset=hz", b'{"name": "a~xb"}')
+        assert r.status_code == 400
+        assert r.json() == {
+            "detail": "JSON parse error - 'hz' codec can't decode byte 0x7e "
+            "in position 11: illegal multibyte sequence"
+        }
+
+    @pytest.mark.parametrize("charset", ["iso-2022-jp", "iso-2022-jp-1", "iso-2022-jp-2",
+                                         "iso-2022-jp-2004", "iso-2022-jp-3", "iso-2022-jp-ext",
+                                         "iso-2022-kr"])
+    def test_json_iso2022_ok(self, admin_client, charset):
+        body = '{"name": "ISO693"}'.encode(charset)
+        r = _cycles_post(admin_client, "application/json; charset=%s" % charset, body)
+        assert r.status_code == 201
+        assert r.json()["name"] == "ISO693"
+
+    def test_json_iso2022_bad_designation(self, admin_client):
+        r = _cycles_post(
+            admin_client, "application/json; charset=iso-2022-jp", b'{"name": "a\x1b(Ib"}'
+        )
+        assert r.status_code == 400
+        assert "illegal multibyte sequence" in r.json()["detail"]
+
+    def test_json_utf7_ok(self, admin_client):
+        body = '{"name": "U7693é"}'.encode("utf-7")
+        r = _cycles_post(admin_client, "application/json; charset=utf-7", body)
+        assert r.status_code == 201
+        assert r.json()["name"] == "U7693é"
+
+    def test_json_utf7_bare_plus(self, admin_client):
+        r = _cycles_post(
+            admin_client, "application/json; charset=utf-7", b'{"name": "a+b"}'
+        )
+        assert r.status_code == 400
+        assert "partial character in shift sequence" in r.json()["detail"]
+
+    def test_json_uesc_ok(self, admin_client):
+        r = _cycles_post(
+            admin_client, "application/json; charset=unicode-escape", b'{"name": "caf\\xe9"}'
+        )
+        assert r.status_code == 201
+        assert r.json()["name"] == "café"
+
+    def test_json_uesc_bad_hex(self, admin_client):
+        r = _cycles_post(
+            admin_client, "application/json; charset=unicode-escape", b'{"name": "a\\x4zb"}'
+        )
+        assert r.status_code == 400
+        assert "truncated \\xXX escape" in r.json()["detail"]
+
+    def test_json_resc_trailing_backslash_drops(self, admin_client):
+        # A trailing backslash drops in stream mode, so the JSON parses
+        # and only the serializer complains about the missing name.
+        r = _cycles_post(
+            admin_client, "application/json; charset=raw-unicode-escape", b'{"a": 1}\\'
+        )
+        assert r.status_code == 400
+        assert r.json() == {"name": ["This field is required."]}
+
+    # -- JSON + punycode / idna -----------------------------------------
+
+    def test_json_punycode_ok(self, admin_client):
+        body = '{"name": "PN693"}'.encode("punycode")
+        r = _cycles_post(admin_client, "application/json; charset=punycode", body)
+        assert r.status_code == 201
+        assert r.json()["name"] == "PN693"
+
+    def test_json_punycode_nonascii(self, admin_client):
+        r = _cycles_post(admin_client, "application/json; charset=punycode", b"\xff")
+        assert r.status_code == 400
+        assert r.json() == {
+            "detail": "JSON parse error - 'ascii' codec can't decode byte 0xff "
+            "in position 0: ordinal not in range(128)"
+        }
+
+    def test_json_idna_ok(self, admin_client):
+        r = _cycles_post(
+            admin_client, "application/json; charset=idna", b'{"name": "IDNA693"}'
+        )
+        assert r.status_code == 201
+        assert r.json()["name"] == "IDNA693"
+
+    def test_json_idna_nonascii(self, admin_client):
+        r = _cycles_post(admin_client, "application/json; charset=idna", b"\xff")
+        assert r.status_code == 400
+        assert r.json() == {
+            "detail": "JSON parse error - 'ascii' codec can't decode byte 0xff "
+            "in position 0: ordinal not in range(128)"
+        }
+
+    # -- JSON + bytes transforms ----------------------------------------
+
+    def test_json_base64_ok(self, admin_client):
+        import base64
+
+        body = base64.encodebytes(b'{"name": "B64693"}')
+        r = _cycles_post(admin_client, "application/json; charset=base64", body)
+        assert r.status_code == 201
+        assert r.json()["name"] == "B64693"
+
+    def test_json_base64_ignores_garbage(self, admin_client):
+        # Non-alphabet bytes vanish, so `!!!` decodes to empty and fails
+        # only as JSON.
+        r = _cycles_post(admin_client, "application/json; charset=base64", b"!!!")
+        assert r.status_code == 400
+        assert r.json()["detail"].startswith("JSON parse error - Expecting value")
+
+    def test_json_base64_bad_padding(self, admin_client):
+        r = _cycles_post(admin_client, "application/json; charset=base64", b"ab")
+        assert r.status_code == 400
+        assert r.json() == {"detail": "JSON parse error - Incorrect padding"}
+
+    def test_json_hex_ok(self, admin_client):
+        body = '{"name": "HEX693"}'.encode("utf-8").hex().encode("ascii")
+        r = _cycles_post(admin_client, "application/json; charset=hex", body)
+        assert r.status_code == 201
+        assert r.json()["name"] == "HEX693"
+
+    def test_json_hex_odd(self, admin_client):
+        r = _cycles_post(admin_client, "application/json; charset=hex", b"abc")
+        assert r.status_code == 400
+        assert r.json() == {"detail": "JSON parse error - Odd-length string"}
+
+    def test_json_quopri_ok(self, admin_client):
+        import quopri
+
+        body = quopri.encodestring(b'{"name": "QP693"}')
+        r = _cycles_post(admin_client, "application/json; charset=quopri", body)
+        assert r.status_code == 201
+        assert r.json()["name"] == "QP693"
+
+    def test_json_uu_ok(self, admin_client):
+        import codecs
+
+        body = codecs.encode(b'{"name": "UU693"}', "uu")
+        r = _cycles_post(admin_client, "application/json; charset=uu", body)
+        assert r.status_code == 201
+        assert r.json()["name"] == "UU693"
+
+    def test_json_uu_missing_begin(self, admin_client):
+        r = _cycles_post(admin_client, "application/json; charset=uu", b"xxx")
+        assert r.status_code == 400
+        assert r.json() == {
+            "detail": 'JSON parse error - Missing "begin" line in input data'
+        }
+
+    def test_json_zlib_ok(self, admin_client):
+        import zlib
+
+        body = zlib.compress(b'{"name": "ZL693"}')
+        r = _cycles_post(admin_client, "application/json; charset=zlib", body)
+        assert r.status_code == 201
+        assert r.json()["name"] == "ZL693"
+
+    def test_json_zlib_bad(self, admin_client):
+        r = _cycles_post(admin_client, "application/json; charset=zlib", b"xxx")
+        assert r.status_code == 500
+        assert r.json() == SERVER_ERROR
+
+    def test_json_bz2_ok(self, admin_client):
+        import bz2
+
+        body = bz2.compress(b'{"name": "BZ693"}')
+        r = _cycles_post(admin_client, "application/json; charset=bz2", body)
+        assert r.status_code == 201
+        assert r.json()["name"] == "BZ693"
+
+    def test_json_bz2_junk(self, admin_client):
+        r = _cycles_post(admin_client, "application/json; charset=bz2", b"xxx")
+        assert r.status_code == 500
+        assert r.json() == SERVER_ERROR
+
+    def test_json_bz2_truncated(self, admin_client):
+        import bz2
+
+        # A truncated stream is `ValueError`-class: a 400, not a 500.
+        body = bz2.compress(b'{"name": "BZ693"}')[:-3]
+        r = _cycles_post(admin_client, "application/json; charset=bz2", body)
+        assert r.status_code == 400
+        assert r.json() == {
+            "detail": "JSON parse error - Compressed data ended before the "
+            "end-of-stream marker was reached"
+        }
+
+    def test_json_rot13_is_500(self, admin_client):
+        r = _cycles_post(
+            admin_client, "application/json; charset=rot13", b'{"name": "ROT693"}'
+        )
+        assert r.status_code == 500
+        assert r.json() == SERVER_ERROR
+
+    def test_json_undefined_is_400(self, admin_client):
+        r = _cycles_post(
+            admin_client, "application/json; charset=undefined", b'{"name": "x"}'
+        )
+        assert r.status_code == 400
+        assert r.json() == {"detail": "JSON parse error - undefined encoding"}
+
+    # -- JSON + surrogates -----------------------------------------------
+
+    def test_json_utf7_surrogate_400(self, admin_client):
+        # utf-7 emits a lone surrogate; the CharField validator reports it.
+        body = b'{"name": "+2AE-693"}'
+        r = _cycles_post(admin_client, "application/json; charset=utf-7", body)
+        assert r.status_code == 400
+        assert r.json() == {
+            "name": ["Surrogate characters are not allowed: U+D801."]
+        }
+
+    # -- form -------------------------------------------------------------
+
+    def test_form_cp1252_pct(self, admin_client):
+        r = _cycles_post(
+            admin_client,
+            "application/x-www-form-urlencoded; charset=cp1252",
+            b"name=caf%E9",
+        )
+        assert r.status_code == 201
+        assert r.json()["name"] == "café"
+
+    def test_form_idna_ascii_ok(self, admin_client):
+        # No dots or escapes: idna strict-decodes the ASCII body as-is.
+        r = _cycles_post(
+            admin_client,
+            "application/x-www-form-urlencoded; charset=idna",
+            b"name=FIDNA693",
+        )
+        assert r.status_code == 201
+        assert r.json()["name"] == "FIDNA693"
+
+    def test_form_idna_pct_is_500(self, admin_client):
+        r = _cycles_post(
+            admin_client,
+            "application/x-www-form-urlencoded; charset=idna",
+            b"a%20=b",
+        )
+        assert r.status_code == 500
+        assert r.json() == SERVER_ERROR
+
+    def test_form_punycode_is_500(self, admin_client):
+        r = _cycles_post(
+            admin_client,
+            "application/x-www-form-urlencoded; charset=punycode",
+            b"name=FPUN693",
+        )
+        assert r.status_code == 500
+        assert r.json() == SERVER_ERROR
+
+    def test_form_punycode_nonascii_falls_back(self, admin_client):
+        r = _cycles_post(
+            admin_client,
+            "application/x-www-form-urlencoded; charset=punycode",
+            b"name=\xff",
+        )
+        assert r.status_code == 201
+        assert r.json()["name"] == "ÿ"
+
+    @pytest.mark.parametrize("charset", ["base64", "hex", "quopri", "uu", "rot13", "zlib", "bz2"])
+    def test_form_transform_is_500(self, admin_client, charset):
+        r = _cycles_post(
+            admin_client,
+            "application/x-www-form-urlencoded; charset=%s" % charset,
+            b"name=x",
+        )
+        assert r.status_code == 500
+        assert r.json() == SERVER_ERROR
+
+    def test_form_undefined_is_500(self, admin_client):
+        r = _cycles_post(
+            admin_client,
+            "application/x-www-form-urlencoded; charset=undefined",
+            b"name=x",
+        )
+        assert r.status_code == 500
+        assert r.json() == SERVER_ERROR
+
+    def test_form_sjis_tail_is_replacement(self, admin_client):
+        r = _cycles_post(
+            admin_client,
+            "application/x-www-form-urlencoded; charset=shift_jis",
+            b"name=%82",
+        )
+        assert r.status_code == 201
+        assert r.json()["name"] == "\ufffd"
+
+    def test_form_utf7_surrogate_400(self, admin_client):
+        r = _cycles_post(
+            admin_client,
+            "application/x-www-form-urlencoded; charset=utf-7",
+            b"name=%2B2AE%2D693",
+        )
+        assert r.status_code == 400
+        assert r.json() == {
+            "name": ["Surrogate characters are not allowed: U+D801."]
+        }
+
+    def test_form_utf7_raw_surrogate_400(self, admin_client):
+        # Raw shift bytes in layer-1 (not percent-encoded): the surrogate
+        # arises before `parse_qsl` and must still 400 at the CharField.
+        r = _cycles_post(
+            admin_client,
+            "application/x-www-form-urlencoded; charset=utf-7",
+            b"name=+2AE-693raw",
+        )
+        assert r.status_code == 400
+        assert r.json() == {
+            "name": ["Surrogate characters are not allowed: U+D801."]
+        }
+
+    # -- multipart ----------------------------------------------------------
+
+    def test_mp_cp1252_ok(self, admin_client):
+        boundary = "BOUND693A"
+        body = (
+            b"--" + boundary.encode() + b'\r\nContent-Disposition: form-data; name="name"\r\n\r\n'
+            + "MP693 café".encode("cp1252") + b"\r\n--" + boundary.encode() + b"--\r\n"
+        )
+        r = _cycles_post(
+            admin_client,
+            "multipart/form-data; boundary=%s; charset=cp1252" % boundary,
+            body,
+        )
+        assert r.status_code == 201
+        assert r.json()["name"] == "MP693 café"
+
+    @pytest.mark.parametrize(
+        "charset", ["idna", "base64", "hex", "quopri", "uu", "zlib", "bz2", "undefined", "rot13"]
+    )
+    def test_mp_reject_is_500(self, admin_client, charset):
+        boundary = "BOUND693B"
+        body = (
+            b"--" + boundary.encode() + b'\r\nContent-Disposition: form-data; name="name"\r\n\r\n'
+            b"x\r\n--" + boundary.encode() + b"--\r\n"
+        )
+        r = _cycles_post(
+            admin_client,
+            "multipart/form-data; boundary=%s; charset=%s" % (boundary, charset),
+            body,
+        )
+        assert r.status_code == 500
+        assert r.json() == SERVER_ERROR
+
+    def test_mp_punycode_mangles_field_name(self, admin_client):
+        # punycode/replace maps `name` to control chars, so the field is
+        # missing and only the serializer complains.
+        boundary = "BOUND693C"
+        body = (
+            b"--" + boundary.encode() + b'\r\nContent-Disposition: form-data; name="name"\r\n\r\n'
+            b"MPUN693\r\n--" + boundary.encode() + b"--\r\n"
+        )
+        r = _cycles_post(
+            admin_client,
+            "multipart/form-data; boundary=%s; charset=punycode" % boundary,
+            body,
+        )
+        assert r.status_code == 400
+        assert r.json() == {"name": ["This field is required."]}
+
+    def test_mp_sjis_lone_lead_is_replacement(self, admin_client):
+        boundary = "BOUND693D"
+        body = (
+            b"--" + boundary.encode() + b'\r\nContent-Disposition: form-data; name="name"\r\n\r\n'
+            b"\x82\r\n--" + boundary.encode() + b"--\r\n"
+        )
+        r = _cycles_post(
+            admin_client,
+            "multipart/form-data; boundary=%s; charset=shift_jis" % boundary,
+            body,
+        )
+        assert r.status_code == 201
+        assert r.json()["name"] == "\ufffd"
+
+    def test_mp_utf7_surrogate_400(self, admin_client):
+        boundary = "BOUND693E"
+        body = (
+            b"--" + boundary.encode() + b'\r\nContent-Disposition: form-data; name="name"\r\n\r\n'
+            b"+2AE-693\r\n--" + boundary.encode() + b"--\r\n"
+        )
+        r = _cycles_post(
+            admin_client,
+            "multipart/form-data; boundary=%s; charset=utf-7" % boundary,
+            body,
+        )
+        assert r.status_code == 400
+        assert r.json() == {
+            "name": ["Surrogate characters are not allowed: U+D801."]
+        }
+
+    # -- normalization -------------------------------------------------------
+
+    def test_charset_dotted_alias_honored(self, admin_client):
+        # `iso.8859.1` normalizes to the dot->underscore alias (live).
+        body = b"name=caf%E9"
+        r = _cycles_post(
+            admin_client,
+            "application/x-www-form-urlencoded; charset=iso.8859.1",
+            body,
+        )
+        assert r.status_code == 201
+        assert r.json()["name"] == "café"
+
+    def test_charset_dotted_module_rejected(self, admin_client):
+        # `shift.jis` is neither an alias nor dotless: utf-8 applies and
+        # the high byte fails JSON with the utf-8 text.
+        r = _cycles_post(
+            admin_client, "application/json; charset=shift.jis", b'{"name": "a\xe9"}'
+        )
+        assert r.status_code == 400
+        assert r.json()["detail"].startswith("JSON parse error - 'utf-8' codec")
+
+    @pytest.mark.parametrize("charset", ["ansi", "dbcs"])
+    def test_charset_windows_alias_rejected(self, admin_client, charset):
+        # `ansi`/`dbcs` alias to Windows-only `mbcs`: LookupError on
+        # Linux, so utf-8 applies (review fix: the engine-less module
+        # used to reach the dispatcher `todo!` and panic the request).
+        r = _cycles_post(
+            admin_client, "application/json; charset=%s" % charset, b'{"name": "a\xe9"}'
+        )
+        assert r.status_code == 400
+        assert r.json()["detail"].startswith("JSON parse error - 'utf-8' codec")
+
+    def test_charset_quoted_and_upper(self, admin_client):
+        body = '{"name": "caf\xe9"}'.encode("cp1252")
+        r = _cycles_post(admin_client, 'application/json; charset="CP1252"', body)
+        assert r.status_code == 201
+        assert r.json()["name"] == "café"
+
+    # -- utf-8-sig ------------------------------------------------------------
+
+    def test_json_u8sig_ok(self, admin_client):
+        r = _cycles_post(
+            admin_client, "application/json; charset=utf-8-sig", b'\xef\xbb\xbf{"name": "S693"}'
+        )
+        assert r.status_code == 201
+        assert r.json()["name"] == "S693"
+
+    def test_json_u8sig_tail_drops(self, admin_client):
+        # BOM + trailing incomplete byte: both drop, so the empty text
+        # fails in `json.loads` before the serializer ever runs.
+        r = _cycles_post(
+            admin_client, "application/json; charset=utf-8-sig", b"\xef\xbb\xbf\xe4"
+        )
+        assert r.status_code == 400
+        assert r.json() == {
+            "detail": "JSON parse error - Expecting value: line 1 column 1 (char 0)"
+        }
+
+    def test_json_u8sig_error_positions_post_bom(self, admin_client):
+        r = _cycles_post(
+            admin_client, "application/json; charset=utf-8-sig", b"\xef\xbb\xbf\xff"
+        )
+        assert r.status_code == 400
+        assert r.json() == {
+            "detail": "JSON parse error - 'utf-8' codec can't decode byte 0xff "
+            "in position 0: invalid start byte"
+        }
+
+    def test_empty_body_with_exotic_charset(self, admin_client):
+        # Content-Length 0 never decodes: the exotic charset is inert
+        # and the request runs with {}.
+        r = _cycles_post(
+            admin_client, "application/json; charset=shift_jis", b""
+        )
+        assert r.status_code == 400
+        assert r.json() == {"name": ["This field is required."]}

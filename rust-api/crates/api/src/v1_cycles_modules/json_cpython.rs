@@ -110,6 +110,40 @@ impl JStr {
         Self::from_clean(text.to_owned())
     }
 
+    /// Decoded text plus lone-surrogate spans (exotic form/multipart
+    /// charsets, PIDASHCONV-693): each span swaps its U+FFFD placeholder
+    /// (byte offset, surrogate value) for a `Sur` unit.
+    pub fn from_dirty(text: &str, surr: &[(usize, u16)]) -> Self {
+        if surr.is_empty() {
+            return Self::from_clean(text.to_owned());
+        }
+        let mut out = Self::new();
+        let bytes = text.as_bytes();
+        let mut pos = 0;
+        let mut idx = 0;
+        while pos < bytes.len() {
+            // Stale spans (no placeholder here — unreachable from the
+            // decoders, whose pairs stay aligned) drop instead of
+            // stalling the later ones.
+            while idx < surr.len() && surr[idx].0 < pos {
+                idx += 1;
+            }
+            if idx < surr.len()
+                && surr[idx].0 == pos
+                && bytes.get(pos..pos + 3) == Some(b"\xef\xbf\xbd")
+            {
+                out.push_surrogate(surr[idx].1);
+                idx += 1;
+                pos += 3;
+                continue;
+            }
+            let ch = text[pos..].chars().next().expect("char boundary");
+            out.push_char(ch);
+            pos += ch.len_utf8();
+        }
+        out
+    }
+
     /// Append one scalar value (used by the parser).
     pub fn push_char(&mut self, ch: char) {
         self.units.push(StrUnit::Ch(ch));
@@ -1313,10 +1347,16 @@ pub enum JsonFail {
 /// verified live: an empty POST answers serializer errors, never a
 /// parse error), anything else goes through [`parse_request_bytes`].
 pub fn parse_request_data(raw: &[u8]) -> Result<JVal, JsonFail> {
+    parse_request_data_spans(raw, &[])
+}
+
+/// [`parse_request_data`] over charset-decoded text carrying
+/// lone-surrogate spans (exotic charsets, PIDASHCONV-693).
+pub fn parse_request_data_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal, JsonFail> {
     if raw.is_empty() {
         return Ok(JVal::Object(JObject::new()));
     }
-    parse_request_bytes(raw)
+    parse_request_bytes_spans(raw, surr)
 }
 
 /// Parse request bytes exactly as DRF's `JSONParser` does: the UTF-8 codec
@@ -1324,6 +1364,14 @@ pub fn parse_request_data(raw: &[u8]) -> Result<JVal, JsonFail> {
 /// text. Fires every error in true scan order — syntax, strict-constant,
 /// int-limit, depth-cap — with byte-exact CPython text.
 pub fn parse_request_bytes(raw: &[u8]) -> Result<JVal, JsonFail> {
+    parse_request_bytes_spans(raw, &[])
+}
+
+/// [`parse_request_bytes`] over charset-decoded text carrying
+/// lone-surrogate spans (exotic charsets, PIDASHCONV-693). Decoded text
+/// is always valid UTF-8, so only the tail-drop arm can truncate —
+/// and spans past the cut are dropped with it.
+pub fn parse_request_bytes_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal, JsonFail> {
     let text = match std::str::from_utf8(raw) {
         Ok(text) => text,
         Err(_) => match incomplete_tail_start(raw) {
@@ -1338,7 +1386,12 @@ pub fn parse_request_bytes(raw: &[u8]) -> Result<JVal, JsonFail> {
             None => return Err(JsonFail::Message(utf8_decode_detail(raw))),
         },
     };
-    parse_json_text(text)
+    let kept = surr
+        .iter()
+        .take_while(|(off, _)| *off < text.len())
+        .copied()
+        .collect::<Vec<_>>();
+    parse_json_text_spans(text, &kept)
 }
 
 /// Start of a trailing incomplete UTF-8 sequence, mirroring the codecs
@@ -1404,6 +1457,14 @@ fn incomplete_tail_start(raw: &[u8]) -> Option<usize> {
 
 /// Parse decoded JSON text (see [`parse_request_bytes`]).
 pub fn parse_json_text(text: &str) -> Result<JVal, JsonFail> {
+    parse_json_text_spans(text, &[])
+}
+
+/// Parse decoded JSON text carrying lone-surrogate spans from the
+/// charset decode (exotic charsets, PIDASHCONV-693): each span is the
+/// byte offset of a U+FFFD placeholder plus the surrogate value. The
+/// string reader swaps placeholders for [`StrUnit::Sur`] units.
+pub fn parse_json_text_spans(text: &str, surr: &[(usize, u16)]) -> Result<JVal, JsonFail> {
     // A leading BOM is CPython's one special case (anywhere else it is an
     // ordinary char, and inside strings a literal).
     if text.starts_with('\u{FEFF}') {
@@ -1416,6 +1477,8 @@ pub fn parse_json_text(text: &str) -> Result<JVal, JsonFail> {
         bytes: text.as_bytes(),
         pos: skip_ws_from(text.as_bytes(), 0),
         stack: Vec::new(),
+        surr,
+        surr_idx: 0,
     };
     // The root value: `None` while a root container is still open.
     let mut pending = parser.read_value()?;
@@ -1500,6 +1563,14 @@ struct Scan<'a> {
     bytes: &'a [u8],
     pos: usize,
     stack: Vec<Frame>,
+    /// Lone-surrogate spans from the charset decode: byte offset of a
+    /// U+FFFD placeholder in `text` plus the surrogate value, sorted by
+    /// offset. The string reader swaps placeholders for [`StrUnit::Sur`]
+    /// units (exotic charsets, PIDASHCONV-693); spans outside strings
+    /// (structural positions) are skipped — the syntax error there (or
+    /// the clean parse) matches Django either way.
+    surr: &'a [(usize, u16)],
+    surr_idx: usize,
 }
 
 impl Scan<'_> {
@@ -1729,6 +1800,21 @@ impl Scan<'_> {
                     return Err(self.fail_margin("Invalid control character at", self.pos, 4));
                 }
                 _ => {
+                    // A charset-decode surrogate placeholder at this
+                    // offset becomes a `Sur` unit (spans are sorted;
+                    // `pos` only advances, so one cursor suffices).
+                    while self.surr_idx < self.surr.len() && self.surr[self.surr_idx].0 < self.pos {
+                        self.surr_idx += 1;
+                    }
+                    if self.surr_idx < self.surr.len()
+                        && self.surr[self.surr_idx].0 == self.pos
+                        && self.bytes.get(self.pos..self.pos + 3) == Some(b"\xef\xbf\xbd")
+                    {
+                        out.push_surrogate(self.surr[self.surr_idx].1);
+                        self.surr_idx += 1;
+                        self.pos += 3;
+                        continue;
+                    }
                     // Valid UTF-8 input: decode one scalar value.
                     let rest = &self.text[self.pos..];
                     let ch = rest.chars().next().expect("char boundary");
@@ -2608,6 +2694,13 @@ mod tests {
         ));
         assert!(matches!(
             parse_request_data(b"\xed\xa0"),
+            Err(JsonFail::Message(detail))
+            if detail == "Expecting value: line 1 column 1 (char 0)"
+        ));
+        // The bytes path (negotiated JSON text, PIDASHCONV-693) has no
+        // empty shortcut: decoded-empty is the same EOF error.
+        assert!(matches!(
+            parse_request_bytes(b""),
             Err(JsonFail::Message(detail))
             if detail == "Expecting value: line 1 column 1 (char 0)"
         ));

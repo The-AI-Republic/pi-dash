@@ -2257,10 +2257,14 @@ fn parse_body_ct(
         super::body::NegotiatedBody::Empty => {
             Ok(((serde_json::Map::new(), BTreeMap::new()), false))
         }
-        super::body::NegotiatedBody::JsonText(text) => {
+        super::body::NegotiatedBody::JsonText { text, surr: _ } => {
             Ok(((parse_json_map(text.as_bytes())?, BTreeMap::new()), false))
         }
-        super::body::NegotiatedBody::Form { map, files } => Ok(((map, files), true)),
+        super::body::NegotiatedBody::Form {
+            map,
+            files,
+            surr: _,
+        } => Ok(((map, files), true)),
     }
 }
 
@@ -2306,7 +2310,7 @@ fn parse_object_or_500_ct(
         .map_err(map_body_error)?
     {
         super::body::NegotiatedBody::Empty => Ok((serde_json::Map::new(), BTreeMap::new())),
-        super::body::NegotiatedBody::JsonText(text) => {
+        super::body::NegotiatedBody::JsonText { text, surr: _ } => {
             let bytes = text.as_bytes();
             let value: Value = serde_json::from_slice(bytes)
                 .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}")))?;
@@ -2315,7 +2319,11 @@ fn parse_object_or_500_ct(
                 _ => Err(Denial::ServerError),
             }
         }
-        super::body::NegotiatedBody::Form { map, files } => Ok((map, files)),
+        super::body::NegotiatedBody::Form {
+            map,
+            files,
+            surr: _,
+        } => Ok((map, files)),
     }
 }
 

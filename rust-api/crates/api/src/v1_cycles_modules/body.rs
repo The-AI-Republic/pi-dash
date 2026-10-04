@@ -25,11 +25,14 @@
 //!
 //! Non-goals (documented, not stubbed): the 5MB body 413 lives in Django
 //! middleware (`request_body_size.py`) and belongs to a serve-wide
-//! follow-up; exotic Python codecs beyond [`SupportedCharset`] degrade to
-//! utf-8 (bogus-charset behavior) with a follow-up filed; filename
-//! sanitizing is the exact `sanitize_file_name` port (full html5 table +
-//! CPython `isprintable`, PIDASHCONV-694). Paths that never touch `request.data`
-//! (GET/DELETE/archive) never call this module, so they can never 415.
+//! follow-up; filename sanitizing is the exact `sanitize_file_name` port
+//! (full html5 table + CPython `isprintable`, PIDASHCONV-694). Paths that
+//! never touch `request.data` (GET/DELETE/archive) never call this module,
+//! so they can never 415.
+//
+//! Exotic codecs (PIDASHCONV-693): every other `codecs.lookup`-reachable
+//! module dispatches through [`SupportedCharset::Exotic`] to
+//! `body_decoders` (same URL paths, same JSON, same SQL semantics).
 
 use axum::http::HeaderMap;
 use serde_json::{Map, Value};
@@ -100,12 +103,21 @@ pub type FormMaps = (Map<String, Value>, FilesMap);
 /// Mirrors DRF's `_full_data` (`data.copy().update(files)` — Django's
 /// `MultiValueDict.update` *extends* key lists, so per key the values are
 /// the text values followed by the file values).
+/// One form/multipart text value: decoded text (U+FFFD placeholders where
+/// the codec emitted lone surrogates) plus the placeholder spans (byte
+/// offset, surrogate value) for the coerce layer's surrogate check.
+#[derive(Debug, Clone, Default)]
+pub struct FormValue {
+    pub text: String,
+    pub surr: Vec<(usize, u16)>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FormBody {
     /// Text values per key, in arrival order (QueryDict lists). A
     /// `BTreeMap`: `serde_json::Map`'s methods exist only on the concrete
     /// `Map<String, Value>`.
-    pub texts: BTreeMap<String, Vec<String>>,
+    pub texts: BTreeMap<String, Vec<FormValue>>,
     /// File values per key, in arrival order.
     pub files: FilesMap,
     /// Text keys in first-seen order (QueryDict key order).
@@ -136,16 +148,24 @@ pub enum NegotiatedBody {
     /// Content-Length says empty: `{}` whatever the content type is.
     Empty,
     /// Decoded JSON source text (charset applied, trailing incomplete
-    /// sequence dropped). The caller parses it with its existing
-    /// serde + CPython-error mapping.
-    JsonText(String),
+    /// sequence dropped) plus lone-surrogate spans: byte offset of a
+    /// U+FFFD placeholder in `text` plus the surrogate value. The caller
+    /// parses with its existing serde + CPython-error mapping, swapping
+    /// placeholders for dirty units.
+    JsonText {
+        text: String,
+        surr: Vec<(usize, u16)>,
+    },
     /// Parsed form/multipart body with HTML-input semantics applied per
     /// `spec` (list fields as arrays, blank skips). `map` holds text-only
     /// values; `files` holds uploads per key (DRF merges files into
-    /// `request.data`, so `in` checks must consult both maps).
+    /// `request.data`, so `in` checks must consult both maps); `surr`
+    /// holds the lone-surrogate spans per key, aligned with the selected
+    /// values (scalars: one entry; list fields: one per array item).
     Form {
         map: Map<String, Value>,
         files: FilesMap,
+        surr: BTreeMap<String, Vec<Vec<(usize, u16)>>>,
     },
 }
 
@@ -177,10 +197,10 @@ pub fn negotiate_body(
         return Ok(NegotiatedBody::Empty);
     }
     let content_type = header_str(headers, "content-type");
-    match select_parser(&content_type) {
+    match select_parser(&content_type)? {
         Parser::Json => {
-            let text = decode_json_body(body, &content_type)?;
-            Ok(NegotiatedBody::JsonText(text))
+            let (text, surr) = decode_json_body(body, &content_type)?;
+            Ok(NegotiatedBody::JsonText { text, surr })
         }
         Parser::Form => {
             let form = parse_form_body(body, &content_type)?;
@@ -200,22 +220,28 @@ pub fn negotiate_body(
 /// skips drop keys, every other key keeps its last text value.
 fn build_form_body(mut form: FormBody, spec: &BodySpec) -> NegotiatedBody {
     let mut map = Map::new();
+    let mut surr: BTreeMap<String, Vec<Vec<(usize, u16)>>> = BTreeMap::new();
     let mut keys: Vec<&String> = form.texts.keys().collect();
     keys.sort();
     for key in keys {
         let values = &form.texts[key.as_str()];
         if spec.list_fields.contains(&key.as_str()) {
-            let mut items: Vec<Value> = values.iter().map(|v| Value::String(v.clone())).collect();
+            let mut items: Vec<Value> = values
+                .iter()
+                .map(|v| Value::String(v.text.clone()))
+                .collect();
             // Files extend the value list (same key) but are not JSON
             // values; the array holds texts only and the files map keeps
             // the uploads for the caller's per-field handling.
             let _ = &mut items;
             map.insert(key.clone(), Value::Array(items));
+            surr.insert(key.clone(), values.iter().map(|v| v.surr.clone()).collect());
         } else if let Some(last) = values.last() {
-            if last.is_empty() && spec.skip_blank_fields.contains(&key.as_str()) {
+            if last.text.is_empty() && spec.skip_blank_fields.contains(&key.as_str()) {
                 continue;
             }
-            map.insert(key.clone(), Value::String(last.clone()));
+            map.insert(key.clone(), Value::String(last.text.clone()));
+            surr.insert(key.clone(), vec![last.surr.clone()]);
         }
     }
     // List fields whose only values are files still arrive as arrays (an
@@ -240,21 +266,26 @@ fn build_form_body(mut form: FormBody, spec: &BodySpec) -> NegotiatedBody {
         }
         if let Some(entries) = scan_indexed_list(&form, field) {
             let mut items = Vec::with_capacity(entries.len());
+            let mut spans = Vec::with_capacity(entries.len());
             let mut uploads = Vec::new();
             for entry in entries {
                 match entry {
-                    IndexedEntry::Text(text) => items.push(Value::String(text)),
+                    IndexedEntry::Text(value) => {
+                        spans.push(value.surr.clone());
+                        items.push(Value::String(value.text));
+                    }
                     IndexedEntry::File(key) => {
                         if let Some(part) = form.files.get_mut(&key).and_then(Vec::pop) {
                             uploads.push(part);
                         }
+                        spans.push(Vec::new());
                         items.push(Value::Null);
                     }
                     IndexedEntry::Dict(pairs) => {
                         let mut rendered = Vec::with_capacity(pairs.len());
                         for (suffix, value) in pairs {
                             let item = match value {
-                                IndexedValue::Text(text) => Value::String(text),
+                                IndexedValue::Text(value) => Value::String(value.text),
                                 IndexedValue::File(key) => {
                                     if let Some(part) = form.files.get_mut(&key).and_then(Vec::pop)
                                     {
@@ -267,11 +298,17 @@ fn build_form_body(mut form: FormBody, spec: &BodySpec) -> NegotiatedBody {
                             pair.insert(suffix, Value::Array(vec![item]));
                             rendered.push(Value::Object(pair));
                         }
+                        // Dict items pack several values into one array
+                        // slot; spans stay empty (only module list fields
+                        // assemble indexed entries, and module drops the
+                        // surr map — the alignment slot is still pushed).
+                        spans.push(Vec::new());
                         items.push(Value::Array(rendered));
                     }
                 }
             }
             map.insert((*field).to_owned(), Value::Array(items));
+            surr.insert((*field).to_owned(), spans);
             if !uploads.is_empty() {
                 form.files.insert((*field).to_owned(), uploads);
             }
@@ -280,12 +317,13 @@ fn build_form_body(mut form: FormBody, spec: &BodySpec) -> NegotiatedBody {
     NegotiatedBody::Form {
         map,
         files: form.files,
+        surr,
     }
 }
 
 /// One assembled indexed-list entry, in index order.
 enum IndexedEntry {
-    Text(String),
+    Text(FormValue),
     /// Key holding the file (the last upload wins, like `.items()`).
     File(String),
     /// Dict-form pairs in first-seen suffix order.
@@ -295,7 +333,7 @@ enum IndexedEntry {
 /// A scanned indexed value: the last text, or the key of the last file.
 #[derive(Debug, Clone)]
 enum IndexedValue {
-    Text(String),
+    Text(FormValue),
     File(String),
 }
 
@@ -448,8 +486,8 @@ enum Parser {
 /// (JSON, form, multipart): first `media_type_matches` win. The match is on
 /// the lowercased base type with `*` wildcards honored on the request side
 /// (`*/*` and `application/*` select the JSON parser — verified live).
-fn select_parser(content_type: &str) -> Parser {
-    let (base, _) = parse_header_parameters(content_type);
+fn select_parser(content_type: &str) -> Result<Parser, BodyError> {
+    let (base, _) = parse_header_parameters(content_type)?;
     let (main, sub) = split_media_type(&base);
     for parser in [
         "application/json",
@@ -458,14 +496,14 @@ fn select_parser(content_type: &str) -> Parser {
     ] {
         let (pmain, psub) = split_media_type(parser);
         if media_type_matches((pmain, psub), (main.clone(), sub.clone())) {
-            return match parser {
+            return Ok(match parser {
                 "application/json" => Parser::Json,
                 "application/x-www-form-urlencoded" => Parser::Form,
                 _ => Parser::Multipart,
-            };
+            });
         }
     }
-    Parser::None
+    Ok(Parser::None)
 }
 
 fn split_media_type(base: &str) -> (String, String) {
@@ -493,8 +531,10 @@ fn media_type_matches(parser: (String, String), request: (String, String)) -> bo
 /// `django/utils/http.py:parse_header_parameters`: quote-aware `;` split,
 /// lowercased main value, lowercased param names, verbatim values with
 /// quotes stripped and backslash-escapes collapsed, RFC 2231 `name*`
-/// decoding.
-fn parse_header_parameters(line: &str) -> (String, Vec<(String, String)>) {
+/// decoding. An RFC 2231 inline charset that rejects `replace` fails
+/// with the pinned 500 (the exception escapes request setup into
+/// `BaseAPIView.handle_exception`).
+fn parse_header_parameters(line: &str) -> Result<(String, Vec<(String, String)>), BodyError> {
     let mut parts = split_header_params(line);
     let main = parts.next().unwrap_or_default().to_lowercase();
     let mut params = Vec::new();
@@ -518,12 +558,13 @@ fn parse_header_parameters(line: &str) -> (String, Vec<(String, String)>) {
             if let (Some(charset), Some(_lang), Some(raw)) =
                 (pieces.next(), pieces.next(), pieces.next())
             {
-                value = percent_decode_str(raw, &charset_to_supported(charset));
+                // Header values never validate: surrogate spans drop.
+                value = percent_decode_str(raw, &charset_to_supported(charset), &[])?.0;
             }
         }
         params.push((name, value));
     }
-    (main, params)
+    Ok((main, params))
 }
 
 /// `django/utils/http.py:_parseparam`: split on `;` that is outside an odd
@@ -569,11 +610,12 @@ fn split_header_params(line: &str) -> impl Iterator<Item = String> + '_ {
     })
 }
 
-/// Charsets the port resolves (`codecs.lookup` over the C builtins; every
-/// other valid-or-bogus name degrades to utf-8, exactly like a bogus name
-/// does under Django — exotic codecs are a filed follow-up, not a stub).
+/// Charsets the port resolves (`codecs.lookup` over all 118 importable
+/// codec modules; rejected names degrade to utf-8, exactly like a bogus
+/// name does under Django). The nine 627 decoders stay inline; every
+/// other module dispatches to `body_decoders` by module name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SupportedCharset {
+pub(crate) enum SupportedCharset {
     Utf8,
     Ascii,
     Latin1,
@@ -583,87 +625,59 @@ enum SupportedCharset {
     Utf32,
     Utf32Le,
     Utf32Be,
+    Exotic(&'static str),
 }
 
 /// Resolve a `charset=` parameter the way `request._set_content_type_params`
-/// plus `codecs.lookup` do: `normalize_encoding` (non-alphanumerics collapse
-/// to `_`, non-ASCII alphanumerics vanish), lowercase (the C builtins match
-/// case-insensitively on every platform), then the `encodings.aliases`
-/// table for the five supported families. Anything else is utf-8.
-fn charset_to_supported(raw: &str) -> SupportedCharset {
-    let mut normalized = String::with_capacity(raw.len());
-    let mut punct = false;
-    for c in raw.chars() {
-        if c.is_alphanumeric() || c == '.' {
-            if punct && !normalized.is_empty() {
-                normalized.push('_');
-            }
-            if c.is_ascii() {
-                normalized.push(c.to_ascii_lowercase());
-            }
-            punct = false;
-        } else {
-            punct = true;
-        }
+/// plus `codecs.lookup` do: byte-oriented `normalize_encoding`, then the
+/// full `encodings.aliases` table, then the dotless importable module
+/// itself. Anything else is utf-8.
+pub(crate) fn charset_to_supported(raw: &str) -> SupportedCharset {
+    match super::body_decoders::resolve_module(raw) {
+        Some("utf_8") => SupportedCharset::Utf8,
+        Some("ascii") => SupportedCharset::Ascii,
+        Some("latin_1") => SupportedCharset::Latin1,
+        Some("utf_16") => SupportedCharset::Utf16,
+        Some("utf_16_le") => SupportedCharset::Utf16Le,
+        Some("utf_16_be") => SupportedCharset::Utf16Be,
+        Some("utf_32") => SupportedCharset::Utf32,
+        Some("utf_32_le") => SupportedCharset::Utf32Le,
+        Some("utf_32_be") => SupportedCharset::Utf32Be,
+        Some(module) => SupportedCharset::Exotic(module),
+        None => SupportedCharset::Utf8,
     }
-    if normalized.is_empty() {
-        return SupportedCharset::Utf8;
-    }
-    let dotted = normalized.replace('.', "_");
-    let key = |candidate: &str| {
-        if let Some(hit) = supported_alias(candidate) {
-            return Some(hit);
-        }
-        None
-    };
-    key(&normalized)
-        .or_else(|| key(&dotted))
-        .unwrap_or(SupportedCharset::Utf8)
-}
-
-/// Canonical names + `encodings.aliases` entries for the five families.
-fn supported_alias(normalized: &str) -> Option<SupportedCharset> {
-    Some(match normalized {
-        "utf_8" | "u8" | "utf" | "utf8" | "utf8_ucs2" | "utf8_ucs4" | "cp65001" => {
-            SupportedCharset::Utf8
-        }
-        "ascii" | "646" | "ansi_x3_4_1968" | "ansi_x3_4_1986" | "cp367" | "csascii" | "ibm367"
-        | "iso646_us" | "iso_646_irv_1991" | "iso_ir_6" | "us" | "us_ascii" => {
-            SupportedCharset::Ascii
-        }
-        "latin_1" | "8859" | "cp819" | "csisolatin1" | "ibm819" | "iso8859" | "iso8859_1"
-        | "iso_8859_1" | "iso_8859_1_1987" | "iso_ir_100" | "l1" | "latin" | "latin1" => {
-            SupportedCharset::Latin1
-        }
-        "utf_16" | "u16" | "utf16" => SupportedCharset::Utf16,
-        "utf_16_le" | "unicodelittleunmarked" | "utf_16le" => SupportedCharset::Utf16Le,
-        "utf_16_be" | "unicodebigunmarked" | "utf_16be" => SupportedCharset::Utf16Be,
-        "utf_32" | "u32" | "utf32" => SupportedCharset::Utf32,
-        "utf_32_le" | "utf_32le" => SupportedCharset::Utf32Le,
-        "utf_32_be" | "utf_32be" => SupportedCharset::Utf32Be,
-        _ => return None,
-    })
 }
 
 /// The charset parameter of a content type (verbatim value; matching is
 /// case-insensitive on the parameter name via `parse_header_parameters`).
-fn content_type_charset(content_type: &str) -> SupportedCharset {
-    let (_, params) = parse_header_parameters(content_type);
+fn content_type_charset(content_type: &str) -> Result<SupportedCharset, BodyError> {
+    let (_, params) = parse_header_parameters(content_type)?;
     // Duplicate params: last wins (`parse_header_parameters` returns a
     // dict in Django, so later pairs overwrite earlier ones).
-    params
+    Ok(params
         .iter()
         .rfind(|(name, _)| name == "charset")
         .map(|(_, value)| charset_to_supported(value))
-        .unwrap_or(SupportedCharset::Utf8)
+        .unwrap_or(SupportedCharset::Utf8))
 }
 
 /// Decode a JSON body: `codecs.getreader(charset)(stream)` semantics. The
 /// stream decode drops a trailing *incomplete* sequence (utf-8 lead
 /// prefix, utf-16 odd byte or pending high surrogate, utf-32 short tail)
-/// and raises on everything else, with CPython's exact texts.
-fn decode_json_body(body: &[u8], content_type: &str) -> Result<String, BodyError> {
-    decode_stream_body(body, content_type_charset(content_type))
+/// and raises on everything else, with CPython's exact texts. Exotic
+/// charsets (including the bytes transforms) dispatch to `body_decoders`.
+/// Returns the text plus lone-surrogate spans (always empty for the nine
+/// 627 charsets, which cannot emit surrogates).
+fn decode_json_body(
+    body: &[u8],
+    content_type: &str,
+) -> Result<(String, Vec<(usize, u16)>), BodyError> {
+    let charset = content_type_charset(content_type)?;
+    if let SupportedCharset::Exotic(_) = charset {
+        return super::body_decoders::decode_json_exotic(body, &charset);
+    }
+    decode_stream_body(body, charset)
+        .map(|text| (text, Vec::new()))
         .map_err(|detail| BodyError::ParseDetail(format!("JSON parse error - {detail}")))
 }
 
@@ -678,14 +692,33 @@ fn decode_stream_body(body: &[u8], charset: SupportedCharset) -> Result<String, 
         SupportedCharset::Utf32 => decode_stream_utf32(body, None),
         SupportedCharset::Utf32Le => decode_stream_utf32(body, Some(false)),
         SupportedCharset::Utf32Be => decode_stream_utf32(body, Some(true)),
+        SupportedCharset::Exotic(_) => {
+            unreachable!("exotic JSON decodes dispatch in decode_json_body")
+        }
     }
 }
 
 /// Strict one-shot decode for the form layer-1 (`QueryDict(bytes)` calls
-/// `bytes.decode(encoding)`): tails fail here (no stream drop); only
-/// success/failure matters because any failure falls back to latin-1.
-fn decode_oneshot_strict(body: &[u8], charset: SupportedCharset) -> Option<String> {
-    match charset {
+/// `bytes.decode(encoding)`): tails fail here (no stream drop). `Ok(None)`
+/// is the `UnicodeDecodeError` whole-body latin-1 fallback; `Err` is any
+/// other exception (the pinned 500). Surrogate spans survive: a raw
+/// `+2AE-` in a utf-7 form body must 400 at the CharField, exactly as a
+/// percent-encoded one does (live probe).
+fn decode_oneshot_strict(
+    body: &[u8],
+    charset: SupportedCharset,
+) -> Result<Option<super::body_decoders::Decoded>, BodyError> {
+    if let SupportedCharset::Exotic(_) = charset {
+        use super::body_decoders::OneshotFail;
+        return match super::body_decoders::decode_oneshot_strict(body, &charset) {
+            Ok(decoded) => Ok(Some(decoded)),
+            Err(OneshotFail::Fallback) => Ok(None),
+            Err(OneshotFail::Server) => Err(BodyError::ServerError),
+        };
+    }
+    // The nine 627 charsets never emit lone surrogates in strict mode
+    // (unpaired surrogates are errors), so spans stay empty.
+    let text = match charset {
         SupportedCharset::Utf8 => std::str::from_utf8(body).ok().map(str::to_owned),
         SupportedCharset::Ascii => {
             if body.is_ascii() {
@@ -701,28 +734,50 @@ fn decode_oneshot_strict(body: &[u8], charset: SupportedCharset) -> Option<Strin
         SupportedCharset::Utf32 => decode_oneshot_utf32(body, None),
         SupportedCharset::Utf32Le => decode_oneshot_utf32(body, Some(false)),
         SupportedCharset::Utf32Be => decode_oneshot_utf32(body, Some(true)),
-    }
+        SupportedCharset::Exotic(_) => {
+            unreachable!("handled above")
+        }
+    };
+    Ok(text.map(|text| super::body_decoders::Decoded {
+        text,
+        surr: Vec::new(),
+    }))
 }
 
 /// Lossy one-shot decode (`force_str(..., errors="replace")`, `unquote`
 /// runs, RFC 2231 values): undecodable spans become U+FFFD. The BOM
 /// codecs assume little-endian when no BOM is present (verified against
-/// CPython) and incomplete tails become a single U+FFFD.
-fn decode_oneshot_replace(bytes: &[u8], charset: SupportedCharset) -> String {
-    match charset {
-        SupportedCharset::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
-        SupportedCharset::Ascii => bytes
-            .iter()
-            .map(|b| if b.is_ascii() { *b as char } else { '\u{FFFD}' })
-            .collect(),
-        SupportedCharset::Latin1 => bytes.iter().map(|b| *b as char).collect(),
-        SupportedCharset::Utf16 => decode_replace_utf16(bytes, None),
-        SupportedCharset::Utf16Le => decode_replace_utf16(bytes, Some(false)),
-        SupportedCharset::Utf16Be => decode_replace_utf16(bytes, Some(true)),
-        SupportedCharset::Utf32 => decode_replace_utf32(bytes, None),
-        SupportedCharset::Utf32Le => decode_replace_utf32(bytes, Some(false)),
-        SupportedCharset::Utf32Be => decode_replace_utf32(bytes, Some(true)),
+/// CPython) and incomplete tails become a single U+FFFD. Exotic codecs
+/// that reject `replace` fail with the pinned 500. The spans are always
+/// empty for the nine 627 charsets.
+fn decode_oneshot_replace(
+    bytes: &[u8],
+    charset: SupportedCharset,
+) -> Result<super::body_decoders::Decoded, BodyError> {
+    if let SupportedCharset::Exotic(_) = charset {
+        return super::body_decoders::decode_oneshot_replace(bytes, &charset)
+            .map_err(|_| BodyError::ServerError);
     }
+    Ok(super::body_decoders::Decoded {
+        text: match charset {
+            SupportedCharset::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
+            SupportedCharset::Ascii => bytes
+                .iter()
+                .map(|b| if b.is_ascii() { *b as char } else { '\u{FFFD}' })
+                .collect(),
+            SupportedCharset::Latin1 => bytes.iter().map(|b| *b as char).collect(),
+            SupportedCharset::Utf16 => decode_replace_utf16(bytes, None),
+            SupportedCharset::Utf16Le => decode_replace_utf16(bytes, Some(false)),
+            SupportedCharset::Utf16Be => decode_replace_utf16(bytes, Some(true)),
+            SupportedCharset::Utf32 => decode_replace_utf32(bytes, None),
+            SupportedCharset::Utf32Le => decode_replace_utf32(bytes, Some(false)),
+            SupportedCharset::Utf32Be => decode_replace_utf32(bytes, Some(true)),
+            SupportedCharset::Exotic(_) => {
+                unreachable!("handled above")
+            }
+        },
+        surr: Vec::new(),
+    })
 }
 
 fn decode_stream_utf8(body: &[u8]) -> Result<String, String> {
@@ -1111,25 +1166,63 @@ fn decode_replace_utf32(bytes: &[u8], big_endian: Option<bool>) -> String {
 /// Percent-decode with a charset (`unquote(..., errors="replace")`):
 /// `+` is already handled by the caller for form data. ASCII runs go
 /// through `%XX` unescaping + `decode(encoding, replace)`; non-ASCII
-/// chars pass through verbatim (`_generate_unquoted_parts`).
-fn percent_decode_str(raw: &str, charset: &SupportedCharset) -> String {
+/// chars pass through verbatim (`_generate_unquoted_parts`). `incoming`
+/// carries layer-1 surrogate spans (byte offsets in `raw`); they can
+/// only sit on non-ASCII placeholders, which pass through 1:1, so each
+/// one re-attaches at the output byte length when its char is copied.
+fn percent_decode_str(
+    raw: &str,
+    charset: &SupportedCharset,
+    incoming: &[(usize, u16)],
+) -> Result<(String, Vec<(usize, u16)>), BodyError> {
+    // `unquote` fast path (`urllib/parse.py`): no `%` anywhere means the
+    // value passes through untouched — the charset decoder never runs.
+    // Without this, `idna` and the bytes transforms (which reject plain
+    // ASCII under `replace`) 500 on %-less values, and punycode mangles
+    // %-less keys (`name` -> controls); verified live against Django.
+    if !raw.contains('%') {
+        return Ok((raw.to_owned(), incoming.to_vec()));
+    }
     let mut out = String::new();
+    let mut surr = Vec::new();
     let mut run = Vec::new();
-    for c in raw.chars() {
+    // One ASCII run: decode, append, shift its spans to output offsets.
+    let flush = |out: &mut String,
+                 surr: &mut Vec<(usize, u16)>,
+                 run: &mut Vec<u8>|
+     -> Result<(), BodyError> {
+        if run.is_empty() {
+            return Ok(());
+        }
+        let base = out.len();
+        let decoded = decode_oneshot_replace(&percent_unescape(run), *charset)?;
+        out.push_str(&decoded.text);
+        surr.extend(decoded.surr.iter().map(|(off, v)| (base + off, *v)));
+        run.clear();
+        Ok(())
+    };
+    let mut inc = incoming.iter().peekable();
+    for (at, c) in raw.char_indices() {
         if c.is_ascii() {
             run.push(c as u8);
-        } else {
-            if !run.is_empty() {
-                out.push_str(&decode_oneshot_replace(&percent_unescape(&run), *charset));
-                run.clear();
-            }
-            out.push(c);
+            continue;
         }
+        flush(&mut out, &mut surr, &mut run)?;
+        // Spans arrive in offset order; stale ones (no char starts
+        // here — unreachable from strict decoders) drop.
+        while let Some((off, v)) = inc.peek() {
+            if *off > at {
+                break;
+            }
+            if *off == at {
+                surr.push((out.len(), *v));
+            }
+            inc.next();
+        }
+        out.push(c);
     }
-    if !run.is_empty() {
-        out.push_str(&decode_oneshot_replace(&percent_unescape(&run), *charset));
-    }
-    out
+    flush(&mut out, &mut surr, &mut run)?;
+    Ok((out, surr))
 }
 
 /// `_unquote_impl`: `%` + two hex digits becomes the byte; anything else
@@ -1169,9 +1262,13 @@ fn hex_val(byte: u8) -> Option<u8> {
 /// More than `DATA_UPLOAD_MAX_NUMBER_FIELDS` (1000) `&`-segments is the
 /// generic 500 (`TooManyFieldsSent`).
 fn parse_form_body(body: &[u8], content_type: &str) -> Result<FormBody, BodyError> {
-    let charset = content_type_charset(content_type);
-    let text = decode_oneshot_strict(body, charset)
-        .unwrap_or_else(|| body.iter().map(|b| *b as char).collect());
+    let charset = content_type_charset(content_type)?;
+    let layer1 =
+        decode_oneshot_strict(body, charset)?.unwrap_or_else(|| super::body_decoders::Decoded {
+            text: body.iter().map(|b| *b as char).collect(),
+            surr: Vec::new(),
+        });
+    let text = layer1.text;
     if text.is_empty() {
         return Ok(FormBody::default());
     }
@@ -1180,22 +1277,35 @@ fn parse_form_body(body: &[u8], content_type: &str) -> Result<FormBody, BodyErro
         return Err(BodyError::ServerError);
     }
     let mut form = FormBody::default();
+    let mut seg_start = 0;
     for segment in text.split('&') {
-        if segment.is_empty() {
-            continue;
+        let seg_end = seg_start + segment.len();
+        if !segment.is_empty() {
+            let (name, value) = match segment.split_once('=') {
+                Some((name, value)) => (name, value),
+                // No `=`: kept with a blank value (`keep_blank_values`).
+                None => (segment, ""),
+            };
+            // Layer-1 spans inside the value re-base to the value start
+            // (`+`→space is byte-preserving, so they stay valid through
+            // the replacement); spans in keys drop (unknown keys never
+            // validate, so a mangled key behaves identically).
+            let val_start = seg_start + name.len() + usize::from(segment.contains('='));
+            let incoming: Vec<(usize, u16)> = layer1
+                .surr
+                .iter()
+                .filter(|(off, _)| *off >= val_start && *off < seg_end)
+                .map(|(off, v)| (off - val_start, *v))
+                .collect();
+            let key = percent_decode_str(&name.replace('+', " "), &charset, &[])?.0;
+            let (text, surr) = percent_decode_str(&value.replace('+', " "), &charset, &incoming)?;
+            let slot = form.texts.entry(key.clone()).or_default();
+            if slot.is_empty() {
+                form.text_order.push(key);
+            }
+            slot.push(FormValue { text, surr });
         }
-        let (name, value) = match segment.split_once('=') {
-            Some((name, value)) => (name, value),
-            // No `=`: kept with a blank value (`keep_blank_values`).
-            None => (segment, ""),
-        };
-        let key = percent_decode_str(&name.replace('+', " "), &charset);
-        let val = percent_decode_str(&value.replace('+', " "), &charset);
-        let slot = form.texts.entry(key.clone()).or_default();
-        if slot.is_empty() {
-            form.text_order.push(key);
-        }
-        slot.push(val);
+        seg_start = seg_end + 1;
     }
     Ok(form)
 }
@@ -1222,7 +1332,7 @@ fn parse_multipart_body(
             "Multipart form parse error - Invalid non-ASCII Content-Type in multipart: {content_type}"
         )));
     }
-    let (_, params) = parse_header_parameters(content_type);
+    let (_, params) = parse_header_parameters(content_type)?;
     // Duplicate params: last wins (Django's params dict overwrites).
     let boundary = params
         .iter()
@@ -1250,7 +1360,7 @@ fn parse_multipart_body(
             }
         }
     }
-    let charset = content_type_charset(content_type);
+    let charset = content_type_charset(content_type)?;
     parse_multipart_parts(body, &boundary, &charset)
 }
 
@@ -1307,7 +1417,7 @@ fn parse_multipart_parts(
     // preamble/epilogue only ever yield RAW items, which still count.
     for chunk in chunks {
         let content = strip_one_crlf(chunk);
-        let item = classify_part(content);
+        let item = classify_part(content)?;
         match item {
             PartItem::Raw | PartItem::Nameless => {
                 num_post_keys += 1;
@@ -1324,20 +1434,24 @@ fn parse_multipart_parts(
                 if num_bytes_read > 5_242_880 {
                     return Err(BodyError::ServerError);
                 }
-                let key = decode_oneshot_replace(&name, *charset);
+                let key = decode_oneshot_replace(&name, *charset)?.text;
                 let mut value = data;
-                if item_transfer_is_base64(content) {
+                if item_transfer_is_base64(content)? {
                     // Fields are lenient: undecodable base64 keeps the
                     // raw bytes (`P33` probe).
                     if let Ok(decoded) = binascii_b64decode(&value) {
                         value = decoded;
                     }
                 }
+                let decoded = decode_oneshot_replace(&value, *charset)?;
                 let slot = form.texts.entry(key.clone()).or_default();
                 if slot.is_empty() {
                     form.text_order.push(key);
                 }
-                slot.push(decode_oneshot_replace(&value, *charset));
+                slot.push(FormValue {
+                    text: decoded.text,
+                    surr: decoded.surr,
+                });
             }
             PartItem::File {
                 name,
@@ -1349,17 +1463,20 @@ fn parse_multipart_parts(
                 if 100 < num_files {
                     return Err(BodyError::ServerError);
                 }
-                let filename = sanitize_file_name(&decode_oneshot_replace(&filename, *charset))?;
+                // Filenames never validate (and sanitize strips the
+                // U+FFFD placeholders as non-printable): spans drop.
+                let filename =
+                    sanitize_file_name(&decode_oneshot_replace(&filename, *charset)?.text)?;
                 let Some(filename) = filename else { continue };
                 let mut value = data;
-                if item_transfer_is_base64(content) {
+                if item_transfer_is_base64(content)? {
                     value = binascii_b64decode(&value).map_err(|_| {
                         BodyError::ParseDetail(
                             "Multipart form parse error - Could not decode base64 data.".to_owned(),
                         )
                     })?;
                 }
-                let key = decode_oneshot_replace(&name, *charset);
+                let key = decode_oneshot_replace(&name, *charset)?.text;
                 // `MemoryFileUploadHandler.activated`: the whole body fits
                 // in `FILE_UPLOAD_MAX_MEMORY_SIZE` (2621440).
                 let in_memory = body.len() <= 2_621_440;
@@ -1422,10 +1539,10 @@ enum PartItem {
 /// the first `\r\n\r\n` inside a 1024-byte window; files are parts whose
 /// disposition carries a nonempty filename. Later duplicate lines
 /// overwrite earlier ones.
-fn classify_part(content: &[u8]) -> PartItem {
+fn classify_part(content: &[u8]) -> Result<PartItem, BodyError> {
     let window = content.len().min(1024);
     let Some(end) = find_subsequence(&content[..window], b"\r\n\r\n") else {
-        return PartItem::Raw;
+        return Ok(PartItem::Raw);
     };
     let (head, data) = (&content[..end], &content[end + 4..]);
     let mut disposition: Option<Vec<(Vec<u8>, Vec<u8>)>> = None;
@@ -1437,7 +1554,7 @@ fn classify_part(content: &[u8]) -> PartItem {
             // (`P22` probe).
             continue;
         };
-        let (name, main_value, params) = parse_header_line(line);
+        let (name, main_value, params) = parse_header_line(line)?;
         if name.is_empty() {
             continue;
         }
@@ -1448,7 +1565,7 @@ fn classify_part(content: &[u8]) -> PartItem {
         }
     }
     let Some(dispo_params) = disposition else {
-        return PartItem::Raw;
+        return Ok(PartItem::Raw);
     };
     let mut name: Option<Vec<u8>> = None;
     let mut filename: Option<Vec<u8>> = None;
@@ -1460,10 +1577,10 @@ fn classify_part(content: &[u8]) -> PartItem {
         }
     }
     let Some(name) = name else {
-        return PartItem::Nameless;
+        return Ok(PartItem::Nameless);
     };
     let name = strip_ascii_whitespace(&name);
-    match filename {
+    Ok(match filename {
         Some(filename) if !filename.is_empty() => PartItem::File {
             name,
             filename,
@@ -1475,16 +1592,16 @@ fn classify_part(content: &[u8]) -> PartItem {
             name,
             data: data.to_vec(),
         },
-    }
+    })
 }
 
 /// Whether the part declares `Content-Transfer-Encoding: base64` (the
 /// header line is lowercased by `parse_header_parameters`, so the match
 /// is case-insensitive; the last such line wins).
-fn item_transfer_is_base64(content: &[u8]) -> bool {
+fn item_transfer_is_base64(content: &[u8]) -> Result<bool, BodyError> {
     let window = content.len().min(1024);
     let Some(end) = find_subsequence(&content[..window], b"\r\n\r\n") else {
-        return false;
+        return Ok(false);
     };
     let mut encoding = String::new();
     for line in content[..end].split(|b| *b == b'\n') {
@@ -1492,12 +1609,12 @@ fn item_transfer_is_base64(content: &[u8]) -> bool {
         let Ok(line) = std::str::from_utf8(line) else {
             continue;
         };
-        let (name, main_value, _) = parse_header_line(line);
+        let (name, main_value, _) = parse_header_line(line)?;
         if name.eq_ignore_ascii_case("content-transfer-encoding") {
             encoding = String::from_utf8_lossy(&main_value).into_owned();
         }
     }
-    encoding == "base64"
+    Ok(encoding == "base64")
 }
 
 /// One header line: `parse_header_parameters` lowercases the whole
@@ -1507,10 +1624,10 @@ fn item_transfer_is_base64(content: &[u8]) -> bool {
 /// The triple is (field name, raw value, parameters).
 type ParsedHeaderLine = (String, Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>);
 
-fn parse_header_line(line: &str) -> ParsedHeaderLine {
-    let (main, params) = parse_header_parameters(line);
+fn parse_header_line(line: &str) -> Result<ParsedHeaderLine, BodyError> {
+    let (main, params) = parse_header_parameters(line)?;
     let Some((name, value)) = main.split_once(':') else {
-        return (String::new(), Vec::new(), Vec::new());
+        return Ok((String::new(), Vec::new(), Vec::new()));
     };
     // Param values here are raw bytes of the (already unquoted) text.
     let params = params
@@ -1520,7 +1637,7 @@ fn parse_header_line(line: &str) -> ParsedHeaderLine {
     // The field name is NOT stripped (4.2 compares it verbatim, so
     // `Name : v` never matches); the value trims like Django's per-use
     // `.strip()` calls (N3/N5).
-    (name.to_owned(), value.trim().as_bytes().to_vec(), params)
+    Ok((name.to_owned(), value.trim().as_bytes().to_vec(), params))
 }
 
 fn strip_ascii_whitespace(bytes: &[u8]) -> Vec<u8> {
@@ -1878,16 +1995,13 @@ mod codec_tests {
                 "{name}"
             );
         }
-        // Bogus, empty, exotic, and punctuation-only degrade to utf-8.
-        for name in [
-            "bogus",
-            "",
-            "cp1252",
-            "windows-1252",
-            "iso-8859-2",
-            "---",
-            "utf 8x",
-        ] {
+        // Bogus, empty, and punctuation-only degrade to utf-8
+        // (exotic codecs resolve since PIDASHCONV-693 — pinned by
+        // `body_battery::battery_resolution` — so they left this list).
+        // Windows-only aliases (`ansi`/`dbcs` -> `mbcs`) reject like
+        // CPython's LookupError on Linux (review fix: the engine-less
+        // module used to reach the dispatcher `todo!` and panic).
+        for name in ["bogus", "", "---", "utf 8x", "ansi", "dbcs", "ANSI", "oem"] {
             assert_eq!(charset_to_supported(name), SupportedCharset::Utf8, "{name}");
         }
         // Interior space collapses to `_`, like CPython (`utf 8` is utf-8).
@@ -2064,45 +2178,37 @@ mod codec_tests {
     fn oneshot_utf16_utf32_no_bom_needed() {
         // One-shot (`bytes.decode`) has no BOM requirement: native-LE
         // default, BOM consumed when present (F9).
+        let one = |bytes: &[u8], cs: SupportedCharset| {
+            decode_oneshot_strict(bytes, cs)
+                .expect("oneshot")
+                .map(|d| d.text)
+        };
         assert_eq!(
-            decode_oneshot_strict(b"abcd", SupportedCharset::Utf16).as_deref(),
+            one(b"abcd", SupportedCharset::Utf16).as_deref(),
             Some("\u{6261}\u{6463}")
         );
+        assert_eq!(one(b"", SupportedCharset::Utf16).as_deref(), Some(""));
         assert_eq!(
-            decode_oneshot_strict(b"", SupportedCharset::Utf16).as_deref(),
+            one(b"\xff\xfe", SupportedCharset::Utf16).as_deref(),
             Some("")
         );
         assert_eq!(
-            decode_oneshot_strict(b"\xff\xfe", SupportedCharset::Utf16).as_deref(),
-            Some("")
-        );
-        assert_eq!(
-            decode_oneshot_strict(b"\xfe\xff\x00A", SupportedCharset::Utf16).as_deref(),
+            one(b"\xfe\xff\x00A", SupportedCharset::Utf16).as_deref(),
             Some("A")
         );
         // Odd tails and lone surrogates fail (form falls back to latin-1).
-        assert_eq!(decode_oneshot_strict(b"abc", SupportedCharset::Utf16), None);
-        assert_eq!(
-            decode_oneshot_strict(b"\x00\xd8", SupportedCharset::Utf16),
-            None
-        );
+        assert_eq!(one(b"abc", SupportedCharset::Utf16), None);
+        assert_eq!(one(b"\x00\xd8", SupportedCharset::Utf16), None);
         // utf-32 one-shot: `abcd` is LE 0x64636261, out of range.
+        assert_eq!(one(b"abcd", SupportedCharset::Utf32), None);
+        assert_eq!(one(b"abc", SupportedCharset::Utf32), None);
+        assert_eq!(one(b"", SupportedCharset::Utf32).as_deref(), Some(""));
         assert_eq!(
-            decode_oneshot_strict(b"abcd", SupportedCharset::Utf32),
-            None
-        );
-        assert_eq!(decode_oneshot_strict(b"abc", SupportedCharset::Utf32), None);
-        assert_eq!(
-            decode_oneshot_strict(b"", SupportedCharset::Utf32).as_deref(),
-            Some("")
-        );
-        assert_eq!(
-            decode_oneshot_strict(b"A\x00\x00\x00", SupportedCharset::Utf32).as_deref(),
+            one(b"A\x00\x00\x00", SupportedCharset::Utf32).as_deref(),
             Some("A")
         );
         assert_eq!(
-            decode_oneshot_strict(b"\xff\xfe\x00\x00A\x00\x00\x00", SupportedCharset::Utf32)
-                .as_deref(),
+            one(b"\xff\xfe\x00\x00A\x00\x00\x00", SupportedCharset::Utf32).as_deref(),
             Some("A")
         );
     }
@@ -2169,7 +2275,11 @@ mod codec_tests {
         )
         .unwrap()
         {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
                 assert!(files.is_empty());
                 map
             }
@@ -2209,6 +2319,45 @@ mod codec_tests {
     }
 
     #[test]
+    fn form_unquote_fast_path() {
+        // `unquote` never runs the charset decoder on %-less values
+        // (PIDASHCONV-693): `idna` accepts plain ASCII, and punycode
+        // falls non-ASCII bodies back to latin-1 without mangling the
+        // `name` key (contract TestCharsetExotic693 pins the 201s).
+        let form = |ct: &str, body: &[u8]| match negotiate(ct, body, &CYCLE_BODY_SPEC).unwrap() {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
+                assert!(files.is_empty());
+                map
+            }
+            other => panic!("expected form, got {other:?}"),
+        };
+        let map = form(
+            "application/x-www-form-urlencoded; charset=idna",
+            b"name=FIDNA693",
+        );
+        assert_eq!(map["name"], Value::String("FIDNA693".to_owned()));
+        let map = form(
+            "application/x-www-form-urlencoded; charset=punycode",
+            b"name=\xff",
+        );
+        assert_eq!(map["name"], Value::String("ÿ".to_owned()));
+        // With a `%` present the decoder runs, and `idna` rejects.
+        assert_eq!(
+            negotiate(
+                "application/x-www-form-urlencoded; charset=idna",
+                b"a%20=b",
+                &CYCLE_BODY_SPEC,
+            )
+            .unwrap_err(),
+            BodyError::ServerError,
+        );
+    }
+
+    #[test]
     fn form_field_limit() {
         let pairs: Vec<String> = (0..1000).map(|i| format!("k{i}=v")).collect();
         let ok_body = pairs.join("&");
@@ -2241,7 +2390,11 @@ mod codec_tests {
         )
         .unwrap()
         {
-            NegotiatedBody::Form { map, files } => (map, files),
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => (map, files),
             other => panic!("expected form, got {other:?}"),
         };
         // Single member still arrives as an array (P24a2).
@@ -2278,7 +2431,11 @@ mod codec_tests {
         )
         .unwrap()
         {
-            NegotiatedBody::Form { map, files } => (map, files),
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => (map, files),
             other => panic!("expected form, got {other:?}"),
         };
         let strs = |items: &[&str]| {
@@ -2372,7 +2529,11 @@ mod codec_tests {
         let ct = "multipart/form-data; boundary=----b";
         let body = b"------b\r\nContent-Disposition: form-data; name=\"members[1]\"\r\n\r\nnot-a-uuid\r\n------b\r\nContent-Disposition: form-data; name=\"members[0]\"; filename=\"i.txt\"\r\nContent-Type: text/plain\r\n\r\nhi\r\n------b--\r\n";
         match negotiate(ct, body, &MODULE_BODY_SPEC).unwrap() {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
                 assert_eq!(
                     map["members"],
                     Value::Array(vec![Value::Null, Value::String("not-a-uuid".to_owned())])
@@ -2392,7 +2553,11 @@ mod codec_tests {
         // Text field round-trips (C01).
         let body = b"------b\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nmpcycle\r\n------b--\r\n";
         match mp(body).unwrap() {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
                 assert_eq!(map["name"], Value::String("mpcycle".to_owned()));
                 assert!(files.is_empty());
             }
@@ -2401,7 +2566,11 @@ mod codec_tests {
         // Unknown file is carried with bytes (C02).
         let body = b"------b\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nv\r\n------b\r\nContent-Disposition: form-data; name=\"att\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nhi\r\n------b--\r\n";
         match mp(body).unwrap() {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
                 assert_eq!(map["name"], Value::String("v".to_owned()));
                 assert_eq!(files["att"][0].filename, "a.txt");
                 assert_eq!(files["att"][0].bytes, b"hi");
@@ -2432,7 +2601,11 @@ mod codec_tests {
         );
         // Garbage with a valid boundary is empty data, not an error (C05).
         match mp(b"this is not multipart").unwrap() {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
                 assert!(map.is_empty());
                 assert!(files.is_empty());
             }
@@ -2441,7 +2614,11 @@ mod codec_tests {
         // Empty filename arrives as a text field (P23).
         let body = b"------b\r\nContent-Disposition: form-data; name=\"name\"; filename=\"\"\r\n\r\nefv\r\n------b--\r\n";
         match mp(body).unwrap() {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
                 assert_eq!(map["name"], Value::String("efv".to_owned()));
                 assert!(files.is_empty());
             }
@@ -2458,7 +2635,11 @@ mod codec_tests {
         );
         let body = b"------b\r\nContent-Disposition: form-data; name=\"name\"\r\nContent-Transfer-Encoding: base64\r\n\r\nabcde\r\n------b--\r\n";
         match mp(body).unwrap() {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
                 assert_eq!(map["name"], Value::String("abcde".to_owned()));
                 assert!(files.is_empty());
             }
@@ -2467,7 +2648,11 @@ mod codec_tests {
         // Non-UTF-8 header line is skipped, killing the part (P22).
         let body = b"------b\r\nContent-Disposition: form-data; name=\"na\xffme\"\r\n\r\nv\r\n------b--\r\n";
         match mp(body).unwrap() {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
                 assert!(map.is_empty());
                 assert!(files.is_empty());
             }
@@ -2476,7 +2661,11 @@ mod codec_tests {
         // Duplicate disposition lines: last wins (R9).
         let body = b"------b\r\nContent-Disposition: form-data; name=\"nope\"\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\ndup1\r\n------b--\r\n";
         match mp(body).unwrap() {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
                 assert_eq!(map["name"], Value::String("dup1".to_owned()));
                 assert!(files.is_empty());
             }
@@ -2487,7 +2676,11 @@ mod codec_tests {
         let body =
             b"------b\r\nContent-Disposition : form-data; name=\"name\"\r\n\r\nv\r\n------b--\r\n";
         match mp(body).unwrap() {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
                 assert!(map.is_empty());
                 assert!(files.is_empty());
             }
@@ -2528,7 +2721,7 @@ mod codec_tests {
         )
         .unwrap()
         {
-            NegotiatedBody::JsonText(text) => assert_eq!(text, "{\"a\":\"é\"}"),
+            NegotiatedBody::JsonText { text, surr: _ } => assert_eq!(text, "{\"a\":\"é\"}"),
             other => panic!("{other:?}"),
         }
         assert!(matches!(
@@ -2545,7 +2738,11 @@ mod codec_tests {
         // at all (F14) — neither trips the field budget.
         let body = b"------b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nv\r\n------b";
         match negotiate(ct, body, &CYCLE_BODY_SPEC).unwrap() {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
                 assert_eq!(map["a"], Value::String("v".to_owned()));
                 assert!(files.is_empty());
             }
@@ -2555,7 +2752,11 @@ mod codec_tests {
         headers.insert("content-type", ct.parse().unwrap());
         headers.insert("content-length", "64".parse().unwrap());
         match negotiate_body(&headers, b"", &CYCLE_BODY_SPEC).unwrap() {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form {
+                map,
+                files,
+                surr: _,
+            } => {
                 assert!(map.is_empty());
                 assert!(files.is_empty());
             }
@@ -2766,7 +2967,7 @@ mod codec_tests {
         ]
         .concat();
         match negotiate(ct, &bad, &CYCLE_BODY_SPEC).unwrap() {
-            NegotiatedBody::Form { map, files } => {
+            NegotiatedBody::Form { map, files, .. } => {
                 assert!(map.is_empty());
                 assert!(files.is_empty());
             }
@@ -2883,41 +3084,33 @@ mod header_tests {
 
     #[test]
     fn parser_selection() {
-        assert_eq!(select_parser("application/json"), Parser::Json);
-        assert_eq!(select_parser("Application/JSON"), Parser::Json);
-        assert_eq!(
-            select_parser("application/json; charset=utf-8"),
-            Parser::Json
-        );
-        assert_eq!(
-            select_parser("application/x-www-form-urlencoded"),
-            Parser::Form
-        );
-        assert_eq!(
-            select_parser("multipart/form-data; boundary=x"),
-            Parser::Multipart
-        );
-        assert_eq!(select_parser("*/*"), Parser::Json);
-        assert_eq!(select_parser("application/*"), Parser::Json);
-        assert_eq!(select_parser("text/plain"), Parser::None);
-        assert_eq!(select_parser("text/*"), Parser::None);
-        assert_eq!(select_parser(""), Parser::None);
-        assert_eq!(select_parser("application/jsonn"), Parser::None);
+        let parse = |content_type: &str| select_parser(content_type).expect("parse params");
+        assert_eq!(parse("application/json"), Parser::Json);
+        assert_eq!(parse("Application/JSON"), Parser::Json);
+        assert_eq!(parse("application/json; charset=utf-8"), Parser::Json);
+        assert_eq!(parse("application/x-www-form-urlencoded"), Parser::Form);
+        assert_eq!(parse("multipart/form-data; boundary=x"), Parser::Multipart);
+        assert_eq!(parse("*/*"), Parser::Json);
+        assert_eq!(parse("application/*"), Parser::Json);
+        assert_eq!(parse("text/plain"), Parser::None);
+        assert_eq!(parse("text/*"), Parser::None);
+        assert_eq!(parse(""), Parser::None);
+        assert_eq!(parse("application/jsonn"), Parser::None);
     }
 
     #[test]
     fn header_params_shapes() {
-        let (main, params) = parse_header_parameters("Multipart/Form-Data; boundary=----x");
+        let params_of = |line: &str| parse_header_parameters(line).expect("parse header params");
+        let (main, params) = params_of("Multipart/Form-Data; boundary=----x");
         assert_eq!(main, "multipart/form-data");
         assert_eq!(params, vec![("boundary".to_owned(), "----x".to_owned())]);
-        let (main, params) = parse_header_parameters("multipart/form-data; boundary=\"a;b\"");
+        let (main, params) = params_of("multipart/form-data; boundary=\"a;b\"");
         assert_eq!(main, "multipart/form-data");
         assert_eq!(params, vec![("boundary".to_owned(), "a;b".to_owned())]);
-        let (main, params) =
-            parse_header_parameters("application/x-www-form-urlencoded; Charset=\"latin-1\"");
+        let (main, params) = params_of("application/x-www-form-urlencoded; Charset=\"latin-1\"");
         assert_eq!(main, "application/x-www-form-urlencoded");
         assert_eq!(params, vec![("charset".to_owned(), "latin-1".to_owned())]);
-        let (main, params) = parse_header_parameters("text/plain");
+        let (main, params) = params_of("text/plain");
         assert_eq!(main, "text/plain");
         assert!(params.is_empty());
     }
