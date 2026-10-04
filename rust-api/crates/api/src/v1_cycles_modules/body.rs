@@ -1998,7 +1998,10 @@ mod codec_tests {
         // Bogus, empty, and punctuation-only degrade to utf-8
         // (exotic codecs resolve since PIDASHCONV-693 — pinned by
         // `body_battery::battery_resolution` — so they left this list).
-        for name in ["bogus", "", "---", "utf 8x"] {
+        // Windows-only aliases (`ansi`/`dbcs` -> `mbcs`) reject like
+        // CPython's LookupError on Linux (review fix: the engine-less
+        // module used to reach the dispatcher `todo!` and panic).
+        for name in ["bogus", "", "---", "utf 8x", "ansi", "dbcs", "ANSI", "oem"] {
             assert_eq!(charset_to_supported(name), SupportedCharset::Utf8, "{name}");
         }
         // Interior space collapses to `_`, like CPython (`utf 8` is utf-8).

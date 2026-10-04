@@ -974,7 +974,7 @@ class TestCharsetExotic693:
         assert r.status_code == 201
         assert r.json()["name"] == "ÿ"
 
-    @pytest.mark.parametrize("charset", ["base64", "hex", "rot13", "zlib", "bz2"])
+    @pytest.mark.parametrize("charset", ["base64", "hex", "quopri", "uu", "rot13", "zlib", "bz2"])
     def test_form_transform_is_500(self, admin_client, charset):
         r = _cycles_post(
             admin_client,
@@ -1042,7 +1042,9 @@ class TestCharsetExotic693:
         assert r.status_code == 201
         assert r.json()["name"] == "MP693 café"
 
-    @pytest.mark.parametrize("charset", ["idna", "base64", "rot13"])
+    @pytest.mark.parametrize(
+        "charset", ["idna", "base64", "hex", "quopri", "uu", "zlib", "bz2", "undefined", "rot13"]
+    )
     def test_mp_reject_is_500(self, admin_client, charset):
         boundary = "BOUND693B"
         body = (
@@ -1121,6 +1123,17 @@ class TestCharsetExotic693:
         # the high byte fails JSON with the utf-8 text.
         r = _cycles_post(
             admin_client, "application/json; charset=shift.jis", b'{"name": "a\xe9"}'
+        )
+        assert r.status_code == 400
+        assert r.json()["detail"].startswith("JSON parse error - 'utf-8' codec")
+
+    @pytest.mark.parametrize("charset", ["ansi", "dbcs"])
+    def test_charset_windows_alias_rejected(self, admin_client, charset):
+        # `ansi`/`dbcs` alias to Windows-only `mbcs`: LookupError on
+        # Linux, so utf-8 applies (review fix: the engine-less module
+        # used to reach the dispatcher `todo!` and panic the request).
+        r = _cycles_post(
+            admin_client, "application/json; charset=%s" % charset, b'{"name": "a\xe9"}'
         )
         assert r.status_code == 400
         assert r.json()["detail"].startswith("JSON parse error - 'utf-8' codec")

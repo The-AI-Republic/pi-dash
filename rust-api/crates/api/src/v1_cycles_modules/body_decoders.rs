@@ -92,16 +92,19 @@ fn alias_lookup(normalized: &str) -> Option<&'static str> {
 
 /// Resolve a `charset=` value to its codec module (`Some`) or reject to
 /// utf-8 (`None`): `aliases[ norm ] || aliases[ norm.dot->underscore ]`,
-/// else the dotless importable module itself. `mbcs`/`oem` are absent
-/// from the tables (non-Windows reachability verified at generation).
+/// else the dotless importable module itself. An aliased module that
+/// cannot import on this platform (`mbcs`, Windows-only: `ansi`/`dbcs`)
+/// rejects like CPython's `LookupError` — Django then keeps the default
+/// encoding (review fix: the engine-less module used to reach the
+/// dispatcher `todo!` and panic the request).
 pub(crate) fn resolve_module(raw: &str) -> Option<&'static str> {
     let norm = normalize_encoding(raw);
     if let Some(module) = alias_lookup(&norm) {
-        return Some(module);
+        return importable(module);
     }
     if norm.contains('.') {
         if let Some(module) = alias_lookup(&norm.replace('.', "_")) {
-            return Some(module);
+            return importable(module);
         }
     } else if !norm.is_empty() && tables::MODULE_NAMES.binary_search(&norm.as_str()).is_ok() {
         // `MODULE_NAMES` is sorted; the stored `&'static str` is returned
@@ -112,6 +115,17 @@ pub(crate) fn resolve_module(raw: &str) -> Option<&'static str> {
         return Some(tables::MODULE_NAMES[i]);
     }
     None
+}
+
+/// Keep an aliased module only when it imports on this platform
+/// (`MODULE_NAMES` is exactly the importable set; `mbcs` is not a
+/// member outside Windows, so `ansi`/`dbcs` reject here).
+fn importable(module: &'static str) -> Option<&'static str> {
+    if tables::MODULE_NAMES.binary_search(&module).is_ok() {
+        Some(module)
+    } else {
+        None
+    }
 }
 
 /// `codecs.lookup(name).name` for reachable names (`None` for rejects).
@@ -702,7 +716,10 @@ fn transform_hex(body: &[u8]) -> Result<Vec<u8>, String> {
         return Err("Odd-length string".to_owned());
     }
     let mut out = Vec::with_capacity(body.len() / 2);
-    for pair in body.chunks_exact(2) {
+    // `as_chunks` (clippy `chunks_exact_to_as_chunks` on current
+    // stable): identical pairs — the length is pre-checked even, so
+    // there is no remainder either way.
+    for pair in body.as_chunks::<2>().0 {
         let hi = hex_value(pair[0]);
         let lo = hex_value(pair[1]);
         match (hi, lo) {
