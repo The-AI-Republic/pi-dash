@@ -31,6 +31,7 @@ pub mod handlers_members;
 pub mod handlers_prefs;
 pub mod handlers_profile;
 pub mod handlers_tokens;
+pub mod handlers_user;
 pub mod handlers_user_extras;
 pub mod handlers_workspace;
 
@@ -47,6 +48,7 @@ pub fn routes() -> Router<AppState> {
         .merge(handlers_prefs::routes())
         .merge(handlers_profile::routes())
         .merge(handlers_tokens::routes())
+        .merge(handlers_user::routes())
         .merge(handlers_user_extras::routes())
         .merge(handlers_workspace::routes())
 }
