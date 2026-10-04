@@ -5539,23 +5539,29 @@ async fn project_patch(
     }
     let now = utc_now_micros();
     apply_update(&pool, &validated, &instance, &actor.id, now).await?;
-    // The intake check reads the *updated* row's name (`:355-364`);
-    // the re-fetch uses the scoped queryset, so a miss is the 500
-    // `AttributeError` branch (`str(project.id)` on `None`).
-    let updated = fetch_project_row_scoped(&pool, &project_id, &actor.id, &slug)
-        .await?
-        .ok_or(Denial::ServerError)?;
+    // Python order (`base.py:356-367`): the intake ensure runs BEFORE the
+    // scoped re-fetch, using the post-save in-memory name (DRF `update()`
+    // setattr's the instance before `save()`, so that is the validated
+    // name when provided, else the stored one — `workspace` is read-only
+    // so the workspace id is unchanged too). On the cross-workspace 500
+    // path Python still creates the intake row before `str(None.id)`.
     if python_truthy(&intake_raw) {
+        let saved_name = validated.name.as_deref().unwrap_or(&instance.name);
         ensure_default_intake(
             &pool,
             &project_id,
-            &updated.workspace_id,
-            &updated.name,
+            &instance.workspace_id,
+            saved_name,
             &actor.id,
             now,
         )
         .await?;
     }
+    // The re-fetch uses the scoped queryset, so a miss is the 500
+    // `AttributeError` branch (`str(project.id)` on `None`).
+    let updated = fetch_project_row_scoped(&pool, &project_id, &actor.id, &slug)
+        .await?
+        .ok_or(Denial::ServerError)?;
     let origin = request_origin(&state)?;
     enqueue_message(
         &pool,
