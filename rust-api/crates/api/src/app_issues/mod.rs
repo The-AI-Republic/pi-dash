@@ -42,6 +42,7 @@
 //! - the manager's triage exclusion drops NULL-state rows with it
 //!   (`NOT (group = 'triage')` over a left join, three-valued logic).
 
+pub mod handlers_archive;
 pub mod handlers_engage;
 pub mod handlers_labels_attachments;
 pub mod handlers_reads;
@@ -75,8 +76,8 @@ use pidash_services::app_issues::{
 use render::v2_page;
 
 /// Register the five list-family GET routes plus the engage-handler
-/// routes. Nothing else: sibling paths stay unmatched and proxy to
-/// Django.
+/// routes and the three archive paths (PIDASHCONV-656). Nothing else:
+/// sibling paths stay unmatched and proxy to Django.
 ///
 /// Non-GET methods on owned paths proxy too. DRF authenticates before it
 /// checks the method, and `POST issues/` is the create endpoint other
@@ -190,6 +191,29 @@ pub fn routes() -> Router<AppState> {
         // merge their routers here the same way; merges keep both sides.
         .merge(handlers_reads::routes())
         .merge(handlers_relations::routes())
+        .route(
+            handlers_archive::ARCHIVED_ISSUES_PATH,
+            owned(get(handlers_archive::archived_list)),
+        )
+        .route(
+            handlers_archive::ISSUE_ARCHIVE_PATH,
+            get(handlers_archive::archive_retrieve)
+                .post(handlers_archive::archive_issue)
+                .delete(handlers_archive::unarchive_issue)
+                .put(crate::edge::proxy)
+                .patch(crate::edge::proxy)
+                .options(crate::edge::proxy),
+        )
+        .route(
+            handlers_archive::BULK_ARCHIVE_PATH,
+            post(handlers_archive::bulk_archive)
+                .get(crate::edge::proxy)
+                .put(crate::edge::proxy)
+                .patch(crate::edge::proxy)
+                .delete(crate::edge::proxy)
+                .head(crate::edge::proxy)
+                .options(crate::edge::proxy),
+        )
 }
 
 /// A list-family path: the GET handler owns reads, everything else falls
