@@ -9,6 +9,8 @@
 //! * [`shape_issue`] — `IssueSerializer` core
 //!   (`api/serializers/issue.py:54-108` helpers + `:109-496`, PIDASHCONV-660,
 //!   this issue; owns this `mod.rs` as the first D-18 serializer to merge).
+//! * [`shape_expand_search`] — expand + issue-link + search shapes
+//!   (`api/serializers/issue.py:1033-1118,1139-1203`, PIDASHCONV-665).
 //! * [`shape_relations`] — relation shapes (`IssueRelationResponse` /
 //!   `Create` / `Remove` / `Show`, `RelatedIssue`;
 //!   `api/serializers/issue.py:729-906`, PIDASHCONV-663).
@@ -30,6 +32,7 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
+pub mod shape_expand_search;
 pub mod shape_issue;
 pub mod shape_pages;
 pub mod shape_relations;
