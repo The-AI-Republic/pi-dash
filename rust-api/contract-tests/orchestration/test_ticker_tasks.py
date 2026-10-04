@@ -28,6 +28,23 @@ def _drain():
     db.wait_for_condition(lambda: broker.queue_depth() == 0, what="broker queue drains")
 
 
+def _wait_settled(issue, what="ticker settles after rollback"):
+    """Wait until the claim→rollback window has closed.
+
+    fire_tick commits the claim (used 0→1, last_tick_at set) and the
+    dispatch-failure rollback (used back to 0) in two separate
+    transactions. last_tick_at alone can fire inside that window, and
+    queue_depth()==0 is already true once the solo worker fetches the
+    message — so neither gates the rollback. Poll for the converged
+    state (attempt mark present, budget restored) instead.
+    """
+    def _settled():
+        tick = _ticker(issue)
+        return tick["last_tick_at"] is not None and tick["used"] == 0
+
+    db.wait_for_condition(_settled, what=what)
+
+
 def _claimable(w, alias):
     """Issue whose fire_tick reaches the claim but whose dispatch fails
     (a prior run exists, yet no default pod): last_tick_at moves as the
@@ -56,6 +73,8 @@ def test_scan_fans_out_one_fire_per_due_ticker(api_client):
     db.wait_for_condition(lambda: _ticker(a)["last_tick_at"] is not None, what="fire_tick(a) executed")
     db.wait_for_condition(lambda: _ticker(b)["last_tick_at"] is not None, what="fire_tick(b) executed")
     _drain()
+    _wait_settled(a, what="fire_tick(a) settles after rollback")
+    _wait_settled(b, what="fire_tick(b) settles after rollback")
 
     for issue in (a, b):
         tick = _ticker(issue)
@@ -93,6 +112,7 @@ def test_fire_tick_claim_rolls_back_when_dispatch_fails(api_client):
     broker.publish_task(FIRE, args=(str(_ticker(issue)["id"]),))
     db.wait_for_condition(lambda: _ticker(issue)["last_tick_at"] is not None, what="fire_tick executed")
     _drain()
+    _wait_settled(issue)
 
     tick = _ticker(issue)
     assert tick["last_tick_at"] is not None
@@ -129,6 +149,7 @@ def test_redelivered_fire_tick_executes_once(api_client):
     broker.publish_task(FIRE, args=(ticker_id,), task_id=tid)
     db.wait_for_condition(lambda: _ticker(issue)["last_tick_at"] is not None, what="first delivery executed")
     _drain()
+    _wait_settled(issue, what="redelivered fire_tick settles after rollback")
 
     tick = _ticker(issue)
     assert tick["used"] == 0
@@ -151,5 +172,6 @@ def test_fire_tick_eta_gates_execution(api_client):
     db.wait_for_condition(lambda: _ticker(issue)["last_tick_at"] is not None,
                           timeout=30, what="fire_tick executed after ETA")
     _drain()
+    _wait_settled(issue, what="fire_tick settles after ETA execution")
     assert _ticker(issue)["used"] == 0
     assert _runs(issue) == 1
