@@ -549,11 +549,45 @@ fn json_parse_denial(raw: &[u8], error: &serde_json::Error) -> Denial {
     Denial::BadJson(format!("{JSON_PARSE_PREFIX}{error}"))
 }
 
-/// Parse a PATCH body: valid JSON, and a dict (DRF interpolates
-/// `type(data).__name__` for anything else).
-fn parse_body(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
-    let value: Value =
-        serde_json::from_slice(raw).map_err(|error| json_parse_denial(raw, &error))?;
+/// Parse a PATCH body's JSON: the cascade pre-check and the dict
+/// check both read this value.
+fn parse_body_json(raw: &[u8]) -> Result<Value, Denial> {
+    serde_json::from_slice(raw).map_err(|error| json_parse_denial(raw, &error))
+}
+
+/// The cascade pre-check over raw `request.data` (`member.py:88`): it
+/// runs before any dict check, so `"role" in data` raises `TypeError`
+/// for scalar bodies (the 500), and a membership hit on a `str`
+/// (substring) or a `list` (element equality) 500s on the `.get`
+/// subscript; a miss skips the cascade and falls through to the
+/// serializer's dict 400. Returns the `role` member for dict bodies.
+fn cascade_role_lookup(value: &Value) -> Result<Option<&Value>, Denial> {
+    match value {
+        Value::Object(map) => Ok(map.get("role")),
+        Value::Array(items) => {
+            if items
+                .iter()
+                .any(|item| matches!(item, Value::String(text) if text == "role"))
+            {
+                Err(Denial::ServerError)
+            } else {
+                Ok(None)
+            }
+        }
+        Value::String(text) => {
+            if text.contains("role") {
+                Err(Denial::ServerError)
+            } else {
+                Ok(None)
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => Err(Denial::ServerError),
+    }
+}
+
+/// The dict half of PATCH body parsing, over an already-parsed value
+/// (DRF interpolates `type(data).__name__` for anything else).
+fn parse_body_value(value: Value) -> Result<Map<String, Value>, Denial> {
     value.as_object().cloned().ok_or_else(|| {
         let kind = python_type_name(&value);
         let mut errors = Map::with_capacity(1);
@@ -600,18 +634,144 @@ fn query_last(query: &QueryMap, key: &str) -> Option<String> {
     }
 }
 
-/// `SearchFilter` terms (`rest_framework/filters.py`): the last `?search=`
-/// value with commas blanked, split on whitespace. Empty input filters
-/// nothing.
+/// `SearchFilter` terms (`rest_framework/filters.py`
+/// `search_smart_split` over Django `smart_split`): the last `?search=`
+/// value split on whitespace with quoted phrases kept together; commas
+/// trim per token, then quoted tokens unescape while the rest split on
+/// commas. Empty input filters nothing.
 fn search_terms(query: &QueryMap) -> Vec<String> {
     query_last(query, "search")
-        .map(|raw| {
-            raw.replace(',', " ")
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect()
-        })
+        .map(|raw| search_smart_split(&raw))
         .unwrap_or_default()
+}
+
+/// DRF `search_smart_split`: each token has commas trimmed, then a
+/// token wrapped in one quote pair (single char included — `"x"` and a
+/// lone `"` both count, the latter unescaping to the empty term) keeps
+/// together unescaped, while any other token splits on commas with
+/// empty pieces dropped and the rest stripped.
+fn search_smart_split(raw: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for token in smart_split_terms(raw) {
+        let trimmed = token.trim_matches(',');
+        let mut chars = trimmed.chars();
+        let Some(first) = chars.next() else {
+            // Empty after the comma trim: `"".split(",")` is `[""]`,
+            // filtered as empty — contributes nothing.
+            continue;
+        };
+        let last = trimmed.chars().next_back().expect("first exists");
+        if (first == '"' || first == '\'') && first == last {
+            terms.push(unescape_string_literal(trimmed));
+        } else {
+            for sub in trimmed.split(',') {
+                if !sub.is_empty() {
+                    terms.push(py_strip(sub).to_owned());
+                }
+            }
+        }
+    }
+    terms
+}
+
+/// Django `smart_split` (`django/utils/text.py`): split on Python
+/// whitespace, keeping quoted phrases (single or double, backslash
+/// escapes, quotes retained) together with any adjacent non-space text.
+/// A backslash-newline or an unclosed quote breaks the quoted match and
+/// the token falls back to a bare non-space run.
+fn smart_split_terms(text: &str) -> Vec<&str> {
+    let mut terms = Vec::new();
+    let mut rest = text.trim_start_matches(py_is_space);
+    while !rest.is_empty() {
+        let end = smart_token_len(rest);
+        terms.push(&rest[..end]);
+        rest = rest[end..].trim_start_matches(py_is_space);
+    }
+    terms
+}
+
+/// One `smart_split` token length: the quote-aware alternative wins when
+/// at least one complete quoted string parses (a later unclosed quote
+/// ends the token instead of failing it, like the regex backtrack),
+/// else the bare non-space run (`\S+`).
+fn smart_token_len(text: &str) -> usize {
+    let mut pos = 0;
+    while let Some(ch) = text[pos..].chars().next() {
+        if py_is_space(ch) || ch == '"' || ch == '\'' {
+            break;
+        }
+        pos += ch.len_utf8();
+    }
+    let mut end = pos;
+    let mut quoted = 0;
+    loop {
+        let Some(ch) = text[end..].chars().next() else {
+            break;
+        };
+        if ch != '"' && ch != '\'' {
+            break;
+        }
+        let Some(after) = quoted_len(&text[end..]) else {
+            break;
+        };
+        end += after;
+        quoted += 1;
+        while let Some(ch) = text[end..].chars().next() {
+            if py_is_space(ch) || ch == '"' || ch == '\'' {
+                break;
+            }
+            end += ch.len_utf8();
+        }
+    }
+    if quoted > 0 {
+        return end;
+    }
+    let mut len = 0;
+    while let Some(ch) = text[len..].chars().next() {
+        if py_is_space(ch) {
+            break;
+        }
+        len += ch.len_utf8();
+    }
+    len
+}
+
+/// One complete quoted string length (`"(?:[^"\\]|\\.)*"` or the
+/// single-quote form — `.` never matches `\n`), or `None` when the
+/// quote never closes.
+fn quoted_len(text: &str) -> Option<usize> {
+    let quote = text.chars().next()?;
+    debug_assert!(quote == '"' || quote == '\'');
+    let mut pos = quote.len_utf8();
+    loop {
+        let ch = text[pos..].chars().next()?;
+        if ch == '\\' {
+            let next = text[pos + 1..].chars().next()?;
+            if next == '\n' {
+                return None;
+            }
+            pos += 1 + next.len_utf8();
+        } else if ch == quote {
+            return Some(pos + quote.len_utf8());
+        } else {
+            pos += ch.len_utf8();
+        }
+    }
+}
+
+/// Django `unescape_string_literal`: strip one quote pair, then unescape
+/// the quote and the backslash, in that order. The caller guarantees a
+/// non-empty string literal (first and last chars the same quote).
+fn unescape_string_literal(term: &str) -> String {
+    let quote = term.chars().next().expect("quoted term");
+    let inner = term
+        .strip_prefix(quote)
+        .and_then(|rest| rest.strip_suffix(quote))
+        .unwrap_or("");
+    let escaped = format!("\\{quote}");
+    inner
+        .replace(&escaped, &quote.to_string())
+        .replace("\\\\", "\\")
 }
 
 /// `icontains` parameter: LIKE metacharacters escaped, wrapped in `%`.
@@ -628,11 +788,16 @@ fn like_param(term: &str) -> String {
     out
 }
 
-/// Python `str.strip()` with no arguments: Unicode whitespace plus
-/// `\x1c`-`\x1f`, which Rust's `char::is_whitespace` does not cover
-/// (verified against CPython: `'\x1c'.isspace()` is true).
+/// Python whitespace (`str.strip`, `re \s`, `str.isspace` — all the same
+/// 29 chars: Rust's `char::is_whitespace` plus `\x1c`-`\x1f`, verified
+/// equal over the whole scalar range).
+fn py_is_space(ch: char) -> bool {
+    ch.is_whitespace() || ('\x1c'..='\x1f').contains(&ch)
+}
+
+/// Python `str.strip()` with no arguments.
 fn py_strip(value: &str) -> &str {
-    value.trim_matches(|c: char| c.is_whitespace() || ('\x1c'..='\x1f').contains(&c))
+    value.trim_matches(py_is_space)
 }
 
 /// Python `str()` over JSON values, for the `ChoiceField` display
@@ -1452,9 +1617,12 @@ fn validate_fk_uuid(value: &Value, allow_null: bool, slot: &mut Vec<String>) -> 
 /// through, strings parse as ISO-8601 (naive values attach the request
 /// timezone, aware values convert), anything else fails with the
 /// humanized-format message. An aware instant outside Python's year
-/// range escapes as `OverflowError` (the 500, not the invalid arm —
-/// `enforce_timezone` runs inside `to_internal_value` past the
-/// `ValueError`/`TypeError` suppress).
+/// range is the `overflow` field error (400): `enforce_timezone` catches
+/// the `OverflowError` from `value.astimezone(field_timezone)`
+/// (`fields.py:1154-1157`). CPython raises on the UTC-side subtraction
+/// first, so the check covers both representations — a UTC-out-of-range
+/// instant overflows in every request timezone, and an in-range instant
+/// still overflows when its request-tz wall date leaves the range.
 fn validate_deleted_at(
     value: &Value,
     timezone: &chrono_tz::Tz,
@@ -1474,10 +1642,14 @@ fn validate_deleted_at(
     };
     match parse_django_datetime(text) {
         Some(ParsedDt::Aware(utc)) => {
-            if python_range_contains(&utc) {
+            let wall = utc.with_timezone(timezone).date_naive();
+            if python_range_contains(&utc.date_naive()) && python_range_contains(&wall) {
                 Ok(Some(Some(utc)))
             } else {
-                Err(Denial::ServerError)
+                errors
+                    .deleted_at
+                    .push("Datetime value out of range.".to_owned());
+                Ok(None)
             }
         }
         Some(ParsedDt::Naive(naive)) => Ok(Some(Some(attach_request_tz(&naive, timezone)))),
@@ -1486,11 +1658,13 @@ fn validate_deleted_at(
 }
 
 /// Python `datetime` range (`0001-01-01` through `9999-12-31`): DRF's
-/// `astimezone` at parse raises past it.
-fn python_range_contains(instant: &DateTime<Utc>) -> bool {
-    let date = instant.date_naive();
-    date >= chrono::NaiveDate::from_ymd_opt(1, 1, 1).expect("min date")
-        && date <= chrono::NaiveDate::from_ymd_opt(9999, 12, 31).expect("max date")
+/// `astimezone` raises past it, on either representation (the UTC-side
+/// subtraction or the request-tz wall). `chrono_tz` offset lookups are
+/// infallible (they extrapolate past the transition tables), so an
+/// out-of-range wall date is the only overflow signal.
+fn python_range_contains(date: &chrono::NaiveDate) -> bool {
+    *date >= chrono::NaiveDate::from_ymd_opt(1, 1, 1).expect("min date")
+        && *date <= chrono::NaiveDate::from_ymd_opt(9999, 12, 31).expect("max date")
 }
 
 /// DRF `enforce_timezone` for naive input: attach the request timezone
@@ -1560,13 +1734,15 @@ struct MemberFullRow {
 }
 
 /// The R1 list/retrieve SELECT head: scope + `select_related` joins. No
-/// `is_active` filter (ported bug B5); the avatar join is `LEFT` (the FK
-/// is nullable) with the asset manager scope, and the asset-workspace
-/// join carries the workspace manager scope (a soft-deleted asset
-/// workspace 404s through the FK descriptor, like Python). The head ends
-/// right after `slug = ` so [`member_rows_builder`] can bind the slug as
-/// `$1` itself — a literal `$1` here would duplicate the bind and 500
-/// every list/retrieve.
+/// `is_active` filter (ported bug B5); the avatar join is a bare `LEFT`
+/// join (the FK is nullable) with no manager scope — `select_related`
+/// never applies the related manager, so a soft-deleted avatar asset
+/// still attaches and its `asset_url` renders — and the asset-workspace
+/// join is likewise unscoped (forward FK descriptors read through the
+/// unscoped base manager, so a soft-deleted asset workspace still
+/// renders its slug). The head ends right after `slug = ` so
+/// [`member_rows_builder`] can bind the slug as `$1` itself — a literal
+/// `$1` here would duplicate the bind and 500 every list/retrieve.
 const MEMBER_SELECT: &str = "SELECT wm.id AS id, wm.created_at AS created_at, \
      wm.updated_at AS updated_at, wm.deleted_at AS deleted_at, wm.role AS role, \
      wm.company_role AS company_role, wm.view_props AS view_props, \
@@ -1583,8 +1759,8 @@ const MEMBER_SELECT: &str = "SELECT wm.id AS id, wm.created_at AS created_at, \
      fa.project_id AS fa_project_id, fa.issue_id AS fa_issue_id, \
      faw.slug AS fa_workspace_slug FROM workspace_members wm \
      JOIN users u ON u.id = wm.member_id \
-     LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id AND fa.deleted_at IS NULL \
-     LEFT JOIN workspaces faw ON faw.id = fa.workspace_id AND faw.deleted_at IS NULL \
+     LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id \
+     LEFT JOIN workspaces faw ON faw.id = fa.workspace_id \
      WHERE wm.workspace_id = (SELECT id FROM workspaces WHERE slug = ";
 
 /// Build the list/retrieve statement: the slug binds as `$1`, then the
@@ -1659,8 +1835,8 @@ async fn fetch_member_row_by_id(
          fa.project_id AS fa_project_id, fa.issue_id AS fa_issue_id, \
          faw.slug AS fa_workspace_slug FROM workspace_members wm \
          JOIN users u ON u.id = wm.member_id \
-         LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id AND fa.deleted_at IS NULL \
-         LEFT JOIN workspaces faw ON faw.id = fa.workspace_id AND faw.deleted_at IS NULL \
+         LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id \
+         LEFT JOIN workspaces faw ON faw.id = fa.workspace_id \
          WHERE wm.id = $1 LIMIT 1",
     )
     .bind(id)
@@ -1765,8 +1941,8 @@ struct ProjectMemberRow {
 /// `FileAsset.asset_url` (`db/models/asset.py:79-99`) for an attached
 /// avatar asset: the four static types render without context, the
 /// attachment/description branches need the asset workspace slug (a NULL
-/// FK 500s through the `.slug` attribute access, a soft-deleted
-/// workspace 404s through the FK descriptor), anything else is `None`.
+/// FK 500s through the `.slug` attribute access, a dangling FK 404s
+/// through the FK descriptor), anything else is `None`.
 fn asset_url_for_row(row: &MemberFullRow) -> Result<Option<String>, Denial> {
     let asset_id = row.fa_id.expect("attached asset");
     match row.fa_entity_type.as_deref() {
@@ -1812,9 +1988,10 @@ fn opt_uuid(id: &Option<Uuid>) -> String {
 }
 
 /// `User.avatar_url` (`db/models/user.py:142-151`) for one row: attached
-/// means the avatar join hit (a soft-deleted asset prefetches `None`
-/// through `select_related` and falls through to the text, like Python);
-/// when attached the asset URL returns as-is with no fall-through.
+/// means the avatar join hit — `select_related` ignores the asset
+/// manager, so a soft-deleted asset still attaches and its URL renders
+/// with no fall-through to the text; only a NULL FK falls back to the
+/// text, then null.
 fn avatar_for_row(row: &MemberFullRow) -> Result<Option<String>, Denial> {
     if row.fa_id.is_none() {
         return Ok(if row.u_avatar.is_empty() {
@@ -2588,13 +2765,23 @@ async fn partial_update_member(
     if actor.id == target.member_id {
         return Denial::BadGuard(SELF_ROLE_BODY).into_response();
     }
-    let fields = match parse_body(&body) {
+    let raw_value = match parse_body_json(&body) {
+        Ok(value) => value,
+        Err(denial) => return denial.into_response(),
+    };
+    // The cascade pre-check reads the raw body before any dict check:
+    // scalar bodies, and `str`/`list` bodies containing `role`, 500.
+    let cascade_role: Option<Value> = match cascade_role_lookup(&raw_value) {
+        Ok(role) => role.cloned(),
+        Err(denial) => return denial.into_response(),
+    };
+    let fields = match parse_body_value(raw_value) {
         Ok(fields) => fields,
         Err(denial) => return denial.into_response(),
     };
-    // The cascade pre-check (`int(data["role"]) == 5`, literal): garbage
-    // escapes as a 500, before validation ever runs.
-    if let Some(role_value) = fields.get("role") {
+    // The cascade (`int(data["role"]) == 5`, literal): garbage escapes
+    // as a 500, before validation ever runs.
+    if let Some(role_value) = cascade_role.as_ref() {
         match python_int(role_value) {
             Some(role) if role == i64::from(qm::GUEST_DEMOTE_ROLE) => {
                 if let Err(denial) = guest_demote_cascade(pool, &slug, &target.member_id).await {
@@ -3114,7 +3301,8 @@ mod tests {
             ("true", "bool"),
             ("null", "NoneType"),
         ] {
-            let denial = parse_body(raw.as_bytes()).unwrap_err();
+            let value = parse_body_json(raw.as_bytes()).expect("json parses");
+            let denial = parse_body_value(value).unwrap_err();
             let Denial::BadFields(errors) = denial else {
                 panic!("{raw} is a field error");
             };
@@ -3129,18 +3317,104 @@ mod tests {
     }
 
     #[test]
+    fn cascade_precheck_reads_the_raw_body() {
+        let case = |raw: &str| cascade_role_lookup(&serde_json::from_str(raw).expect("json"));
+        // Dict bodies yield the `role` member, or no cascade.
+        assert_eq!(
+            case("{\"role\": 5}").ok().flatten().cloned(),
+            Some(serde_json::json!(5))
+        );
+        assert!(matches!(case("{\"a\": 1}"), Ok(None)));
+        // Scalar bodies 500 on `"role" in data` (`TypeError`).
+        for raw in ["5", "5.5", "true", "null"] {
+            assert!(matches!(case(raw), Err(Denial::ServerError)), "{raw}");
+        }
+        // `str` bodies 500 on a substring hit, else fall through.
+        assert!(matches!(
+            case("\"has role in it\""),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(case("\"clean\""), Ok(None)));
+        // `list` bodies 500 on element equality, else fall through.
+        assert!(matches!(case("[\"role\"]"), Err(Denial::ServerError)));
+        assert!(matches!(
+            case("[\"a\", \"role\"]"),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(case("[\"a\", 5]"), Ok(None)));
+        assert!(matches!(case("[5]"), Ok(None)));
+        assert!(matches!(case("[]"), Ok(None)));
+    }
+
+    #[test]
     fn search_terms_follow_drf() {
         let query =
             |raw: &str| HashMap::from([("search".to_owned(), OneOrMany::One(raw.to_owned()))]);
         assert!(search_terms(&HashMap::new()).is_empty());
-        assert!(search_terms(&query("")).is_empty());
-        assert!(search_terms(&query("  ")).is_empty());
-        assert_eq!(search_terms(&query("ada")), vec!["ada"]);
-        // Commas blank, whitespace splits.
-        assert_eq!(
-            search_terms(&query("ada,lovelace x")),
-            vec!["ada", "lovelace", "x"]
-        );
+        // Probe battery vs the real `search_smart_split` (Django 4.2.30 +
+        // DRF 3.15.2-identical): quoted phrases keep together, unclosed
+        // quotes fall back to bare runs, lone quotes unescape to the
+        // empty term, commas trim per token then split the rest.
+        for (raw, expected) in [
+            ("", vec![]),
+            ("  ", vec![]),
+            ("ada", vec!["ada"]),
+            ("ada,lovelace x", vec!["ada", "lovelace", "x"]),
+            ("\"john doe\"", vec!["john doe"]),
+            ("'john doe'", vec!["john doe"]),
+            ("\"a b\" c", vec!["a b", "c"]),
+            ("a\"b c\"d", vec!["a\"b c\"d"]),
+            ("\"unclosed", vec!["\"unclosed"]),
+            ("unclosed\"", vec!["unclosed\""]),
+            ("\"", vec![""]),
+            ("'", vec![""]),
+            ("\"\"", vec![""]),
+            ("''", vec![""]),
+            ("a,,b", vec!["a", "b"]),
+            (",a,", vec!["a"]),
+            (",", vec![]),
+            (",,,", vec![]),
+            ("\"a,b\",c", vec!["\"a", "b\"", "c"]),
+            ("\"a,b\",", vec!["a,b"]),
+            (",\"a,b\"", vec!["a,b"]),
+            ("\"a b\",", vec!["a b"]),
+            ("  a  b  ", vec!["a", "b"]),
+            ("a'b", vec!["a'b"]),
+            ("a\"b", vec!["a\"b"]),
+            ("ab\"cd\"ef\"gh", vec!["ab\"cd\"ef", "\"gh"]),
+            ("a\"b\"c\"d", vec!["a\"b\"c", "\"d"]),
+            ("\"a\"b\"c\"", vec!["a\"b\"c"]),
+            ("\"a\" \"b\"", vec!["a", "b"]),
+            ("\"lead\"mid", vec!["\"lead\"mid"]),
+            ("mid\"trail\"", vec!["mid\"trail\""]),
+            ("\"a\"\"b\"", vec!["a\"\"b"]),
+            ("\"   \"", vec!["   "]),
+            ("'   '", vec!["   "]),
+            ("\",\"", vec![","]),
+            ("\", \"", vec![", "]),
+            ("\"a b\" \"c d\" e", vec!["a b", "c d", "e"]),
+            ("'\"'", vec!["\""]),
+            ("\"'\"", vec!["'"]),
+            ("a\tb", vec!["a", "b"]),
+            ("\"caf\u{e9}\"", vec!["caf\u{e9}"]),
+            ("caf\u{e9} x", vec!["caf\u{e9}", "x"]),
+        ] {
+            assert_eq!(search_terms(&query(raw)), expected, "{raw:?}");
+        }
+        // Backslashes: `\\.` escapes inside quotes, a backslash-newline
+        // breaks the quoted match, embedded newlines stay in quotes.
+        assert_eq!(search_terms(&query("a\\b")), vec!["a\\b"]);
+        assert_eq!(search_terms(&query("\"a\\b\"")), vec!["a\\b"]);
+        assert_eq!(search_terms(&query("\"a\\\"b\"")), vec!["a\"b"]);
+        assert_eq!(search_terms(&query("'a\\'b'")), vec!["a'b"]);
+        assert_eq!(search_terms(&query("\"a\\\n\"")), vec!["\"a\\", ""]);
+        assert_eq!(search_terms(&query("\"a\nb\"")), vec!["a\nb"]);
+        // Python whitespace beyond ASCII: NUL is not space, while
+        // \x1c and \x85 split like any other whitespace.
+        assert_eq!(search_terms(&query("a\0b")), vec!["a\0b"]);
+        assert_eq!(search_terms(&query("\"\0\"")), vec!["\0"]);
+        assert_eq!(search_terms(&query("\x1ca\x1f")), vec!["a"]);
+        assert_eq!(search_terms(&query("a\u{85}b")), vec!["a", "b"]);
         // Repeats read last, like `QueryDict.get`.
         let repeated = HashMap::from([(
             "search".to_owned(),
@@ -3584,15 +3858,16 @@ mod tests {
     fn deleted_at_validation_matches_datetimefield() {
         use chrono_tz::Tz;
         let utc = Tz::UTC;
-        let case = |json: &str| {
+        let case_in = |json: &str, timezone: &Tz| {
             let mut errors = FieldErrors::default();
             let value = validate_deleted_at(
                 &serde_json::from_str(json).expect("json"),
-                &utc,
+                timezone,
                 &mut errors,
             );
             (value, errors.deleted_at)
         };
+        let case = |json: &str| case_in(json, &utc);
         let (value, errors) = case("null");
         assert!(errors.is_empty());
         assert!(matches!(value, Ok(Some(None))));
@@ -3612,15 +3887,47 @@ mod tests {
         let (_, errors) = case("5");
         assert_eq!(errors.len(), 1);
         assert!(errors[0].starts_with("Datetime has wrong format."));
-        // Aware instants past Python's year range escape as `OverflowError`
-        // (the 500, not the invalid arm).
+        // Aware instants past Python's year range are the `overflow`
+        // field error (400), not the 500: `enforce_timezone` catches it.
         for raw in [
             "\"0001-01-01T00:00:00+05:00\"",
             "\"9999-12-31T23:00:00-05:00\"",
+            "\"9999-12-31T23:00:00-14:00\"",
         ] {
-            let (denial, errors) = case(raw);
-            assert!(errors.is_empty(), "{raw}");
-            assert!(matches!(denial, Err(Denial::ServerError)), "{raw}");
+            let (value, errors) = case(raw);
+            assert_eq!(
+                errors,
+                vec!["Datetime value out of range.".to_owned()],
+                "{raw}"
+            );
+            assert!(matches!(value, Ok(None)), "{raw}");
+        }
+        // The range covers both representations: an in-UTC instant whose
+        // request-tz wall leaves the range overflows, and a UTC-out
+        // instant overflows in every request timezone (CPython raises on
+        // the UTC-side subtraction first — probed, both directions).
+        let york = Tz::America__New_York;
+        let kiriti = Tz::Pacific__Kiritimati;
+        let (value, errors) = case_in("\"0001-01-01T00:30:00Z\"", &utc);
+        assert!(errors.is_empty());
+        assert!(matches!(value, Ok(Some(Some(_)))));
+        let (value, errors) = case_in("\"0001-01-01T00:30:00Z\"", &york);
+        assert_eq!(errors, vec!["Datetime value out of range.".to_owned()]);
+        assert!(matches!(value, Ok(None)));
+        let (value, errors) = case_in("\"9999-12-31T23:30:00Z\"", &utc);
+        assert!(errors.is_empty());
+        assert!(matches!(value, Ok(Some(Some(_)))));
+        let (value, errors) = case_in("\"9999-12-31T23:30:00Z\"", &kiriti);
+        assert_eq!(errors, vec!["Datetime value out of range.".to_owned()]);
+        assert!(matches!(value, Ok(None)));
+        for timezone in [&utc, &york] {
+            let (value, errors) = case_in("\"9999-12-31T19:30:00-05:00\"", timezone);
+            assert_eq!(
+                errors,
+                vec!["Datetime value out of range.".to_owned()],
+                "{timezone:?}"
+            );
+            assert!(matches!(value, Ok(None)), "{timezone:?}");
         }
         // In-range extremes still validate.
         assert!(case("\"0001-01-01T00:00:00Z\"").0.is_ok());
@@ -3681,9 +3988,13 @@ mod tests {
         );
         assert!(sql.contains("wm.deleted_at IS NULL"));
         assert!(sql.contains("JOIN users u ON u.id = wm.member_id"));
-        assert!(sql.contains(
-            "LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id AND fa.deleted_at IS NULL"
-        ));
+        // The avatar joins are bare `LEFT` joins: `select_related` and
+        // the FK descriptors ignore the related managers, so soft-deleted
+        // assets and asset workspaces still attach.
+        assert!(sql.contains("LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id "));
+        assert!(sql.contains("LEFT JOIN workspaces faw ON faw.id = fa.workspace_id "));
+        assert!(!sql.contains("fa.deleted_at"));
+        assert!(!sql.contains("faw.deleted_at"));
         // B5 pins the *filter*, not the column: `is_active` is selected
         // (the serializer renders it) but never filtered on.
         let where_clause = sql
@@ -3857,7 +4168,8 @@ mod tests {
         row.fa_workspace_id = None;
         row.fa_workspace_slug = None;
         assert!(matches!(asset_url_for_row(&row), Err(Denial::ServerError)));
-        // Soft-deleted workspace: the FK descriptor 404s.
+        // Dangling FK (no row at all — a soft-deleted workspace still
+        // joins): the FK descriptor 404s.
         row.fa_workspace_id = Some(Uuid::new_v4());
         assert!(matches!(
             asset_url_for_row(&row),
