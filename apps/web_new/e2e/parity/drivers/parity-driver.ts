@@ -1516,6 +1516,91 @@ export interface ParityDriver {
   // --- entries above are untouched per the shared driver contract.
   /** Placeholder blocks in the on-screen sidebar's project list while it loads; zero once rows render. */
   sidebarProjectPlaceholderCount(): Promise<number>;
+
+  /**
+   * Display (arrangement) controls (NEWFRONT-119): the issues header
+   * popover with shown-fields pills, grouping, ordering, and switches.
+   */
+  /** Open the Display popover; ends with its panel visible. */
+  openDisplayOptions(): Promise<void>;
+  /** Dismiss the Display popover. */
+  closeDisplayOptions(): Promise<void>;
+  /** Visible text of the open Display panel (section headings plus options). */
+  displayPanelText(): Promise<string>;
+  /** Pick a grouping dimension (for example "States" or "None"). */
+  setDisplayGroupBy(option: string): Promise<void>;
+  /** Pick a sort order (for example "Manual" or "Last created"). */
+  setDisplayOrderBy(option: string): Promise<void>;
+  /** Check or uncheck an Options switch (for example "Show empty groups"). */
+  setDisplayExtraOption(option: string, enabled: boolean): Promise<void>;
+  /** Whether a Display radio or checkbox option currently shows checked. */
+  isDisplayOptionChecked(option: string): Promise<boolean>;
+  /** Toggle a shown-fields pill (for example "Assignee"). */
+  toggleDisplayProperty(option: string): Promise<void>;
+  /** Whether a shown-fields pill currently shows active. */
+  isDisplayPropertyActive(option: string): Promise<boolean>;
+  /**
+   * Condition-row builder (NEWFRONT-119): the header toggle plus the row
+   * of field/operator/value conditions with its clear and view actions.
+   */
+  /** Toggle the builder row via the header control beside Display. */
+  toggleRichFilterRow(): Promise<void>;
+  /** Whether the builder row is currently visible. */
+  isRichFilterRowVisible(): Promise<boolean>;
+  /** Visible text of the builder row (conditions plus actions). */
+  richFilterRowText(): Promise<string>;
+  /** Open the field picker and add a condition for the named property. */
+  addRichCondition(property: string): Promise<void>;
+  /**
+   * Pick values in the open value slot of the last condition (for example
+   * ["Urgent"] or ["Backlog"]); closes the slot afterwards.
+   */
+  pickRichValues(values: string[]): Promise<void>;
+  /**
+   * Pick values by substring in the open value slot; closes the slot
+   * afterwards. Member options prefix an avatar initial in their accessible
+   * name ("P Parity Oracle"), so callers match on the name part.
+   */
+  pickRichValuesContaining(values: string[]): Promise<void>;
+  /**
+   * Names of the properties the field picker currently offers, without
+   * adding anything (opens the picker and dismisses it).
+   */
+  listRichPickerOptions(): Promise<string[]>;
+  /** Names of the options in the currently open value slot. */
+  richValueOptions(): Promise<string[]>;
+  /**
+   * Operator option labels for the single condition in the row, without
+   * changing anything (opens the operator menu and dismisses it).
+   */
+  richOperatorOptions(): Promise<string[]>;
+  /** Pick an operator for the single condition in the row by label. */
+  pickRichOperator(option: string): Promise<void>;
+  /** Whether the single-condition operator control is locked (one operator). */
+  isSingleRichOperatorLocked(): Promise<boolean>;
+  /** Whether a date calendar is currently open on the row. */
+  isRichCalendarOpen(): Promise<boolean>;
+  /** Pick a calendar day by its number (first match; opens the slot first). */
+  pickRichDay(day: string): Promise<void>;
+  /** Number of conditions currently in the row. */
+  richConditionCount(): Promise<number>;
+  /** Remove the index-th condition in the row. */
+  removeRichCondition(index: number): Promise<void>;
+  /** Click "Clear all" when the row offers it. */
+  clearRichFilters(): Promise<void>;
+  /** Open a saved project view page; requires an authenticated session. */
+  openProjectView(workspaceSlug: string, projectId: string, viewId: string): Promise<void>;
+  /** Save the current expression as a view with the given title. */
+  saveRichViewAs(name: string): Promise<void>;
+  /** Apply pending view changes via "Update view". */
+  updateRichView(): Promise<void>;
+  /** Header analytics entry (NEWFRONT-119): project-scoped dialog. */
+  /** Open the analytics dialog; ends with it visible. */
+  openAnalytics(): Promise<void>;
+  /** Dismiss the analytics dialog. */
+  closeAnalytics(): Promise<void>;
+  /** Visible text of the open analytics dialog. */
+  analyticsDialogText(): Promise<string>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

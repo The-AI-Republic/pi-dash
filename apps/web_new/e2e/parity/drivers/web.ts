@@ -368,6 +368,10 @@ export class WebDriver implements ParityDriver {
   async openProjectIssues(workspaceSlug: string, projectId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues`);
     await this.page.waitForLoadState("domcontentloaded");
+    // A dead session bounces back to the entry route; fail fast and clearly
+    // instead of polling an empty signed-out page to the test timeout.
+    if (new URL(this.page.url()).pathname === "/")
+      throw new Error("[parity] issues page bounced to sign-in; the session did not survive.");
     // The dev-server route module intermittently fails to fetch under
     // sibling contention, leaving main empty; reload until the list boots
     // (chrome text renders) the same way the detail/peek opens do.
@@ -6101,6 +6105,179 @@ export class WebDriver implements ParityDriver {
     }
   }
 
+  // Display (arrangement) controls (NEWFRONT-119). Observed on the running
+  // old app: the header holds icon-only layout buttons, the builder toggle,
+  // then named Display and Analytics buttons. Display opens a popover panel
+  // (a headless-ui popover panel) with one block per section; each block
+  // starts with its heading ("Display Properties", "Group by", "Order by";
+  // the switches block has no heading) followed by pill, radio, or
+  // checkbox buttons. Checked radios/checkboxes render a check icon.
+  private displayButton() {
+    return this.page.getByRole("button", { name: "Display" });
+  }
+
+  private displayPanel() {
+    // Scoped by its heading: the page holds several popover panels (row
+    // menus, layout switch) and an unscoped locator would wait on all of
+    // them at once.
+    return this.page.locator('div[id^="headlessui-popover-panel"]', { hasText: "Display Properties" });
+  }
+
+  private displaySection(heading: string) {
+    return this.displayPanel().locator("div.py-2", { hasText: heading });
+  }
+
+  async openDisplayOptions(): Promise<void> {
+    // Bounded: a throttled page load must fail fast and loudly, never burn
+    // the whole test timeout on one click.
+    await this.displayButton().waitFor({ state: "visible", timeout: 60_000 });
+    await this.displayButton().click({ timeout: 30_000 });
+    await this.displayPanel().getByText("Display Properties", { exact: true }).waitFor({ timeout: 30_000 });
+  }
+
+  async closeDisplayOptions(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    // Hidden, not detached: the popover lingers in the DOM while its
+    // close transition runs. If Escape missed (focus was outside), toggle
+    // the Display button itself instead of hanging.
+    try {
+      await this.displayPanel().waitFor({ state: "hidden", timeout: 10_000 });
+    } catch {
+      await this.displayButton().click();
+      await this.displayPanel().waitFor({ state: "hidden" });
+    }
+  }
+
+  async displayPanelText(): Promise<string> {
+    return (await this.displayPanel().innerText()).trim();
+  }
+
+  /**
+   * Activate a Display panel option. A real mouse click races the PATCH
+   * re-render: the pill shifts under the cursor and the click lands on the
+   * backdrop, dismissing the popover without toggling. A single dispatched
+   * click cannot misfire that way; the visible-wait first keeps a genuinely
+   * missing option failing honestly.
+   */
+  private async clickPanelOption(target: Locator): Promise<void> {
+    // The popover can dismiss under load between the open and the click (a
+    // re-render drops it). Re-open once when the panel itself is gone; when
+    // it is still open, wait out the slow render instead. A genuinely
+    // missing option fails the second wait honestly either way.
+    try {
+      await target.waitFor({ state: "visible", timeout: 15_000 });
+    } catch {
+      // Re-open only when no panel instance is visible (a closing transition
+      // can linger beside the live one, so probe every match); otherwise
+      // wait out the slow render instead of toggling a live panel shut.
+      const panels = this.displayPanel();
+      const count = await panels.count();
+      let open = false;
+      for (let index = 0; index < count && !open; index += 1) {
+        open = await panels
+          .nth(index)
+          .isVisible()
+          .catch(() => false);
+      }
+      if (!open) await this.openDisplayOptions();
+      await target.waitFor({ state: "visible", timeout: 15_000 });
+    }
+    await target.dispatchEvent("click");
+  }
+
+  async setDisplayGroupBy(option: string): Promise<void> {
+    await this.clickPanelOption(this.displaySection("Group by").getByRole("button", { name: option }));
+  }
+
+  async setDisplayOrderBy(option: string): Promise<void> {
+    await this.clickPanelOption(this.displaySection("Order by").getByRole("button", { name: option }));
+  }
+
+  async setDisplayExtraOption(option: string, enabled: boolean): Promise<void> {
+    const target = this.displayPanel().getByRole("button", { name: option });
+    if ((await this.isDisplayOptionChecked(option)) !== enabled) await this.clickPanelOption(target);
+  }
+
+  async isDisplayOptionChecked(option: string): Promise<boolean> {
+    const target = this.displayPanel().getByRole("button", { name: option });
+    return (await target.locator("svg").count()) > 0;
+  }
+
+  async toggleDisplayProperty(option: string): Promise<void> {
+    await this.clickPanelOption(this.displaySection("Display Properties").getByRole("button", { name: option }));
+  }
+
+  async isDisplayPropertyActive(option: string): Promise<boolean> {
+    // Pills carry no check icon; the active one paints the accent
+    // background while the inactive one stays unfilled.
+    const pill = this.displaySection("Display Properties").getByRole("button", { name: option });
+    await pill.waitFor({ state: "visible", timeout: 15_000 });
+    return ((await pill.getAttribute("class")) ?? "").includes("bg-accent-primary");
+  }
+
+  // Condition-row builder (NEWFRONT-119). Observed on the running old app:
+  // the toggle is the header button just before Display (icon-only, so it
+  // is located structurally, not by name). The row itself renders below the
+  // header when visible; its add control opens a searchable picker whose
+  // options carry the property names.
+  private headerControlButtons() {
+    const bar = this.displayButton().locator("xpath=ancestor::div[contains(@class,'justify-end')][1]");
+    return bar.getByRole("button");
+  }
+
+  private async richToggle() {
+    // The toggle is the icon-only button immediately before Display (after
+    // the layout switch cluster); locating it relative to Display survives
+    // layout-count changes that a fixed offset would not.
+    await this.displayButton().waitFor({ state: "visible", timeout: 60_000 });
+    const buttons = await this.headerControlButtons().all();
+    let displayIndex = -1;
+    for (let index = 0; index < buttons.length; index += 1) {
+      const button = buttons[index];
+      if (button === undefined) continue;
+      const text = ((await button.innerText().catch(() => "")) as string).trim();
+      if (text === "Display") {
+        displayIndex = index;
+        break;
+      }
+    }
+    const toggle = displayIndex > 0 ? buttons[displayIndex - 1] : undefined;
+    if (toggle === undefined) throw new Error("[parity] rich-filter toggle not found.");
+    return toggle;
+  }
+
+  private richRow() {
+    // The bare class pair also matches cards and menus elsewhere on the
+    // page, so require a condition remove control: the row renders one per
+    // condition and only while it is visible.
+    return this.page.locator('div.rounded-lg.bg-layer-1:has(button[aria-label="Remove filter"])').first();
+  }
+
+  async toggleRichFilterRow(): Promise<void> {
+    await (await this.richToggle()).click({ timeout: 30_000 });
+  }
+
+  async isRichFilterRowVisible(): Promise<boolean> {
+    return (await this.richRow().count()) > 0;
+  }
+
+  async richFilterRowText(): Promise<string> {
+    return (await this.richRow().innerText()).trim();
+  }
+
+  async addRichCondition(property: string): Promise<void> {
+    const before = await this.richConditionCount();
+    await this.openAddPicker();
+    await this.page.getByRole("option", { name: property, exact: true }).click({ timeout: 60_000 });
+    // Picking a property adds the condition (its value slot usually pops
+    // open next, so options lingering is expected, not a failure).
+    const start = Date.now();
+    while ((await this.richConditionCount()) <= before) {
+      if (Date.now() - start > 15_000) throw new Error(`[parity] picking ${property} added no condition.`);
+      await this.page.waitForTimeout(250);
+    }
+  }
+
   async activityFilterOptionLabels(): Promise<string[]> {
     const found: string[] = [];
     for (const label of ["Updates", "Comments", "State", "Assignee"]) {
@@ -7994,5 +8171,235 @@ export class WebDriver implements ParityDriver {
       .getByRole("status")
       .evaluateAll((regions) => regions.reduce((total, region) => total + region.children.length, 0))
       .catch(() => 0);
+  }
+
+  async pickRichValues(values: string[]): Promise<void> {
+    for (const value of values) {
+      await this.page.getByRole("option", { name: value, exact: true }).click({ timeout: 60_000 });
+    }
+    await this.closeValueSlot();
+  }
+
+  async pickRichValuesContaining(values: string[]): Promise<void> {
+    for (const value of values) {
+      await this.page.getByRole("option", { name: value }).click({ timeout: 60_000 });
+    }
+    await this.closeValueSlot();
+  }
+
+  /**
+   * The row's + control: its only button with neither an accessible name
+   * nor text (condition buttons carry property/operator/value text, remove
+   * buttons are labelled, and row actions carry text).
+   */
+  private async findAddControl(): Promise<Locator> {
+    const buttons = await this.richRow().getByRole("button").all();
+    for (const button of buttons) {
+      const label = await button.getAttribute("aria-label");
+      const text = ((await button.innerText().catch(() => "")) as string).trim();
+      if (label === null && text === "") return button;
+    }
+    throw new Error("[parity] rich-filter add control not found.");
+  }
+
+  private async openAddPicker(): Promise<void> {
+    // Callers leave no popup open (peeks and picks dismiss after
+    // themselves), so a click always opens; the + control toggles, and a
+    // double-open would shut it again instead of failing here.
+    await (await this.findAddControl()).click({ timeout: 30_000 });
+    await this.page.getByRole("option").first().waitFor({ timeout: 15_000 });
+  }
+
+  private async closeAddPicker(): Promise<void> {
+    if ((await this.page.getByRole("option").count()) === 0) return;
+    await (await this.findAddControl()).click({ timeout: 30_000 });
+    await this.page.waitForFunction(() => document.querySelectorAll('[role="option"]').length === 0, null, {
+      timeout: 15_000,
+    });
+  }
+
+  async listRichPickerOptions(): Promise<string[]> {
+    await this.openAddPicker();
+    const names = await this.page.getByRole("option").allTextContents();
+    await this.closeAddPicker();
+    return names.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async richValueOptions(): Promise<string[]> {
+    const names = await this.page.getByRole("option").allTextContents();
+    return names.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  /**
+   * Dismiss the value slot after picking. Multi-select slots stay open for
+   * further picks; toggling the slot's own button shuts it (Escape does
+   * nothing to these popups).
+   */
+  private async closeValueSlot(): Promise<void> {
+    if ((await this.page.getByRole("option").count()) === 0) return;
+    const row = this.richRow();
+    const buttons = await row.getByRole("button").all();
+    const named: Locator[] = [];
+    for (const button of buttons) {
+      if ((await button.getAttribute("aria-label")) !== null) continue;
+      const text = ((await button.innerText().catch(() => "")) as string).trim();
+      // Row actions sort with the conditions and must never be mistaken for
+      // the value slot: view pages render Save as / Update view once dirty
+      // propagates, and toggling Save as opens the Create View dialog.
+      if (text === "" || text === "Clear all" || text === "Save view" || text === "Save as" || text === "Update view")
+        continue;
+      named.push(button);
+    }
+    // Property, operator, then the value slot of the last condition.
+    const slot = named[named.length - 1];
+    if (slot === undefined) throw new Error("[parity] value slot control not found.");
+    await slot.click({ timeout: 30_000 });
+    await this.page.waitForFunction(() => document.querySelectorAll('[role="option"]').length === 0, null, {
+      timeout: 15_000,
+    });
+  }
+
+  /**
+   * The operator control is the second named button of a single-condition
+   * row (property first, then operator, then the value slot, then the
+   * labelled remove button).
+   */
+  private async singleConditionOperator() {
+    const row = this.richRow();
+    const buttons = await row.getByRole("button").all();
+    const named: import("@playwright/test").Locator[] = [];
+    for (const button of buttons) {
+      const label = await button.getAttribute("aria-label");
+      if (label !== null) continue;
+      const text = ((await button.innerText().catch(() => "")) as string).trim();
+      if (text === "") continue;
+      named.push(button);
+    }
+    // Property, operator, then possibly the value slot.
+    const operator = named[1];
+    if (operator === undefined) throw new Error("[parity] condition operator control not found.");
+    // The control locks when its property offers a single operator; fail
+    // fast instead of clicking a disabled button to the test timeout.
+    if (await operator.isDisabled()) throw new Error("[parity] condition operator is locked (single operator).");
+    return operator;
+  }
+
+  async richOperatorOptions(): Promise<string[]> {
+    const operator = await this.singleConditionOperator();
+    await operator.click({ timeout: 30_000 });
+    await this.page.getByRole("option").first().waitFor({ timeout: 15_000 });
+    const names = await this.page.getByRole("option").allTextContents();
+    // Escape does nothing to these popups; the operator button toggles.
+    await (await this.singleConditionOperator()).click({ timeout: 30_000 });
+    await this.page.waitForFunction(() => document.querySelectorAll('[role="option"]').length === 0, null, {
+      timeout: 15_000,
+    });
+    return names.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async pickRichOperator(option: string): Promise<void> {
+    await (await this.singleConditionOperator()).click({ timeout: 30_000 });
+    await this.page.getByRole("option", { name: option, exact: true }).click({ timeout: 60_000 });
+    await this.page.waitForFunction(() => document.querySelectorAll('[role="option"]').length === 0, null, {
+      timeout: 15_000,
+    });
+  }
+
+  async isSingleRichOperatorLocked(): Promise<boolean> {
+    const row = this.richRow();
+    const buttons = await row.getByRole("button").all();
+    const named: import("@playwright/test").Locator[] = [];
+    for (const button of buttons) {
+      const label = await button.getAttribute("aria-label");
+      if (label !== null) continue;
+      const text = ((await button.innerText().catch(() => "")) as string).trim();
+      if (text === "") continue;
+      named.push(button);
+    }
+    const operator = named[1];
+    if (operator === undefined) throw new Error("[parity] condition operator control not found.");
+    return operator.isDisabled();
+  }
+
+  async isRichCalendarOpen(): Promise<boolean> {
+    return (await this.page.getByRole("gridcell").count()) > 0;
+  }
+
+  async pickRichDay(day: string): Promise<void> {
+    // The calendar toggles off its value slot; reopen when a previous pick
+    // (or a range second slot) left it shut.
+    if ((await this.page.getByRole("gridcell").count()) === 0) {
+      const slots = this.richRow().getByRole("button", { name: "--", exact: true });
+      await slots.last().click({ timeout: 30_000 });
+      await this.page.getByRole("gridcell").first().waitFor({ timeout: 15_000 });
+    }
+    // Mid-month days (13-19) sit in the current month only, so a loose
+    // name match still resolves to exactly one cell.
+    await this.page.getByRole("gridcell", { name: day }).first().click({ timeout: 30_000 });
+  }
+
+  async richConditionCount(): Promise<number> {
+    return this.richRow().getByRole("button", { name: "Remove filter" }).count();
+  }
+
+  async removeRichCondition(index: number): Promise<void> {
+    await this.richRow().getByRole("button", { name: "Remove filter" }).nth(index).click({ timeout: 30_000 });
+  }
+
+  async clearRichFilters(): Promise<void> {
+    await this.richRow().getByRole("button", { name: "Clear all" }).click({ timeout: 30_000 });
+  }
+
+  async openProjectView(workspaceSlug: string, projectId: string, viewId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/views/${viewId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    if (new URL(this.page.url()).pathname === "/")
+      throw new Error("[parity] view page bounced to sign-in; the session did not survive.");
+  }
+
+  /**
+   * Activate a rich-row action. Like clickPanelOption: a real mouse click
+   * races the PATCH re-render storm after a value pick (the button never
+   * settles, so the click waits to the test timeout); a dispatched click
+   * after a visible-wait cannot miss that way.
+   */
+  private async clickRowAction(name: string): Promise<void> {
+    const target = this.richRow().getByRole("button", { name });
+    // Generous: the Update affordance appears only once the dirty state
+    // propagates after the PATCH round-trip, slow on a hot shared stack.
+    await target.waitFor({ state: "visible", timeout: 60_000 });
+    await target.dispatchEvent("click");
+  }
+
+  async saveRichViewAs(name: string): Promise<void> {
+    await this.clickRowAction("Save view");
+    const dialog = this.page.getByRole("dialog");
+    await dialog.getByPlaceholder("Title").fill(name);
+    await dialog.getByRole("button", { name: "Create View" }).click({ timeout: 30_000 });
+    // Creating navigates to the new view page; wait for it so callers read
+    // the committed view instead of racing the in-flight POST.
+    await this.page.waitForURL(/\/views\//, { timeout: 60_000 });
+  }
+
+  async updateRichView(): Promise<void> {
+    await this.clickRowAction("Update view");
+  }
+
+  // Header analytics entry (NEWFRONT-119). Observed on the running old app:
+  // a named Analytics button opens a project-scoped dialog that carries the
+  // project name and per-group counts; Escape dismisses it.
+  async openAnalytics(): Promise<void> {
+    await this.page.getByRole("button", { name: "Analytics" }).click();
+    await this.page.getByRole("dialog").waitFor();
+  }
+
+  async closeAnalytics(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page.getByRole("dialog").waitFor({ state: "detached" });
+  }
+
+  async analyticsDialogText(): Promise<string> {
+    return (await this.page.getByRole("dialog").innerText()).trim();
   }
 }
