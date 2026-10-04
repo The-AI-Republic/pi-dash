@@ -848,6 +848,12 @@ fn python_int_hex(text: &str) -> Option<u128> {
 
 /// Python `str()` of a JSON number: ints render decimal, floats render
 /// [`python_float_repr`].
+///
+/// Known edge (the same `serde_json` demotion [`validate_parent`]
+/// documents): a JSON integer above `u64::MAX` arrives here as `f64` and
+/// renders as a float (`1e+30`) where Python renders the full digits —
+/// observed in coerced `name`/body text and in `invalid_choice` messages
+/// for huge-int `access` input. Same foundation flip to close.
 fn python_number_str(number: &serde_json::Number) -> String {
     if let Some(int) = number.as_i64() {
         return int.to_string();
