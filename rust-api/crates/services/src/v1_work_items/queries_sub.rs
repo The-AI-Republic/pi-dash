@@ -12,12 +12,12 @@
 //!
 //! | Unit | Python source | Builders |
 //! | --- | --- | --- |
-//! | Label list/detail | `views/issue.py:1322-1336` (detail inherits it, `:1440`; `get`/`patch`/`delete` add `.get(pk)`, `:1466/:1492/:1535`; patch conflict check `:1495-1506`) | [`label_scope_where`], [`label_list_sql`], [`label_detail_where`], [`label_external_dedupe_where`] |
-//! | Link list/detail | `:1557-1569` / `:1662-1675` (detail `get` pk-`None` branch `:1704-1712`, else `.get(pk)` `:1713`; `patch`/`delete` direct `.get` `:1746`/`:1795`) | [`link_scope_where`], [`link_list_sql`], [`link_detail_sql`], [`link_detail_where`], [`link_direct_lookup_where`] |
-//! | Comment list/detail | `:1805-1828` / `:1961-1984` (`get` `.get(pk)` `:2006`; `patch`/`delete` direct `.get` `:2035`/`:2117`; patch conflict check `:2041-2055`) | [`comment_scope_where`], [`comment_is_member_sql`], [`comment_list_sql`], [`comment_detail_where`], [`comment_direct_lookup_where`], [`comment_external_dedupe_where`] |
+//! | Label list/detail | `views/issue.py:1322-1336` (detail inherits it, `:1440`; `get`/`patch`/`delete` add `.get(pk)`, `:1468/:1499/:1544`; patch conflict check `:1502-1512`) | [`label_scope_where`], [`label_list_sql`], [`label_detail_where`], [`label_external_dedupe_where`] |
+//! | Link list/detail | `:1557-1569` / `:1662-1675` (detail `get` pk-`None` branch `:1702-1711`, else `.get(pk)` `:1712`; `patch`/`delete` direct `.get` `:1743`/`:1781`) | [`link_scope_where`], [`link_list_sql`], [`link_detail_sql`], [`link_detail_where`], [`link_direct_lookup_where`] |
+//! | Comment list/detail | `:1805-1828` / `:1961-1984` (`get` `.get(pk)` `:2008`; `patch`/`delete` direct `.get` `:2040`/`:2109`; patch conflict check `:2045-2054`) | [`comment_scope_where`], [`comment_is_member_sql`], [`comment_list_sql`], [`comment_detail_where`], [`comment_direct_lookup_where`], [`comment_external_dedupe_where`] |
 //! | Activity list/detail | `:2156-2165` / `:2211-2224` (inline in `get`, no `get_queryset`; detail `.first()` + 404 body) | [`activity_list_where`], [`activity_list_sql`], [`activity_detail_where`], [`ACTIVITY_NOT_FOUND_BODY`] |
-//! | Attachment list/detail | `:2235-2653` (list filter `:2438-2444`; post dedupe `:2354-2375`; detail `.get`s `:2491`/`:2562`/`:2640`) | [`attachment_list_where`], [`attachment_list_sql`], [`attachment_dedupe_where`], [`attachment_detail_where`], [`attachment_issue_where`] |
-//! | Relation grouped read | `:2965-3008` aggregate + `:3010-3019` merge | [`relation_scope_where`], [`relation_aggregate_sql`], [`RELATION_RESPONSE_KEYS`], [`union_ids`] |
+//! | Attachment list/detail | `:2235-2653` (list filter `:2438-2444`; post dedupe `:2359-2385`; detail `.get`s `:2488`/`:2562`/`:2626`) | [`attachment_list_where`], [`attachment_list_sql`], [`attachment_dedupe_where`], [`attachment_detail_where`], [`attachment_issue_where`] |
+//! | Relation grouped read | `:2971-2995` aggregate + `:2997-3006` merge | [`relation_scope_where`], [`relation_aggregate_sql`], [`RELATION_RESPONSE_KEYS`], [`union_ids`] |
 //! | Relation create map/refetch | mapper `utils/issue_relation_mapper.py:19-32`, reverse set `:3077`, refetch `:3111-3132` | [`actual_relation`], [`is_reverse_relation`], [`relation_refetch_where`] |
 //! | Workpad read/lock | get_queryset `:3269-3273`, `get` `:3275-3279`, patch lock `:3307-3321` | [`workpad_scope_where`], [`workpad_list_sql`], [`workpad_get_where`], [`workpad_lock_sql`] |
 //! | PR links list/detail | `github_pr.py:37-49` / `:86-95` | [`pr_list_sql`], [`pr_detail_sql`], [`pr_detail_where`] |
@@ -37,7 +37,7 @@
 //!   fanout guard. No fanout is possible through `EXISTS`, so the
 //!   representative selects keep `DISTINCT` only where the Python chain
 //!   calls `.distinct()`, as a source-fidelity marker.
-//! * `select_related` (label `:1331-1333`, comment `:1814`/`:1970`,
+//! * `select_related` (label `:1331-1333`, comment `:1815`/`:1971`,
 //!   activity `:2164`/`:2220`) is a fetch hint — same rows with or
 //!   without it — so the selects project `{table}.*` plus real
 //!   annotations only ([`comment_is_member_sql`]).
@@ -55,25 +55,25 @@
 //!    applies (list `:2438-2444`, all detail `.get`s; the endpoints
 //!    declare no `permission_classes`).
 //! 2. The relation grouped read ignores `project_id`
-//!    (`:2984-2987`) — cross-project rows aggregate into the response.
-//! 3. `duplicate`/`relates_to` merge via `set()` (`:3015-3016`) —
+//!    (`:2979-2982`) — cross-project rows aggregate into the response.
+//! 3. `duplicate`/`relates_to` merge via `set()` (`:3000-3001`) —
 //!    direction-union order is unstable. [`union_ids`] keeps the union
 //!    membership with first-seen order.
 //! 4. Link/comment `patch`/`delete` use a direct `.get()` bypassing the
-//!    queryset's member/archived guards (`:1746`/`:1795`, `:2035`/`:2117`).
+//!    queryset's member/archived guards (`:1743`/`:1781`, `:2040`/`:2109`).
 //! 5. PR/review-link detail drops the archived guard, the order and the
 //!    distinct (`github_pr.py:86-95`, `git_code_review.py:86-95`) —
 //!    detach works on archived projects.
 //! 6. Link detail `get` with `pk is None` paginates the whole list
-//!    (`:1704-1712`); comment detail has no such branch. Handler-owned,
+//!    (`:1702-1711`); comment detail has no such branch. Handler-owned,
 //!    noted so the mapping reads total.
-//! 7. The eight `kwargs.get("order_by", "-created_at")` chains always
+//! 7. The seven `kwargs.get("order_by", "-created_at")` chains always
 //!    take the default on the wire (no URL conf sets an `order_by`
 //!    kwarg); only activity reads live `request.GET` — and defaults to
 //!    ascending `created_at`.
 //! 8. Comment patch compares `external_id` in Python before the dedupe
-//!    `exists()` (`:2042-2043`); label patch excludes the pk in SQL
-//!    (`:1504`). Both shapes ported as observed.
+//!    `exists()` (`:2047`); label patch excludes the pk in SQL
+//!    (`:1511`). Both shapes ported as observed.
 //! 9. A raw `blocking` row matches NO aggregate arm — the grouped read
 //!    only knows stored types (fixture seed note).
 //!
@@ -92,12 +92,12 @@
 pub const TRIAGE_GROUP: &str = "triage";
 
 /// The `.order_by(self.kwargs.get("order_by", "-created_at"))` default
-/// carried by the eight queryset chains (label, link ×2, comment ×2,
+/// carried by the seven queryset chains (label, link ×2, comment ×2,
 /// PR/review list). Always taken on the wire — ported bug 7.
 pub const QUERYSET_ORDER_DEFAULT: &str = "-created_at";
 
 /// The activity `.order_by(request.GET.get("order_by", "created_at"))`
-/// default (`:2165`, `:2223`) — ascending, unlike every queryset chain.
+/// default (`:2165`, `:2222`) — ascending, unlike every queryset chain.
 pub const ACTIVITY_ORDER_DEFAULT: &str = "created_at";
 
 /// Fields the activity reads exclude (`~Q(field__in=[...])`, `:2159`,
@@ -108,16 +108,16 @@ pub const ACTIVITY_EXCLUDED_FIELDS: &[&str] = &["comment", "vote", "reaction", "
 /// (`db/models/asset.py:34`).
 pub const ISSUE_ATTACHMENT_ENTITY: &str = "ISSUE_ATTACHMENT";
 
-/// Activity detail 404 body (`:2226`, DRF compact separators, key order
+/// Activity detail 404 body (`:2227`, DRF compact separators, key order
 /// as constructed).
 pub const ACTIVITY_NOT_FOUND_BODY: &str =
     "{\"message\":\"Activity not found.\",\"code\":\"NOT_FOUND\"}";
 
-/// Workpad patch missing-`body` error message (`:3289-3292`).
+/// Workpad patch missing-`body` error message (`:3287-3291`).
 pub const WORKPAD_MISSING_BODY_MESSAGE: &str =
     "PATCH requires a `body` field in the request payload.";
 
-/// Workpad patch missing-`body` status (`:3291`).
+/// Workpad patch missing-`body` status (`:3290`).
 pub const WORKPAD_MISSING_BODY_STATUS: u16 = 400;
 
 // ---------------------------------------------------------------------------
@@ -168,14 +168,14 @@ impl SubOrder {
 // Shared guards
 // ---------------------------------------------------------------------------
 
-/// `workspace__slug=slug` (`:1323`, `:1558`, …): every table here carries
+/// `workspace__slug=slug` (`:1324`, `:1559`, …): every table here carries
 /// its own `workspace_id` FK.
 pub fn workspace_slug_sql(table: &str) -> String {
     format!("{table}.workspace_id = (SELECT id FROM workspaces WHERE slug = :slug)")
 }
 
 /// `project__project_projectmember__member=user, __is_active=True`
-/// (`:1326-1329`, `:1561-1564`, …) as an `EXISTS` correlated on
+/// (`:1326-1329`, `:1562-1565`, …) as an `EXISTS` correlated on
 /// `{table}.project_id`.
 ///
 /// No `deleted_at` guard: the fixture SQL shows the join-span form
@@ -188,7 +188,7 @@ pub fn member_guard_sql(table: &str) -> String {
     )
 }
 
-/// `project__archived_at__isnull=True` (`:1330`, `:1565`, …) as an
+/// `project__archived_at__isnull=True` (`:1330`, `:1566`, …) as an
 /// `EXISTS` correlated on `{table}.project_id`.
 pub fn project_live_sql(table: &str) -> String {
     format!(
@@ -207,7 +207,7 @@ pub fn live_row_sql(table: &str) -> String {
 // Labels (views/issue.py:1322-1336, detail :1440+)
 // ---------------------------------------------------------------------------
 
-/// Label scope in source order (`:1323-1330`): slug, project, member,
+/// Label scope in source order (`:1324-1330`): slug, project, member,
 /// live project. Detail reuses it via inheritance (`:1440`).
 pub fn label_scope_where() -> String {
     [
@@ -231,12 +231,12 @@ pub fn label_list_sql(order: &SubOrder) -> String {
     )
 }
 
-/// Detail predicate (`:1466`, `:1492`, `:1535`): scope + pk.
+/// Detail predicate (`:1468`, `:1499`, `:1544`): scope + pk.
 pub fn label_detail_where() -> String {
     format!("{} AND labels.id = :pk", label_scope_where())
 }
 
-/// Label patch external-dedupe `exists()` (`:1495-1506`): same
+/// Label patch external-dedupe `exists()` (`:1502-1512`): same
 /// project/slug/source/id, excluding this pk → 409 `{"error": "Label
 /// with the same external id and external source already exists",
 /// "id": ...}`. Ported asymmetry 8: the exclusion lives in SQL here.
@@ -256,7 +256,7 @@ pub fn label_external_dedupe_where() -> String {
 // Links (views/issue.py:1557-1569 list, :1662-1675 detail)
 // ---------------------------------------------------------------------------
 
-/// Link scope in source order (`:1558-1565`, `:1663-1670`): slug,
+/// Link scope in source order (`:1559-1566`, `:1664-1671`): slug,
 /// project, issue, member, live project. Both chains are identical.
 pub fn link_scope_where() -> String {
     [
@@ -271,7 +271,7 @@ pub fn link_scope_where() -> String {
 }
 
 /// Full representative link list `SELECT`: scope + kwargs order
-/// (`:1566`) + `DISTINCT` (`:1567`). (Order-before-distinct in source
+/// (`:1567`) + `DISTINCT` (`:1568`). (Order-before-distinct in source
 /// is immaterial — same rows as the label chain's order.)
 pub fn link_list_sql(order: &SubOrder) -> String {
     format!(
@@ -284,17 +284,17 @@ pub fn link_list_sql(order: &SubOrder) -> String {
 /// Full representative link detail `SELECT` (`:1662-1675`): identical
 /// chain to the list (fixture `link_detail_queryset` pins the same SQL).
 /// Detail `get` either paginates this (ported bug 6: `pk is None`,
-/// `:1704-1712`) or appends the pk ([`link_detail_where`], `:1713`).
+/// `:1702-1711`) or appends the pk ([`link_detail_where`], `:1712`).
 pub fn link_detail_sql(order: &SubOrder) -> String {
     link_list_sql(order)
 }
 
-/// Detail predicate (`:1713`): scope + pk.
+/// Detail predicate (`:1712`): scope + pk.
 pub fn link_detail_where() -> String {
     format!("{} AND issue_links.id = :pk", link_scope_where())
 }
 
-/// Link `patch`/`delete` direct lookup (`:1746`, `:1795`):
+/// Link `patch`/`delete` direct lookup (`:1743`, `:1781`):
 /// `IssueLink.objects.get(workspace__slug, project_id, issue_id, pk)` —
 /// ported bug 4: bypasses the queryset's member/archived guards.
 pub fn link_direct_lookup_where() -> String {
@@ -312,7 +312,7 @@ pub fn link_direct_lookup_where() -> String {
 // Comments (views/issue.py:1805-1828 list, :1961-1984 detail)
 // ---------------------------------------------------------------------------
 
-/// Comment scope in source order (`:1806-1813`, `:1962-1969`): slug,
+/// Comment scope in source order (`:1807-1814`, `:1963-1970`): slug,
 /// project, issue, member, live project. Both chains are identical.
 pub fn comment_scope_where() -> String {
     [
@@ -326,7 +326,7 @@ pub fn comment_scope_where() -> String {
     .join(" AND ")
 }
 
-/// `is_member=Exists(...)` annotation (`:1815-1823`, `:1971-1979`) in
+/// `is_member=Exists(...)` annotation (`:1816-1825`, `:1972-1981`) in
 /// fixture predicate order: live row, active, member, project, slug.
 /// Unlike [`member_guard_sql`], this explicit `ProjectMember.objects`
 /// filter carries the manager's `deleted_at IS NULL`.
@@ -339,9 +339,9 @@ pub fn comment_is_member_sql() -> String {
 }
 
 /// Full representative comment list/detail `SELECT`: scope +
-/// `is_member` annotation + kwargs order (`:1824`) + `DISTINCT`
-/// (`:1825`). `select_related("workspace", "project", "issue", "actor")`
-/// (`:1814`, `:1970`) is a fetch hint — same rows.
+/// `is_member` annotation + kwargs order (`:1826`) + `DISTINCT`
+/// (`:1827`). `select_related("workspace", "project", "issue", "actor")`
+/// (`:1815`, `:1971`) is a fetch hint — same rows.
 pub fn comment_list_sql(order: &SubOrder) -> String {
     format!(
         "SELECT DISTINCT issue_comments.*, {} AS is_member FROM issue_comments WHERE {} ORDER BY {}",
@@ -351,13 +351,13 @@ pub fn comment_list_sql(order: &SubOrder) -> String {
     )
 }
 
-/// Detail predicate (`:2006`): scope + pk (the annotation still
+/// Detail predicate (`:2008`): scope + pk (the annotation still
 /// applies — the detail chain annotates identically).
 pub fn comment_detail_where() -> String {
     format!("{} AND issue_comments.id = :pk", comment_scope_where())
 }
 
-/// Comment `patch`/`delete` direct lookup (`:2035`, `:2117`):
+/// Comment `patch`/`delete` direct lookup (`:2040`, `:2109`):
 /// `IssueComment.objects.get(workspace__slug, project_id, issue_id, pk)`
 /// — ported bug 4: bypasses the queryset's member/archived guards
 /// (and the `is_member` annotation).
@@ -372,11 +372,11 @@ pub fn comment_direct_lookup_where() -> String {
     .join(" AND ")
 }
 
-/// Comment patch external-dedupe `exists()` (`:2044-2050`): same
+/// Comment patch external-dedupe `exists()` (`:2045-2054`): same
 /// project/slug/source/id → 409 `{"error": "Work item comment with the
 /// same external id and external source already exists", "id": ...}`.
 /// Ported asymmetry 8: no pk exclusion in SQL — the caller compares
-/// `external_id` in Python first (`:2042-2043`).
+/// `external_id` in Python first (`:2047`).
 pub fn comment_external_dedupe_where() -> String {
     [
         live_row_sql("issue_comments"),
@@ -431,7 +431,7 @@ pub fn activity_list_sql(order: &SubOrder) -> String {
 
 /// Activity detail predicates (`:2212-2219`): list predicates + pk,
 /// executed with `.order_by(...).first()` (`:2222-2223`, `LIMIT 1`);
-/// empty renders [`ACTIVITY_NOT_FOUND_BODY`] (`:2226`).
+/// empty renders [`ACTIVITY_NOT_FOUND_BODY`] (`:2227`).
 pub fn activity_detail_where() -> String {
     format!("{} AND issue_activities.id = :pk", activity_list_where())
 }
@@ -469,10 +469,10 @@ pub fn attachment_list_sql() -> String {
     )
 }
 
-/// Attachment post external-dedupe `exists()` (`:2359-2368`): same
+/// Attachment post external-dedupe `exists()` (`:2359-2369`): same
 /// project/slug/source/id/issue/entity → 409 `{"error": "Issue with
 /// the same external id and external source already exists",
-/// "id": ...}` (`:2377-2383`).
+/// "id": ...}` (`:2379-2384`).
 pub fn attachment_dedupe_where() -> String {
     [
         live_row_sql("file_assets"),
@@ -486,7 +486,7 @@ pub fn attachment_dedupe_where() -> String {
     .join(" AND ")
 }
 
-/// Attachment detail lookup (`:2491`, `:2562`, `:2640`):
+/// Attachment detail lookup (`:2488`, `:2562`, `:2626`):
 /// `FileAsset.objects.get(pk, workspace__slug, project_id)`.
 pub fn attachment_detail_where() -> String {
     [
@@ -498,8 +498,8 @@ pub fn attachment_detail_where() -> String {
     .join(" AND ")
 }
 
-/// Attachment issue load for the permission check (`:2308`, `:2472`,
-/// `:2626`): `Issue.objects.get(pk, workspace__slug, project_id)` —
+/// Attachment issue load for the permission check (`:2318`, `:2474`,
+/// `:2612`): `Issue.objects.get(pk, workspace__slug, project_id)` —
 /// note the plain manager (triage/archived/draft rows load here).
 pub fn attachment_issue_where() -> String {
     [
@@ -512,10 +512,10 @@ pub fn attachment_issue_where() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Relations: grouped read (views/issue.py:2965-3008) + merge (:3010-3019)
+// Relations: grouped read (views/issue.py:2971-2995) + merge (:2997-3006)
 // ---------------------------------------------------------------------------
 
-/// Grouped-read scope (`:2984-2987`): live rows mentioning the issue on
+/// Grouped-read scope (`:2979-2982`): live rows mentioning the issue on
 /// either side, in this workspace. Ported bug 2: NO `project_id`
 /// predicate — cross-project rows aggregate into the response.
 pub fn relation_scope_where() -> String {
@@ -528,7 +528,7 @@ pub fn relation_scope_where() -> String {
     .join(" AND ")
 }
 
-/// One `_agg_ids` arm (`:2974-2979`): distinct ids where the stored
+/// One `_agg_ids` arm (`:2973-2977`): distinct ids where the stored
 /// type and the fixed side match, `COALESCE`d to the empty uuid array
 /// (`:2971`).
 pub fn relation_aggregate_arm(
@@ -544,7 +544,7 @@ pub fn relation_aggregate_arm(
     )
 }
 
-/// Full representative grouped aggregate `SELECT` (`:2989-3008`): all
+/// Full representative grouped aggregate `SELECT` (`:2984-2995`): all
 /// ten arms in source order over the scope.
 pub fn relation_aggregate_sql() -> String {
     let arms = [
@@ -611,7 +611,7 @@ pub fn relation_aggregate_sql() -> String {
     )
 }
 
-/// Grouped-response keys in source order (`:3010-3019`).
+/// Grouped-response keys in source order (`:2997-3006`).
 pub const RELATION_RESPONSE_KEYS: &[&str] = &[
     "blocking",
     "blocked_by",
@@ -623,7 +623,7 @@ pub const RELATION_RESPONSE_KEYS: &[&str] = &[
     "finish_before",
 ];
 
-/// `list(set(forward + related))` (`:3015-3016`, ported bug 3):
+/// `list(set(forward + related))` (`:3000-3001`, ported bug 3):
 /// direction-union membership with first-seen order. Python's
 /// `set()` order is hash-based and unstable; only the membership is
 /// contractual, and the fixture pins exactly that.
@@ -657,17 +657,17 @@ pub fn actual_relation(requested: &str) -> &str {
 }
 
 /// The reverse-wire set (`:3077`): these swap the issue/related sides
-/// on write (`:3082-3083`) and refetch (`:3113-3118`).
+/// on write (`:3082-3083`) and refetch (`:3113-3114`, `:3119-3120`).
 pub fn is_reverse_relation(requested: &str) -> bool {
     matches!(requested, "blocking" | "start_after" | "finish_after")
 }
 
-/// Post-create refetch filter (`:3111-3128`): the written pairs (sides
+/// Post-create refetch filter (`:3111-3130`): the written pairs (sides
 /// per `reverse`) + stored type + workspace slug, with
 /// `select_related("issue__state", "related_issue__state")` (`:3127`;
 /// fetch hint). Reverse renders `RelatedIssueSerializer`, forward
-/// `IssueRelationSerializer` (`:3130`). (`bulk_create(...,
-/// batch_size=10, ignore_conflicts=True)` `:3079-3092` is handler-owned.)
+/// `IssueRelationSerializer` (`:3132`). (`bulk_create(...,
+/// batch_size=10, ignore_conflicts=True)` `:3079-3094` is handler-owned.)
 pub fn relation_refetch_where(reverse: bool) -> String {
     let pairs = if reverse {
         "issue_relations.issue_id IN (:issues) AND issue_relations.related_issue_id = :issue_id"
@@ -743,7 +743,7 @@ pub fn workpad_get_where() -> String {
     format!("{} AND issues.id = :pk", workpad_scope_where())
 }
 
-/// Executed patch-lock `SELECT` (`:3315-3317`, fixture
+/// Executed patch-lock `SELECT` (`:3309-3310`, fixture
 /// `workpad_patch_lock`): the `get` form plus `LIMIT 21` (executed
 /// `.get()`) plus `FOR UPDATE OF issues` (`select_for_update(of=
 /// ("self",))`). The `OF issues` scope is load-bearing, not cosmetic:
@@ -762,7 +762,7 @@ pub fn workpad_lock_sql() -> String {
 // PR links (views/github_pr.py:37-49 list, :86-95 detail)
 // ---------------------------------------------------------------------------
 
-/// PR-link list scope in source order (`:38-45`): slug, project,
+/// PR-link list scope in source order (`:39-46`): slug, project,
 /// issue, member, live project.
 pub fn pr_scope_where() -> String {
     [
@@ -777,7 +777,7 @@ pub fn pr_scope_where() -> String {
 }
 
 /// Full representative PR-link list `SELECT`: scope + kwargs order
-/// (`:46`) + `DISTINCT` (`:47`).
+/// (`:47`) + `DISTINCT` (`:48`).
 pub fn pr_list_sql(order: &SubOrder) -> String {
     format!(
         "SELECT DISTINCT github_pull_request_links.* FROM github_pull_request_links WHERE {} ORDER BY {}",
@@ -786,7 +786,7 @@ pub fn pr_list_sql(order: &SubOrder) -> String {
     )
 }
 
-/// PR-link detail scope (`:87-94`, ported bug 5): slug, project,
+/// PR-link detail scope (`:88-94`, ported bug 5): slug, project,
 /// issue, member — NO archived guard, and the chain calls neither
 /// `.order_by` nor `.distinct()`, so `Meta.ordering` applies.
 pub fn pr_detail_scope_where() -> String {
@@ -801,7 +801,7 @@ pub fn pr_detail_scope_where() -> String {
 }
 
 /// Effective PR-link detail order: `Meta.ordering = ("-created_at",)`
-/// (`db/models/integration/github.py:252`).
+/// (`db/models/integration/github.py:251`).
 pub const PR_DETAIL_ORDER_SQL: &str = "github_pull_request_links.created_at DESC";
 
 /// Full representative PR-link detail `SELECT` (queryset form, fixture
@@ -814,7 +814,7 @@ pub fn pr_detail_sql() -> String {
     )
 }
 
-/// PR-link `delete` predicate (`:95`): detail scope + pk.
+/// PR-link `delete` predicate (`:98`): detail scope + pk.
 pub fn pr_detail_where() -> String {
     format!(
         "{} AND github_pull_request_links.id = :pk",
@@ -826,7 +826,7 @@ pub fn pr_detail_where() -> String {
 // Review links (views/git_code_review.py:32-44 list, :86-95 detail)
 // ---------------------------------------------------------------------------
 
-/// Review-link list scope in source order (`:33-40`): slug, project,
+/// Review-link list scope in source order (`:34-41`): slug, project,
 /// issue, member, live project.
 pub fn review_scope_where() -> String {
     [
@@ -841,7 +841,7 @@ pub fn review_scope_where() -> String {
 }
 
 /// Full representative review-link list `SELECT`: scope + kwargs order
-/// (`:41`) + `DISTINCT` (`:42`).
+/// (`:42`) + `DISTINCT` (`:43`).
 pub fn review_list_sql(order: &SubOrder) -> String {
     format!(
         "SELECT DISTINCT git_code_review_links.* FROM git_code_review_links WHERE {} ORDER BY {}",
@@ -850,7 +850,7 @@ pub fn review_list_sql(order: &SubOrder) -> String {
     )
 }
 
-/// Review-link detail scope (`:87-94`, ported bug 5): slug, project,
+/// Review-link detail scope (`:88-94`, ported bug 5): slug, project,
 /// issue, member — NO archived guard, and the chain calls neither
 /// `.order_by` nor `.distinct()`, so `Meta.ordering` applies.
 pub fn review_detail_scope_where() -> String {
@@ -865,7 +865,7 @@ pub fn review_detail_scope_where() -> String {
 }
 
 /// Effective review-link detail order: `Meta.ordering =
-/// ("-created_at",)` (`db/models/integration/git.py:259`).
+/// ("-created_at",)` (`db/models/integration/git.py:253`).
 pub const REVIEW_DETAIL_ORDER_SQL: &str = "git_code_review_links.created_at DESC";
 
 /// Full representative review-link detail `SELECT` (queryset form,
@@ -878,7 +878,7 @@ pub fn review_detail_sql() -> String {
     )
 }
 
-/// Review-link `delete` predicate (`:95`): detail scope + pk.
+/// Review-link `delete` predicate (`:98`): detail scope + pk.
 pub fn review_detail_where() -> String {
     format!(
         "{} AND git_code_review_links.id = :pk",
