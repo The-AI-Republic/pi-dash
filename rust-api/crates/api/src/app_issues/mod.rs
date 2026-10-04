@@ -1097,10 +1097,24 @@ fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &
 /// `IssueListDetailSerializer`'s prefetch reads: the reverse managers run
 /// on the plain `objects` manager, so the array subqueries carry *no*
 /// soft-delete guard and the module one neither joins `modules` nor checks
-/// Count annotations render `NULL` when empty: Django's grouped
-/// `Subquery(...values().annotate(count=Count()).values("count"))` has no
-/// `Coalesce`, so zero related rows yield `NULL` → JSON `null`, never `0`.
-/// `NULLIF(COUNT(*), 0)` reproduces that on every list path.
+/// `scalar_counts` selects the empty-count rendering per path: Django
+/// uses two annotation shapes for these three counts and they differ
+/// exactly here (both verified with `str(qs.query)` on Django 4.2.30,
+/// `USE_TZ`, `TIME_ZONE="UTC"`).
+/// Scalar (`Func(F("id"), function="Count")`, not an Aggregate → no
+/// `GROUP BY`): `(SELECT Count(U0."id") ...)` always returns one row, so
+/// empty renders `0`. Used by `IssueListEndpoint.get`
+/// (`app/views/issue/base.py:121-141`) and
+/// `IssueDetailEndpoint.apply_annotations` (`base.py:999-1019`) — the
+/// `flat_list` and `detail_list` paths (`scalar_counts = true`, plain
+/// `COUNT`).
+/// Grouped (`Subquery(...values().annotate(count=Count()).values("count"))`
+/// → `GROUP BY`): zero related rows yield zero groups, so the scalar
+/// subquery is `NULL` → JSON `null`. Used by
+/// `IssueViewSet.apply_annotations` (`base.py:225-251`) and
+/// `IssuePaginatedViewSet.get_queryset` (`base.py:839-866`) — the
+/// `list_issues` (flat + grouped) and `v2_list` paths
+/// (`scalar_counts = false`, `NULLIF(COUNT(*), 0)`).
 /// Array guards mirror the managers Django queries through:
 /// `IssueLabel`/`IssueAssignee`/`ModuleIssue.objects` are soft-deletion
 /// managers (deleted rows excluded everywhere); the v2 assignee filter
@@ -1114,19 +1128,25 @@ fn annotation_selects(
     skip_array: Option<&str>,
     assignee_active_member: bool,
     module_archived_guard: bool,
+    scalar_counts: bool,
 ) -> String {
-    let mut selects = String::from(
+    let count = if scalar_counts {
+        "COUNT(*)"
+    } else {
+        "NULLIF(COUNT(*), 0)"
+    };
+    let mut selects = format!(
         r#"issue.id, issue.name, issue.state_id, issue.sort_order, issue.completed_at,
         issue.estimate_point_id AS estimate_point, issue.priority, issue.start_date,
         issue.target_date, issue.sequence_id, issue.project_id, issue.parent_id,
         (SELECT ci.cycle_id FROM cycle_issues ci
           WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL LIMIT 1) AS cycle_id,
-        (SELECT NULLIF(COUNT(*), 0) FROM issue_links il
+        (SELECT {count} FROM issue_links il
           WHERE il.issue_id = issue.id AND il.deleted_at IS NULL) AS link_count,
-        (SELECT NULLIF(COUNT(*), 0) FROM file_assets fa
+        (SELECT {count} FROM file_assets fa
           WHERE fa.issue_id = issue.id AND fa.entity_type = 'ISSUE_ATTACHMENT'
             AND fa.deleted_at IS NULL) AS attachment_count,
-        (SELECT NULLIF(COUNT(*), 0) FROM issues c
+        (SELECT {count} FROM issues c
            LEFT JOIN states cs ON cs.id = c.state_id AND cs.deleted_at IS NULL
            JOIN projects cp ON cp.id = c.project_id
           WHERE c.parent_id = issue.id AND c.deleted_at IS NULL
@@ -1535,6 +1555,34 @@ fn quote_json(rendered: String) -> String {
 // ---- group values ---------------------------------------------------------------
 // Port of `issue_group_values`: the known group buckets per field.
 
+/// `state_id` group values (`utils/grouper.py::issue_group_values`,
+/// `State.objects.filter(is_triage=False, ...)`): the explicit
+/// `is_triage = FALSE` plus `StateManager`'s `NOT (group = 'triage')`
+/// (`db/models/state.py:79-83`). `$1` = slug, `$2` = project.
+const STATE_GROUP_VALUES_SQL: &str = r#"SELECT s.id FROM states s JOIN workspaces w ON w.id = s.workspace_id
+                   WHERE s.is_triage = FALSE AND NOT (s."group" = 'triage')
+                   AND w.slug = $1 AND s.project_id = $2 AND s.deleted_at IS NULL"#;
+
+/// `SELECT` for the `target_date`/`start_date`/`created_by` group-values
+/// branches (`utils/grouper.py::issue_group_values`):
+/// `SELECT DISTINCT {column}, issue.created_at ... ORDER BY issue.created_at DESC`.
+/// The extra `created_at` select is Django's `get_extra_select`
+/// (`db/models/sql/compiler.py`): plain `DISTINCT` over the value column
+/// with the default `-created_at` ordering would be rejected by Postgres
+/// ("ORDER BY expressions must appear in select list"), so Django selects
+/// the ordering column too — `DISTINCT` then applies to the PAIR, values
+/// duplicate, and NULLs are kept (no `IS NOT NULL`). Callers read column
+/// 0 (`values_list(flat=True)` yields `row[0]`); NULL reads as `"None"`
+/// (Python `str(None)`, `paginator.py::__get_field_dict`). `from_where` is
+/// the filtered-set fragment (from/joins/where, binds first).
+fn distinct_group_values_sql(column: &str, from_where: &str) -> String {
+    format!(
+        "SELECT DISTINCT {column} AS bucket, issue.created_at AS ordering_created_at \
+         {from_where} \
+         ORDER BY issue.created_at DESC"
+    )
+}
+
 pub async fn group_values(
     pool: &sqlx::PgPool,
     field: &str,
@@ -1550,16 +1598,12 @@ pub async fn group_values(
     };
     match field {
         "state_id" => {
-            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-                r#"SELECT s.id FROM states s JOIN workspaces w ON w.id = s.workspace_id
-                   WHERE s.is_triage = FALSE AND w.slug = $1 AND s.project_id = $2
-                   AND s.deleted_at IS NULL"#,
-            )
-            .bind(slug)
-            .bind(project_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(STATE_GROUP_VALUES_SQL)
+                .bind(slug)
+                .bind(project_id)
+                .fetch_all(pool)
+                .await
+                .map_err(|_| Denial::ServerError)?;
             Ok(rows.into_iter().map(|row| row.0.to_string()).collect())
         }
         "labels__id" => {
@@ -1647,10 +1691,7 @@ pub async fn group_values(
                 "start_date" => "issue.start_date::text",
                 _ => "issue.created_by_id::text",
             };
-            let sql = format!(
-                "SELECT DISTINCT {column} AS bucket {} WHERE {column} IS NOT NULL",
-                filtered.from_where
-            );
+            let sql = distinct_group_values_sql(column, &filtered.from_where);
             let query = bind_all(&sql, filtered.values.clone())?;
             let rows = query
                 .fetch_all(pool)
@@ -1658,8 +1699,9 @@ pub async fn group_values(
                 .map_err(|_| Denial::ServerError)?;
             let mut out = Vec::new();
             for row in rows {
-                let bucket: String = row.try_get("bucket").map_err(|_| Denial::ServerError)?;
-                out.push(bucket);
+                let bucket: Option<String> =
+                    row.try_get("bucket").map_err(|_| Denial::ServerError)?;
+                out.push(bucket.unwrap_or_else(|| "None".to_owned()));
             }
             Ok(out)
         }
@@ -1812,7 +1854,8 @@ pub async fn list_issues(
         )
         .await;
     }
-    let selects = annotation_selects(true, None, false, true);
+    // Grouped `Count` annotations: empty counts render NULL.
+    let selects = annotation_selects(true, None, false, true, false);
     let fields = on_results_fields(None, None);
     flat_paginated_response(
         &context, &filtered, &key_expr, direction, per_page, cursor, selects, fields, false,
@@ -1918,7 +1961,8 @@ async fn grouped_response(
     let limit = per_page.min(1000);
     let window = grouped_window(limit, cursor.offset, cursor.value, None).map_err(page_denial)?;
     let group_expr = group_expression(group_by)?;
-    let selects = annotation_selects(true, skip_array_for(group_by), false, true);
+    // Grouped `Count` annotations: empty counts render NULL.
+    let selects = annotation_selects(true, skip_array_for(group_by), false, true, false);
     let member_select = group_member_select(group_by);
     let sub_expr = match &sub_group_by {
         Some(sub) => Some(group_expression(sub)?),
@@ -2233,7 +2277,8 @@ pub async fn flat_list(
     // Flat ordering: the `order_issue_queryset` fragment directly — no
     // paginator re-ordering, no `NULLS LAST` (Postgres defaults apply).
     let order_clause = flat_order_sql(&order_spec, &context.params.order_by)?;
-    let selects = annotation_selects(true, None, false, true);
+    // Scalar `Func(Count)` annotations: empty counts render 0.
+    let selects = annotation_selects(true, None, false, true, true);
     let inner = format!(
         "SELECT {selects} {} ORDER BY {order_clause}",
         filtered.from_where
@@ -2491,7 +2536,8 @@ pub async fn detail_list(
     let per_page = params.per_page;
     let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw)
         .map_err(|error| Denial::BadDetail(error.detail()))?;
-    let selects = annotation_selects(true, None, false, false);
+    // Scalar `Func(Count)` annotations: empty counts render 0.
+    let selects = annotation_selects(true, None, false, false, true);
     let fields: Vec<String> = DETAIL_FIELDS
         .iter()
         .map(|name| (*name).to_owned())
@@ -2543,7 +2589,8 @@ pub async fn v2_list(
         fetch_count(&context.pool, &sql, filtered.values.clone()).await?
     };
     let page = v2_page(cursor_raw, total_results).map_err(|_| Denial::ServerError)?;
-    let mut selects = annotation_selects(true, None, true, true);
+    // Grouped `Count` annotations: empty counts render NULL.
+    let mut selects = annotation_selects(true, None, true, true, false);
     // `description_html` is a plain model column, not an annotation: v2
     // always selects it (like `.values()` does) so `?description=true`
     // renders it instead of null.
@@ -2756,22 +2803,56 @@ mod tests {
     }
 
     #[test]
-    fn count_annotations_render_null_when_empty() {
-        // No `Coalesce` in Python: zero related rows yield NULL, not 0.
-        let selects = annotation_selects(true, None, false, true);
-        assert!(selects.contains("NULLIF(COUNT(*), 0)"));
+    fn count_annotations_grouped_paths_render_null_when_empty() {
+        // `IssueViewSet.apply_annotations` + `IssuePaginatedViewSet`: the
+        // grouped `Count` subquery has no `Coalesce`, so zero related rows
+        // yield NULL, not 0 (`list_issues` flat/grouped, `v2_list`).
+        let selects = annotation_selects(true, None, false, true, false);
+        assert_eq!(selects.matches("NULLIF(COUNT(*), 0)").count(), 3);
         assert!(!selects.contains("(SELECT COUNT(*)"));
+    }
+
+    #[test]
+    fn count_annotations_scalar_paths_render_zero_when_empty() {
+        // `IssueListEndpoint.get` + `IssueDetailEndpoint`: `Func(Count)` is
+        // not an Aggregate, so Django emits no GROUP BY and the subquery
+        // always returns one row — 0 when empty, never NULL (`flat_list`,
+        // `detail_list`).
+        let selects = annotation_selects(true, None, false, true, true);
+        assert_eq!(selects.matches("(SELECT COUNT(*)").count(), 3);
+        assert!(!selects.contains("NULLIF"));
+    }
+
+    #[test]
+    fn distinct_group_values_keep_django_extra_select() {
+        // `values_list(field, flat=True).distinct()` with the default
+        // `-created_at` ordering: Django selects the ordering column too
+        // (`get_extra_select`), orders by it, and keeps NULLs.
+        let sql = distinct_group_values_sql("issue.target_date::text", "FROM issues issue");
+        assert!(sql.contains("SELECT DISTINCT issue.target_date::text AS bucket"));
+        assert!(sql.contains("issue.created_at AS ordering_created_at"));
+        assert!(sql.contains("ORDER BY issue.created_at DESC"));
+        assert!(!sql.contains("IS NOT NULL"));
+    }
+
+    #[test]
+    fn state_group_values_exclude_triage_group() {
+        // `State.objects.filter(is_triage=False, ...)`: the explicit flag
+        // plus `StateManager`'s `NOT (group = 'triage')`.
+        assert!(STATE_GROUP_VALUES_SQL.contains("s.is_triage = FALSE"));
+        assert!(STATE_GROUP_VALUES_SQL.contains("NOT (s.\"group\" = 'triage')"));
+        assert!(STATE_GROUP_VALUES_SQL.contains("s.deleted_at IS NULL"));
     }
 
     #[test]
     fn detail_arrays_keep_deleted_guard_without_module_join() {
         // The detail prefetches (`...objects.all()`) carry the managers'
         // deleted filter but no archived-module guard.
-        let guarded = annotation_selects(true, None, false, true);
+        let guarded = annotation_selects(true, None, false, true, false);
         assert!(guarded.contains("il.deleted_at IS NULL"));
         assert!(guarded.contains("JOIN modules m ON m.id = mi.module_id"));
         assert!(guarded.contains("m.archived_at IS NULL"));
-        let detail = annotation_selects(true, None, false, false);
+        let detail = annotation_selects(true, None, false, false, true);
         assert!(detail.contains("il.deleted_at IS NULL"));
         assert!(detail.contains("ia.deleted_at IS NULL"));
         assert!(detail.contains("mi.deleted_at IS NULL"));
