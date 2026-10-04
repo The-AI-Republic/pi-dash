@@ -5077,12 +5077,18 @@ fn anchor_sql(slug_bind: &str) -> String {
 /// expression (`OffsetPaginator.get_result` re-orders by `(key dir,
 /// -created_at)`). Unknown keys raise Django's `FieldError` → 500.
 /// `pk` is Django's primary-key alias (`F("pk")` resolves — no key
-/// allowlist in `paginator.py`); `workspace__slug` spans the `w` join
-/// (`F("workspace__slug")` 200s — general dunder spans stay 500 here).
+/// allowlist in `paginator.py`); `workspace__slug` maps to
+/// `p.workspace_id`, NOT `w.slug` — the fetch is `SELECT DISTINCT`
+/// and `w.slug` is not in the select list, so Postgres rejects
+/// `ORDER BY w.slug` (`for SELECT DISTINCT, ORDER BY expressions
+/// must appear in select list`). Both are constant under the
+/// `w.slug = $1` filter, so ties fall to `-created_at` exactly as in
+/// Python (`F("workspace__slug")` 200s — general dunder spans stay
+/// 500 here).
 fn order_column(key: &str) -> Result<&'static str, Denial> {
     match key {
         "pk" => Ok("p.id"),
-        "workspace__slug" => Ok("w.slug"),
+        "workspace__slug" => Ok("p.workspace_id"),
         "created_at" => Ok("p.created_at"),
         "updated_at" => Ok("p.updated_at"),
         "archived_at" => Ok("p.archived_at"),
@@ -6714,7 +6720,7 @@ mod tests {
         assert_eq!(order_column("workspace").unwrap(), "p.workspace_id");
         assert_eq!(order_column("sort_order").unwrap(), "sort_order");
         assert_eq!(order_column("pk").unwrap(), "p.id");
-        assert_eq!(order_column("workspace__slug").unwrap(), "w.slug");
+        assert_eq!(order_column("workspace__slug").unwrap(), "p.workspace_id");
         assert!(matches!(order_column("nope"), Err(Denial::ServerError)));
     }
 
