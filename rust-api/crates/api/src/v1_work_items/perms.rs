@@ -478,7 +478,9 @@ impl ResolveRunError {
 ///   [`active_run_of_caller`] over `newest_runs_on_issue` — never an error.
 /// * Unparseable header: `(None, NotUuid)`. `Uuid::parse_str` accepts the
 ///   same four spellings `uuid.UUID` does (simple, hyphenated, braced,
-///   `urn:uuid:`), so malformed means malformed on both sides.
+///   `urn:uuid:`). CPython's parser is sloppier in corners no real caller
+///   sends (misplaced hyphens, unbalanced braces, `_` separators), which
+///   answer `NotUuid` here; the strict parse stands.
 /// * Unknown id, or an owned run on another issue / a finished run:
 ///   `(None, None)` — "simply not an agent move on this issue".
 /// * A run the caller may not speak for: `(None, NotYours)` — checked
