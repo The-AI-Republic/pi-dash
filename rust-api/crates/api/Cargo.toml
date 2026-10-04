@@ -87,6 +87,10 @@ rustls = { version = "0.23.45", default-features = false, features = ["ring", "s
 # D-17 PIDASHCONV-341): same 0.9 line the auth and jobs crates build on,
 # so the lockfile gains no new downloads.
 rand = "0.9"
+# D-18 orchestration actions (PIDASHCONV-678) draw ticker jitter through the
+# db-crate `jitter_seconds`, which is generic over the rand 0.8 `Rng` the db
+# crate builds on — the jobs-crate `rand08` alias precedent, no new package.
+rand08 = { package = "rand", version = "0.8" }
 tokio-rustls = "0.26.5"
 webpki-roots = "1.0.9"
 tower = { version = "0.5" }

@@ -262,6 +262,9 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // PIDASHCONV-680, via `v1_work_items::routes`; sibling
         // handler issues extend the merge; merges keep both sides;
         // `auth_oauth::routes` already covers the device flow.
+        // D-18 work-item action routes, PIDASHCONV-678, via
+        // `v1_work_items::routes` (sibling handler issues extend that
+        // module's merge, keeping both sides).
         // Registration is the cutover granularity — sibling paths have no
         // Rust route and keep proxying to Django through the fallback.
         RouteGroup::ApiV1 => crate::auth_oauth::routes()

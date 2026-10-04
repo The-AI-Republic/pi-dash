@@ -1,15 +1,16 @@
-//! D-18 work-item route registration: link + comment routes
-//! (handlers B, PIDASHCONV-674) plus PR / code-review link routes
-//! (handlers H, PIDASHCONV-680).
+//! D-18 work-item route registration: action routes (handlers F,
+//! PIDASHCONV-678), link + comment routes (handlers B, PIDASHCONV-674),
+//! plus PR / code-review link routes (handlers H, PIDASHCONV-680).
 //!
-//! Ports `apps/api/pi_dash/api/urls/work_item.py:60-77,154-171` (the eight
-//! link/comment paths: four `work-items/` routes plus their deprecated
-//! `issues/` twins, which share the view classes and therefore the
-//! handlers) and `urls/work_item.py:218-236` (the four PR/review-link
-//! paths) onto the merged D-18 foundation. Cutover granularity is the
-//! route + method (the pilot `owned()` pattern): the owned methods serve
-//! from Rust, every other method on these paths proxies to Django so its
-//! 405-after-auth and metadata responses are preserved byte for byte.
+//! Ports `apps/api/pi_dash/api/urls/work_item.py:133-151` (the four action
+//! paths), `urls/work_item.py:60-77,154-171` (the eight link/comment paths:
+//! four `work-items/` routes plus their deprecated `issues/` twins, which
+//! share the view classes and therefore the handlers) and
+//! `urls/work_item.py:218-236` (the four PR/review-link paths) onto the
+//! merged D-18 foundation. Cutover granularity is the route + method (the
+//! pilot `owned()` pattern): the owned methods serve from Rust, every other
+//! method on these paths proxies to Django so its 405-after-auth and
+//! metadata responses are preserved byte for byte.
 //!
 //! Sibling D-18 handler issues register their own routes here; on rebase
 //! keep both sides, never fork this file.
@@ -19,6 +20,8 @@
 use axum::Router;
 
 use crate::state::AppState;
+
+use super::handlers_actions::{owned_action, post_retick, post_run_ai, post_wait, post_yield};
 
 use super::handlers_pr_links::{
     pr_create, pr_destroy, pr_list, review_create, review_destroy, review_list,
@@ -30,9 +33,10 @@ use super::handlers_social::{
     patch_comment, patch_link, post_comment, post_link,
 };
 
-/// Register the D-18 link/comment paths (`urls/work_item.py:60-77,154-171`,
-/// PIDASHCONV-674) and the PR/review-link paths
-/// (`urls/work_item.py:218-236`, PIDASHCONV-680).
+/// Register the four action paths (`urls/work_item.py:133-151`,
+/// PIDASHCONV-678), the D-18 link/comment paths
+/// (`urls/work_item.py:60-77,154-171`, PIDASHCONV-674) and the
+/// PR/review-link paths (`urls/work_item.py:218-236`, PIDASHCONV-680).
 ///
 /// Sibling `v1_work_items` paths have no Rust route yet and keep proxying
 /// to Django through the fallback; on rebase keep both sides.
@@ -114,6 +118,26 @@ pub fn routes() -> Router<AppState> {
                     .delete(delete_comment),
             ),
         )
+        // `work_item.py:133-136` — re-tick (post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/re-tick/",
+            owned_action(axum::routing::post(post_retick)),
+        )
+        // `work_item.py:137-140` — wait (post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/wait/",
+            owned_action(axum::routing::post(post_wait)),
+        )
+        // `work_item.py:141-144` — run-ai (post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/run-ai/",
+            owned_action(axum::routing::post(post_run_ai)),
+        )
+        // `work_item.py:145-151` — agent-run yield (post).
+        .route(
+            "/api/v1/workspaces/{slug}/agent-runs/{run_id}/yield/",
+            owned_action(axum::routing::post(post_yield)),
+        )
 }
 
 #[cfg(test)]
@@ -150,6 +174,9 @@ mod tests {
     async fn owned_methods_answer_401_anonymous() {
         let issue = "11111111-1111-1111-1111-111111111111";
         let pk = "22222222-2222-2222-2222-222222222222";
+        let pid = "11111111-1111-1111-1111-111111111111";
+        let iid = "22222222-2222-2222-2222-222222222222";
+        let rid = "33333333-3333-3333-3333-333333333333";
         for (method, uri) in [
             (
                 "GET",
@@ -179,6 +206,22 @@ mod tests {
                     "/api/v1/workspaces/acme/projects/p1/work-items/{issue}/code-reviews/{pk}/"
                 ),
             ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/re-tick/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/wait/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/run-ai/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/agent-runs/{rid}/yield/"),
+            ),
         ] {
             assert_eq!(
                 status(method, &uri).await,
@@ -194,6 +237,8 @@ mod tests {
     async fn unowned_methods_proxy() {
         let issue = "11111111-1111-1111-1111-111111111111";
         let pk = "22222222-2222-2222-2222-222222222222";
+        let pid = "11111111-1111-1111-1111-111111111111";
+        let iid = "22222222-2222-2222-2222-222222222222";
         assert_eq!(
             status(
                 "PUT",
@@ -228,6 +273,45 @@ mod tests {
                 &format!(
                     "/api/v1/workspaces/acme/projects/p1/work-items/{issue}/code-reviews/{pk}/"
                 )
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "GET",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/re-tick/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "PUT",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/wait/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    /// Non-UUID path segments proxy to Django (its `<uuid:>` converter
+    /// would not match), before auth runs.
+    #[tokio::test]
+    async fn non_uuid_segments_proxy() {
+        let pid = "11111111-1111-1111-1111-111111111111";
+        assert_eq!(
+            status(
+                "POST",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/not-a-uuid/re-tick/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "POST",
+                "/api/v1/workspaces/acme/agent-runs/not-a-uuid/yield/",
             )
             .await,
             StatusCode::BAD_GATEWAY
