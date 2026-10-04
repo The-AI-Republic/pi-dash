@@ -287,10 +287,10 @@ pub fn sole_workspace_admin_count_sql() -> String {
 }
 
 /// R6 sole-workspace-admin guard (`:165-168`): fires when the leaver is an
-/// admin and `not count > 1` — the negated-spelling form is kept verbatim
-/// (ported bug 6), i.e. the guard blocks at `count <= 1`.
+/// admin and `count <= 1` (Python `not count > 1`, ported bug 6; simplified
+/// from the negated spelling — behavior-identical for integers).
 pub fn sole_workspace_admin_blocks(requester_role: i32, admin_count: i64) -> bool {
-    requester_role == ROLE_ADMIN && !(admin_count > 1)
+    requester_role == ROLE_ADMIN && admin_count <= 1
 }
 
 // ---------------------------------------------------------------------------
