@@ -413,43 +413,55 @@ test(
     const firstId = await issueIdByName(seed, seed.projectId, owner.cookie, seed.issueNames[0] ?? "");
     await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { label_ids: [label.id] }, owner.cookie);
     const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "state", sub_group_by: "labels" });
-    await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(2);
+    // Cleanup runs even when an assertion fails: a leaked KB fold label
+    // self-cascades into the retry (test-3: the retry died on attempt 1's
+    // label because the cleanup step never ran).
+    try {
+      await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(2);
 
-    await test.step("the None lane stays empty on the seed project", async () => {
-      // Intended: the two unlabeled seed issues render here (count 2).
-      // Pinned: the labels sub-grouped query drops seed rows without
-      // labels, so the lane shows count 0 and no cards (NEWFRONT-158).
-      // The first render can briefly show the flat-grouped rows (None at
-      // count 2 with the seed cards) before the grouped response replaces
-      // them — the post-rebase re-verify read exactly that transient — so
-      // poll until the lane settles instead of reading it once.
-      await expect
-        .poll(async () => (await driver.kanbanCards()).map((card) => card.name), { timeout: 120_000 })
-        .toContain(seed.issueNames[0] ?? "");
-      await expect
-        .poll(
-          async () => {
-            const lanes = await driver.kanbanSwimlanes();
-            const names = (await driver.kanbanCards()).map((card) => card.name);
-            return {
-              none: lanes.find((entry) => entry.name === "None")?.count,
-              hasFirst: names.includes(seed.issueNames[0] ?? ""),
-              hasSecond: names.includes(seed.issueNames[1] ?? ""),
-              hasThird: names.includes(seed.issueNames[2] ?? ""),
-            };
-          },
-          { timeout: 120_000 }
-        )
-        .toEqual({ none: 0, hasFirst: true, hasSecond: false, hasThird: false });
-      const rows = await serverIssues(seed.workspaceSlug, seed.projectId, owner.cookie);
-      expect(rows).toHaveLength(3);
-    });
-
-    await test.step("cleanup removes the label and restores preferences", async () => {
-      await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { label_ids: [] }, owner.cookie);
-      await serverDeleteLabel(seed.workspaceSlug, seed.projectId, label.id, owner.cookie);
-      await restoreBoard(seed, seed.projectId, ctx);
-    });
+      await test.step("the None lane stays empty on the seed project", async () => {
+        // Intended: the two unlabeled seed issues render here (count 2).
+        // Pinned: the labels sub-grouped query drops seed rows without
+        // labels, so the lane shows count 0 and no cards (NEWFRONT-158).
+        // The first render can briefly show the flat-grouped rows (None at
+        // count 2 with the seed cards) before the grouped response replaces
+        // them — the post-rebase re-verify read exactly that transient — so
+        // poll until the lane settles instead of reading it once.
+        await expect
+          .poll(async () => (await driver.kanbanCards()).map((card) => card.name), { timeout: 120_000 })
+          .toContain(seed.issueNames[0] ?? "");
+        const laneSettled = async () => {
+          const lanes = await driver.kanbanSwimlanes();
+          const names = (await driver.kanbanCards()).map((card) => card.name);
+          return {
+            none: lanes.find((entry) => entry.name === "None")?.count,
+            hasFirst: names.includes(seed.issueNames[0] ?? ""),
+            hasSecond: names.includes(seed.issueNames[1] ?? ""),
+            hasThird: names.includes(seed.issueNames[2] ?? ""),
+          };
+        };
+        const settled = { none: 0, hasFirst: true, hasSecond: false, hasThird: false };
+        try {
+          await expect.poll(laneSettled, { timeout: 120_000 }).toEqual(settled);
+        } catch {
+          // The grouped fetch itself can stall under contention: test-3
+          // held the flat pre-grouped render (None at 2) for the whole
+          // 120s window while the server deterministically drops the rows
+          // (10/10 direct reads). One reload re-issues the fetch; a
+          // genuinely changed behavior still fails its second window.
+          await kanbanReloadWithRetry(driver);
+          await expect.poll(laneSettled, { timeout: 120_000 }).toEqual(settled);
+        }
+        const rows = await serverIssues(seed.workspaceSlug, seed.projectId, owner.cookie);
+        expect(rows).toHaveLength(3);
+      });
+    } finally {
+      await test.step("cleanup removes the label and restores preferences", async () => {
+        await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { label_ids: [] }, owner.cookie);
+        await serverDeleteLabel(seed.workspaceSlug, seed.projectId, label.id, owner.cookie);
+        await restoreBoard(seed, seed.projectId, ctx);
+      });
+    }
   }
 );
 
@@ -886,12 +898,21 @@ test(
       expect(none).not.toBe("");
       await driver.kanbanDragCardToColumnEnd(beta, label.name);
       await expect.poll(() => driver.kanbanColumnCards(label.name), { timeout: 60_000 }).toContain(beta);
-      expect((await serverIssueDetails(seed.workspaceSlug, projectId, betaId, owner.cookie)).labelIds).toContain(
-        label.id
-      );
+      // The card renders optimistically; the PATCH can land after the UI
+      // read (test-3 forensics: the label was present ~40min later). Poll
+      // the server truth until it persists instead of reading it once.
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, projectId, betaId, owner.cookie)).labelIds, {
+          timeout: 60_000,
+        })
+        .toContain(label.id);
       await driver.kanbanDragCardToColumnEnd(beta, none);
       await expect.poll(() => driver.kanbanColumnCards(none), { timeout: 60_000 }).toContain(beta);
-      expect((await serverIssueDetails(seed.workspaceSlug, projectId, betaId, owner.cookie)).labelIds).toHaveLength(0);
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, projectId, betaId, owner.cookie)).labelIds, {
+          timeout: 60_000,
+        })
+        .toHaveLength(0);
     });
 
     await test.step("module membership moves through the module call", async () => {
@@ -899,9 +920,14 @@ test(
       await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
       await driver.kanbanDragCardToColumnEnd(gamma, memberName);
       await expect.poll(() => driver.kanbanColumnCards(memberName), { timeout: 60_000 }).toContain(gamma);
-      expect((await serverIssueDetails(seed.workspaceSlug, projectId, gammaId, owner.cookie)).moduleIds).toContain(
-        moduleId
-      );
+      // Same optimistic-render race as the label step above (test-3
+      // forensics: the module was present ~40min later) — poll until it
+      // persists.
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, projectId, gammaId, owner.cookie)).moduleIds, {
+          timeout: 60_000,
+        })
+        .toContain(moduleId);
     });
 
     await test.step("cycle membership moves through the cycle call", async () => {
@@ -909,7 +935,13 @@ test(
       await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
       await driver.kanbanDragCardToColumnEnd(alpha, memberName);
       await expect.poll(() => driver.kanbanColumnCards(memberName), { timeout: 60_000 }).toContain(alpha);
-      expect((await serverIssueDetails(seed.workspaceSlug, projectId, alphaId, owner.cookie)).cycleId).toBe(cycleId);
+      // Same optimistic-render race as the label step above — poll until
+      // the cycle membership persists.
+      await expect
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, projectId, alphaId, owner.cookie)).cycleId, {
+          timeout: 60_000,
+        })
+        .toBe(cycleId);
     });
 
     await test.step("cleanup removes the scratch project", async () => {
