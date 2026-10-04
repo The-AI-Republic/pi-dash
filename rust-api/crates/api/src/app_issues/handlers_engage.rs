@@ -50,7 +50,7 @@
 //! * A guest commenting on a foreign issue is refused with 400, not 403
 //!   (`comment.py:86-89`).
 //! * `PUT` on a comment runs DRF's default `update` (no decorator gate,
-//!   no enqueues, no `edited_at` logic, full-update defaults) while
+//!   no enqueues, no `edited_at` logic, missing fields untouched) while
 //!   `PATCH` runs the custom `partial_update` (ADMIN + creator gate,
 //!   both enqueues, conditional `edited_at`).
 //! * The create response carries `updated_by` set (the description-link
@@ -117,8 +117,7 @@ pub const COMMENT_REACTION_PATH: &str =
 
 /// Register the ten engage routes. Owned methods serve from Rust; every
 /// other method on these paths falls through to Django (its
-/// 405-after-auth and metadata responses live there). `HEAD` rides
-/// axum's `get` handling like Django's `GET`-backed `HEAD`.
+/// 405-after-auth, `HEAD`, and metadata responses live there).
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(HISTORY_PATH, owned(axum::routing::get(history), &["GET"]))
@@ -184,13 +183,20 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// An engage path: the owned methods serve from Rust, everything else
-/// falls through to Django (the social-handler cutover shape).
+/// falls through to Django (the social-handler cutover shape). `HEAD`
+/// and `TRACE` proxy explicitly: axum's implicit `HEAD`-from-`GET` and
+/// its empty 405 would otherwise diverge from Django (the plain
+/// `APIView` history route 405s `HEAD` as JSON after auth, while the
+/// viewset routes map `head` onto `get` — `viewsets.py:105-106` — and
+/// `TRACE` 405s as JSON everywhere).
 fn owned(
     methods: axum::routing::MethodRouter<AppState>,
     owned: &[&str],
 ) -> axum::routing::MethodRouter<AppState> {
     let mut router = methods;
-    for other in ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
+    for other in [
+        "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE",
+    ] {
         if owned.contains(&other) {
             continue;
         }
@@ -200,6 +206,8 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
+            "TRACE" => router.trace(crate::edge::proxy),
             _ => router.options(crate::edge::proxy),
         };
     }
@@ -414,6 +422,28 @@ async fn resolve_project_id(
     .await
     .map_err(|_| Denial::ServerError)?;
     row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+}
+
+/// Parse a `<uuid:>` path segment the way Django's `UUIDConverter` does:
+/// lowercase hex, hyphenated, 36 chars (`django/urls/converters.py:25`).
+/// Uppercase / simple / braced / `urn:` spellings never route in Django
+/// (resolver 404), so they proxy here instead of serving. `Result` (not
+/// `Option`) so call sites keep their `Ok` / `Err` proxy arms.
+fn path_uuid(raw: &str) -> Result<uuid::Uuid, ()> {
+    if raw.len() != 36 {
+        return Err(());
+    }
+    let strict = raw.bytes().enumerate().all(|(index, byte)| {
+        if index == 8 || index == 13 || index == 18 || index == 23 {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+        }
+    });
+    if !strict {
+        return Err(());
+    }
+    raw.parse::<uuid::Uuid>().map_err(|_| ())
 }
 
 /// Membership facts for one `(user, slug, project)` over the same rows
@@ -798,9 +828,8 @@ const ENGAGE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
 /// `JSONString` — `""` → "Value must be valid JSON."); blank form
 /// input for the nullable scalars (`deleted_at`, `edited_at`,
 /// `speaker_agent_run_id`) coerces to `None` (`Field.get_value`);
-/// uploads surface as `{"__file__": filename}` sentinels (DRF reads
-/// the file object: `CharField` invalid, choice/FK echo the filename,
-/// `comment_json` invalid).
+/// uploads are dropped (they live in `request.FILES`, which no engage
+/// view reads, so Django never sees them either).
 /// A negotiated request body: the validator map plus whether it came
 /// from HTML input (form/multipart). Validators branch on `is_html`
 /// exactly where DRF does (`get_value`, `JSONString`, file objects) —
@@ -826,8 +855,12 @@ async fn read_body(req: axum::extract::Request) -> Result<RequestBody, Denial> {
                 is_html: false,
             })
         }
-        Ok(shared_body::NegotiatedBody::Form { map, files }) => {
-            form_body_map(map, files).map(|map| RequestBody { map, is_html: true })
+        Ok(shared_body::NegotiatedBody::Form { map, files: _ }) => {
+            // The views validate `request.data` only — uploads live in
+            // `request.FILES`, which no engage path reads — so files are
+            // dropped here instead of merging as sentinels.
+            form_body_map(map, shared_body::FilesMap::new())
+                .map(|map| RequestBody { map, is_html: true })
         }
         Err(shared_body::BodyError::UnsupportedMediaType(message)) => {
             Err(Denial::UnsupportedMediaType(message))
@@ -874,12 +907,14 @@ fn file_sentinel(filename: &str) -> Value {
     )]))
 }
 
-/// Merge a negotiated form body into the validator map: files merge
-/// over texts last-wins (DRF `_full_data`), list fields append file
-/// sentinels after texts, blank nullable scalars coerce to `None`,
-/// and `comment_json` strings JSON-parse (bare `NaN`/`Infinity` →
-/// the 500 Django's `json.dumps` round-trip would die with — the
-/// form parser accepts them, the `JSONField` save does not).
+/// Merge a negotiated form body into the validator map: blank
+/// nullable scalars coerce to `None`, and `comment_json` strings
+/// JSON-parse (bare `NaN`/`Infinity` → the 500 Django's `json.dumps`
+/// round-trip would die with — the form parser accepts them, the
+/// `JSONField` save does not). The `files` map arrives empty from
+/// `read_body` (uploads live in `request.FILES`, unread here); the
+/// merge arms below only run under the unit tests, which pin the
+/// sentinel shapes for reference.
 fn form_body_map(
     map: Map<String, Value>,
     files: shared_body::FilesMap,
@@ -1419,17 +1454,15 @@ fn json_number_to_f64(number: &serde_json::Number) -> Option<f64> {
 /// render the CPython spelling: `1e16` in, `1e+16` out).
 fn normalize_parse_floats(value: &mut Value) {
     match value {
-        Value::Number(number) => {
-            if number.is_f64() {
-                if let Some(float) = number.as_f64() {
-                    let literal = py_float_repr(float);
-                    if let Ok(Value::Number(replacement)) = serde_json::from_str::<Value>(&literal)
-                    {
-                        *number = replacement;
-                    }
+        Value::Number(number) if number.is_f64() => {
+            if let Some(float) = number.as_f64() {
+                let literal = py_float_repr(float);
+                if let Ok(Value::Number(replacement)) = serde_json::from_str::<Value>(&literal) {
+                    *number = replacement;
                 }
             }
         }
+        Value::Number(_) => {}
         Value::Array(items) => {
             for item in items {
                 normalize_parse_floats(item);
@@ -1511,7 +1544,9 @@ fn app_origin(state: &AppState) -> String {
 /// `SELECT` for the logo/cover/avatar asset row behind `*_url`
 /// properties.
 fn logo_asset_sql() -> String {
-    "SELECT \"a\".\"id\", \"a\".\"entity_type\", \"a\".\"workspace_id\", \"a\".\"project_id\", \"a\".\"issue_id\", \"w\".\"slug\" AS \"workspace_slug\" FROM \"file_assets\" AS \"a\" LEFT OUTER JOIN \"workspaces\" AS \"w\" ON (\"a\".\"workspace_id\" = \"w\".\"id\") WHERE (\"a\".\"deleted_at\" IS NULL AND \"a\".\"id\" = $1)".to_owned()
+    // The asset FK traversal is `_base_manager` (a soft-deleted asset
+    // still renders its URL), so the read is unguarded.
+    "SELECT \"a\".\"id\", \"a\".\"entity_type\", \"a\".\"workspace_id\", \"a\".\"project_id\", \"a\".\"issue_id\", \"w\".\"slug\" AS \"workspace_slug\" FROM \"file_assets\" AS \"a\" LEFT OUTER JOIN \"workspaces\" AS \"w\" ON (\"a\".\"workspace_id\" = \"w\".\"id\") WHERE (\"a\".\"id\" = $1)".to_owned()
 }
 
 /// Port of `FileAsset.asset_url` (`db/models/asset.py:80-99`):
@@ -1524,19 +1559,21 @@ fn asset_url(
     workspace_slug: Option<&str>,
     project_id: Option<&str>,
     issue_id: Option<&str>,
-) -> Option<String> {
+) -> Result<Option<String>, Denial> {
     match entity_type {
         Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
-            Some(format!("/api/assets/v2/static/{asset_id}/"))
+            Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
         }
         Some("ISSUE_ATTACHMENT") => {
+            // A null workspace/project/issue is Django's `None.slug`
+            // `AttributeError` → the generic 500, not a quiet null.
             let (slug, project, issue) = match (workspace_slug, project_id, issue_id) {
                 (Some(s), Some(p), Some(i)) => (s, p, i),
-                _ => return None,
+                _ => return Err(Denial::ServerError),
             };
-            Some(format!(
+            Ok(Some(format!(
                 "/api/assets/v2/workspaces/{slug}/projects/{project}/issues/{issue}/attachments/{asset_id}/"
-            ))
+            )))
         }
         Some(
             "ISSUE_DESCRIPTION"
@@ -1546,13 +1583,13 @@ fn asset_url(
         ) => {
             let (slug, project) = match (workspace_slug, project_id) {
                 (Some(s), Some(p)) => (s, p),
-                _ => return None,
+                _ => return Err(Denial::ServerError),
             };
-            Some(format!(
+            Ok(Some(format!(
                 "/api/assets/v2/workspaces/{slug}/projects/{project}/{asset_id}/"
-            ))
+            )))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -1577,13 +1614,13 @@ async fn logo_or_cover_url(
     let project_id = opt_str(o, "project_id")?;
     let issue_id = opt_str(o, "issue_id")?;
     let id = req_str(o, "id")?;
-    Ok(asset_url(
+    asset_url(
         &id,
         entity_type.as_deref(),
         workspace_slug.as_deref(),
         project_id.as_deref(),
         issue_id.as_deref(),
-    ))
+    )
 }
 
 /// Owned app `UserLiteSerializer` row (`user.py:141-153`).
@@ -1673,14 +1710,16 @@ fn project_lite_value(row: &ProjectLiteOwned) -> Result<Value, Denial> {
     serde_json::to_value(&view).map_err(|_| Denial::ServerError)
 }
 
-/// `project_detail` leaf over a project id (default-manager guard).
+/// `project_detail` leaf over a project id. Forward-FK traversal uses
+/// `_base_manager` (soft-deleted rows render), so the read is
+/// unguarded; only a truly absent row 500s.
 async fn fetch_project_lite(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
 ) -> Result<ProjectLiteOwned, Denial> {
     let row = fetch_optional_object(
         pool,
-        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"deleted_at\" IS NULL AND \"projects\".\"id\" = $1)",
+        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)",
         &[SqlParam::Uuid(*project_id)],
     )
     .await?
@@ -1725,14 +1764,16 @@ fn workspace_lite_value(row: &WorkspaceLiteOwned) -> Result<Value, Denial> {
     serde_json::to_value(&view).map_err(|_| Denial::ServerError)
 }
 
-/// `workspace_detail` leaf over a workspace id (default-manager guard).
+/// `workspace_detail` leaf over a workspace id. Forward-FK traversal
+/// uses `_base_manager` (soft-deleted rows render), so the read is
+/// unguarded; only a truly absent row 500s.
 async fn fetch_workspace_lite(
     pool: &sqlx::PgPool,
     workspace_id: &uuid::Uuid,
 ) -> Result<WorkspaceLiteOwned, Denial> {
     let row = fetch_optional_object(
         pool,
-        "SELECT \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"slug\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\" FROM \"workspaces\" WHERE (\"workspaces\".\"deleted_at\" IS NULL AND \"workspaces\".\"id\" = $1)",
+        "SELECT \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"slug\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\" FROM \"workspaces\" WHERE (\"workspaces\".\"id\" = $1)",
         &[SqlParam::Uuid(*workspace_id)],
     )
     .await?
@@ -1792,9 +1833,11 @@ async fn fetch_issue_flat(
     pool: &sqlx::PgPool,
     issue_id: &uuid::Uuid,
 ) -> Result<IssueFlatOwned, Denial> {
+    // Forward-FK traversal (`_base_manager`): soft-deleted issues
+    // render, so the read is unguarded.
     let row = fetch_optional_object(
         pool,
-        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"is_draft\" FROM \"issues\" WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"id\" = $1)",
+        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"is_draft\" FROM \"issues\" WHERE (\"issues\".\"id\" = $1)",
         &[SqlParam::Uuid(*issue_id)],
     )
     .await?
@@ -2718,7 +2761,9 @@ async fn check_fk(
             return Ok(Presence::Missing);
         }
         Some(Value::Number(number)) => {
-            let rendered = number.to_string();
+            // The echo renders through CPython `str()` (overflow floats
+            // read `inf`, not their source spelling).
+            let rendered = py_str_value(&Value::Number(number.clone()));
             Some((rendered, uuid_from_json_int(number)))
         }
         Some(Value::String(text)) => Some((text.clone(), uuid_from_json_hex(text))),
@@ -4247,6 +4292,12 @@ async fn history(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
+    // The `<uuid:>` converter rejects before auth (URL resolving runs
+    // first), so the proxy check leads here like on every other path.
+    let issue_id = match path_uuid(&issue_raw) {
+        Ok(id) => id,
+        Err(_) => return crate::edge::proxy(State(state), req).await,
+    };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
         Err(error) => return error.into_response(),
@@ -4270,10 +4321,6 @@ async fn history(
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
     }
-    let issue_id = match issue_raw.parse::<uuid::Uuid>() {
-        Ok(id) => id,
-        Err(_) => return crate::edge::proxy(State(state), req).await,
-    };
     let tenant = match tenant_context(&pool, &user_id).await {
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
@@ -4481,15 +4528,18 @@ fn splice_and(sql: &str, predicate: &str) -> String {
 }
 
 /// Insert a `descriptions` row: the comment-save side effect
-/// (`db/models/issue.py:613-617`). Audit is the acting user
-/// (`BaseModel.save` over crum); `stripped` arrives already resolved
-/// (`None` when the html is empty — `Description.save` recomputes it).
+/// (`db/models/issue.py:613-617`). Audit comes from the comment save
+/// (`created_by` is the acting user on create, the comment's original
+/// creator on an update-mint; `updated_by` is set only on the latter);
+/// `stripped` arrives already resolved (`None` when the html is empty —
+/// `Description.save` recomputes it).
 #[allow(clippy::too_many_arguments)]
 async fn insert_description(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: &uuid::Uuid,
     project_id: &uuid::Uuid,
-    created_by: &uuid::Uuid,
+    created_by: Option<&uuid::Uuid>,
+    updated_by: Option<&uuid::Uuid>,
     json: &Value,
     html: &str,
     stripped: Option<&str>,
@@ -4499,12 +4549,13 @@ async fn insert_description(
     sqlx::query(
         r#"INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
             workspace_id, project_id, description_json, description_html, description_binary, description_stripped)
-           VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, NULL, $9)"#,
+           VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, NULL, $10)"#,
     )
     .bind(id)
     .bind(now)
     .bind(now)
     .bind(created_by)
+    .bind(updated_by)
     .bind(workspace_id)
     .bind(project_id)
     .bind(json)
@@ -4613,7 +4664,8 @@ async fn save_comment_update(
                 tx,
                 &stored.workspace_id,
                 &stored.project_id,
-                user_id,
+                stored.created_by.as_ref(),
+                Some(user_id),
                 &json,
                 &html,
                 stripped_for_desc,
@@ -4741,6 +4793,36 @@ async fn read_context(
     })
 }
 
+/// `filterset_fields = ["issue__id", "workspace__id"]` (`comment.py:41`):
+/// exact UUID matches narrowing the list queryset (and `get_object`,
+/// which filters through the same backends). Garbage answers
+/// django-filter's per-field `{"<param>": ["Enter a valid UUID."]}`
+/// 400 — not the generic invalid-detail body.
+fn filterset_predicates(
+    query: &super::QueryMap,
+) -> Result<Vec<(&'static str, uuid::Uuid)>, Denial> {
+    let mut filters = Vec::new();
+    let mut errors = Map::new();
+    for (param, column) in [
+        ("issue__id", "issue_comments.issue_id"),
+        ("workspace__id", "issue_comments.workspace_id"),
+    ] {
+        if let Some(raw) = super::query_last(query, param) {
+            // Django's `forms.UUIDField` takes every spelling
+            // `uuid.UUID()` does (no converter involved here).
+            match raw.parse::<uuid::Uuid>() {
+                Ok(id) => filters.push((column, id)),
+                Err(_) => push_error(&mut errors, param, "Enter a valid UUID.".to_owned()),
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(filters)
+    } else {
+        Err(Denial::BadJson(Value::Object(errors)))
+    }
+}
+
 /// `IssueCommentViewSet.list` (`comment.py:43-69`): DRF's default over
 /// the annotated queryset, bare array, newest first.
 async fn comment_list(
@@ -4750,7 +4832,7 @@ async fn comment_list(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let issue_id = match issue_raw.parse::<uuid::Uuid>() {
+    let issue_id = match path_uuid(&issue_raw) {
         Ok(id) => id,
         Err(_) => return crate::edge::proxy(State(state), req).await,
     };
@@ -4758,23 +4840,10 @@ async fn comment_list(
         Ok(ctx) => ctx,
         Err(error) => return error.into_response(),
     };
-    // `filterset_fields = ["issue__id", "workspace__id"]`: exact UUID
-    // matches; garbage answers the invalid-detail 400.
-    let mut filters: Vec<(String, uuid::Uuid)> = Vec::new();
-    for (param, column) in [
-        ("issue__id", "issue_comments.issue_id"),
-        ("workspace__id", "issue_comments.workspace_id"),
-    ] {
-        if let Some(raw) = super::query_last(&query, param) {
-            match raw.parse::<uuid::Uuid>() {
-                Ok(id) => filters.push((column.to_owned(), id)),
-                Err(_) => {
-                    return Denial::BadError("Please provide valid detail".to_owned())
-                        .into_response();
-                }
-            }
-        }
-    }
+    let filters = match filterset_predicates(&query) {
+        Ok(filters) => filters,
+        Err(error) => return error.into_response(),
+    };
     // The path issue always scopes; the filterset only narrows further.
     let mut binder = super::Binder::new();
     let mut sql = super::queries_engage::comment_list_sql(
@@ -4784,8 +4853,8 @@ async fn comment_list(
         ctx.issue_id,
         ctx.user_id,
     );
-    for (column, id) in &filters {
-        let holder = binder.bind_uuid(*id);
+    for (column, id) in filters {
+        let holder = binder.bind_uuid(id);
         sql = splice_and(&sql, &format!("{column} = {holder}"));
     }
     let rows = match fetch_positional_rows(&ctx.pool, &sql, binder.values()).await {
@@ -4805,23 +4874,26 @@ async fn comment_list(
     }
 }
 
-/// `IssueCommentViewSet.retrieve`: `get_object` over the list queryset;
-/// a miss is DRF's `Http404` detail body.
+/// `IssueCommentViewSet.retrieve`: `get_object` over the list queryset
+/// (filterset included — `get_object` filters first); a miss is DRF's
+/// `Http404` detail body.
 async fn comment_retrieve(
     State(state): State<AppState>,
     Path((slug, project_raw, issue_raw, pk_raw)): Path<(String, String, String, String)>,
+    Query(query): Query<super::QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let (issue_id, pk) = match (
-        issue_raw.parse::<uuid::Uuid>(),
-        pk_raw.parse::<uuid::Uuid>(),
-    ) {
+    let (issue_id, pk) = match (path_uuid(&issue_raw), path_uuid(&pk_raw)) {
         (Ok(issue_id), Ok(pk)) => (issue_id, pk),
         _ => return crate::edge::proxy(State(state), req).await,
     };
     let ctx = match read_context(&state, &slug, &project_raw, issue_id, extension).await {
         Ok(ctx) => ctx,
+        Err(error) => return error.into_response(),
+    };
+    let filters = match filterset_predicates(&query) {
+        Ok(filters) => filters,
         Err(error) => return error.into_response(),
     };
     let mut binder = super::Binder::new();
@@ -4832,6 +4904,10 @@ async fn comment_retrieve(
         ctx.issue_id,
         ctx.user_id,
     );
+    for (column, id) in filters {
+        let holder = binder.bind_uuid(id);
+        sql = splice_and(&sql, &format!("{column} = {holder}"));
+    }
     let holder = binder.bind_uuid(pk);
     sql = splice_and(&sql, &format!("issue_comments.id = {holder}"));
     let rows = match fetch_positional_rows(&ctx.pool, &sql, binder.values()).await {
@@ -4857,7 +4933,7 @@ async fn comment_create(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let issue_id = match issue_raw.parse::<uuid::Uuid>() {
+    let issue_id = match path_uuid(&issue_raw) {
         Ok(id) => id,
         Err(_) => return crate::edge::proxy(State(state), req).await,
     };
@@ -4981,7 +5057,8 @@ async fn comment_create(
         &mut tx,
         &workspace_id,
         &project_id,
-        &user_id,
+        Some(&user_id),
+        None,
         &base.json,
         &base.html,
         stripped_for_desc,
@@ -4992,10 +5069,12 @@ async fn comment_create(
         Ok(id) => id,
         Err(error) => return error.into_response(),
     };
-    let now2 = chrono::Utc::now();
-    if sqlx::query("UPDATE issue_comments SET description_id = $1, updated_at = $2 WHERE id = $3")
+    // `update_fields=["description_id"]` writes that column only: the
+    // `auto_now` stamp is skipped (in memory AND in the row — Django's
+    // well-known `update_fields` gotcha), while `BaseModel.save` still
+    // assigns `updated_by` on the in-memory instance.
+    if sqlx::query("UPDATE issue_comments SET description_id = $1 WHERE id = $2")
         .bind(description_id)
-        .bind(now2)
         .bind(base.id)
         .execute(&mut *tx)
         .await
@@ -5006,11 +5085,10 @@ async fn comment_create(
     if tx.commit().await.is_err() {
         return Denial::ServerError.into_response();
     }
-    // In-memory post-save state: the link update stamps `updated_at`
-    // and (in memory only — `update_fields` does not persist it)
-    // `updated_by`.
+    // In-memory post-save state: `updated_at` keeps the first save's
+    // stamp; only `description_id` and (in memory only) `updated_by`
+    // move.
     base.description_id = Some(description_id);
-    base.updated_at = now2;
     base.updated_by = Some(user_id);
     let rendered = match render_base_comment(&pool, &base, &tenant.timezone, None).await {
         Ok(value) => value,
@@ -5106,9 +5184,9 @@ async fn soft_delete_row(
 
 /// DRF's default `update` (`comment.py:184-195` maps PUT with no view
 /// override): `get_object` (annotated queryset + filterset), full
-/// validation with model defaults for missing defaulted fields, plain
-/// save — no decorator gate (class `IsAuthenticated` only), no
-/// enqueues, no `edited_at` logic.
+/// validation with missing fields untouched (no required fields, no
+/// serializer defaults), plain save — no decorator gate (class
+/// `IsAuthenticated` only), no enqueues, no `edited_at` logic.
 async fn comment_update(
     State(state): State<AppState>,
     Path((slug, project_raw, issue_raw, pk_raw)): Path<(String, String, String, String)>,
@@ -5116,15 +5194,16 @@ async fn comment_update(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let (issue_id, pk) = match (
-        issue_raw.parse::<uuid::Uuid>(),
-        pk_raw.parse::<uuid::Uuid>(),
-    ) {
+    let (issue_id, pk) = match (path_uuid(&issue_raw), path_uuid(&pk_raw)) {
         (Ok(issue_id), Ok(pk)) => (issue_id, pk),
         _ => return crate::edge::proxy(State(state), req).await,
     };
     let ctx = match read_context(&state, &slug, &project_raw, issue_id, extension).await {
         Ok(ctx) => ctx,
+        Err(error) => return error.into_response(),
+    };
+    let filters = match filterset_predicates(&query) {
+        Ok(filters) => filters,
         Err(error) => return error.into_response(),
     };
     let mut binder = super::Binder::new();
@@ -5135,22 +5214,9 @@ async fn comment_update(
         ctx.issue_id,
         ctx.user_id,
     );
-    for (param, column) in [
-        ("issue__id", "issue_comments.issue_id"),
-        ("workspace__id", "issue_comments.workspace_id"),
-    ] {
-        if let Some(raw) = super::query_last(&query, param) {
-            match raw.parse::<uuid::Uuid>() {
-                Ok(id) => {
-                    let holder = binder.bind_uuid(id);
-                    sql = splice_and(&sql, &format!("{column} = {holder}"));
-                }
-                Err(_) => {
-                    return Denial::BadError("Please provide valid detail".to_owned())
-                        .into_response();
-                }
-            }
-        }
+    for (column, id) in filters {
+        let holder = binder.bind_uuid(id);
+        sql = splice_and(&sql, &format!("{column} = {holder}"));
     }
     let holder = binder.bind_uuid(pk);
     sql = splice_and(&sql, &format!("issue_comments.id = {holder}"));
@@ -5189,8 +5255,10 @@ async fn comment_update(
         Ok(false) => {}
         Err(error) => return error.into_response(),
     }
-    // Full update: missing defaulted fields take their model defaults;
-    // missing non-defaulted fields stay untouched.
+    // Full update with no required fields and no serializer defaults:
+    // missing fields stay untouched (DRF `SkipField`), exactly like the
+    // partial path — only the gate, the enqueues, and the `edited_at`
+    // rule differ.
     let now = chrono::Utc::now();
     let mut tx = match ctx.pool.begin().await {
         Ok(tx) => tx,
@@ -5199,13 +5267,19 @@ async fn comment_update(
     let base = match save_comment_update(
         &mut tx,
         &stored,
-        attrs.html.unwrap_or_else(|| "<p></p>".to_owned()),
-        attrs.json.unwrap_or(Value::Object(Map::new())),
-        attrs.attachments.unwrap_or_default(),
-        attrs.labels.unwrap_or_default(),
-        attrs.access.unwrap_or_else(|| "INTERNAL".to_owned()),
-        attrs.speaker_type.unwrap_or_else(|| "human".to_owned()),
-        attrs.speaker_label.unwrap_or_default(),
+        attrs.html.unwrap_or_else(|| stored.html.clone()),
+        attrs.json.unwrap_or_else(|| stored.json.clone()),
+        attrs
+            .attachments
+            .unwrap_or_else(|| stored.attachments.clone()),
+        attrs.labels.unwrap_or_else(|| stored.labels.clone()),
+        attrs.access.unwrap_or_else(|| stored.access.clone()),
+        attrs
+            .speaker_type
+            .unwrap_or_else(|| stored.speaker_type.clone()),
+        attrs
+            .speaker_label
+            .unwrap_or_else(|| stored.speaker_label.clone()),
         attrs.deleted_at.unwrap_or(stored.deleted_at),
         attrs.description,
         attrs.actor,
@@ -5244,10 +5318,7 @@ async fn comment_partial_update(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let (issue_id, pk) = match (
-        issue_raw.parse::<uuid::Uuid>(),
-        pk_raw.parse::<uuid::Uuid>(),
-    ) {
+    let (issue_id, pk) = match (path_uuid(&issue_raw), path_uuid(&pk_raw)) {
         (Ok(issue_id), Ok(pk)) => (issue_id, pk),
         _ => return crate::edge::proxy(State(state), req).await,
     };
@@ -5302,11 +5373,19 @@ async fn comment_partial_update(
         Ok(false) => {}
         Err(error) => return error.into_response(),
     }
-    // `edited_at` stamps only when raw `comment_html` arrived AND
-    // differs (`comment.py:139-142`) — overriding any input value.
-    let edited_at = match &attrs.html {
-        Some(html) if *html != stored.html => Some(Some(chrono::Utc::now())),
-        _ => attrs.edited_at,
+    // `edited_at` stamps when the RAW `comment_html` input arrived AND
+    // differs (`comment.py:124` compares `request.data`, pre-strip:
+    // whitespace-padded no-ops still stamp, and numbers never equal
+    // the stored string) — overriding any input value.
+    let html_touched_and_changed = match body.get("comment_html") {
+        Some(Value::String(raw)) => *raw != stored.html,
+        Some(Value::Number(_)) => true,
+        _ => false,
+    };
+    let edited_at = if html_touched_and_changed {
+        Some(Some(chrono::Utc::now()))
+    } else {
+        attrs.edited_at
     };
     // Partial: missing fields stay untouched (no defaults).
     let now = chrono::Utc::now();
@@ -5406,10 +5485,7 @@ async fn comment_destroy(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let (issue_id, pk) = match (
-        issue_raw.parse::<uuid::Uuid>(),
-        pk_raw.parse::<uuid::Uuid>(),
-    ) {
+    let (issue_id, pk) = match (path_uuid(&issue_raw), path_uuid(&pk_raw)) {
         (Ok(issue_id), Ok(pk)) => (issue_id, pk),
         _ => return crate::edge::proxy(State(state), req).await,
     };
@@ -5581,7 +5657,7 @@ async fn comment_reaction_list(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let comment_id = match comment_raw.parse::<uuid::Uuid>() {
+    let comment_id = match path_uuid(&comment_raw) {
         Ok(id) => id,
         Err(_) => return crate::edge::proxy(State(state), req).await,
     };
@@ -5658,7 +5734,7 @@ async fn comment_reaction_create(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let comment_id = match comment_raw.parse::<uuid::Uuid>() {
+    let comment_id = match path_uuid(&comment_raw) {
         Ok(id) => id,
         Err(_) => return crate::edge::proxy(State(state), req).await,
     };
@@ -5780,7 +5856,7 @@ async fn comment_reaction_destroy(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let comment_id = match comment_raw.parse::<uuid::Uuid>() {
+    let comment_id = match path_uuid(&comment_raw) {
         Ok(id) => id,
         Err(_) => return crate::edge::proxy(State(state), req).await,
     };
@@ -5880,7 +5956,7 @@ async fn issue_reaction_list(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let issue_id = match issue_raw.parse::<uuid::Uuid>() {
+    let issue_id = match path_uuid(&issue_raw) {
         Ok(id) => id,
         Err(_) => return crate::edge::proxy(State(state), req).await,
     };
@@ -5942,7 +6018,7 @@ async fn issue_reaction_create(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let issue_id = match issue_raw.parse::<uuid::Uuid>() {
+    let issue_id = match path_uuid(&issue_raw) {
         Ok(id) => id,
         Err(_) => return crate::edge::proxy(State(state), req).await,
     };
@@ -6085,7 +6161,7 @@ async fn issue_reaction_destroy(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let issue_id = match issue_raw.parse::<uuid::Uuid>() {
+    let issue_id = match path_uuid(&issue_raw) {
         Ok(id) => id,
         Err(_) => return crate::edge::proxy(State(state), req).await,
     };
@@ -6206,7 +6282,7 @@ async fn subscriber_list(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    if issue_raw.parse::<uuid::Uuid>().is_err() {
+    if path_uuid(&issue_raw).is_err() {
         return crate::edge::proxy(State(state), req).await;
     }
     let pool = match pool_of(&state) {
@@ -6333,7 +6409,7 @@ async fn subscriber_create(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let issue_id = match issue_raw.parse::<uuid::Uuid>() {
+    let issue_id = match path_uuid(&issue_raw) {
         Ok(id) => id,
         Err(_) => return crate::edge::proxy(State(state), req).await,
     };
@@ -6366,11 +6442,7 @@ async fn subscriber_create(
     };
     let RequestBody { map: body, is_html } = request_body;
     let mut errors = Map::new();
-    let subscriber =
-        match require_fk(&pool, &mut errors, &body, "subscriber", "users", is_html).await {
-            Ok(subscriber) => subscriber,
-            Err(error) => return error.into_response(),
-        };
+    // Error order is DRF field order (`deleted_at` before `subscriber`).
     let deleted_at = match check_datetime(&mut errors, &body, "deleted_at", true) {
         Presence::Missing => {
             if !errors.contains_key("deleted_at") {
@@ -6411,6 +6483,11 @@ async fn subscriber_create(
     {
         return error.into_response();
     }
+    let subscriber =
+        match require_fk(&pool, &mut errors, &body, "subscriber", "users", is_html).await {
+            Ok(subscriber) => subscriber,
+            Err(error) => return error.into_response(),
+        };
     if !errors.is_empty() {
         return Denial::BadJson(Value::Object(errors)).into_response();
     }
@@ -6492,10 +6569,7 @@ async fn subscriber_destroy(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let (issue_id, subscriber_id) = match (
-        issue_raw.parse::<uuid::Uuid>(),
-        subscriber_raw.parse::<uuid::Uuid>(),
-    ) {
+    let (issue_id, subscriber_id) = match (path_uuid(&issue_raw), path_uuid(&subscriber_raw)) {
         (Ok(issue_id), Ok(subscriber_id)) => (issue_id, subscriber_id),
         _ => return crate::edge::proxy(State(state), req).await,
     };
@@ -6540,7 +6614,7 @@ async fn subscribe(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let issue_id = match issue_raw.parse::<uuid::Uuid>() {
+    let issue_id = match path_uuid(&issue_raw) {
         Ok(id) => id,
         Err(_) => return crate::edge::proxy(State(state), req).await,
     };
@@ -6628,7 +6702,7 @@ async fn unsubscribe(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let issue_id = match issue_raw.parse::<uuid::Uuid>() {
+    let issue_id = match path_uuid(&issue_raw) {
         Ok(id) => id,
         Err(_) => return crate::edge::proxy(State(state), req).await,
     };
@@ -6672,7 +6746,7 @@ async fn subscription_status(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Response {
-    let issue_id = match issue_raw.parse::<uuid::Uuid>() {
+    let issue_id = match path_uuid(&issue_raw) {
         Ok(id) => id,
         Err(_) => return crate::edge::proxy(State(state), req).await,
     };
@@ -7485,6 +7559,65 @@ mod tests {
     }
 
     #[test]
+    fn path_uuid_matches_django_converter() {
+        let canonical = "12345678-1234-1234-1234-1234567890ab";
+        assert!(path_uuid(canonical).is_ok());
+        // Django's `<uuid:>` regex is lowercase-hex hyphenated only;
+        // every other spelling fails URL resolving (→ proxy here).
+        for raw in [
+            "12345678-1234-1234-1234-1234567890AB",
+            "123456781234123412341234567890ab",
+            "{12345678-1234-1234-1234-1234567890ab}",
+            "urn:uuid:12345678-1234-1234-1234-1234567890ab",
+            "not-a-uuid",
+            "",
+            "12345678-1234-1234-1234-1234567890abc",
+            "12345678_1234_1234_1234_1234567890ab",
+        ] {
+            assert!(path_uuid(raw).is_err(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn filterset_errors_match_django_filter() {
+        use std::collections::HashMap;
+        // Valid values narrow; absent values are ignored.
+        let query: super::super::QueryMap = HashMap::new();
+        assert!(filterset_predicates(&query).unwrap().is_empty());
+        let id = "12345678-1234-1234-1234-1234567890ab";
+        let mut query: super::super::QueryMap = HashMap::new();
+        query.insert(
+            "issue__id".to_owned(),
+            super::super::OneOrMany::Many(vec!["junk".to_owned(), id.to_owned()]),
+        );
+        let filters = filterset_predicates(&query).unwrap();
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].0, "issue_comments.issue_id");
+        // Garbage answers the per-field django-filter body, in
+        // `filterset_fields` order — not the invalid-detail 400.
+        let mut query: super::super::QueryMap = HashMap::new();
+        query.insert(
+            "workspace__id".to_owned(),
+            super::super::OneOrMany::One("junk".to_owned()),
+        );
+        query.insert(
+            "issue__id".to_owned(),
+            super::super::OneOrMany::One("junk".to_owned()),
+        );
+        match filterset_predicates(&query) {
+            Err(Denial::BadJson(Value::Object(errors))) => {
+                let keys: Vec<String> = errors.keys().cloned().collect();
+                assert_eq!(keys, vec!["issue__id", "workspace__id"]);
+                assert_eq!(
+                    errors["issue__id"],
+                    serde_json::json!(["Enter a valid UUID."])
+                );
+            }
+            other => panic!("expected field errors, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn splice_and_keeps_django_shape() {
         let sql = "SELECT a FROM t WHERE x = $1 ORDER BY t.created_at DESC";
         assert_eq!(
@@ -7496,7 +7629,7 @@ mod tests {
     #[test]
     fn asset_url_matches_model_property() {
         assert_eq!(
-            asset_url("abc", Some("USER_AVATAR"), None, None, None),
+            asset_url("abc", Some("USER_AVATAR"), None, None, None).unwrap(),
             Some("/api/assets/v2/static/abc/".to_owned())
         );
         assert_eq!(
@@ -7506,14 +7639,17 @@ mod tests {
                 Some("ws"),
                 Some("p"),
                 Some("i")
-            ),
+            )
+            .unwrap(),
             Some("/api/assets/v2/workspaces/ws/projects/p/issues/i/attachments/abc/".to_owned())
         );
-        assert_eq!(asset_url("abc", Some("BOGUS"), None, None, None), None);
         assert_eq!(
-            asset_url("abc", Some("ISSUE_ATTACHMENT"), None, Some("p"), Some("i")),
+            asset_url("abc", Some("BOGUS"), None, None, None).unwrap(),
             None
         );
+        // A null workspace is Django's `None.slug` `AttributeError` →
+        // the generic 500, not a quiet null.
+        assert!(asset_url("abc", Some("ISSUE_ATTACHMENT"), None, Some("p"), Some("i")).is_err());
     }
 
     fn file_part(filename: &str) -> shared_body::FilePart {
