@@ -13,5 +13,21 @@
 //! (PIDASHCONV-571/572/573/574); they consume this module's gates,
 //! tenant context, denial bodies, and cache-key helpers. Sibling layer
 //! issues extend this module; merges keep both sides.
+//!
+//! [`handlers_invites`] ports the invite / join / favorite / deploy-board
+//! handler family (PIDASHCONV-573); [`routes`] merges its routes —
+//! sibling handler issues extend the merge; merges keep both sides.
 
 pub mod gates;
+pub mod handlers_invites;
+
+use axum::Router;
+
+use crate::state::AppState;
+
+/// App project routes: each handler file exposes its own `routes()`
+/// (sibling D-25 handler issues extend this merge; merges keep both
+/// sides), merged here for the F-10 overlay seam.
+pub fn routes() -> Router<AppState> {
+    handlers_invites::routes()
+}
