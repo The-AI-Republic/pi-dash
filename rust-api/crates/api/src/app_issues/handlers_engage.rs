@@ -849,13 +849,13 @@ async fn read_body(req: axum::extract::Request) -> Result<RequestBody, Denial> {
             map: Map::new(),
             is_html: false,
         }),
-        Ok(shared_body::NegotiatedBody::JsonText(text)) => {
+        Ok(shared_body::NegotiatedBody::JsonText { text, .. }) => {
             parse_json_body(&text).map(|map| RequestBody {
                 map,
                 is_html: false,
             })
         }
-        Ok(shared_body::NegotiatedBody::Form { map, files: _ }) => {
+        Ok(shared_body::NegotiatedBody::Form { map, .. }) => {
             // The views validate `request.data` only — uploads live in
             // `request.FILES`, which no engage path reads — so files are
             // dropped here instead of merging as sentinels.
