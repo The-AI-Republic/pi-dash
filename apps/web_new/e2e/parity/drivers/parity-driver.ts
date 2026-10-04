@@ -1601,6 +1601,179 @@ export interface ParityDriver {
   closeAnalytics(): Promise<void>;
   /** Visible text of the open analytics dialog. */
   analyticsDialogText(): Promise<string>;
+
+  // -------------------------------------------------------------------------
+  // Command palette / Power-K, search, help, browse, repo-star
+  // (NEWFRONT-127, rows SHELL-080, 082, 083, 084, 085, 087, 089, 094, 103, 106).
+  // Added additively to the interface (never forking a driver). The palette is
+  // a cmdk surface inside a Headless-UI dialog: scenarios drive it with the
+  // real keyboard chord and read what the user sees (placeholder, group
+  // headings, command titles, the selected row, the server-search heading).
+  // -------------------------------------------------------------------------
+
+  /** The current location's path (what the address bar shows). */
+  currentUrlPath(): Promise<string>;
+  /** Navigate to an arbitrary path already authenticated (workspace pages). */
+  goToPath(path: string): Promise<void>;
+
+  // --- palette open / close / reset (SHELL-080, SHELL-082) ---
+  /** Press the global open chord (Ctrl/Cmd+K); resolves settled at root, throws if it never settles. */
+  pressPaletteOpenChord(): Promise<void>;
+  /** Whether the centered modal palette is open (dialog + command input shown). */
+  isCommandPaletteOpen(): Promise<boolean>;
+  /** The palette search input's placeholder (identifies root vs a sub-page), or null. */
+  commandPalettePlaceholder(): Promise<string | null>;
+  /** Focus the top-bar search input (an always-present text field) and type into it. */
+  focusAndTypeTopBarSearch(text: string): Promise<void>;
+  /** Click the modal backdrop (outside the panel) to close the palette. */
+  closeCommandPaletteViaBackdrop(): Promise<void>;
+
+  // --- palette query + keyboard flow (SHELL-083, SHELL-085) ---
+  /** Type into the open palette's command input. */
+  typeInCommandPalette(text: string): Promise<void>;
+  /** The current value of the palette command input. */
+  commandPaletteQueryValue(): Promise<string>;
+  /** Press a key while the palette input is focused (Escape/Backspace/ArrowDown/Enter/etc.). */
+  pressInCommandPalette(key: string): Promise<void>;
+  /** Visible group headings currently rendered in the palette, in display order. */
+  paletteGroupHeadings(): Promise<string[]>;
+  /** Visible command item titles currently rendered in the palette, in display order. */
+  paletteCommandTitles(): Promise<string[]>;
+  /** Whether a command with this exact title is currently listed. */
+  paletteHasCommand(title: string): Promise<boolean>;
+  /** Activate (click) a palette command by its exact visible title. */
+  activatePaletteCommand(title: string): Promise<void>;
+  /** The text of the currently highlighted (aria-selected) palette item, or null. */
+  paletteSelectedItemText(): Promise<string | null>;
+
+  // --- server search (SHELL-084) ---
+  /** The "Search results for …" heading text shown for a server search, or null. */
+  paletteSearchResultsHeading(): Promise<string | null>;
+  /** Whether the search-results heading is showing its in-flight pulse. */
+  isPaletteSearchHeadingPulsing(): Promise<boolean>;
+  /** Whether the footer workspace-level scope toggle is present. */
+  paletteHasWorkspaceLevelToggle(): Promise<boolean>;
+  /** Whether that scope toggle is enabled (disabled when no project is in context). */
+  isWorkspaceLevelToggleEnabled(): Promise<boolean>;
+  /** Flip the footer workspace-level scope toggle. */
+  toggleWorkspaceLevel(): Promise<void>;
+  /**
+   * Count palette search requests to GET /workspaces/{slug}/search/ while
+   * running `action` (proves debounce coalescing and the no-network blank case).
+   */
+  countSearchRequests(action: () => Promise<void>): Promise<number>;
+  /** The query params of the most recent palette search request, or null. */
+  lastSearchRequestParams(): Promise<Record<string, string> | null>;
+
+  // --- shortcuts reference dialog (SHELL-094) ---
+  /** Whether the keyboard-shortcuts reference dialog is open. */
+  isShortcutsDialogOpen(): Promise<boolean>;
+  /** Press the global chord that opens the shortcuts dialog (Ctrl/Cmd+/). */
+  pressShortcutsDialogChord(): Promise<void>;
+  /** Type into the shortcuts dialog's filter box. */
+  typeShortcutsFilter(text: string): Promise<void>;
+  /** Visible command titles listed in the shortcuts dialog, in display order. */
+  shortcutsDialogCommandTitles(): Promise<string[]>;
+
+  // --- repo-star action (SHELL-103) ---
+  /** The repo-star link's {href,target,rel} attributes, or null when absent. */
+  repoStarLinkAttributes(): Promise<{ href: string; target: string; rel: string } | null>;
+  /** The src of the repo-star icon image (theme-adaptive asset), or null. */
+  repoStarIconSrc(): Promise<string | null>;
+
+  // --- preferences: theme, language, timezone, first day of week
+  //     (SHELL-088, 095, 096, 097). The four "Change …" preference commands
+  //     open cmdk sub-pages whose options are ordinary [cmdk-item] nodes, so the
+  //     existing palette readers/activators (paletteHasCommand, paletteCommandTitles,
+  //     activatePaletteCommand, typeInCommandPalette) drive them additively.
+  //     These two reads observe the applied result the user sees: the active
+  //     theme is the <html> data-theme attribute, the interface language is
+  //     the <html> lang attribute. The persisted server state is read back
+  //     through helpers/api. ---
+  /** The data-theme attribute of the document root (the applied theme), or "". */
+  documentTheme(): Promise<string>;
+  /** The lang attribute of the document root (set when the interface language changes). */
+  documentLang(): Promise<string>;
+
+  // --- palette creation entries (SHELL-086) ---
+  //     The "Create" group commands open their own scoped creation surface:
+  //     work-item/page/view/cycle/module/project open a modal dialog (separate
+  //     from the palette's cmdk dialog), while workspace creation routes to a
+  //     dedicated page. Reuses the existing palette readers/activators plus
+  //     page-visible copy (the creation modal embeds closed cmdk pickers, so
+  //     its title identifies it, not the absence of cmdk).
+
+  // --- palette pickers: empty / no-results / no-recents (SHELL-093) ---
+  //     A picker whose data is empty renders a plain empty line (e.g. "No
+  //     labels found"), and a server search with no hits renders a no-results
+  //     row ("No results found — Clear search"); no history/recents section
+  //     ever appears. The empty line is plain text (not a cmdk item), so this
+  //     scoped read finds any visible text inside the palette surface.
+  /** Whether the open palette surface shows this visible text anywhere. */
+  paletteHasText(text: string): Promise<boolean>;
+
+  // --- browse route (SHELL-106, negative row) ---
+  /** Open the workspace-level browse route for a work-item identifier (e.g. "PROJ-1"). */
+  openBrowseWorkItem(workspaceSlug: string, identifier: string): Promise<void>;
+  /** Whether the browse route rendered the project-scoped work-item detail view. */
+  browseShowsWorkItemDetail(): Promise<boolean>;
+  /** Whether any workspace-wide list/grid of work items exists on the browse route. */
+  browseShowsWorkspaceWideList(): Promise<boolean>;
+
+  // --- top-bar search box (SHELL-081) ---
+  //     The top bar carries an always-visible plain text input that opens an
+  //     inline (non-dialog) cmdk results panel on focus: the same command list
+  //     plus grouped server hits as the modal palette. Escape clears the term
+  //     and closes; an outside click closes; closing resets the term.
+  /** The top-bar search input's placeholder, or null when absent. */
+  topBarSearchPlaceholder(): Promise<string | null>;
+  /** Focus (click) the top-bar search input. */
+  focusTopBarSearch(): Promise<void>;
+  /** Whether the top-bar inline results panel is currently open. */
+  isTopBarResultsOpen(): Promise<boolean>;
+  /** Type into the top-bar search input. */
+  typeInTopBarSearch(text: string): Promise<void>;
+  /** The current value of the top-bar search input. */
+  topBarSearchValue(): Promise<string>;
+  /** Visible command item titles in the top-bar results panel, in display order. */
+  topBarResultsCommandTitles(): Promise<string[]>;
+  /** Press a key while the top-bar search input is focused. */
+  pressInTopBarSearch(key: string): Promise<void>;
+  /** Click outside the top-bar panel to close it. */
+  closeTopBarViaOutsideClick(): Promise<void>;
+
+  // --- shared empty-state kit tiers (SHELL-104) ---
+  //     The kit tiers are distinguished by rendered structure: Simple centers
+  //     an optional illustration with a heading and never renders buttons;
+  //     Detailed leads with text plus optional art and action buttons; Section
+  //     is a compact box with an icon slot, title text and an optional action.
+  //     Art resolves per the active theme. Empty states render full-page or
+  //     embedded in a widget, so the reader scopes to the box carrying the
+  //     given exact title text instead of to a page region.
+  /**
+   * The rendered structure of the empty-state box titled `title`: its
+   * description (or null), illustration src (or null) and visible button
+   * labels in display order — or null when no such box is visible.
+   */
+  titledEmptyState(title: string): Promise<{
+    description: string | null;
+    imageSrc: string | null;
+    buttons: string[];
+  } | null>;
+  /** Click the `label` action button inside the empty-state box titled `title`. */
+  clickEmptyStateAction(title: string, label: string): Promise<void>;
+  /** Type into the issue-search modal's search box (placeholder "Type to search"). */
+  typeInIssueSearchModal(text: string): Promise<void>;
+
+  // --- cover-image primitive (SHELL-105) ---
+  //     Project cards and detail headers render covers through one primitive:
+  //     a missing source shows a shimmer placeholder unless the caller opts
+  //     into default art; static and Unsplash URLs render as-is; anything else
+  //     resolves through the file-URL helper; loaded art is a cover-fit image.
+  /** Srcs of the cover images on the projects list, in card order (null when a card shows the shimmer). */
+  projectCardCoverSrcs(): Promise<(string | null)[]>;
+  /** Whether any project card currently shows the cover shimmer placeholder. */
+  projectCardCoverShimmerVisible(): Promise<boolean>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

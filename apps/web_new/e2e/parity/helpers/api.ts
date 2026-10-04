@@ -6340,3 +6340,167 @@ export async function deleteProjectView(
   });
   if (!res.ok) throw new Error(`[parity] view delete failed with HTTP ${res.status}.`);
 }
+
+
+// --- Command palette / search / preferences / shared kit (NEWFRONT-127, SHELL-080-097 + 103-106).
+// --- Appended; existing helpers above are untouched per the shared driver contract.
+
+/** Create one project page; resolves with its id. */
+export async function serverCreatePage(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(`[parity] page create failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { id?: unknown };
+  if (typeof payload.id !== "string") throw new Error("[parity] page create returned no id.");
+  return payload.id;
+}
+
+/** Whether the cycle currently carries the caller's favorite mark. */
+export async function serverCycleIsFavorite(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] cycle read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { is_favorite?: unknown };
+  return payload.is_favorite === true;
+}
+
+/** Delete one project page (archive-then-delete; throws naming the failure). */
+export async function serverDeletePage(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  // The API refuses to delete a live page (400); archiving first is the
+  // same two-step the UI performs.
+  const archived = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/archive/`,
+    { method: "POST", headers: { cookie: sessionCookie } }
+  );
+  if (!archived.ok) throw new Error(`[parity] page archive failed with HTTP ${archived.status}.`);
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/`, {
+    method: "DELETE",
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] page delete failed with HTTP ${res.status}.`);
+}
+
+/**
+ * Ensure the workspace user with `email` holds the GUEST project role.
+ * Idempotent: re-adding an existing member reactivates the same row, so
+ * scenarios heal the seed's intended state instead of depending on it.
+ */
+export async function serverEnsureProjectGuest(
+  workspaceSlug: string,
+  projectId: string,
+  email: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const membersRes = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/members/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!membersRes.ok) throw new Error(`[parity] workspace member list failed with HTTP ${membersRes.status}.`);
+  const rows = (await membersRes.json()) as Array<{ member?: { id?: unknown; email?: unknown } }>;
+  const userId = rows.find((row) => row.member?.email === email)?.member?.id;
+  if (typeof userId !== "string") throw new Error(`[parity] workspace user ${email} not found.`);
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/members/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ members: [{ member_id: userId, role: PROJECT_ROLE_GUEST }] }),
+  });
+  if (!res.ok) throw new Error(`[parity] project guest ensure failed with HTTP ${res.status}.`);
+}
+
+/**
+ * The browse-route key for the first seeded work item ("IDENT-seq"), which the
+ * workspace browse route (`/{slug}/browse/{key}`) resolves to a detail view.
+ * SHELL-106 proves that key opens the project-scoped detail, not a browser.
+ */
+export async function serverFirstWorkItemKey(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ key: string; name: string }> {
+  const identifier = await serverProjectIdentifier(workspaceSlug, projectId, sessionCookie, apiBase);
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] issues read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const first = rows[0] as { sequence_id?: unknown; name?: unknown } | undefined;
+  if (!first || typeof first.sequence_id !== "number" || typeof first.name !== "string") {
+    throw new Error("[parity] could not resolve the first work item's sequence_id/name.");
+  }
+  return { key: `${identifier}-${first.sequence_id}`, name: first.name };
+}
+
+/** The project's stored cover image reference, or null when unset. */
+export async function serverProjectCover(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string | null> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { cover_image?: unknown };
+  return typeof payload.cover_image === "string" ? payload.cover_image : null;
+}
+
+/** Set (or clear, with null) the project's cover image reference. */
+export async function serverUpdateProjectCover(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  coverImage: string | null,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    method: "PATCH",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ cover_image: coverImage }),
+  });
+  if (!res.ok) throw new Error(`[parity] project cover update failed with HTTP ${res.status}.`);
+}
+
+/** The signed-in user's account record (user_timezone, …). */
+export async function serverUserAccount(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${apiBase}/api/users/me/`, { headers: { cookie: sessionCookie } });
+  if (!res.ok) throw new Error(`[parity] user read failed with HTTP ${res.status}.`);
+  return (await res.json()) as Record<string, unknown>;
+}
+
+/** The signed-in user's profile (theme, language, start_of_the_week, …). */
+export async function serverUserProfile(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${apiBase}/api/users/me/profile/`, { headers: { cookie: sessionCookie } });
+  if (!res.ok) throw new Error(`[parity] profile read failed with HTTP ${res.status}.`);
+  return (await res.json()) as Record<string, unknown>;
+}

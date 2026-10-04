@@ -24,6 +24,10 @@ import type {
   WorkspaceOnboardingView,
 } from "./parity-driver";
 
+// Placeholder of the command-palette input at root (each sub-page swaps in
+// its own); the open chord settles on it to ride out the 200ms close-reset.
+const PALETTE_ROOT_PLACEHOLDER = "Type a command or search";
+
 export class WebDriver implements ParityDriver {
   readonly target: ParityTarget = "web";
   readonly page: Page;
@@ -924,10 +928,90 @@ export class WebDriver implements ParityDriver {
     return locator.first().isVisible();
   }
 
+  // Bounded single-node reads for flickering surfaces (the palette remounts
+  // mid-read under load). Playwright's getAttribute/textContent/inputValue
+  // auto-wait with no action timeout, so a detach between isShown and the read
+  // hangs until the TEST timeout. These cap the read at 5s and report a
+  // detach as null instead of hanging.
+  private async readAttr(locator: Locator, name: string): Promise<string | null> {
+    if (!(await this.isShown(locator))) return null;
+    try {
+      return await locator.first().getAttribute(name, { timeout: 5_000 });
+    } catch {
+      return null;
+    }
+  }
+
+  private async readText(locator: Locator): Promise<string | null> {
+    if (!(await this.isShown(locator))) return null;
+    try {
+      const text = await locator.first().textContent({ timeout: 5_000 });
+      return text?.replace(/\s+/g, " ").trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async readValue(locator: Locator): Promise<string | null> {
+    if (!(await this.isShown(locator))) return null;
+    try {
+      return await locator.first().inputValue({ timeout: 5_000 });
+    } catch {
+      return null;
+    }
+  }
+
   async openAuthenticated(path: string, cookies: ParityBrowserCookie[]): Promise<void> {
     await this.page.context().addCookies(cookies);
     await this.page.goto(path);
     await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  // -------------------------------------------------------------------------
+  // Command palette / Power-K, search, help, browse, repo-star
+  // (NEWFRONT-127, rows SHELL-080, 082, 083, 084, 085, 087, 089, 094, 103, 106).
+  // The old app builds the palette on `cmdk` inside a Headless-UI dialog and
+  // carries NO data-testid, so selectors target cmdk's own DOM attributes
+  // ([cmdk-root]/[cmdk-input]/[cmdk-item]/[cmdk-group-heading]), placeholder
+  // text ("Type a command or search"), aria-selected, and visible labels —
+  // all user-visible. Derived from a source read of core/components/power-k;
+  // the oracle driver is extended here, never forked.
+  // -------------------------------------------------------------------------
+
+  /**
+   * The centered MODAL palette, scoped to its Headless-UI dialog so its cmdk
+   * nodes never collide with the top-bar search box (SHELL-081), which embeds
+   * its own cmdk surface inline (not in a dialog).
+   */
+  private paletteModal(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.locator("[cmdk-root]") })
+      .first();
+  }
+
+  /** The cmdk command input of the open modal palette (root or a sub-page). */
+  private paletteInput(): Locator {
+    return this.paletteModal().locator("[cmdk-input]").first();
+  }
+
+  private paletteRoot(): Locator {
+    return this.paletteModal().locator("[cmdk-root]").first();
+  }
+
+  private paletteItems(): Locator {
+    return this.paletteModal().locator("[cmdk-item]");
+  }
+
+  async currentUrlPath(): Promise<string> {
+    return new URL(this.page.url()).pathname;
+  }
+
+  async goToPath(path: string): Promise<void> {
+    // Settle on parsed DOM, not full load: late sub-resources (fonts, art)
+    // can stall the load event for minutes on a dev server while the app
+    // itself is already interactive. Callers wait for their own content.
+    await this.page.goto(path, { waitUntil: "domcontentloaded", timeout: 120_000 });
   }
 
   // NOTE (rebase over NEWFRONT-107): a single currentPath keeps the
@@ -8401,5 +8485,459 @@ export class WebDriver implements ParityDriver {
 
   async analyticsDialogText(): Promise<string> {
     return (await this.page.getByRole("dialog").innerText()).trim();
+  }
+
+  // --- palette open / close / reset (SHELL-080, SHELL-082) ---
+
+  /** Close the modal palette if open (stuck sub-pages included) and ground focus. */
+  private async resetPaletteToClosed(): Promise<void> {
+    // Activating a picker entry does not reliably close the palette, and an
+    // open-but-stale sub-page has no pending reset (the timer only arms on
+    // close), so waiting on it would hang forever. Two Escapes cover a
+    // leftover query (first clears, second closes).
+    for (let i = 0; i < 2 && (await this.isCommandPaletteOpen()); i++) {
+      await this.pressInCommandPalette("Escape");
+    }
+    await this.page
+      .waitForFunction(() => document.querySelectorAll('[role="dialog"] [cmdk-root]').length === 0, {
+        timeout: 10_000,
+      })
+      .catch(() => undefined);
+    // After the palette unmounts, focus can strand on the detached input,
+    // where keypresses dispatch into the void instead of reaching the
+    // document shortcut listener. Blur grounds attached focus; Tab then
+    // grounds even detached limbo (focus navigation is chrome-level, so it
+    // works when document delivery is broken). Focus-only, no activation.
+    // Two document-level Escapes sandwich the grounding: one first, because
+    // a stray open menu (e.g. a work-item row dropdown) swallows the chord;
+    // one after, because Tab itself can land on a row trigger and pop its
+    // menu open again (suite15 proved five such menus stacked across
+    // attempts, each swallowing the next chord). Escapes close menus only.
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    await this.page
+      .evaluate(() => {
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      })
+      .catch(() => undefined);
+    await this.page.keyboard.press("Tab").catch(() => undefined);
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+  }
+
+  /** Whether the modal palette sits at root with a stable, non-empty command list. */
+  private async paletteSettledAtRoot(): Promise<boolean> {
+    // Commands stream in (static entries first, data-backed ones as their
+    // stores resolve), so a bare non-empty read races stragglers: require
+    // the count to hold still across half a second.
+    if ((await this.commandPalettePlaceholder()) !== PALETTE_ROOT_PLACEHOLDER) return false;
+    const first = await this.paletteItems().count();
+    if (first === 0) return false;
+    await this.page.waitForTimeout(500);
+    if ((await this.commandPalettePlaceholder()) !== PALETTE_ROOT_PLACEHOLDER) return false;
+    const second = await this.paletteItems().count();
+    return second === first && second > 0;
+  }
+
+  async pressPaletteOpenChord(): Promise<void> {
+    // The old app's handler catches Ctrl/Cmd+K on document before its typing
+    // guard, so this opens the palette from anywhere, including inside inputs.
+    // The first attempt is a bare press, preserving caller focus semantics
+    // (080 proves the chord fires while an input holds focus); only retries
+    // normalize first, for stuck or focus-stranded states.
+    // Under shared-host load a lone chord can land before the shortcut
+    // listener attaches (hydration or a chunk compile still in flight), so
+    // retry until the palette reads open, populated AND back at root: the
+    // input renders before the command list, callers assert commands
+    // immediately, and a reopen within 200ms of a close briefly shows the
+    // previous sub-page (the reset timer is uncleared, so it always
+    // self-heals to root — this wait simply rides it out).
+    // The read mirrors paletteModal scope (dialog-hosted cmdk only) so an
+    // expanded top-bar search never masquerades as the open modal. Twelve
+    // attempts (~120s worst case, ~1s happy path) ride out even a fully
+    // stalled post-navigation remount.
+    for (let attempt = 0; attempt < 12; attempt++) {
+      if (attempt > 0) await this.resetPaletteToClosed();
+      if (!(await this.isCommandPaletteOpen())) {
+        await this.page.keyboard.press("ControlOrMeta+k");
+      }
+      const deadline = Date.now() + 10_000;
+      let settled = false;
+      while (Date.now() < deadline) {
+        if (await this.paletteSettledAtRoot()) {
+          settled = true;
+          break;
+        }
+        await this.page.waitForTimeout(250);
+      }
+      if (settled) return;
+    }
+    // Never silently return unsettled: every caller proceeds to interact
+    // with the palette, so an unsettled return only converts into a downstream
+    // hang (suite15: a 300s click wait). Fail fast with the real cause.
+    throw new Error("[parity] palette did not settle at root after 12 open attempts");
+  }
+
+  async isCommandPaletteOpen(): Promise<boolean> {
+    return this.isShown(this.paletteInput());
+  }
+
+  async commandPalettePlaceholder(): Promise<string | null> {
+    return this.readAttr(this.paletteInput(), "placeholder");
+  }
+
+  async focusAndTypeTopBarSearch(text: string): Promise<void> {
+    // The ce top navigation always mounts an expandable search input
+    // (placeholder "Search commands..."). Focus it and type to prove the
+    // open chord still fires while a text field holds focus.
+    const search = this.page.getByPlaceholder("Search commands...").first();
+    await search.click();
+    await search.pressSequentially(text);
+  }
+
+  async closeCommandPaletteViaBackdrop(): Promise<void> {
+    // Headless-UI renders the backdrop as a fixed full-screen layer behind the
+    // panel; a top-left click lands on it, not on the centered max-w-2xl panel.
+    await this.page.mouse.click(5, 5);
+  }
+
+  // --- palette query + keyboard flow (SHELL-083, SHELL-085) ---
+
+  async typeInCommandPalette(text: string): Promise<void> {
+    await this.paletteInput().pressSequentially(text);
+  }
+
+  async commandPaletteQueryValue(): Promise<string> {
+    return (await this.readValue(this.paletteInput())) ?? "";
+  }
+
+  async pressInCommandPalette(key: string): Promise<void> {
+    await this.paletteInput().press(key);
+  }
+
+  async paletteGroupHeadings(): Promise<string[]> {
+    const texts = await this.paletteModal().locator("[cmdk-group-heading]").allTextContents();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async paletteCommandTitles(): Promise<string[]> {
+    // Each cmdk item renders an icon, its title, and optional shortcut badges;
+    // the trimmed text content is dominated by the title. Callers match by
+    // substring (paletteHasCommand) rather than exact equality.
+    const texts = await this.paletteItems().allTextContents();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
+  }
+
+  async paletteHasCommand(title: string): Promise<boolean> {
+    return this.isShown(this.paletteItems().filter({ hasText: title }));
+  }
+
+  async activatePaletteCommand(title: string): Promise<void> {
+    // Bounded click with one re-settle retry: the palette can detach between
+    // the caller's settle and this click, and an unbounded click then hangs
+    // until the test timeout (suite15). Re-opening is a safe no-op when the
+    // palette is already settled (no re-press, settle check only).
+    try {
+      await this.paletteItems().filter({ hasText: title }).first().click({ timeout: 15_000 });
+    } catch {
+      await this.pressPaletteOpenChord();
+      await this.paletteItems().filter({ hasText: title }).first().click({ timeout: 15_000 });
+    }
+  }
+
+  async paletteSelectedItemText(): Promise<string | null> {
+    return this.readText(this.paletteModal().locator('[cmdk-item][aria-selected="true"]').first());
+  }
+
+  // --- server search (SHELL-084) ---
+
+  private searchResultsHeading(): Locator {
+    return this.paletteModal()
+      .getByText(/Search results for/i)
+      .first();
+  }
+
+  async paletteSearchResultsHeading(): Promise<string | null> {
+    return this.readText(this.searchResultsHeading());
+  }
+
+  async isPaletteSearchHeadingPulsing(): Promise<boolean> {
+    const cls = (await this.readAttr(this.searchResultsHeading(), "class")) ?? "";
+    return cls.includes("animate-pulse");
+  }
+
+  private workspaceLevelToggle(): Locator {
+    // Footer scope control labelled "Workspace level"; the ToggleSwitch is the
+    // adjacent switch/button.
+    return this.paletteRoot()
+      .locator("*")
+      .filter({ hasText: /Workspace level/i })
+      .getByRole("switch")
+      .first();
+  }
+
+  async paletteHasWorkspaceLevelToggle(): Promise<boolean> {
+    return this.isShown(
+      this.paletteModal()
+        .getByText(/Workspace level/i)
+        .first()
+    );
+  }
+
+  async isWorkspaceLevelToggleEnabled(): Promise<boolean> {
+    const toggle = this.workspaceLevelToggle();
+    if ((await toggle.count()) === 0) return false;
+    return toggle.isEnabled();
+  }
+
+  async toggleWorkspaceLevel(): Promise<void> {
+    await this.workspaceLevelToggle().click();
+  }
+
+  private searchRequests: URL[] = [];
+  private searchTrackingOn = false;
+
+  private ensureSearchTracking(): void {
+    if (this.searchTrackingOn) return;
+    this.searchTrackingOn = true;
+    this.page.on("request", (req) => {
+      const url = req.url();
+      if (/\/api\/workspaces\/[^/]+\/search\/?(\?|$)/.test(url)) {
+        this.searchRequests.push(new URL(url));
+      }
+    });
+  }
+
+  async countSearchRequests(action: () => Promise<void>): Promise<number> {
+    this.ensureSearchTracking();
+    const before = this.searchRequests.length;
+    await action();
+    return this.searchRequests.length - before;
+  }
+
+  async lastSearchRequestParams(): Promise<Record<string, string> | null> {
+    const last = this.searchRequests.at(-1);
+    if (!last) return null;
+    return Object.fromEntries(last.searchParams.entries());
+  }
+
+  // --- shortcuts reference dialog (SHELL-094) ---
+
+  async isShortcutsDialogOpen(): Promise<boolean> {
+    return this.isShown(this.page.getByText("Keyboard shortcuts", { exact: false }));
+  }
+
+  async pressShortcutsDialogChord(): Promise<void> {
+    await this.page.keyboard.press("ControlOrMeta+/");
+  }
+
+  async typeShortcutsFilter(text: string): Promise<void> {
+    await this.page.getByPlaceholder("Search for shortcuts").fill(text);
+  }
+
+  async shortcutsDialogCommandTitles(): Promise<string[]> {
+    const dialog = this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByPlaceholder("Search for shortcuts") })
+      .first();
+    const root = (await dialog.count()) > 0 ? dialog : this.page.getByRole("dialog").first();
+    const texts = await root.locator("h5 ~ * , li, [class*='flex']").allTextContents();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
+  }
+
+  // --- repo-star action (SHELL-103) ---
+
+  async repoStarLinkAttributes(): Promise<{ href: string; target: string; rel: string } | null> {
+    const link = this.page.getByRole("link", { name: /Star us on GitHub/i }).first();
+    if ((await link.count()) === 0) return null;
+    return {
+      href: (await link.getAttribute("href")) ?? "",
+      target: (await link.getAttribute("target")) ?? "",
+      rel: (await link.getAttribute("rel")) ?? "",
+    };
+  }
+
+  async repoStarIconSrc(): Promise<string | null> {
+    const img = this.page
+      .getByRole("link", { name: /Star us on GitHub/i })
+      .first()
+      .locator("img")
+      .first();
+    if ((await img.count()) === 0) return null;
+    return img.getAttribute("src");
+  }
+
+  // --- preferences: theme, language, timezone, first day of week
+  //     (SHELL-088, 095, 096, 097). The palette preference commands open cmdk
+  //     sub-pages whose options are ordinary [cmdk-item] nodes, so the existing
+  //     palette readers/activators drive them; these two reads observe the
+  //     applied result — the theme as a class on the document root, the
+  //     interface language as the root lang attribute. ---
+
+  async documentTheme(): Promise<string> {
+    return (await this.page.locator("html").getAttribute("data-theme")) ?? "";
+  }
+
+  async documentLang(): Promise<string> {
+    return (await this.page.locator("html").getAttribute("lang")) ?? "";
+  }
+
+  // --- palette creation entries (SHELL-086) ---
+
+  // --- palette pickers: empty / no-results / no-recents (SHELL-093) ---
+
+  async paletteHasText(text: string): Promise<boolean> {
+    return this.isShown(this.paletteModal().getByText(text, { exact: false }));
+  }
+
+  // --- browse route (SHELL-106, negative row) ---
+
+  async openBrowseWorkItem(workspaceSlug: string, identifier: string): Promise<void> {
+    await this.goToPath(`/${workspaceSlug}/browse/${identifier}`);
+  }
+
+  async browseShowsWorkItemDetail(): Promise<boolean> {
+    // The missing-key branch renders an explicit empty state; its absence
+    // (paired with the caller's route-URL and work-item-title assertions)
+    // proves the project-scoped detail rendered instead.
+    return !(await this.isShown(this.page.getByText("Work item does not exist")));
+  }
+
+  async browseShowsWorkspaceWideList(): Promise<boolean> {
+    // A cross-project browser would render many project/work-item cards or a
+    // list grid; the negative row asserts none exists.
+    const grid = this.page.locator('[class*="grid-cols-"]').filter({
+      has: this.page.locator('a[href*="/projects/"]'),
+    });
+    return this.isShown(grid);
+  }
+
+  // --- top-bar search box (SHELL-081) ---
+  //     The top navigation always mounts the plain-text search input; focusing
+  //     it opens an inline cmdk panel (no dialog). The panel only ever
+  //     coexists with a closed modal palette in these scenarios, so page-level
+  //     cmdk readers observe it while the modal readers stay dialog-scoped.
+
+  private topBarSearchInput(): Locator {
+    return this.page.getByPlaceholder("Search commands...").first();
+  }
+
+  async topBarSearchPlaceholder(): Promise<string | null> {
+    return this.readAttr(this.topBarSearchInput(), "placeholder");
+  }
+
+  async focusTopBarSearch(): Promise<void> {
+    await this.topBarSearchInput().click();
+  }
+
+  async isTopBarResultsOpen(): Promise<boolean> {
+    if (await this.isCommandPaletteOpen()) return false;
+    return this.isShown(this.page.locator("[cmdk-list]"));
+  }
+
+  async typeInTopBarSearch(text: string): Promise<void> {
+    await this.topBarSearchInput().pressSequentially(text);
+  }
+
+  async topBarSearchValue(): Promise<string> {
+    return (await this.readValue(this.topBarSearchInput())) ?? "";
+  }
+
+  async topBarResultsCommandTitles(): Promise<string[]> {
+    const texts = await this.page.locator("[cmdk-item]").allTextContents();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
+  }
+
+  async pressInTopBarSearch(key: string): Promise<void> {
+    await this.topBarSearchInput().press(key);
+  }
+
+  async closeTopBarViaOutsideClick(): Promise<void> {
+    // The inline panel closes on outside mousedown; a top-left click lands
+    // far from the centered top-bar field.
+    await this.page.mouse.click(5, 5);
+  }
+
+  // --- shared empty-state kit tiers (SHELL-104) ---
+
+  private emptyStateBox(title: string): Locator {
+    // The box is the nearest ancestor div of the exact title text that also
+    // carries the tier's media or actions (an img, a button, or both); page
+    // chrome outside the box never leaks into the read.
+    return this.page.getByText(title, { exact: true }).first().locator("xpath=ancestor::div[.//img or .//button][1]");
+  }
+
+  async titledEmptyState(title: string): Promise<{
+    description: string | null;
+    imageSrc: string | null;
+    buttons: string[];
+  } | null> {
+    const titleEl = this.page.getByText(title, { exact: true }).first();
+    if (!(await this.isShown(titleEl))) return null;
+    const box = this.emptyStateBox(title);
+    if ((await box.count()) === 0) return null;
+    const img = box.locator("img").first();
+    const buttonTexts = await box.getByRole("button").allTextContents();
+    // The description is a paragraph (Simple, Detailed) or, for Section, the
+    // leaf span that is neither the title nor button chrome.
+    let description: string | null = null;
+    const para = box.locator("p").first();
+    if (await this.isShown(para)) {
+      description = ((await para.textContent()) ?? "").replace(/\s+/g, " ").trim() || null;
+    } else {
+      const spans = box.locator("span");
+      for (let i = 0, n = await spans.count(); i < n; i += 1) {
+        const candidate = spans.nth(i);
+        if ((await candidate.locator("xpath=ancestor::button[1]").count()) > 0) continue;
+        const text = ((await candidate.textContent()) ?? "").replace(/\s+/g, " ").trim();
+        if (text.length > 0 && text !== title) {
+          description = text;
+          break;
+        }
+      }
+    }
+    return {
+      description,
+      imageSrc: (await this.isShown(img)) ? await img.getAttribute("src") : null,
+      buttons: buttonTexts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0),
+    };
+  }
+
+  async clickEmptyStateAction(title: string, label: string): Promise<void> {
+    const button = this.emptyStateBox(title).getByRole("button", { name: label }).first();
+    await button.waitFor({ timeout: 60_000 });
+    await button.click();
+  }
+
+  async typeInIssueSearchModal(text: string): Promise<void> {
+    // The modal's search input is the only "Type to search" box on the page
+    // (the top-bar search reads "Search commands...").
+    const input = this.page.getByPlaceholder("Type to search").first();
+    await input.waitFor({ timeout: 60_000 });
+    await input.pressSequentially(text);
+  }
+
+  // --- cover-image primitive (SHELL-105) ---
+
+  private projectCards(): Locator {
+    // Project cards link to the project's issues list and always render the
+    // cover slot (shimmer while empty, an image once art resolves), which
+    // tells them apart from plain navigation links to the same area.
+    return this.page
+      .locator('a[href*="/projects/"][href*="/issues"]')
+      .filter({ has: this.page.locator("img, .animate-pulse") });
+  }
+
+  async projectCardCoverSrcs(): Promise<(string | null)[]> {
+    const cards = this.projectCards();
+    const count = await cards.count();
+    const srcs: (string | null)[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const img = cards.nth(i).locator("img").first();
+      srcs.push((await this.isShown(img)) ? await img.getAttribute("src") : null);
+    }
+    return srcs;
+  }
+
+  async projectCardCoverShimmerVisible(): Promise<boolean> {
+    return this.isShown(this.projectCards().locator(".animate-pulse").first());
   }
 }
