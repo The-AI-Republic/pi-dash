@@ -925,7 +925,7 @@ fn parse_fromiso_time(
         }
     } else if digit_frac {
         let run = run_len(rest);
-        if run >= 2 && (drop_allowed || run % 2 == 0) {
+        if run >= 2 && (drop_allowed || run.is_multiple_of(2)) {
             saw_fraction_sep = true;
             (micro, rest) = take_fraction(rest, run)?;
         }
