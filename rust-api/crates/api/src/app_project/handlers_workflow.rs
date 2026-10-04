@@ -42,7 +42,8 @@
 //!   old default and answers 204.
 //! * State create with a valid `order` key raises `TypeError` (the
 //!   declared field is passed to `State.objects.create`) → 500; on
-//!   `partial_update` the same key is validated but silently dropped.
+//!   `partial_update` the same key is `setattr`'d (unwritten) and echoed
+//!   as the response's last field.
 //! * Point `partial_update` with `{}` fails `validate()` (`if not data`,
 //!   `estimate.py:22`) → 400 `{"non_field_errors": ["Estimate points
 //!   are required"]}`.
@@ -413,6 +414,33 @@ async fn resolve_project_id(
 /// detail"}`.
 fn parse_uuid_or_invalid(raw: &str) -> Result<uuid::Uuid, Denial> {
     raw.parse::<uuid::Uuid>().map_err(|_| Denial::BadValidation)
+}
+
+/// `UUIDField.to_python` for a raw JSON id (`fields/__init__.py`):
+/// in-range ints/bools → `UUID(int=…)`; floats, composites,
+/// out-of-range ints, and garbage strings raise `ValidationError`.
+/// (Callers filter `None`/`null` first — it passes `to_python` through.
+/// Integer spellings past `u64::MAX` parse as `f64`, so they 400 here;
+/// Django would `UUID(int=…)` the few below 2^128 — no test sends
+/// 20-digit ids.)
+fn raw_uuid_prep(raw: &Value) -> Result<uuid::Uuid, ()> {
+    match raw {
+        Value::Null => Err(()),
+        Value::Bool(flag) => Ok(uuid::Uuid::from_u128(u128::from(*flag))),
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                u128::try_from(int)
+                    .map(uuid::Uuid::from_u128)
+                    .map_err(|_| ())
+            } else if let Some(uint) = number.as_u64() {
+                Ok(uuid::Uuid::from_u128(u128::from(uint)))
+            } else {
+                Err(())
+            }
+        }
+        Value::String(text) => text.parse::<uuid::Uuid>().map_err(|_| ()),
+        Value::Array(_) | Value::Object(_) => Err(()),
+    }
 }
 
 /// Membership roles for the gates: active, non-deleted rows scoped to the
@@ -793,16 +821,16 @@ fn validate_char(
     }
 }
 
-/// DRF `BooleanField`: the case-insensitive true/false sets (note `1`/`0`
-/// but only `0.0`, not `1.0`); null → the null error; unhashables →
-/// invalid (`fields.py`).
+/// DRF `BooleanField`: set membership, so `1.0` is `true` (`1.0 == 1`,
+/// same hash) exactly like `1`, and `0.0` is `false` like `0`; null →
+/// the null error; unhashables → invalid (`fields.py`).
 fn validate_bool(value: &Value) -> Result<bool, String> {
     const INVALID: &str = "Must be a valid boolean.";
     match value {
         Value::Null => Err("This field may not be null.".to_owned()),
         Value::Bool(flag) => Ok(*flag),
         Value::Number(number) => {
-            if number.as_i64() == Some(1) {
+            if number.as_i64() == Some(1) || number.as_f64() == Some(1.0) {
                 Ok(true)
             } else if number.as_i64() == Some(0) || number.as_f64() == Some(0.0) {
                 Ok(false)
@@ -1190,9 +1218,10 @@ struct StateInput {
     default: Option<bool>,
     description: Option<String>,
     sequence: Option<f64>,
-    /// Present (valid or not) on create → the `TypeError` 500; validated
-    /// but dropped on patch.
-    order_present: bool,
+    /// Validated `order`: present on create → the `TypeError` 500; on
+    /// patch `update()` `setattr`s it onto the in-memory instance so
+    /// `.data` echoes it (last field) though `save()` never persists it.
+    order: Option<f64>,
 }
 
 /// Validate one state payload through the `StateSerializer` field rules
@@ -1263,15 +1292,12 @@ fn validate_state_input(
             Err(message) => push_field_error(&mut errors, "sequence", message),
         },
     }
-    // `order`: declared float, validated but (on patch) unwritten.
+    // `order`: declared float; the validated value is retained for the
+    // patch-response echo (create 500s on any present value instead).
     if let Some(value) = data.get("order") {
-        input.order_present = true;
-        if validate_float(value).is_err() {
-            push_field_error(
-                &mut errors,
-                "order",
-                validate_float(value).expect_err("checked invalid"),
-            );
+        match validate_float(value) {
+            Ok(order) => input.order = Some(order),
+            Err(message) => push_field_error(&mut errors, "order", message),
         }
     }
     (input, errors)
@@ -1319,7 +1345,7 @@ async fn state_create(
     if let Some(errors) = ser::state_validate(input.group.as_deref()) {
         return Ok(json_response(StatusCode::BAD_REQUEST, errors.to_string()));
     }
-    if input.order_present {
+    if input.order.is_some() {
         // The declared `order` reaches `State.objects.create(**validated)`
         // → `TypeError` → the generic 500.
         return Err(Denial::ServerError);
@@ -1456,8 +1482,8 @@ async fn state_partial_update(
     if let Some(errors) = ser::state_validate(input.group.as_deref()) {
         return Ok(json_response(StatusCode::BAD_REQUEST, errors.to_string()));
     }
-    // A valid `order` is `setattr`'d and dropped by `save()` — validated
-    // but unwritten (see module docs).
+    // A valid `order` is `setattr`'d onto the in-memory instance and
+    // dropped by `save()` (unwritten) — but `.data` still renders it.
     let name = input.name.unwrap_or(current.name);
     let color = input.color.unwrap_or(current.color);
     let group = input.group.unwrap_or(current.group);
@@ -1503,7 +1529,23 @@ async fn state_partial_update(
     .await
     .map_err(|_| Denial::ServerError)?;
     let row = row.ok_or(Denial::ServerError)?;
-    Ok(json_ok(render_state(&state_row_from(row)).to_string()))
+    Ok(json_ok(
+        render_patched_state(&state_row_from(row), input.order).to_string(),
+    ))
+}
+
+/// The patch response: the read shape plus the `setattr`'d `order` echo
+/// as its last field when the payload carried a valid one (`.data`
+/// renders the in-memory instance — `serializers.py`
+/// `ModelSerializer.update` — and `order` is last in `Meta.fields`).
+fn render_patched_state(row: &StateRow, order: Option<f64>) -> Value {
+    let mut rendered = render_state(row);
+    if let Some(order) = order {
+        if let Some(map) = rendered.as_object_mut() {
+            map.insert("order".to_owned(), serde_json::json!(order));
+        }
+    }
+    rendered
 }
 
 /// `StateViewSet.mark_as_default` (`state/base.py:111-119`): clear every
@@ -2089,6 +2131,28 @@ fn validate_bulk_point(item: &Map<String, Value>) -> Result<BulkPointInput, Valu
     })
 }
 
+/// Bulk-create `estimate_points` gate (`estimate/base.py:76-80`): a
+/// missing key and an explicit `null` both reach the `many=True`
+/// serializer as `None` → `validate_empty_values` fails `null`, whose
+/// single-error list `.errors` rewrites to `{"non_field_errors": ["No
+/// data provided"]}` (`serializers.py`).
+enum CreatePoints<'a> {
+    Missing,
+    Items(Vec<&'a Value>),
+    NotAList(String),
+}
+
+fn bulk_create_points_shape(points: Option<&Value>) -> CreatePoints<'_> {
+    match points {
+        None | Some(Value::Null) => CreatePoints::Missing,
+        Some(Value::Array(items)) => CreatePoints::Items(items.iter().collect()),
+        Some(other) => CreatePoints::NotAList(format!(
+            "Expected a list of items but got type \"{}\".",
+            python_type_name(other)
+        )),
+    }
+}
+
 /// `BulkEstimatePointEndpoint.create` (`estimate/base.py:63-101`):
 /// persist the `Estimate` row *first* (unvalidated header fields, random
 /// name default), *then* validate the points — a 400 still creates a
@@ -2180,16 +2244,18 @@ async fn bulk_create(
     .execute(&pool)
     .await
     .map_err(db_denial)?;
-    // Points validation (`many=True`): a missing key means `[]`; an
-    // explicit non-list (including `null`) is the `not_a_list` 400.
-    let items: Vec<&Value> = match data.get("estimate_points") {
-        None => Vec::new(),
-        Some(Value::Array(items)) => items.iter().collect(),
-        Some(other) => {
-            let message = format!(
-                "Expected a list of items but got type \"{}\".",
-                python_type_name(other)
-            );
+    // Points validation (`many=True`): `:78` passes
+    // `request.data.get("estimate_points")` (no default) — the estimate
+    // row above already persists whatever the gate below answers.
+    let items: Vec<&Value> = match bulk_create_points_shape(data.get("estimate_points")) {
+        CreatePoints::Missing => {
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                ser::non_field_errors("No data provided").to_string(),
+            ));
+        }
+        CreatePoints::Items(items) => items,
+        CreatePoints::NotAList(message) => {
             return Ok(json_response(
                 StatusCode::BAD_REQUEST,
                 ser::non_field_errors(&message).to_string(),
@@ -2356,6 +2422,32 @@ async fn bulk_retrieve(
     ))
 }
 
+/// Bulk-PATCH `estimate_points` `len()` gate (`estimate/base.py:110`):
+/// only missing/`[]`/`{}`/`""` take the required 400; `len()` on a
+/// scalar/`null` raises `TypeError` → pre-lookup 500. Non-empty
+/// containers pass the gate — iterating them yields non-dicts whose
+/// `.get("id")` raises `AttributeError` only after the header write
+/// (`:118-130`).
+enum PatchPoints<'a> {
+    Missing,
+    Items(&'a Vec<Value>),
+    IteratesNonDicts,
+    Unsized,
+}
+
+fn bulk_patch_points_gate(points: Option<&Value>) -> PatchPoints<'_> {
+    match points {
+        None => PatchPoints::Missing,
+        Some(Value::Array(items)) if items.is_empty() => PatchPoints::Missing,
+        Some(Value::Array(items)) => PatchPoints::Items(items),
+        Some(Value::Object(map)) if map.is_empty() => PatchPoints::Missing,
+        Some(Value::Object(_)) => PatchPoints::IteratesNonDicts,
+        Some(Value::String(text)) if text.is_empty() => PatchPoints::Missing,
+        Some(Value::String(_)) => PatchPoints::IteratesNonDicts,
+        Some(_) => PatchPoints::Unsized,
+    }
+}
+
 /// `BulkEstimatePointEndpoint.partial_update`
 /// (`estimate/base.py:108-144`): empty/missing points → the required
 /// 400; the estimate lookup is *unscoped* (live-only); a truthy
@@ -2377,46 +2469,19 @@ async fn bulk_partial_update(
     // after the permission check (`InvalidationOrder::AfterPermissionCheck`)
     // — cited, not executed.
     let data = body.0.as_object().ok_or(Denial::ServerError)?;
-    // `if not len(request.data.get("estimate_points", []))` — and `len()`
-    // on a scalar raises `TypeError` → 500, while iterating a non-list
-    // raises `AttributeError` → 500. Only missing/`[]`/`{}`/`""` take
-    // the 400; anything else non-list is a 500.
-    let items: Vec<&Map<String, Value>> = match data.get("estimate_points") {
-        // Missing → `[]` → falsy → the required 400.
-        None => {
+    // `if not len(request.data.get("estimate_points", []))` (`:110`).
+    // Item-shape failures wait for the points-filter comprehension
+    // (`:125-130`) — after the header write below.
+    let raw_items: Option<&Vec<Value>> = match bulk_patch_points_gate(data.get("estimate_points")) {
+        PatchPoints::Missing => {
             return Ok(json_response(
                 StatusCode::BAD_REQUEST,
                 POINTS_REQUIRED_BODY.to_owned(),
             ));
         }
-        Some(Value::Array(items)) if items.is_empty() => {
-            return Ok(json_response(
-                StatusCode::BAD_REQUEST,
-                POINTS_REQUIRED_BODY.to_owned(),
-            ));
-        }
-        Some(Value::Array(items)) => {
-            let mut maps = Vec::with_capacity(items.len());
-            for item in items {
-                maps.push(item.as_object().ok_or(Denial::ServerError)?);
-            }
-            maps
-        }
-        Some(Value::Object(map)) if map.is_empty() => {
-            return Ok(json_response(
-                StatusCode::BAD_REQUEST,
-                POINTS_REQUIRED_BODY.to_owned(),
-            ));
-        }
-        Some(Value::String(text)) if text.is_empty() => {
-            return Ok(json_response(
-                StatusCode::BAD_REQUEST,
-                POINTS_REQUIRED_BODY.to_owned(),
-            ));
-        }
-        // Explicit `null`/scalars → `len()` `TypeError` → 500;
-        // non-empty dicts/strings iterate non-dicts → 500.
-        Some(_) => return Err(Denial::ServerError),
+        PatchPoints::Unsized => return Err(Denial::ServerError),
+        PatchPoints::Items(items) => Some(items),
+        PatchPoints::IteratesNonDicts => None,
     };
     let estimate_id = parse_uuid_or_invalid(&estimate_raw)?;
     // Unscoped lookup (pinned bug): live-only, any project.
@@ -2466,8 +2531,24 @@ async fn bulk_partial_update(
         .await
         .map_err(db_denial)?;
     }
-    // `pk__in=[…]`: a missing id is `NULL` (matches nothing); a
-    // non-UUID id raises `ValidationError` → the invalid-detail 400.
+    // The points-filter comprehension (`:125-130`): the header `save()`
+    // above already landed. Iterating a non-empty dict/string yields
+    // non-dicts, and any non-dict item, raises `AttributeError` → 500.
+    let items: Vec<&Map<String, Value>> = match raw_items {
+        None => return Err(Denial::ServerError),
+        Some(raw) => {
+            let mut maps = Vec::with_capacity(raw.len());
+            for item in raw {
+                maps.push(item.as_object().ok_or(Denial::ServerError)?);
+            }
+            maps
+        }
+    };
+    // `pk__in=[…]` (`UUIDField.to_python`): a missing id is `NULL`
+    // (matches nothing); in-range ints/bools coerce via `UUID(int=…)`
+    // (a valid lookup the `str()` match then skips); floats, composites,
+    // out-of-range ints, and garbage strings raise `ValidationError` →
+    // the invalid-detail 400.
     let mut ids: Vec<uuid::Uuid> = Vec::with_capacity(items.len());
     for item in &items {
         match item.get("id") {
@@ -2475,7 +2556,9 @@ async fn bulk_partial_update(
             Some(Value::String(raw)) => {
                 ids.push(parse_uuid_or_invalid(raw)?);
             }
-            Some(_) => return Err(Denial::BadValidation),
+            Some(other) => {
+                raw_uuid_prep(other).map_err(|_| Denial::BadValidation)?;
+            }
         }
     }
     let matched: Vec<EstimatePointRowTuple> = if ids.is_empty() {
@@ -2871,13 +2954,19 @@ async fn point_destroy(
     let data = data.as_object().ok_or(Denial::ServerError)?;
     // `new_estimate_id` is truthy-gated (`if new_estimate_id:`): falsy
     // values (`""`, `0`, missing) take the else branch. The `str()`-ed
-    // value feeds both the dumps and the update.
+    // value feeds the dumps; the update feeds the RAW value through
+    // `UUIDField` prep (`to_python`): in-range ints/bools → `UUID(int=…)`
+    // (a dangling id fails the FK → the `IntegrityError` 400); floats,
+    // composites, out-of-range ints, and garbage strings raise
+    // `ValidationError` → the invalid-detail 400.
     let new_raw = data.get("new_estimate_id");
-    let new_id_text: Option<String> = if python_truthy(new_raw) {
-        Some(python_str(new_raw.unwrap_or(&Value::Null)))
-    } else {
-        None
-    };
+    let (new_id_text, new_uuid): (Option<String>, Option<Result<uuid::Uuid, ()>>) =
+        if python_truthy(new_raw) {
+            let raw = new_raw.unwrap_or(&Value::Null);
+            (Some(python_str(raw)), Some(raw_uuid_prep(raw)))
+        } else {
+            (None, None)
+        };
     // `Issue.objects` (live-only) on this point, `Meta.ordering`
     // (`-created_at`) — the loop order the emits follow.
     let issues: Vec<(uuid::Uuid, Option<uuid::Uuid>)> = sqlx::query_as(
@@ -2909,16 +2998,16 @@ async fn point_destroy(
             epoch: Utc::now().timestamp(),
         };
         enqueue_issue_activity(&pool, &emit).await;
-        if let Some(new_text) = new_id_text.as_deref() {
+        if new_id_text.is_some() {
             // The re-evaluated queryset: after the first iteration
             // nothing matches (all rows moved) — except the message
-            // still sends per issue. Django's UUID prep
-            // (`uuid.UUID(…)`, all four spellings — the `FromStr` rule
-            // too) rejects garbage → the invalid-detail 400 *after*
-            // the emit above; a well-formed but dangling id fails the
-            // FK → the `IntegrityError` 400.
-            let Ok(new_uuid) = new_text.parse::<uuid::Uuid>() else {
-                return Err(Denial::BadValidation);
+            // still sends per issue. Django's UUID prep (raw value
+            // through `to_python`) rejects garbage → the invalid-detail
+            // 400 *after* the emit above; a well-formed but dangling id
+            // fails the FK → the `IntegrityError` 400.
+            let new_uuid = match &new_uuid {
+                Some(Ok(id)) => *id,
+                _ => return Err(Denial::BadValidation),
             };
             sqlx::query(
                 r#"UPDATE issues SET estimate_point_id = $1 WHERE id IN (
@@ -2946,9 +3035,25 @@ async fn point_destroy(
     .await
     .map_err(db_denial)?;
     let (old_key,) = old.ok_or(Denial::ServerError)?;
-    // Decrement higher keys (`:234-240`, `bulk_update(["key"])` — no
-    // `updated_at` touch); the response is the decremented set in
-    // `Meta.ordering` (value) order.
+    // The decremented set (`:234-240`, `bulk_update(["key"])` — no
+    // `updated_at` touch): exactly the rows with `key > old_key`,
+    // captured by id BEFORE the decrement — a non-deleted row sharing
+    // the old key (no unique constraint; bulk PATCH sets raw keys) is
+    // excluded from the response. The deleted row itself (key == old
+    // key) is never in the set.
+    let moved_rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
+        r#"SELECT ep.id FROM estimate_points ep JOIN workspaces w ON w.id = ep.workspace_id
+           WHERE ep.deleted_at IS NULL AND ep.estimate_id = $1
+             AND ep.project_id = $2 AND w.slug = $3 AND ep."key" > $4"#,
+    )
+    .bind(estimate_id)
+    .bind(project_id)
+    .bind(&slug)
+    .bind(old_key)
+    .fetch_all(&pool)
+    .await
+    .map_err(db_denial)?;
+    let moved_ids: Vec<uuid::Uuid> = moved_rows.into_iter().map(|row| row.0).collect();
     sqlx::query(
         r#"UPDATE estimate_points ep SET "key" = ep."key" - 1
            FROM workspaces w
@@ -2963,22 +3068,22 @@ async fn point_destroy(
     .execute(&pool)
     .await
     .map_err(db_denial)?;
-    let decremented: Vec<EstimatePointRowTuple> = sqlx::query_as(
-        r#"SELECT ep.id, ep.created_at, ep.updated_at, ep.deleted_at, ep.key,
-                  ep.description, ep.value, ep.created_by_id, ep.updated_by_id,
-                  ep.project_id, ep.workspace_id, ep.estimate_id
-           FROM estimate_points ep JOIN workspaces w ON w.id = ep.workspace_id
-           WHERE ep.deleted_at IS NULL AND ep.estimate_id = $1
-             AND ep.project_id = $2 AND w.slug = $3 AND ep."key" >= $4
-           ORDER BY ep.value ASC"#,
-    )
-    .bind(estimate_id)
-    .bind(project_id)
-    .bind(&slug)
-    .bind(old_key)
-    .fetch_all(&pool)
-    .await
-    .map_err(db_denial)?;
+    let decremented: Vec<EstimatePointRowTuple> = if moved_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as(
+            r#"SELECT ep.id, ep.created_at, ep.updated_at, ep.deleted_at, ep.key,
+                      ep.description, ep.value, ep.created_by_id, ep.updated_by_id,
+                      ep.project_id, ep.workspace_id, ep.estimate_id
+               FROM estimate_points ep
+               WHERE ep.id = ANY($1)
+               ORDER BY ep.value ASC"#,
+        )
+        .bind(&moved_ids)
+        .fetch_all(&pool)
+        .await
+        .map_err(db_denial)?
+    };
     let now = utc_now_micros();
     sqlx::query(
         r#"UPDATE estimate_points SET deleted_at = $1, updated_at = $1, updated_by_id = $2
@@ -2991,14 +3096,11 @@ async fn point_destroy(
     .await
     .map_err(db_denial)?;
     enqueue_soft_delete(&pool, "estimatepoint", &point_id).await;
-    // The decremented set is exactly the rows that moved: every live
-    // row of this estimate at/above the old key except the deleted one
-    // (the deleted row still reads live until the tombstone above —
-    // filter it out).
+    // The captured set, in `Meta.ordering` (value) order — the deleted
+    // row was never a member (its key equals, not exceeds, the old key).
     let points: Vec<Value> = decremented
         .iter()
         .map(|tuple| estimate_point_row_from(tuple.clone()))
-        .filter(|point| point.id != point_id)
         .map(|point| render_point(&point, actor.timezone))
         .collect();
     Ok(json_ok(Value::Array(points).to_string()))
@@ -3287,6 +3389,32 @@ mod tests {
     }
 
     #[test]
+    fn state_patch_echoes_validated_order_last() {
+        // D1: a valid `order` is echoed as the last field (the validated
+        // float — int input renders `1.0`); absent stays absent.
+        let (input, errors) = validate_state_input(&object(&[("order", json!(1))]), true);
+        assert!(errors.is_empty());
+        assert_eq!(input.order, Some(1.0));
+        let row = StateRow {
+            id: "51c37f86-28ce-4312-bc88-652b24de6290".parse().unwrap(),
+            project_id: "3e0008a4-62ec-448c-abe2-5fca6ee60c5a".parse().unwrap(),
+            workspace_id: "94f09a58-8b7e-46c3-a43b-afe7c649a108".parse().unwrap(),
+            name: "Staging".to_owned(),
+            color: "#00FF00".to_owned(),
+            group: "started".to_owned(),
+            default: false,
+            description: String::new(),
+            sequence: 70000.0,
+        };
+        assert!(render_patched_state(&row, input.order)
+            .to_string()
+            .ends_with(r#""sequence":70000.0,"order":1.0}"#));
+        assert!(!render_patched_state(&row, None)
+            .to_string()
+            .contains("order"));
+    }
+
+    #[test]
     fn state_validation_matches_drf() {
         // Required pair missing → both field errors, field order.
         let (input, errors) = validate_state_input(&object(&[]), false);
@@ -3332,7 +3460,7 @@ mod tests {
             false,
         );
         assert!(errors.is_empty());
-        assert!(input.order_present);
+        assert_eq!(input.order, Some(2.5));
         let (_, errors) = validate_state_input(&object(&[("order", json!("x"))]), true);
         assert_eq!(
             Value::Object(errors).to_string(),
@@ -3398,6 +3526,109 @@ mod tests {
     }
 
     #[test]
+    fn bulk_create_points_gate_matches_list_serializer() {
+        // D2: missing/`null` → the `No data provided` rewrite (probe-run
+        // against DRF 3.15.2); other non-lists → `not_a_list`; lists pass.
+        assert!(matches!(
+            bulk_create_points_shape(None),
+            CreatePoints::Missing
+        ));
+        assert!(matches!(
+            bulk_create_points_shape(Some(&Value::Null)),
+            CreatePoints::Missing
+        ));
+        assert_eq!(
+            ser::non_field_errors("No data provided").to_string(),
+            r#"{"non_field_errors":["No data provided"]}"#
+        );
+        match bulk_create_points_shape(Some(&json!("x"))) {
+            CreatePoints::NotAList(message) => {
+                assert_eq!(message, "Expected a list of items but got type \"str\".")
+            }
+            _ => panic!("not_a_list"),
+        }
+        match bulk_create_points_shape(Some(&json!([1]))) {
+            CreatePoints::Items(items) => assert_eq!(items.len(), 1),
+            _ => panic!("items"),
+        }
+    }
+
+    #[test]
+    fn bulk_patch_points_gate_matches_len_check() {
+        // D3: only missing/`[]`/`{}`/`""` take the required 400;
+        // scalars/`null` are pre-lookup 500s; non-empty containers pass
+        // the gate (their item-shape failure lands post-header).
+        assert!(matches!(bulk_patch_points_gate(None), PatchPoints::Missing));
+        assert!(matches!(
+            bulk_patch_points_gate(Some(&json!([]))),
+            PatchPoints::Missing
+        ));
+        assert!(matches!(
+            bulk_patch_points_gate(Some(&json!({}))),
+            PatchPoints::Missing
+        ));
+        assert!(matches!(
+            bulk_patch_points_gate(Some(&json!(""))),
+            PatchPoints::Missing
+        ));
+        assert!(matches!(
+            bulk_patch_points_gate(Some(&Value::Null)),
+            PatchPoints::Unsized
+        ));
+        assert!(matches!(
+            bulk_patch_points_gate(Some(&json!(7))),
+            PatchPoints::Unsized
+        ));
+        assert!(matches!(
+            bulk_patch_points_gate(Some(&json!(true))),
+            PatchPoints::Unsized
+        ));
+        assert!(matches!(
+            bulk_patch_points_gate(Some(&json!({"a": 1}))),
+            PatchPoints::IteratesNonDicts
+        ));
+        assert!(matches!(
+            bulk_patch_points_gate(Some(&json!("x"))),
+            PatchPoints::IteratesNonDicts
+        ));
+        match bulk_patch_points_gate(Some(&json!([7]))) {
+            PatchPoints::Items(items) => assert_eq!(items.len(), 1),
+            _ => panic!("items"),
+        }
+    }
+
+    #[test]
+    fn raw_uuid_prep_matches_to_python() {
+        // D4/D5: in-range ints/bools → `UUID(int=…)` (probe-run against
+        // Django 4.2.30); floats, composites, out-of-range ints, and
+        // garbage strings fail.
+        assert_eq!(
+            raw_uuid_prep(&json!(5)).expect("int"),
+            uuid::Uuid::from_u128(5)
+        );
+        assert_eq!(
+            raw_uuid_prep(&json!(0)).expect("zero"),
+            uuid::Uuid::from_u128(0)
+        );
+        assert_eq!(
+            raw_uuid_prep(&json!(true)).expect("bool"),
+            uuid::Uuid::from_u128(1)
+        );
+        assert_eq!(
+            raw_uuid_prep(&json!("08bfa3c6-3213-4559-af45-b8aa934012b8")).expect("uuid"),
+            "08bfa3c6-3213-4559-af45-b8aa934012b8"
+                .parse::<uuid::Uuid>()
+                .unwrap()
+        );
+        assert!(raw_uuid_prep(&json!(5.0)).is_err());
+        assert!(raw_uuid_prep(&json!(-1)).is_err());
+        assert!(raw_uuid_prep(&json!([1])).is_err());
+        assert!(raw_uuid_prep(&json!({"a": 1})).is_err());
+        assert!(raw_uuid_prep(&json!("x")).is_err());
+        assert!(raw_uuid_prep(&json!("")).is_err());
+    }
+
+    #[test]
     fn point_patch_empty_dict_demands_points() {
         // Partial `{}` → `validate({})` → the required-points 400.
         let (patch, errors, _) = validate_point_patch(&object(&[]));
@@ -3441,10 +3672,12 @@ mod tests {
             validate_float(&json!("x")).expect_err("junk"),
             "A valid number is required."
         );
-        // `BooleanField`: the case-insensitive sets, `1`/`0`/`0.0`.
+        // `BooleanField`: the case-insensitive sets, `1`/`0`/`0.0` — and
+        // `1.0`, which set-membership accepts (`1.0 == 1`, same hash).
         assert!(validate_bool(&json!("YES")).expect("yes"));
         assert!(!validate_bool(&json!(0)).expect("zero"));
         assert!(!validate_bool(&json!(0.0)).expect("zero float"));
+        assert!(validate_bool(&json!(1.0)).expect("one float"));
         assert_eq!(
             validate_bool(&json!(1.5)).expect_err("float"),
             "Must be a valid boolean."
