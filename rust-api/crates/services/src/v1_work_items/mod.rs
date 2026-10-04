@@ -29,8 +29,8 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod shape_issue;
-pub mod shape_relations;
 pub mod shape_pages;
+pub mod shape_relations;
 
 /// One entry of a DRF `fields=` argument (`base.py:19-30,41-60`): either a
 /// plain field name or a `{name: sub-fields}` dict entry. Query-string
