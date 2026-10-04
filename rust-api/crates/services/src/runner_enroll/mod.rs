@@ -16,13 +16,19 @@
 //!   PIDASHCONV-583).
 //! * [`validation`] — run-creation validation + pod resolution
 //!   (`services/validation.py:28-182`, PIDASHCONV-587).
+//! * [`revoke`] — `Runner.revoke` cascade (`runner/models.py:542-685`,
+//!   PIDASHCONV-588).
+//! * [`delete`] — `delete_runner` + `delete_dev_machine`
+//!   (`services/runner_delete.py:47-143`, PIDASHCONV-588).
 //!
 //! Wiring note: the crate root declares `pub mod runner_enroll;` (seam for
 //! this issue's new files); sibling D-13 issues add their own files here.
 //! `mod.rs` edits stay additive-only.
+pub mod delete;
 pub mod pod_naming;
 pub mod purge;
 pub mod queries;
+pub mod revoke;
 pub mod serializers;
 pub mod tokens;
 pub mod validation;
