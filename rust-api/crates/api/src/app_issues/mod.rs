@@ -43,6 +43,7 @@
 //!   (`NOT (group = 'triage')` over a left join, three-valued logic).
 
 pub mod handlers_archive;
+pub mod handlers_core;
 pub mod handlers_engage;
 pub mod handlers_labels_attachments;
 pub mod handlers_reads;
@@ -91,7 +92,36 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/issues/",
-            owned(get(list_issues)),
+            get(list_issues)
+                .post(handlers_core::create_issue)
+                .put(proxy)
+                .patch(proxy)
+                .delete(proxy)
+                .options(proxy)
+                .trace(proxy)
+                .fallback(proxy),
+        )
+        .route(
+            handlers_core::CORE_DETAIL_PATH,
+            get(handlers_core::retrieve_issue)
+                .put(handlers_core::put_update_issue)
+                .patch(handlers_core::partial_update_issue)
+                .delete(handlers_core::destroy_issue)
+                .post(proxy)
+                .options(proxy)
+                .trace(proxy)
+                .fallback(proxy),
+        )
+        .route(
+            handlers_core::BULK_DELETE_PATH,
+            delete(handlers_core::bulk_delete_issues)
+                .get(proxy)
+                .put(proxy)
+                .patch(proxy)
+                .post(proxy)
+                .options(proxy)
+                .trace(proxy)
+                .fallback(proxy),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/issues/list/",
