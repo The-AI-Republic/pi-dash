@@ -42,6 +42,7 @@
 //! - the manager's triage exclusion drops NULL-state rows with it
 //!   (`NOT (group = 'triage')` over a left join, three-valued logic).
 
+pub mod handlers_labels_attachments;
 pub mod queries_core;
 pub mod queries_engage;
 pub mod render;
@@ -51,7 +52,7 @@ use std::collections::HashMap;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use axum::Router;
 use chrono_tz::Tz;
 use sea_query::backend::PostgresQueryBuilder;
@@ -81,6 +82,7 @@ use render::v2_page;
 /// with no per-method logic; `HEAD` rides axum's `get` handling like
 /// Django's `GET`-backed `HEAD`.
 pub fn routes() -> Router<AppState> {
+    let proxy = crate::edge::proxy;
     Router::new()
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/issues/",
@@ -101,6 +103,83 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/deleted-issues/",
             owned(get(deleted_list)),
+        )
+        .route(
+            handlers_labels_attachments::LABELS_PATH,
+            get(handlers_labels_attachments::label_list)
+                .post(handlers_labels_attachments::label_create)
+                .put(proxy)
+                .patch(proxy)
+                .delete(proxy)
+                .options(proxy)
+                .trace(proxy)
+                .fallback(proxy),
+        )
+        .route(
+            handlers_labels_attachments::LABEL_PATH,
+            get(handlers_labels_attachments::label_retrieve)
+                .put(handlers_labels_attachments::label_update)
+                .patch(handlers_labels_attachments::label_partial_update)
+                .delete(handlers_labels_attachments::label_destroy)
+                .post(proxy)
+                .options(proxy)
+                .trace(proxy)
+                .fallback(proxy),
+        )
+        .route(
+            handlers_labels_attachments::BULK_LABELS_PATH,
+            post(handlers_labels_attachments::bulk_create_labels)
+                .get(proxy)
+                .put(proxy)
+                .patch(proxy)
+                .delete(proxy)
+                .options(proxy)
+                .trace(proxy)
+                .fallback(proxy),
+        )
+        .route(
+            handlers_labels_attachments::V1_ATTACHMENTS_PATH,
+            get(handlers_labels_attachments::v1_list)
+                .post(handlers_labels_attachments::v1_create)
+                .put(proxy)
+                .patch(proxy)
+                .delete(proxy)
+                .options(proxy)
+                .trace(proxy)
+                .fallback(proxy),
+        )
+        .route(
+            handlers_labels_attachments::V1_ATTACHMENT_PATH,
+            delete(handlers_labels_attachments::v1_delete)
+                .get(proxy)
+                .post(proxy)
+                .put(proxy)
+                .patch(proxy)
+                .options(proxy)
+                .trace(proxy)
+                .fallback(proxy),
+        )
+        .route(
+            handlers_labels_attachments::V2_ATTACHMENTS_PATH,
+            get(handlers_labels_attachments::v2_list)
+                .post(handlers_labels_attachments::v2_create)
+                .put(proxy)
+                .patch(proxy)
+                .delete(proxy)
+                .options(proxy)
+                .trace(proxy)
+                .fallback(proxy),
+        )
+        .route(
+            handlers_labels_attachments::V2_ATTACHMENT_PATH,
+            get(handlers_labels_attachments::v2_detail)
+                .patch(handlers_labels_attachments::v2_patch)
+                .delete(handlers_labels_attachments::v2_delete)
+                .post(proxy)
+                .put(proxy)
+                .options(proxy)
+                .trace(proxy)
+                .fallback(proxy),
         )
 }
 
