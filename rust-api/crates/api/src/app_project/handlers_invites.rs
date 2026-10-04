@@ -1451,8 +1451,7 @@ fn default_issue_props_json() -> String {
         .to_string()
 }
 
-/// `db/models/project.py:get_default_views` (board create `views`
-/// default).
+/// Board create `views` default (inline in `base.py:561-569`).
 fn default_board_views_json() -> String {
     serde_json::json!({
         "list": true, "kanban": true, "calendar": true, "gantt": true, "spreadsheet": true,
@@ -1901,8 +1900,9 @@ async fn user_invite_list(
 /// (`invite.py:128-180`, workspace ADMIN/MEMBER-gated): join `project_ids`
 /// — the SECRET-project guard 403s non-admins, then live memberships are
 /// reactivated and missing member + user-property rows are bulk-inserted
-/// (`ON CONFLICT DO NOTHING`), answering 201. Unknown ids are skipped
-/// silently; a bad-UUID id is the `ValidationError` 400.
+/// (`ON CONFLICT DO NOTHING`), answering 201. Unknown ids vanish from
+/// the guard's queryset but fail the member insert (FK `IntegrityError`
+/// 400); a bad-UUID id is the `ValidationError` 400.
 async fn user_invite_create(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -1930,6 +1930,23 @@ async fn user_invite_create(
         Some(map) => map,
         None => return Err(Denial::ServerError),
     };
+    // `WorkspaceMember.objects.get(...)` (`invite.py:133`) evaluates
+    // before the `id__in` list is ever prepped (`:136` is lazy): a miss
+    // 404s ahead of any 400. The gate passed, so the row exists; a miss
+    // is a race, answering the `.get()` 404 like Python.
+    let member: Option<(uuid::Uuid, i16)> = sqlx::query_as(
+        r#"SELECT wm.workspace_id, wm.role FROM workspace_members wm
+           JOIN workspaces w ON w.id = wm.workspace_id
+           WHERE wm.member_id = $1 AND w.slug = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
+    )
+    .bind(resolved.id)
+    .bind(&slug)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    let Some((workspace_id, workspace_role)) = member else {
+        return Err(Denial::ObjectNotFound);
+    };
     let project_ids = match data.get("project_ids") {
         None => Vec::new(),
         Some(Value::Null) => return Err(Denial::ServerError),
@@ -1946,7 +1963,8 @@ async fn user_invite_create(
             ids
         }
         // A string iterates its chars through UUID prep (each one
-        // fails); anything else is not iterable (`TypeError` → 500).
+        // fails); a dict iterates its keys; anything else is not
+        // iterable (`TypeError` → 500).
         Some(Value::String(raw)) => {
             if raw.is_empty() {
                 Vec::new()
@@ -1955,28 +1973,13 @@ async fn user_invite_create(
             }
         }
         Some(Value::Object(map)) => {
-            if map.is_empty() {
-                Vec::new()
-            } else {
-                return Err(Denial::BadValidation);
+            let mut ids = Vec::with_capacity(map.len());
+            for key in map.keys() {
+                ids.push(prep_uuid(&Value::String(key.clone()))?);
             }
+            ids
         }
         Some(_) => return Err(Denial::ServerError),
-    };
-    // The gate passed, so the workspace row exists; a miss (a race)
-    // answers the `.get()` 404 like Python.
-    let member: Option<(uuid::Uuid, i16)> = sqlx::query_as(
-        r#"SELECT wm.workspace_id, wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(resolved.id)
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id, workspace_role)) = member else {
-        return Err(Denial::ObjectNotFound);
     };
     // `Project.objects.filter(id__in=..., workspace__slug=...)`: live
     // rows only; unknown ids vanish silently.
@@ -2081,10 +2084,11 @@ async fn join_get(
 }
 
 /// `POST .../projects/<project_id>/join/<uuid:pk>/` (`invite.py:186-249`,
-/// `AllowAny`): the email check 403s first, then a repeat response 400s,
-/// then the response is recorded and an accept creates/reactivates the
-/// workspace + project memberships (with the member-save user-property
-/// side effect). A decline stops after the record.
+/// `AllowAny`): the invite lookup 404s first, then the email check
+/// 403s, then a repeat response 400s, then the response is recorded
+/// and an accept creates/reactivates the workspace + project
+/// memberships (with the member-save user-property side effect). A
+/// decline stops after the record.
 async fn join_post(
     State(state): State<AppState>,
     Path((slug, project_raw, pk)): Path<(String, String, String)>,
@@ -2102,6 +2106,11 @@ async fn join_post(
             .parse::<uuid::Uuid>()
             .map_err(|_| Denial::BadValidation)?,
     };
+    // The `.get()` runs before `request.data` is touched
+    // (`invite.py:187` precedes `:189`): a miss 404s ahead of any
+    // 415 / malformed-body / non-dict failure.
+    let pk = pk.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
+    let invite = fetch_join_invite(&pool, &slug, &project_id, &pk).await?;
     let body = match parse_body(&state, req).await {
         Ok(body) => body,
         Err(response) => return Ok(response),
@@ -2111,8 +2120,6 @@ async fn join_post(
         Some(map) => map,
         None => return Err(Denial::ServerError),
     };
-    let pk = pk.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
-    let invite = fetch_join_invite(&pool, &slug, &project_id, &pk).await?;
     // `email == "" or invite.email != email` — plain `!=`, so a missing
     // or mistyped email 403s before anything else.
     let email = data.get("email").and_then(Value::as_str).unwrap_or("");
@@ -2352,9 +2359,9 @@ async fn fav_create(
 }
 
 /// `DELETE .../user-favorite-projects/<project_id>/` (`base.py:528-537`):
-/// hard-delete (`soft=False`) the caller's matching favorite, 204. The
-/// `<str:project_id>` rewrites like any project kwarg; a miss is the
-/// `.get()` 404.
+/// hard-delete (`soft=False`) the caller's matching favorite with its
+/// folder subtree, 204. The `<str:project_id>` rewrites like any
+/// project kwarg; a miss is the `.get()` 404.
 async fn fav_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
@@ -2390,11 +2397,23 @@ async fn fav_destroy(
     let Some((id,)) = rows.first() else {
         return Err(Denial::ObjectNotFound);
     };
-    sqlx::query("DELETE FROM user_favorites WHERE id = $1")
-        .bind(id)
-        .execute(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    // Hard delete cascades through the self-FK (`parent`,
+    // `on_delete=CASCADE`): Django's Collector gathers descendants via
+    // the unfiltered base manager, so children in any `deleted_at`
+    // state go with the row — one statement, `NO ACTION` checks at
+    // statement end. No signals hang off the model.
+    sqlx::query(
+        "WITH RECURSIVE subtree AS (
+             SELECT id FROM user_favorites WHERE id = $1
+             UNION ALL
+             SELECT f.id FROM user_favorites f JOIN subtree s ON f.parent_id = s.id
+         )
+         DELETE FROM user_favorites WHERE id IN (SELECT id FROM subtree)",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
 
@@ -2443,11 +2462,14 @@ async fn board_list(
 /// (`base.py:553-581`, `ProjectMemberPermission`-gated): the unscoped
 /// `get_or_create`, then the flags / views assignment and a second save
 /// (so `updated_by` is always stamped), answering 200 — never 201. A
-/// missing project row is the `.get()` 404 (raised by the workspace
-/// backfill); a bad-UUID flag is the `ValidationError` 400; an
-/// explicit-null flag or view falls to its NOT NULL column (the
-/// `IntegrityError` 400); any non-null `intake` raises `ValueError` on
-/// the FK-descriptor assignment (the generic 500).
+/// missing project row is the `.get()` 404, raised by the create path's
+/// workspace backfill (the `get` hit never reads the project row); any
+/// non-null `intake` raises `ValueError` on the FK-descriptor
+/// assignment (the generic 500); a bad bool flag is the
+/// `ValidationError` 400; an explicit-null flag or view falls to its
+/// NOT NULL column (the `IntegrityError` 400). The intake and flag
+/// failures land after `get_or_create`, so a just-created row persists
+/// past them.
 async fn board_create(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
@@ -2467,33 +2489,15 @@ async fn board_create(
         Some(map) => map,
         None => return Err(Denial::ServerError),
     };
-    let comments = prep_bool_flag(data.get("is_comments_enabled"))?;
-    let reactions = prep_bool_flag(data.get("is_reactions_enabled"))?;
-    let votes = prep_bool_flag(data.get("is_votes_enabled"))?;
-    // `project_deploy_board.intake = ...` assigns through the FK
-    // descriptor, which only accepts an `Intake` instance or `None` —
-    // any JSON value raises `ValueError` (live probe 2026-10-03), so
-    // only a missing or null `intake` reaches the write.
-    if !matches!(data.get("intake"), None | Some(Value::Null)) {
-        return Err(Denial::ServerError);
-    }
     let views = match data.get("views") {
         None => serde_json::from_str(&default_board_views_json()).expect("default views parse"),
         Some(value) => value.clone(),
     };
-    // The workspace backfill (`WorkspaceBaseModel.save`) fetches the
-    // project first: a miss is the 404, before any board row is read.
-    let workspace: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL")
-            .bind(project_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = workspace else {
-        return Err(Denial::ObjectNotFound);
-    };
     // `get_or_create(entity_name, entity_identifier, project_id)` —
-    // unscoped (no workspace predicate), live manager only.
+    // unscoped (no workspace predicate), live manager only. The `get`
+    // runs before anything else touches the database: when it hits, no
+    // project row is ever read (a deleted project under a live board
+    // still answers 200).
     let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
         "SELECT id FROM deploy_boards
          WHERE entity_name = 'project' AND entity_identifier = $1 AND project_id = $2
@@ -2507,6 +2511,19 @@ async fn board_create(
     let board_id = match existing {
         Some((id,)) => id,
         None => {
+            // The create path's workspace backfill
+            // (`WorkspaceBaseModel.save`) fetches the project: a miss is
+            // the 404, before the row is inserted.
+            let workspace: Option<(uuid::Uuid,)> = sqlx::query_as(
+                "SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL",
+            )
+            .bind(project_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            let Some((workspace_id,)) = workspace else {
+                return Err(Denial::ObjectNotFound);
+            };
             let id = uuid::Uuid::new_v4();
             let insert = sqlx::query(
                 "INSERT INTO deploy_boards (id, workspace_id, project_id, entity_identifier,
@@ -2552,6 +2569,21 @@ async fn board_create(
             }
         }
     };
+    // `project_deploy_board.intake = ...` runs after `get_or_create`
+    // (a created row persists past the failure): the FK-descriptor
+    // assignment only accepts an `Intake` instance or `None` — any JSON
+    // value raises `ValueError`, the generic 500.
+    if !matches!(data.get("intake"), None | Some(Value::Null)) {
+        return Err(Denial::ServerError);
+    }
+    // The second save's `BooleanField.get_prep_value`, in model field
+    // order: missing is `False`, explicit `null` stays `None` (the NOT
+    // NULL column raises the `IntegrityError` 400 on the write),
+    // anything else preps or is the `ValidationError` 400. A created row
+    // persists past these failures too.
+    let comments = prep_bool_flag(data.get("is_comments_enabled"))?;
+    let reactions = prep_bool_flag(data.get("is_reactions_enabled"))?;
+    let votes = prep_bool_flag(data.get("is_votes_enabled"))?;
     // The assignment + second save: flags, views and intake land here
     // (explicit nulls fall to their NOT NULL columns → 400), and
     // `updated_by`/`updated_at` stamp on both the created and the found
@@ -2822,19 +2854,31 @@ fn validate_patch_name(value: &Value) -> Result<Option<String>, &'static str> {
 }
 
 /// DRF `DateTimeField.to_internal_value` (`iso-8601`, `allow_null`) for
-/// `deleted_at`: datetimes parse (RFC 3339 plus the space-separated and
-/// minute-precision spellings Django accepts), naive values assume UTC
-/// (`USE_TZ`, `TIME_ZONE = "UTC"`).
+/// `deleted_at`: datetimes parse (RFC 3339 plus the space-separated,
+/// minute-precision and colon-less-offset spellings Django's
+/// `parse_datetime` accepts — single-digit components ride chrono's
+/// padding leniency, trailing whitespace rides the regex's `\s*`),
+/// naive values assume UTC (`USE_TZ`, `TIME_ZONE = "UTC"`).
 fn validate_patch_datetime(value: &Value) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
     if value.is_null() {
         return Ok(None);
     }
     let raw = match value {
-        Value::String(raw) => raw,
+        Value::String(raw) => raw.trim_end(),
         _ => return Err(datetime_format_error()),
     };
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
         return Ok(Some(dt.with_timezone(&chrono::Utc)));
+    }
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f%z",
+        "%Y-%m-%d %H:%M:%S%.f%z",
+        "%Y-%m-%dT%H:%M%z",
+        "%Y-%m-%d %H:%M%z",
+    ] {
+        if let Ok(dt) = chrono::DateTime::parse_from_str(raw, format) {
+            return Ok(Some(dt.with_timezone(&chrono::Utc)));
+        }
     }
     for format in [
         "%Y-%m-%dT%H:%M:%S%.f",
@@ -3158,13 +3202,16 @@ async fn board_partial_update(
     if !errors.is_empty() {
         return Err(Denial::Raw(StatusCode::BAD_REQUEST, errors.body()));
     }
-    // `UniqueTogetherValidator` pair (`unique_together` + the
-    // conditional `UniqueConstraint`): both run over the live manager
-    // excluding self, against the effective triple — missing keys fill
-    // from the instance, so the check runs on every PATCH. The triple
-    // validator only fires when the new `deleted_at` stays null; the
-    // pair validator fires on any live (name, identifier) clash
-    // (live probes 2026-10-03).
+    // `UniqueTogetherValidator` over (`entity_name`,
+    // `entity_identifier`, `deleted_at`) (`validators.py`, update path):
+    // missing keys fill from the instance, then the check runs only
+    // when a triple field changed — and never when a changed value is
+    // `None`. The clash filter carries the effective `deleted_at`, and
+    // live rows all carry null, so a set `deleted_at` never matches
+    // (soft-delete-plus-rename PATCHes pass). DRF derives no validator
+    // from the conditional `UniqueConstraint`: at most the one triple
+    // message renders, and a write-time race there surfaces as the
+    // `IntegrityError` 400 instead.
     let mut new_name = current.entity_name.clone();
     let mut new_identifier = current.entity_identifier;
     let mut new_deleted_at = current.deleted_at;
@@ -3179,30 +3226,40 @@ async fn board_partial_update(
             _ => {}
         }
     }
-    let clash: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM deploy_boards
-         WHERE entity_name IS NOT DISTINCT FROM $1
-           AND entity_identifier IS NOT DISTINCT FROM $2
-           AND deleted_at IS NULL AND id <> $3)",
-    )
-    .bind(new_name)
-    .bind(new_identifier)
-    .bind(pk)
-    .fetch_one(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if clash {
-        if new_deleted_at.is_none() {
+    let mut any_changed = false;
+    let mut changed_null = false;
+    if new_name != current.entity_name {
+        any_changed = true;
+        changed_null |= new_name.is_none();
+    }
+    if new_identifier != current.entity_identifier {
+        any_changed = true;
+        changed_null |= new_identifier.is_none();
+    }
+    if new_deleted_at != current.deleted_at {
+        any_changed = true;
+        changed_null |= new_deleted_at.is_none();
+    }
+    if any_changed && !changed_null && new_deleted_at.is_none() {
+        let clash: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM deploy_boards
+             WHERE entity_name IS NOT DISTINCT FROM $1
+               AND entity_identifier IS NOT DISTINCT FROM $2
+               AND deleted_at IS NULL AND id <> $3)",
+        )
+        .bind(new_name)
+        .bind(new_identifier)
+        .bind(pk)
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+        if clash {
             errors.push(
                 "non_field_errors",
                 "The fields entity_name, entity_identifier, deleted_at must make a unique set."
                     .to_owned(),
             );
         }
-        errors.push(
-            "non_field_errors",
-            "The fields entity_name, entity_identifier must make a unique set.".to_owned(),
-        );
     }
     if !errors.is_empty() {
         return Err(Denial::Raw(StatusCode::BAD_REQUEST, errors.body()));
@@ -3570,6 +3627,22 @@ mod tests {
         assert_eq!(
             minute.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "2026-10-02T22:22:00Z"
+        );
+        // Django's `parse_datetime` extras: colon-less offsets,
+        // single-digit components, trailing whitespace.
+        let flat = validate_patch_datetime(&Value::String("2026-10-02T22:22:39+0200".to_owned()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            flat.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "2026-10-02T20:22:39Z"
+        );
+        let padded = validate_patch_datetime(&Value::String("2026-1-2T3:04 ".to_owned()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            padded.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "2026-01-02T03:04:00Z"
         );
         let err = validate_patch_datetime(&Value::String("tomorrow".to_owned())).unwrap_err();
         assert!(err.starts_with("Datetime has wrong format. Use one of these formats instead: "));
