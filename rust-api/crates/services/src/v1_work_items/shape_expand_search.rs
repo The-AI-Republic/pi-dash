@@ -96,13 +96,18 @@
 //! * `description` and `description_json` render the same value (the declared
 //!   `JSONField(source="description_json")` plus the auto model field).
 //! * `ModuleSerializer.members` is declared `write_only=True`
-//!   (`module.py:177-181`), hence absent from every read — including the
-//!   nested module shape here. F18-03's module `intended_nested_shape_keys`
-//!   lists it (model-field inference on an unrenderable class); the replay
-//!   test pins the true 22-key list and the deviation is noted in the PR.
-//! * Advanced `url` is three-state: input absent → key omitted
-//!   (`required=False` + `SkipField`), explicit `None` → `null`
-//!   (`allow_null=True`), string → string. [`UrlPresence`] models all three.
+//!   (`module.py:177-181`) but the `to_representation` override
+//!   (`module.py:203-206`) appends `data["members"]` on EVERY read, as a
+//!   trailing key: `[str(member.id) for member in instance.members.all()]`.
+//!   The nested module shape here therefore ends with `members` (stringified
+//!   member pks in `members.all()` order), and F18-03's 23-key
+//!   `intended_nested_shape_keys` matches truth exactly.
+//! * Advanced `url` is two-state (`required=False, allow_null=True`):
+//!   `None` → `null`, string → string. A missing input ALSO renders
+//!   present-`null`: `Field.get_attribute` returns `None` on `allow_null`
+//!   before it ever reaches the `required`/`SkipField` check (pinned DRF
+//!   3.15.2 `fields.py`). The wire omission (unconfigured host → no `url`
+//!   key) is the handler's key-pop (PIDASHCONV-677), not this shape.
 //! * Advanced `state` renders `null` both when the input state is `None`
 //!   (the `None` shortcut, `serializers.py:530-534`) and when the key is
 //!   absent (`allow_null=True` in `Field.get_attribute`). On the wire the
@@ -254,13 +259,17 @@ pub struct ExpandRepresentationInput<'a> {
     /// `IssueLabel` ids in queryset (`-created_at`) order.
     pub label_ids: &'a [&'a str],
     /// Caller-rendered expanded labels (`LabelLiteSerializer` read shape,
-    /// PIDASHCONV-661's scope), in `Label.objects.filter(pk__in=...)` order.
+    /// PIDASHCONV-661's scope), in the same through-queryset (`-created_at`)
+    /// order as `label_ids` (`get_labels` iterates `obj.label_issue.all()`
+    /// in both branches, `issue.py:1090-1096`).
     pub expanded_labels: &'a [Value],
     /// `IssueAssignee` ids in queryset (`-created_at`) order.
     pub assignee_ids: &'a [&'a str],
-    /// User rows for context-`expand=assignees`, in
-    /// `User.objects.filter(pk__in=...)` order; rendered via the reused
-    /// D-19 `UserLite`.
+    /// User rows for context-`expand=assignees`, in the same
+    /// through-queryset (`-created_at`) order as `assignee_ids`
+    /// (`get_assignees` iterates `obj.issue_assignee.all()` in both
+    /// branches, `issue.py:1097-1118`); rendered via the reused D-19
+    /// `UserLite`.
     pub assignee_rows: &'a [UserLiteRow<'a>],
     /// Rendered values for map-hit constructor-`expand` names (`state`,
     /// `project`, `workspace`, `created_by`, `updated_by`, `parent`,
@@ -492,13 +501,13 @@ pub const MODULE_METRIC_FIELDS: [&str; 6] = [
     "backlog_issues",
 ];
 
-/// `ModuleSerializer` wire order, all 28 keys: `id`
+/// `ModuleSerializer` wire order, all 29 keys: `id`
 /// (`BaseSerializer`, `api/serializers/base.py:17`), the 6 declared metrics,
 /// then the `Module` model fields — concrete fields first, then forward
-/// relations in model order (`db/models/module.py:66-95`). The declared
-/// `members` field is `write_only=True` (`module.py:177-181`), hence absent
-/// from every read (this list included).
-pub const MODULE_READ_FIELDS: [&str; 28] = [
+/// relations in model order (`db/models/module.py:66-95`) — and finally the
+/// trailing `members` the `to_representation` override appends
+/// (`module.py:203-206`).
+pub const MODULE_READ_FIELDS: [&str; 29] = [
     "id",
     "total_issues",
     "cancelled_issues",
@@ -527,6 +536,7 @@ pub const MODULE_READ_FIELDS: [&str; 28] = [
     "project",
     "workspace",
     "lead",
+    "members",
 ];
 
 /// A metric annotation value: `None` = annotation missing (key omitted);
@@ -535,7 +545,8 @@ pub const MODULE_READ_FIELDS: [&str; 28] = [
 /// alias reads wrong here, so this module carries its own).
 pub type ModuleMetric<T> = Option<Option<T>>;
 
-/// `ModuleSerializer` output shape (`module.py:169-197`).
+/// `ModuleSerializer` output shape (`module.py:169-206`, incl. the
+/// `to_representation` override).
 ///
 /// Wire order is [`MODULE_READ_FIELDS`]. The 6 metrics are annotation-fed
 /// (key omitted when the annotation is missing); every other key is always
@@ -572,6 +583,10 @@ pub struct ModuleReadView<'a> {
     pub project: &'a str,
     pub workspace: &'a str,
     pub lead: Option<&'a str>,
+    /// Stringified member pks (`str(member.id)`), in `members.all()` order
+    /// (the M2M target-model ordering, `-created_at`): the trailing key the
+    /// `to_representation` override appends (`module.py:203-206`).
+    pub members: &'a [&'a str],
 }
 
 fn opt_module_metric<S, T>(
@@ -622,7 +637,7 @@ where
 
 impl Serialize for ModuleReadView<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut out = serializer.serialize_struct("ModuleReadView", 28)?;
+        let mut out = serializer.serialize_struct("ModuleReadView", 29)?;
         out.serialize_field("id", self.id)?;
         opt_module_metric::<S, i64>(&mut out, "total_issues", self.total_issues)?;
         opt_module_metric::<S, i64>(&mut out, "cancelled_issues", self.cancelled_issues)?;
@@ -651,6 +666,9 @@ impl Serialize for ModuleReadView<'_> {
         out.serialize_field("project", self.project)?;
         out.serialize_field("workspace", self.workspace)?;
         opt_module_string::<S>(&mut out, "lead", self.lead)?;
+        // Trailing `members` from the `to_representation` override
+        // (`module.py:203-206`): always present, even when empty.
+        out.serialize_field("members", self.members)?;
         out.end()
     }
 }
@@ -679,9 +697,9 @@ pub struct ModuleIssueInput<'a> {
 
 /// Port of the `issue.py` `ModuleIssueSerializer` DECLARED read shape
 /// (`:1047-1060`): `{module: <ModuleSerializer>}`. With unannotated metrics
-/// the nested object is the true 22-key read list (F18-03's
-/// `intended_nested_shape_keys` minus the `write_only` `members` — see the
-/// module docs).
+/// the nested object is the fixture's 23-key `intended_nested_shape_keys`
+/// (the 29 [`MODULE_READ_FIELDS`] minus the 6 unannotated metrics),
+/// trailing `members` included (the `module.py:203-206` override).
 pub fn render_module_issue(
     input: &ModuleIssueInput<'_>,
 ) -> Result<Map<String, Value>, ExpandSearchError> {
@@ -891,19 +909,6 @@ pub struct AdvancedSearchProjectView<'a> {
     pub name: &'a str,
 }
 
-/// The advanced-result `url` field (`issue.py:1190-1197`,
-/// `required=False, allow_null=True`): input absent → key omitted
-/// (`SkipField`); explicit `None` → `null`; string → string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UrlPresence<'a> {
-    /// Key absent from the input: the key is omitted from the output.
-    Absent,
-    /// Explicit `None` input: the key renders `null`.
-    Null,
-    /// A URL string.
-    Value(&'a str),
-}
-
 /// A row for `IssueAdvancedSearchResultSerializer.to_representation`
 /// (`issue.py:1166-1198`). Datetimes cross this boundary already rendered as
 /// DRF strings; `rank` is the `float(row["_rank"] or 0.0)` value.
@@ -925,7 +930,13 @@ pub struct AdvancedSearchResultRow<'a> {
     /// `None` renders `null` (`allow_null=True`).
     pub completed_at: Option<&'a str>,
     pub rank: f64,
-    pub url: UrlPresence<'a>,
+    /// The advanced-result `url` field (`issue.py:1190-1197`,
+    /// `required=False, allow_null=True`): `None` → `null` (both for an
+    /// explicit `None` and for a missing input — `Field.get_attribute`
+    /// returns `None` on `allow_null` before the `SkipField` check), `Some`
+    /// → the string. Always present; the handler pops the key for the
+    /// unconfigured-wire case.
+    pub url: Option<&'a str>,
 }
 
 /// `IssueAdvancedSearchResultSerializer` field order (`issue.py:1174-1197`).
@@ -946,8 +957,8 @@ pub const ADVANCED_RESULT_FIELDS: [&str; 13] = [
 ];
 
 /// Port of `IssueAdvancedSearchResultSerializer.to_representation`
-/// (`issue.py:1166-1198`): the 13 keys in declaration order, `url` omitted
-/// only for [`UrlPresence::Absent`].
+/// (`issue.py:1166-1198`): the 13 keys in declaration order, always present
+/// (`url` renders `null` for `None`).
 pub fn render_advanced_result(
     row: &AdvancedSearchResultRow<'_>,
 ) -> Result<Map<String, Value>, ExpandSearchError> {
@@ -996,15 +1007,7 @@ pub fn render_advanced_result(
             None => return Err(ExpandSearchError::NonFiniteFloat("rank")),
         },
     );
-    match row.url {
-        UrlPresence::Absent => {}
-        UrlPresence::Null => {
-            out.insert("url".to_string(), Value::Null);
-        }
-        UrlPresence::Value(url) => {
-            out.insert("url".to_string(), Value::String(url.to_string()));
-        }
-    }
+    out.insert("url".to_string(), opt_str(row.url));
     Ok(out)
 }
 
@@ -1445,6 +1448,7 @@ mod tests {
             project: "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
             workspace: "e8f1a2b3-1111-4222-8333-444444444444",
             lead: None,
+            members: &["79c81d76-5a93-4d3d-894d-5935576834b6"],
         }
     }
 
@@ -1465,30 +1469,22 @@ mod tests {
         let rendered_map = render_module_issue(&input).expect("renders");
         assert_eq!(map_keys(&rendered_map), vec!["module"]);
         let nested = rendered_map["module"].as_object().expect("nested object");
-
-        // True read list: MODULE_READ_FIELDS minus the unannotated metrics.
-        let expected: Vec<String> = MODULE_READ_FIELDS
-            .iter()
-            .filter(|key| !MODULE_METRIC_FIELDS.contains(key))
-            .map(ToString::to_string)
-            .collect();
-        assert_eq!(map_keys(nested), expected);
-        assert_eq!(nested.len(), 22);
+        // Unannotated metrics drop their keys, leaving exactly the
+        // fixture's intended 23-key list in order (`members` trailing, from
+        // the `module.py:203-206` override).
+        assert_eq!(
+            map_keys(nested),
+            str_list(&golden["intended_nested_shape_keys"])
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(nested.len(), 23);
         assert_eq!(nested["status"], Value::String("planned".to_string()));
-
-        // The ONLY deviation from F18-03's inferred intended list is the
-        // `write_only` `members` key (`module.py:177-181`), which live DRF
-        // never renders.
-        let intended: Vec<String> = str_list(&golden["intended_nested_shape_keys"])
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        let missing: Vec<&String> = intended
-            .iter()
-            .filter(|key| !nested.contains_key(*key))
-            .collect();
-        assert_eq!(missing, vec!["members"]);
-        assert_eq!(intended.len(), 23);
+        assert_eq!(
+            nested["members"],
+            json!(["79c81d76-5a93-4d3d-894d-5935576834b6"]),
+        );
 
         // `expand=module` replaces the object with the link row's pk.
         let expanded = ModuleIssueInput {
@@ -1524,7 +1520,7 @@ mod tests {
             assert!(!nested.contains_key(key), "missing annotation drops {key}");
         }
         // Full wire order with every metric present.
-        assert_eq!(MODULE_READ_FIELDS.len(), 28);
+        assert_eq!(MODULE_READ_FIELDS.len(), 29);
     }
 
     #[test]
@@ -1642,7 +1638,7 @@ mod tests {
             updated_at: "2026-01-02T00:00:00Z",
             completed_at: None,
             rank: 0.75,
-            url: UrlPresence::Value("http://x/ws-x/browse/CT1-1"),
+            url: Some("http://x/ws-x/browse/CT1-1"),
         }
     }
 
@@ -1657,23 +1653,26 @@ mod tests {
             serde_json::to_string(&golden["render"]).expect("serializes"),
         );
 
-        // Explicit-`None` url renders a present `null` key.
+        // Explicit-`None` url renders a present `null` key — and so does a
+        // missing input (`Field.get_attribute` returns `None` on `allow_null`
+        // before the `SkipField` check), so there is no omit arm: the handler
+        // pops the key for the unconfigured-wire case.
         let mut no_url = advanced_row();
-        no_url.url = UrlPresence::Null;
+        no_url.url = None;
         let rendered_map = render_advanced_result(&no_url).expect("renders");
         assert_eq!(
             rendered(&rendered_map),
             serde_json::to_string(&golden["render_no_url"]).expect("serializes"),
         );
 
-        // Absent url omits the key (the wire case); null state/snippet render
-        // `null` keys.
+        // Null state/snippet/`completed_at` render `null` keys.
         let mut bare = advanced_row();
-        bare.url = UrlPresence::Absent;
+        bare.url = None;
         bare.state = None;
         bare.snippet = None;
         let rendered_map = render_advanced_result(&bare).expect("renders");
-        assert!(!rendered_map.contains_key("url"));
+        assert_eq!(rendered_map["url"], Value::Null);
+        assert_eq!(map_keys(&rendered_map), ADVANCED_RESULT_FIELDS);
         assert_eq!(rendered_map["state"], Value::Null);
         assert_eq!(golden["null_state"], Value::Null);
         assert_eq!(rendered_map["snippet"], Value::Null);
