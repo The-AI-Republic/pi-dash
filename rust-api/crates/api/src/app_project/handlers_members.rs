@@ -37,7 +37,10 @@
 //! Request order mirrors DRF `initial()`: session authN (401), the
 //! `project_id` rewrite (UUIDs pass through unchecked; other identifiers
 //! resolve `UPPER(strip)` in the workspace, else 404 `Project not found`),
+//! `TimezoneMixin` activation (unknown zones are the `KeyError` 400),
 //! then the gate (403), then the body. Anonymous callers skip the rewrite.
+//! `project-roles` is the exception: its class-level `WorkspaceUserPermission`
+//! runs inside `super().initial()`, before activation, so its gate stays first.
 //!
 //! Layering: gates in `super::gates` (PIDASHCONV-569), serializers in
 //! `pidash_services::app_project::ser_member` (PIDASHCONV-564), queries in
@@ -235,6 +238,8 @@ pub enum Denial {
     BadDetail(String),
     /// 400, `{"error": ...}` (view-inline).
     BadError(String),
+    /// 403, `{"error": ...}` (view-inline role matrix).
+    ForbiddenError(String),
     /// 400, serializer `errors` object as-is.
     BadJson(Value),
     /// 500, generic branch.
@@ -264,6 +269,10 @@ impl Denial {
             ),
             Denial::BadError(message) => (
                 StatusCode::BAD_REQUEST,
+                format!("{{\"error\":{}}}", json_string(message)),
+            ),
+            Denial::ForbiddenError(message) => (
+                StatusCode::FORBIDDEN,
                 format!("{{\"error\":{}}}", json_string(message)),
             ),
             Denial::BadJson(value) => (
@@ -378,6 +387,28 @@ async fn resolve_project_id(
     row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
 }
 
+/// Django's `<uuid:>` converter (`django/urls/converters.py:26`):
+/// `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`
+/// matched case-sensitively — only lowercase hyphenated UUIDs reach the
+/// view; uppercase/braced/`urn:`/simple-hex forms resolver-404 before
+/// auth. `uuid::Uuid::parse` accepts all of those, so the `<uuid:pk>`
+/// / `<uuid:member_id>` shells gate on this and proxy otherwise.
+fn is_django_uuid(raw: &str) -> bool {
+    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+    let mut parts = raw.split('-');
+    for want in GROUPS {
+        match parts.next() {
+            Some(part)
+                if part.len() == want
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) => {}
+            _ => return false,
+        }
+    }
+    parts.next().is_none()
+}
+
 /// Membership facts for one `(user, slug, project)` over the same rows the
 /// decorator reads (`app/permissions/base.py:44-78`), with the
 /// allowed-role flags computed against the calling gate's roles.
@@ -458,8 +489,10 @@ fn gate_for(method: &str, path: &str) -> Result<&'static gates::Gate, Denial> {
         .ok_or(Denial::ServerError)
 }
 
-/// `request.user.user_timezone` (`TimezoneMixin`): unknown zones 500
-/// through the same branch Django's `zoneinfo` activation raises into.
+/// `request.user.user_timezone` (`TimezoneMixin.initial`, after
+/// `super().initial()` but before the `@allow_permission` action gates):
+/// `ZoneInfo` activation raises `ZoneInfoNotFoundError`, a `KeyError`
+/// subclass, so unknown zones are the `KeyError` 400, not the 500.
 async fn actor_timezone(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<Tz, Denial> {
     let row: Option<(String,)> =
         sqlx::query_as(r#"SELECT u.user_timezone FROM users u WHERE u.id = $1"#)
@@ -468,7 +501,8 @@ async fn actor_timezone(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<Tz,
             .await
             .map_err(|_| Denial::ServerError)?;
     let (name,) = row.ok_or(Denial::ServerError)?;
-    name.parse().map_err(|_| Denial::ServerError)
+    name.parse()
+        .map_err(|_| body_error("The required key does not exist."))
 }
 
 fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
@@ -624,6 +658,10 @@ fn json_value_to_jval(value: &Value) -> JVal {
 
 fn body_error(body: &str) -> Denial {
     Denial::BadError(body.to_owned())
+}
+
+fn forbidden_error(body: &str) -> Denial {
+    Denial::ForbiddenError(body.to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -2006,6 +2044,23 @@ fn split_tz_suffix(text: &str) -> Option<(&str, Option<chrono::FixedOffset>)> {
 
 /// Full `deleted_at` input pipeline: grammar, then `enforce_timezone`
 /// (naive → request zone with the DST-gap arm, aware → converted).
+/// The offset in force immediately before a DST gap: Python `fold=0`
+/// semantics for `MappedLocalTime::None` wall times. Steps back in
+/// 10-minute increments (gaps run 1h typically, 24h for date-line
+/// skips); `None` is unreachable on real zone data.
+fn offset_before_gap(tz: &Tz, naive: &chrono::NaiveDateTime) -> Option<chrono::FixedOffset> {
+    let mut probe = *naive;
+    for _ in 0..200 {
+        probe = probe.checked_sub_signed(chrono::Duration::minutes(10))?;
+        match tz.offset_from_local_datetime(&probe) {
+            chrono::MappedLocalTime::Single(offset) => return Some(offset.fix()),
+            chrono::MappedLocalTime::Ambiguous(first, _) => return Some(first.fix()),
+            chrono::MappedLocalTime::None => {}
+        }
+    }
+    None
+}
+
 fn parse_member_datetime(
     text: &str,
     tz: &Tz,
@@ -2035,9 +2090,25 @@ fn parse_member_datetime(
         None => match tz.from_local_datetime(&naive) {
             chrono::MappedLocalTime::Single(local) => Ok(local.with_timezone(&chrono::Utc)),
             chrono::MappedLocalTime::Ambiguous(first, _) => Ok(first.with_timezone(&chrono::Utc)),
-            chrono::MappedLocalTime::None => Err(FieldFail::one(format!(
-                "Invalid datetime for the timezone \"{tz_name}\"."
-            ))),
+            // Spring-forward gaps: Django's `make_aware` under ZoneInfo
+            // is a bare `replace(tzinfo)` (never raises) and DRF's
+            // `valid_datetime` only rejects ambiguous times, so gap wall
+            // times 200 and store with the pre-transition (fold=0)
+            // offset — never the `make_aware` 400.
+            chrono::MappedLocalTime::None => {
+                let offset = offset_before_gap(tz, &naive).ok_or_else(|| {
+                    FieldFail::one(format!("Invalid datetime for the timezone \"{tz_name}\"."))
+                })?;
+                let utc = naive
+                    .checked_sub_signed(chrono::Duration::seconds(i64::from(
+                        offset.local_minus_utc(),
+                    )))
+                    .map(|naive_utc| {
+                        chrono::DateTime::from_naive_utc_and_offset(naive_utc, chrono::Utc)
+                    })
+                    .ok_or_else(|| FieldFail::one("Datetime value out of range.".to_owned()))?;
+                Ok(utc)
+            }
         },
     }
 }
@@ -2074,8 +2145,10 @@ async fn member_list_inner(
     let project_id = resolve_project_id(&pool, slug, project_raw).await?;
     let gate = gate_for("GET", "workspaces/<slug>/projects/<project_id>/members/")?;
     let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id, gate_roles(gate)).await?;
-    check_gate(gate, slug, &facts)?;
+    // `TimezoneMixin.initial` activates before the `@allow_permission`
+    // action gate: unknown zones 400 even where the gate would 403.
     let tz = actor_timezone(&pool, &user_id).await?;
+    check_gate(gate, slug, &facts)?;
     // Custom `list()` queryset (`member.py:159-166`): the get_queryset
     // scope plus `is_active` and the member's live workspace membership
     // (no `deleted_at` guard on the joined rows — QUIRK-fanout, so no
@@ -2216,8 +2289,10 @@ async fn member_create_inner(
     let project_id = resolve_project_id(&pool, slug, project_raw).await?;
     let gate = gate_for("POST", "workspaces/<slug>/projects/<project_id>/members/")?;
     let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id, gate_roles(gate)).await?;
-    check_gate(gate, slug, &facts)?;
+    // `TimezoneMixin.initial` activates before the `@allow_permission`
+    // action gate: unknown zones 400 even where the gate would 403.
     let tz = actor_timezone(&pool, &user_id).await?;
+    check_gate(gate, slug, &facts)?;
     let data = negotiate_data(headers, body)?;
     // `request.data.get("members", [])`: only mappings have `.get`.
     let members = match &data.value {
@@ -2270,23 +2345,58 @@ async fn member_create_inner(
     .await
 }
 
-/// How a `role` value travels to Postgres on the bulk paths: Django
-/// sends untyped params, so every value renders to text (`int` digits,
-/// `repr` floats, verbatim strings, `True`/`False`, JSON for composites)
-/// and the `CAST` / column type coerces or rejects it — exactly like
-/// `bulk_update` / `bulk_create`. `None` (missing role on an existing
-/// row) is SQL NULL → the `IntegrityError` 400.
-fn role_bind_text(value: &JVal) -> Option<String> {
+/// How a `role` value travels to Postgres on the bulk paths.
+/// `SmallIntegerField.get_prep_value` runs `int(value)` in Python
+/// before anything reaches Postgres, so the port normalizes the same
+/// way: bools become 0/1 (a 201 — `True` stores role 1, verified
+/// live), floats truncate toward zero, strings parse (or the
+/// `ValueError` 500), composites are the `TypeError` 500. Out-of-int2
+/// values fail at the DB exactly like Django's (huge ints ride `f64`,
+/// still out of range). `None` (missing role on an existing row) is
+/// SQL NULL → the `IntegrityError` 400.
+#[derive(Debug, PartialEq)]
+enum RoleBind {
+    Null,
+    Int(i64),
+    Float(f64),
+    Text(String),
+}
+
+fn role_bind(value: &JVal) -> RoleBind {
     match value {
-        JVal::Null => None,
-        JVal::Bool(true) => Some("True".to_owned()),
-        JVal::Bool(false) => Some("False".to_owned()),
-        JVal::Num(number) => Some(number.py_string()),
-        JVal::Str(text) => Some(
-            text.to_clean_string()
-                .unwrap_or_else(|| text.to_lossy_string()),
-        ),
-        JVal::Array(_) | JVal::Object(_) => Some(to_serde_publish(value).to_string()),
+        JVal::Null => RoleBind::Null,
+        JVal::Bool(flag) => RoleBind::Int(i64::from(*flag)),
+        JVal::Num(number) => {
+            if number.is_float() {
+                let float = number.as_f64();
+                if float.is_finite() {
+                    // `int()` truncates toward zero; `as` saturates
+                    // huge magnitudes to `i64::{MAX, MIN}`, still out
+                    // of int2 range → the same 500.
+                    RoleBind::Int(float as i64)
+                } else {
+                    // NaN/inf: `int()` raises → 500; Postgres errors
+                    // on the float8→int2 conversion the same way.
+                    RoleBind::Float(float)
+                }
+            } else {
+                match number.as_i64() {
+                    Some(int) => RoleBind::Int(int),
+                    None => RoleBind::Float(number.as_f64()),
+                }
+            }
+        }
+        JVal::Str(_) => match python_int(value) {
+            Some(int) if int <= i128::from(i64::MAX) && int >= i128::from(i64::MIN) => {
+                RoleBind::Int(int as i64)
+            }
+            Some(int) => RoleBind::Float(int as f64),
+            // Unparseable text: a typed TEXT param has no cast to
+            // smallint (42804) — the 500 `int()`'s `ValueError` maps
+            // to. (The content is irrelevant: every TEXT fails.)
+            None => RoleBind::Text(to_serde_publish(value).to_string()),
+        },
+        JVal::Array(_) | JVal::Object(_) => RoleBind::Text(to_serde_publish(value).to_string()),
     }
 }
 
@@ -2433,12 +2543,12 @@ async fn member_create_write(
             role_by_member.insert(text.clone(), role);
         }
     }
-    let mut updates: Vec<(uuid::Uuid, Option<String>)> = Vec::new();
+    let mut updates: Vec<(uuid::Uuid, RoleBind)> = Vec::new();
     for (id, member_id) in &existing {
         let Some(role) = role_by_member.get(&member_id.to_string()) else {
             return Err(body_error("The required key does not exist."));
         };
-        updates.push((*id, role_bind_text(role)));
+        updates.push((*id, role_bind(role)));
     }
     // `bulk_update(["is_active", "role"])` (`member.py:97`): one atomic
     // statement with Django's `CAST(CASE ... AS smallint)` shape
@@ -2473,7 +2583,13 @@ async fn member_create_write(
         sql.push(')');
         let mut query = sqlx::query(&sql);
         for (id, role) in &updates {
-            query = query.bind(id).bind(role);
+            query = query.bind(id);
+            query = match role {
+                RoleBind::Null => query.bind(None::<String>),
+                RoleBind::Int(int) => query.bind(int),
+                RoleBind::Float(float) => query.bind(float),
+                RoleBind::Text(text) => query.bind(text),
+            };
         }
         for (id, _) in &updates {
             query = query.bind(id).bind(true);
@@ -2502,19 +2618,19 @@ async fn member_create_write(
     // Append rows in request order, duplicates included
     // (`member.py:113-138`): `bulk_create` skips conflicts, so extra
     // rows for reactivated members simply do not insert.
-    let member_view = project_member::default_props().to_string();
-    let member_prefs = project_member::default_preferences().to_string();
+    // JSONB columns: bind the `Value` itself — psycopg sends jsonb
+    // params, while TEXT has no assignment cast to jsonb (42804).
+    let member_view = project_member::default_props();
+    let member_prefs = project_member::default_preferences();
     let props_filters =
-        pidash_db::app_issues::models_core::project_user_property::default_filters().to_string();
+        pidash_db::app_issues::models_core::project_user_property::default_filters();
     let props_display_filters =
-        pidash_db::app_issues::models_core::project_user_property::default_display_filters()
-            .to_string();
+        pidash_db::app_issues::models_core::project_user_property::default_display_filters();
     let props_display_properties =
-        pidash_db::app_issues::models_core::project_user_property::default_display_properties()
-            .to_string();
-    let props_rich = project_user_property::default_rich_filters().to_string();
-    let props_prefs = project_user_property::default_preferences().to_string();
-    let mut new_members: Vec<(uuid::Uuid, uuid::Uuid, Option<String>, f64)> = Vec::new();
+        pidash_db::app_issues::models_core::project_user_property::default_display_properties();
+    let props_rich = project_user_property::default_rich_filters();
+    let props_prefs = project_user_property::default_preferences();
+    let mut new_members: Vec<(uuid::Uuid, uuid::Uuid, RoleBind, f64)> = Vec::new();
     for item in &members {
         let JVal::Object(object) = item else {
             return Err(Denial::ServerError);
@@ -2524,8 +2640,8 @@ async fn member_create_write(
         // `member.get("role", 5)`: absent means Guest, present-but-null
         // stays NULL (the `IntegrityError` 400 on insert).
         let role = match object.get("role") {
-            None => Some("5".to_owned()),
-            Some(value) => role_bind_text(value),
+            None => RoleBind::Int(5),
+            Some(value) => role_bind(value),
         };
         // `str(member.get("member_id"))`: the RAW request value, so a
         // bool/int id (`True`, `15`) never matches a canonical-uuid
@@ -2573,8 +2689,14 @@ async fn member_create_write(
                 .bind(project_id)
                 .bind(workspace_id)
                 .bind(member_id)
-                .bind(None::<String>)
-                .bind(role)
+                .bind(None::<String>);
+            query = match role {
+                RoleBind::Null => query.bind(None::<String>),
+                RoleBind::Int(int) => query.bind(int),
+                RoleBind::Float(float) => query.bind(float),
+                RoleBind::Text(text) => query.bind(text),
+            };
+            query = query
                 .bind(&member_view)
                 .bind(&member_view)
                 .bind(&member_prefs)
@@ -2677,7 +2799,7 @@ async fn member_retrieve(
     body: Bytes,
 ) -> Response {
     // The `<uuid:pk>` converter rejects before auth (Django resolver).
-    if pk_raw.parse::<uuid::Uuid>().is_err() {
+    if !is_django_uuid(&pk_raw) {
         return proxy_through(state, method, uri, headers, body).await;
     }
     into_response(member_retrieve_inner(&state, &slug, &project_raw, &pk_raw, extension).await)
@@ -2698,8 +2820,10 @@ async fn member_retrieve_inner(
         "workspaces/<slug>/projects/<project_id>/members/<pk>/",
     )?;
     let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id, gate_roles(gate)).await?;
-    check_gate(gate, slug, &facts)?;
+    // `TimezoneMixin.initial` activates before the `@allow_permission`
+    // action gate: unknown zones 400 even where the gate would 403.
     let tz = actor_timezone(&pool, &user_id).await?;
+    check_gate(gate, slug, &facts)?;
     let pk = pk_raw
         .parse::<uuid::Uuid>()
         .map_err(|_| Denial::ServerError)?;
@@ -2760,7 +2884,7 @@ async fn member_partial_update(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     body: Bytes,
 ) -> Response {
-    if pk_raw.parse::<uuid::Uuid>().is_err() {
+    if !is_django_uuid(&pk_raw) {
         return proxy_through(state, method, uri, headers, body).await;
     }
     into_response(
@@ -2794,8 +2918,10 @@ async fn member_partial_update_inner(
         "workspaces/<slug>/projects/<project_id>/members/<pk>/",
     )?;
     let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id, gate_roles(gate)).await?;
-    check_gate(gate, slug, &facts)?;
+    // `TimezoneMixin.initial` activates before the `@allow_permission`
+    // action gate: unknown zones 400 even where the gate would 403.
     let tz = actor_timezone(&pool, &user_id).await?;
+    check_gate(gate, slug, &facts)?;
     let tz_name = actor_timezone_name(&pool, &user_id).await?;
     let pk = pk_raw
         .parse::<uuid::Uuid>()
@@ -2874,26 +3000,35 @@ async fn member_partial_update_inner(
             let contains = items
                 .iter()
                 .any(|item| matches!(item, JVal::Str(text) if text.eq_str("role")));
-            if contains {
-                return Err(Denial::ServerError);
+            if !contains {
+                return Err(non_dict_body("list"));
             }
-            return Err(non_dict_body("list"));
+            // `"role" in [...]` is true: the 403 matrix runs before the
+            // `.get` AttributeError 500 (`member.py:230-245`), so fall
+            // through with a missing value.
+            role_present = true;
+            role_value = None;
         }
         JVal::Str(text) => {
-            if text.contains_str("role") {
-                return Err(Denial::ServerError);
+            if !text.contains_str("role") {
+                return Err(non_dict_body("str"));
             }
-            return Err(non_dict_body("str"));
+            // Substring `"role"`: same 403-then-500 order as lists.
+            role_present = true;
+            role_value = None;
         }
         JVal::Num(_) | JVal::Bool(_) | JVal::Null => return Err(Denial::ServerError),
     }
     if role_present {
-        // The 403 matrix (`member.py:230-250`).
+        // The 403 matrix (`member.py:230-250`): inline 403s with the
+        // `{"error": ...}` shape, not the gate's `detail` body.
         if requester_role < pidash_auth::permissions::ROLE_ADMIN && !is_workspace_admin {
-            return Err(body_error("You do not have permission to update roles"));
+            return Err(forbidden_error(
+                "You do not have permission to update roles",
+            ));
         }
         if i128::from(target.role) >= i128::from(requester_role) && !is_workspace_admin {
-            return Err(body_error(
+            return Err(forbidden_error(
                 "You cannot update the role of a member with a role equal to or higher than your own",
             ));
         }
@@ -2902,7 +3037,7 @@ async fn member_partial_update_inner(
             None => return Err(Denial::ServerError),
         };
         if new_role >= i128::from(requester_role) && !is_workspace_admin {
-            return Err(body_error(
+            return Err(forbidden_error(
                 "You cannot assign a role equal to or higher than your own",
             ));
         }
@@ -2986,14 +3121,15 @@ async fn member_partial_update_inner(
     if let Some(role) = patch.role {
         query = query.bind(role as i16);
     }
+    // JSONB columns bind the `Value` (TEXT has no cast to jsonb).
     if let Some(view_props) = patch.view_props.as_ref() {
-        query = query.bind(view_props.to_string());
+        query = query.bind(view_props);
     }
     if let Some(default_props) = patch.default_props.as_ref() {
-        query = query.bind(default_props.to_string());
+        query = query.bind(default_props);
     }
     if let Some(preferences) = patch.preferences.as_ref() {
-        query = query.bind(preferences.to_string());
+        query = query.bind(preferences);
     }
     if let Some(sort_order) = patch.sort_order {
         query = query.bind(sort_order);
@@ -3074,7 +3210,7 @@ async fn member_destroy(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     body: Bytes,
 ) -> Response {
-    if pk_raw.parse::<uuid::Uuid>().is_err() {
+    if !is_django_uuid(&pk_raw) {
         return proxy_through(state, method, uri, headers, body).await;
     }
     into_response(member_destroy_inner(&state, &slug, &project_raw, &pk_raw, extension).await)
@@ -3095,8 +3231,10 @@ async fn member_destroy_inner(
         "workspaces/<slug>/projects/<project_id>/members/<pk>/",
     )?;
     let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id, gate_roles(gate)).await?;
-    check_gate(gate, slug, &facts)?;
+    // `TimezoneMixin.initial` activates before the `@allow_permission`
+    // action gate: unknown zones 400 even where the gate would 403.
     let _tz = actor_timezone(&pool, &user_id).await?;
+    check_gate(gate, slug, &facts)?;
     let pk = pk_raw
         .parse::<uuid::Uuid>()
         .map_err(|_| Denial::ServerError)?;
@@ -3177,8 +3315,10 @@ async fn member_leave_inner(
         "workspaces/<slug>/projects/<project_id>/members/leave/",
     )?;
     let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id, gate_roles(gate)).await?;
-    check_gate(gate, slug, &facts)?;
+    // `TimezoneMixin.initial` activates before the `@allow_permission`
+    // action gate: unknown zones 400 even where the gate would 403.
     let _tz = actor_timezone(&pool, &user_id).await?;
+    check_gate(gate, slug, &facts)?;
     let rows: Vec<(uuid::Uuid, i16)> = sqlx::query_as(
         r#"SELECT pm.id, pm.role FROM project_members pm
            JOIN workspaces w ON w.id = pm.workspace_id
@@ -3250,8 +3390,10 @@ async fn member_me_inner(
         "workspaces/<slug>/projects/<project_id>/project-members/me/",
     )?;
     let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id, gate_roles(gate)).await?;
-    check_gate(gate, slug, &facts)?;
+    // `TimezoneMixin.initial` activates before the `@allow_permission`
+    // action gate: unknown zones 400 even where the gate would 403.
     let tz = actor_timezone(&pool, &user_id).await?;
+    check_gate(gate, slug, &facts)?;
     // Own row (`endpoint:333-336`): 404 when not an active member.
     let rows = sqlx::query(&format!(
         "{FULL_SELECT} WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
@@ -3323,6 +3465,9 @@ async fn project_roles_inner(
         gates::GateOutcome::Deny => return Err(Denial::ClassDenied),
         gates::GateOutcome::Unauthenticated => return Err(Denial::Unauthorized),
     }
+    // Class-level `WorkspaceUserPermission` runs inside
+    // `super().initial()`, before `TimezoneMixin` activates — so here,
+    // unlike the `@allow_permission` actions, the gate stays first.
     let _tz = actor_timezone(&pool, &user_id).await?;
     // `{project_id: role}` newest-first (`endpoint:349-353`): duplicate
     // rows fold last-wins at first position, exactly like the dict
@@ -3370,7 +3515,7 @@ async fn preference_get(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     body: Bytes,
 ) -> Response {
-    if member_raw.parse::<uuid::Uuid>().is_err() {
+    if !is_django_uuid(&member_raw) {
         return proxy_through(state, method, uri, headers, body).await;
     }
     into_response(preference_get_inner(&state, &slug, &project_raw, &member_raw, extension).await)
@@ -3391,8 +3536,10 @@ async fn preference_get_inner(
         "workspaces/<slug>/projects/<project_id>/preferences/member/<member_id>/",
     )?;
     let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id, gate_roles(gate)).await?;
-    check_gate(gate, slug, &facts)?;
+    // `TimezoneMixin.initial` activates before the `@allow_permission`
+    // action gate: unknown zones 400 even where the gate would 403.
     let tz = actor_timezone(&pool, &user_id).await?;
+    check_gate(gate, slug, &facts)?;
     let member_id = member_raw
         .parse::<uuid::Uuid>()
         .map_err(|_| Denial::ServerError)?;
@@ -3431,7 +3578,7 @@ async fn preference_patch(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     body: Bytes,
 ) -> Response {
-    if member_raw.parse::<uuid::Uuid>().is_err() {
+    if !is_django_uuid(&member_raw) {
         return proxy_through(state, method, uri, headers, body).await;
     }
     into_response(
@@ -3465,8 +3612,10 @@ async fn preference_patch_inner(
         "workspaces/<slug>/projects/<project_id>/preferences/member/<member_id>/",
     )?;
     let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id, gate_roles(gate)).await?;
-    check_gate(gate, slug, &facts)?;
+    // `TimezoneMixin.initial` activates before the `@allow_permission`
+    // action gate: unknown zones 400 even where the gate would 403.
     let tz = actor_timezone(&pool, &user_id).await?;
+    check_gate(gate, slug, &facts)?;
     let member_id = member_raw
         .parse::<uuid::Uuid>()
         .map_err(|_| Denial::ServerError)?;
@@ -3528,7 +3677,7 @@ async fn preference_patch_inner(
         r#"UPDATE project_members SET preferences = $1, updated_at = $2, updated_by_id = $3
            WHERE id = $4"#,
     )
-    .bind(merged.to_string())
+    .bind(&merged)
     .bind(chrono::Utc::now())
     .bind(user_id)
     .bind(
@@ -3915,6 +4064,97 @@ mod tests {
         // Same instants stay valid in UTC.
         assert!(overflow("9999-12-31T23:59:59Z", &tz).is_ok());
         assert!(overflow("0001-01-01T00:00:00Z", &tz).is_ok());
+    }
+
+    #[test]
+    fn uuid_converter_matches_django_resolver() {
+        // Lowercase hyphenated only — every other `Uuid::parse` form
+        // resolver-404s (`django/urls/converters.py:26`).
+        let good = "abcdef01-2345-6789-abcd-ef0123456789";
+        assert!(is_django_uuid(good));
+        assert!(!is_django_uuid(&good.to_uppercase()));
+        assert!(!is_django_uuid(&format!("{{{good}}}")));
+        assert!(!is_django_uuid(&format!("urn:uuid:{good}")));
+        assert!(!is_django_uuid(&good.replace('-', "")));
+        assert!(!is_django_uuid("44444444-4444-4444-4444-44444444440"));
+        assert!(!is_django_uuid("44444444-4444-4444-4444-4444444444022"));
+        assert!(!is_django_uuid("g4444444-4444-4444-4444-444444444402"));
+        assert!(!is_django_uuid(""));
+        assert!(!is_django_uuid("not-a-uuid-at-all-ok-fine"));
+    }
+
+    #[test]
+    fn dst_gap_uses_pre_transition_offset() {
+        // Spring-forward gap wall times 200 with the fold=0 offset
+        // (verified against live `to_internal_value`: NY 2024-03-10
+        // 02:30 stores 07:30Z); ambiguous times keep the first offset.
+        let ny: Tz = "America/New_York".parse().unwrap();
+        let parse = |text: &str| {
+            parse_member_datetime(text, &ny, "America/New_York")
+                .map(|dt| dt.to_rfc3339())
+                .map_err(|fail| match fail {
+                    FieldFail::Messages(messages) => messages.join(";"),
+                    FieldFail::ServerError => "500".to_owned(),
+                })
+        };
+        assert_eq!(
+            parse("2024-03-10T02:30:00").unwrap(),
+            "2024-03-10T07:30:00+00:00"
+        );
+        assert_eq!(
+            parse("2024-03-10T02:00:00").unwrap(),
+            "2024-03-10T07:00:00+00:00"
+        );
+        assert_eq!(
+            parse("2024-11-03T01:30:00").unwrap(),
+            "2024-11-03T05:30:00+00:00"
+        );
+        assert_eq!(
+            parse("2024-01-02T03:04:05").unwrap(),
+            "2024-01-02T08:04:05+00:00"
+        );
+    }
+
+    #[test]
+    fn role_bind_matches_get_prep_value() {
+        // `SmallIntegerField.get_prep_value` runs `int(value)` in
+        // Python first: bools → 0/1 (live-verified: `True` 201s with
+        // role 1), floats truncate, strings parse, composites and
+        // unparseable text are the 500 arms (typed TEXT has no cast
+        // to smallint).
+        assert_eq!(role_bind(&jval("15")), RoleBind::Int(15));
+        assert_eq!(role_bind(&jval("-0")), RoleBind::Int(0));
+        assert_eq!(role_bind(&jval("15.0")), RoleBind::Int(15));
+        assert_eq!(role_bind(&jval("15.9")), RoleBind::Int(15));
+        assert_eq!(role_bind(&jval("-15.9")), RoleBind::Int(-15));
+        assert_eq!(role_bind(&jval("1e3")), RoleBind::Int(1000));
+        assert_eq!(role_bind(&jval("0.5")), RoleBind::Int(0));
+        assert_eq!(role_bind(&jval("null")), RoleBind::Null);
+        assert_eq!(role_bind(&jval("true")), RoleBind::Int(1));
+        assert_eq!(role_bind(&jval("false")), RoleBind::Int(0));
+        assert_eq!(role_bind(&jval("\"15\"")), RoleBind::Int(15));
+        assert_eq!(role_bind(&jval("\" 15 \"")), RoleBind::Int(15));
+        assert_eq!(role_bind(&jval("\"1_5\"")), RoleBind::Int(15));
+        assert!(matches!(role_bind(&jval("\"15.5\"")), RoleBind::Text(_)));
+        assert!(matches!(role_bind(&jval("\"abc\"")), RoleBind::Text(_)));
+        assert!(matches!(role_bind(&jval("[15]")), RoleBind::Text(_)));
+        assert!(matches!(
+            role_bind(&jval("{\"role\": 15}")),
+            RoleBind::Text(_)
+        ));
+        match role_bind(&jval(&"9".repeat(60))) {
+            RoleBind::Float(float) => assert!(float.is_finite() && float > 0.0),
+            other => panic!("overflow int binds f64, got {other:?}"),
+        }
+        match role_bind(&jval(&"9".repeat(400))) {
+            RoleBind::Float(float) => assert!(float.is_infinite()),
+            other => panic!("huge int saturates to inf, got {other:?}"),
+        }
+        assert_eq!(role_bind(&jval("1e400")), RoleBind::Float(f64::INFINITY));
+        match role_bind(&jval(&format!("\"{}\"", "9".repeat(60)))) {
+            RoleBind::Float(float) => assert!(float.is_finite() && float > 1e37),
+            other => panic!("huge digit-string binds out-of-range f64, got {other:?}"),
+        }
     }
 
     #[test]
