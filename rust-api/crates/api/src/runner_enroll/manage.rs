@@ -2021,13 +2021,13 @@ fn owned(
 
 /// Register the web runners/machines/pods routes
 /// (`runner/web_urls.py`: the dev-machine list, the runner list,
-/// runner detail get+patch, the pod list get+post, pod detail
-/// get+patch+delete). Merged under `RouteGroup::RunnerWeb` at the F-10
-/// seam; sibling handler issues extend the merge, keeping both sides.
+/// runner detail get+patch (+delete, PIDASHCONV-593), the pod list
+/// get+post, pod detail get+patch+delete). Merged under
+/// `RouteGroup::RunnerWeb` at the F-10 seam; sibling handler issues
+/// extend the merge, keeping both sides.
 pub fn routes() -> Router<AppState> {
     use axum::routing::get;
     const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
-    const GET_PATCH: &[&str] = &["POST", "PUT", "DELETE", "HEAD", "OPTIONS"];
     const GET_POST: &[&str] = &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     const GET_PATCH_DELETE: &[&str] = &["POST", "PUT", "HEAD", "OPTIONS"];
     Router::new()
@@ -2038,7 +2038,15 @@ pub fn routes() -> Router<AppState> {
         .route("/api/runners/", owned(get(runners_list), GET_ONLY))
         .route(
             "/api/runners/{runner_id}/",
-            owned(get(runner_detail).patch(runner_patch), GET_PATCH),
+            // The DELETE joins this same registration (PIDASHCONV-593):
+            // axum merges same-path `MethodRouter`s, so a second
+            // registration would collide on the doubly-defined DELETE.
+            owned(
+                get(runner_detail)
+                    .patch(runner_patch)
+                    .delete(super::delete_cmds::runner_delete),
+                GET_PATCH_DELETE,
+            ),
         )
         .route(
             "/api/runners/pods/",

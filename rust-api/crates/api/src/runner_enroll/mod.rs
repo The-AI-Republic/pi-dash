@@ -15,7 +15,13 @@
 //! - [`manage`]: the web runners/machines/pods endpoints
 //!   (`runner/views/runners.py:62-125,289-425`, `runner/views/pods.py`,
 //!   PIDASHCONV-591) — fixture ids D13-F2 + D13-F5 + D13-F6 + D13-F7.
+//!
+//! - [`delete_cmds`]: the deletes + machine-command endpoints
+//!   (`runner/views/runners.py:249-286,427-452`,
+//!   `runner/views/machine_commands.py:63-257`, PIDASHCONV-593) —
+//!   fixture ids D13-F5 + D13-F6 + D13-F7 + D13-F8.
 
 pub mod auth;
+pub mod delete_cmds;
 pub mod manage;
 pub mod throttle;
