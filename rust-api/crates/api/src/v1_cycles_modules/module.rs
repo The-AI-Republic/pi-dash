@@ -138,9 +138,20 @@ pub enum Denial {
     Conflict(String),
     /// 500, generic branch.
     ServerError,
+    /// 500, the DRF renderer crashed encoding a top-level surrogate echo
+    /// (the double fault escapes to wsgiref's plain 500 — exact bytes,
+    /// `text/plain`, no JSON envelope; same arm as cycle's, PIDASHCONV-732).
+    RendererCrash,
 }
 
 impl Denial {
+    fn content_type(&self) -> &'static str {
+        match self {
+            Denial::RendererCrash => super::json_cpython::PLAIN_CRASH_CONTENT_TYPE,
+            _ => "application/json",
+        }
+    }
+
     fn status_and_body(&self) -> (StatusCode, String) {
         match self {
             Denial::Unauthorized => (StatusCode::UNAUTHORIZED, UNAUTHENTICATED_BODY.to_owned()),
@@ -173,16 +184,21 @@ impl Denial {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
             ),
+            Denial::RendererCrash => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                super::json_cpython::PLAIN_CRASH_BODY.to_owned(),
+            ),
         }
     }
 }
 
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
+        let content_type = self.content_type();
         let (status, body) = self.status_and_body();
         Response::builder()
             .status(status)
-            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::CONTENT_TYPE, content_type)
             .body(axum::body::Body::from(body))
             .expect("static denial response")
     }
@@ -2307,36 +2323,118 @@ fn form_field_surr(
     out
 }
 
+/// Per-element dirtiness for the `members` list (PIDASHCONV-732),
+/// index-aligned with the coerced text items: each `members` child is its
+/// own top-level string input to the UUID coercion, so a dirty element
+/// echoes raw into its `is not a valid UUID.` message and crashes the
+/// renderer exactly like a dirty `lead`.
+pub type MembersDirty = Vec<bool>;
+
+/// Attribute JSON lone-surrogate spans to `members` elements
+/// (PIDASHCONV-732): the auxiliary CPython parse (same one 712 uses for
+/// fields) recovers which array elements are dirty strings, last-wins like
+/// serde; a non-array `members` (or anything unattributable) yields no
+/// flags — its shape error carries no echo, so there is nothing to crash.
+fn json_members_dirty(text: &str, surr: &[(usize, u16)]) -> MembersDirty {
+    let mut out = MembersDirty::new();
+    if surr.is_empty() {
+        return out;
+    }
+    let Ok(value) = super::json_cpython::parse_json_text_spans(text, surr) else {
+        return out;
+    };
+    let Some(object) = value.into_object() else {
+        return out;
+    };
+    for (key, value) in object.iter() {
+        if key.to_clean_string().as_deref() != Some("members") {
+            continue;
+        }
+        if let super::json_cpython::JVal::Array(items) = value {
+            out = items
+                .iter()
+                .map(|item| {
+                    matches!(
+                        item,
+                        super::json_cpython::JVal::Str(text) if text.has_surrogate()
+                    )
+                })
+                .collect();
+        } else {
+            out = MembersDirty::new();
+        }
+    }
+    out
+}
+
+/// Attribute form/multipart lone-surrogate spans to `members` elements
+/// (PIDASHCONV-732): `build_form_body` aligns the `members` span lists
+/// with the array items (exact-key and indexed alike), so each string
+/// element reads its own slot; indexed file placeholders and dict-form
+/// slots carry no spans and stay clean (their echoes render filenames
+/// and `MultiValueDict` text, never a raw surrogate).
+fn form_members_dirty(
+    map: &serde_json::Map<String, Value>,
+    surr: &BTreeMap<String, Vec<Vec<(usize, u16)>>>,
+) -> MembersDirty {
+    let Some(Value::Array(items)) = map.get("members") else {
+        return MembersDirty::new();
+    };
+    let lists = surr.get("members");
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let Value::String(text) = item else {
+                return false;
+            };
+            let spans: &[(usize, u16)] = lists
+                .and_then(|lists| lists.get(index))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            if spans.is_empty() {
+                return false;
+            }
+            super::json_cpython::JStr::from_dirty(text, spans).has_surrogate()
+        })
+        .collect()
+}
+
 /// Content-negotiated `parse_body` (PIDASHCONV-627): empty is `{}`, form /
 /// multipart arrives as its text map, JSON keeps the existing serde path
 /// over the decoded text (no empty shortcut: CL>0 with empty decoded text
 /// is the EOF `ParseError`). The files map carries uploads per key, the
-/// surr map the first surrogate per dirty field (PIDASHCONV-712).
+/// surr map the first surrogate per dirty field (PIDASHCONV-712), the
+/// members flags the per-element dirtiness (PIDASHCONV-732).
 /// The trailing flag reports HTML (form/multipart) input for the
 /// `get_value` blank rules in coercion.
 fn parse_body_ct(
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<(super::body::FormMaps, FieldSurr, bool), Denial> {
+) -> Result<(super::body::FormMaps, FieldSurr, MembersDirty, bool), Denial> {
     match super::body::negotiate_body(headers, body, &super::body::MODULE_BODY_SPEC)
         .map_err(map_body_error)?
     {
         super::body::NegotiatedBody::Empty => Ok((
             (serde_json::Map::new(), BTreeMap::new()),
             FieldSurr::new(),
+            MembersDirty::new(),
             false,
         )),
         super::body::NegotiatedBody::JsonText { text, surr } => {
             let fields = json_field_surr(&text, &surr);
+            let members = json_members_dirty(&text, &surr);
             Ok((
                 (parse_json_map(text.as_bytes())?, BTreeMap::new()),
                 fields,
+                members,
                 false,
             ))
         }
         super::body::NegotiatedBody::Form { map, files, surr } => {
             let fields = form_field_surr(&map, &surr);
-            Ok(((map, files), fields, true))
+            let members = form_members_dirty(&map, &surr);
+            Ok(((map, files), fields, members, true))
         }
     }
 }
@@ -2590,26 +2688,37 @@ fn check_max_length(text: &str, max_length: Option<usize>) -> Result<(), CoerceF
 /// DRF `ChoiceField` over one JSON value (verified live): `null` fails
 /// unless `allow_null`; anything whose `str()` is not a valid choice fails
 /// `"{input}" is not a valid choice.` with the Python rendering (not JSON:
-/// `"['a']"`, `"True"`, `"1.5"`).
+/// `"['a']"`, `"True"`, `"1.5"`). `dirty` is true when the value is a
+/// top-level string carrying a lone surrogate (PIDASHCONV-732): it echoes
+/// raw into the choice message and crashes the renderer
+/// ([`Denial::RendererCrash`]), aborting the request instead of
+/// collecting, hence the nested result (same shape as cycle's).
 pub fn coerce_choice(
     value: Option<&Value>,
     choices: &[&str],
-) -> Result<Option<String>, CoerceFail> {
+    dirty: bool,
+) -> Result<Result<Option<String>, CoerceFail>, Denial> {
     let fail = |body: String| CoerceFail { body };
     let Some(value) = value else {
-        return Err(fail(r#"["This field is required."]"#.to_owned()));
+        return Ok(Err(fail(r#"["This field is required."]"#.to_owned())));
     };
     if value.is_null() {
-        return Err(fail(r#"["This field may not be null."]"#.to_owned()));
+        return Ok(Err(fail(r#"["This field may not be null."]"#.to_owned())));
+    }
+    if dirty {
+        // A dirty top-level string never matches a clean choice, so the
+        // crash precedes the membership check (nested echoes repr-escape
+        // and stay clean 400s — callers only flag top-level strings).
+        return Err(Denial::RendererCrash);
     }
     let text = py_repr(value);
     if choices.contains(&text.as_str()) {
-        Ok(Some(text))
+        Ok(Ok(Some(text)))
     } else {
-        Err(fail(format!(
+        Ok(Err(fail(format!(
             "[{}]",
             json_string(&format!(r#""{text}" is not a valid choice."#))
-        )))
+        ))))
     }
 }
 
@@ -2635,46 +2744,60 @@ pub enum PkValue {
 /// * float/list/dict/str → the UUID parse, failing
 ///   `“<value>” is not a valid UUID.` (DRF's curly quotes) with the Python
 ///   rendering, else the existence check with the raw echo.
-pub fn coerce_pk_shape(value: &Value, allow_null: bool) -> Result<PkValue, CoerceFail> {
+///
+/// `dirty` is true when the value is a top-level string carrying a lone
+/// surrogate (PIDASHCONV-732): it echoes raw into the UUID message and
+/// crashes the renderer ([`Denial::RendererCrash`]), aborting the request
+/// instead of collecting, hence the nested result (same shape as cycle's).
+pub fn coerce_pk_shape(
+    value: &Value,
+    allow_null: bool,
+    dirty: bool,
+) -> Result<Result<PkValue, CoerceFail>, Denial> {
     let fail = |body: String| CoerceFail { body };
     match value {
         Value::Null => {
             if allow_null {
-                Ok(PkValue::Null)
+                Ok(Ok(PkValue::Null))
             } else {
-                Err(fail(r#"["This field may not be null."]"#.to_owned()))
+                Ok(Err(fail(r#"["This field may not be null."]"#.to_owned())))
             }
         }
-        Value::Bool(_) => Err(fail(format!(
+        Value::Bool(_) => Ok(Err(fail(format!(
             "[{}]",
             json_string("Incorrect type. Expected pk value, received bool.")
-        ))),
+        )))),
         Value::Number(n) => {
             // `UUID(int=...)` accepts the u128 range (negatives and huge
             // values fail); the digit echo is exact even past u64 thanks to
             // `arbitrary_precision`.
             let digits = py_repr(&Value::Number(n.clone()));
             match digits.parse::<u128>().map(uuid::Uuid::from_u128) {
-                Ok(id) => Ok(PkValue::Id(id)),
-                Err(_) => Err(fail(invalid_uuid_message(&digits))),
+                Ok(id) => Ok(Ok(PkValue::Id(id))),
+                Err(_) => Ok(Err(fail(invalid_uuid_message(&digits)))),
             }
         }
         Value::String(raw) => {
+            if dirty {
+                // A dirty `request.data` string echoes raw into the UUID
+                // message and crashes the renderer (verified live).
+                return Err(Denial::RendererCrash);
+            }
             // `RelatedField.run_validation` forces `''` to `None` on every
             // path (verified live: JSON and form blanks behave alike) —
             // so the empty arm is shared, not HTML-only.
             if raw.is_empty() {
                 if allow_null {
-                    return Ok(PkValue::Null);
+                    return Ok(Ok(PkValue::Null));
                 }
-                return Err(fail(r#"["This field may not be null."]"#.to_owned()));
+                return Ok(Err(fail(r#"["This field may not be null."]"#.to_owned())));
             }
             match raw.parse::<uuid::Uuid>() {
-                Ok(id) => Ok(PkValue::Id(id)),
-                Err(_) => Err(fail(invalid_uuid_message(raw))),
+                Ok(id) => Ok(Ok(PkValue::Id(id))),
+                Err(_) => Ok(Err(fail(invalid_uuid_message(raw)))),
             }
         }
-        Value::Array(_) | Value::Object(_) => Err(fail(invalid_uuid_message(&py_repr(value)))),
+        Value::Array(_) | Value::Object(_) => Ok(Err(fail(invalid_uuid_message(&py_repr(value))))),
     }
 }
 
@@ -2690,15 +2813,20 @@ pub fn invalid_uuid_message(rendered: &str) -> String {
 /// live: `“1.5” is not a valid UUID.`). `coerce_pk_shape` routes numbers
 /// through the int path, so floats need their own arm — handled by testing
 /// `is_f64` before calling it. This helper keeps that decision in one place.
-pub fn coerce_pk_value(value: &Value, allow_null: bool) -> Result<PkValue, CoerceFail> {
+/// `dirty` passes through to [`coerce_pk_shape`] (floats are never dirty).
+pub fn coerce_pk_value(
+    value: &Value,
+    allow_null: bool,
+    dirty: bool,
+) -> Result<Result<PkValue, CoerceFail>, Denial> {
     if let Value::Number(n) = value {
         if n.is_f64() {
-            return Err(CoerceFail {
+            return Ok(Err(CoerceFail {
                 body: invalid_uuid_message(&py_repr(value)),
-            });
+            }));
         }
     }
-    coerce_pk_shape(value, allow_null)
+    coerce_pk_shape(value, allow_null, dirty)
 }
 
 /// Check one coerced user id against `User.objects.all()`: the full `users`
@@ -2942,7 +3070,9 @@ fn parse_week_date(text: &str) -> Option<chrono::NaiveDate> {
 /// semantics (every field optional). Date failures reuse the services
 /// layer's `DRF_DATE_FORMAT_MESSAGE` (verified against DRF's `DateField`).
 /// `field_surr` carries the first surrogate per dirty field for the
-/// `CharField` validator (PIDASHCONV-712).
+/// `CharField` validator (PIDASHCONV-712) and the dirty flags for the
+/// echoing `status` / `lead` coercions; `members_dirty` carries the
+/// per-element flags for the `members` children (PIDASHCONV-732).
 pub async fn coerce_write(
     pool: &PgPool,
     body: &serde_json::Map<String, Value>,
@@ -2950,6 +3080,7 @@ pub async fn coerce_write(
     files: &super::body::FilesMap,
     html: bool,
     field_surr: &FieldSurr,
+    members_dirty: &MembersDirty,
 ) -> Result<ModuleWrite, Denial> {
     use pidash_services::v1_cycles_modules::module_shapes as shapes;
     let mut errors: Vec<(String, String)> = Vec::new();
@@ -3070,16 +3201,20 @@ pub async fn coerce_write(
         }
     }
     // status: ChoiceField(6); missing absent. The choice list comes from
-    // the types layer's `ModuleStatus::ALL` (single source of truth).
+    // the types layer's `ModuleStatus::ALL` (single source of truth). An
+    // upload shadows the text (the filename is coerced, never dirty), so
+    // the dirty flag only applies to the text value (PIDASHCONV-732).
     match body.get("status") {
         None => {}
         value => {
             use pidash_types::v1_cycles_modules::module_shapes::ModuleStatus;
             let choices: [&str; 6] = std::array::from_fn(|index| ModuleStatus::ALL[index].as_str());
-            match coerce_choice(value, &choices) {
-                Ok(Some(status)) => write.status = Some(status),
-                Ok(None) => {}
-                Err(fail) => errors.push(("status".to_owned(), fail.body)),
+            let dirty = !files.contains_key("status") && field_surr.contains_key("status");
+            match coerce_choice(value, &choices, dirty) {
+                Ok(Ok(Some(status))) => write.status = Some(status),
+                Ok(Ok(None)) => {}
+                Ok(Err(fail)) => errors.push(("status".to_owned(), fail.body)),
+                Err(denial) => return Err(denial),
             }
         }
     }
@@ -3095,9 +3230,12 @@ pub async fn coerce_write(
     }
     match body.get("lead") {
         None => {}
-        Some(value) => match coerce_pk_value(value, true) {
-            Ok(PkValue::Null) => write.lead = Some(None),
-            Ok(PkValue::Id(id)) => {
+        // An upload shadows the text (removed above, so the text is never
+        // coerced alongside a file); the dirty flag only ever marks the
+        // text value (PIDASHCONV-732).
+        Some(value) => match coerce_pk_value(value, true, field_surr.contains_key("lead")) {
+            Ok(Ok(PkValue::Null)) => write.lead = Some(None),
+            Ok(Ok(PkValue::Id(id))) => {
                 let echo = match value {
                     Value::Number(_) => py_repr(value),
                     Value::String(s) => s.clone(),
@@ -3113,7 +3251,8 @@ pub async fn coerce_write(
                     }
                 }
             }
-            Err(fail) => errors.push(("lead".to_owned(), fail.body)),
+            Ok(Err(fail)) => errors.push(("lead".to_owned(), fail.body)),
+            Err(denial) => return Err(denial),
         },
     }
     // members: list of user PKs; missing absent. Uploads append after the
@@ -3157,10 +3296,13 @@ pub async fn coerce_write(
                             continue;
                         }
                     }
-                    match coerce_pk_value(item, false) {
-                        Ok(PkValue::Null) => child_errors
+                    // Each element carries its own dirty flag (PIDASHCONV-732);
+                    // missing slots (unattributable input) read clean.
+                    let dirty = members_dirty.get(index).copied().unwrap_or(false);
+                    match coerce_pk_value(item, false, dirty) {
+                        Ok(Ok(PkValue::Null)) => child_errors
                             .push((index, r#"["This field may not be null."]"#.to_owned())),
-                        Ok(PkValue::Id(id)) => {
+                        Ok(Ok(PkValue::Id(id))) => {
                             let echo = match item {
                                 Value::Number(_) => py_repr(item),
                                 Value::String(s) => s.clone(),
@@ -3176,7 +3318,8 @@ pub async fn coerce_write(
                                 }
                             }
                         }
-                        Err(fail) => child_errors.push((index, fail.body)),
+                        Ok(Err(fail)) => child_errors.push((index, fail.body)),
+                        Err(denial) => return Err(denial),
                     }
                 }
                 for (offset, part) in uploads.iter().enumerate() {
@@ -3787,8 +3930,17 @@ pub async fn create_module_inner(
     )
     .await?;
     let project = fetch_project(&pre.pool, &project_id, &workspace_id).await?;
-    let ((raw, files), field_surr, html) = parse_body_ct(headers, body)?;
-    let write = coerce_write(&pre.pool, &raw, false, &files, html, &field_surr).await?;
+    let ((raw, files), field_surr, members_dirty, html) = parse_body_ct(headers, body)?;
+    let write = coerce_write(
+        &pre.pool,
+        &raw,
+        false,
+        &files,
+        html,
+        &field_surr,
+        &members_dirty,
+    )
+    .await?;
     // `validate()`: the project gates (the context id is always present
     // and the row was just fetched; `module_view` is the live arm),
     // then the date order, then the members rewrite.
@@ -4037,8 +4189,17 @@ pub async fn patch_module_inner(
             "Archived module cannot be edited".to_owned(),
         ));
     }
-    let ((raw, files), field_surr, html) = parse_body_ct(headers, body)?;
-    let write = coerce_write(&pre.pool, &raw, true, &files, html, &field_surr).await?;
+    let ((raw, files), field_surr, members_dirty, html) = parse_body_ct(headers, body)?;
+    let write = coerce_write(
+        &pre.pool,
+        &raw,
+        true,
+        &files,
+        html,
+        &field_surr,
+        &members_dirty,
+    )
+    .await?;
     // `validate()`: the project must still be live (its soft-delete
     // between gate and body would 404 here, matching `DoesNotExist`), the
     // module view must be on, the provided dates ordered; the members list
@@ -5688,29 +5849,108 @@ mod tests {
     }
 
     #[test]
+    fn members_dirty_attribution_732() {
+        // JSON: per-element flags, index-aligned with the array.
+        assert_eq!(
+            json_members_dirty("{\"members\": [\"�\", \"ok\"]}", &[(14, 0xD801)]),
+            vec![true, false]
+        );
+        // Only string elements flag; numbers, nulls and nested arrays
+        // never crash (their echoes repr-escape).
+        assert_eq!(
+            json_members_dirty(
+                "{\"members\": [\"�\", 5, null, [\"�\"]]}",
+                &[(14, 0xD801), (31, 0xD800)]
+            ),
+            vec![true, false, false, false]
+        );
+        // Last-wins like serde: a trailing scalar shadows the array, and
+        // its shape error carries no echo, so no flags survive.
+        assert!(json_members_dirty(
+            "{\"members\": [\"�\"], \"members\": \"s\"}",
+            &[(14, 0xD800)]
+        )
+        .is_empty());
+        // A literal placeholder with no spans attributes nothing.
+        assert!(json_members_dirty("{\"members\": [\"�\"]}", &[]).is_empty());
+        // Malformed JSON attributes nothing (serde already answered).
+        assert!(json_members_dirty("{\"members\": ", &[(0, 0xD800)]).is_empty());
+        // Form: each string element reads its own aligned slot.
+        let map: serde_json::Map<String, Value> =
+            serde_json::from_str("{\"members\": [\"�a\", \"ok\"]}").expect("form map");
+        let mut surr: BTreeMap<String, Vec<Vec<(usize, u16)>>> = BTreeMap::new();
+        surr.insert("members".to_owned(), vec![vec![(0, 0xD801)], Vec::new()]);
+        assert_eq!(form_members_dirty(&map, &surr), vec![true, false]);
+        // Placeholders and dict-form slots carry no spans and stay clean;
+        // missing slots read clean too.
+        let map: serde_json::Map<String, Value> =
+            serde_json::from_str("{\"members\": [null, [{\"x\": [\"�\"]}]]}").expect("indexed");
+        assert_eq!(form_members_dirty(&map, &surr), vec![false, false]);
+        let map: serde_json::Map<String, Value> =
+            serde_json::from_str("{\"name\": \"m\"}").expect("no members");
+        assert!(form_members_dirty(&map, &surr).is_empty());
+        assert!(form_members_dirty(&map, &BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn renderer_crash_denial_732() {
+        // The crash answers the exact wsgiref plain-500 bytes (same consts
+        // cycle uses), with `text/plain` and no JSON envelope.
+        let denial = Denial::RendererCrash;
+        assert_eq!(denial.content_type(), "text/plain");
+        let (status, body) = denial.status_and_body();
+        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body,
+            super::super::json_cpython::PLAIN_CRASH_BODY.to_owned()
+        );
+    }
+
+    #[test]
     fn choice_coercion_echoes_python() {
         let choices = ["planned", "in-progress"];
         assert_eq!(
-            coerce_choice(Some(&serde_json::json!(["a"])), &choices)
+            coerce_choice(Some(&serde_json::json!(["a"])), &choices, false)
+                .expect("shallow")
                 .expect_err("list")
                 .body,
             r#"["\"['a']\" is not a valid choice."]"#
         );
         assert_eq!(
-            coerce_choice(Some(&Value::Bool(true)), &choices)
+            coerce_choice(Some(&Value::Bool(true)), &choices, false)
+                .expect("shallow")
                 .expect_err("bool")
                 .body,
             r#"["\"True\" is not a valid choice."]"#
         );
         assert_eq!(
-            coerce_choice(Some(&Value::Null), &choices)
+            coerce_choice(Some(&Value::Null), &choices, false)
+                .expect("shallow")
                 .expect_err("null")
                 .body,
             r#"["This field may not be null."]"#
         );
         assert_eq!(
-            coerce_choice(Some(&Value::String("planned".to_owned())), &choices).expect("ok"),
+            coerce_choice(Some(&Value::String("planned".to_owned())), &choices, false)
+                .expect("shallow")
+                .expect("ok"),
             Some("planned".to_owned())
+        );
+        // A dirty top-level string echoes raw into the choice message,
+        // which crashes the renderer (the oracle's plain 500); only nested
+        // members stay clean 400s (callers never flag them dirty).
+        assert!(matches!(
+            coerce_choice(
+                Some(&Value::String("\u{FFFD}732".to_owned())),
+                &choices,
+                true
+            ),
+            Err(Denial::RendererCrash)
+        ));
+        assert!(
+            coerce_choice(Some(&serde_json::json!(["\u{FFFD}"])), &choices, false)
+                .expect("shallow")
+                .is_err()
         );
     }
 
@@ -5718,7 +5958,8 @@ mod tests {
     fn pk_coercion_edges() {
         // Bool is the only incorrect_type.
         assert_eq!(
-            coerce_pk_value(&Value::Bool(true), true)
+            coerce_pk_value(&Value::Bool(true), true, false)
+                .expect("shallow")
                 .expect_err("bool")
                 .body,
             r#"["Incorrect type. Expected pk value, received bool."]"#
@@ -5727,42 +5968,65 @@ mod tests {
         // (`RelatedField.run_validation` forces `''` to `None` before the
         // `allow_null` check — verified live against the real field classes).
         assert_eq!(
-            coerce_pk_value(&Value::String(String::new()), true).expect("lead-empty"),
+            coerce_pk_value(&Value::String(String::new()), true, false)
+                .expect("shallow")
+                .expect("lead-empty"),
             PkValue::Null
         );
         assert_eq!(
-            coerce_pk_value(&Value::String(String::new()), false)
+            coerce_pk_value(&Value::String(String::new()), false, false)
+                .expect("shallow")
                 .expect_err("child-empty")
                 .body,
             r#"["This field may not be null."]"#
         );
         // Curly quotes on invalid UUIDs.
         assert_eq!(
-            coerce_pk_value(&Value::String("not-a-uuid".to_owned()), true)
+            coerce_pk_value(&Value::String("not-a-uuid".to_owned()), true, false)
+                .expect("shallow")
                 .expect_err("bad-uuid")
                 .body,
             "[\"\u{201c}not-a-uuid\u{201d} is not a valid UUID.\"]"
         );
         assert_eq!(
-            coerce_pk_value(&serde_json::json!([]), true)
+            coerce_pk_value(&serde_json::json!([]), true, false)
+                .expect("shallow")
                 .expect_err("list")
                 .body,
             "[\"\u{201c}[]\u{201d} is not a valid UUID.\"]"
         );
         // Ints coerce via UUID(int=...).
         assert_eq!(
-            coerce_pk_value(&serde_json::json!(5), true).expect("int"),
+            coerce_pk_value(&serde_json::json!(5), true, false)
+                .expect("shallow")
+                .expect("int"),
             PkValue::Id(uuid::Uuid::from_u128(5))
         );
-        assert!(coerce_pk_value(&serde_json::json!(-5), true).is_err());
+        assert!(coerce_pk_value(&serde_json::json!(-5), true, false)
+            .expect("shallow")
+            .is_err());
         // Floats always fail.
-        assert!(coerce_pk_value(&serde_json::json!(1.5), true).is_err());
+        assert!(coerce_pk_value(&serde_json::json!(1.5), true, false)
+            .expect("shallow")
+            .is_err());
         // Valid UUIDs pass through.
         let id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
         assert_eq!(
-            coerce_pk_value(&Value::String(id.to_string()), true).expect("uuid"),
+            coerce_pk_value(&Value::String(id.to_string()), true, false)
+                .expect("shallow")
+                .expect("uuid"),
             PkValue::Id(id)
         );
+        // A dirty top-level string echoes raw into the UUID message and
+        // crashes the renderer (verified live on lead and members alike).
+        assert!(matches!(
+            coerce_pk_value(&Value::String("\u{FFFD}732".to_owned()), true, true),
+            Err(Denial::RendererCrash)
+        ));
+        assert!(matches!(
+            coerce_pk_value(&Value::String("\u{FFFD}732".to_owned()), false, true),
+            Err(Denial::RendererCrash)
+        ));
     }
 
     #[test]
