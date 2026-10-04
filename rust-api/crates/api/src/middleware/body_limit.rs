@@ -15,6 +15,10 @@
 //! The limit is `<=`-shaped on both sides: a body of exactly the limit
 //! passes, `limit + 1` is rejected — same as Django, which only raises once
 //! the buffered body grows past the maximum.
+//!
+//! This layer is the sole enforcer: [`stack`](crate::middleware::stack)
+//! pairs it with `DefaultBodyLimit::disable()` so axum's own 2MB
+//! extractor default cannot shadow it (PIDASHCONV-692).
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -252,6 +256,43 @@ mod tests {
             .await
             .expect("serve");
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn stack_serves_mid_size_bodies_to_bytes_handlers() {
+        // axum's `Bytes` extractor defaults to a 2MB cap; the serve stack
+        // must disable it so this layer's Django-shaped 5MB cap is the
+        // sole enforcer (PIDASHCONV-692). A 3MB body reaches the echo;
+        // limit + 1 still answers the Django 413 bytes.
+        let settings = pidash_db::config::Settings::test_defaults();
+        assert_eq!(settings.file_size_limit, 5_242_880);
+        let state = crate::AppState::with_settings("body-limit-1", settings);
+        let echo: axum::Router<crate::AppState> = axum::Router::new().route(
+            "/api/x/",
+            axum::routing::post(|body: axum::body::Bytes| async move { body }),
+        );
+        let app = crate::build_app(state, Some(echo));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/x/")
+                    .body(Body::from(vec![b'y'; 3 * 1024 * 1024]))
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_bytes(response).await, vec![b'y'; 3 * 1024 * 1024]);
+        let response = app
+            .oneshot(
+                Request::post("/api/x/")
+                    .body(Body::from(vec![b'y'; 5_242_881]))
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(body_bytes(response).await, BODY_TOO_LARGE_JSON);
     }
 
     #[tokio::test]

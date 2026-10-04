@@ -33,6 +33,7 @@ pub mod logging;
 pub mod security;
 pub mod session;
 
+use axum::extract::DefaultBodyLimit;
 use axum::Router;
 
 pub use body_limit::{BodyLimitLayer, BODY_TOO_LARGE_JSON, DEFAULT_BODY_LIMIT_BYTES};
@@ -107,6 +108,13 @@ where
         .layer(RequestLoggerLayer::new(logging.clone(), sink.clone()))
         .layer(TokenLogLayer::new(logging.clone(), sink))
         .layer(BodyLimitLayer::new(body_limit_bytes))
+        // axum's `Bytes`/`String`/`Json`/`Form` extractors default to a 2MB
+        // cap; Django enforces exactly one cap (`DATA_UPLOAD_MAX_MEMORY_SIZE`,
+        // 5MB) via `RequestBodySizeLimitMiddleware`, so the default must go —
+        // otherwise the 2-5MB window 413s with axum's plain-text rejection
+        // instead of reaching the view. `BodyLimitLayer` above stays the
+        // sole enforcer (PIDASHCONV-692).
+        .layer(DefaultBodyLimit::disable())
         .layer(GzipLayer::new())
         .layer(SessionLayer::new(session))
         .layer(SecurityLayer::new(security.clone()))
