@@ -222,40 +222,190 @@ pub fn raw_group_mismatch(
     }
 }
 
+/// Longest digit run `int()` accepts: `sys.get_int_max_str_digits()` is 4300
+/// on the backend (Python 3.12, no override anywhere in the repo), so a
+/// longer digit run raises `ValueError` exactly like a misspelling. Only
+/// digit characters count — sign, `_` separators and surrounding whitespace
+/// do not (all probed).
+const MAX_INT_DIGITS: usize = 4300;
+
+/// Starts of the Unicode decimal-digit runs `int()` accepts: every code point
+/// `c` with `start <= c < start + 10` reads as digit `c - start`. Generated
+/// from CPython `unicodedata.decimal` (Unicode 15.0.0, the tables backend
+/// Python 3.12 ships): each run verified a contiguous 0-9 block. (Mirrors the
+/// `paginator` kernel, which this crate cannot import.)
+const DECIMAL_DIGIT_RUN_STARTS: &[u32] = &[
+    0x00030, // U+0030..U+0039 DIGIT
+    0x00660, // U+0660..U+0669 ARABIC-INDIC DIGIT
+    0x006F0, // U+06F0..U+06F9 EXTENDED ARABIC-INDIC DIGIT
+    0x007C0, // U+07C0..U+07C9 NKO DIGIT
+    0x00966, // U+0966..U+096F DEVANAGARI DIGIT
+    0x009E6, // U+09E6..U+09EF BENGALI DIGIT
+    0x00A66, // U+0A66..U+0A6F GURMUKHI DIGIT
+    0x00AE6, // U+0AE6..U+0AEF GUJARATI DIGIT
+    0x00B66, // U+0B66..U+0B6F ORIYA DIGIT
+    0x00BE6, // U+0BE6..U+0BEF TAMIL DIGIT
+    0x00C66, // U+0C66..U+0C6F TELUGU DIGIT
+    0x00CE6, // U+0CE6..U+0CEF KANNADA DIGIT
+    0x00D66, // U+0D66..U+0D6F MALAYALAM DIGIT
+    0x00DE6, // U+0DE6..U+0DEF SINHALA LITH DIGIT
+    0x00E50, // U+0E50..U+0E59 THAI DIGIT
+    0x00ED0, // U+0ED0..U+0ED9 LAO DIGIT
+    0x00F20, // U+0F20..U+0F29 TIBETAN DIGIT
+    0x01040, // U+1040..U+1049 MYANMAR DIGIT
+    0x01090, // U+1090..U+1099 MYANMAR SHAN DIGIT
+    0x017E0, // U+17E0..U+17E9 KHMER DIGIT
+    0x01810, // U+1810..U+1819 MONGOLIAN DIGIT
+    0x01946, // U+1946..U+194F LIMBU DIGIT
+    0x019D0, // U+19D0..U+19D9 NEW TAI LUE DIGIT
+    0x01A80, // U+1A80..U+1A89 TAI THAM HORA DIGIT
+    0x01A90, // U+1A90..U+1A99 TAI THAM THAM DIGIT
+    0x01B50, // U+1B50..U+1B59 BALINESE DIGIT
+    0x01BB0, // U+1BB0..U+1BB9 SUNDANESE DIGIT
+    0x01C40, // U+1C40..U+1C49 LEPCHA DIGIT
+    0x01C50, // U+1C50..U+1C59 OL CHIKI DIGIT
+    0x0A620, // U+A620..U+A629 VAI DIGIT
+    0x0A8D0, // U+A8D0..U+A8D9 SAURASHTRA DIGIT
+    0x0A900, // U+A900..U+A909 KAYAH LI DIGIT
+    0x0A9D0, // U+A9D0..U+A9D9 JAVANESE DIGIT
+    0x0A9F0, // U+A9F0..U+A9F9 MYANMAR TAI LAING DIGIT
+    0x0AA50, // U+AA50..U+AA59 CHAM DIGIT
+    0x0ABF0, // U+ABF0..U+ABF9 MEETEI MAYEK DIGIT
+    0x0FF10, // U+FF10..U+FF19 FULLWIDTH DIGIT
+    0x104A0, // U+104A0..U+104A9 OSMANYA DIGIT
+    0x10D30, // U+10D30..U+10D39 HANIFI ROHINGYA DIGIT
+    0x11066, // U+11066..U+1106F BRAHMI DIGIT
+    0x110F0, // U+110F0..U+110F9 SORA SOMPENG DIGIT
+    0x11136, // U+11136..U+1113F CHAKMA DIGIT
+    0x111D0, // U+111D0..U+111D9 SHARADA DIGIT
+    0x112F0, // U+112F0..U+112F9 KHUDAWADI DIGIT
+    0x11450, // U+11450..U+11459 NEWA DIGIT
+    0x114D0, // U+114D0..U+114D9 TIRHUTA DIGIT
+    0x11650, // U+11650..U+11659 MODI DIGIT
+    0x116C0, // U+116C0..U+116C9 TAKRI DIGIT
+    0x11730, // U+11730..U+11739 AHOM DIGIT
+    0x118E0, // U+118E0..U+118E9 WARANG CITI DIGIT
+    0x11950, // U+11950..U+11959 DIVES AKURU DIGIT
+    0x11C50, // U+11C50..U+11C59 BHAIKSUKI DIGIT
+    0x11D50, // U+11D50..U+11D59 MASARAM GONDI DIGIT
+    0x11DA0, // U+11DA0..U+11DA9 GUNJALA GONDI DIGIT
+    0x11F50, // U+11F50..U+11F59 KAWI DIGIT
+    0x16A60, // U+16A60..U+16A69 MRO DIGIT
+    0x16AC0, // U+16AC0..U+16AC9 TANGSA DIGIT
+    0x16B50, // U+16B50..U+16B59 PAHAWH HMONG DIGIT
+    0x1D7CE, // U+1D7CE..U+1D7D7 MATHEMATICAL BOLD DIGIT
+    0x1D7D8, // U+1D7D8..U+1D7E1 MATHEMATICAL DOUBLE-STRUCK DIGIT
+    0x1D7E2, // U+1D7E2..U+1D7EB MATHEMATICAL SANS-SERIF DIGIT
+    0x1D7EC, // U+1D7EC..U+1D7F5 MATHEMATICAL SANS-SERIF BOLD DIGIT
+    0x1D7F6, // U+1D7F6..U+1D7FF MATHEMATICAL MONOSPACE DIGIT
+    0x1E140, // U+1E140..U+1E149 NYIAKENG PUACHUE HMONG DIGIT
+    0x1E2F0, // U+1E2F0..U+1E2F9 WANCHO DIGIT
+    0x1E4F0, // U+1E4F0..U+1E4F9 NAG MUNDARI DIGIT
+    0x1E950, // U+1E950..U+1E959 ADLAM DIGIT
+    0x1FBF0, // U+1FBF0..U+1FBF9 SEGMENTED DIGIT
+];
+
+/// The decimal value of `c` when CPython reads it as a digit in `int()`,
+/// else `None`. Covers ASCII `0-9` plus every Unicode decimal run (`١٠`,
+/// `１０`, `१०`, ...); other numerics (`²`, `½`, `Ⅻ`) are `None`.
+fn decimal_digit_value(c: char) -> Option<u32> {
+    if c.is_ascii_digit() {
+        return Some(c as u32 - '0' as u32);
+    }
+    let cp = c as u32;
+    DECIMAL_DIGIT_RUN_STARTS
+        .iter()
+        .find(|start| cp >= **start && cp - **start < 10)
+        .map(|start| cp - *start)
+}
+
+/// A successfully spelled `int()`: the exact value when it fits `i128`, else
+/// its overflow class. Huge positives trip the ceiling; huge negatives fall
+/// through to the `i64` clamp, like any negative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PyInt {
+    Small(i128),
+    HugePositive,
+    HugeNegative,
+}
+
+/// CPython `int(text)`: surrounding `White_Space` stripped (exactly Rust
+/// `trim()`), one optional ASCII sign, PEP-515 `_` separators strictly
+/// between digits, ASCII + Unicode decimal digits, at most [`MAX_INT_DIGITS`]
+/// digit characters. Any `ValueError` spelling is `None`.
+fn parse_py_int_value(raw: &str) -> Option<PyInt> {
+    let trimmed = raw.trim();
+    let (negative, body) = match trimmed.strip_prefix(['+', '-']) {
+        Some(rest) => (trimmed.starts_with('-'), rest),
+        None => (false, trimmed),
+    };
+    if body.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = body.chars().collect();
+    let mut digits: Vec<u32> = Vec::with_capacity(chars.len());
+    let mut prev_is_digit = false;
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch == '_' {
+            // PEP 515: `_` only between two digits (`1_0` ok; `1_`, `_1`,
+            // `1__0` raise). Either neighbor may be a Unicode decimal digit.
+            let next_is_digit = chars
+                .get(index + 1)
+                .is_some_and(|next| decimal_digit_value(*next).is_some());
+            if !prev_is_digit || !next_is_digit {
+                return None;
+            }
+            prev_is_digit = false;
+            continue;
+        }
+        let digit = decimal_digit_value(*ch)?;
+        digits.push(digit);
+        prev_is_digit = true;
+    }
+    if digits.is_empty() || digits.len() > MAX_INT_DIGITS {
+        return None;
+    }
+    let mut magnitude: i128 = 0;
+    for digit in digits {
+        match magnitude
+            .checked_mul(10)
+            .and_then(|scaled| scaled.checked_add(digit as i128))
+        {
+            Some(value) => magnitude = value,
+            None => {
+                return Some(if negative {
+                    PyInt::HugeNegative
+                } else {
+                    PyInt::HugePositive
+                });
+            }
+        }
+    }
+    Some(PyInt::Small(if negative { -magnitude } else { magnitude }))
+}
+
 /// `BasePaginator.get_per_page`: non-integers and over-max values raise.
-/// Python's `int()` is unbounded (whitespace/underscores/signs allowed),
-/// so a huge magnitude parses fine and then trips the ceiling instead of
-/// failing to parse. Inputs that overflow even `i128` but read as an
-/// integer take the ceiling branch too, exactly like `int()` would.
+/// Python's `int()` reads at most [`MAX_INT_DIGITS`] digits (`ValueError`
+/// past that, like any misspelling); below the cap it is unbounded, so a
+/// huge magnitude parses fine and then trips the ceiling instead of failing
+/// to parse.
 pub fn parse_per_page(raw: Option<&str>) -> Result<i64, ParamError> {
     const MAX: i64 = ListParams::DEFAULT_PER_PAGE;
     let Some(text) = raw else {
         return Ok(ListParams::DEFAULT_PER_PAGE);
     };
     let ceiling = || ParamError::detail(format!("Invalid per_page value. Cannot exceed {MAX}."));
-    let digits = text.trim().replace('_', "");
-    let per_page = match digits.parse::<i128>() {
-        Ok(value) => value,
-        Err(_) => {
-            // `int()` accepts an optional sign plus digits (after the same
-            // trim/underscore cleanup); anything else is not an integer.
-            // Beyond `i128`, emulate unbounded-then-compare: a positive
-            // magnitude necessarily trips the ceiling, a negative one
-            // falls through to the `i64` clamp below.
-            let body: &str = digits.strip_prefix(['+', '-']).unwrap_or(&digits);
-            if !body.is_empty() && body.bytes().all(|byte| byte.is_ascii_digit()) {
-                if digits.starts_with('-') {
-                    return Ok(i64::MIN);
-                }
+    match parse_py_int_value(text) {
+        None => Err(ParamError::detail("Invalid per_page parameter.")),
+        Some(PyInt::HugePositive) => Err(ceiling()),
+        Some(PyInt::HugeNegative) => Ok(i64::MIN),
+        Some(PyInt::Small(per_page)) => {
+            if per_page > MAX as i128 {
                 return Err(ceiling());
             }
-            return Err(ParamError::detail("Invalid per_page parameter."));
+            Ok(per_page.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
         }
-    };
-    if per_page > MAX as i128 {
-        return Err(ceiling());
     }
-    Ok(per_page.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
 }
 
 /// Comma-split with empties dropped; empty/absent means `None`.
@@ -375,6 +525,49 @@ mod tests {
         // Non-integers still fail to parse.
         let err = ListParams::parse(&query(&[("per_page", "lots")]), false).unwrap_err();
         assert_eq!(err.body(), r#"{"detail":"Invalid per_page parameter."}"#);
+    }
+
+    #[test]
+    fn per_page_spelling_matches_cpython_int() {
+        // PEP 515: `_` only strictly between digits (mirrors the `paginator`
+        // kernel, which this crate cannot import).
+        assert_eq!(parse_per_page(Some("1_0")), Ok(10));
+        for bad in ["1_", "_1", "1__0", "100_"] {
+            assert_eq!(
+                parse_per_page(Some(bad)).unwrap_err().body(),
+                r#"{"detail":"Invalid per_page parameter."}"#,
+                "{bad}"
+            );
+        }
+        // Unicode decimal digits read as their values.
+        assert_eq!(parse_per_page(Some("١٠")), Ok(10));
+        assert_eq!(parse_per_page(Some("１２")), Ok(12));
+    }
+
+    #[test]
+    fn per_page_digit_cap_matches_backend_limit() {
+        // 39..4300 digits parse, then trip the ceiling; past the backend's
+        // 4300-digit `int()` cap the spelling itself raises.
+        for huge in ["9".repeat(39), "9".repeat(100), "9".repeat(4300)] {
+            assert_eq!(
+                parse_per_page(Some(&huge)).unwrap_err().body(),
+                r#"{"detail":"Invalid per_page value. Cannot exceed 1000."}"#,
+                "{} digits",
+                huge.len()
+            );
+        }
+        for capped in ["9".repeat(4301), "9".repeat(5000)] {
+            assert_eq!(
+                parse_per_page(Some(&capped)).unwrap_err().body(),
+                r#"{"detail":"Invalid per_page parameter."}"#,
+                "{} digits",
+                capped.len()
+            );
+        }
+        assert_eq!(
+            parse_per_page(Some(&format!("-{}", "9".repeat(100)))),
+            Ok(i64::MIN)
+        );
     }
 
     #[test]
