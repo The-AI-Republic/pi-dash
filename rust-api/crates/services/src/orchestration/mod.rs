@@ -69,6 +69,9 @@ pub mod dispatch;
 pub mod entries;
 pub mod relations;
 
+// NOTE: dispatch::REASON_NO_ELIGIBLE_RUNNER (same "no-eligible-runner"
+// value) is re-exported once via `entries` below to avoid a duplicate
+// flat-path import; both module definitions stay authoritative.
 pub use dispatch::{
     agent_wait_log_line, auto_paused_log_line, bounce_body, bounce_issue_no_eligible_runner,
     bounce_log_line, cap_hit_leave_log_line, disarmed_log_line, dispatch_continuation_run,
@@ -85,11 +88,8 @@ pub use dispatch::{
     COMMENT_INSERT_SQL, DESCRIPTION_INSERT_SQL, IN_PROGRESS_STATE_SQL, ISSUE_STATE_UPDATE_SQL,
     LIVE_ASSIGNEE_CANDIDATES_SQL, PAUSED_STATE_SQL, PAUSE_ISSUE_LOCK_SQL, PROJECT_CLOCK_POLICY_SQL,
     PROJECT_DEFAULT_STATE_SQL, PROJECT_ROLE_FACTS_SQL, REASON_NO_LLM_CONFIG,
-    // NOTE: dispatch::REASON_NO_ELIGIBLE_RUNNER (same "no-eligible-runner"
-    // value) is re-exported once via `entries` below to avoid a duplicate
-    // flat-path import; both module definitions stay authoritative.
-    REASON_NO_MANAGED_RUNNER, RETICK_ISSUE_LOCK_SQL,
-    WAIT_ACTIVITY_INSERT_SQL, WAIT_REARM_UPDATE_SQL, WAIT_UPDATE_SQL, WORKSPACE_SLUG_SQL,
+    REASON_NO_MANAGED_RUNNER, RETICK_ISSUE_LOCK_SQL, WAIT_ACTIVITY_INSERT_SQL,
+    WAIT_REARM_UPDATE_SQL, WAIT_UPDATE_SQL, WORKSPACE_SLUG_SQL,
 };
 
 pub use creation::{

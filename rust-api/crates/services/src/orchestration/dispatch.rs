@@ -924,6 +924,15 @@ async fn effective_executor<S: DispatchSeam>(
     seam: &mut S,
     issue: &IssueView,
 ) -> Result<String, DispatchError> {
+    // Python's `or` short-circuit (`agent_execution.py:66`): a set
+    // override wins without touching the project row at all.
+    if let Some(value) = issue
+        .agent_executor
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(value.to_owned());
+    }
     let project_id = issue.project_id.ok_or_else(|| {
         DispatchError::Store(CreationError::MissingRow("issue has no project".to_owned()))
     })?;
@@ -3516,6 +3525,23 @@ mod tests {
             .await
             .expect("resolve");
         assert_eq!(out, None);
+    }
+
+    #[tokio::test]
+    async fn executor_override_short_circuits_project_read() {
+        // Python's `or` (`agent_execution.py:66`): a set per-issue
+        // override wins without touching the project row — even when
+        // the issue has no project at all (the fake `project()` would
+        // panic on "project scripted" if it were read).
+        let mut seam = FakeSeam::stocked();
+        seam.issue.as_mut().expect("issue").project_id = None;
+        seam.issue.as_mut().expect("issue").agent_executor = Some("local_runner".to_owned());
+        seam.project = None;
+        let actor = uid(0x46);
+        let out = resolve_creator_for_trigger(&mut seam, uid(0x01), "tick", Some(actor))
+            .await
+            .expect("resolve");
+        assert_eq!(out, Some(actor));
     }
 
     #[tokio::test]
