@@ -294,19 +294,20 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // Runner handlers merge their routers here (D-15 L7 runs +
         // approvals + metrics, PIDASHCONV-542; L8 run endpoints + chat
         // web/daemon/SSE, PIDASHCONV-543; D-13 web runners/machines/pods,
-        // PIDASHCONV-591; D-13 deletes + machine commands (web),
-        // PIDASHCONV-593 (its daemon result route merges under
-        // `RouteGroup::Runner` below); D-13 desktop enroll + project
-        // lists, PIDASHCONV-595; D-14 machine sessions,
-        // PIDASHCONV-559; D-13 refresh + revokes, PIDASHCONV-592;
-        // sibling handler issues extend the merge; merges keep both
-        // sides).
+        // PIDASHCONV-591; D-13 daemon enrollment, PIDASHCONV-590;
+        // D-13 deletes + machine commands (web), PIDASHCONV-593 (its
+        // daemon result route merges under `RouteGroup::Runner` below);
+        // D-13 desktop enroll + project lists, PIDASHCONV-595; D-14
+        // machine sessions, PIDASHCONV-559; D-13 refresh + revokes,
+        // PIDASHCONV-592; sibling handler issues extend the merge;
+        // merges keep both sides).
         // Registration is the cutover granularity — sibling paths have
         // no Rust route and keep proxying to Django through the
         // fallback.
         RouteGroup::RunnerWeb => crate::runner_runs::routes()
             .merge(crate::runner_runs::chat::web_routes())
             .merge(crate::runner_enroll::manage::routes())
+            .merge(crate::runner_enroll::enroll::web_routes())
             .merge(crate::runner_enroll::delete_cmds::web_routes())
             .merge(crate::runner_enroll::teardown::web_routes())
             .merge(crate::runner_enroll::projects::web_routes()),
@@ -315,6 +316,7 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::runner_runs::daemon_routes())
             .merge(crate::runner_enroll::teardown::daemon_routes())
             .merge(crate::runner_sessions::routes())
+            .merge(crate::runner_enroll::enroll::daemon_routes())
             .merge(crate::runner_enroll::delete_cmds::daemon_routes())
             .merge(crate::runner_enroll::desktop::routes())
             .merge(crate::runner_enroll::projects::daemon_routes()),
