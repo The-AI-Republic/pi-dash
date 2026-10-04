@@ -3295,6 +3295,9 @@ pub(crate) fn decode_oneshot_strict(
                 })
                 .map_err(|_| OneshotFail::Fallback)
         }
+        // Bytes transforms are not text codecs: `bytes.decode` raises a
+        // non-`UnicodeDecodeError` (no latin-1 fallback), pinned 500.
+        m if is_bytes_transform(m) => Err(OneshotFail::Server),
         _ => todo!("oneshot engine for {module}"),
     }
 }
@@ -3341,6 +3344,9 @@ pub(crate) fn decode_oneshot_replace(body: &[u8], cs: &SupportedCharset) -> Resu
                 surr: Vec::new(),
             })
         }
+        // Bytes transforms reject `replace` (`force_str` raises), pinned
+        // 500 on the multipart path (verified live).
+        m if is_bytes_transform(m) => Err(()),
         _ => todo!("replace engine for {module}"),
     }
 }
