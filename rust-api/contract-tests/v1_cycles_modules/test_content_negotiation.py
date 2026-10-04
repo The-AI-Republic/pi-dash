@@ -609,6 +609,10 @@ def _cycles_post(admin_client, content_type, body):
     return admin_client.post(CYCLES, content=body, headers={"Content-Type": content_type})
 
 
+def _modules_post(admin_client, content_type, body):
+    return admin_client.post(MODULES, content=body, headers={"Content-Type": content_type})
+
+
 class TestCharsetExotic693:
     """PIDASHCONV-693: the full CPython codec table via `charset=`."""
 
@@ -1182,3 +1186,56 @@ class TestCharsetExotic693:
         )
         assert r.status_code == 400
         assert r.json() == {"name": ["This field is required."]}
+
+
+class TestModuleCharsetExotic712:
+    """PIDASHCONV-712: module writes thread 693's surrogate spans (utf-7)."""
+
+    def test_json_utf7_surrogate_400(self, admin_client):
+        # utf-7 emits a lone surrogate; the module CharField reports it.
+        body = b'{"name": "+2AE-693"}'
+        r = _modules_post(admin_client, "application/json; charset=utf-7", body)
+        assert r.status_code == 400
+        assert r.json() == {
+            "name": ["Surrogate characters are not allowed: U+D801."]
+        }
+
+    def test_form_utf7_surrogate_400(self, admin_client):
+        r = _modules_post(
+            admin_client,
+            "application/x-www-form-urlencoded; charset=utf-7",
+            b"name=%2B2AE%2D693",
+        )
+        assert r.status_code == 400
+        assert r.json() == {
+            "name": ["Surrogate characters are not allowed: U+D801."]
+        }
+
+    def test_form_utf7_raw_surrogate_400(self, admin_client):
+        # Raw shift bytes in layer-1 (not percent-encoded): the surrogate
+        # arises before `parse_qsl` and must still 400 at the CharField.
+        r = _modules_post(
+            admin_client,
+            "application/x-www-form-urlencoded; charset=utf-7",
+            b"name=+2AE-693raw",
+        )
+        assert r.status_code == 400
+        assert r.json() == {
+            "name": ["Surrogate characters are not allowed: U+D801."]
+        }
+
+    def test_mp_utf7_surrogate_400(self, admin_client):
+        boundary = "BOUND712A"
+        body = (
+            b"--" + boundary.encode() + b'\r\nContent-Disposition: form-data; name="name"\r\n\r\n'
+            b"+2AE-693\r\n--" + boundary.encode() + b"--\r\n"
+        )
+        r = _modules_post(
+            admin_client,
+            "multipart/form-data; boundary=%s; charset=utf-7" % boundary,
+            body,
+        )
+        assert r.status_code == 400
+        assert r.json() == {
+            "name": ["Surrogate characters are not allowed: U+D801."]
+        }
