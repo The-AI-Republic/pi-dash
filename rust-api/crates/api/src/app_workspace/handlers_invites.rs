@@ -630,8 +630,11 @@ enum EmailCheck {
 fn classify_email(value: Option<&Value>) -> EmailCheck {
     match value {
         None | Some(Value::Null) => EmailCheck::Invalid,
-        Some(Value::String(s)) => EmailCheck::Candidate(s.clone()),
+        // Falsy guard first: `""` must take the `not value` 400, not
+        // the `Candidate` arm below (behavior-identical either way —
+        // the validator rejects `""` — but the test pins the shape).
         Some(value) if !py_truthy(value) => EmailCheck::Invalid,
+        Some(Value::String(s)) => EmailCheck::Candidate(s.clone()),
         // `"@" in value`: element equality for lists, key lookup for
         // dicts — reaching `.rsplit` 500s; missing it 400s.
         Some(Value::Array(items))
