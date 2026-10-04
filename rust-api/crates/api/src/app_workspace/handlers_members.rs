@@ -267,9 +267,6 @@ pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The required object does no
 /// `JsonResponse` bytes, i.e. `json.dumps` defaults with the space after
 /// the colon.
 pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
-/// `handle_exception`'s `ValidationError` branch: garbage UUIDs (pk path
-/// param, UUID FK input) and the like.
-pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 /// `handle_exception`'s `IntegrityError` branch: unique-constraint
 /// collisions at save (DRF runs no uniqueness validators for this
 /// serializer, so the database is the only guard).
@@ -306,8 +303,6 @@ pub enum Denial {
     ObjectNotFound,
     /// 404, the URL resolver (`<uuid:pk>` converter miss → `handler404`).
     PageNotFound,
-    /// 400, `ValidationError` branch.
-    BadValidation,
     /// 400, `IntegrityError` branch.
     BadPayload,
     /// 400, malformed JSON body (carries the full `detail` text, reason
@@ -331,7 +326,6 @@ impl Denial {
             Denial::MemberNotFound => (StatusCode::NOT_FOUND, MEMBER_NOT_FOUND_BODY.to_owned()),
             Denial::ObjectNotFound => (StatusCode::NOT_FOUND, OBJECT_NOT_FOUND_BODY.to_owned()),
             Denial::PageNotFound => (StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned()),
-            Denial::BadValidation => (StatusCode::BAD_REQUEST, INVALID_DETAIL_BODY.to_owned()),
             Denial::BadPayload => (StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY.to_owned()),
             Denial::BadJson(detail) => (
                 StatusCode::BAD_REQUEST,
@@ -1551,18 +1545,33 @@ fn validate_json_prop(value: &Value, slot: &mut Vec<String>) -> Option<Value> {
     Some(value.clone())
 }
 
-/// One UUID FK value through `PrimaryKeyRelatedField`: null honors
-/// `allow_null`, bools/composites fail or escape per the field type, and
-/// garbage strings escape as Django `ValidationError` (the caller's
-/// `BadValidation`, *not* a field error — `to_internal_value` only
-/// catches `ObjectDoesNotExist`/`TypeError`/`ValueError`).
+/// One UUID FK value through `PrimaryKeyRelatedField`: `""` converts
+/// to `None` first (`RelatedField.run_validation` → `validate_empty_values`,
+/// so `allow_null` decides between a valid `Null` and the null message),
+/// bools fail `incorrect_type`, non-negative ints are tiny UUIDs, and
+/// every other input is the fancy-quote field error — Django's
+/// `UUIDField.to_python` raises `ValidationError`, which
+/// `Serializer.to_internal_value` catches per-field
+/// (`serializers.py:502-504`), so nothing escapes to `handle_exception`.
+/// Note: serde stores int-text past `u64::MAX` as f64, indistinguishable
+/// from float-text, so that range renders the float repr instead of the
+/// full digits (and misses `does_not_exist` below 2^128) — vanishingly
+/// rare, the same bucket as the sibling ports.
 enum FkValue {
     /// Field error already pushed.
     Invalid,
-    /// Django `ValidationError` escaping `is_valid()`.
-    BadInput,
     Null,
     Id(Uuid),
+}
+
+/// The `UUIDField.to_python` failure message (`fields/__init__.py`):
+/// fancy quotes around the `str()` display.
+fn push_invalid_uuid(value: &Value, slot: &mut Vec<String>) -> FkValue {
+    slot.push(format!(
+        "\u{201c}{}\u{201d} is not a valid UUID.",
+        python_str(value)
+    ));
+    FkValue::Invalid
 }
 
 fn validate_fk_uuid(value: &Value, allow_null: bool, slot: &mut Vec<String>) -> FkValue {
@@ -1580,31 +1589,43 @@ fn validate_fk_uuid(value: &Value, allow_null: bool, slot: &mut Vec<String>) -> 
         }
         Value::Number(number) => {
             // `int` inputs take the `int=` form (`uuid.UUID(int=5)` is a
-            // valid tiny UUID); floats take the `hex=` form and escape.
+            // valid tiny UUID); negatives fail `to_python` like every
+            // other non-UUID input.
             if let Some(int) = number.as_i64() {
                 if int < 0 {
-                    return FkValue::BadInput;
+                    return push_invalid_uuid(value, slot);
                 }
                 return FkValue::Id(Uuid::from_u128(int as u128));
             }
             if let Some(uint) = number.as_u64() {
                 return FkValue::Id(Uuid::from_u128(u128::from(uint)));
             }
+            // Floats take the `hex=` form and fail `to_python`
+            // (`AttributeError`, caught alongside `ValueError`); unbounded
+            // ints are tiny UUIDs in range, fancy-quote past 2^128.
             match number.as_f64() {
-                Some(_) => FkValue::BadInput,
-                // Unbounded ints: in-range ones are tiny UUIDs, the rest
-                // overflow `uuid.UUID(int=...)` and escape.
+                Some(_) => push_invalid_uuid(value, slot),
                 None => match number.to_string().parse::<u128>() {
                     Ok(big) => FkValue::Id(Uuid::from_u128(big)),
-                    Err(_) => FkValue::BadInput,
+                    Err(_) => push_invalid_uuid(value, slot),
                 },
             }
         }
-        Value::String(raw) => match Uuid::parse_str(raw) {
-            Ok(id) => FkValue::Id(id),
-            Err(_) => FkValue::BadInput,
-        },
-        Value::Array(_) | Value::Object(_) => FkValue::BadInput,
+        Value::String(raw) => {
+            // `""` is `None` before validation (`validate_empty_values`).
+            if raw.is_empty() {
+                if allow_null {
+                    return FkValue::Null;
+                }
+                slot.push("This field may not be null.".to_owned());
+                return FkValue::Invalid;
+            }
+            match Uuid::parse_str(raw) {
+                Ok(id) => FkValue::Id(id),
+                Err(_) => push_invalid_uuid(value, slot),
+            }
+        }
+        Value::Array(_) | Value::Object(_) => push_invalid_uuid(value, slot),
     }
 }
 
@@ -2436,7 +2457,6 @@ async fn validate_patch(
 ) -> Result<PatchSets, Response> {
     let mut errors = FieldErrors::default();
     let mut sets = PatchSets::default();
-    let mut bad_input = false;
     // deleted_at.
     if let Some(value) = fields.get("deleted_at") {
         match validate_deleted_at(value, timezone, &mut errors) {
@@ -2494,7 +2514,8 @@ async fn validate_patch(
             sets.explored_features = Some(prop);
         }
     }
-    // FKs (existence is field-level; garbage escapes as `ValidationError`).
+    // FKs (existence is field-level; garbage is the fancy-quote field
+    // error, coexisting with every other field error in wire order).
     if let Some(value) = fields.get("created_by") {
         match validate_fk_uuid(value, true, &mut errors.created_by) {
             FkValue::Id(id) => {
@@ -2509,7 +2530,6 @@ async fn validate_patch(
             }
             FkValue::Null => sets.created_by = Some(None),
             FkValue::Invalid => {}
-            FkValue::BadInput => bad_input = true,
         }
     }
     if let Some(value) = fields.get("updated_by") {
@@ -2526,7 +2546,6 @@ async fn validate_patch(
             }
             FkValue::Null => sets.updated_by = Some(None),
             FkValue::Invalid => {}
-            FkValue::BadInput => bad_input = true,
         }
     }
     if let Some(value) = fields.get("workspace") {
@@ -2543,11 +2562,7 @@ async fn validate_patch(
             }
             FkValue::Null => {}
             FkValue::Invalid => {}
-            FkValue::BadInput => bad_input = true,
         }
-    }
-    if bad_input {
-        return Err(Denial::BadValidation.into_response());
     }
     if !errors.is_empty() {
         return Err(Denial::BadFields(errors.into_value()).into_response());
@@ -2610,8 +2625,8 @@ async fn apply_patch(
             sep.push_bind(*created_by);
         }
         if let Some(updated_by) = &sets.updated_by {
-            // Validated (so garbage still 400s/escapes above) but
-            // overwritten by the stamp below, like `BaseModel.save`.
+            // Validated (so garbage still 400s above as a field error)
+            // but overwritten by the stamp below, like `BaseModel.save`.
             let _ = updated_by;
         }
         if let Some(workspace) = &sets.workspace {
@@ -3190,10 +3205,6 @@ mod tests {
             "{\"error\":\"The required object does not exist.\"}"
         );
         assert_eq!(
-            INVALID_DETAIL_BODY,
-            "{\"error\":\"Please provide valid detail\"}"
-        );
-        assert_eq!(
             INVALID_PAYLOAD_BODY,
             "{\"error\":\"The payload is not valid\"}"
         );
@@ -3222,7 +3233,6 @@ mod tests {
         assert_eq!(status_of(&Denial::MemberNotFound), StatusCode::NOT_FOUND);
         assert_eq!(status_of(&Denial::ObjectNotFound), StatusCode::NOT_FOUND);
         assert_eq!(status_of(&Denial::PageNotFound), StatusCode::NOT_FOUND);
-        assert_eq!(status_of(&Denial::BadValidation), StatusCode::BAD_REQUEST);
         assert_eq!(status_of(&Denial::BadPayload), StatusCode::BAD_REQUEST);
         assert_eq!(
             status_of(&Denial::BadJson("x".to_owned())),
@@ -3240,7 +3250,7 @@ mod tests {
             status_of(&Denial::ServerError),
             StatusCode::INTERNAL_SERVER_ERROR
         );
-        // The parse-error envelope carries lowercase `detail`, like DRF's
+        // The parse-error envelope carries capital `Detail`, like DRF's
         // `exception_handler`.
         let (_, body) = Denial::BadJson("JSON parse error - e".to_owned()).status_and_body();
         assert_eq!(body, "{\"detail\":\"JSON parse error - e\"}");
@@ -3641,11 +3651,53 @@ mod tests {
         assert!(matches!(case("null", true).0, FkValue::Null));
         assert!(matches!(case("null", false).0, FkValue::Invalid));
         assert!(matches!(case("true", false).0, FkValue::Invalid));
-        assert!(matches!(case("\"abc\"", false).0, FkValue::BadInput));
-        assert!(matches!(case("5.5", false).0, FkValue::BadInput));
-        assert!(matches!(case("[1]", false).0, FkValue::BadInput));
-        assert!(matches!(case("{\"a\":1}", false).0, FkValue::BadInput));
-        assert!(matches!(case("-5", false).0, FkValue::BadInput));
+        // Garbage is the fancy-quote field error (Django's
+        // `ValidationError`, caught per-field by
+        // `Serializer.to_internal_value`), never an escaping branch —
+        // proven on the real serializer class, all six displays.
+        for (json, display) in [
+            ("\"abc\"", "abc"),
+            ("\"5\"", "5"),
+            ("-5", "-5"),
+            ("5.5", "5.5"),
+            ("[1]", "[1]"),
+            ("{\"a\":1}", "{'a': 1}"),
+        ] {
+            let (outcome, errors) = case(json, false);
+            assert!(matches!(outcome, FkValue::Invalid), "{json}");
+            assert_eq!(
+                errors,
+                vec![format!("\u{201c}{display}\u{201d} is not a valid UUID.")],
+                "{json}"
+            );
+        }
+        // `""` converts to `None` before validation: a valid NULL where
+        // the field allows it, the null message where it does not.
+        assert!(matches!(case("\"\"", true).0, FkValue::Null));
+        assert!(case("\"\"", true).1.is_empty());
+        let (outcome, errors) = case("\"\"", false);
+        assert!(matches!(outcome, FkValue::Invalid));
+        assert_eq!(errors, vec!["This field may not be null."]);
+        // The garbage error coexists with other field errors in wire
+        // order (no short-circuit): role sorts before workspace.
+        let mut errors = FieldErrors::default();
+        errors.role.push("\"xx\" is not a valid choice.".to_owned());
+        let outcome = validate_fk_uuid(
+            &serde_json::from_str("\"abc\"").expect("json"),
+            false,
+            &mut errors.workspace,
+        );
+        assert!(matches!(outcome, FkValue::Invalid));
+        let rendered = errors.into_value();
+        let object = rendered.as_object().expect("object");
+        let keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["role", "workspace"]);
+        assert_eq!(
+            object["workspace"],
+            Value::Array(vec![Value::String(format!(
+                "\u{201c}abc\u{201d} is not a valid UUID."
+            ))]),
+        );
         let (_, errors) = case("true", false);
         assert_eq!(
             errors,
