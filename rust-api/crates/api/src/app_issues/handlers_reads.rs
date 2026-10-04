@@ -49,7 +49,9 @@
 //! - Bulk dates: issues missing from the DB are silently skipped; issues
 //!   with both dates set are appended twice (harmless under `bulk_update`);
 //!   non-`%Y-%m-%d` date strings raise `ValueError` → generic 500; the 400
-//!   body uses the `message` key, not `error`.
+//!   body uses the `message` key, not `error`. `int`/`bool`/`None` ids
+//!   convert in `id__in` and then miss (skipped, 200); a repeated id
+//!   observes the earlier update's in-memory dates.
 //! - Bulk dates and the sub-issue link write through `bulk_update`, so no
 //!   signals fire (FX-ISS-21): no orchestration transition, no git-sync
 //!   completion — only the `issue_activity` enqueues below.
@@ -1006,16 +1008,10 @@ async fn bulk_dates(
     let object = body
         .as_object()
         .ok_or(Denial::ServerError.into_response())?;
-    let updates = object.get("updates").unwrap_or(&Value::Null);
-    let updates = match updates {
-        Value::Null => &[][..],
-        Value::Array(items) => &items[..],
-        // Iterating a non-list raises `TypeError` → 500.
-        _ => return Err(Denial::ServerError.into_response()),
-    };
+    let updates = select_updates(object)?;
     // The id list comprehension runs FIRST (`:1143`): a non-object element
     // raises `TypeError` → 500, a missing `id` raises `KeyError` → 400.
-    let mut ids: Vec<&str> = Vec::with_capacity(updates.len());
+    let mut ids: Vec<UpdateId<'_>> = Vec::with_capacity(updates.len());
     for update in updates {
         let item = update
             .as_object()
@@ -1023,15 +1019,18 @@ async fn bulk_dates(
         let id = item.get("id").ok_or_else(|| {
             Denial::BadError("The required key does not exist.".to_owned()).into_response()
         })?;
-        let id = id.as_str().ok_or(Denial::ServerError.into_response())?;
-        ids.push(id);
+        ids.push(classify_update_id(id)?);
     }
-    // `id__in` with a non-UUID value raises `ValidationError` → 400.
+    // `id__in` with a non-UUID STRING raises `ValidationError` → 400; the
+    // converted ids (`int`/`bool`/`None`) join the lookup harmlessly and
+    // then miss the `str(issue.id)`-keyed dict.
     let mut parsed: Vec<uuid::Uuid> = Vec::with_capacity(ids.len());
     for id in &ids {
-        match id.parse::<uuid::Uuid>() {
-            Ok(value) => parsed.push(value),
-            Err(_) => return Err(invalid_detail_body()),
+        if let UpdateId::Raw(text) = id {
+            match text.parse::<uuid::Uuid>() {
+                Ok(value) => parsed.push(value),
+                Err(_) => return Err(invalid_detail_body()),
+            }
         }
     }
     let epoch = Utc::now().timestamp();
@@ -1049,17 +1048,31 @@ async fn bulk_dates(
     }
     // Per-update processing in request order (`:1151-1191`): unknown ids
     // are silently SKIPPED (the dict is keyed by canonical uuid string, so
-    // a non-canonical-but-valid spelling misses too).
+    // a non-canonical-but-valid spelling misses too — as do the converted
+    // `int`/`bool`/`None` ids, which never equal a `str(issue.id)` key).
+    // A repeated id observes the EARLIER update's values: the loop assigns
+    // onto the shared in-memory issue (`issue.start_date = …`), so the
+    // second occurrence validates against and enqueues the first one's
+    // dates, not the stored ones.
     let mut writes: Vec<BulkWrite> = Vec::new();
-    for (update, &id) in updates.iter().zip(ids.iter()) {
+    for (update, id) in updates.iter().zip(ids.iter()) {
+        let id = match id {
+            UpdateId::Raw(text) => *text,
+            UpdateId::Unmatchable => continue,
+        };
         let Some(row) = by_id.get(id) else {
             continue;
         };
         let item = update
             .as_object()
             .ok_or(Denial::ServerError.into_response())?;
-        let current_start = get_str(row, "start_date");
-        let current_target = get_str(row, "target_date");
+        let (written_start, written_target) = written_current(&writes, id);
+        let current_start = written_start
+            .as_deref()
+            .or_else(|| get_str(row, "start_date"));
+        let current_target = written_target
+            .as_deref()
+            .or_else(|| get_str(row, "target_date"));
         let new_start = item.get("start_date").unwrap_or(&Value::Null);
         let new_target = item.get("target_date").unwrap_or(&Value::Null);
         let merged_start = merge_date(current_start, new_start)?;
@@ -1139,11 +1152,60 @@ async fn fetch_bulk_issues(
     fetch_json_rows(pool, &inner, binder.values()).await
 }
 
+/// `request.data.get("updates", [])` plus iteration (`:1141-1143`): a
+/// missing key defaults to `[]`; an explicit null or any other non-list
+/// breaks iteration (`TypeError` → 500).
+fn select_updates(object: &Map<String, Value>) -> Result<&[Value], Response> {
+    match object.get("updates") {
+        None => Ok(&[]),
+        Some(Value::Array(items)) => Ok(items),
+        _ => Err(Denial::ServerError.into_response()),
+    }
+}
+
+/// `update["id"]` as the `id__in` lookup sees it (`:1143-1147`):
+/// `UUIDField.to_python` converts ints/bools (`uuid.UUID(int=…)`) and
+/// passes nulls through (`IS NULL`), so those ids query harmlessly and
+/// then miss the `str(issue.id)`-keyed dict → skipped with a 200; floats,
+/// lists and dicts fail conversion (`ValidationError` → 400), as do
+/// non-UUID strings (rejected at the parse step).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateId<'a> {
+    Raw(&'a str),
+    Unmatchable,
+}
+
+fn classify_update_id(value: &Value) -> Result<UpdateId<'_>, Response> {
+    match value {
+        Value::String(text) => Ok(UpdateId::Raw(text)),
+        Value::Number(number) if number.is_i64() || number.is_u64() => Ok(UpdateId::Unmatchable),
+        Value::Bool(_) | Value::Null => Ok(UpdateId::Unmatchable),
+        _ => Err(invalid_detail_body()),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BulkWrite<'a> {
     id: &'a str,
     start_date: Option<chrono::NaiveDate>,
     target_date: Option<chrono::NaiveDate>,
+}
+
+/// The in-request mutation a repeated id observes (`:1177-1191` assign
+/// onto the shared in-memory issue): a previously written half renders
+/// ISO, exactly like `str()` of the assigned date.
+fn written_current(writes: &[BulkWrite<'_>], id: &str) -> (Option<String>, Option<String>) {
+    match writes.iter().find(|write| write.id == id) {
+        Some(write) => (
+            write
+                .start_date
+                .map(|date| date.format("%Y-%m-%d").to_string()),
+            write
+                .target_date
+                .map(|date| date.format("%Y-%m-%d").to_string()),
+        ),
+        None => (None, None),
+    }
 }
 
 fn upsert_write<'a>(
@@ -2388,9 +2450,14 @@ async fn sub_issues_post(
     }
     let mut parsed: Vec<uuid::Uuid> = Vec::with_capacity(sub_ids.len());
     for id in &sub_ids {
-        match id.parse::<uuid::Uuid>() {
-            Ok(value) => parsed.push(value),
-            Err(_) => return Err(invalid_detail_body()),
+        // Converted ids (`int`/`bool`/`None`) never match a row — Django's
+        // `id__in` converts them and finds nothing — but they still get
+        // their enqueue below. A non-UUID STRING is `ValidationError` → 400.
+        if let SubIssueId::Fetch(text) = id {
+            match text.parse::<uuid::Uuid>() {
+                Ok(value) => parsed.push(value),
+                Err(_) => return Err(invalid_detail_body()),
+            }
         }
     }
     let found = fetch_scoped_issue_ids(&pool, &parsed)
@@ -2409,7 +2476,7 @@ async fn sub_issues_post(
                 &pool,
                 sub_issue_activity_message(
                     &parent_id,
-                    id,
+                    id.raw(),
                     &gate.user_id,
                     &gate.project_id,
                     Utc::now().timestamp(),
@@ -2456,20 +2523,46 @@ fn invalid_detail_body() -> Response {
     )
 }
 
+/// One requested sub-issue id (`sub_issue.py:206-214`): `Fetch` ids join
+/// the `id__in` lookup (a non-UUID string is `ValidationError` → 400);
+/// `Converted` ids (`int`/`bool`/`None`, in Python-`str()` form) convert
+/// in the lookup, match nothing, but still get their enqueue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SubIssueId {
+    Fetch(String),
+    Converted(String),
+}
+
+impl SubIssueId {
+    fn raw(&self) -> &str {
+        match self {
+            SubIssueId::Fetch(text) | SubIssueId::Converted(text) => text,
+        }
+    }
+}
+
 /// `request.data.get("sub_issue_ids", [])` plus the `len()` gate (`:206-212`):
 /// missing → `[]` → the required-400; explicit null/number/bool breaks
 /// `len()` → 500; a string iterates its chars downstream (any non-empty
 /// string fails UUID validation → the invalid-detail 400); a dict iterates
-/// its keys.
-fn parse_sub_issue_ids(object: &Map<String, Value>) -> Result<Vec<String>, Response> {
+/// its keys. Array items convert like the bulk-dates ids: `int`/`bool`/
+/// `None` match nothing but still enqueue; floats/lists/dicts → 400.
+fn parse_sub_issue_ids(object: &Map<String, Value>) -> Result<Vec<SubIssueId>, Response> {
     match object.get("sub_issue_ids") {
         None => Ok(Vec::new()),
         Some(Value::Array(items)) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                match item.as_str() {
-                    Some(text) => out.push(text.to_owned()),
-                    None => return Err(invalid_detail_body()),
+                match item {
+                    Value::String(text) => out.push(SubIssueId::Fetch(text.clone())),
+                    Value::Number(number) if number.is_i64() || number.is_u64() => {
+                        out.push(SubIssueId::Converted(number.to_string()))
+                    }
+                    Value::Bool(flag) => out.push(SubIssueId::Converted(
+                        if *flag { "True" } else { "False" }.to_owned(),
+                    )),
+                    Value::Null => out.push(SubIssueId::Converted("None".to_owned())),
+                    _ => return Err(invalid_detail_body()),
                 }
             }
             Ok(out)
@@ -2481,7 +2574,10 @@ fn parse_sub_issue_ids(object: &Map<String, Value>) -> Result<Vec<String>, Respo
                 Err(invalid_detail_body())
             }
         }
-        Some(Value::Object(map)) => Ok(map.keys().cloned().collect()),
+        Some(Value::Object(map)) => Ok(map
+            .keys()
+            .map(|key| SubIssueId::Fetch(key.clone()))
+            .collect()),
         Some(_) => Err(Denial::ServerError.into_response()),
     }
 }
@@ -2920,10 +3016,36 @@ mod tests {
         assert!(parse_sub_issue_ids(&empty).unwrap().is_empty());
         let mut one = Map::new();
         one.insert("sub_issue_ids".to_owned(), serde_json::json!(["a"]));
-        assert_eq!(parse_sub_issue_ids(&one).unwrap(), vec!["a".to_owned()]);
+        assert_eq!(
+            parse_sub_issue_ids(&one).unwrap(),
+            vec![SubIssueId::Fetch("a".to_owned())]
+        );
+        // `int`/`bool`/`None` items convert (`uuid.UUID(int=…)` / `IS NULL`)
+        // and enqueue in Python-`str()` form; floats/lists/dicts → 400.
+        let mut number = Map::new();
+        number.insert("sub_issue_ids".to_owned(), serde_json::json!([3]));
+        assert_eq!(
+            parse_sub_issue_ids(&number).unwrap(),
+            vec![SubIssueId::Converted("3".to_owned())]
+        );
+        let mut flag = Map::new();
+        flag.insert("sub_issue_ids".to_owned(), serde_json::json!([true]));
+        assert_eq!(
+            parse_sub_issue_ids(&flag).unwrap(),
+            vec![SubIssueId::Converted("True".to_owned())]
+        );
+        let mut null_item = Map::new();
+        null_item.insert("sub_issue_ids".to_owned(), serde_json::json!([null]));
+        assert_eq!(
+            parse_sub_issue_ids(&null_item).unwrap(),
+            vec![SubIssueId::Converted("None".to_owned())]
+        );
         let mut bad_item = Map::new();
-        bad_item.insert("sub_issue_ids".to_owned(), serde_json::json!([3]));
+        bad_item.insert("sub_issue_ids".to_owned(), serde_json::json!([1.5]));
         assert!(parse_sub_issue_ids(&bad_item).is_err());
+        let mut nested = Map::new();
+        nested.insert("sub_issue_ids".to_owned(), serde_json::json!([[3]]));
+        assert!(parse_sub_issue_ids(&nested).is_err());
         let mut text = Map::new();
         text.insert("sub_issue_ids".to_owned(), serde_json::json!("abc"));
         assert!(parse_sub_issue_ids(&text).is_err());
@@ -2931,6 +3053,64 @@ mod tests {
         empty_text.insert("sub_issue_ids".to_owned(), serde_json::json!(""));
         assert!(parse_sub_issue_ids(&empty_text).unwrap().is_empty());
         let _ = &mut missing;
+    }
+
+    #[test]
+    fn updates_selector_matrix() {
+        // Missing → `[]`; an explicit null breaks iteration, like any
+        // other non-list.
+        let missing = Map::new();
+        assert!(select_updates(&missing).unwrap().is_empty());
+        let mut null = Map::new();
+        null.insert("updates".to_owned(), Value::Null);
+        assert!(select_updates(&null).is_err());
+        let mut number = Map::new();
+        number.insert("updates".to_owned(), serde_json::json!(3));
+        assert!(select_updates(&number).is_err());
+        let mut list = Map::new();
+        list.insert("updates".to_owned(), serde_json::json!([{"id": "x"}]));
+        assert_eq!(select_updates(&list).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn update_id_matrix() {
+        assert_eq!(
+            classify_update_id(&serde_json::json!("abc")).unwrap(),
+            UpdateId::Raw("abc")
+        );
+        // Converted (`uuid.UUID(int=…)` / `IS NULL`): skipped with a 200.
+        assert_eq!(
+            classify_update_id(&serde_json::json!(3)).unwrap(),
+            UpdateId::Unmatchable
+        );
+        assert_eq!(
+            classify_update_id(&serde_json::json!(true)).unwrap(),
+            UpdateId::Unmatchable
+        );
+        assert_eq!(
+            classify_update_id(&Value::Null).unwrap(),
+            UpdateId::Unmatchable
+        );
+        // Unconvertible: `ValidationError` → 400.
+        assert!(classify_update_id(&serde_json::json!(1.5)).is_err());
+        assert!(classify_update_id(&serde_json::json!(["a"])).is_err());
+        assert!(classify_update_id(&serde_json::json!({"id": "a"})).is_err());
+    }
+
+    #[test]
+    fn repeated_id_observes_earlier_write() {
+        let day = |text: &str| chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap();
+        let writes = vec![BulkWrite {
+            id: "a",
+            start_date: Some(day("2026-02-01")),
+            target_date: None,
+        }];
+        assert_eq!(
+            written_current(&writes, "a"),
+            (Some("2026-02-01".to_owned()), None)
+        );
+        assert_eq!(written_current(&writes, "b"), (None, None));
+        assert_eq!(written_current(&[], "a"), (None, None));
     }
 
     #[test]
