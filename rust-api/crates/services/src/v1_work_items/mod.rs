@@ -31,6 +31,11 @@
 //!   asset-metadata emits plus the attachment S3 offline inputs;
 //!   `api/views/issue.py` `.delay` sites, `api/views/page.py:156-170`,
 //!   `settings/storage.py`, PIDASHCONV-672).
+//! * [`queries_search`] — search + page read queries (legacy/advanced
+//!   search SQL + params + result assembly, page visibility queryset +
+//!   parent validation + fetch-or-error + detail select + archive reads;
+//!   `api/views/issue.py:2654-2917`, `search/issue.py:128-198`,
+//!   `api/views/page.py:173-232,480-553`, PIDASHCONV-670).
 //! * Sibling issues extend this file with their own `pub mod shape_*;` /
 //!   `queries_*` lines (PIDASHCONV-661…663,665…672); on rebase keep both sides,
 //!   never fork a helper.
@@ -47,6 +52,7 @@
 
 pub mod columns;
 pub mod queries_core;
+pub mod queries_search;
 pub mod queries_sub;
 pub mod shape_expand_search;
 pub mod shape_issue;
