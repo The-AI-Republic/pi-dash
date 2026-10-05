@@ -9039,6 +9039,34 @@ export class WebDriver implements ParityDriver {
     await this.emptyStateCreateButton().click();
   }
 
+  async emptyStateArtworkSignature(): Promise<string | null> {
+    // The empty-state artwork sits next to its heading inside the same
+    // block; the page carries several landmarks, so climb from the heading
+    // to the nearest ancestor holding illustrations and signature the
+    // biggest one (icons are an order of magnitude smaller than the art).
+    const heading = this.page.getByRole("heading", {
+      name: /No active projects|No matching results\.|No projects archived/,
+    });
+    if (!(await this.isShown(heading))) return null;
+    return heading.first().evaluate((node) => {
+      const area = (el: SVGSVGElement): number => {
+        const rect = el.getBoundingClientRect();
+        return rect.width * rect.height;
+      };
+      let scope: HTMLElement | null = node as HTMLElement;
+      for (let depth = 0; depth < 6 && scope; depth += 1) {
+        const svgs = [...scope.querySelectorAll("svg")];
+        if (svgs.length > 0) {
+          const biggest = svgs.reduce((a, b) => (area(a) >= area(b) ? a : b));
+          const html = biggest.outerHTML;
+          return `${html.length}:${html.slice(0, 160)}`;
+        }
+        scope = scope.parentElement;
+      }
+      return null;
+    });
+  }
+
   private headerCreateButton(): Locator {
     // Header create button: label "Add Project" (>=sm) or "Project" (below sm).
     return this.page.getByRole("button", { name: /^(Add Project|Project)$/ });
@@ -9049,9 +9077,18 @@ export class WebDriver implements ParityDriver {
   }
 
   async headerCreateButtonLabel(): Promise<string | null> {
+    // innerText, not textContent: both the full and the short label mount
+    // and CSS hides one, so only rendered text tells them apart.
     const btn = this.headerCreateButton();
     if (!(await this.isShown(btn))) return null;
-    return (await btn.first().textContent())?.trim() ?? null;
+    return (
+      (
+        await btn
+          .first()
+          .innerText()
+          .catch(() => null)
+      )?.trim() ?? null
+    );
   }
 
   async clickHeaderCreateButton(): Promise<void> {
@@ -9094,11 +9131,28 @@ export class WebDriver implements ParityDriver {
 
   private sortTrigger(): Locator {
     // Order-by trigger shows the current option label among Manual/Name/...
-    return this.page.getByRole("button", { name: /(Manual|Name|Created date|Number of members)/ }).first();
+    return this.page.getByRole("button", { name: /(Manual|Name|Created date|Number of members)/ });
+  }
+
+  private async shownTrigger(trigger: Locator): Promise<Locator> {
+    // Role queries match hidden nodes too, and the desktop filter row and
+    // the mobile bar both mount sort/filter triggers; drive the visible
+    // one so the same methods work at desktop and phone widths.
+    const count = await trigger.count();
+    for (let index = 0; index < count; index += 1) {
+      if (
+        await trigger
+          .nth(index)
+          .isVisible()
+          .catch(() => false)
+      )
+        return trigger.nth(index);
+    }
+    return trigger.first();
   }
 
   async openSortMenu(): Promise<void> {
-    await this.sortTrigger().click();
+    await (await this.shownTrigger(this.sortTrigger())).click();
   }
 
   async selectSortOption(label: string): Promise<void> {
@@ -9106,7 +9160,8 @@ export class WebDriver implements ParityDriver {
   }
 
   async currentSortLabel(): Promise<string> {
-    return (await this.sortTrigger().textContent())?.trim() ?? "";
+    const trigger = await this.shownTrigger(this.sortTrigger());
+    return ((await trigger.textContent()) ?? "").trim();
   }
 
   async isSortDirectionDisabled(): Promise<boolean> {
@@ -9119,11 +9174,11 @@ export class WebDriver implements ParityDriver {
   }
 
   private filterTrigger(): Locator {
-    return this.page.getByRole("button", { name: "Filters" }).first();
+    return this.page.getByRole("button", { name: "Filters" });
   }
 
   async openFilterMenu(): Promise<void> {
-    await this.filterTrigger().click();
+    await (await this.shownTrigger(this.filterTrigger())).click();
   }
 
   private filterPanel(): Locator {
@@ -9146,7 +9201,8 @@ export class WebDriver implements ParityDriver {
 
   async isFilterBadgeVisible(): Promise<boolean> {
     // Active-filter dot renders as a small accent span on the trigger.
-    const dot = this.filterTrigger().locator('span[class*="bg-accent-primary"]');
+    const trigger = await this.shownTrigger(this.filterTrigger());
+    const dot = trigger.locator('span[class*="bg-accent-primary"]');
     return this.isShown(dot);
   }
 
@@ -9192,11 +9248,18 @@ export class WebDriver implements ParityDriver {
     // Collapsed until the toolbar's icon-only search button expands it; it
     // is the first button in the toolbar (sort, Filters, create follow).
     await this.listToolbar().getByRole("button").first().click();
+    // Settle: the expand lags the click, and a second opener must see the
+    // open field rather than clicking the magnifier a second time.
+    await this.listSearchInput().waitFor({ state: "visible", timeout: 10_000 });
   }
 
   async typeListSearch(text: string): Promise<void> {
+    // Human-scale keystrokes, not fill: fill's single synthetic input event
+    // leaves the outside-click detector holding a stale closure, so the
+    // next outside click collapses the field despite the text. Spaced-out
+    // trusted key events flush every keystroke and the field stays open.
     await this.openListSearch();
-    await this.listSearchInput().fill(text);
+    await this.listSearchInput().pressSequentially(text, { delay: 60 });
   }
 
   async listSearchValue(): Promise<string> {
@@ -9216,7 +9279,9 @@ export class WebDriver implements ParityDriver {
   }
 
   async clickOutsideListSearch(): Promise<void> {
-    await this.page.getByRole("main").click({ position: { x: 5, y: 5 } });
+    // The leading breadcrumb is plain text with no handlers: a click there
+    // is purely "outside" the search field without navigating anywhere.
+    await this.breadcrumbItems().first().click();
   }
 
   async cardShortCode(name: string): Promise<string | null> {
@@ -9252,6 +9317,37 @@ export class WebDriver implements ParityDriver {
 
   async clickFavoriteStar(name: string): Promise<void> {
     await this.favoriteStar(name).first().click();
+  }
+
+  async cardHasCoverImage(name: string): Promise<boolean> {
+    // The cover carries the project name as its accessible label; a
+    // cover-less card renders a loading block instead of an image.
+    const card = this.cardByName(name).first();
+    return this.isShown(card.getByRole("img", { name, exact: true }));
+  }
+
+  async cardHasLogo(name: string): Promise<boolean> {
+    // The logo box holds an emoji glyph or an icon once a logo is set and
+    // stays an empty skeleton otherwise.
+    const card = this.cardByName(name).first();
+    const box = card.locator("div.grid.h-9.w-9").first();
+    if (!(await this.isShown(box))) return false;
+    const text = ((await box.textContent()) ?? "").trim();
+    if (text.length > 0) return true;
+    return (await box.locator("svg").count()) > 0;
+  }
+
+  async cardAvatarStack(name: string): Promise<string[]> {
+    // Avatar circles are the only fully round nodes on a card, nested three
+    // deep per avatar; the leafmost circles carry one initial each, and the
+    // stack overflows into a "+N" bubble past its display cap.
+    const card = this.cardByName(name).first();
+    return card.locator("div.rounded-full").evaluateAll((nodes) =>
+      nodes
+        .filter((node) => node.querySelector("div.rounded-full") === null)
+        .map((node) => (node.textContent ?? "").trim())
+        .filter((text) => text.length > 0)
+    );
   }
 
   async clickProjectCard(name: string): Promise<void> {
@@ -9396,6 +9492,10 @@ export class WebDriver implements ParityDriver {
     return this.isShown(this.archivedCard(name).getByText("Archived", { exact: false }));
   }
 
+  async isRestoreDialogVisible(): Promise<boolean> {
+    return this.isShown(this.modalScope().getByRole("heading", { name: /^Restore / }));
+  }
+
   async openDeleteProjectDialog(name: string): Promise<void> {
     await this.openCardContextMenu(name);
     await this.clickCardContextMenuItem("Delete");
@@ -9434,7 +9534,16 @@ export class WebDriver implements ParityDriver {
   }
 
   async submitCreateProject(): Promise<void> {
-    await this.page.getByRole("button", { name: "Create project", exact: true }).click();
+    // A sticky app-level toast (e.g. the cover-upload degradation warning,
+    // which never auto-dismisses) can sit over the submit button and
+    // intercept pointer clicks forever; the button itself is verified
+    // present, so dispatch the click when the pointer cannot land.
+    const btn = this.page.getByRole("button", { name: "Create project", exact: true });
+    try {
+      await btn.click({ timeout: 10_000 });
+    } catch {
+      await btn.first().evaluate((node) => (node as HTMLElement).click());
+    }
   }
 
   async createProjectErrorText(): Promise<string | null> {
@@ -9447,5 +9556,19 @@ export class WebDriver implements ParityDriver {
       if (await this.isShown(loc)) return (await loc.first().textContent())?.trim() ?? text;
     }
     return null;
+  }
+
+  async createFormCoverVisible(): Promise<boolean> {
+    return this.isShown(this.modalScope().getByRole("img", { name: "Project cover image" }));
+  }
+
+  async createFormIconVisible(): Promise<boolean> {
+    // The icon picker label holds the prefilled emoji glyph or icon and
+    // stays empty until a logo value exists.
+    const box = this.modalScope().locator("span.grid.h-11.w-11").first();
+    if (!(await this.isShown(box))) return false;
+    const text = ((await box.textContent()) ?? "").trim();
+    if (text.length > 0) return true;
+    return (await box.locator("svg").count()) > 0;
   }
 }

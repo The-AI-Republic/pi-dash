@@ -10,12 +10,15 @@
 // apps/web first.
 import { test, expect } from "../../fixtures";
 import {
+  ROLE,
+  addProjectMembersViaApi,
   archiveProjectViaApi,
   browserSessionCookies,
   createProjectViaApi,
   createWorkspaceForProjects,
   markOnboardedForProjects,
   projectByName,
+  seatFreshMember,
   setLastWorkspaceForProjects,
   signUpAuthedSession,
   uniqueSuffixForProjects,
@@ -44,6 +47,7 @@ test(
       await driver.openArchiveProjectDialog(ws.slug, projId);
       await expect.poll(() => driver.archiveDialogBodyText()).toContain("archived");
       await driver.confirmArchive();
+      await expect.poll(() => driver.isToastVisible("has been archived successfully")).toBe(true);
       await expect
         .poll(async () => (await projectByName(owner, ws.slug, "Archivable Project"))?.archived_at ?? null)
         .not.toBeNull();
@@ -57,9 +61,16 @@ test(
       await driver.awaitProjectCard("Archivable Project");
       await driver.clickCardRestore("Archivable Project");
       await driver.confirmRestore();
+      await expect.poll(() => driver.isToastVisible("in your projects")).toBe(true);
       await expect
         .poll(async () => (await projectByName(owner, ws.slug, "Archivable Project"))?.archived_at ?? null)
         .toBeNull();
+    });
+
+    await test.step("restoring returns to the default list with the card back", async () => {
+      await expect.poll(() => driver.currentUrlPath()).not.toContain("/archives");
+      await driver.awaitProjectCard("Archivable Project");
+      await expect.poll(() => driver.visibleProjectCardNames()).toContain("Archivable Project");
     });
   }
 );
@@ -82,6 +93,17 @@ test(
     await test.step("the card shows the archived marker and admin actions", async () => {
       expect(await driver.cardShowsArchivedMarker("Muted Project")).toBe(true);
       expect(await driver.archivedCardHasAdminActions("Muted Project")).toBe(true);
+    });
+
+    await test.step("a guest sees the muted card with no admin actions", async () => {
+      const guest = await seatFreshMember(owner, ws.slug, ROLE.GUEST, "parity-acard-guest");
+      await markOnboardedForProjects(guest);
+      await setLastWorkspaceForProjects(guest, ws.id);
+      await addProjectMembersViaApi(owner, ws.slug, projId, [{ member_id: guest.userId, role: ROLE.GUEST }]);
+      await driver.openAuthenticated(`/${ws.slug}/projects/archives`, browserSessionCookies(guest));
+      await driver.awaitProjectCard("Muted Project");
+      expect(await driver.cardShowsArchivedMarker("Muted Project")).toBe(true);
+      expect(await driver.archivedCardHasAdminActions("Muted Project")).toBe(false);
     });
   }
 );
@@ -107,16 +129,20 @@ test(
     await test.step("the destructive button stays disabled until both fields are correct", async () => {
       await driver.openDeleteProjectDialog("Doomed Project");
       await expect.poll(() => driver.isDeleteSubmitDisabled()).toBe(true);
+      await driver.fillDeleteProjectName("Wrong Name");
+      await driver.fillDeleteConfirmPhrase("delete my project");
+      await expect.poll(() => driver.isDeleteSubmitDisabled()).toBe(true);
       await driver.fillDeleteProjectName("Doomed Project");
       await driver.fillDeleteConfirmPhrase("wrong phrase");
       await expect.poll(() => driver.isDeleteSubmitDisabled()).toBe(true);
     });
 
-    await test.step("correct entries remove the project", async () => {
+    await test.step("correct entries remove the project with a success notice", async () => {
       await driver.fillDeleteConfirmPhrase("delete my project");
       await expect.poll(() => driver.isDeleteSubmitDisabled()).toBe(false);
       await driver.submitDelete();
       await expect.poll(() => projectByName(owner, ws.slug, "Doomed Project")).toBeUndefined();
+      await expect.poll(() => driver.isToastVisible("Project deleted successfully")).toBe(true);
     });
   }
 );

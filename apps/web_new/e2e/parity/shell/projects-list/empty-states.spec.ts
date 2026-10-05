@@ -39,6 +39,11 @@ test(
       await expect.poll(() => driver.isEmptyStateCreateEnabled()).toBe(true);
     });
 
+    await test.step("the admin action opens the create form", async () => {
+      await driver.clickEmptyStateCreate();
+      await expect.poll(() => driver.isCreateProjectDialogVisible()).toBe(true);
+    });
+
     await test.step("a guest sees the same empty state but the action is disabled", async () => {
       const guest = await seatFreshMember(owner, ws.slug, ROLE.GUEST, "parity-empty-guest");
       await markOnboardedForProjects(guest);
@@ -62,17 +67,23 @@ test(
     await setLastWorkspaceForProjects(owner, ws.id);
     await createProjectViaApi(owner, ws.slug, { name: "Real Project", identifier: "REAL" });
 
+    let missArt: string | null = null;
     await test.step("a nonsense search shows the no-match variant", async () => {
       await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(owner));
       await driver.awaitProjectCard("Real Project");
       await driver.openListSearch();
       await driver.typeListSearch("zzz-no-such-project-zzz");
       await expect.poll(() => driver.emptyStateHeading()).toBe("No matching results.");
+      missArt = await driver.emptyStateArtworkSignature();
+      expect(missArt).not.toBeNull();
     });
 
     await test.step("the archive view with nothing archived shows the congratulatory variant", async () => {
       await driver.openArchivedProjects(ws.slug);
       await expect.poll(() => driver.emptyStateHeading()).toBe("No projects archived");
+      const archiveArt = await driver.emptyStateArtworkSignature();
+      expect(archiveArt).not.toBeNull();
+      expect(archiveArt).not.toBe(missArt);
     });
   }
 );

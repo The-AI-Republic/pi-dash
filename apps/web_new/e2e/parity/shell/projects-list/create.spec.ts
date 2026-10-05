@@ -16,6 +16,7 @@ import {
   markOnboardedForProjects,
   projectByName,
   projectFeatureFlags,
+  projectTimezone,
   setLastWorkspaceForProjects,
   signUpAuthedSession,
   uniqueSuffixForProjects,
@@ -53,12 +54,25 @@ test(
       await expect.poll(() => projectByName(owner, ws.slug, "Nebula Craft")).not.toBeUndefined();
     });
 
+    await test.step("creating closes the modal with a success notice", async () => {
+      await expect.poll(() => driver.isCreateProjectDialogVisible()).toBe(false);
+      await expect.poll(() => driver.isToastVisible("Project created successfully")).toBe(true);
+    });
+
     await test.step("a reused name yields a field-specific error", async () => {
       await driver.clickHeaderCreateButton();
       await driver.fillCreateProjectName("Nebula Craft");
       await driver.fillCreateProjectShortCode("NEBX");
       await driver.submitCreateProject();
       await expect.poll(() => driver.createProjectErrorText()).toContain("name is already taken");
+    });
+
+    await test.step("a reused short code yields a field-specific error", async () => {
+      const existing = await projectByName(owner, ws.slug, "Nebula Craft");
+      await driver.fillCreateProjectName("Another Craft");
+      await driver.fillCreateProjectShortCode(existing!.identifier);
+      await driver.submitCreateProject();
+      await expect.poll(() => driver.createProjectErrorText()).toContain("identifier is already taken");
     });
   }
 );
@@ -72,6 +86,13 @@ test(
     await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(owner));
     await expect.poll(() => driver.emptyStateHeading()).toBe("No active projects");
     await driver.clickEmptyStateCreate();
+    await expect.poll(() => driver.isCreateProjectDialogVisible()).toBe(true);
+
+    await test.step("the fresh form shows its prefilled cover and icon", async () => {
+      expect(await driver.createFormCoverVisible()).toBe(true);
+      expect(await driver.createFormIconVisible()).toBe(true);
+    });
+
     await driver.fillCreateProjectName("Defaults Demo");
     await driver.submitCreateProject();
 
@@ -84,6 +105,10 @@ test(
       expect(flags?.issue_views_view).toBe(false);
       expect(flags?.page_view).toBe(false);
       expect(flags?.intake_view).toBe(false);
+    });
+
+    await test.step("the created project carries a prefilled timezone", async () => {
+      await expect.poll(() => projectTimezone(owner, ws.slug, "Defaults Demo")).not.toBeNull();
     });
   }
 );

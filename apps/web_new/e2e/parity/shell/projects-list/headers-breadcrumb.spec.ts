@@ -9,6 +9,7 @@
 // primitive: terminal crumb is plain text, not a link). Green on apps/web.
 import { test, expect } from "../../fixtures";
 import {
+  NETWORK,
   ROLE,
   browserSessionCookies,
   createProjectViaApi,
@@ -72,6 +73,14 @@ test(
         .toBe(true);
       await expect.poll(() => driver.isHeaderCreateButtonVisible()).toBe(false);
     });
+
+    await test.step("the create button label shortens on small screens", async () => {
+      await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(owner));
+      await driver.setViewportWidth(1320);
+      await expect.poll(() => driver.headerCreateButtonLabel()).toContain("Add Project");
+      await driver.setViewportWidth(500);
+      await expect.poll(() => driver.headerCreateButtonLabel()).toBe("Project");
+    });
   }
 );
 
@@ -80,6 +89,11 @@ test(
   { tag: specTags(MOBILE) },
   async ({ driver }) => {
     const { owner, ws } = await ownerWithOneProject("mobhdr");
+    await createProjectViaApi(owner, ws.slug, {
+      name: "mobhdr Zed",
+      identifier: "MZED",
+      network: NETWORK.PRIVATE,
+    });
 
     await test.step("phone widths hide the desktop filter row and show the mobile bar", async () => {
       await driver.setViewportWidth(400);
@@ -87,6 +101,20 @@ test(
       await driver.awaitProjectCard("mobhdr Card");
       await expect.poll(() => driver.isMobileListHeaderVisible()).toBe(true);
       await expect.poll(() => driver.isDesktopFilterRowVisible()).toBe(false);
+    });
+
+    await test.step("the mobile bar sorts the list", async () => {
+      await driver.openSortMenu();
+      await driver.selectSortOption("Name");
+      await expect.poll(() => driver.currentSortLabel()).toContain("Name");
+      await expect.poll(() => driver.visibleProjectCardNames()).toEqual(["mobhdr Card", "mobhdr Zed"]);
+    });
+
+    await test.step("the mobile bar filters the list", async () => {
+      await driver.openFilterMenu();
+      await driver.selectFilterOption("Private");
+      await driver.closeMenu();
+      await expect.poll(() => driver.visibleProjectCardNames()).toEqual(["mobhdr Zed"]);
     });
   }
 );

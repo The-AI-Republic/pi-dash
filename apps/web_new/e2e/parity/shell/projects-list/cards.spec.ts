@@ -18,6 +18,7 @@ import {
   createWorkspaceForProjects,
   markOnboardedForProjects,
   projectByName,
+  projectMemberRole,
   seatFreshMember,
   setLastWorkspaceForProjects,
   signUpAuthedSession,
@@ -51,8 +52,37 @@ test(
 
     await test.step("an admin sees the star and starring persists on the server", async () => {
       expect(await driver.cardHasFavoriteStar("Secret Card")).toBe(true);
+      expect(await driver.isFavoritesOpen()).toBe(false);
       await driver.clickFavoriteStar("Secret Card");
       await expect.poll(async () => (await projectByName(owner, ws.slug, "Secret Card"))?.is_favorite).toBe(true);
+    });
+
+    await test.step("the first star opens the favorites section", async () => {
+      await expect.poll(() => driver.isFavoritesOpen()).toBe(true);
+    });
+
+    await test.step("a created card shows its cover, logo and member stack with count", async () => {
+      await driver.clickHeaderCreateButton();
+      await expect.poll(() => driver.isCreateProjectDialogVisible()).toBe(true);
+      await driver.fillCreateProjectName("Cover Card");
+      await driver.submitCreateProject();
+      await driver.awaitProjectCard("Cover Card");
+      expect(await driver.cardHasCoverImage("Cover Card")).toBe(true);
+      expect(await driver.cardHasLogo("Cover Card")).toBe(true);
+      await expect.poll(() => driver.cardAvatarStack("Cover Card")).toHaveLength(1);
+
+      const mateOne = await seatFreshMember(owner, ws.slug, ROLE.MEMBER, "parity-card-m1");
+      const mateTwo = await seatFreshMember(owner, ws.slug, ROLE.MEMBER, "parity-card-m2");
+      const mateThree = await seatFreshMember(owner, ws.slug, ROLE.MEMBER, "parity-card-m3");
+      const cover = await projectByName(owner, ws.slug, "Cover Card");
+      await addProjectMembersViaApi(owner, ws.slug, cover!.id, [
+        { member_id: mateOne.userId, role: ROLE.MEMBER },
+        { member_id: mateTwo.userId, role: ROLE.MEMBER },
+        { member_id: mateThree.userId, role: ROLE.MEMBER },
+      ]);
+      await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(owner));
+      await driver.awaitProjectCard("Cover Card");
+      await expect.poll(() => driver.cardAvatarStack("Cover Card")).toEqual(expect.arrayContaining(["+2"]));
     });
 
     await test.step("a guest sees no favorite star", async () => {
@@ -133,6 +163,19 @@ test(
       await driver.closeMenu();
     });
 
+    await test.step("copy-link writes the project address to the clipboard", async () => {
+      await driver.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+      await driver.openCardContextMenu("Owned Action");
+      await driver.clickCardContextMenuItem("Copy link");
+      await expect.poll(() => driver.readClipboardText()).toContain(`/projects/${projId}/issues`);
+    });
+
+    await test.step("settings navigates to the project settings page", async () => {
+      await driver.openCardContextMenu("Owned Action");
+      await driver.clickCardContextMenuItem("Settings");
+      await expect.poll(() => driver.currentUrlPath()).toContain(`/settings/projects/${projId}`);
+    });
+
     await test.step("a non-member sees join and open-in-new-tab", async () => {
       const outsider = await seatFreshMember(owner, ws.slug, ROLE.MEMBER, "parity-actions-out");
       await markOnboardedForProjects(outsider);
@@ -145,14 +188,63 @@ test(
       await driver.closeMenu();
     });
 
+    await test.step("open-in-new-tab opens the project issues view", async () => {
+      const outsider = await seatFreshMember(owner, ws.slug, ROLE.MEMBER, "parity-actions-tab");
+      await markOnboardedForProjects(outsider);
+      await setLastWorkspaceForProjects(outsider, ws.id);
+      await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(outsider));
+      await driver.awaitProjectCard("Owned Action");
+      await driver.openCardContextMenu("Owned Action");
+      const popupPromise = driver.page.context().waitForEvent("page");
+      await driver.clickCardContextMenuItem("Open in new tab");
+      const popup = await popupPromise;
+      await popup.waitForLoadState("domcontentloaded");
+      expect(popup.url()).toContain(`/projects/${projId}/issues`);
+      await popup.close();
+    });
+
+    await test.step("join opens the join dialog and confirming lands inside", async () => {
+      const outsider = await seatFreshMember(owner, ws.slug, ROLE.MEMBER, "parity-actions-join");
+      await markOnboardedForProjects(outsider);
+      await setLastWorkspaceForProjects(outsider, ws.id);
+      await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(outsider));
+      await driver.awaitProjectCard("Owned Action");
+      await driver.openCardContextMenu("Owned Action");
+      await driver.clickCardContextMenuItem("Join");
+      await expect.poll(() => driver.isJoinDialogVisible()).toBe(true);
+      await driver.confirmJoin();
+      await expect.poll(() => driver.currentUrlPath()).toContain(`/projects/${projId}/issues`);
+      await expect.poll(() => projectMemberRole(outsider, ws.slug, projId)).toBe(ROLE.MEMBER);
+    });
+
     await test.step("an admin on an archived card sees restore and delete", async () => {
       await archiveProjectViaApi(owner, ws.slug, projId);
+      const doomedId = await createProjectViaApi(owner, ws.slug, { name: "Doomed Action", identifier: "DMDA" });
+      await archiveProjectViaApi(owner, ws.slug, doomedId);
       await driver.openAuthenticated(`/${ws.slug}/projects/archives`, browserSessionCookies(owner));
       await driver.awaitProjectCard("Owned Action");
       await driver.openCardContextMenu("Owned Action");
       const items = await driver.contextMenuItemLabels();
       expect(items).toEqual(expect.arrayContaining(["Restore", "Delete"]));
       await driver.closeMenu();
+    });
+
+    await test.step("restore opens its dialog and returns the project", async () => {
+      await driver.openCardContextMenu("Owned Action");
+      await driver.clickCardContextMenuItem("Restore");
+      await expect.poll(() => driver.isRestoreDialogVisible()).toBe(true);
+      await driver.confirmRestore();
+      await expect
+        .poll(async () => (await projectByName(owner, ws.slug, "Owned Action"))?.archived_at ?? null)
+        .toBeNull();
+    });
+
+    await test.step("delete opens the destructive dialog", async () => {
+      await driver.openAuthenticated(`/${ws.slug}/projects/archives`, browserSessionCookies(owner));
+      await driver.awaitProjectCard("Doomed Action");
+      await driver.openCardContextMenu("Doomed Action");
+      await driver.clickCardContextMenuItem("Delete");
+      await expect.poll(() => driver.isDeleteSubmitDisabled()).toBe(true);
     });
   }
 );

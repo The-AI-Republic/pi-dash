@@ -6910,3 +6910,26 @@ export async function projectFeatureFlags(
     intake_view: bool("intake_view"),
   };
 }
+
+/** Set a project's lead to a workspace member (the same PATCH the UI sends). */
+export async function setProjectLeadViaApi(
+  session: AuthedSession,
+  slug: string,
+  projectId: string,
+  userId: string
+): Promise<void> {
+  const res = await sessionFetch(session, "PATCH", `/api/workspaces/${slug}/projects/${projectId}/`, {
+    project_lead: userId,
+  });
+  if (!res.ok) throw new Error(`[parity] project lead set failed with HTTP ${res.status}.`);
+}
+
+/** A project's stored timezone, or null when the field is missing/empty. */
+export async function projectTimezone(session: AuthedSession, slug: string, name: string): Promise<string | null> {
+  const res = await sessionFetch(session, "GET", `/api/workspaces/${slug}/projects/details/`);
+  if (!res.ok) throw new Error(`[parity] projects/details read failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Array<Record<string, unknown>>;
+  const row = rows.find((r) => r["name"] === name);
+  const tz = row?.["timezone"];
+  return typeof tz === "string" && tz.length > 0 ? tz : null;
+}

@@ -94,6 +94,14 @@ test(
       expect(await projectMemberRole(guest, ws.slug, projId)).toBe(ROLE.GUEST);
     });
 
+    await test.step("a wrong confirmation phrase is rejected while membership holds", async () => {
+      await driver.fillLeaveProjectName("Leavable Project");
+      await driver.fillLeaveConfirmPhrase("leave");
+      await driver.submitLeave();
+      await expect.poll(() => driver.leaveErrorText()).not.toBeNull();
+      expect(await projectMemberRole(guest, ws.slug, projId)).toBe(ROLE.GUEST);
+    });
+
     await test.step("correct entries remove membership and route back to the list", async () => {
       await driver.fillLeaveProjectName("Leavable Project");
       await driver.fillLeaveConfirmPhrase("Leave Project");

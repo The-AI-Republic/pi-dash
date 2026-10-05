@@ -2881,6 +2881,9 @@ export class WebNewDriver implements ParityDriver {
   async clickEmptyStateCreate(): Promise<void> {
     return todo("clickEmptyStateCreate");
   }
+  async emptyStateArtworkSignature(): Promise<string | null> {
+    return todo("emptyStateArtworkSignature");
+  }
   async isHeaderCreateButtonVisible(): Promise<boolean> {
     return todo("isHeaderCreateButtonVisible");
   }
@@ -2980,6 +2983,15 @@ export class WebNewDriver implements ParityDriver {
   async clickFavoriteStar(_name: string): Promise<void> {
     return todo("clickFavoriteStar");
   }
+  async cardHasCoverImage(_name: string): Promise<boolean> {
+    return todo("cardHasCoverImage");
+  }
+  async cardHasLogo(_name: string): Promise<boolean> {
+    return todo("cardHasLogo");
+  }
+  async cardAvatarStack(_name: string): Promise<string[]> {
+    return todo("cardAvatarStack");
+  }
   async clickProjectCard(_name: string): Promise<void> {
     return todo("clickProjectCard");
   }
@@ -3043,6 +3055,9 @@ export class WebNewDriver implements ParityDriver {
   async cardShowsArchivedMarker(_name: string): Promise<boolean> {
     return todo("cardShowsArchivedMarker");
   }
+  async isRestoreDialogVisible(): Promise<boolean> {
+    return todo("isRestoreDialogVisible");
+  }
   async openDeleteProjectDialog(_name: string): Promise<void> {
     return todo("openDeleteProjectDialog");
   }
@@ -3075,5 +3090,11 @@ export class WebNewDriver implements ParityDriver {
   }
   async createProjectErrorText(): Promise<string | null> {
     return todo("createProjectErrorText");
+  }
+  async createFormCoverVisible(): Promise<boolean> {
+    return todo("createFormCoverVisible");
+  }
+  async createFormIconVisible(): Promise<boolean> {
+    return todo("createFormIconVisible");
   }
 }

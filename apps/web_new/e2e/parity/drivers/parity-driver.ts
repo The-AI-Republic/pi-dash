@@ -1809,6 +1809,8 @@ export interface ParityDriver {
   isEmptyStateCreateEnabled(): Promise<boolean>;
   /** Click the empty-state create action (opens the create modal). */
   clickEmptyStateCreate(): Promise<void>;
+  /** A signature of the empty-state artwork (distinguishes the art variants), or null. */
+  emptyStateArtworkSignature(): Promise<string | null>;
 
   // --- desktop + mobile header (SHELL-043, SHELL-044, SHELL-045) ---
   /** Whether the header create button is present (hidden from guests / archive view). */
@@ -1878,6 +1880,12 @@ export interface ParityDriver {
   cardHasFavoriteStar(name: string): Promise<boolean>;
   /** Toggle the favorite star on a card. */
   clickFavoriteStar(name: string): Promise<void>;
+  /** Whether the card renders its cover image (as opposed to a loading block). */
+  cardHasCoverImage(name: string): Promise<boolean>;
+  /** Whether the card renders the project logo/icon next to its name. */
+  cardHasLogo(name: string): Promise<boolean>;
+  /** Texts of the member-avatar stack circles (initials plus any "+N" overflow). */
+  cardAvatarStack(name: string): Promise<string[]>;
 
   // --- routing + quick actions (SHELL-033, SHELL-034) ---
   /** Click a project card body (routing / intercept depends on membership). */
@@ -1919,6 +1927,8 @@ export interface ParityDriver {
   confirmRestore(): Promise<void>;
   /** Whether an archived card exposes inline restore/delete admin actions. */
   archivedCardHasAdminActions(name: string): Promise<boolean>;
+  /** Whether the restore confirmation dialog is currently open. */
+  isRestoreDialogVisible(): Promise<boolean>;
   /** Whether an archived card shows its muted "Archived" marker. */
   cardShowsArchivedMarker(name: string): Promise<boolean>;
 
@@ -1939,6 +1949,10 @@ export interface ParityDriver {
   submitCreateProject(): Promise<void>;
   /** The visible create error text (duplicate name/code, upload warning), or null. */
   createProjectErrorText(): Promise<string | null>;
+  /** Whether the open create form shows its prefilled cover image. */
+  createFormCoverVisible(): Promise<boolean>;
+  /** Whether the open create form shows its prefilled project icon. */
+  createFormIconVisible(): Promise<boolean>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */
