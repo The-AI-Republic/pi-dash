@@ -1835,7 +1835,7 @@ const ARCHIVE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
 };
 
 /// DRF's `UnsupportedMediaType` body: lowercase `detail`
-/// (`exception_handler` renders `{'Detail': exc.detail}`, the same
+/// (`exception_handler` renders `{'detail': exc.detail}`, the same
 /// renderer as `Denial::BadDetail` — the shared `Denial` has no 415
 /// variant, so the bulk arm builds it locally).
 fn unsupported_media_type_body(message: &str) -> String {
