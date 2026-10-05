@@ -1468,6 +1468,7 @@ fn parse_multipart_parts(
                 let filename =
                     sanitize_file_name(&decode_oneshot_replace(&filename, *charset)?.text)?;
                 let Some(filename) = filename else { continue };
+                let filename = truncate_uploaded_name(&filename);
                 let mut value = data;
                 if item_transfer_is_base64(content)? {
                     value = binascii_b64decode(&value).map_err(|_| {
@@ -1751,6 +1752,35 @@ fn sanitize_file_name(name: &str) -> Result<Option<String>, BodyError> {
         return Ok(None);
     }
     Ok(Some(name))
+}
+
+/// `UploadedFile._set_name` truncation (`django/core/files/uploadedfile.py`):
+/// names longer than 255 chars are cut to exactly 255, keeping the
+/// `os.path.splitext` extension and cutting the root to fit. All lengths and
+/// slices are char-counted. The sibling steps need no code: `basename` is
+/// identity (no `/` survives the strip above) and `validate_file_name` is
+/// identity (no slashes; the name is never `""`, `"."` or `".."`).
+fn truncate_uploaded_name(name: &str) -> String {
+    if name.chars().count() <= 255 {
+        return name.to_owned();
+    }
+    let (root, ext) = splitext_no_sep(name);
+    let ext: String = ext.chars().take(255).collect();
+    let root: String = root.chars().take(255 - ext.chars().count()).collect();
+    format!("{root}{ext}")
+}
+
+/// `genericpath._splitext` with no separator present: split at the last `.`
+/// unless every char before it is a dot (leading-dot names keep the dots in
+/// the root, e.g. `('.bashrc', '')`). The cut is at an ASCII byte, so both
+/// slices are char boundaries.
+fn splitext_no_sep(name: &str) -> (&str, &str) {
+    if let Some(dot) = name.rfind('.') {
+        if name[..dot].chars().any(|c| c != '.') {
+            return (&name[..dot], &name[dot..]);
+        }
+    }
+    (name, "")
 }
 
 /// `html.unescape` (`CPython/Lib/html/__init__.py`): the
@@ -2973,6 +3003,87 @@ mod codec_tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn uploaded_name_truncation() {
+        // `UploadedFile._set_name` (Django 4.2.30): names longer than 255
+        // chars are cut to exactly 255, extension-preserving; 255 and below
+        // pass through untouched. Pinned against the live backends by
+        // `test_filename_truncate.py`.
+        let ct = "multipart/form-data; boundary=----b";
+        let filename_of = |dispo: &[u8]| match negotiate(ct, dispo, &CYCLE_BODY_SPEC).unwrap() {
+            NegotiatedBody::Form { files, .. } => files
+                .get("att")
+                .map(|v| v[0].filename.clone())
+                .unwrap_or_else(|| "<skipped>".to_owned()),
+            other => panic!("{other:?}"),
+        };
+        let part = |d: &[u8]| {
+            [
+                b"------b\r\nContent-Disposition: form-data; name=\"att\"; filename=\"".as_slice(),
+                d,
+                b"\"\r\n\r\nx\r\n------b--\r\n".as_slice(),
+            ]
+            .concat()
+        };
+        // Boundary: 254/255 untouched, 256 cut to 255.
+        assert_eq!(filename_of(&part(&vec![b'a'; 254])), "a".repeat(254));
+        assert_eq!(filename_of(&part(&vec![b'a'; 255])), "a".repeat(255));
+        assert_eq!(filename_of(&part(&vec![b'a'; 256])), "a".repeat(255));
+        // Extension preserved; root absorbs the cut.
+        let long_ext = [vec![b'a'; 900], b".txt".to_vec()].concat();
+        assert_eq!(
+            filename_of(&part(&long_ext)),
+            format!("{}.txt", "a".repeat(251))
+        );
+        // Leading-dot names keep the dots in the root (no extension).
+        let leading_dot = [b".".to_vec(), vec![b'b'; 300]].concat();
+        assert_eq!(
+            filename_of(&part(&leading_dot)),
+            format!(".{}", "b".repeat(254))
+        );
+        // A root of only dots never splits either.
+        assert_eq!(filename_of(&part(&vec![b'.'; 300])), ".".repeat(255));
+        // Trailing-dot root with a 300-char tail: the tail is the extension.
+        let trailing = [b"name.".to_vec(), vec![b'f'; 300]].concat();
+        assert_eq!(
+            filename_of(&part(&trailing)),
+            format!(".{}", "f".repeat(254))
+        );
+        // Bare trailing dot: the dot is a 1-char extension.
+        let bare_dot = [vec![b'g'; 300], b".".to_vec()].concat();
+        assert_eq!(
+            filename_of(&part(&bare_dot)),
+            format!("{}.", "g".repeat(254))
+        );
+        // An extension past 255 chars is itself cut first; the root vanishes.
+        let long_ext_only = [b"jk.".to_vec(), vec![b'l'; 300]].concat();
+        assert_eq!(
+            filename_of(&part(&long_ext_only)),
+            format!(".{}", "l".repeat(254))
+        );
+        // Interior dots: the last dot wins.
+        let multi_dot = [vec![b'h'; 200], b".mid.".to_vec(), vec![b'i'; 100]].concat();
+        assert_eq!(
+            filename_of(&part(&multi_dot)),
+            format!("{}.{}", "h".repeat(154), "i".repeat(100))
+        );
+        // Leading dots with a real extension still split at the last dot.
+        let dotdot_ext = [b"..".to_vec(), vec![b'd'; 300], b".txt".to_vec()].concat();
+        assert_eq!(
+            filename_of(&part(&dotdot_ext)),
+            format!("..{}.txt", "d".repeat(249))
+        );
+        // Char-counted, not byte-counted.
+        assert_eq!(
+            filename_of(&part("é".repeat(200).as_bytes())),
+            "é".repeat(200)
+        );
+        assert_eq!(
+            filename_of(&part("é".repeat(300).as_bytes())),
+            "é".repeat(255)
+        );
     }
 
     #[test]
