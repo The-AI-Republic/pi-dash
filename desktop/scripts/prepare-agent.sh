@@ -28,6 +28,7 @@ cp "$oss_dir/LICENSE.txt" "$license_dir/pidash-LICENSE.txt"
 
 if [[ ! -f "$bin_dir/engine-version.txt" ]] || [[ "$(<"$bin_dir/engine-version.txt")" != "$engine_tag" ]] || [[ ! -x "$bin_dir/pidash-agent-engine$suffix" ]]; then
   task_tmp="$(mktemp -d)"
+  trap 'rm -rf "$task_tmp"' EXIT
   asset="codex-$engine_target$suffix.tar.gz"
   gh release download "$engine_tag" --repo openai/codex --pattern "$asset" --dir "$task_tmp"
   digest="$(gh api "repos/openai/codex/releases/tags/$engine_tag" --jq ".assets[] | select(.name == \"$asset\") | .digest")"
