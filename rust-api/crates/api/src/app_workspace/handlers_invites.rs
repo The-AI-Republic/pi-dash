@@ -1519,13 +1519,397 @@ fn validate_patch_accepted(value: &Value) -> Result<bool, String> {
 const DATETIME_INVALID_MESSAGE: &str =
     "Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z].";
 
-/// Django `parse_datetime` grammar (`django/utils/dateparse.py`):
-/// `YYYY-MM-DD[T ]HH:MM[:SS[.ffffff]][tz]` with 1-2 digit parts,
-/// optional seconds, 1-12 fractional digits (13+ rejected; the first 6
-/// kept, probed live), and `Z`/`±HH[:][MM]` tz (naive reads as UTC
-/// under `USE_TZ`).
-fn parse_django_datetime(value: &str) -> Option<DateTime<Utc>> {
-    let (date, time) = value.split_once(['T', ' '])?;
+/// A parsed `deleted_at` input: aware values carry their instant, naive
+/// values the wall time (DRF then attaches the request timezone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedDt {
+    Aware(DateTime<Utc>),
+    Naive(chrono::NaiveDateTime),
+}
+
+/// Parse exactly what Django's `parse_datetime` accepts
+/// (`django/utils/dateparse.py`, probed live against Django 4.2.30 /
+/// CPython 3.12): `datetime.fromisoformat` first, then the regex
+/// fallback — the union of both arms. Anything else is `None` (the
+/// caller's wrong-format 400; a `ValueError` from either arm lands on
+/// the same 400 through DRF's `contextlib.suppress`, so `None` covers
+/// both outcomes).
+fn parse_django_datetime(text: &str) -> Option<ParsedDt> {
+    parse_iso_datetime(text).or_else(|| parse_regex_datetime(text))
+}
+
+/// The `fromisoformat` arm (CPython 3.12): calendar dates (`YYYY-MM-DD`,
+/// `YYYYMMDD`) and ISO week dates (`YYYY-Www[-d]`, `YYYYWww[d]`, weekday
+/// default 1), an optional time after any single non-digit separator
+/// (exactly-two-digit parts, seconds optional, any-length fraction
+/// truncated to 6), and an optional `Z`/numeric offset (total strictly
+/// under 24h). Unpadded dates, whitespace gaps and the trailing-newline
+/// quirk belong to the regex arm below.
+fn parse_iso_datetime(text: &str) -> Option<ParsedDt> {
+    if text.is_empty() || py_strip(text).len() != text.len() {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    // Date part: 4-digit year first in every accepted shape.
+    if bytes.len() < 4 || !bytes[..4].iter().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let year: i32 = text[..4].parse().ok()?;
+    let (date, rest) = parse_iso_date(text, year)?;
+    if rest.is_empty() {
+        // Date-only renders midnight.
+        return Some(ParsedDt::Naive(
+            date.and_hms_opt(0, 0, 0).expect("midnight valid"),
+        ));
+    }
+    // Any single non-digit separator (`T`, `t`, `X`, space, tab, even
+    // `+`/`-` — the offset only starts after the time part).
+    let rest = match rest.strip_prefix('T') {
+        Some(tail) => tail,
+        None => {
+            let mut chars = rest.chars();
+            let sep = chars.next()?;
+            if sep.is_ascii_digit() {
+                return None;
+            }
+            chars.as_str()
+        }
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    parse_iso_time(date, rest)
+}
+
+/// Parse the date head, returning the day and the unparsed tail.
+fn parse_iso_date(text: &str, year: i32) -> Option<(chrono::NaiveDate, &str)> {
+    let bytes = text.as_bytes();
+    // Week dates contain an uppercase `W` (`2024-W03[-1]`, `2024W03[1]`).
+    // The basic form takes no dash-day (`2024W03-1` is rejected outright —
+    // the dash is not retried as a time separator).
+    if bytes.len() > 4 && bytes[4] == b'W' {
+        let tail = &text[5..];
+        if tail.len() < 2 || !tail.as_bytes()[..2].iter().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if tail.as_bytes().get(2) == Some(&b'-') {
+            return None;
+        }
+        let week: u32 = tail[..2].parse().ok()?;
+        let (weekday, rest) = match tail.as_bytes().get(2) {
+            Some(digit) if digit.is_ascii_digit() => (tail[2..3].parse().ok()?, &tail[3..]),
+            _ => (1, &tail[2..]),
+        };
+        if !(1..=7).contains(&weekday) {
+            return None;
+        }
+        let date = chrono::NaiveDate::from_isoywd_opt(year, week, weekday_as_monday0(weekday))?;
+        return Some((date, rest));
+    }
+    if bytes.len() > 4 && bytes[4] == b'-' {
+        // `YYYY-Www` extended week form.
+        if bytes.get(5) == Some(&b'W') {
+            let tail = &text[6..];
+            if tail.len() < 2 || !tail.as_bytes()[..2].iter().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let week: u32 = tail[..2].parse().ok()?;
+            let (weekday, rest) = match tail[2..].strip_prefix('-') {
+                Some(day) => {
+                    let digit = day.as_bytes().first()?;
+                    if !digit.is_ascii_digit() {
+                        return None;
+                    }
+                    (day[..1].parse().ok()?, &day[1..])
+                }
+                None => (1, &tail[2..]),
+            };
+            if !(1..=7).contains(&weekday) {
+                return None;
+            }
+            let date = chrono::NaiveDate::from_isoywd_opt(year, week, weekday_as_monday0(weekday))?;
+            return Some((date, rest));
+        }
+        // `YYYY-MM-DD`, strictly zero-padded (byte-checked before
+        // slicing so non-ASCII input rejects instead of panicking).
+        if bytes.len() < 10 || bytes[7] != b'-' {
+            return None;
+        }
+        if !bytes[5..7].iter().all(|b| b.is_ascii_digit())
+            || !bytes[8..10].iter().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        let (month, day): (u32, u32) = (text[5..7].parse().ok()?, text[8..10].parse().ok()?);
+        let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+        return Some((date, &text[10..]));
+    }
+    // Basic `YYYYMMDD`.
+    if bytes.len() < 8 || !bytes[4..8].iter().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (month, day): (u32, u32) = (text[4..6].parse().ok()?, text[6..8].parse().ok()?);
+    let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+    Some((date, &text[8..]))
+}
+
+fn weekday_as_monday0(weekday: u32) -> chrono::Weekday {
+    match weekday {
+        1 => chrono::Weekday::Mon,
+        2 => chrono::Weekday::Tue,
+        3 => chrono::Weekday::Wed,
+        4 => chrono::Weekday::Thu,
+        5 => chrono::Weekday::Fri,
+        6 => chrono::Weekday::Sat,
+        _ => chrono::Weekday::Sun,
+    }
+}
+
+/// Parse the time tail (time + optional fraction + optional offset).
+/// `fromisoformat` takes exactly-two-digit parts (`HH[:MM[:SS]]` or
+/// `HHMM[SS]`; probed: `T3`, `T03:4` and `T03:04:5` all fail on padded
+/// and basic dates alike — single-digit parts belong to the regex
+/// arm). The fraction (`.`/`,` anywhere, `:` only after extended
+/// seconds — `T030405:06` fails) is always a seconds fraction, even on
+/// the hour or minute (`T10.5` is 10:00:00.5, probed). In basic form a
+/// digit run past the pairs is the fraction too, but needs at least 2
+/// digits (`T0304050` fails, `T03040500` parses). An empty fraction is
+/// only valid ahead of a tz (`05.+tz` parses, `05.` does not — probed).
+fn parse_iso_time(date: chrono::NaiveDate, rest: &str) -> Option<ParsedDt> {
+    let bytes = rest.as_bytes();
+    if bytes.len() < 2 || !bytes[..2].iter().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hour: u32 = rest[..2].parse().ok()?;
+    if hour > 23 {
+        return None;
+    }
+    let rest = &rest[2..];
+    let (minute, second, rest, basic) = if let Some(tail) = rest.strip_prefix(':') {
+        let tb = tail.as_bytes();
+        if tb.len() < 2 || !tb[..2].iter().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let minute: u32 = tail[..2].parse().ok()?;
+        let tail = &tail[2..];
+        if let Some(tail) = tail.strip_prefix(':') {
+            let tb = tail.as_bytes();
+            if tb.len() < 2 || !tb[..2].iter().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let second: u32 = tail[..2].parse().ok()?;
+            (minute, second, &tail[2..], false)
+        } else {
+            (minute, 0, tail, false)
+        }
+    } else if rest.len() >= 2 && rest.as_bytes()[..2].iter().all(|b| b.is_ascii_digit()) {
+        // Basic `HHMM[SS]` (no colon after the hour).
+        let minute: u32 = rest[..2].parse().ok()?;
+        let tail = &rest[2..];
+        if tail.len() >= 2 && tail.as_bytes()[..2].iter().all(|b| b.is_ascii_digit()) {
+            let second: u32 = tail[..2].parse().ok()?;
+            (minute, second, &tail[2..], true)
+        } else {
+            (minute, 0, tail, true)
+        }
+    } else {
+        (0, 0, rest, true)
+    };
+    if minute > 59 || second > 59 {
+        return None;
+    }
+    // A digit run past basic pairs is the fraction (`T03040500`);
+    // extended parts never take one (`T03:04:056` fails).
+    let (micros, rest, frac_consumed) = if basic {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            (0, rest, false)
+        } else {
+            if digits.len() < 2 {
+                return None;
+            }
+            (frac_micros(&digits), &rest[digits.len()..], true)
+        }
+    } else {
+        (0, rest, false)
+    };
+    // A separated fraction — `.`/`,` anywhere, `:` only after extended
+    // seconds — and never after a digit fraction (`T03040500.5` fails).
+    let (micros, rest) = if frac_consumed {
+        (micros, rest)
+    } else if let Some(frac) = rest.strip_prefix(['.', ',']) {
+        let digits: String = frac.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() && frac.is_empty() {
+            return None;
+        }
+        (frac_micros(&digits), &frac[digits.len()..])
+    } else if !basic && rest.starts_with(':') {
+        // `:` after extended seconds is the fraction (`T03:04:05:06`).
+        // (After extended minutes-without-seconds the rest never starts
+        // with `:` — a colon there was already consumed as seconds — so
+        // this branch implies seconds were parsed.)
+        let frac = &rest[1..];
+        let digits: String = frac.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() && frac.is_empty() {
+            return None;
+        }
+        (frac_micros(&digits), &frac[digits.len()..])
+    } else {
+        (micros, rest)
+    };
+    let naive = date.and_hms_micro_opt(hour, minute, second, micros)?;
+    if rest.is_empty() {
+        return Some(ParsedDt::Naive(naive));
+    }
+    let offset = parse_iso_offset(rest)?;
+    Some(ParsedDt::Aware(naive.and_utc() - offset))
+}
+
+/// A seconds fraction past its separator: any digit length, truncated
+/// to 6, right-padded to microseconds (`:1` is 100000us, `:1234567` is
+/// 123456us — probed). Empty (only valid ahead of a tz in the time
+/// part) is zero.
+fn frac_micros(digits: &str) -> u32 {
+    let mut buf = digits.to_owned();
+    buf.truncate(6);
+    while buf.len() < 6 {
+        buf.push('0');
+    }
+    buf.parse().unwrap_or(0)
+}
+
+/// `Z` (uppercase only) or a numeric offset. The fraction — after `.`,
+/// `,` or `:` in extended form (`+05:00:00:01` is +5h + 0.01s), after
+/// `.`/`,` in basic form (`+0500.5`), or as extra basic digits past
+/// `HHMMSS` (`+0500001234`; at least 2 — `+0500001` fails) — is always
+/// a seconds fraction (`+05.5` is 5h + 0.5s, probed), never a second
+/// fraction-twice (`+05000000.5` fails). Parts are unchecked (`+00:61`
+/// is +01:01); only the total must stay strictly under 24h (CPython
+/// raises past it, which DRF suppresses into the wrong-format 400).
+fn parse_iso_offset(text: &str) -> Option<chrono::Duration> {
+    if text == "Z" {
+        return Some(chrono::Duration::seconds(0));
+    }
+    let bytes = text.as_bytes();
+    let sign: i64 = match bytes.first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let digits = &text[1..];
+    let db = digits.as_bytes();
+    if db.len() < 2 || !db[..2].iter().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i64 = digits[..2].parse().ok()?;
+    let tail = &digits[2..];
+    let (minutes, seconds, micros) = if let Some(tail) = tail.strip_prefix(':') {
+        // Extended: every present part is exactly two digits.
+        let tb = tail.as_bytes();
+        if tb.len() < 2 || !tb[..2].iter().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let minutes: i64 = tail[..2].parse().ok()?;
+        let tail = &tail[2..];
+        if let Some(tail) = tail.strip_prefix(':') {
+            let tb = tail.as_bytes();
+            if tb.len() < 2 || !tb[..2].iter().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let seconds: i64 = tail[..2].parse().ok()?;
+            let tail = &tail[2..];
+            let (micros, tail) = parse_offset_frac(tail, true)?;
+            if !tail.is_empty() {
+                return None;
+            }
+            (minutes, seconds, micros)
+        } else {
+            let (micros, tail) = parse_offset_frac(tail, false)?;
+            if !tail.is_empty() {
+                return None;
+            }
+            (minutes, 0, micros)
+        }
+    } else if tail.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
+        // Basic `HHMM[SS][fraction-digits]`: greedy pairs first.
+        let tb = tail.as_bytes();
+        if tb.len() < 2 || !tb[..2].iter().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let minutes: i64 = tail[..2].parse().ok()?;
+        let tail = &tail[2..];
+        let (seconds, tail) =
+            if tail.len() >= 2 && tail.as_bytes()[..2].iter().all(|b| b.is_ascii_digit()) {
+                (tail[..2].parse().ok()?, &tail[2..])
+            } else {
+                (0, tail)
+            };
+        let run: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if run.is_empty() {
+            let (micros, tail) = parse_offset_frac(tail, false)?;
+            if !tail.is_empty() {
+                return None;
+            }
+            (minutes, seconds, micros)
+        } else {
+            // Digit fraction: at least 2 digits, then end (a second
+            // fraction after it fails).
+            if run.len() < 2 {
+                return None;
+            }
+            let tail = &tail[run.len()..];
+            if !tail.is_empty() {
+                return None;
+            }
+            (minutes, seconds, frac_micros(&run))
+        }
+    } else {
+        // Hours only, optionally with a `.`/`,` fraction (`+05.5`).
+        let (micros, tail) = parse_offset_frac(tail, false)?;
+        if !tail.is_empty() {
+            return None;
+        }
+        (0, 0, micros)
+    };
+    let total_micros =
+        sign * ((hours * 3600 + minutes * 60 + seconds) * 1_000_000 + i64::from(micros));
+    if total_micros.abs() >= 86_400_000_000 {
+        return None;
+    }
+    Some(chrono::Duration::microseconds(total_micros))
+}
+
+/// The optional offset fraction: `.`/`,` anywhere, `:` only after
+/// extended seconds. Absent is zero; the offset is always last, so a
+/// separator with an empty fraction fails (`+05:00:00.` does not parse
+/// — probed).
+fn parse_offset_frac(tail: &str, colon: bool) -> Option<(u32, &str)> {
+    let frac =
+        tail.strip_prefix(['.', ','])
+            .or_else(|| if colon { tail.strip_prefix(':') } else { None });
+    let Some(frac) = frac else {
+        return Some((0, tail));
+    };
+    let digits: String = frac.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    Some((frac_micros(&digits), &frac[digits.len()..]))
+}
+
+/// The regex fallback arm (`datetime_re` in `django/utils/dateparse.py`,
+/// read from the Django 4.2.30 source and probed): unpadded extended
+/// dates (`\d{4}-\d{1,2}-\d{1,2}`), `T`/space separator, unpadded time
+/// with optional seconds and a 1-12 digit fraction (first 6 kept),
+/// `\s*` gaps before the tz or end, and a `Z`/`±HH`/`±HHMM`/`±HH:MM`
+/// tz whose total stays strictly under 24h (parts unchecked —
+/// `+00:61` is +01:01). Python's `$` also matches just before one
+/// trailing newline (`Z\n` parses, `Z ` and `Z\n\n` do not — probed).
+fn parse_regex_datetime(text: &str) -> Option<ParsedDt> {
+    // The `$`-before-final-newline quirk: strip at most one trailing
+    // `\n` up front, then require an exact end below.
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    let (date, time) = text.split_once(['T', ' '])?;
     let mut date_parts = date.split('-');
     let (year, month, day) = (date_parts.next()?, date_parts.next()?, date_parts.next()?);
     if date_parts.next().is_some() {
@@ -1534,120 +1918,256 @@ fn parse_django_datetime(value: &str) -> Option<DateTime<Utc>> {
     if !(year.len() == 4 && (1..=2).contains(&month.len()) && (1..=2).contains(&day.len())) {
         return None;
     }
-    let (hour, minute, second, micros, offset_mins): (u32, u32, u32, u32, i32) = {
-        // Split the tz suffix first (`Z` or `±HH[:][MM]` at the end;
-        // Django's grammar allows uppercase `Z` only).
-        let (clock, offset_mins) = if let Some(clock) = time.strip_suffix('Z') {
-            if clock.contains(['+', '-']) {
-                return None;
+    if !year.bytes().all(|b| b.is_ascii_digit())
+        || !month.bytes().all(|b| b.is_ascii_digit())
+        || !day.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    // Split the tz suffix first (`Z` or `±HH[[:]MM]` at the end;
+    // uppercase `Z` only). The `\s*` gap sits between the clock and
+    // the tz — never after it — so the clock trims but the zone must
+    // match exactly.
+    let none_offset = chrono::Duration::seconds(0);
+    let (clock, offset, aware) = if let Some(clock) = time.strip_suffix('Z') {
+        if clock.contains(['+', '-']) {
+            return None;
+        }
+        (clock, none_offset, true)
+    } else if let Some(pos) = time.rfind(['+', '-']) {
+        // A sign past position 0 starts the tz (the clock itself has
+        // no signs; `rfind` on the whole time part is safe because
+        // date and time split above).
+        let (clock, zone) = time.split_at(pos);
+        let sign: i64 = if zone.starts_with('-') { -1 } else { 1 };
+        let tail = &zone[1..];
+        let digits: String = match tail.len() {
+            2 | 4 => tail.to_owned(),
+            5 if tail.as_bytes()[2] == b':' => {
+                format!("{}{}", &tail[..2], &tail[3..])
             }
-            (clock, 0)
-        } else if let Some(pos) = time.rfind(['+', '-']) {
-            // A sign past position 0 starts the tz (the clock itself has
-            // no signs; `rfind` on the whole time part is safe because
-            // date and time split above).
-            let (clock, zone) = time.split_at(pos);
-            let sign = if zone.starts_with('-') { -1 } else { 1 };
-            // Django's zone grammar is exactly `±HH`, `±HHMM` or
-            // `±HH:MM` — anything else (`+05:`, `+05::00`, `+0:500`)
-            // fails the match and the field 400s (probed live).
-            let tail = &zone[1..];
-            let digits: String = match tail.len() {
-                2 | 4 => tail.to_owned(),
-                5 if tail.as_bytes()[2] == b':' => {
-                    format!("{}{}", &tail[..2], &tail[3..])
-                }
-                _ => return None,
-            };
-            if !digits.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            let hours: i32 = digits[..2].parse().ok()?;
-            let mins: i32 = if digits.len() == 4 {
-                digits[2..].parse().ok()?
-            } else {
-                0
-            };
-            if hours > 23 || mins > 59 {
-                return None;
-            }
-            (clock, sign * (hours * 60 + mins))
+            _ => return None,
+        };
+        if !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let hours: i64 = digits[..2].parse().ok()?;
+        let mins: i64 = if digits.len() == 4 {
+            digits[2..].parse().ok()?
         } else {
-            (time, 0)
+            0
         };
-        let mut clock_parts = clock.split(':');
-        let (hour, minute) = (clock_parts.next()?, clock_parts.next()?);
-        let second_raw = clock_parts.next().unwrap_or("00");
-        if clock_parts.next().is_some() {
+        // No per-part range check (`get_fixed_timezone` only bounds
+        // the total, in minutes, strictly under a day).
+        let total_mins = sign * (hours * 60 + mins);
+        if total_mins.abs() >= 1440 {
             return None;
         }
-        if !((1..=2).contains(&hour.len()) && (1..=2).contains(&minute.len())) {
-            return None;
-        }
-        let (second, micros) = match second_raw.split_once(['.', ',']) {
-            Some((sec, frac)) => {
-                // Django's grammar caps the fraction at 12 digits
-                // (`\d{1,6}\d{0,6}`, probed) and keeps the first 6.
-                if !(1..=2).contains(&sec.len())
-                    || frac.is_empty()
-                    || frac.len() > 12
-                    || !frac.bytes().all(|b| b.is_ascii_digit())
-                {
-                    return None;
-                }
-                let mut buf = frac.to_owned();
-                buf.truncate(6);
-                while buf.len() < 6 {
-                    buf.push('0');
-                }
-                (sec, buf.parse().ok()?)
-            }
-            None => {
-                if !(1..=2).contains(&second_raw.len()) {
-                    return None;
-                }
-                (second_raw, 0)
-            }
-        };
-        (
-            hour.parse().ok()?,
-            minute.parse().ok()?,
-            second.parse().ok()?,
-            micros,
-            offset_mins,
-        )
+        (clock, chrono::Duration::minutes(total_mins), true)
+    } else {
+        (time, none_offset, false)
     };
+    let clock = clock.trim_end_matches(|c: char| c.is_whitespace());
+    let mut clock_parts = clock.split(':');
+    let (hour, minute) = (clock_parts.next()?, clock_parts.next()?);
+    let second_raw = clock_parts.next().unwrap_or("00");
+    if clock_parts.next().is_some() {
+        return None;
+    }
+    if !((1..=2).contains(&hour.len()) && (1..=2).contains(&minute.len())) {
+        return None;
+    }
+    if !hour.bytes().all(|b| b.is_ascii_digit()) || !minute.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (second, micros) = match second_raw.split_once(['.', ',']) {
+        Some((sec, frac)) => {
+            // `(\d{1,6})\d{0,6}`: 1-12 digits, first 6 kept.
+            if !(1..=2).contains(&sec.len())
+                || frac.is_empty()
+                || frac.len() > 12
+                || !frac.bytes().all(|b| b.is_ascii_digit())
+                || !sec.bytes().all(|b| b.is_ascii_digit())
+            {
+                return None;
+            }
+            (sec, frac_micros(frac))
+        }
+        None => {
+            if !(1..=2).contains(&second_raw.len())
+                || !second_raw.bytes().all(|b| b.is_ascii_digit())
+            {
+                return None;
+            }
+            (second_raw, 0)
+        }
+    };
+    let (hour, minute, second): (u32, u32, u32) = (
+        hour.parse().ok()?,
+        minute.parse().ok()?,
+        second.parse().ok()?,
+    );
     let naive = chrono::NaiveDate::from_ymd_opt(
         year.parse().ok()?,
         month.parse().ok()?,
         day.parse().ok()?,
     )?
     .and_hms_micro_opt(hour, minute, second, micros)?;
-    Some((naive - chrono::Duration::minutes(i64::from(offset_mins))).and_utc())
+    if aware {
+        // `Z` and zero offsets (`+00`, `-00:00`) are aware UTC, not
+        // naive: under a non-UTC request tz the instants differ.
+        Some(ParsedDt::Aware(naive.and_utc() - offset))
+    } else {
+        Some(ParsedDt::Naive(naive))
+    }
+}
+
+/// Python `datetime` range (`0001-01-01` through `9999-12-31`): DRF's
+/// `astimezone` raises past it, on either representation (the UTC-side
+/// subtraction or the request-tz wall). `chrono_tz` offset lookups are
+/// infallible (they extrapolate past the transition tables), so an
+/// out-of-range wall date is the only overflow signal.
+fn python_range_contains(date: &chrono::NaiveDate) -> bool {
+    *date >= chrono::NaiveDate::from_ymd_opt(1, 1, 1).expect("min date")
+        && *date <= chrono::NaiveDate::from_ymd_opt(9999, 12, 31).expect("max date")
+}
+
+/// DRF `enforce_timezone` for naive input: attach the request timezone
+/// (`make_aware`, fold 0; a DST-gap wall time takes the pre-transition
+/// offset, like zoneinfo's non-raising attach — probed: NY `02:30` in
+/// the spring gap attaches `-05:00`).
+fn attach_request_tz(naive: &chrono::NaiveDateTime, timezone: &chrono_tz::Tz) -> DateTime<Utc> {
+    use chrono::{MappedLocalTime, TimeZone};
+    match timezone.from_local_datetime(naive) {
+        MappedLocalTime::Single(local) | MappedLocalTime::Ambiguous(local, _) => {
+            local.with_timezone(&Utc)
+        }
+        MappedLocalTime::None => {
+            // DST gap: step back to the wall time just before it and
+            // attach that offset (`shift` is the negated UTC offset, so
+            // the instant is `naive + shift`). Day-scale gaps (the
+            // Apia/Kwajalein skipped days) need more than one step back;
+            // the walk is bounded and the subtraction checked so a
+            // year-min wall can never panic.
+            let mut probe = *naive;
+            for _ in 0..72 {
+                let Some(back) = probe.checked_sub_signed(chrono::Duration::hours(1)) else {
+                    break;
+                };
+                probe = back;
+                match timezone.from_local_datetime(&probe) {
+                    MappedLocalTime::Single(local) | MappedLocalTime::Ambiguous(local, _) => {
+                        let shift = local.timestamp() - probe.and_utc().timestamp();
+                        return naive.and_utc() + chrono::Duration::seconds(shift);
+                    }
+                    MappedLocalTime::None => {}
+                }
+            }
+            naive.and_utc()
+        }
+    }
+}
+
+/// DRF `DateTimeField` `overflow` message (probed live).
+const DATETIME_OVERFLOW_MESSAGE: &str = "Datetime value out of range.";
+
+/// A `deleted_at` validation failure: the wrong-format/`overflow` 400
+/// message, or the raw-`OverflowError` 500 (naive wall whose UTC
+/// conversion leaves Python's range — re-raised past DRF's `except`,
+/// probed live).
+#[derive(Debug, PartialEq)]
+enum PatchDtError {
+    Invalid(String),
+    ServerError,
 }
 
 /// `deleted_at` (`DateTimeField(null=True)` → `allow_null`): `None`
-/// clears, strings parse through [`parse_django_datetime`], anything
-/// else is the wrong-format 400 (probed live).
-fn validate_patch_deleted_at(value: &Value) -> Result<Option<DateTime<Utc>>, String> {
+/// clears; strings parse through [`parse_django_datetime`] with naive
+/// inputs attaching the request timezone (`TimezoneMixin.initial`
+/// activates it, `enforce_timezone` → `make_aware`); an aware instant
+/// outside Python's range is the `overflow` 400; anything else is the
+/// wrong-format 400 (all probed live against Django 4.2.30 / CPython
+/// 3.12).
+fn validate_patch_deleted_at(
+    value: &Value,
+    timezone: &chrono_tz::Tz,
+) -> Result<Option<DateTime<Utc>>, PatchDtError> {
     if value.is_null() {
         return Ok(None);
     }
-    match value {
-        Value::String(s) => parse_django_datetime(s)
-            .map(Some)
-            .ok_or_else(|| DATETIME_INVALID_MESSAGE.to_owned()),
-        _ => Err(DATETIME_INVALID_MESSAGE.to_owned()),
+    let Value::String(s) = value else {
+        return Err(PatchDtError::Invalid(DATETIME_INVALID_MESSAGE.to_owned()));
+    };
+    match parse_django_datetime(s) {
+        Some(ParsedDt::Aware(utc)) => {
+            let wall = utc.with_timezone(timezone).date_naive();
+            if python_range_contains(&utc.date_naive()) && python_range_contains(&wall) {
+                Ok(Some(utc))
+            } else {
+                Err(PatchDtError::Invalid(DATETIME_OVERFLOW_MESSAGE.to_owned()))
+            }
+        }
+        Some(ParsedDt::Naive(naive)) => {
+            let utc = attach_request_tz(&naive, timezone);
+            if python_range_contains(&utc.date_naive()) {
+                Ok(Some(utc))
+            } else {
+                Err(PatchDtError::ServerError)
+            }
+        }
+        None => Err(PatchDtError::Invalid(DATETIME_INVALID_MESSAGE.to_owned())),
     }
+}
+
+/// Python `uuid.UUID(hex=...)` (CPython 3.12 `uuid.py`, probed live):
+/// case-sensitive global `urn:`/`uuid:` strip, `{}` strip on both ends,
+/// ALL hyphens removed anywhere (misplaced and doubled hyphens parse),
+/// 32 chars required — then `int(_, 16)` (leading/trailing int-ws
+/// stripped, one sign, single underscores between digits; negative is
+/// out of range). Non-ASCII hex is a documented approximation
+/// (ASCII-only here, mirroring [`py_int`]).
+fn parse_uuid_hex(raw: &str) -> Option<uuid::Uuid> {
+    let stripped = raw.replace("urn:", "").replace("uuid:", "");
+    let stripped = stripped.trim_matches(|c| c == '{' || c == '}');
+    let compact: String = stripped.chars().filter(|c| *c != '-').collect();
+    if compact.chars().count() != 32 {
+        return None;
+    }
+    let text = py_int_strip(&compact);
+    // One `+` sign (`int("+..", 16)` works; `-` cannot survive the
+    // hyphen strip above, and a negative int is out of range anyway).
+    let text = text.strip_prefix('+').unwrap_or(text);
+    // Single underscores only between digits (`int("2_0", 16)` works).
+    let mut cleaned = String::with_capacity(text.len());
+    let mut prev_underscore = true;
+    for c in text.chars() {
+        if c == '_' {
+            if prev_underscore {
+                return None;
+            }
+            prev_underscore = true;
+        } else if c.is_ascii_hexdigit() {
+            cleaned.push(c);
+            prev_underscore = false;
+        } else {
+            return None;
+        }
+    }
+    if prev_underscore {
+        return None;
+    }
+    u128::from_str_radix(&cleaned, 16)
+        .ok()
+        .map(uuid::Uuid::from_u128)
 }
 
 /// `PrimaryKeyRelatedField(queryset=User, allow_null=True)` (`created_by` /
 /// `updated_by`, probed against DRF 3.15.2 + Django 4.2.30): `None`
 /// clears; bools are `incorrect_type`; ints ride `UUID(int=)` (any
 /// `0 <= i < 2**128`; out of range → the smart-quote invalid); strings
-/// ride `UUID(hex=)`
-/// (unparseable → the smart-quote invalid); floats/arrays/objects are
-/// the smart-quote invalid; well-formed but unknown UUIDs are
+/// ride `UUID(hex=)` ([`parse_uuid_hex`]; unparseable → the smart-quote
+/// invalid); floats/arrays/objects are the smart-quote invalid;
+/// well-formed but unknown UUIDs are
 /// `Invalid pk "<input>" - object does not exist.` with the ORIGINAL
 /// input display.
 async fn validate_patch_user(pool: &PgPool, value: &Value) -> Result<Option<uuid::Uuid>, String> {
@@ -1679,9 +2199,9 @@ async fn validate_patch_user(pool: &PgPool, value: &Value) -> Result<Option<uuid
                 return Err(format!("“{}” is not a valid UUID.", py_num_str(n)));
             }
         }
-        Value::String(s) => match s.parse::<uuid::Uuid>() {
-            Ok(id) => id,
-            Err(_) => return Err(format!("“{s}” is not a valid UUID.")),
+        Value::String(s) => match parse_uuid_hex(s) {
+            Some(id) => id,
+            None => return Err(format!("“{s}” is not a valid UUID.")),
         },
         Value::Array(_) | Value::Object(_) => {
             return Err(format!("“{}” is not a valid UUID.", py_repr(value)));
@@ -1707,13 +2227,29 @@ async fn validate_patch_user(pool: &PgPool, value: &Value) -> Result<Option<uuid
     Ok(Some(parsed))
 }
 
+/// `type(data).__name__` for a JSON number (DRF `serializers.py:485`):
+/// Python parses digit-only literals as `int` at any width, so the kind
+/// comes from the literal syntax, not the range — `is_i64()/is_u64()`
+/// would misreport `2**64` as `float` (probed live on CPython 3.12).
+fn json_number_kind(n: &serde_json::Number) -> &'static str {
+    if n.to_string().contains(['.', 'e', 'E']) {
+        "float"
+    } else {
+        "int"
+    }
+}
+
 /// Validate a PATCH body for an invite: non-dict bodies fail with the
 /// `non_field_errors` shape, unknown and read-only keys are ignored, and
 /// field errors collect in serializer-field order (`deleted_at`,
 /// `accepted`, `role`, `created_by`, `updated_by` — the
 /// [`ser_invite::INVITE_WIRE_FIELDS`] order restricted to the writable
 /// remainder, probed live).
-async fn validate_invite_patch(pool: &PgPool, body: &Value) -> Result<InvitePatch, Value> {
+async fn validate_invite_patch(
+    pool: &PgPool,
+    body: &Value,
+    timezone: &chrono_tz::Tz,
+) -> Result<InvitePatch, Denial> {
     let data = match body {
         Value::Object(map) => map,
         Value::Null => {
@@ -1722,31 +2258,29 @@ async fn validate_invite_patch(pool: &PgPool, body: &Value) -> Result<InvitePatc
                 "non_field_errors".to_owned(),
                 Value::Array(vec![Value::String("No data provided".to_owned())]),
             );
-            return Err(Value::Object(errors));
+            return Err(Denial::BadJson(Value::Object(errors)));
         }
-        Value::Array(_) => return Err(non_dict_errors("list")),
-        Value::String(_) => return Err(non_dict_errors("str")),
-        Value::Bool(_) => return Err(non_dict_errors("bool")),
+        Value::Array(_) => return Err(Denial::BadJson(non_dict_errors("list"))),
+        Value::String(_) => return Err(Denial::BadJson(non_dict_errors("str"))),
+        Value::Bool(_) => return Err(Denial::BadJson(non_dict_errors("bool"))),
         Value::Number(n) => {
-            let kind = if n.is_i64() || n.is_u64() {
-                "int"
-            } else {
-                "float"
-            };
-            return Err(non_dict_errors(kind));
+            return Err(Denial::BadJson(non_dict_errors(json_number_kind(n))));
         }
     };
     let mut errors = Map::new();
     let mut patch = InvitePatch::default();
     if let Some(value) = data.get("deleted_at") {
-        match validate_patch_deleted_at(value) {
+        match validate_patch_deleted_at(value, timezone) {
             Ok(dt) => patch.deleted_at = Some(dt),
-            Err(message) => {
+            Err(PatchDtError::Invalid(message)) => {
                 errors.insert(
                     "deleted_at".to_owned(),
                     Value::Array(vec![Value::String(message)]),
                 );
             }
+            // The naive-wall 500 short-circuits the whole body (a raw
+            // `OverflowError`, not a field error — probed live).
+            Err(PatchDtError::ServerError) => return Err(Denial::ServerError),
         }
     }
     if let Some(value) = data.get("accepted") {
@@ -1795,7 +2329,7 @@ async fn validate_invite_patch(pool: &PgPool, body: &Value) -> Result<InvitePatc
     if errors.is_empty() {
         Ok(patch)
     } else {
-        Err(Value::Object(errors))
+        Err(Denial::BadJson(Value::Object(errors)))
     }
 }
 
@@ -2285,9 +2819,9 @@ async fn invite_patch(
             Err(_) => return Denial::BadDetail(JSON_PARSE_ERROR.to_owned()).into_response(),
         }
     };
-    let patch = match validate_invite_patch(pool, &patch_body).await {
+    let patch = match validate_invite_patch(pool, &patch_body, &actor.timezone).await {
         Ok(patch) => patch,
-        Err(errors) => return Denial::BadJson(errors).into_response(),
+        Err(denial) => return denial.into_response(),
     };
     // `perform_update` → `save()` (stamps `updated_at` even for
     // `{}`), and `BaseModel.save()` stamps `updated_by` with the caller
@@ -2775,7 +3309,7 @@ fn classify_invitations(value: Option<&Value>) -> InvitationsInput {
                 }
             }
             Value::String(s) => {
-                out.push(s.parse::<uuid::Uuid>().map_err(|_| ())?);
+                out.push(parse_uuid_hex(s).ok_or(())?);
                 Ok(())
             }
             Value::Array(_) | Value::Object(_) => Err(()),
@@ -4087,56 +4621,214 @@ mod tests {
 
     #[test]
     fn patch_deleted_at_matches_datetime_field() {
-        assert_eq!(validate_patch_deleted_at(&Value::Null), Ok(None));
-        let parsed = validate_patch_deleted_at(&serde_json::json!("2026-01-01T00:00:00Z"))
-            .expect("parses")
-            .expect("some");
-        assert_eq!(parsed.to_rfc3339(), "2026-01-01T00:00:00+00:00");
-        // Naive reads as UTC under `USE_TZ`.
-        let naive = validate_patch_deleted_at(&serde_json::json!("2026-01-01 00:00:00"))
-            .expect("parses")
-            .expect("some");
-        assert_eq!(naive.to_rfc3339(), "2026-01-01T00:00:00+00:00");
-        // Django grammar extras: 1-digit parts, missing seconds, offsets.
-        assert!(
-            validate_patch_deleted_at(&serde_json::json!("2026-1-2T3:04+05:30"))
-                .expect("parses")
-                .is_some()
-        );
-        assert!(
-            validate_patch_deleted_at(&serde_json::json!("2026-01-02T03:04:05.1234567Z"))
-                .expect("parses")
-                .is_some()
-        );
-        // 12 fractional digits parse (first 6 kept); 13+ are invalid.
-        let twelve =
-            validate_patch_deleted_at(&serde_json::json!("2026-01-02T03:04:05.123456789012Z"))
-                .expect("parses")
-                .expect("some");
-        assert_eq!(twelve.to_rfc3339(), "2026-01-02T03:04:05.123456+00:00");
-        // Django zone shapes `±HH` / `±HHMM` still parse.
-        for raw in ["\"2026-01-02T03:04:05+05\"", "\"2026-01-02T03:04:05+0500\""] {
+        let utc = &chrono_tz::UTC;
+        let tokyo = &chrono_tz::Asia::Tokyo;
+        let york = &chrono_tz::America::New_York;
+        assert_eq!(validate_patch_deleted_at(&Value::Null, utc), Ok(None));
+        // (input, timezone, expected UTC instant): the `fromisoformat` ∪
+        // regex union, all probed live against Django 4.2.30 / CPython
+        // 3.12. Naive inputs attach the request timezone.
+        let parsed = |raw: &str, tz: &chrono_tz::Tz| {
             let value: Value = serde_json::from_str(raw).expect("case is JSON");
-            assert!(
-                validate_patch_deleted_at(&value).expect("parses").is_some(),
-                "deleted_at({raw})"
-            );
+            validate_patch_deleted_at(&value, tz)
+                .expect("parses")
+                .expect("some")
+                .to_rfc3339()
+        };
+        for (raw, tz, want) in [
+            ("\"2026-01-01T00:00:00Z\"", utc, "2026-01-01T00:00:00+00:00"),
+            // Naive attaches the request tz (identity under UTC).
+            ("\"2026-01-01 00:00:00\"", utc, "2026-01-01T00:00:00+00:00"),
+            (
+                "\"2026-01-02T03:04:05\"",
+                tokyo,
+                "2026-01-01T18:04:05+00:00",
+            ),
+            ("\"2026-01-02\"", tokyo, "2026-01-01T15:00:00+00:00"),
+            (
+                "\"2026-01-02T03:04:05Z\"",
+                tokyo,
+                "2026-01-02T03:04:05+00:00",
+            ),
+            // Any-char separator, basic/week/date-only shapes.
+            ("\"2026-01-02t03:04:05\"", utc, "2026-01-02T03:04:05+00:00"),
+            ("\"2026-01-02X03:04:05\"", utc, "2026-01-02T03:04:05+00:00"),
+            ("\"20260102T030405\"", utc, "2026-01-02T03:04:05+00:00"),
+            ("\"2026-01-02T03\"", utc, "2026-01-02T03:00:00+00:00"),
+            ("\"2026-01-02T0304\"", utc, "2026-01-02T03:04:00+00:00"),
+            ("\"2026-W05-6\"", utc, "2026-01-31T00:00:00+00:00"),
+            ("\"2026W056\"", utc, "2026-01-31T00:00:00+00:00"),
+            ("\"2026-01-02\"", utc, "2026-01-02T00:00:00+00:00"),
+            // Fractions: any length truncated to 6.
+            (
+                "\"2026-01-02T03:04:05.1234567890123Z\"",
+                utc,
+                "2026-01-02T03:04:05.123456+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05.123456789012Z\"",
+                utc,
+                "2026-01-02T03:04:05.123456+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05:06\"",
+                utc,
+                "2026-01-02T03:04:05.06+00:00",
+            ),
+            ("\"20260102T03040500\"", utc, "2026-01-02T03:04:05+00:00"),
+            // Offsets: seconds, fractions (always seconds fractions),
+            // unchecked parts with the total under 24h.
+            (
+                "\"2026-01-02T03:04:05+05:00:00\"",
+                utc,
+                "2026-01-01T22:04:05+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05+000061\"",
+                utc,
+                "2026-01-02T03:03:04+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05+05:00:00.5\"",
+                utc,
+                "2026-01-01T22:04:04.5+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05+00:61\"",
+                utc,
+                "2026-01-02T02:03:05+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05+05\"",
+                utc,
+                "2026-01-01T22:04:05+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05+0500\"",
+                utc,
+                "2026-01-01T22:04:05+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05+05.5\"",
+                utc,
+                "2026-01-01T22:04:04.5+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05+050000123\"",
+                utc,
+                "2026-01-01T22:04:04.877+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05+00\"",
+                utc,
+                "2026-01-02T03:04:05+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05-00\"",
+                utc,
+                "2026-01-02T03:04:05+00:00",
+            ),
+            // Regex arm: unpadded parts, `\s*` gaps, trailing newline,
+            // empty fraction ahead of a tz.
+            ("\"2026-1-2T3:04+05:30\"", utc, "2026-01-01T21:34:00+00:00"),
+            (
+                "\"2026-1-2T3:04:05+00:61\"",
+                utc,
+                "2026-01-02T02:03:05+00:00",
+            ),
+            ("\"2026-01-02T03:04:05 \"", utc, "2026-01-02T03:04:05+00:00"),
+            (
+                "\"2026-01-02T03:04:05  +05:00\"",
+                utc,
+                "2026-01-01T22:04:05+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05Z\\n\"",
+                utc,
+                "2026-01-02T03:04:05+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05.+05:00\"",
+                utc,
+                "2026-01-01T22:04:05+00:00",
+            ),
+            (
+                "\"2026-01-02T03:04:05.Z\"",
+                utc,
+                "2026-01-02T03:04:05+00:00",
+            ),
+            (
+                "\"20260102T030405.123+05:00\"",
+                utc,
+                "2026-01-01T22:04:05.123+00:00",
+            ),
+            // Folds attach fold-0 without failing (probed live).
+            ("\"2026-11-01T01:30:00\"", york, "2026-11-01T05:30:00+00:00"),
+            ("\"2026-03-08T02:30:00\"", york, "2026-03-08T07:30:00+00:00"),
+        ] {
+            assert_eq!(parsed(raw, tz), want, "deleted_at({raw})");
         }
+        // Wrong-format 400s (both arms reject, or `ValueError`).
         for raw in [
             "\"nope\"",
             "\"\"",
             "5",
             "\"2026-13-45T99:99:99Z\"",
-            "\"2026-01-02T03:04:05.1234567890123Z\"",
             "\"2026-01-02T03:04:05+05:\"",
             "\"2026-01-02T03:04:05+05::00\"",
             "\"2026-01-02T03:04:05+0:500\"",
             "[]",
+            "\"2026-01-02T03:04:05Z \"",
+            "\"2026-01-02T03:04:05z\"",
+            "\" 2026-01-02T03:04:05\"",
+            "\"2026-01-02T3\"",
+            "\"2026-01-02T030\"",
+            "\"2026-01-02T0304050\"",
+            "\"20260102T03:4\"",
+            "\"20260102T03:04:5\"",
+            "\"2026-01-02T03:04:05+05000\"",
+            "\"2026-01-02T03:04:05+0500001\"",
+            "\"2026-01-02T03:04:05+050000:12\"",
+            "\"2026-01-02T03:04:05+05000000.5\"",
+            "\"2026-01-02T03:04:05.\"",
+            "\"2026-01-02T03:04:05+05:00:00:00:00\"",
+            "\"2026-01-02T03:04:05+5\"",
+            "\"2026-01-02T03:04:05+053\"",
+            "\"2026-01-02Z\"",
+            "\"2026-01-02T\"",
+            "\"2026-1-2T3:04:05.1234567890123\"",
+            "\"2026-1-2T3:04:05.+05:00\"",
+            "\"2026-01-02T03:04:05+24:00\"",
+            "\"2026-01-02T03:04:05+99:99\"",
+            "\"2026-1-2T03:04:05+24:00\"",
+            "\"2026-01-02T03:04:05:06.5\"",
+            "\"2026-01-02T03:04:05.5xyz\"",
         ] {
             let value: Value = serde_json::from_str(raw).expect("case is JSON");
             assert_eq!(
-                validate_patch_deleted_at(&value),
-                Err(DATETIME_INVALID_MESSAGE.to_owned()),
+                validate_patch_deleted_at(&value, utc),
+                Err(PatchDtError::Invalid(DATETIME_INVALID_MESSAGE.to_owned())),
+                "deleted_at({raw})"
+            );
+        }
+        // Aware overflow is the `overflow` 400 ...
+        let value: Value =
+            serde_json::from_str("\"9999-12-31T23:30:00+00:00\"").expect("case is JSON");
+        assert_eq!(
+            validate_patch_deleted_at(&value, tokyo),
+            Err(PatchDtError::Invalid(DATETIME_OVERFLOW_MESSAGE.to_owned())),
+            "deleted_at(overflow)"
+        );
+        // ... while a naive wall converting past the range is a raw
+        // `OverflowError` → 500 (probed live).
+        for (raw, tz) in [
+            ("\"0001-01-01T00:30:00\"", tokyo),
+            ("\"9999-12-31T23:30:00\"", york),
+        ] {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            assert_eq!(
+                validate_patch_deleted_at(&value, tz),
+                Err(PatchDtError::ServerError),
                 "deleted_at({raw})"
             );
         }
@@ -4157,6 +4849,98 @@ mod tests {
                 format!("Invalid data. Expected a dictionary, but got {kind}."),
                 "non-dict({raw})"
             );
+        }
+    }
+
+    #[test]
+    fn non_dict_number_kind_matches_python_type() {
+        // `json_number_kind` is the `type(data).__name__` arm inside
+        // `validate_invite_patch` (async/DB-bound, so pinned here at the
+        // helper — the table above feeds the kind in directly and cannot
+        // catch a range-based misreport).
+        for (raw, want) in [
+            ("5", "int"),
+            ("-5", "int"),
+            ("0", "int"),
+            ("18446744073709551616", "int"),
+            ("340282366920938463463374607431768211455", "int"),
+            ("5.0", "float"),
+            ("5.5", "float"),
+            ("1e3", "float"),
+            ("1E3", "float"),
+            ("-2.5e-3", "float"),
+        ] {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            let Value::Number(n) = &value else {
+                panic!("case is a number: {raw}");
+            };
+            assert_eq!(json_number_kind(n), want, "kind({raw})");
+        }
+    }
+
+    #[test]
+    fn uuid_hex_matches_python_uuid() {
+        // `parse_uuid_hex` is the `UUID(hex=)` arm shared by PATCH-user
+        // validation (async/DB-bound) and my-accept prep — pinned here
+        // at the helper, plus through `classify_invitations` below. All
+        // cases probed live on CPython 3.12.
+        let canonical =
+            uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("canonical");
+        for raw in [
+            "550e8400-e29b-41d4-a716-446655440000",
+            "550e8400e29b41d4a716446655440000",
+            "550e8400e29b-41d4-a716-446655440000",
+            "5-50e8400e29b41d4a716446655440000",
+            "550e8400e29b--41d4-a716-446655440000",
+            "{550e8400-e29b-41d4-a716-446655440000}",
+            "{550e8400e29b41d4a716446655440000",
+            "550e8400e29b41d4a716446655440000}",
+            "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
+            "uuid:550e8400-e29b-41d4-a716-446655440000",
+            "550e8400urn:e29b41d4a716446655440000",
+            "550E8400E29B41D4A716446655440000",
+        ] {
+            assert_eq!(parse_uuid_hex(raw), Some(canonical), "uuid({raw})");
+        }
+        // `int(_, 16)` leniency: the value is the stripped 31-hex int,
+        // zero-padded on render.
+        let shifted =
+            uuid::Uuid::parse_str("0550e840-0e29-b41d-4a71-644665544000").expect("shifted");
+        for raw in [
+            " 550e8400e29b41d4a71644665544000",
+            "550e8400e29b41d4a71644665544000 ",
+            "+550e8400e29b41d4a71644665544000",
+            "550e8400_e29b41d4a71644665544000",
+            "\t550e8400e29b41d4a71644665544000",
+        ] {
+            assert_eq!(parse_uuid_hex(raw), Some(shifted), "uuid({raw:?})");
+        }
+        for raw in [
+            "",
+            "550e8400-e29b-41d4-a716-44665544000",
+            "550e8400-e29b-41d4-a716-4466554400000",
+            "-550e8400e29b41d4a71644665544000",
+            "550e8400e29b41d4a71644665544__00",
+            "URN:UUID:550E8400-E29B-41D4-A716-446655440000",
+            "550e8400e29b41d4a7164466554400g",
+            "------------------------------------",
+        ] {
+            assert_eq!(parse_uuid_hex(raw), None, "uuid({raw:?})");
+        }
+    }
+
+    #[test]
+    fn invitations_uuid_leniency_matches_python() {
+        // Shifted-hyphen ids ride prep (Django 204s where strict
+        // parsing 400s — probed live).
+        let value: Value = serde_json::from_str(
+            "[\"550e8400e29b-41d4-a716-446655440000\", \"550e8400_e29b41d4a71644665544000\"]",
+        )
+        .expect("case is JSON");
+        match classify_invitations(Some(&value)) {
+            InvitationsInput::Ids(ids) => assert_eq!(ids.len(), 2),
+            InvitationsInput::InvalidUuid => panic!("expected ids, got InvalidUuid"),
+            InvitationsInput::ServerError => panic!("expected ids, got ServerError"),
         }
     }
 
