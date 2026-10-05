@@ -14,6 +14,12 @@
 //! throttled callers answer the matching 429 fallback through
 //! [`throttle`](super::throttle) (`UiPage` renderer).
 //!
+//! DRF order reproduced (`APIView.initial`, `views.py:399-407`, verified
+//! against the pinned 3.15.2 source): `?format=` negotiates before
+//! throttling — the single `TemplateHTMLRenderer` serves absent, empty,
+//! or `html` formats and 404s anything else without touching the throttle
+//! or the session, on GET and unsafe methods alike.
+//!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 use axum::extract::{Request, State};
@@ -33,6 +39,12 @@ pub const CONTENT_TYPE_HTML: &str = "text/html; charset=utf-8";
 /// (`'%d %s'`, no `405.html` template exists).
 pub const NOT_ALLOWED_BODY: &str = "405 Method Not Allowed";
 
+/// Exact bytes of the unknown-format 404 on both UI pages (live-Django
+/// oracle, pinned spectacular 0.28 + DRF 3.15.2): the same
+/// `TemplateHTMLRenderer` exception fallback (`'%d %s'`, no `404.html`
+/// template exists).
+pub const UNKNOWN_FORMAT_BODY: &str = "404 Not Found";
+
 /// The served swagger-ui template: FX-OPENAPI-05's normalized capture with
 /// the CSRF hole emptied (`CSRFTOKEN"] = "";`). The hole is refilled per
 /// render by [`fill_csrf_token`].
@@ -50,10 +62,14 @@ const CSRF_HOLE: &str = "CSRFTOKEN\"] = \"\";";
 const CSRF_TOKEN_LEN: usize = 64;
 
 /// `GET /api/schema/swagger-ui/`: the swagger-ui page with a fresh CSRF
-/// token per render. Gated on the cutover flip, throttled.
+/// token per render. Gated on the cutover flip; `?format=` negotiates
+/// before throttling (DRF `initial`).
 pub async fn serve_swagger_ui(State(state): State<AppState>, req: Request) -> Response {
     if !super::rust_serves(&state) {
         return crate::edge::proxy(State(state), req).await;
+    }
+    if !serves_html(&req) {
+        return unknown_format();
     }
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
@@ -69,10 +85,13 @@ pub async fn serve_swagger_ui(State(state): State<AppState>, req: Request) -> Re
 }
 
 /// `GET /api/schema/redoc/`: the redoc page, byte-static. Gated on the
-/// cutover flip, throttled.
+/// cutover flip; `?format=` negotiates before throttling (DRF `initial`).
 pub async fn serve_redoc(State(state): State<AppState>, req: Request) -> Response {
     if !super::rust_serves(&state) {
         return crate::edge::proxy(State(state), req).await;
+    }
+    if !serves_html(&req) {
+        return unknown_format();
     }
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
@@ -88,11 +107,15 @@ pub async fn serve_redoc(State(state): State<AppState>, req: Request) -> Respons
 }
 
 /// Unsafe methods on either UI page: the pinned `405 Method Not Allowed`
-/// fallback (throttle-checked first, so a throttled caller answers 429
-/// instead).
+/// fallback. Negotiation runs before throttling (DRF `initial`):
+/// unknown formats 404 without spending budget, and a throttled caller
+/// answers 429 instead.
 pub async fn method_not_allowed(State(state): State<AppState>, req: Request) -> Response {
     if !super::rust_serves(&state) {
         return crate::edge::proxy(State(state), req).await;
+    }
+    if !serves_html(&req) {
+        return unknown_format();
     }
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
@@ -103,6 +126,27 @@ pub async fn method_not_allowed(State(state): State<AppState>, req: Request) -> 
         StatusCode::METHOD_NOT_ALLOWED,
         CONTENT_TYPE_HTML,
         NOT_ALLOWED_BODY.as_bytes().to_vec(),
+        false,
+    )
+}
+
+/// `?format=` negotiation for the single-`TemplateHTMLRenderer` pages:
+/// absent, empty, or `html` serves; anything else 404s (DRF
+/// `negotiation.py:filter_renderers`, bare `Http404`).
+fn serves_html(req: &Request) -> bool {
+    matches!(
+        super::last_format_value(req.uri().query().unwrap_or("")).as_deref(),
+        None | Some("") | Some("html")
+    )
+}
+
+/// The unknown-format 404 on either UI page: the `TemplateHTMLRenderer`
+/// exception fallback with `Allow` and no `Vary` (single renderer class).
+fn unknown_format() -> Response {
+    super::view_response(
+        StatusCode::NOT_FOUND,
+        CONTENT_TYPE_HTML,
+        UNKNOWN_FORMAT_BODY.as_bytes().to_vec(),
         false,
     )
 }
@@ -350,5 +394,145 @@ mod tests {
             normalize(&body_text(response).await),
             normalize(&keyed_body)
         );
+    }
+
+    /// A GET with a non-HTML `?format=` 404s on both UI pages
+    /// (live-Django oracle: `404 Not Found`, `text/html`, `Allow`, no
+    /// `Vary`), while `html`/empty/absent still serve.
+    #[tokio::test]
+    async fn ui_unknown_format_404s() {
+        for path in [SWAGGER_UI_PATH, REDOC_PATH] {
+            for query in ["?format=xml", "?format=json", "?format=JSON"] {
+                let response = flipped_app()
+                    .oneshot(get(&format!("{path}{query}"), "ui-d3-neg"))
+                    .await
+                    .expect("serve");
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}{query}");
+                let headers = response.headers().clone();
+                assert_eq!(
+                    headers.get(axum::http::header::CONTENT_TYPE).expect("ct"),
+                    CONTENT_TYPE_HTML,
+                    "{path}{query}"
+                );
+                assert_eq!(
+                    headers.get(axum::http::header::ALLOW).expect("allow"),
+                    ALLOW,
+                    "{path}{query}"
+                );
+                assert!(headers.get(axum::http::header::VARY).is_none());
+                let body = body_text(response).await;
+                assert_eq!(body, UNKNOWN_FORMAT_BODY, "{path}{query}");
+                assert_eq!(body, "404 Not Found", "{path}{query}");
+            }
+            for query in ["?format=html", "?format=", ""] {
+                let response = flipped_app()
+                    .oneshot(get(&format!("{path}{query}"), "ui-d3-html"))
+                    .await
+                    .expect("serve");
+                assert_eq!(response.status(), StatusCode::OK, "{path}{query}");
+            }
+        }
+    }
+
+    /// `?format=html` serves the same pages as the default (swagger
+    /// normalizes to the template, redoc byte-equal).
+    #[tokio::test]
+    async fn ui_html_format_serves_same_pages() {
+        let response = flipped_app()
+            .oneshot(get(&format!("{SWAGGER_UI_PATH}?format=html"), "ui-d3-page"))
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(normalize(&body_text(response).await), SWAGGER_UI_TEMPLATE);
+        let response = flipped_app()
+            .oneshot(get(&format!("{REDOC_PATH}?format=html"), "ui-d3-page"))
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_text(response).await, REDOC_TEMPLATE);
+    }
+
+    /// Unsafe methods with a non-HTML `?format=` 404 on both UI pages
+    /// (negotiation first), not 405 — while `?format=html` still 405s.
+    #[tokio::test]
+    async fn ui_unsafe_unknown_format_404s() {
+        for path in [SWAGGER_UI_PATH, REDOC_PATH] {
+            for http_method in ["POST", "PUT", "PATCH", "DELETE"] {
+                let response = flipped_app()
+                    .oneshot(method(
+                        http_method,
+                        &format!("{path}?format=xml"),
+                        "ui-d5-neg",
+                    ))
+                    .await
+                    .expect("serve");
+                assert_eq!(
+                    response.status(),
+                    StatusCode::NOT_FOUND,
+                    "{http_method} {path}"
+                );
+                let body = body_text(response).await;
+                assert_eq!(body, UNKNOWN_FORMAT_BODY, "{http_method} {path}");
+                let response = flipped_app()
+                    .oneshot(method(
+                        http_method,
+                        &format!("{path}?format=html"),
+                        "ui-d5-html",
+                    ))
+                    .await
+                    .expect("serve");
+                assert_eq!(
+                    response.status(),
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "{http_method} {path}"
+                );
+                let body = body_text(response).await;
+                assert_eq!(body, NOT_ALLOWED_BODY, "{http_method} {path}");
+            }
+        }
+    }
+
+    /// Negotiation runs before throttling on the UI pages too: a throttled
+    /// `?format=xml` answers 404, not 429.
+    #[tokio::test]
+    async fn throttled_ui_unknown_format_404s() {
+        for _ in 0..30 {
+            let response = flipped_app()
+                .oneshot(get(REDOC_PATH, "ui-d1-neg"))
+                .await
+                .expect("serve");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let response = flipped_app()
+            .oneshot(get(&format!("{REDOC_PATH}?format=xml"), "ui-d1-neg"))
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(response.headers().get(axum::http::header::VARY).is_none());
+        let body = body_text(response).await;
+        assert_eq!(body, UNKNOWN_FORMAT_BODY);
+        let response = flipped_app()
+            .oneshot(get(REDOC_PATH, "ui-d1-neg"))
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// UI unknown-format 404s spend no throttle budget: 30 of them, then
+    /// the same ident still serves.
+    #[tokio::test]
+    async fn ui_unknown_format_404s_burn_no_budget() {
+        for _ in 0..30 {
+            let response = flipped_app()
+                .oneshot(get(&format!("{SWAGGER_UI_PATH}?format=json"), "ui-d2-free"))
+                .await
+                .expect("serve");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        let response = flipped_app()
+            .oneshot(get(SWAGGER_UI_PATH, "ui-d2-free"))
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

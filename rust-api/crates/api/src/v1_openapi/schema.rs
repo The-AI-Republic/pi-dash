@@ -7,12 +7,14 @@
 //! the HTTP shell — content types, `Content-Disposition`, `Allow`/`Vary`,
 //! the 301 twin, and the unsafe-method 405s.
 //!
-//! DRF order reproduced (`views.py:dispatch`, verified against the pinned
-//! 3.15.2 source): the cutover gate, then `check_throttles`, then
-//! method/format dispatch — a throttled unsafe method answers 429, not
-//! 405, and a throttled `?format=xml` answers 429, not 404. The denial
-//! renderer follows the requested format (JSON iff `?format=json`, else
-//! the YAML default).
+//! DRF order reproduced (`APIView.initial`, `views.py:399-407`, verified
+//! against the pinned 3.15.2 source): the cutover gate, then `?format=`
+//! negotiation (`perform_content_negotiation` — unknown formats 404
+//! without touching the throttle or the session), then `check_throttles`,
+//! then method dispatch — a throttled `?format=xml` answers 404, not 429,
+//! while a throttled plain unsafe method still answers 429. The negotiated
+//! renderer (JSON iff `?format=json`, else the YAML default) renders the
+//! 405s and the 429 denials alike.
 //!
 //! `?format=` follows `QueryDict.get` (last value wins; empty counts as
 //! absent — DRF's `if format:`), matched against renderer `format` attrs
@@ -64,63 +66,131 @@ pub const NOT_ALLOWED_BODY_PATCH: &str =
 pub const NOT_ALLOWED_BODY_DELETE: &str =
     "detail:\n  string: Method \"DELETE\" not allowed.\n  code: method_not_allowed\n";
 
+/// Exact bytes of the unsafe-method 405s with `?format=json` (live-Django
+/// oracle, pinned spectacular 0.28 + DRF 3.15.2): DRF's `MethodNotAllowed`
+/// through the OpenAPI JSON renderer (4-space indent, no trailing newline,
+/// lowercase `detail` key, no `code`).
+pub const NOT_ALLOWED_BODY_JSON_POST: &str =
+    "{\n    \"detail\": \"Method \\\"POST\\\" not allowed.\"\n}";
+/// Exact bytes of the unsafe-method 405s with `?format=json` (live-Django
+/// oracle, pinned spectacular 0.28 + DRF 3.15.2): DRF's `MethodNotAllowed`
+/// through the OpenAPI JSON renderer (4-space indent, no trailing newline,
+/// lowercase `detail` key, no `code`).
+pub const NOT_ALLOWED_BODY_JSON_PUT: &str =
+    "{\n    \"detail\": \"Method \\\"PUT\\\" not allowed.\"\n}";
+/// Exact bytes of the unsafe-method 405s with `?format=json` (live-Django
+/// oracle, pinned spectacular 0.28 + DRF 3.15.2): DRF's `MethodNotAllowed`
+/// through the OpenAPI JSON renderer (4-space indent, no trailing newline,
+/// lowercase `detail` key, no `code`).
+pub const NOT_ALLOWED_BODY_JSON_PATCH: &str =
+    "{\n    \"detail\": \"Method \\\"PATCH\\\" not allowed.\"\n}";
+/// Exact bytes of the unsafe-method 405s with `?format=json` (live-Django
+/// oracle, pinned spectacular 0.28 + DRF 3.15.2): DRF's `MethodNotAllowed`
+/// through the OpenAPI JSON renderer (4-space indent, no trailing newline,
+/// lowercase `detail` key, no `code`).
+pub const NOT_ALLOWED_BODY_JSON_DELETE: &str =
+    "{\n    \"detail\": \"Method \\\"DELETE\\\" not allowed.\"\n}";
+
 /// `GET /api/schema/`: the OpenAPI document (YAML default, JSON via
-/// `?format=json`, 404 on unknown formats). Gated on the cutover flip,
-/// throttled before format dispatch.
+/// `?format=json`, 404 on unknown formats). Gated on the cutover flip;
+/// `?format=` negotiates before throttling (DRF `initial`), so unknown
+/// formats 404 without spending throttle budget.
 pub async fn serve(State(state): State<AppState>, req: Request) -> Response {
     if !super::rust_serves(&state) {
         return crate::edge::proxy(State(state), req).await;
     }
-    let format = last_format_value(req.uri().query().unwrap_or(""));
+    let format = super::last_format_value(req.uri().query().unwrap_or(""));
+    // Negotiation runs before throttling (DRF `APIView.initial`): an
+    // unknown format 404s without touching the throttle or the session.
     let renderer = match format.as_deref() {
+        None | Some("") | Some("yaml") => DenialRenderer::Yaml,
         Some("json") => DenialRenderer::Json,
-        _ => DenialRenderer::Yaml,
+        Some(_) => {
+            return super::view_response(
+                StatusCode::NOT_FOUND,
+                CONTENT_TYPE_YAML,
+                UNKNOWN_FORMAT_BODY.as_bytes().to_vec(),
+                true,
+            );
+        }
     };
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
     if let Some(denied) = super::throttle_verdict(&state, ident, session).await {
         return super::throttled(renderer, denied.wait, true);
     }
-    match format.as_deref() {
-        None | Some("") | Some("yaml") => doc_response(
-            CONTENT_TYPE_YAML,
-            DISPOSITION_YAML,
-            pidash_services::v1_openapi::doc::render_yaml().into_bytes(),
-        ),
-        Some("json") => doc_response(
+    if format.as_deref() == Some("json") {
+        doc_response(
             CONTENT_TYPE_JSON,
             DISPOSITION_JSON,
             pidash_services::v1_openapi::doc::render_json().into_bytes(),
-        ),
-        Some(_) => super::view_response(
-            StatusCode::NOT_FOUND,
+        )
+    } else {
+        // Unknown formats returned above; the rest render YAML.
+        doc_response(
             CONTENT_TYPE_YAML,
-            UNKNOWN_FORMAT_BODY.as_bytes().to_vec(),
-            true,
-        ),
+            DISPOSITION_YAML,
+            pidash_services::v1_openapi::doc::render_yaml().into_bytes(),
+        )
     }
 }
 
-/// Unsafe methods on `/api/schema/`: the pinned YAML 405 (throttle-checked
-/// first, so a throttled caller answers 429 instead).
+/// Unsafe methods on `/api/schema/`: the pinned 405 in the negotiated
+/// renderer (JSON iff `?format=json`, else YAML). Negotiation runs before
+/// throttling (DRF `initial`): unknown formats 404 without spending
+/// budget, and a throttled caller answers the negotiated 429 instead.
 pub async fn method_not_allowed(State(state): State<AppState>, req: Request) -> Response {
     if !super::rust_serves(&state) {
         return crate::edge::proxy(State(state), req).await;
     }
+    let format = super::last_format_value(req.uri().query().unwrap_or(""));
+    let wants_json = match format.as_deref() {
+        None | Some("") | Some("yaml") => false,
+        Some("json") => true,
+        Some(_) => {
+            return super::view_response(
+                StatusCode::NOT_FOUND,
+                CONTENT_TYPE_YAML,
+                UNKNOWN_FORMAT_BODY.as_bytes().to_vec(),
+                true,
+            );
+        }
+    };
+    let renderer = if wants_json {
+        DenialRenderer::Json
+    } else {
+        DenialRenderer::Yaml
+    };
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
     if let Some(denied) = super::throttle_verdict(&state, ident, session).await {
-        return super::throttled(DenialRenderer::Yaml, denied.wait, true);
+        return super::throttled(renderer, denied.wait, true);
     }
-    let body = match req.method().as_str() {
-        "PUT" => NOT_ALLOWED_BODY_PUT,
-        "PATCH" => NOT_ALLOWED_BODY_PATCH,
-        "DELETE" => NOT_ALLOWED_BODY_DELETE,
-        _ => NOT_ALLOWED_BODY_POST,
+    let method = req.method().as_str();
+    let (content_type, body) = if wants_json {
+        (
+            CONTENT_TYPE_JSON,
+            match method {
+                "PUT" => NOT_ALLOWED_BODY_JSON_PUT,
+                "PATCH" => NOT_ALLOWED_BODY_JSON_PATCH,
+                "DELETE" => NOT_ALLOWED_BODY_JSON_DELETE,
+                _ => NOT_ALLOWED_BODY_JSON_POST,
+            },
+        )
+    } else {
+        (
+            CONTENT_TYPE_YAML,
+            match method {
+                "PUT" => NOT_ALLOWED_BODY_PUT,
+                "PATCH" => NOT_ALLOWED_BODY_PATCH,
+                "DELETE" => NOT_ALLOWED_BODY_DELETE,
+                _ => NOT_ALLOWED_BODY_POST,
+            },
+        )
     };
     super::view_response(
         StatusCode::METHOD_NOT_ALLOWED,
-        CONTENT_TYPE_YAML,
+        content_type,
         body.as_bytes().to_vec(),
         true,
     )
@@ -162,18 +232,6 @@ fn doc_response(content_type: &'static str, disposition: &'static str, body: Vec
         HeaderValue::from_static(disposition),
     );
     response
-}
-
-/// Django `QueryDict.get('format')`: the last `format` value, or `None`
-/// when absent. Percent-decoding included (`serde_urlencoded`, like
-/// Django's query parser).
-fn last_format_value(query: &str) -> Option<String> {
-    let pairs: Vec<(String, String)> = serde_urlencoded::from_str(query).unwrap_or_default();
-    pairs
-        .into_iter()
-        .filter(|(key, _)| key == "format")
-        .map(|(_, value)| value)
-        .next_back()
 }
 
 #[cfg(test)]
@@ -589,5 +647,209 @@ mod tests {
             .await
             .expect("serve");
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// Negotiation runs before throttling (DRF `initial`): a throttled
+    /// `?format=xml` answers the YAML 404, not 429 — and the throttle
+    /// budget stays exhausted afterwards.
+    #[tokio::test]
+    async fn throttled_unknown_format_404s() {
+        for _ in 0..30 {
+            let response = flipped_app()
+                .oneshot(get(SCHEMA_PATH, "schema-d1-neg"))
+                .await
+                .expect("serve");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let response = flipped_app()
+            .oneshot(get("/api/schema/?format=xml", "schema-d1-neg"))
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let headers = response.headers().clone();
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).expect("ct"),
+            CONTENT_TYPE_YAML
+        );
+        assert_eq!(headers.get(header::ALLOW).expect("allow"), ALLOW);
+        assert_eq!(headers.get(header::VARY).expect("vary"), "Accept");
+        assert!(headers.get(header::RETRY_AFTER).is_none());
+        let body = body_bytes(response).await;
+        assert_eq!(body, UNKNOWN_FORMAT_BODY.as_bytes());
+        let response = flipped_app()
+            .oneshot(get(SCHEMA_PATH, "schema-d1-neg"))
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// Unknown-format 404s spend no throttle budget (DRF `initial`
+    /// negotiates before `check_throttles`): 30 of them, then the same
+    /// ident still serves both renderers.
+    #[tokio::test]
+    async fn unknown_format_404s_burn_no_budget() {
+        for _ in 0..30 {
+            let response = flipped_app()
+                .oneshot(get("/api/schema/?format=xml", "schema-d2-free"))
+                .await
+                .expect("serve");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        let response = flipped_app()
+            .oneshot(get(SCHEMA_PATH, "schema-d2-free"))
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = flipped_app()
+            .oneshot(get("/api/schema/?format=json", "schema-d2-free"))
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Unsafe methods with `?format=json` answer the 405 through the JSON
+    /// renderer (live-Django oracle: exact bytes, `+json` content type,
+    /// `Allow`/`Vary` shell, no `Content-Disposition`).
+    #[tokio::test]
+    async fn unsafe_json_format_405_json_bytes() {
+        for (http_method, body_const, body_len) in [
+            ("POST", NOT_ALLOWED_BODY_JSON_POST, 48usize),
+            ("PUT", NOT_ALLOWED_BODY_JSON_PUT, 47usize),
+            ("PATCH", NOT_ALLOWED_BODY_JSON_PATCH, 49usize),
+            ("DELETE", NOT_ALLOWED_BODY_JSON_DELETE, 50usize),
+        ] {
+            let response = flipped_app()
+                .oneshot(method(
+                    http_method,
+                    "/api/schema/?format=json",
+                    "schema-d4-json",
+                ))
+                .await
+                .expect("serve");
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{http_method}"
+            );
+            let headers = response.headers().clone();
+            assert_eq!(
+                headers.get(header::CONTENT_TYPE).expect("ct"),
+                CONTENT_TYPE_JSON,
+                "{http_method}"
+            );
+            assert_eq!(
+                headers.get(header::ALLOW).expect("allow"),
+                ALLOW,
+                "{http_method}"
+            );
+            assert_eq!(
+                headers.get(header::VARY).expect("vary"),
+                "Accept",
+                "{http_method}"
+            );
+            assert!(
+                headers.get(header::CONTENT_DISPOSITION).is_none(),
+                "{http_method}"
+            );
+            let body = body_bytes(response).await;
+            assert_eq!(body.len(), body_len, "{http_method}");
+            assert_eq!(body, body_const.as_bytes(), "{http_method}");
+            let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
+            assert_eq!(
+                parsed["detail"],
+                format!("Method \"{http_method}\" not allowed."),
+                "{http_method}"
+            );
+        }
+    }
+
+    /// Unsafe methods with an unknown `?format=` answer the YAML 404
+    /// (negotiation first), not the 405.
+    #[tokio::test]
+    async fn unsafe_unknown_format_404s() {
+        for http_method in ["POST", "PUT", "PATCH", "DELETE"] {
+            let response = flipped_app()
+                .oneshot(method(
+                    http_method,
+                    "/api/schema/?format=xml",
+                    "schema-d4-unk",
+                ))
+                .await
+                .expect("serve");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{http_method}");
+            let headers = response.headers().clone();
+            assert_eq!(
+                headers.get(header::CONTENT_TYPE).expect("ct"),
+                CONTENT_TYPE_YAML,
+                "{http_method}"
+            );
+            assert_eq!(
+                headers.get(header::VARY).expect("vary"),
+                "Accept",
+                "{http_method}"
+            );
+            let body = body_bytes(response).await;
+            assert_eq!(body, UNKNOWN_FORMAT_BODY.as_bytes(), "{http_method}");
+        }
+    }
+
+    /// A throttled unsafe method with `?format=json` answers the 429
+    /// through the negotiated JSON renderer (throttle still runs before
+    /// method dispatch — only negotiation runs before the throttle).
+    #[tokio::test]
+    async fn throttled_unsafe_json_format_429_json_denial() {
+        use super::super::throttle::{DENIAL_BODY_JSON, DENIAL_CONTENT_TYPE_JSON};
+        for _ in 0..30 {
+            let response = flipped_app()
+                .oneshot(get(SCHEMA_PATH, "schema-d4-uwt"))
+                .await
+                .expect("serve");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let response = flipped_app()
+            .oneshot(method("POST", "/api/schema/?format=json", "schema-d4-uwt"))
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let headers = response.headers().clone();
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).expect("ct"),
+            DENIAL_CONTENT_TYPE_JSON
+        );
+        assert_eq!(headers.get(header::ALLOW).expect("allow"), ALLOW);
+        assert_eq!(headers.get(header::VARY).expect("vary"), "Accept");
+        assert!(headers.get(header::RETRY_AFTER).is_some());
+        let body = body_bytes(response).await;
+        assert_eq!(body, DENIAL_BODY_JSON.as_bytes());
+    }
+
+    /// Malformed query pairs recover per pair like Django's `QueryDict`:
+    /// `%zz` stays a literal (unknown) format, one bad pair never breaks
+    /// the rest, and `;` does not split pairs.
+    #[tokio::test]
+    async fn malformed_format_decoding_matches_querydict() {
+        let response = flipped_app()
+            .oneshot(get("/api/schema/?format=%zz", "schema-dec"))
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = flipped_app()
+            .oneshot(get("/api/schema/?format=%zz&format=json", "schema-dec"))
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).expect("ct"),
+            CONTENT_TYPE_JSON
+        );
+        let response = flipped_app()
+            .oneshot(get("/api/schema/?a=1;format=json", "schema-dec"))
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).expect("ct"),
+            CONTENT_TYPE_YAML
+        );
     }
 }

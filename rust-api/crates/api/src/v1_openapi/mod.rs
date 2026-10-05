@@ -157,6 +157,80 @@ pub(crate) fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Django `QueryDict.get('format')`: the last `format` value, or `None`
+/// when absent.
+///
+/// Decoded per pair (`&`-separated; the first `=` splits key from value
+/// and a bare key counts as blank; `+` is a space; valid `%XX` escapes
+/// decode to their byte while truncated or non-hex escapes stay literal;
+/// the bytes then decode lossily as UTF-8) — exactly
+/// `urllib.parse.parse_qsl` under Django's settings (`separator='&'`,
+/// `errors='replace'`). One malformed pair never breaks the rest, and
+/// `;` does not split pairs (both verified against Django 4.2's
+/// `QueryDict`; the 24-vector battery lives in
+/// `last_format_value_matches_querydict`).
+pub(crate) fn last_format_value(query: &str) -> Option<String> {
+    let mut format = None;
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (raw_key, raw_value) = match pair.split_once('=') {
+            Some((key, value)) => (key, value),
+            None => (pair, ""),
+        };
+        if decode_query_component(raw_key) == "format" {
+            format = Some(decode_query_component(raw_value));
+        }
+    }
+    format
+}
+
+/// One `application/x-www-form-urlencoded` component: `unquote_plus` with
+/// `errors='replace'` (`+` to space, valid `%XX` to its byte, anything
+/// else literal, bytes lossy UTF-8).
+fn decode_query_component(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                decoded.push(b' ');
+                i += 1;
+            }
+            b'%' => {
+                let pair = bytes
+                    .get(i + 1)
+                    .zip(bytes.get(i + 2))
+                    .and_then(|(&hi, &lo)| hex_nibble(hi).zip(hex_nibble(lo)));
+                if let Some((hi, lo)) = pair {
+                    decoded.push((hi << 4) | lo);
+                    i += 3;
+                } else {
+                    decoded.push(b'%');
+                    i += 1;
+                }
+            }
+            byte => {
+                decoded.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// One hex digit's value, or `None` outside `[0-9a-fA-F]`.
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// DRF ident for one request: `X-Forwarded-For` (whitespace-stripped) when
 /// present, else the TCP peer. Unit-test requests carry no `ConnectInfo`,
 /// so loopback stands in for the peer there.
@@ -504,6 +578,44 @@ mod tests {
             "192.0.2.7:1234".parse::<SocketAddr>().expect("addr"),
         ));
         assert_eq!(peer_ident(&peered), "192.0.2.7");
+    }
+
+    /// `last_format_value` replays Django 4.2's `QueryDict.get('format')`
+    /// on all 24 oracle vectors (`/tmp/djprobe/qsbattery.py`, outside the
+    /// repo): last-wins, bare keys blank, empties skipped, `+` to space,
+    /// valid escapes decoded (lossy UTF-8), malformed escapes literal and
+    /// per-pair (one bad pair never breaks the rest), `;` not a separator,
+    /// keys case-sensitive.
+    #[test]
+    fn last_format_value_matches_querydict() {
+        for (query, expected) in [
+            ("format=json", Some("json")),
+            ("format=", Some("")),
+            ("", None),
+            ("format=%zz", Some("%zz")),
+            ("format=%zz&format=json", Some("json")),
+            ("format=json&format=%zz", Some("%zz")),
+            ("a=1;format=json", None),
+            ("format", Some("")),
+            ("format&format=json", Some("json")),
+            ("&&format=json&&", Some("json")),
+            ("format=a+b", Some("a b")),
+            ("format=%6A%53%4F%4E", Some("jSON")),
+            ("format=%ff", Some("�")),
+            ("for%6Dat=json", Some("json")),
+            ("FORMAT=json", None),
+            ("format=json%20", Some("json ")),
+            ("x=%zz&format=json", Some("json")),
+            ("format=%2", Some("%2")),
+            ("format=%", Some("%")),
+            ("format=a%2Fb", Some("a/b")),
+            ("a=%zz&format=%41", Some("A")),
+            ("format=json;format=yaml", Some("json;format=yaml")),
+            ("format=%C3%A9", Some("é")),
+            ("%66ormat=json", Some("json")),
+        ] {
+            assert_eq!(last_format_value(query).as_deref(), expected, "{query:?}");
+        }
     }
 
     /// No session, an empty session, or a session without Django-auth keys
