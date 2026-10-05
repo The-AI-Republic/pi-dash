@@ -190,6 +190,53 @@ def test_activity_detail_shape(api, world, seeder):
     assert response.json()["id"] == activity["id"]
 
 
+def test_activity_list_span_order_by(api, world, seeder):
+    """Related-span order_by JOINs and 200s with the related column's order
+    (PIDASHCONV-748); every activity shares this issue's project, so the
+    `project__name` order is trivially stable while `actor__email` orders."""
+    issue_id = world["issue"]["id"]
+    ws_id = world["workspace"]["id"]
+    proj_id = world["project"]["id"]
+    user_a = seeder.create_user(email=f"a-span-{seeder.tag}@example.com")
+    user_z = seeder.create_user(email=f"z-span-{seeder.tag}@example.com")
+    act_a = seeder.create_issue_activity(
+        ws_id, proj_id, issue_id, verb="created", actor_id=user_a["id"]
+    )
+    act_z = seeder.create_issue_activity(
+        ws_id, proj_id, issue_id, verb="updated", actor_id=user_z["id"]
+    )
+    asc = api.get(
+        sub_url(world, issue_id, "activities"), params={"order_by": "actor__email"}
+    )
+    assert asc.status_code == 200, asc.text
+    assert [row["id"] for row in asc.json()["results"]] == [act_a["id"], act_z["id"]]
+    desc = api.get(
+        sub_url(world, issue_id, "activities"), params={"order_by": "-actor__email"}
+    )
+    assert desc.status_code == 200, desc.text
+    assert [row["id"] for row in desc.json()["results"]] == [act_z["id"], act_a["id"]]
+    span = api.get(
+        sub_url(world, issue_id, "activities"), params={"order_by": "project__name"}
+    )
+    assert span.status_code == 200, span.text
+    assert span.json()["total_results"] == 2
+    assert {row["id"] for row in span.json()["results"]} == {act_a["id"], act_z["id"]}
+
+
+def test_activity_detail_span_order_by(api, world, seeder):
+    """The detail chain takes the span order without 500ing (PIDASHCONV-748)."""
+    issue_id = world["issue"]["id"]
+    activity = seeder.create_issue_activity(
+        world["workspace"]["id"], world["project"]["id"], issue_id, verb="updated"
+    )
+    response = api.get(
+        sub_url(world, issue_id, "activities", activity["id"]),
+        params={"order_by": "project__name"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["id"] == activity["id"]
+
+
 def test_attachment_list_shape(api, world, seeder):
     """The attachment list is a bare JSON list (not the paginated envelope)."""
     issue_id = world["issue"]["id"]
