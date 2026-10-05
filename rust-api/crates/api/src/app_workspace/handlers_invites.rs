@@ -98,7 +98,7 @@ use sqlx::PgPool;
 use pidash_services::app_project::ser_member as lite_ws;
 use pidash_services::app_project::ser_shared as lite_user;
 use pidash_services::app_workspace::{
-    queries_membership as queries, ser_invite, ser_workspace, tasks,
+    models_workspace, queries_membership as queries, ser_invite, ser_workspace, tasks,
 };
 
 use super::gates;
@@ -708,6 +708,14 @@ fn audit_columns_on_update(
     current_created_by: Option<uuid::Uuid>,
 ) -> (Option<uuid::Uuid>, Option<uuid::Uuid>) {
     (caller, caller.and(current_created_by))
+}
+
+/// Parse one member JSON default fresh per row: `get_default_props` /
+/// `get_issue_props` / `dict` are callables, so each Django row gets a
+/// fresh dict — never share one parsed value across rows (the merged
+/// `handlers_workspace.rs` precedent).
+fn member_default_json(text: &str) -> Result<Value, Denial> {
+    serde_json::from_str(text).map_err(|_| Denial::ServerError)
 }
 
 // ---------------------------------------------------------------------------
@@ -2607,13 +2615,17 @@ async fn invite_create(
     }
     // `bulk_create(batch_size=10, ignore_conflicts=True)` (`:113-115`):
     // duplicate `(email, workspace)` rows are silently skipped while the
-    // endpoint still answers success.
+    // endpoint still answers success. `bulk_create` writes every model
+    // field (`accepted=False`, `message`/`responded_at` NULL, no
+    // `save()` audit stamp so `updated_by`/`deleted_at` NULL) and no
+    // column carries a DB default — the literals below are required,
+    // not cosmetic (PIDASHCONV-751: omitting `accepted` 400s).
     for batch in pending.chunks(queries::INVITE_BULK_BATCH_SIZE as usize) {
         let mut values: Vec<String> = Vec::with_capacity(batch.len());
         for index in 0..batch.len() {
             let base = index * 8;
             values.push(format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ${}, ${}, NULL, NULL, ${}, FALSE, ${}, ${}, NULL, NULL, ${})",
                 base + 1,
                 base + 2,
                 base + 3,
@@ -2626,7 +2638,8 @@ async fn invite_create(
         }
         let sql = format!(
             "INSERT INTO workspace_member_invites \
-             (id, created_at, updated_at, created_by_id, email, workspace_id, token, role) \
+             (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
+             email, accepted, workspace_id, token, message, responded_at, role) \
              VALUES {} ON CONFLICT DO NOTHING",
             values.join(", ")
         );
@@ -3056,6 +3069,29 @@ async fn join_post(
         Ok(existing) => existing,
         Err(_) => return Denial::ServerError.into_response(),
     };
+    // Django-side member defaults for the create arm below: no member
+    // column carries a DB default, so the INSERT must supply every
+    // NOT NULL field (`workspace.py:207-213`; PIDASHCONV-751).
+    let view_props =
+        match member_default_json(models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON) {
+            Ok(props) => props,
+            Err(denial) => return denial.into_response(),
+        };
+    let default_props =
+        match member_default_json(models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON) {
+            Ok(props) => props,
+            Err(denial) => return denial.into_response(),
+        };
+    let issue_props =
+        match member_default_json(models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON) {
+            Ok(props) => props,
+            Err(denial) => return denial.into_response(),
+        };
+    let empty_dict = match member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)
+    {
+        Ok(props) => props,
+        Err(denial) => return denial.into_response(),
+    };
     if let Some((member_id, member_created_by)) = existing {
         let (updated_by_id, created_by_id) =
             audit_columns_on_update(responder_id, member_created_by);
@@ -3078,9 +3114,10 @@ async fn join_post(
         }
     } else if let Err(error) = sqlx::query(
         "INSERT INTO workspace_members \
-         (id, created_at, updated_at, created_by_id, updated_by_id, workspace_id, member_id, \
-         role) \
-         VALUES ($1, $2, $2, $3, NULL, $4, $5, $6)",
+         (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
+         workspace_id, member_id, role, company_role, view_props, default_props, issue_props, \
+         getting_started_checklist, tips, explored_features, is_active) \
+         VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, NULL, $7, $8, $9, $10, $11, $12, TRUE)",
     )
     .bind(uuid::Uuid::new_v4())
     .bind(now)
@@ -3088,6 +3125,12 @@ async fn join_post(
     .bind(invite.workspace_id)
     .bind(user_id)
     .bind(invite.role)
+    .bind(view_props)
+    .bind(default_props)
+    .bind(issue_props)
+    .bind(empty_dict.clone())
+    .bind(empty_dict.clone())
+    .bind(empty_dict)
     .execute(pool)
     .await
     {
@@ -3463,29 +3506,66 @@ async fn my_invites_create(
     }
     // The bulk-create (`:289-300`, `created_by` explicit, no batch size)
     // then the queryset soft-delete (`:303`, `deleted_at` only).
+    // `bulk_create` writes every model field and no member column
+    // carries a DB default, so the JSON props and `is_active` ride
+    // along explicitly (PIDASHCONV-751).
     if !invites.is_empty() {
         let mut values: Vec<String> = Vec::with_capacity(invites.len());
         for index in 0..invites.len() {
-            let base = index * 7;
+            let base = index * 13;
             values.push(format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ${}, ${}, NULL, NULL, ${}, ${}, ${}, NULL, \
+                 ${}, ${}, ${}, ${}, ${}, ${}, TRUE)",
                 base + 1,
                 base + 2,
                 base + 3,
                 base + 4,
                 base + 5,
                 base + 6,
-                base + 7
+                base + 7,
+                base + 8,
+                base + 9,
+                base + 10,
+                base + 11,
+                base + 12,
+                base + 13
             ));
         }
         let sql = format!(
             "INSERT INTO workspace_members \
-             (id, created_at, updated_at, created_by_id, workspace_id, member_id, role) \
+             (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
+             workspace_id, member_id, role, company_role, view_props, default_props, \
+             issue_props, getting_started_checklist, tips, explored_features, is_active) \
              VALUES {} ON CONFLICT DO NOTHING",
             values.join(", ")
         );
         let mut query = sqlx::query(&sql);
         for invite in invites.iter() {
+            // Fresh defaults per row: the Django callables mint a new
+            // dict per instance.
+            let view_props = match member_default_json(
+                models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
+            ) {
+                Ok(props) => props,
+                Err(denial) => return denial.into_response(),
+            };
+            let default_props = match member_default_json(
+                models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
+            ) {
+                Ok(props) => props,
+                Err(denial) => return denial.into_response(),
+            };
+            let issue_props = match member_default_json(
+                models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON,
+            ) {
+                Ok(props) => props,
+                Err(denial) => return denial.into_response(),
+            };
+            let empty_dict =
+                match member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON) {
+                    Ok(props) => props,
+                    Err(denial) => return denial.into_response(),
+                };
             query = query
                 .bind(uuid::Uuid::new_v4())
                 .bind(now)
@@ -3493,7 +3573,13 @@ async fn my_invites_create(
                 .bind(user_id)
                 .bind(invite.workspace_id)
                 .bind(user_id)
-                .bind(invite.role);
+                .bind(invite.role)
+                .bind(view_props)
+                .bind(default_props)
+                .bind(issue_props)
+                .bind(empty_dict.clone())
+                .bind(empty_dict.clone())
+                .bind(empty_dict);
         }
         if let Err(error) = query.execute(pool).await {
             if is_integrity_error(&error) {
@@ -3951,6 +4037,30 @@ async fn join_request_approve(
     let requester_id = request.requester_id;
     let request_role = request.role;
     let approver_id = actor.id;
+    // Django-side member defaults for the create arm: no member column
+    // carries a DB default (`workspace.py:207-213`; PIDASHCONV-751).
+    // Parsed outside the `async move` so a bad constant answers 500
+    // through `Denial` instead of poisoning the `sqlx::Error` chain.
+    let view_props =
+        match member_default_json(models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON) {
+            Ok(props) => props,
+            Err(denial) => return denial.into_response(),
+        };
+    let default_props =
+        match member_default_json(models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON) {
+            Ok(props) => props,
+            Err(denial) => return denial.into_response(),
+        };
+    let issue_props =
+        match member_default_json(models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON) {
+            Ok(props) => props,
+            Err(denial) => return denial.into_response(),
+        };
+    let empty_dict = match member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)
+    {
+        Ok(props) => props,
+        Err(denial) => return denial.into_response(),
+    };
     let approved = async move {
         let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
             "SELECT wm.id FROM workspace_members wm WHERE wm.workspace_id = $1 AND wm.member_id = $2 \
@@ -3975,11 +4085,15 @@ async fn join_request_approve(
             .await?;
         } else {
             // The create `.save()` keeps `updated_by` NULL on add
-            // (`db/models/base.py:37-39`), so the column stays unset.
+            // (`db/models/base.py:37-39`), so the column stays unset —
+            // while the JSON props ride the model defaults (`:207-213`).
             sqlx::query(
                 "INSERT INTO workspace_members \
-                 (id, created_at, updated_at, created_by_id, workspace_id, member_id, role) \
-                 VALUES ($1, $2, $2, $3, $4, $5, $6)",
+                 (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
+                 workspace_id, member_id, role, company_role, view_props, default_props, \
+                 issue_props, getting_started_checklist, tips, explored_features, is_active) \
+                 VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, NULL, $7, $8, $9, \
+                 $10, $11, $12, TRUE)",
             )
             .bind(uuid::Uuid::new_v4())
             .bind(now)
@@ -3987,6 +4101,12 @@ async fn join_request_approve(
             .bind(workspace_id)
             .bind(requester_id)
             .bind(request_role)
+            .bind(view_props)
+            .bind(default_props)
+            .bind(issue_props)
+            .bind(empty_dict.clone())
+            .bind(empty_dict.clone())
+            .bind(empty_dict)
             .execute(&mut *tx)
             .await?;
         }
