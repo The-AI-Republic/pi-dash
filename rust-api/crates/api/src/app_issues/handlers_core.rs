@@ -103,7 +103,6 @@ use pidash_auth::permissions::membership::ProjectRoleFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_auth::scope::TenantScope;
 use pidash_db::app_pages::strip::sync_description_stripped;
-use pidash_db::dispatch::status::AgentRunTrigger;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS, TABLE as TICKER_TABLE,
 };
@@ -629,7 +628,7 @@ fn negotiate_input(headers: &HeaderMap, body: &[u8]) -> Result<RequestData, Resp
             files: BTreeMap::new(),
             is_html: false,
         }),
-        shared_body::NegotiatedBody::JsonText(text) => parse_request_data(text.as_bytes())
+        shared_body::NegotiatedBody::JsonText { text, .. } => parse_request_data(text.as_bytes())
             .map(|parsed| RequestData {
                 value: to_serde_publish(&parsed),
                 files: BTreeMap::new(),
@@ -641,7 +640,7 @@ fn negotiate_input(headers: &HeaderMap, body: &[u8]) -> Result<RequestData, Resp
                 }
                 JsonFail::Recursion => Denial::ServerError.into_response(),
             }),
-        shared_body::NegotiatedBody::Form { map, files } => Ok(RequestData {
+        shared_body::NegotiatedBody::Form { map, files, .. } => Ok(RequestData {
             value: Value::Object(map),
             files,
             is_html: true,
@@ -3499,7 +3498,7 @@ impl CreationSeam for CoreSignalSeam<'_> {
         _issue_id: Uuid,
         _run_id: Uuid,
         _parent_run_id: Option<Uuid>,
-        _trigger: AgentRunTrigger,
+        _trigger: &str,
         _created_by_id: Uuid,
     ) -> Result<RenderBundle, CreationError> {
         seam_unreachable("render_bundle")
