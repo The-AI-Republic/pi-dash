@@ -6386,6 +6386,8 @@ pub async fn bulk_delete_issues(
         // touches.
         let project_bind = survivors.len() + 2;
         let slug_bind = survivors.len() + 3;
+        // Comma-join, not JOIN..ON: Postgres forbids referencing the
+        // UPDATE target from a FROM-clause ON expression.
         let sql = format!(
             "UPDATE issues AS issue SET deleted_at = $1 \
              FROM projects AS project, workspaces AS workspace \
