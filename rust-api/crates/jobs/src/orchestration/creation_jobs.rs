@@ -44,7 +44,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
-use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
+use pidash_db::dispatch::status::AgentRunStatus;
 use pidash_db::tx::Transaction;
 use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile, UserFlags,
@@ -221,16 +221,19 @@ fn map_status(value: String) -> Result<AgentRunStatus, sqlx::Error> {
     AgentRunStatus::from_value(&value).ok_or_else(|| decode_error("status", &value))
 }
 
-fn map_trigger(value: String) -> Result<AgentRunTrigger, sqlx::Error> {
-    AgentRunTrigger::from_value(&value).ok_or_else(|| decode_error("trigger", &value))
-}
-
 fn map_executor(value: String) -> Result<AgentExecutorKind, sqlx::Error> {
+    // Strictness is safe here (unlike the trigger): the
+    // `agent_run_cloud_has_no_local_assignment` check constraint
+    // (`runner/models.py:1065-1075`, migration 0024) admits only the
+    // three members, so an unknown stored value is unreachable.
     AgentExecutorKind::from_value(&value).ok_or_else(|| decode_error("executor_kind", &value))
 }
 
 /// Map one [`RUN_VIEW_COLUMNS`][pidash_services::orchestration::creation::RUN_VIEW_COLUMNS]
-/// row onto the services view.
+/// row onto the services view. The trigger is carried through
+/// unparsed: Django's `TextChoices` are choices-only (no DB check),
+/// so the stored value may sit outside `AgentRunTrigger`
+/// (migration 0029) and every read path must tolerate it.
 fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
     let status: String = row.try_get("status")?;
     let trigger: String = row.try_get("trigger")?;
@@ -245,7 +248,7 @@ fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
         parent_run_id: row.try_get("parent_run_id")?,
         work_item_id: row.try_get("work_item_id")?,
         status: map_status(status)?,
-        trigger: map_trigger(trigger)?,
+        trigger,
         executor_kind: map_executor(executor_kind)?,
         phase_kind: row.try_get("phase_kind")?,
         run_config: row.try_get("run_config")?,
@@ -495,7 +498,7 @@ where
             .bind(row.executor_kind.value())
             .bind(&row.error_code)
             .bind(&row.tool_plan)
-            .bind(row.trigger.value())
+            .bind(&row.trigger)
             .bind(&row.phase_kind)
             .bind(&row.run_config)
             .bind(row.now)
@@ -634,7 +637,7 @@ where
         issue_id: Uuid,
         run_id: Uuid,
         parent_run_id: Option<Uuid>,
-        trigger: AgentRunTrigger,
+        trigger: &str,
         created_by_id: Uuid,
     ) -> Result<RenderBundle, CreationError> {
         load_render_bundle(
@@ -1151,7 +1154,7 @@ async fn load_render_bundle(
     issue_id: Uuid,
     run_id: Uuid,
     parent_run_id: Option<Uuid>,
-    trigger: AgentRunTrigger,
+    trigger: &str,
     created_by_id: Uuid,
 ) -> Result<RenderBundle, CreationError> {
     let row = sqlx::query(ISSUE_SELECT_SQL)
@@ -1504,6 +1507,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_db::dispatch::status::AgentRunTrigger;
     use pidash_services::dispatch::CloudAgentAdmissionError;
     use pidash_services::orchestration::creation::{
         ContinuationRequest, CreateDispatchRequest, HandoffCreateRequest,
@@ -3253,5 +3257,54 @@ mod tests {
             &[ticker],
         )
         .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    async fn live_unknown_trigger_reads_carry_raw_value() {
+        // Django never validates agent_run.trigger on read: TextChoices
+        // are choices-only (no DB check), migration 0029 documents
+        // blocker_completed rows reading back as an unknown trigger, and
+        // the contract harness seeds trigger='human'. Every read path
+        // must carry such values through instead of failing to decode.
+        let pool = pool().await;
+        let graph = seed_graph(&pool, "trig-raw").await;
+        let id = seed_run(
+            &pool,
+            &graph,
+            "running",
+            "human",
+            "local_runner",
+            "coding-task",
+            None,
+            None,
+            None,
+            json!({}),
+            now(),
+        )
+        .await;
+        let tx = Transaction::begin(&pool).await.expect("tx");
+        let mut store = LiveCreationStore::new(tx, &pool, deps());
+        let active = CreationSeam::active_run_for(&mut store, graph.issue)
+            .await
+            .expect("active read tolerates unknown trigger");
+        assert_eq!(active.as_ref().map(|run| run.id), Some(id));
+        assert_eq!(
+            active.as_ref().map(|run| run.trigger.as_str()),
+            Some("human")
+        );
+        let row = CreationSeam::run(&mut store, id)
+            .await
+            .expect("direct read tolerates unknown trigger")
+            .expect("row");
+        assert_eq!(row.trigger, "human");
+        let prior = CreationSeam::latest_prior_run(&mut store, graph.issue)
+            .await
+            .expect("prior read tolerates unknown trigger")
+            .expect("row");
+        assert_eq!(prior.trigger, "human");
+        let (tx, _, _, _, _, _) = store.into_parts();
+        tx.rollback().await.expect("rollback");
+        cleanup(&pool, graph, &[id], &[], &[], &[], &[], &[]).await;
     }
 }

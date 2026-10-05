@@ -1482,7 +1482,7 @@ mod tests {
             parent_run_id: None,
             work_item_id: Some(uid(0x01)),
             status,
-            trigger: AgentRunTrigger::StateTransition,
+            trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             executor_kind: AgentExecutorKind::LocalRunner,
             phase_kind: "coding-task".to_owned(),
             run_config: json!({}),
@@ -1832,7 +1832,7 @@ mod tests {
                 parent_run_id: row.parent_run_id,
                 work_item_id: Some(row.work_item_id),
                 status: AgentRunStatus::Queued,
-                trigger: row.trigger,
+                trigger: row.trigger.clone(),
                 executor_kind: row.executor_kind,
                 phase_kind: row.phase_kind.clone(),
                 run_config: row.run_config.clone(),
@@ -1899,7 +1899,7 @@ mod tests {
             _issue_id: Uuid,
             _run_id: Uuid,
             _parent_run_id: Option<Uuid>,
-            _trigger: AgentRunTrigger,
+            _trigger: &str,
             _created_by_id: Uuid,
         ) -> Result<RenderBundle, CreationError> {
             self.bundle
@@ -2080,7 +2080,7 @@ mod tests {
                 parent_run_id: None,
                 work_item_id: None,
                 status: AgentRunStatus::Queued,
-                trigger: AgentRunTrigger::Scheduler,
+                trigger: AgentRunTrigger::Scheduler.value().to_owned(),
                 executor_kind: row.executor_kind,
                 phase_kind: String::new(),
                 run_config: json!({}),
@@ -2578,7 +2578,7 @@ mod tests {
         let run = seam.runs.get(&run_id).expect("run stored").clone();
         let golden = &case["after"]["run"];
         assert_eq!(run.status.value(), golden["status"].as_str().unwrap());
-        assert_eq!(run.trigger.value(), golden["trigger"].as_str().unwrap());
+        assert_eq!(run.trigger, golden["trigger"].as_str().unwrap());
         assert_eq!(run.phase_kind, golden["phase_kind"].as_str().unwrap());
         assert_eq!(run.parent_run_id, None);
         assert!(golden["parent_run"].is_null());
@@ -2873,7 +2873,7 @@ mod tests {
         let run = seam.runs.get(&run_id).expect("run stored").clone();
         let golden = &case["after"]["run"];
         assert_eq!(run.status.value(), golden["status"].as_str().unwrap());
-        assert_eq!(run.trigger.value(), golden["trigger"].as_str().unwrap());
+        assert_eq!(run.trigger, golden["trigger"].as_str().unwrap());
         assert_eq!(run.phase_kind, golden["phase_kind"].as_str().unwrap());
         assert_eq!(run.parent_run_id, Some(prior));
         assert_eq!(run.pinned_runner_id, Some(uid(0x55)));
@@ -2994,7 +2994,7 @@ mod tests {
         let run = seam.runs.get(&run_id).expect("run stored").clone();
         let golden = &case["after"];
         assert_eq!(run.status.value(), golden["status"].as_str().unwrap());
-        assert_eq!(run.trigger.value(), golden["trigger"].as_str().unwrap());
+        assert_eq!(run.trigger, golden["trigger"].as_str().unwrap());
         assert_eq!(run.phase_kind, golden["phase_kind"].as_str().unwrap());
         assert_eq!(run.parent_run_id, None);
         assert!(golden["parent_run"].is_null());
@@ -3391,7 +3391,7 @@ mod tests {
         let run = seam.runs.get(&run_id).expect("run stored").clone();
         let golden = &case["after"];
         assert_eq!(run.status.value(), golden["status"].as_str().unwrap());
-        assert_eq!(run.trigger.value(), golden["trigger"].as_str().unwrap());
+        assert_eq!(run.trigger, golden["trigger"].as_str().unwrap());
         assert_eq!(run.phase_kind, golden["phase_kind"].as_str().unwrap());
         assert_eq!(run.parent_run_id, None);
         assert_eq!(run.pinned_runner_id, None);

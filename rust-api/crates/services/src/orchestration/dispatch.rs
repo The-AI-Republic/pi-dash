@@ -2181,7 +2181,7 @@ mod tests {
             parent_run_id: None,
             work_item_id: Some(uid(0x01)),
             status,
-            trigger,
+            trigger: trigger.value().to_owned(),
             executor_kind: AgentExecutorKind::LocalRunner,
             phase_kind: "coding-task".to_owned(),
             run_config: json!({}),
@@ -2441,7 +2441,7 @@ mod tests {
             _issue_id: Uuid,
             _run_id: Uuid,
             _parent_run_id: Option<Uuid>,
-            _trigger: AgentRunTrigger,
+            _trigger: &str,
             _created_by_id: Uuid,
         ) -> Result<RenderBundle, CreationError> {
             todo!("builder-success paths replay live in jobs")

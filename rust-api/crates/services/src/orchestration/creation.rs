@@ -105,28 +105,32 @@ use crate::prompting::{composer, context, recipes};
 // ---------------------------------------------------------------------------
 
 /// `AgentRunTrigger.TICK` is the only automatic issue trigger
-/// (`runner/models.py:273`, `AUTOMATIC_ISSUE_TRIGGERS`).
-pub fn is_automatic_issue_trigger(trigger: AgentRunTrigger) -> bool {
-    trigger == AgentRunTrigger::Tick
+/// (`runner/models.py:273`, `AUTOMATIC_ISSUE_TRIGGERS`). The trigger is
+/// the raw stored string: Django never validates the column on read,
+/// so an unrecognized value is simply not a member (migration 0029:
+/// neither human nor automatic).
+pub fn is_automatic_issue_trigger(trigger: &str) -> bool {
+    trigger == AgentRunTrigger::Tick.value()
 }
 
 /// `run_is_human_triggered` (`runner/models.py:279-281`): the trigger is
 /// one of `HUMAN_TRIGGERS` (`models.py:259-266`: state_transition,
-/// run_ai, comment_and_run, direct).
-pub fn is_human_triggered(trigger: AgentRunTrigger) -> bool {
-    matches!(
-        trigger,
-        AgentRunTrigger::StateTransition
-            | AgentRunTrigger::RunAi
-            | AgentRunTrigger::CommentAndRun
-            | AgentRunTrigger::Direct
-    )
+/// run_ai, comment_and_run, direct). Unrecognized values answer false,
+/// as the `in` check does in Python.
+pub fn is_human_triggered(trigger: &str) -> bool {
+    [
+        AgentRunTrigger::StateTransition.value(),
+        AgentRunTrigger::RunAi.value(),
+        AgentRunTrigger::CommentAndRun.value(),
+        AgentRunTrigger::Direct.value(),
+    ]
+    .contains(&trigger)
 }
 
 /// The user whose overrides apply to the run (`composer.py:372-380`):
 /// human-triggered runs resolve with `created_by`, automatic runs use
 /// workspace + defaults only.
-pub fn user_id_for_run(trigger: AgentRunTrigger, created_by_id: Uuid) -> Option<String> {
+pub fn user_id_for_run(trigger: &str, created_by_id: Uuid) -> Option<String> {
     is_human_triggered(trigger).then(|| created_by_id.to_string())
 }
 
@@ -534,7 +538,12 @@ pub struct StateView {
     pub group: String,
 }
 
-/// The consumed `agent_run` projection ([`RUN_VIEW_COLUMNS`]).
+/// The consumed `agent_run` projection ([`RUN_VIEW_COLUMNS`]). The
+/// trigger is the raw stored string, never parsed: Django's
+/// `TextChoices` are choices-only (no DB check), so legacy or
+/// hand-written rows can carry values outside
+/// [`AgentRunTrigger`] (migration 0029) and every read path carries
+/// them through.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunView {
     pub id: Uuid,
@@ -546,7 +555,7 @@ pub struct RunView {
     pub parent_run_id: Option<Uuid>,
     pub work_item_id: Option<Uuid>,
     pub status: AgentRunStatus,
-    pub trigger: AgentRunTrigger,
+    pub trigger: String,
     pub executor_kind: AgentExecutorKind,
     pub phase_kind: String,
     pub run_config: Value,
@@ -607,7 +616,10 @@ pub struct NewAgentRun {
     /// The `error_code` splat (`""` except the managed waiting path).
     pub error_code: String,
     pub tool_plan: Value,
-    pub trigger: AgentRunTrigger,
+    /// The raw stamped value: the handoff builder inherits the
+    /// parent's verbatim (`service.py:612`), which may itself be
+    /// outside [`AgentRunTrigger`].
+    pub trigger: String,
     /// The handoff builder passes `""` (it stamps no kind).
     pub phase_kind: String,
     pub run_config: Value,
@@ -747,7 +759,9 @@ pub struct RenderBundle {
 pub struct RunRenderRef {
     pub run_id: Uuid,
     pub parent_run_id: Option<Uuid>,
-    pub trigger: AgentRunTrigger,
+    /// The raw stored trigger (`context.py:627` passes it to the
+    /// template verbatim).
+    pub trigger: String,
     pub executor_kind: AgentExecutorKind,
     pub tool_plan: Value,
     pub created_by_id: Uuid,
@@ -1064,7 +1078,7 @@ pub fn render_first_turn(
         run_id: run.run_id.to_string(),
         run_template_name: kind.to_owned(),
         attempt: context::compute_attempt(bundle.prior_run_count),
-        trigger: Some(run.trigger.value().to_owned()),
+        trigger: Some(run.trigger.clone()),
         executor_kind: run.executor_kind.value().to_owned(),
         available_tools: run.tool_plan.get("tools").cloned().unwrap_or(Value::Null),
         unavailable_capabilities: run
@@ -1100,7 +1114,7 @@ pub fn render_first_turn(
     // Override keys are workspace/user UUID strings (`load_index`),
     // not the slug.
     let workspace_id = issue.workspace_id.to_string();
-    let user_id = user_id_for_run(run.trigger, run.created_by_id);
+    let user_id = user_id_for_run(&run.trigger, run.created_by_id);
     let tool_catalog_version = run
         .tool_plan
         .get("catalog_version")
@@ -1235,7 +1249,7 @@ pub trait CreationSeam {
         issue_id: Uuid,
         run_id: Uuid,
         parent_run_id: Option<Uuid>,
-        trigger: AgentRunTrigger,
+        trigger: &str,
         created_by_id: Uuid,
     ) -> Result<RenderBundle, CreationError>;
     /// The EE schema-tool name (`extra_toolsets_schema_tool`,
@@ -1280,6 +1294,8 @@ pub struct CreateDispatchRequest {
     pub creator_id: Uuid,
     pub pod_id: Uuid,
     pub fresh_session: bool,
+    /// The trigger to stamp: requests are built from validated
+    /// members, while stored rows carry the raw string.
     pub trigger: AgentRunTrigger,
     /// The clock for `created_at` / `ended_at` (frozen in tests).
     pub now: DateTime<Utc>,
@@ -1292,6 +1308,8 @@ pub struct ContinuationRequest {
     pub parent: RunView,
     pub creator_id: Uuid,
     pub pod_id: Uuid,
+    /// The trigger to stamp: requests are built from validated
+    /// members, while stored rows carry the raw string.
     pub trigger: AgentRunTrigger,
     /// The clock for `created_at` / `ended_at` (frozen in tests).
     pub now: DateTime<Utc>,
@@ -1343,7 +1361,7 @@ async fn render_new_run<C: CreationSeam>(
             issue_id,
             run_id,
             parent_run_id,
-            run_ref.trigger,
+            &run_ref.trigger,
             run_ref.created_by_id,
         )
         .await?;
@@ -1375,7 +1393,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
         .project_id
         .ok_or_else(|| CreationError::MissingRow("issue has no project".to_owned()))?;
     let project = seam.project(project_id).await?;
-    let automatic = is_automatic_issue_trigger(req.trigger);
+    let automatic = is_automatic_issue_trigger(req.trigger.value());
     let flags = seam.user_flags(req.creator_id).await?;
     let execution = match seam
         .execution_fields(&ExecutionRequest {
@@ -1437,7 +1455,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             executor_kind: execution.executor_kind,
             error_code: execution.error_code.clone().unwrap_or_default(),
             tool_plan: execution.tool_plan.clone(),
-            trigger: req.trigger,
+            trigger: req.trigger.value().to_owned(),
             phase_kind: kind.clone(),
             run_config: run_config_for_issue(
                 project.repo_url.as_deref(),
@@ -1466,7 +1484,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
         &RunRenderRef {
             run_id: run.id,
             parent_run_id: run.parent_run_id,
-            trigger: run.trigger,
+            trigger: run.trigger.clone(),
             executor_kind: run.executor_kind,
             tool_plan: run.tool_plan.clone(),
             created_by_id: run.created_by_id,
@@ -1511,7 +1529,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
         let runner = seam.runner(runner_id).await?;
         computed_pin = pinned_runner_for(runner.as_ref(), Some(req.pod_id));
     }
-    let automatic = is_automatic_issue_trigger(req.trigger);
+    let automatic = is_automatic_issue_trigger(req.trigger.value());
     let flags = seam.user_flags(req.creator_id).await?;
     let execution = match seam
         .execution_fields(&ExecutionRequest {
@@ -1568,7 +1586,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
             executor_kind: execution.executor_kind,
             error_code: execution.error_code.clone().unwrap_or_default(),
             tool_plan: execution.tool_plan.clone(),
-            trigger: req.trigger,
+            trigger: req.trigger.value().to_owned(),
             phase_kind: kind.clone(),
             run_config,
             now: req.now,
@@ -1593,7 +1611,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
         &RunRenderRef {
             run_id: run.id,
             parent_run_id: run.parent_run_id,
-            trigger: run.trigger,
+            trigger: run.trigger.clone(),
             executor_kind: run.executor_kind,
             tool_plan: run.tool_plan.clone(),
             created_by_id: run.created_by_id,
@@ -1684,7 +1702,7 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
             executor_kind: execution.executor_kind,
             error_code: execution.error_code.clone().unwrap_or_default(),
             tool_plan: execution.tool_plan.clone(),
-            trigger: req.parent.trigger,
+            trigger: req.parent.trigger.clone(),
             phase_kind: String::new(),
             run_config,
             now: req.now,
@@ -1708,7 +1726,7 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
         &RunRenderRef {
             run_id: run.id,
             parent_run_id: run.parent_run_id,
-            trigger: run.trigger,
+            trigger: run.trigger.clone(),
             executor_kind: run.executor_kind,
             tool_plan: run.tool_plan.clone(),
             created_by_id: run.created_by_id,
@@ -2041,7 +2059,7 @@ mod tests {
             parent_run_id: None,
             work_item_id: Some(uid(0x01)),
             status: AgentRunStatus::Queued,
-            trigger: AgentRunTrigger::StateTransition,
+            trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             executor_kind: AgentExecutorKind::LocalRunner,
             phase_kind: "coding-task".to_owned(),
             run_config: json!({}),
@@ -2346,7 +2364,7 @@ mod tests {
                 parent_run_id: row.parent_run_id,
                 work_item_id: Some(row.work_item_id),
                 status: AgentRunStatus::Queued,
-                trigger: row.trigger,
+                trigger: row.trigger.clone(),
                 executor_kind: row.executor_kind,
                 phase_kind: row.phase_kind.clone(),
                 run_config: row.run_config.clone(),
@@ -2416,7 +2434,7 @@ mod tests {
             _issue_id: Uuid,
             _run_id: Uuid,
             _parent_run_id: Option<Uuid>,
-            _trigger: AgentRunTrigger,
+            _trigger: &str,
             _created_by_id: Uuid,
         ) -> Result<RenderBundle, CreationError> {
             if let Some(err) = self.bundle_err.clone() {
@@ -2671,20 +2689,34 @@ mod tests {
 
     #[test]
     fn trigger_predicates() {
-        assert!(is_automatic_issue_trigger(AgentRunTrigger::Tick));
+        assert!(is_automatic_issue_trigger(AgentRunTrigger::Tick.value()));
         assert!(!is_automatic_issue_trigger(
-            AgentRunTrigger::StateTransition
+            AgentRunTrigger::StateTransition.value()
         ));
         for trigger in [
-            AgentRunTrigger::StateTransition,
-            AgentRunTrigger::RunAi,
-            AgentRunTrigger::CommentAndRun,
-            AgentRunTrigger::Direct,
+            AgentRunTrigger::StateTransition.value(),
+            AgentRunTrigger::RunAi.value(),
+            AgentRunTrigger::CommentAndRun.value(),
+            AgentRunTrigger::Direct.value(),
         ] {
             assert!(is_human_triggered(trigger), "{trigger:?}");
             assert!(user_id_for_run(trigger, uid(1)).is_some());
         }
-        for trigger in [AgentRunTrigger::Tick, AgentRunTrigger::Scheduler] {
+        assert!(!is_automatic_issue_trigger(
+            AgentRunTrigger::Scheduler.value()
+        ));
+        for trigger in [
+            AgentRunTrigger::Tick.value(),
+            AgentRunTrigger::Scheduler.value(),
+        ] {
+            assert!(!is_human_triggered(trigger), "{trigger:?}");
+            assert_eq!(user_id_for_run(trigger, uid(1)), None);
+        }
+        // Unrecognized stored values (migration 0029's
+        // blocker_completed rows, hand-written rows) are neither
+        // human nor automatic, as the Python `in` checks answer.
+        for trigger in ["human", "blocker_completed", "", "bogus"] {
+            assert!(!is_automatic_issue_trigger(trigger), "{trigger:?}");
             assert!(!is_human_triggered(trigger), "{trigger:?}");
             assert_eq!(user_id_for_run(trigger, uid(1)), None);
         }
@@ -2707,7 +2739,7 @@ mod tests {
             &RunRenderRef {
                 run_id: uid(0x80),
                 parent_run_id: None,
-                trigger: AgentRunTrigger::StateTransition,
+                trigger: AgentRunTrigger::StateTransition.value().to_owned(),
                 executor_kind: AgentExecutorKind::LocalRunner,
                 tool_plan: json!({}),
                 created_by_id: uid(0x40),
@@ -2750,7 +2782,7 @@ mod tests {
             &RunRenderRef {
                 run_id: uid(0x80),
                 parent_run_id: Some(uid(0x70)),
-                trigger: AgentRunTrigger::StateTransition,
+                trigger: AgentRunTrigger::StateTransition.value().to_owned(),
                 executor_kind: AgentExecutorKind::LocalRunner,
                 tool_plan: json!({}),
                 created_by_id: uid(0x40),
@@ -2802,7 +2834,7 @@ mod tests {
             row.phase_kind,
             case["after"]["phase_kind"].as_str().unwrap()
         );
-        assert_eq!(row.trigger, AgentRunTrigger::StateTransition);
+        assert_eq!(row.trigger, AgentRunTrigger::StateTransition.value());
         assert_eq!(row.executor_kind, AgentExecutorKind::LocalRunner);
         assert_eq!(row.tool_plan, json!({}));
         assert_eq!(
@@ -2993,7 +3025,7 @@ mod tests {
         let inserted = seam.inserted.borrow();
         assert_eq!(inserted[0].parent_run_id, Some(uid(0x70)));
         assert_eq!(inserted[0].pinned_runner_id, Some(uid(0x60)));
-        assert_eq!(inserted[0].trigger, AgentRunTrigger::CommentAndRun);
+        assert_eq!(inserted[0].trigger, AgentRunTrigger::CommentAndRun.value());
     }
 
     #[tokio::test]
@@ -3238,7 +3270,10 @@ mod tests {
             .expect("handoff")
             .expect("replacement");
         assert_eq!(replacement.parent_run_id, Some(uid(0x90)));
-        assert_eq!(replacement.trigger, AgentRunTrigger::StateTransition);
+        assert_eq!(
+            replacement.trigger,
+            AgentRunTrigger::StateTransition.value()
+        );
         // The handoff stamps no phase kind.
         assert_eq!(
             replacement.phase_kind,
@@ -3269,6 +3304,24 @@ mod tests {
                 "git_work_branch": null,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn handoff_inherits_unknown_parent_trigger_verbatim() {
+        // `trigger=parent.trigger` (`service.py:612`) copies the raw
+        // stored value, even when it is outside the enum members.
+        let mut seam = handoff_seam();
+        seam.runs
+            .borrow_mut()
+            .get_mut(&uid(0x90))
+            .expect("source")
+            .trigger = "human".to_owned();
+        let replacement = complete_project_move_handoff(&mut seam, uid(0x90), now())
+            .await
+            .expect("handoff")
+            .expect("replacement");
+        assert_eq!(replacement.trigger, "human");
+        assert_eq!(seam.inserted.borrow()[0].trigger, "human");
     }
 
     #[tokio::test]
