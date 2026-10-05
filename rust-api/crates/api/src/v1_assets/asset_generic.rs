@@ -101,6 +101,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use hmac::{Hmac, Mac};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -312,6 +313,9 @@ pub enum Denial {
     PostWorkspaceMissing,
     BadPayload,
     InvalidDetail,
+    /// 400, `{"error": ...}` (`handle_exception` `KeyError` branch:
+    /// unknown stored time zone).
+    BadError(String),
     ServerError,
 }
 
@@ -328,16 +332,25 @@ impl IntoResponse for Denial {
             Denial::PostWorkspaceMissing => raw(StatusCode::NOT_FOUND, POST_WORKSPACE_MISSING_BODY),
             Denial::BadPayload => raw(StatusCode::BAD_REQUEST, PAYLOAD_NOT_VALID_BODY),
             Denial::InvalidDetail => raw(StatusCode::BAD_REQUEST, INVALID_DETAIL_BODY),
+            Denial::BadError(message) => json_body(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"error": message}),
+            ),
             Denial::ServerError => raw(StatusCode::INTERNAL_SERVER_ERROR, SERVER_ERROR_BODY),
         }
     }
 }
 
 /// The authenticated actor: the API token's user id
-/// (`validate_api_token` / `validate_machine_token`).
-#[derive(Debug, Clone, Copy)]
+/// (`validate_api_token` / `validate_machine_token`) plus the RAW stored
+/// time-zone name. The zone is NOT parsed here — `TimezoneMixin.initial`
+/// (`api/views/base.py:43-48`) activates it after authentication, so a
+/// bad zone 400s (an empty one 500s) via [`activate_timezone`], never
+/// during auth.
+#[derive(Debug, Clone)]
 pub struct Actor {
     pub id: Uuid,
+    pub timezone: Option<String>,
 }
 
 /// Authenticate one request from its `X-Api-Key` header.
@@ -364,7 +377,39 @@ pub async fn authenticate(
             authenticate_machine_token(pool, presented, secret_key).await?
         }
     };
-    Ok(Actor { id })
+    let timezone = load_timezone_name(pool, &id).await?;
+    Ok(Actor { id, timezone })
+}
+
+/// The request time zone (`TimezoneMixin.initial`): the user's stored zone
+/// name, loaded but NOT parsed — parsing happens after authentication in
+/// [`activate_timezone`].
+async fn load_timezone_name(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Option<String>, Denial> {
+    let zone: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    Ok(zone.and_then(|row| row.0))
+}
+
+/// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
+/// after authentication; these routes carry no further gate). A missing
+/// zone defaults to UTC; an unknown zone name 400s:
+/// `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`, which subclasses
+/// `KeyError`, so `handle_exception` answers the `KeyError` branch
+/// (`api/views/base.py:160-164`). An EMPTY zone 500s: `ZoneInfo('')`
+/// raises `ValueError` (not `KeyError`), which falls through to the
+/// generic 500 (`api/views/base.py:166-171`).
+fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
+    match timezone {
+        None => Ok(chrono_tz::UTC),
+        Some("") => Err(Denial::ServerError),
+        Some(zone) => zone
+            .parse::<Tz>()
+            .map_err(|_| Denial::BadError("The required key does not exist.".to_owned())),
+    }
 }
 
 async fn authenticate_api_token(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, Denial> {
@@ -883,6 +928,13 @@ async fn generic_get(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
+    // Auth passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after authentication; an unknown zone 400s and an empty one
+    // 500s before the workspace lookup). Validation-only: this response
+    // renders no datetimes.
+    if let Err(denial) = activate_timezone(actor.timezone.as_deref()) {
+        return denial.into_response();
+    }
     let _ = actor;
     // `workspace = Workspace.objects.get(slug=slug)` → 404 first.
     let workspace = match workspace_id(pool, &slug).await {
@@ -984,6 +1036,13 @@ async fn generic_post(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
+    // Auth passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after authentication, before `request.data` is touched; an
+    // unknown zone 400s and an empty one 500s). Validation-only: this
+    // response renders no datetimes.
+    if let Err(denial) = activate_timezone(actor.timezone.as_deref()) {
+        return denial.into_response();
+    }
     let data = match parse_object(&body) {
         Ok(data) => data,
         Err(ProxyOr500::Proxy) => {
@@ -1161,6 +1220,13 @@ async fn generic_patch(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
+    // Auth passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after authentication; an unknown zone 400s and an empty one
+    // 500s before the asset lookup). Validation-only: this response
+    // renders no datetimes.
+    if let Err(denial) = activate_timezone(_actor.timezone.as_deref()) {
+        return denial.into_response();
+    }
     // The lookup runs BEFORE `request.data` is touched (DRF parses
     // lazily): a missing asset 404s even with a malformed body.
     // `FileAsset.objects.get(id, workspace__slug, is_deleted=False)`.
@@ -1575,6 +1641,37 @@ mod tests {
     use super::*;
     use pidash_db::config::StorageSettings;
     use pidash_db::v1_assets::model::file_asset;
+
+    #[test]
+    fn activate_timezone_empty_zone_500s() {
+        // `ZoneInfo('')` raises `ValueError` (not `KeyError`), so an
+        // empty stored zone is the generic 500 while an unknown zone is
+        // the `KeyError`-branch 400 (PIDASHCONV-747, live-probed).
+        assert!(matches!(
+            activate_timezone(Some("")),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(
+            activate_timezone(Some("Not/AZone")),
+            Err(Denial::BadError(_))
+        ));
+        assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
+        assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
+    }
+
+    #[tokio::test]
+    async fn bad_error_body_is_byte_exact() {
+        let response =
+            Denial::BadError("The required key does not exist.".to_owned()).into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("body");
+        assert_eq!(
+            &body[..],
+            br#"{"error":"The required key does not exist."}"#
+        );
+    }
 
     fn test_storage() -> StorageSettings {
         StorageSettings {
