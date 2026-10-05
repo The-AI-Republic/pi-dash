@@ -189,10 +189,10 @@ const ISSUE_IDS_REQUIRED_BODY: &str = r#"{"error":"Issue IDs are required"}"#;
 /// Destroy's synced-issue guard (`base.py:731-737`).
 const DESTROY_SYNCED_BODY: &str = r#"{"error":"This issue is synced from a Git provider. Unbind the project's repository to delete."}"#;
 
-/// The create `.values()` key order (`base.py:433-461`), verbatim: the
-/// annotation keys sit between `parent_id` and `created_at`
-/// (`cycle_id`, `module_ids`, `label_ids`, `assignee_ids`,
-/// `sub_issues_count`), and `attachment_count` precedes `link_count`.
+/// The create post-query's 26 `.values()` keys in WIRE order (captured raw
+/// from live creates — Django emits the concrete fields first in compiler
+/// order, then the annotations in annotation-definition order; this is NOT
+/// the `.values()` call order FX-ISS-14 lists, and live wins).
 const CREATE_RESPONSE_FIELDS: [&str; 26] = [
     "id",
     "name",
@@ -206,20 +206,20 @@ const CREATE_RESPONSE_FIELDS: [&str; 26] = [
     "sequence_id",
     "project_id",
     "parent_id",
-    "cycle_id",
-    "module_ids",
-    "label_ids",
-    "assignee_ids",
-    "sub_issues_count",
     "created_at",
     "updated_at",
     "created_by",
     "updated_by",
-    "attachment_count",
-    "link_count",
     "is_draft",
     "archived_at",
     "deleted_at",
+    "cycle_id",
+    "link_count",
+    "attachment_count",
+    "sub_issues_count",
+    "assignee_ids",
+    "label_ids",
+    "module_ids",
 ];
 
 /// Body spec for the shared DRF body pipeline: the two `ListField`s arrive
@@ -6651,8 +6651,11 @@ mod tests {
 
     #[test]
     fn create_response_follows_values_order() {
-        // `base.py:433-461` verbatim: annotations between `parent_id` and
-        // `created_at`, `attachment_count` before `link_count`.
+        // WIRE order, not the `base.py:433-461` call order: Django's
+        // compiler emits concrete `.values()` fields first (call order),
+        // then annotations in definition order (`apply_annotations`
+        // cycle/link/attachment/sub-count, then the grouper's
+        // assignee/label/module ids). Verified against live creates.
         assert_eq!(
             CREATE_RESPONSE_FIELDS.as_slice(),
             [
@@ -6668,20 +6671,20 @@ mod tests {
                 "sequence_id",
                 "project_id",
                 "parent_id",
-                "cycle_id",
-                "module_ids",
-                "label_ids",
-                "assignee_ids",
-                "sub_issues_count",
                 "created_at",
                 "updated_at",
                 "created_by",
                 "updated_by",
-                "attachment_count",
-                "link_count",
                 "is_draft",
                 "archived_at",
                 "deleted_at",
+                "cycle_id",
+                "link_count",
+                "attachment_count",
+                "sub_issues_count",
+                "assignee_ids",
+                "label_ids",
+                "module_ids",
             ]
             .as_slice()
         );
