@@ -1213,17 +1213,25 @@ pub fn wait_response(
 }
 
 /// The run-ai refusal (`:1237-1244`): 409 `{"error","reason"}` with the
-/// `_RUN_AI_REASON_MESSAGES` text, or the `.get` default.
-pub fn run_ai_refusal(reason: &str) -> (StatusCode, String) {
+/// `_RUN_AI_REASON_MESSAGES` text, or the `.get` default. `None` (creation
+/// refused after preflight passed, so `dispatch_run_ai_run_with_reason`
+/// returns `(None, None)`) renders `"reason":null`, exactly as the view's
+/// `{"error": ..., "reason": reason}` does for `reason=None`.
+pub fn run_ai_refusal(reason: Option<&str>) -> (StatusCode, String) {
     let message = match reason {
-        "active_run_exists" => RUN_AI_ACTIVE_RUN_MESSAGE,
-        "no_pod" => RUN_AI_NO_POD_MESSAGE,
-        "no_eligible_runner" => RUN_AI_NO_ELIGIBLE_RUNNER_MESSAGE,
+        Some("active_run_exists") => RUN_AI_ACTIVE_RUN_MESSAGE,
+        Some("no_pod") => RUN_AI_NO_POD_MESSAGE,
+        Some("no_eligible_runner") => RUN_AI_NO_ELIGIBLE_RUNNER_MESSAGE,
         _ => RUN_AI_FALLBACK_MESSAGE,
     };
     let mut map = serde_json::Map::with_capacity(2);
     map.insert("error".to_owned(), Value::String(message.to_owned()));
-    map.insert("reason".to_owned(), Value::String(reason.to_owned()));
+    map.insert(
+        "reason".to_owned(),
+        reason
+            .map(|reason| Value::String(reason.to_owned()))
+            .unwrap_or(Value::Null),
+    );
     let body = serde_json::to_string(&Value::Object(map)).expect("run-ai body");
     (StatusCode::CONFLICT, body)
 }
@@ -1596,8 +1604,7 @@ async fn run_ai_inner(
     .map_err(|error| db_error(error, "run-ai-driver"))?;
     let outcome = out.outcome;
     let Some(run_id) = outcome.run_id else {
-        let reason = outcome.reason.unwrap_or_default();
-        let (status, body) = run_ai_refusal(&reason);
+        let (status, body) = run_ai_refusal(outcome.reason.as_deref());
         return Ok(json_response(status, body));
     };
     let row: Option<(Uuid, String, String)> = sqlx::query_as(
@@ -1792,7 +1799,7 @@ mod tests {
 
     #[test]
     fn replay_run_ai_no_pod() {
-        let (status, body) = run_ai_refusal("no_pod");
+        let (status, body) = run_ai_refusal(Some("no_pod"));
         let (fx_status, fx_body) = call_body("run_ai");
         assert_eq!(status.as_u16(), fx_status);
         assert_eq!(body, fx_body);
@@ -1869,15 +1876,15 @@ mod tests {
     fn run_ai_refusal_table() {
         for (reason, message) in [
             (
-                "active_run_exists",
+                Some("active_run_exists"),
                 "the work item already has an active or queued run",
             ),
-            ("no_pod", "no pod is available to run this work item"),
+            (Some("no_pod"), "no pod is available to run this work item"),
             (
-                "no_eligible_runner",
+                Some("no_eligible_runner"),
                 "no eligible runner or execution principal is available for this work item",
             ),
-            ("something-new", "could not dispatch a run"),
+            (Some("something-new"), "could not dispatch a run"),
         ] {
             let (status, body) = run_ai_refusal(reason);
             assert_eq!(status, StatusCode::CONFLICT);
@@ -1890,6 +1897,19 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn run_ai_refusal_none_reason_renders_null() {
+        // `dispatch_run_ai_run_with_reason` returns `(None, None)` when
+        // creation refuses after preflight passed; the view renders
+        // `{"error": <default>, "reason": None}` (`:1238-1244`).
+        let (status, body) = run_ai_refusal(None);
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body,
+            r#"{"error":"could not dispatch a run","reason":null}"#
+        );
     }
 
     #[test]
