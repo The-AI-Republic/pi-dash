@@ -26,6 +26,11 @@
 //!   (`api/serializers/issue.py:907-1032` + `:1119-1138`, PIDASHCONV-664).
 //! * [`columns`] — models layer: F18-05 column-verification record +
 //!   nullable-column consts (PIDASHCONV-667; D-18 owns no tables).
+//! * [`tasks`] — task call-site publishers (`issue_activity` /
+//!   `model_activity` / link-title crawl / page transaction+version /
+//!   asset-metadata emits plus the attachment S3 offline inputs;
+//!   `api/views/issue.py` `.delay` sites, `api/views/page.py:156-170`,
+//!   `settings/storage.py`, PIDASHCONV-672).
 //! * Sibling issues extend this file with their own `pub mod shape_*;` /
 //!   `queries_*` lines (PIDASHCONV-661…663,665…672); on rebase keep both sides,
 //!   never fork a helper.
@@ -48,6 +53,7 @@ pub mod shape_issue;
 pub mod shape_pages;
 pub mod shape_relations;
 pub mod shape_social;
+pub mod tasks;
 
 /// One entry of a DRF `fields=` argument (`base.py:19-30,41-60`): either a
 /// plain field name or a `{name: sub-fields}` dict entry. Query-string
