@@ -97,8 +97,10 @@ pub const WORK_ITEM_NOT_FOUND_BODY: &str = r#"{"error":"Work item not found."}"#
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `RequestBodySizeLimitMiddleware` past 5 MiB (the D-26 app-surface
 /// precedent; this module takes the full `Request` for the proxy fallback,
-/// so the limit is enforced here instead of axum's default).
-pub const REQUEST_TOO_LARGE_BODY: &str = r#"{"error":"REQUEST_BODY_TOO_LARGE","detail":"The size of the request body exceeds the maximum allowed size."}"#;
+/// so the limit is enforced here instead of axum's default). Spacing is
+/// Django `JsonResponse` default (`json.dumps` separators), matching
+/// `crate::middleware::BODY_TOO_LARGE_JSON` — not DRF's compact render.
+pub const REQUEST_TOO_LARGE_BODY: &str = r#"{"error": "REQUEST_BODY_TOO_LARGE", "detail": "The size of the request body exceeds the maximum allowed size."}"#;
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
@@ -3479,7 +3481,7 @@ mod tests {
             denied_status(&Denial::RequestTooLarge),
             (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                REQUEST_TOO_LARGE_BODY.to_owned()
+                r#"{"error": "REQUEST_BODY_TOO_LARGE", "detail": "The size of the request body exceeds the maximum allowed size."}"#.to_owned()
             )
         );
         assert!(is_server_error(Denial::ServerError));
