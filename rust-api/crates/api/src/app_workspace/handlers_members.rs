@@ -1313,6 +1313,16 @@ fn take_time2(text: &str) -> Option<(u32, &str)> {
     None
 }
 
+/// Two ASCII digits as a number. A bare `str::parse` would also take a
+/// leading `+` (and `-0`, which parses to 0) — both rejected by CPython
+/// inside tz parts (PIDASHCONV-745).
+fn two_digits(text: &str) -> Option<i64> {
+    if text.len() != 2 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
 /// `Z` (uppercase only) or a numeric offset, returned as signed total
 /// microseconds; the total must stay strictly under 24h (CPython raises
 /// past it, which DRF suppresses into the invalid arm). A seconds
@@ -1353,18 +1363,10 @@ fn parse_iso_offset(text: &str) -> Option<i64> {
         let mut parts = clock.split(':');
         let hour_text = parts.next()?;
         let minute_text = parts.next()?;
-        if hour_text.len() != 2 || minute_text.len() != 2 {
-            return None;
-        }
-        let hours: i64 = hour_text.parse().ok()?;
-        let minutes: i64 = minute_text.parse().ok()?;
+        let hours = two_digits(hour_text)?;
+        let minutes = two_digits(minute_text)?;
         let seconds: i64 = match parts.next() {
-            Some(part) => {
-                if part.len() != 2 {
-                    return None;
-                }
-                part.parse().ok()?
-            }
+            Some(part) => two_digits(part)?,
             None => 0,
         };
         if parts.next().is_some() {
@@ -4451,6 +4453,16 @@ mod tests {
             "2024-01-15T10:30:00+5",
             "2024-01-15T10:30:00+24:00",
             "2024-01-15T10:30:00-24:00",
+            // ASCII signs inside extended tz parts (PIDASHCONV-745):
+            // `str::parse` accepts a leading `+`, and `-0` parses to 0.
+            "2026-01-02T03:04:05++5:00",
+            "2026-01-02T03:04:05+05:+0",
+            "2026-01-02T03:04:05+05:-0",
+            "2026-01-02T03:04:05+-0:00",
+            "2026-01-02T03:04:05+05:00:-0",
+            "2026-01-02T03:04:05+05:+5",
+            "2026-01-02T03:04:05+05:00:+5",
+            "2026-01-02T03:04:05+05:00:+0",
             "2024-01-15T",
             "2024-0é-15",
             "2024-01-1é",
