@@ -9773,17 +9773,12 @@ async fn save_issue_patch(
         .description_html
         .clone()
         .unwrap_or_else(|| issue.description_html.clone());
-    let stripped = if html.is_empty() {
-        // `save()` skips the recompute for falsy html — the old value
-        // survives.
-        issue.description_stripped.clone()
+    // `Issue.save()` non-adding branch: falsy html → NULL, else the
+    // strip result as-is (even `""` — `strip_tags("<p></p>")`).
+    let stripped: Option<String> = if html.is_empty() {
+        None
     } else {
-        let stripped = strip_tags_ml(&html);
-        if stripped.is_empty() {
-            None
-        } else {
-            Some(stripped)
-        }
+        Some(strip_tags_ml(&html))
     };
 
     sqlx::query(
@@ -10002,18 +9997,16 @@ async fn apply_triage_transition(
     } else {
         None
     };
-    let stripped = if pre_save.description_html.is_empty() {
-        pre_save.description_stripped.clone()
+    // Same non-adding rule (`issue.save()` rewrites all fields):
+    // falsy html → NULL, else the strip result as-is.
+    let stripped: Option<String> = if pre_save.description_html.is_empty() {
+        None
     } else {
-        let stripped = strip_tags_ml(&pre_save.description_html);
-        if stripped.is_empty() {
-            None
-        } else {
-            Some(stripped)
-        }
+        Some(strip_tags_ml(&pre_save.description_html))
     };
     // The full-row rewrite IS the clobber: every pre-save column is
-    // written back, so issue-half writes from this request vanish.
+    // written back, so issue-half writes from this request vanish
+    // (`point` included — it is writable via the issue-half).
     sqlx::query(
         r#"UPDATE "issues" SET "name" = $1, "description_json" = $2, "description_html" = $3,
            "description_stripped" = $4, "priority" = $5, "complexity_score" = $6,
@@ -10022,8 +10015,8 @@ async fn apply_triage_transition(
            "external_source" = $14, "external_id" = $15, "git_work_branch" = $16,
            "created_via" = $17, "agent_executor" = $18, "created_by_id" = $19,
            "parent_id" = $20, "state_id" = $21, "estimate_point_id" = $22, "type_id" = $23,
-           "assigned_pod_id" = $24, "deleted_at" = $25,
-           "updated_at" = $26, "updated_by_id" = $27 WHERE "id" = $28"#,
+           "assigned_pod_id" = $24, "deleted_at" = $25, "point" = $26,
+           "updated_at" = $27, "updated_by_id" = $28 WHERE "id" = $29"#,
     )
     .bind(&pre_save.name)
     .bind(&pre_save.description_json)
@@ -10050,6 +10043,7 @@ async fn apply_triage_transition(
     .bind(pre_save.type_id)
     .bind(pre_save.assigned_pod_id)
     .bind(pre_save.deleted_at)
+    .bind(pre_save.point)
     .bind(now)
     .bind(user_id)
     .bind(pre_save.id)
@@ -10116,60 +10110,15 @@ fn is_falsy_json(value: &Value) -> bool {
     }
 }
 
-/// Postgres `float8out` for the implicit-assignment-cast text columns:
-/// shortest round-trip, integral values without `.0`, signed 2-digit
-/// exponents (`5.0` → `"5"`, `1e16` → `"1e+16"`).
-fn pg_float_text(value: f64) -> String {
-    if value.is_nan() {
-        return "NaN".to_owned();
-    }
-    if value.is_infinite() {
-        return if value.is_sign_positive() {
-            "Infinity".to_owned()
-        } else {
-            "-Infinity".to_owned()
-        };
-    }
-    let debug = format!("{value:?}");
-    if let Some(pos) = debug.find('e') {
-        let (mantissa, exp) = debug.split_at(pos);
-        let exp = &exp[1..];
-        let (sign, digits) = match exp.strip_prefix(['+', '-']) {
-            Some(rest) if exp.starts_with('-') => ("-", rest),
-            Some(rest) => ("+", rest),
-            None => ("+", exp),
-        };
-        let mut digits = digits.to_owned();
-        while digits.len() < 2 {
-            digits.insert(0, '0');
-        }
-        return format!("{mantissa}e{sign}{digits}");
-    }
-    if debug.contains('.') {
-        let trimmed = debug.trim_end_matches('0').trim_end_matches('.');
-        return trimmed.to_owned();
-    }
-    debug
-}
-
-/// Create-path `name`: truthiness was checked by the caller; strings
-/// store (over-`varchar(255)` is the 500 `DataError`), numbers take
-/// Postgres's assignment casts, bools and containers fail (no cast /
-/// unadaptable) with the 500.
+/// Create-path `name`: truthiness was checked by the caller.
+/// `CharField.to_python` maps every non-str non-None through `str()`
+/// — bools (`True`/`False`), ints, floats (Python float repr, `5.0`
+/// stays `"5.0"`), containers (single-quote repr). Over-`varchar(255)`
+/// and NUL bytes are the 500 `DataError` at INSERT.
 fn coerce_create_name(value: &Value) -> Result<String, Denial> {
-    let text = match value {
-        Value::String(text) => text.clone(),
-        Value::Number(number) => {
-            if let Some(i) = number.as_i64() {
-                i.to_string()
-            } else if let Some(u) = number.as_u64() {
-                u.to_string()
-            } else {
-                pg_float_text(number.as_f64().unwrap_or(f64::NAN))
-            }
-        }
-        _ => return Err(Denial::ServerError),
-    };
+    // Null is unreachable (falsy → the 400 above); `py_str` maps it
+    // to `"None"` rather than crashing.
+    let text = py_str(value);
     if text.contains('\x00') || text.chars().count() > 255 {
         return Err(Denial::ServerError);
     }
@@ -10178,7 +10127,11 @@ fn coerce_create_name(value: &Value) -> Result<String, Denial> {
 
 /// Create-path `description_html`: missing defaults to `"<p></p>"`;
 /// explicit null violates the non-null column (the `IntegrityError`
-/// 400); numbers cast; bools/containers are the 500.
+/// 400); strings store (NUL bytes are the 500; `text` has no length
+/// cap). Every other JSON type 500s — NOT via `to_python`'s `str()`:
+/// `Issue.save()` runs `strip_tags(html)` first, and
+/// `HTMLParser.feed` raises `TypeError` on non-str (verified live:
+/// bool/int/float/list/dict all 500).
 fn coerce_create_html(value: Option<&Value>) -> Result<String, Denial> {
     let Some(value) = value else {
         return Ok("<p></p>".to_owned());
@@ -10186,23 +10139,13 @@ fn coerce_create_html(value: Option<&Value>) -> Result<String, Denial> {
     if value.is_null() {
         return Err(Denial::PayloadInvalid);
     }
-    let text = match value {
-        Value::String(text) => text.clone(),
-        Value::Number(number) => {
-            if let Some(i) = number.as_i64() {
-                i.to_string()
-            } else if let Some(u) = number.as_u64() {
-                u.to_string()
-            } else {
-                pg_float_text(number.as_f64().unwrap_or(f64::NAN))
-            }
-        }
-        _ => return Err(Denial::ServerError),
+    let Value::String(text) = value else {
+        return Err(Denial::ServerError);
     };
     if text.contains('\x00') {
         return Err(Denial::ServerError);
     }
-    Ok(text)
+    Ok(text.clone())
 }
 
 /// `jsonb` rejects non-finite floats (`invalid input syntax` →
@@ -10327,10 +10270,12 @@ async fn insert_issue(
     .flatten();
     let sort_order = max_sort.map_or(65535.0, |max| max + 10000.0);
     let pod_id = default_pod_for_project(pool, &project.id).await?;
-    let stripped = if description_html.is_empty() {
-        String::new()
+    // `Issue.save()` adding branch: falsy html → NULL, else the strip
+    // result as-is (even `""` — no `or None` on this path).
+    let stripped: Option<String> = if description_html.is_empty() {
+        None
     } else {
-        strip_tags_ml(description_html)
+        Some(strip_tags_ml(description_html))
     };
 
     let id = Uuid::new_v4();
@@ -10395,7 +10340,7 @@ async fn insert_issue(
         name: name.to_owned(),
         description_json: description_json.clone(),
         description_html: description_html.to_owned(),
-        description_stripped: Some(stripped),
+        description_stripped: stripped,
         description_binary: None,
         priority: Some(priority.to_owned()),
         complexity_score: Some(0),
@@ -10638,7 +10583,6 @@ async fn intake_create(
     if is_falsy_json(name_value) {
         return Err(Denial::NameRequired);
     }
-    let name = coerce_create_name(name_value)?;
 
     let intake_id = fetch_intake_id(&ctx.pool, &slug, &ctx.project_id).await?;
     let project = fetch_project(&ctx.pool, &ctx.project_id).await?;
@@ -10676,6 +10620,9 @@ async fn intake_create(
     if json_has_nonfinite(&description_json) {
         return Err(Denial::ServerError);
     }
+    // Both length/NUL `DataError`s fire at INSERT (`:190`) — after
+    // the guard, the priority check and the triage get-or-create.
+    let name = coerce_create_name(name_value)?;
     let description_html = coerce_create_html(issue_data.get("description_html"))?;
     let issue = insert_issue(
         &ctx.pool,
@@ -10804,12 +10751,6 @@ async fn intake_update(
 ) -> HandlerResult {
     let issue_id = parse_uuid_or_invalid(&raw_issue_id)?;
     let ctx = context(&state, &headers, &slug, &raw_project_id).await?;
-    let data = parse_json_body(&body, &headers)?;
-    let Value::Object(mut data) = data else {
-        // `.pop` on a non-dict (list → `TypeError`, else
-        // `AttributeError`) is the 500.
-        return Err(Denial::ServerError);
-    };
     let intake_id = fetch_intake_id(&ctx.pool, &slug, &ctx.project_id).await?;
     let project = fetch_project(&ctx.pool, &ctx.project_id).await?;
     if intake_id.is_none() && !project.intake_view {
@@ -10826,6 +10767,14 @@ async fn intake_update(
         return Err(Denial::EditDenied);
     }
 
+    // `request.data` is lazy — the first touch is the `pop` at `:344`,
+    // AFTER every guard above, so malformed bodies lose to them.
+    let data = parse_json_body(&body, &headers)?;
+    let Value::Object(mut data) = data else {
+        // `.pop` on a non-dict (list → `TypeError`, else
+        // `AttributeError`) is the 500.
+        return Err(Denial::ServerError);
+    };
     // `request.data.pop("issue", False)` — the pop MUTATES the data
     // the status-half activity dumps later.
     let issue_data = data.remove("issue");
@@ -22588,17 +22537,40 @@ mod tests {
 
     #[test]
     fn create_name_coercion() {
+        // `CharField`/`TextField.to_python` `str()`s every non-str
+        // non-None (bools, floats with `.0`, single-quote container
+        // reprs); only length/NUL fail.
         assert_eq!(
             coerce_create_name(&Value::String("x".to_owned())).expect("name"),
             "x"
         );
         assert_eq!(coerce_create_name(&Value::from(7)).expect("name"), "7");
-        assert!(coerce_create_name(&Value::Bool(true)).is_err());
+        assert_eq!(
+            coerce_create_name(&Value::Bool(true)).expect("name"),
+            "True"
+        );
+        assert_eq!(
+            coerce_create_name(&Value::Bool(false)).expect("name"),
+            "False"
+        );
+        assert_eq!(coerce_create_name(&Value::from(5.0)).expect("name"), "5.0");
+        assert_eq!(
+            coerce_create_name(&Value::from(vec![Value::from(1), Value::from(2)])).expect("name"),
+            "[1, 2]"
+        );
+        assert!(coerce_create_name(&Value::String("x".repeat(256))).is_err());
+        assert!(coerce_create_name(&Value::String("x\x00y".to_owned())).is_err());
         assert_eq!(coerce_create_html(None).expect("default"), "<p></p>");
         assert_eq!(
             coerce_create_html(Some(&Value::String("<p>x</p>".to_owned()))).expect("html"),
             "<p>x</p>"
         );
+        // Non-str html 500s in save()'s strip_tags (TypeError), before
+        // to_python ever runs — verified live for every JSON type.
+        assert!(coerce_create_html(Some(&Value::Bool(true))).is_err());
+        assert!(coerce_create_html(Some(&Value::from(7))).is_err());
+        assert!(coerce_create_html(Some(&Value::from(5.0))).is_err());
+        assert!(coerce_create_html(Some(&Value::Null)).is_err());
     }
 
     #[test]
@@ -22614,16 +22586,6 @@ mod tests {
                 digest[7],
             ])
         });
-    }
-
-    #[test]
-    fn pg_float_text_matches_float8out() {
-        // Shortest round-trip, integral without `.0`, signed 2-digit
-        // exponents.
-        assert_eq!(pg_float_text(5.0), "5");
-        assert_eq!(pg_float_text(1e16), "1e+16");
-        assert_eq!(pg_float_text(0.5), "0.5");
-        assert_eq!(pg_float_text(-0.0), "-0");
     }
 
     #[test]
