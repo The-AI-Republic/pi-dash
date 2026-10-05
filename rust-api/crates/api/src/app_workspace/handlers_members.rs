@@ -2851,46 +2851,49 @@ async fn apply_patch(
     let now = Utc::now();
     let mut qb = sqlx::QueryBuilder::new("UPDATE workspace_members SET ");
     {
+        // `Separated` inserts the separator before every item after the
+        // first — binds included — so only the `col = ` half is a
+        // separated item; the placeholder half rides unseparated.
         let mut sep = qb.separated(", ");
         if let Some(role) = sets.role {
             sep.push("role = ");
-            sep.push_bind(i16::try_from(role).expect("role fits"));
+            sep.push_bind_unseparated(i16::try_from(role).expect("role fits"));
         }
         if let Some(company_role) = &sets.company_role {
             sep.push("company_role = ");
-            sep.push_bind(company_role.clone());
+            sep.push_bind_unseparated(company_role.clone());
         }
         if let Some(view_props) = &sets.view_props {
             sep.push("view_props = ");
-            sep.push_bind(view_props.clone());
+            sep.push_bind_unseparated(view_props.clone());
         }
         if let Some(default_props) = &sets.default_props {
             sep.push("default_props = ");
-            sep.push_bind(default_props.clone());
+            sep.push_bind_unseparated(default_props.clone());
         }
         if let Some(issue_props) = &sets.issue_props {
             sep.push("issue_props = ");
-            sep.push_bind(issue_props.clone());
+            sep.push_bind_unseparated(issue_props.clone());
         }
         if let Some(is_active) = sets.is_active {
             sep.push("is_active = ");
-            sep.push_bind(is_active);
+            sep.push_bind_unseparated(is_active);
         }
         if let Some(checklist) = &sets.getting_started_checklist {
             sep.push("getting_started_checklist = ");
-            sep.push_bind(checklist.clone());
+            sep.push_bind_unseparated(checklist.clone());
         }
         if let Some(tips) = &sets.tips {
             sep.push("tips = ");
-            sep.push_bind(tips.clone());
+            sep.push_bind_unseparated(tips.clone());
         }
         if let Some(features) = &sets.explored_features {
             sep.push("explored_features = ");
-            sep.push_bind(features.clone());
+            sep.push_bind_unseparated(features.clone());
         }
         if let Some(created_by) = &sets.created_by {
             sep.push("created_by_id = ");
-            sep.push_bind(*created_by);
+            sep.push_bind_unseparated(*created_by);
         }
         if let Some(updated_by) = &sets.updated_by {
             // Validated (so garbage still 400s above as a field error)
@@ -2899,16 +2902,16 @@ async fn apply_patch(
         }
         if let Some(workspace) = &sets.workspace {
             sep.push("workspace_id = ");
-            sep.push_bind(*workspace);
+            sep.push_bind_unseparated(*workspace);
         }
         if let Some(deleted_at) = &sets.deleted_at {
             sep.push("deleted_at = ");
-            sep.push_bind(*deleted_at);
+            sep.push_bind_unseparated(*deleted_at);
         }
         sep.push("updated_at = ");
-        sep.push_bind(now);
+        sep.push_bind_unseparated(now);
         sep.push("updated_by_id = ");
-        sep.push_bind(*actor_id);
+        sep.push_bind_unseparated(*actor_id);
     }
     qb.push(" WHERE id = ");
     qb.push_bind(*target_id);
