@@ -24,4 +24,5 @@
 pub mod auth;
 pub mod delete_cmds;
 pub mod manage;
+pub mod teardown;
 pub mod throttle;
