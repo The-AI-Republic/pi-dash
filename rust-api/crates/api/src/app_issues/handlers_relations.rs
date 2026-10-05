@@ -82,6 +82,9 @@
 //! * Uppercase/simple/braced `urn:` UUID spellings in `<uuid:>` path
 //!   segments never route in Django (resolver 404, HTML); they proxy here
 //!   instead of serving.
+//! * A list/dict `relation_type` 500s (`dict.get` on an unhashable key)
+//!   whenever `issues` is non-empty — but an empty list never evaluates
+//!   the mapper, so that 201s.
 
 use std::collections::HashMap;
 
@@ -306,7 +309,7 @@ impl Denial {
             ),
             Denial::RequestTooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                r#"{"error":"REQUEST_BODY_TOO_LARGE","Detail":"The size of the request body exceeds the maximum allowed size."}"#.to_owned(),
+                r#"{"error":"REQUEST_BODY_TOO_LARGE","detail":"The size of the request body exceeds the maximum allowed size."}"#.to_owned(),
             ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1201,6 +1204,11 @@ async fn relation_create(
             .collect(),
         _ => return Denial::ServerError.into_response(),
     };
+    // Unhashable `relation_type` 500s on the first comprehension item,
+    // before any item prep runs.
+    if relation_type_unhashable(relation_raw, !items.is_empty()) {
+        return Denial::ServerError.into_response();
+    }
     // Item prep (`UUIDField`): bad strings / floats / dicts / lists →
     // `ValidationError`; ints/bools ride `UUID(int=)`; `None` becomes a
     // NULL insert. Prep runs for the whole batch before the first
@@ -1326,6 +1334,14 @@ async fn relation_create(
     )
     .await;
     json_response(StatusCode::CREATED, Value::Array(rendered).to_string())
+}
+
+/// `get_actual_relation` (`issue_relation_mapper.py`) runs once per
+/// bulk-comprehension item: an unhashable `relation_type` (list/dict)
+/// raises `TypeError` → 500 — but an empty `issues` list never
+/// evaluates it, so that 201s.
+fn relation_type_unhashable(raw: &Value, has_items: bool) -> bool {
+    has_items && matches!(raw, Value::Array(_) | Value::Object(_))
 }
 
 /// Python `str()` of a request scalar: JSON strings pass through, numbers
@@ -1740,6 +1756,12 @@ async fn fetch_relation_edge(
 /// the IDN retry, then the 253-char hostname cap. Same algorithm as the
 /// module-links copy (per-module copies are the codebase precedent).
 fn django_url_valid(url: &str) -> bool {
+    // `URLValidator.__call__` rejects past `max_length = 2048` (code
+    // points) before anything else; the link `url` is a `TextField`,
+    // so no model `max_length` shadows this arm.
+    if url.chars().count() > 2048 {
+        return false;
+    }
     let scheme = url.split("://").next().unwrap_or("").to_lowercase();
     if !["http", "https", "ftp", "ftps"].contains(&scheme.as_str()) {
         return false;
@@ -2065,6 +2087,16 @@ fn is_python_truthy(value: &Value) -> bool {
     }
 }
 
+/// Python `str.strip()` for `CharField(trim_whitespace=True)` (the
+/// DRF default): strips the same set `is_python_space` matches.
+fn py_strip(text: &str) -> &str {
+    text.trim_matches(is_python_space)
+}
+
+/// `ProhibitNullCharactersValidator` (a default `CharField` validator):
+/// NUL fails even when every other check passes.
+const NULL_CHARACTERS_MESSAGE: &str = "Null characters are not allowed.";
+
 /// Validated link fields (`None` = key absent from the input).
 #[derive(Debug)]
 struct LinkFields {
@@ -2075,35 +2107,68 @@ struct LinkFields {
 
 /// `IssueLinkSerializer` validation (`issue.py:804-877`): the
 /// `to_internal_value` scheme step (with its truthy-non-string 500),
-/// `CharField` rules for `title` (nullable + blank, 255 chars,
-/// int/float coerced, bools rejected), `url` (required unless partial,
-/// non-nullable, `URLValidator` → the nested `{"error": ...}` shape),
-/// and `metadata` (any JSON but null). Unknown and read-only keys are
-/// ignored. Errors collect in writable-field order.
+/// then `CharField` rules — strip first (`trim_whitespace`, the DRF
+/// default), blank on the stripped value, `max_length` + NUL validators
+/// on it, and for `url` the `URLValidator` (`issue.py:826-830`) whose
+/// nested dict error keeps its `{"error": ...}` shape under the key.
+/// `title` (nullable + blank, 255 chars, int/float coerced, bools
+/// rejected), `url` (required unless partial, non-nullable), `metadata`
+/// (any JSON but null). Unknown and read-only keys are ignored. Errors
+/// collect in writable-field order.
 fn validate_link_body(body: &Map<String, Value>, partial: bool) -> Result<LinkFields, Denial> {
     let mut errors: FieldErrors = Vec::new();
     // `to_internal_value` (`issue.py:817-823`) runs before field
-    // validation: truthy non-string `url` 500s on `.startswith`; other
-    // values pass through (the prepend below).
+    // validation: truthy non-string `url` 500s on `.startswith`;
+    // strings take the prepend; falsy numbers fall through to the
+    // field, which coerces them (`str(data)`) instead of rejecting.
     let mut url_raw: Option<Value> = body.get("url").cloned();
     if let Some(raw) = url_raw.clone() {
         if !matches!(raw, Value::String(_)) && is_python_truthy(&raw) {
             return Err(Denial::ServerError);
         }
-        if let Value::String(text) = &raw {
-            if !text.is_empty() && !text.starts_with("http://") && !text.starts_with("https://") {
+        match &raw {
+            Value::String(text)
+                if !text.is_empty()
+                    && !text.starts_with("http://")
+                    && !text.starts_with("https://") =>
+            {
                 url_raw = Some(Value::String(format!("http://{text}")));
             }
+            Value::Number(number) => {
+                url_raw = Some(Value::String(number.to_string()));
+            }
+            _ => {}
         }
     }
     // `title`: `CharField(max_length=255, null=True, blank=True)` →
-    // `required=False`. Absent on full writes too (model null).
+    // `required=False`. Absent on full writes too (model null). The
+    // blank check, the length cap and the NUL check all run on the
+    // stripped value; a whitespace-only title validates to `""`.
     let mut title: Option<Option<String>> = None;
     if let Some(raw) = body.get("title") {
-        match raw {
-            Value::Null => title = Some(None),
-            Value::String(text) => {
-                if text.chars().count() > 255 {
+        let coerced: Option<String> = match raw {
+            Value::Null => {
+                title = Some(None);
+                None
+            }
+            Value::String(text) => Some(py_strip(text).to_owned()),
+            Value::Number(number) => Some(py_strip(&number.to_string()).to_owned()),
+            Value::Bool(_) | Value::Array(_) | Value::Object(_) => {
+                push_error(
+                    &mut errors,
+                    "title",
+                    Value::String("Not a valid string.".to_owned()),
+                );
+                None
+            }
+        };
+        if let Some(candidate) = coerced {
+            if candidate.is_empty() {
+                title = Some(Some(String::new()));
+            } else {
+                // Field validators collect: length first, then NUL.
+                let mut bad = false;
+                if candidate.chars().count() > 255 {
                     push_error(
                         &mut errors,
                         "title",
@@ -2111,26 +2176,26 @@ fn validate_link_body(body: &Map<String, Value>, partial: bool) -> Result<LinkFi
                             "Ensure this field has no more than 255 characters.".to_owned(),
                         ),
                     );
-                } else {
-                    title = Some(Some(text.clone()));
+                    bad = true;
+                }
+                if candidate.contains('\0') {
+                    push_error(
+                        &mut errors,
+                        "title",
+                        Value::String(NULL_CHARACTERS_MESSAGE.to_owned()),
+                    );
+                    bad = true;
+                }
+                if !bad {
+                    title = Some(Some(candidate));
                 }
             }
-            Value::Bool(_) => push_error(
-                &mut errors,
-                "title",
-                Value::String("Not a valid string.".to_owned()),
-            ),
-            Value::Number(number) => title = Some(Some(number.to_string())),
-            Value::Array(_) | Value::Object(_) => push_error(
-                &mut errors,
-                "title",
-                Value::String("Not a valid string.".to_owned()),
-            ),
         }
     }
     // `url`: required (unless partial), non-nullable, non-blank, then
-    // `URLValidator` (`issue.py:826-830`) whose nested dict error keeps
-    // its `{"error": ...}` shape under the `url` key.
+    // the NUL validator and `URLValidator`, all on the stripped value.
+    // The NUL failure is a plain list entry and pre-empts the nested
+    // `{"error": ...}` shape (field validators run first).
     let mut url: Option<String> = None;
     match url_raw {
         None if partial => {}
@@ -2145,13 +2210,20 @@ fn validate_link_body(body: &Map<String, Value>, partial: bool) -> Result<LinkFi
             Value::String("This field may not be null.".to_owned()),
         ),
         Some(Value::String(text)) => {
-            if text.is_empty() {
+            let stripped = py_strip(&text).to_owned();
+            if stripped.is_empty() {
                 push_error(
                     &mut errors,
                     "url",
                     Value::String("This field may not be blank.".to_owned()),
                 );
-            } else if !django_url_valid(&text) {
+            } else if stripped.contains('\0') {
+                push_error(
+                    &mut errors,
+                    "url",
+                    Value::String(NULL_CHARACTERS_MESSAGE.to_owned()),
+                );
+            } else if !django_url_valid(&stripped) {
                 // Bare dict, not a one-list: DRF renders a dict
                 // detail as-is (`{"url": {"error": ...}}`).
                 let mut nested = Map::new();
@@ -2161,18 +2233,15 @@ fn validate_link_body(body: &Map<String, Value>, partial: bool) -> Result<LinkFi
                 );
                 set_error(&mut errors, "url", Value::Object(nested));
             } else {
-                url = Some(text);
+                url = Some(stripped);
             }
         }
-        // Falsy non-strings (`false`, `0`, `""`-handled-above): no
+        // Falsy non-strings (`false`, empty composites): no
         // `.startswith` call, so field validation rejects them as
-        // non-strings.
-        Some(Value::Bool(_)) | Some(Value::Number(_)) => push_error(
-            &mut errors,
-            "url",
-            Value::String("Not a valid string.".to_owned()),
-        ),
-        Some(Value::Array(_) | Value::Object(_)) => push_error(
+        // non-strings. (Falsy numbers coerce above and never land here.)
+        Some(Value::Bool(_))
+        | Some(Value::Number(_))
+        | Some(Value::Array(_) | Value::Object(_)) => push_error(
             &mut errors,
             "url",
             Value::String("Not a valid string.".to_owned()),
@@ -5534,11 +5603,14 @@ async fn pr_create(
         Ok(body) => body,
         Err(denial) => return denial.into_response(),
     };
-    // `(raw_url or "").strip()` (`github_pr.py:54`): missing/null →
-    // `""` (the invalid-URL 400 below); non-strings 500 on `.strip`.
+    // `(raw_url or "").strip()` (`github_pr.py:54`): missing/null
+    // and falsy non-strings (`0`, `false`, `[]`, `{}`) collapse to `""`
+    // (the invalid-URL 400 below); truthy non-strings 500 on `.strip`;
+    // strings strip inside the port's parser.
     let raw_url = match body.map.get("url").unwrap_or(&Value::Null) {
         Value::Null => String::new(),
         Value::String(text) => text.clone(),
+        other if !is_python_truthy(other) => String::new(),
         _ => return Denial::ServerError.into_response(),
     };
     let ctx = TransportContext {
@@ -5813,9 +5885,12 @@ async fn review_create(
         Ok(body) => body,
         Err(denial) => return denial.into_response(),
     };
+    // `(raw_url or "").strip()` (`code_reviews.py:167`): same falsy
+    // collapse as the PR create; strings strip in the port's parser.
     let raw_url = match body.map.get("url").unwrap_or(&Value::Null) {
         Value::Null => String::new(),
         Value::String(text) => text.clone(),
+        other if !is_python_truthy(other) => String::new(),
         _ => return Denial::ServerError.into_response(),
     };
     let ctx = TransportContext {
@@ -6152,6 +6227,21 @@ mod tests {
     }
 
     #[test]
+    fn relation_type_unhashable_only_with_items() {
+        // A list/dict `relation_type` 500s (unhashable `dict.get` key),
+        // but only when the comprehension runs it: empty `issues` 201s.
+        assert!(relation_type_unhashable(&serde_json::json!([]), true));
+        assert!(relation_type_unhashable(&serde_json::json!({"a": 1}), true));
+        assert!(!relation_type_unhashable(&serde_json::json!([]), false));
+        assert!(!relation_type_unhashable(&serde_json::json!({}), false));
+        assert!(!relation_type_unhashable(
+            &Value::String("relates_to".to_owned()),
+            true
+        ));
+        assert!(!relation_type_unhashable(&serde_json::json!(123), true));
+    }
+
+    #[test]
     fn py_str_matches_python() {
         assert_eq!(py_str(&Value::Bool(true)), "True");
         assert_eq!(py_str(&Value::Bool(false)), "False");
@@ -6211,6 +6301,64 @@ mod tests {
             let denial = validate_link_body(&body(&[("url", value)]), false).expect_err("500");
             assert!(is_server_error(denial));
         }
+    }
+
+    #[test]
+    fn link_url_falsy_number_coerces_then_fails_validation() {
+        // `CharField` coerces falsy numbers (`str(data)`) instead of
+        // rejecting: `"0"` then fails `URLValidator` like any string.
+        for value in [serde_json::json!(0), serde_json::json!(0.0)] {
+            let denial = validate_link_body(&body(&[("url", value)]), false).expect_err("invalid");
+            assert_eq!(
+                denied_status(&denial).1,
+                r#"{"url":{"error":"Invalid URL format."}}"#
+            );
+        }
+    }
+
+    #[test]
+    fn link_fields_strip_whitespace() {
+        // `trim_whitespace` (the DRF default): values strip before the
+        // blank check, the validators and the store.
+        let fields = validate_link_body(
+            &body(&[
+                ("title", Value::String("  padded  ".to_owned())),
+                ("url", Value::String("https://example.com/x ".to_owned())),
+            ]),
+            false,
+        )
+        .expect("strip");
+        assert_eq!(fields.title, Some(Some("padded".to_owned())));
+        assert_eq!(fields.url.as_deref(), Some("https://example.com/x"));
+        // Whitespace-only titles validate to `""` (blank is allowed).
+        let fields = validate_link_body(&body(&[("title", Value::String("   ".to_owned()))]), true)
+            .expect("blank");
+        assert_eq!(fields.title, Some(Some(String::new())));
+        // The length cap runs on the stripped value.
+        let padded = format!("{} ", "x".repeat(255));
+        assert!(validate_link_body(&body(&[("title", Value::String(padded))]), true).is_ok());
+    }
+
+    #[test]
+    fn link_fields_reject_nul() {
+        let denial =
+            validate_link_body(&body(&[("title", Value::String("a\0b".to_owned()))]), true)
+                .expect_err("nul");
+        assert_eq!(
+            denied_status(&denial).1,
+            r#"{"title":["Null characters are not allowed."]}"#
+        );
+        // The NUL failure is a plain list entry and pre-empts the
+        // nested `URLValidator` shape (field validators run first).
+        let denial = validate_link_body(
+            &body(&[("url", Value::String("https://example.com/a\0b".to_owned()))]),
+            false,
+        )
+        .expect_err("nul");
+        assert_eq!(
+            denied_status(&denial).1,
+            r#"{"url":["Null characters are not allowed."]}"#
+        );
     }
 
     #[test]
@@ -6307,6 +6455,17 @@ mod tests {
         ] {
             assert!(!django_url_valid(url), "{url}");
         }
+    }
+
+    #[test]
+    fn url_validator_enforces_max_length() {
+        // `URLValidator.max_length = 2048` counts code points.
+        let ok = format!("http://example.com/{}", "é".repeat(2048 - 19));
+        assert_eq!(ok.chars().count(), 2048);
+        assert!(django_url_valid(&ok));
+        let over = format!("http://example.com/{}", "é".repeat(2048 - 19 + 1));
+        assert_eq!(over.chars().count(), 2049);
+        assert!(!django_url_valid(&over));
     }
 
     // -- dumps + floats -----------------------------------------------------
@@ -6592,6 +6751,19 @@ mod tests {
         assert_eq!(
             denied_status(&Denial::LinkNotFound).0,
             StatusCode::NOT_FOUND
+        );
+        // The 413 shape matches the middleware (lowercase `detail`); the
+        // 415 shape matches DRF content negotiation.
+        assert_eq!(
+            denied_status(&Denial::RequestTooLarge).1,
+            r#"{"error":"REQUEST_BODY_TOO_LARGE","detail":"The size of the request body exceeds the maximum allowed size."}"#
+        );
+        assert_eq!(
+            denied_status(&Denial::UnsupportedMediaType(
+                "Unsupported media type \"text/plain\" in request.".to_owned()
+            ))
+            .1,
+            r#"{"detail":"Unsupported media type \"text/plain\" in request."}"#
         );
     }
 }
