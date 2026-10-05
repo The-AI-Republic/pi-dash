@@ -4639,42 +4639,31 @@ fn lxml_parse_fragment(html: &str) -> Vec<LxmlNode> {
             text.clear();
         };
     while pos < bytes.len() {
-        // Raw-text content runs verbatim to its end tag.
-        if let Some(open) = stack.last() {
-            if lxml_is_rawtext(&open.name) {
-                // The end tag matches case-insensitively (`</SCRIPT>`
-                // closes `<script>`). `plaintext` never closes.
-                let rest = &html[pos..];
-                // The end tag may carry trailing junk (`</script foo>`,
-                // `</title/>` close); the name must match exactly
-                // (`</scriptfoo>` does not close `script`).
-                let found = if open.name == "plaintext" {
-                    None
-                } else {
-                    lxml_find_rawtext_end(rest, &open.name)
-                };
-                if let Some((end, close_len)) = found {
-                    let raw = rest[..end].to_owned();
-                    if !raw.is_empty() {
-                        // RCDATA (`title`/`textarea`) decodes entities;
-                        // other raw-text stays verbatim (probed).
-                        let content = if open.name == "title" || open.name == "textarea" {
-                            lxml_decode_entities(&raw, false)
-                        } else {
-                            raw
-                        };
-                        let node = LxmlNode::Text(content);
-                        stack.last_mut().expect("open").children.push(node);
-                    }
-                    pos += end + close_len;
-                    let element = stack.pop().expect("open");
-                    push_element(&mut stack, &mut roots, element);
-                    continue;
-                }
-                // Unclosed raw-text runs to EOF.
-                let raw = rest.to_owned();
+        // Raw-text content runs verbatim to its end tag. The name is
+        // cloned up front: the pop below fires only when the end tag
+        // is found, so this is deliberately not a pop-if-rawtext.
+        let rawtext_name = stack
+            .last()
+            .filter(|open| lxml_is_rawtext(&open.name))
+            .map(|open| open.name.clone());
+        if let Some(name) = rawtext_name {
+            // The end tag matches case-insensitively (`</SCRIPT>`
+            // closes `<script>`). `plaintext` never closes.
+            let rest = &html[pos..];
+            // The end tag may carry trailing junk (`</script foo>`,
+            // `</title/>` close); the name must match exactly
+            // (`</scriptfoo>` does not close `script`).
+            let found = if name == "plaintext" {
+                None
+            } else {
+                lxml_find_rawtext_end(rest, &name)
+            };
+            if let Some((end, close_len)) = found {
+                let raw = rest[..end].to_owned();
                 if !raw.is_empty() {
-                    let content = if open.name == "title" || open.name == "textarea" {
+                    // RCDATA (`title`/`textarea`) decodes entities;
+                    // other raw-text stays verbatim (probed).
+                    let content = if name == "title" || name == "textarea" {
                         lxml_decode_entities(&raw, false)
                     } else {
                         raw
@@ -4682,8 +4671,23 @@ fn lxml_parse_fragment(html: &str) -> Vec<LxmlNode> {
                     let node = LxmlNode::Text(content);
                     stack.last_mut().expect("open").children.push(node);
                 }
-                break;
+                pos += end + close_len;
+                let element = stack.pop().expect("open");
+                push_element(&mut stack, &mut roots, element);
+                continue;
             }
+            // Unclosed raw-text runs to EOF.
+            let raw = rest.to_owned();
+            if !raw.is_empty() {
+                let content = if name == "title" || name == "textarea" {
+                    lxml_decode_entities(&raw, false)
+                } else {
+                    raw
+                };
+                let node = LxmlNode::Text(content);
+                stack.last_mut().expect("open").children.push(node);
+            }
+            break;
         }
         if bytes[pos] != b'<' {
             // Decode entities lazily at flush; accumulate raw bytes.
