@@ -103,8 +103,11 @@
 //!
 //! PATCH partial-write rules for 674 (`IssueLinkSerializer` with
 //! `partial=True`, `views/issue.py:1746-1748`): writable fields are
-//! `title`, `url` and `metadata` (every other `__all__` field is in
-//! `Meta.read_only_fields`); missing keys are skipped (`SkipField`);
+//! `deleted_at` (`DateTimeField`, `required=False`, `allow_null` —
+//! probed live on the Show serializer; it is NOT in
+//! `Meta.read_only_fields`), `title`, `url` and `metadata` (every other
+//! `__all__` field is in `Meta.read_only_fields`); missing keys are
+//! skipped (`SkipField`);
 //! present `title`/`url` follow the create field rules above EXCEPT there
 //! is no `validate_url` call and no duplicate guard, so PATCH accepts
 //! `ftp://…` URLs and duplicate `(url, issue_id)` pairs that POST rejects.
@@ -120,8 +123,10 @@
 //! * The scheme check is a case-sensitive `startswith`: `HTTP://…`
 //!   passes `URLValidator` (which lowercases first) but fails here with
 //!   "Invalid URL scheme."
-//! * The IDN retry skips the IPv6 and hostname-length re-checks (Django's
-//!   `except` branch) — a 400-char astral host validates.
+//! * The IDN retry skips only the IPv6 re-verify (Django's `except`
+//!   branch); the 253-char hostname cap below it in `validators.py` still
+//!   applies to the ORIGINAL hostname — a 253-char astral host validates,
+//!   254 fails (both probed).
 //! * A scheme that passes the pre-check but is not `scheme_chars`-clean
 //!   (only reachable via non-ASCII folds, e.g. `HTTPſ://…`) fails with
 //!   "Invalid URL format.": Python's scheme check lowercases `ſ` to
@@ -661,12 +666,14 @@ fn url_format_ok(value: &str) -> bool {
         return false;
     }
     if authority_path_matches(authority, rest) {
-        // Direct match → IPv6 re-verify + hostname cap (the `else:` branch).
+        // Direct match → IPv6 re-verify (the `else:` branch) + the
+        // unconditional hostname cap.
         if let Some(inner) = bracketed_verify_inner(authority) {
-            // Vacuous on reachable inputs (the urlsplit stage above already
-            // strict-validated every bracketed inner — proven in
-            // `bracketed_netloc_invalid`) but kept for structural parity
-            // with `validators.py`.
+            // Load-bearing for userinfo + brackets (`[u]@[::1]`: the
+            // direct match passes but Django's greedy `(.+)` re-verify
+            // rejects — probed FORMAT); on plain `[inner]` inputs the
+            // urlsplit stage above already strict-validated the same
+            // string.
             if inner.parse::<Ipv6Addr>().is_err() {
                 return false;
             }
@@ -681,13 +688,21 @@ fn url_format_ok(value: &str) -> bool {
         };
         return hostname.chars().count() <= HOSTNAME_MAX_LENGTH;
     }
-    // IDN retry: `punycode(netloc)` then the regex ALONE — the `except`
-    // branch skips the IPv6/hostname re-checks (probed: a 400-char astral
-    // host validates).
+    // IDN retry: `punycode(netloc)` then the regex. The `except` branch
+    // skips only the IPv6 re-verify — the 253-char hostname cap sits BELOW
+    // the try/except in `validators.py`, so it runs UNCONDITIONALLY on the
+    // ORIGINAL hostname (probed: a 253-char astral host validates, 254
+    // fails — a 400-char astral host does NOT validate).
     let Some(retry_authority) = punycode_netloc(authority) else {
         return false;
     };
-    authority_path_matches(&retry_authority, rest)
+    if !authority_path_matches(&retry_authority, rest) {
+        return false;
+    }
+    let Some(hostname) = split_hostname(authority) else {
+        return false;
+    };
+    hostname.chars().count() <= HOSTNAME_MAX_LENGTH
 }
 
 /// `value.split("://")[0].lower() in ["http", "https", "ftp", "ftps"]`,
@@ -2104,11 +2119,22 @@ mod tests {
     }
 
     #[test]
-    fn url_idn_retry_skips_length_cap() {
-        // 50 astral labels: direct fails everywhere, the retry encodes and
-        // matches — and the 253-char cap never runs (probed VALID).
+    fn url_idn_retry_applies_length_cap() {
+        // 50 astral labels (103 chars): direct fails everywhere, the retry
+        // encodes and matches — and the 253-char cap passes (probed VALID).
         let host = format!("{}com", "\u{20000}.".repeat(50));
+        assert_eq!(host.chars().count(), 103);
         url_case(&format!("http://{host}/"), Ok(()));
+        // The cap counts the ORIGINAL hostname on the retry path too
+        // (probed: 253 VALID, 254 FORMAT).
+        for (extra, total, want) in [
+            ("xxxxx", 253, Ok(())),
+            ("xxxxxx", 254, Err(LinkUrlError::Format)),
+        ] {
+            let host = format!("{}{}.com", "a\u{20000}b.".repeat(61), extra);
+            assert_eq!(host.chars().count(), total);
+            url_case(&format!("http://{host}/"), want);
+        }
     }
 
     // ---- F18-02 render replays ---------------------------------------------
