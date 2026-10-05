@@ -193,6 +193,11 @@ _ENV_INFRA = {
     "MIN_RUNNER_VERSION": None,
     "RUNNER_AGENT_STALL_THRESHOLD_SECS": 360,
     "RUNNER_AGENT_OBSERVABILITY_STALE_SECS": 90,
+    # Pin wait budget: how long a QUEUED run pinned to a healthy-but-busy
+    # runner may wait before the matcher releases the pin to an idle runner
+    # in the same pod. Overridable per pod via ``Pod.pin_wait_budget_secs``;
+    # 0 disables auto-release. See PDASHOSS01-272.
+    "RUNNER_PIN_WAIT_BUDGET_SECS": 600,
     # Desktop-bundled managed runner (.ai_design/managed_runner/design.md §16).
     "MANAGED_RUNNER_ENABLED": "false",
     "MANAGED_RUNNER_MAX_PER_USER_PROJECT": 1,
