@@ -65,11 +65,11 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use chrono_tz::Tz;
 use serde::Serialize;
@@ -117,8 +117,9 @@ use super::{
     Denial, FilteredSet, Gate, HandlerResult, ListContext, QueryMap, RELATION_JOINS,
 };
 use crate::state::AppState;
+use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json_cpython::{
-    parse_request_bytes, JVal, JsonFail, JSON_PARSE_PREFIX,
+    parse_request_bytes_spans, JObject, JStr, JVal, JsonFail, JSON_PARSE_PREFIX,
 };
 
 /// Archived collection path in `app/urls/issue.py:247-249` form.
@@ -1717,6 +1718,7 @@ fn to_spaced_json<T: Serialize>(value: &T) -> Result<String, Denial> {
 pub async fn bulk_archive(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
+    headers: HeaderMap,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     body: axum::body::Bytes,
 ) -> HandlerResult {
@@ -1729,25 +1731,39 @@ pub async fn bulk_archive(
     }
     archive_allow(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
     let context = archive_tenant(base).await?;
-    // `request.data`: a zero-length body short-circuits to `{}` (DRF's
-    // content-length check, whatever the content-type — the required 400).
-    // Anything else parses through the shared CPython-grammar parser, so
-    // the reason text is byte-exact (`{oops` and friends); past the depth
+    // `request.data` through the shared negotiator: empty (by the
+    // Content-Length header, whatever the content-type) short-circuits
+    // to `{}` — the required 400; an unsupported or missing content
+    // type is the 415; JSON keeps the `JVal` parse (the
+    // `to_serde_publish` inf hazard from the D5 review), so the reason
+    // text stays byte-exact (`{oops` and friends) and past the depth
     // cap Django's `RecursionError` escapes DRF into the JSON 500.
-    let parsed: Option<JVal> = if body.is_empty() {
-        None
-    } else {
-        match parse_request_bytes(&body) {
-            Ok(value) => Some(value),
-            Err(JsonFail::Message(reason)) => {
+    let parsed: Option<JVal> =
+        match shared_body::negotiate_body(&headers, &body, &ARCHIVE_BODY_SPEC) {
+            Ok(shared_body::NegotiatedBody::Empty) => None,
+            Ok(shared_body::NegotiatedBody::JsonText { text, surr }) => {
+                match parse_request_bytes_spans(text.as_bytes(), &surr) {
+                    Ok(value) => Some(value),
+                    Err(JsonFail::Message(reason)) => {
+                        return Err(Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{reason}")));
+                    }
+                    Err(JsonFail::Recursion) => return Err(Denial::ServerError),
+                }
+            }
+            Ok(shared_body::NegotiatedBody::Form { map, files, surr }) => {
+                Some(form_request_data(&map, &files, &surr)?)
+            }
+            Err(shared_body::BodyError::UnsupportedMediaType(message)) => {
                 return Ok(status_response(
-                    StatusCode::BAD_REQUEST,
-                    &parse_error_body(&reason),
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    &unsupported_media_type_body(&message),
                 ));
             }
-            Err(JsonFail::Recursion) => return Err(Denial::ServerError),
-        }
-    };
+            Err(shared_body::BodyError::ParseDetail(message)) => {
+                return Err(Denial::BadDetail(message));
+            }
+            Err(shared_body::BodyError::ServerError) => return Err(Denial::ServerError),
+        };
     let ids = parse_bulk_ids(parsed.as_ref())?;
     let today = chrono::Utc::now().date_naive();
     let origin = activity_origin(&state)?;
@@ -1809,15 +1825,58 @@ pub async fn bulk_archive(
     Ok(json_response(format!("{{\"archived_at\":\"{today}\"}}")))
 }
 
-/// DRF's `ParseError` body: lowercase `detail`, the `JSON parse error -
-/// ` prefix, CPython's reason. (The shared `Denial::BadDetail` renders a
-/// capital-D key — out of this diff's paths — so the bulk arm builds its
-/// own body.)
-fn parse_error_body(reason: &str) -> String {
-    format!(
-        "{{\"detail\":{}}}",
-        json_detail(&format!("{JSON_PARSE_PREFIX}{reason}"))
-    )
+/// Bulk HTML-input shape: the view reads `request.data` raw (no
+/// serializer), so no key arrives as a list (`QueryDict.get` reads the
+/// last value) and no blank rule applies (form `issue_ids=` is the
+/// required-400 through the empty-string arm, not an absence).
+const ARCHIVE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
+    list_fields: &[],
+    skip_blank_fields: &[],
+};
+
+/// DRF's `UnsupportedMediaType` body: lowercase `detail`
+/// (`exception_handler` renders `{'Detail': exc.detail}`, the same
+/// renderer as `Denial::BadDetail` — the shared `Denial` has no 415
+/// variant, so the bulk arm builds it locally).
+fn unsupported_media_type_body(message: &str) -> String {
+    format!("{{\"detail\":{}}}", json_detail(message))
+}
+
+/// `request.data` for an HTML body, as the `JVal` object
+/// [`parse_bulk_ids`] reads. DRF merges files into the data
+/// (`_full_data`: texts then files per key), and `.get` reads the last
+/// value — the last upload when the key carries any file, else the
+/// last text value. Only `issue_ids` is ever read, so the object
+/// carries just that member (absent when the key never arrived, which
+/// is the required-400).
+fn form_request_data(
+    map: &Map<String, Value>,
+    files: &shared_body::FilesMap,
+    surr: &BTreeMap<String, Vec<Vec<(usize, u16)>>>,
+) -> Result<JVal, Denial> {
+    const KEY: &str = "issue_ids";
+    let mut object = JObject::new();
+    if let Some(parts) = files.get(KEY).filter(|parts| !parts.is_empty()) {
+        // An upload: `len()` is the byte size (`File.__len__`). An empty
+        // file is the required-400 (fall through with the member
+        // absent); a nonzero one iterates byte lines in `pk__in`, and
+        // every line raises `TypeError` in `uuid.UUID(hex=...)`, which
+        // `to_python` does not catch (only `AttributeError`/
+        // `ValueError`) — the JSON 500.
+        let last = parts.last().expect("nonempty file list");
+        if !last.bytes.is_empty() {
+            return Err(Denial::ServerError);
+        }
+        return Ok(JVal::Object(object));
+    }
+    if let Some(Value::String(text)) = map.get(KEY) {
+        let spans = surr.get(KEY).and_then(|spans| spans.first()).cloned();
+        object.insert(
+            JStr::from_text(KEY),
+            JVal::Str(JStr::from_dirty(text, &spans.unwrap_or_default())),
+        );
+    }
+    Ok(JVal::Object(object))
 }
 
 /// `request.data.get("issue_ids", [])`, then `len()` and the `pk__in`
@@ -2292,6 +2351,7 @@ impl PreflightSeam for ArchivePreflight {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::v1_cycles_modules::json_cpython::parse_request_bytes;
     use pidash_services::app_issues::{ISSUE_DETAIL_ARCHIVE_FIELDS, ISSUE_DETAIL_BASE_FIELDS};
 
     fn uid(n: u128) -> uuid::Uuid {
@@ -2593,15 +2653,18 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn bulk_parse_error_body_is_lowercase_cpython() {
+    #[tokio::test]
+    async fn bulk_parse_error_body_is_lowercase_cpython() {
         // A blank-but-nonempty body carries the CPython position.
         let Err(JsonFail::Message(blank)) = parse_request_bytes(b" ") else {
             panic!("blank body must fail");
         };
         assert_eq!(blank, "Expecting value: line 1 column 2 (char 1)");
+        let (status, body) =
+            denial_body(Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{blank}"))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(
-            parse_error_body(&blank),
+            body,
             "{\"detail\":\"JSON parse error - Expecting value: line 1 column 2 (char 1)\"}"
         );
         // The shared parser's reason for `{oops`, verbatim.
@@ -2612,11 +2675,135 @@ mod tests {
             reason,
             "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
         );
+        let (status, body) =
+            denial_body(Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{reason}"))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(
-            parse_error_body(&reason),
+            body,
             "{\"detail\":\"JSON parse error - \
              Expecting property name enclosed in double quotes: line 1 column 2 (char 1)\"}"
         );
+    }
+
+    #[test]
+    fn bulk_unsupported_media_type_body_is_lowercase() {
+        assert_eq!(
+            unsupported_media_type_body("Unsupported media type \"\" in request."),
+            "{\"detail\":\"Unsupported media type \\\"\\\" in request.\"}"
+        );
+        assert_eq!(
+            unsupported_media_type_body("Unsupported media type \"text/plain\" in request."),
+            "{\"detail\":\"Unsupported media type \\\"text/plain\\\" in request.\"}"
+        );
+    }
+
+    #[test]
+    fn bulk_negotiate_matrix() {
+        use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+        fn negotiate(content_type: Option<&str>, body: &[u8]) -> Result<String, String> {
+            let mut headers = HeaderMap::new();
+            if let Some(content_type) = content_type {
+                headers.insert(CONTENT_TYPE, content_type.parse().expect("ct"));
+            }
+            headers.insert(CONTENT_LENGTH, body.len().into());
+            match shared_body::negotiate_body(&headers, body, &ARCHIVE_BODY_SPEC) {
+                Ok(shared_body::NegotiatedBody::Empty) => Ok("empty".to_owned()),
+                Ok(shared_body::NegotiatedBody::JsonText { text, .. }) => Ok(text),
+                Ok(shared_body::NegotiatedBody::Form { map, .. }) => Ok(format!(
+                    "form:{}",
+                    map.get("issue_ids").cloned().unwrap_or_default()
+                )),
+                Err(error) => Err(format!("{error:?}")),
+            }
+        }
+        // Missing or foreign content-type + non-empty body is the 415.
+        assert!(negotiate(None, b"{}")
+            .unwrap_err()
+            .contains("Unsupported media type"));
+        assert!(negotiate(Some("text/plain"), b"{}")
+            .unwrap_err()
+            .contains("text/plain"));
+        // Empty short-circuits whatever the content-type.
+        assert_eq!(negotiate(None, b"").unwrap(), "empty");
+        assert_eq!(negotiate(Some("text/plain"), b"").unwrap(), "empty");
+        // JSON still decodes; form reads the last value.
+        assert_eq!(
+            negotiate(Some("application/json"), b"{\"issue_ids\": []}").unwrap(),
+            "{\"issue_ids\": []}"
+        );
+        assert_eq!(
+            negotiate(
+                Some("application/x-www-form-urlencoded"),
+                b"issue_ids=a&issue_ids=b"
+            )
+            .unwrap(),
+            "form:\"b\""
+        );
+        assert_eq!(
+            negotiate(Some("application/x-www-form-urlencoded"), b"issue_ids=").unwrap(),
+            "form:\"\""
+        );
+    }
+
+    #[test]
+    fn bulk_form_request_data_last_wins_files_beat_texts() {
+        use shared_body::FilePart;
+        fn part(bytes: &[u8]) -> FilePart {
+            FilePart {
+                filename: "f".to_owned(),
+                content_type: "text/plain".to_owned(),
+                bytes: bytes.to_vec(),
+                in_memory: true,
+            }
+        }
+        // Absent key → required-400; blank text → required-400; junk text →
+        // invalid-400 (the string arm iterates characters).
+        let empty = Map::new();
+        let no_files = shared_body::FilesMap::new();
+        let no_surr = BTreeMap::new();
+        let data = form_request_data(&empty, &no_files, &no_surr).expect("data");
+        assert!(matches!(
+            parse_bulk_ids(Some(&data)),
+            Err(Denial::BadError(message)) if message == IDS_REQUIRED_MESSAGE
+        ));
+        let mut blank = Map::new();
+        blank.insert("issue_ids".to_owned(), Value::String(String::new()));
+        let data = form_request_data(&blank, &no_files, &no_surr).expect("data");
+        assert!(matches!(
+            parse_bulk_ids(Some(&data)),
+            Err(Denial::BadError(message)) if message == IDS_REQUIRED_MESSAGE
+        ));
+        let mut junk = Map::new();
+        junk.insert("issue_ids".to_owned(), Value::String("abc".to_owned()));
+        let data = form_request_data(&junk, &no_files, &no_surr).expect("data");
+        assert!(matches!(
+            parse_bulk_ids(Some(&data)),
+            Err(Denial::BadError(message)) if message == INVALID_DETAIL_MESSAGE
+        ));
+        // Even a well-formed UUID string is the invalid-400: `pk__in`
+        // iterates the string character by character.
+        let one = uid(1);
+        let mut single = Map::new();
+        single.insert("issue_ids".to_owned(), Value::String(one.to_string()));
+        let data = form_request_data(&single, &no_files, &no_surr).expect("data");
+        assert!(matches!(
+            parse_bulk_ids(Some(&data)),
+            Err(Denial::BadError(message)) if message == INVALID_DETAIL_MESSAGE
+        ));
+        // An empty upload is the required-400; a nonzero one is the 500
+        // (`TypeError` escapes `to_python`).
+        let mut files = shared_body::FilesMap::new();
+        files.insert("issue_ids".to_owned(), vec![part(b"")]);
+        let data = form_request_data(&single, &files, &no_surr).expect("data");
+        assert!(matches!(
+            parse_bulk_ids(Some(&data)),
+            Err(Denial::BadError(message)) if message == IDS_REQUIRED_MESSAGE
+        ));
+        files.insert("issue_ids".to_owned(), vec![part(b"x")]);
+        assert!(matches!(
+            form_request_data(&single, &files, &no_surr),
+            Err(Denial::ServerError)
+        ));
     }
 
     #[test]
