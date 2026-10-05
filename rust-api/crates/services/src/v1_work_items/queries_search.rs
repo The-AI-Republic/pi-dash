@@ -542,11 +542,20 @@ pub fn parse_project_param(raw: Option<&str>) -> ProjectRef<'_> {
     }
 }
 
+/// Python `str.strip()` membership (`db/models/project.py:210`): Rust
+/// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
+/// `str.strip` against `char::is_whitespace` over all code points —
+/// those four are the only differences).
+fn is_py_strip_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
 /// `str(value).strip().upper()` (`db/models/project.py:210`): the
-/// identifier normalization before the btree equality lookup. Both
-/// `strip`/`upper` and `trim`/`to_uppercase` are Unicode-aware.
+/// identifier normalization before the btree equality lookup.
+/// `trim_matches(is_py_strip_ws)` matches `strip` exactly (including
+/// U+001C-U+001F); `to_uppercase` matches `upper`.
 pub fn normalize_project_identifier(value: &str) -> String {
-    value.trim().to_uppercase()
+    value.trim_matches(is_py_strip_ws).to_uppercase()
 }
 
 /// Join for the identifier branch of `Project.resolve`
@@ -2960,5 +2969,28 @@ mod tests {
         let select = advanced_select_sql();
         assert!(select.contains(&fts::rank_sql("issues", ":fts")));
         assert!(select.contains(&fts::headline_sql(":fts")));
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_736_tests {
+    use super::normalize_project_identifier;
+
+    #[test]
+    fn project_identifier_strips_py_whitespace() {
+        assert_eq!(normalize_project_identifier("  eng "), "ENG");
+        // Python `str.strip()` also strips U+001C-U+001F (PIDASHCONV-736).
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let padded = format!("{sep}eng{sep}");
+            assert_eq!(
+                normalize_project_identifier(&padded),
+                "ENG",
+                "U+{:04X} padding must strip like Python",
+                sep as u32
+            );
+        }
+        // TAB and U+0085 padding already matched Django; pin the behavior.
+        assert_eq!(normalize_project_identifier("\teng\t"), "ENG");
+        assert_eq!(normalize_project_identifier("\u{85}eng\u{85}"), "ENG");
     }
 }
