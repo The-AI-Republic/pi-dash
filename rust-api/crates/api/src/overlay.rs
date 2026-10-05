@@ -213,8 +213,9 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // description (PIDASHCONV-332) + state ops (PIDASHCONV-328)
         // in `app_pages`; D-36 scheduler definitions (PIDASHCONV-633) +
         // scheduler bindings (PIDASHCONV-634) + occurrences
-        // (PIDASHCONV-635) in `app_scheduler`; D-24 accounts/profile/
-        // graphs/dashboard (PIDASHCONV-620) in `app_workspace`
+        // (PIDASHCONV-635) in `app_scheduler`; D-24 invitations + join +
+        // join-requests (PIDASHCONV-617) + accounts/profile/graphs/
+        // dashboard (PIDASHCONV-620) in `app_workspace`
         // (siblings 615-619/621-624 extend that module's merge,
         // keeping both sides); the D-23 OpenAPI schema trio
         // (`v1_openapi`, PIDASHCONV-535): `/api/schema/`,
