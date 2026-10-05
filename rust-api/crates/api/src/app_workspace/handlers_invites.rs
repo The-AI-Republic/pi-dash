@@ -46,9 +46,10 @@
 //! * BUG-stuck-invite (`invite.py:222-231`, R12): when the invitee has no
 //!   account, or rejects, the invite is kept with `responded_at` set —
 //!   permanently "already responded".
-//! * BUG-no-created-by (`invite.py:197-201`, R12): the join-created member
-//!   carries no `created_by`, while the bulk path (R14) and approve (R18)
-//!   set it explicitly.
+//! * BUG-no-created-by (`invite.py:197-201`, R12): the view passes no
+//!   `created_by` for the join-created member (the bulk path, R14, and
+//!   approve, R18, set it explicitly), so the crum save-stamp provides
+//!   it — the responder when authed, NULL when anonymous.
 //! * BUG-owner-no-active (`permissions/workspace.py:51-58`): the owner gate
 //!   has no `is_active` filter — deactivated admins still pass.
 //! * BUG-admin-admits-member (`permissions/workspace.py:61-71`): despite the
@@ -62,9 +63,10 @@
 //!   `1`, `[0]` all accept.
 //! * `role` is raw `int()` (`invite.py:63`): `"20"` passes, `"20.0"` 500s,
 //!   huge values 400/500 by sign.
-//! * `message` on join-request create rides `TextField` driver coercion
-//!   (`join_request.py:117-123`): ints/bools/floats store as their
-//!   Postgres text rendering, dicts/lists 500.
+//! * `message` on join-request create rides `TextField.get_prep_value`
+//!   (`join_request.py:117-123`), which is `str(value)`: bools store as
+//!   `True`/`False`, dicts/lists store as their repr (and 201),
+//!   numbers store as their Python rendering.
 //! * `my-invitations` accept takes any iterable (`invite.py:257-259`):
 //!   strings/dicts iterate (chars/keys), non-iterables 500, unparseable
 //!   UUIDs 400 `"Please provide valid detail"`.
@@ -351,7 +353,18 @@ fn py_int(value: &Value) -> Result<i128, ()> {
                 // are floats; huge magnitudes saturate (still off-scale
                 // for the role comparison, which is all the caller needs).
                 Ok(f.trunc().clamp(i128::MIN as f64, i128::MAX as f64) as i128)
+            } else if !n.to_string().contains(['.', 'e', 'E']) {
+                // `as_f64` filters non-finite, so `None` on a digit-only
+                // literal is a Python int past f64 range (`int()` still
+                // succeeds): saturate by sign like the string arm below.
+                Ok(if n.to_string().starts_with('-') {
+                    -i128::MAX
+                } else {
+                    i128::MAX
+                })
             } else {
+                // A float literal past f64 range (`1e999`): Python's
+                // `int()` raises `OverflowError` → 500.
                 Err(())
             }
         }
@@ -410,7 +423,9 @@ fn py_truthy(value: &Value) -> bool {
             } else if let Some(u) = n.as_u64() {
                 u != 0
             } else {
-                n.as_f64().is_some_and(|f| f != 0.0)
+                // `as_f64` filters non-finite, so `None` here is a ±inf
+                // literal — and Python `bool(inf)` is `True`.
+                n.as_f64().is_none_or(|f| f != 0.0)
             }
         }
         Value::String(s) => !s.is_empty(),
@@ -489,6 +504,39 @@ fn py_float_repr(f: f64) -> String {
     format!("{sign}{head}.{tail}")
 }
 
+/// Python `str()` of a JSON number (`str(data)` in `ChoiceField`, the
+/// `UUIDField` error displays, `TextField.get_prep_value`): ints render
+/// exact digits (parsed, so `-0` is `"0"`), float literals render via
+/// [`py_float_repr`], and float literals past f64 range render
+/// `"inf"`/`"-inf"`. `as_f64` filters non-finite, so `None` there means
+/// ±inf for float syntax — but a digit-only literal past f64 range is a
+/// Python int and keeps its exact digits.
+fn py_num_str(n: &serde_json::Number) -> String {
+    if let Some(i) = n.as_i64() {
+        i.to_string()
+    } else if let Some(u) = n.as_u64() {
+        u.to_string()
+    } else if let Some(f) = n.as_f64() {
+        let raw = n.to_string();
+        if raw.contains(['.', 'e', 'E']) {
+            py_float_repr(f)
+        } else {
+            raw
+        }
+    } else {
+        let raw = n.to_string();
+        if raw.contains(['.', 'e', 'E']) {
+            if raw.starts_with('-') {
+                "-inf".to_owned()
+            } else {
+                "inf".to_owned()
+            }
+        } else {
+            raw
+        }
+    }
+}
+
 /// Python `repr()` of a JSON string: single quotes unless the value holds
 /// a single quote and no double quote; control characters escaped,
 /// printable Unicode verbatim.
@@ -534,13 +582,7 @@ fn py_repr(value: &Value) -> String {
         Value::Null => "None".to_owned(),
         Value::Bool(true) => "True".to_owned(),
         Value::Bool(false) => "False".to_owned(),
-        Value::Number(n) => {
-            if let Some(f) = n.as_f64().filter(|_| !(n.is_i64() || n.is_u64())) {
-                py_float_repr(f)
-            } else {
-                n.to_string()
-            }
-        }
+        Value::Number(n) => py_num_str(n),
         Value::String(s) => py_str_repr(s),
         Value::Array(items) => {
             let inner: Vec<String> = items.iter().map(py_repr).collect();
@@ -1407,13 +1449,7 @@ fn validate_patch_role(value: &Value) -> Result<i16, String> {
     let display = match value {
         Value::Bool(true) => "True".to_owned(),
         Value::Bool(false) => "False".to_owned(),
-        Value::Number(n) => {
-            if let Some(f) = n.as_f64().filter(|_| !(n.is_i64() || n.is_u64())) {
-                py_float_repr(f)
-            } else {
-                n.to_string()
-            }
-        }
+        Value::Number(n) => py_num_str(n),
         Value::String(s) => s.clone(),
         Value::Array(_) | Value::Object(_) => py_repr(value),
         Value::Null => unreachable!("null returned above"),
@@ -1512,10 +1548,18 @@ fn parse_django_datetime(value: &str) -> Option<DateTime<Utc>> {
             // date and time split above).
             let (clock, zone) = time.split_at(pos);
             let sign = if zone.starts_with('-') { -1 } else { 1 };
-            let digits: String = zone[1..].chars().filter(|c| *c != ':').collect();
-            if !(digits.len() == 2 || digits.len() == 4)
-                || !digits.bytes().all(|b| b.is_ascii_digit())
-            {
+            // Django's zone grammar is exactly `±HH`, `±HHMM` or
+            // `±HH:MM` — anything else (`+05:`, `+05::00`, `+0:500`)
+            // fails the match and the field 400s (probed live).
+            let tail = &zone[1..];
+            let digits: String = match tail.len() {
+                2 | 4 => tail.to_owned(),
+                5 if tail.as_bytes()[2] == b':' => {
+                    format!("{}{}", &tail[..2], &tail[3..])
+                }
+                _ => return None,
+            };
+            if !digits.bytes().all(|b| b.is_ascii_digit()) {
                 return None;
             }
             let hours: i32 = digits[..2].parse().ok()?;
@@ -1599,8 +1643,9 @@ fn validate_patch_deleted_at(value: &Value) -> Result<Option<DateTime<Utc>>, Str
 
 /// `PrimaryKeyRelatedField(queryset=User, allow_null=True)` (`created_by` /
 /// `updated_by`, probed against DRF 3.15.2 + Django 4.2.30): `None`
-/// clears; bools are `incorrect_type`; ints ride `UUID(int=)` (negative
-/// out of range → the smart-quote invalid); strings ride `UUID(hex=)`
+/// clears; bools are `incorrect_type`; ints ride `UUID(int=)` (any
+/// `0 <= i < 2**128`; out of range → the smart-quote invalid); strings
+/// ride `UUID(hex=)`
 /// (unparseable → the smart-quote invalid); floats/arrays/objects are
 /// the smart-quote invalid; well-formed but unknown UUIDs are
 /// `Invalid pk "<input>" - object does not exist.` with the ORIGINAL
@@ -1625,9 +1670,13 @@ async fn validate_patch_user(pool: &PgPool, value: &Value) -> Result<Option<uuid
                 uuid::Uuid::from_u128(i as u128)
             } else if let Some(u) = n.as_u64() {
                 uuid::Uuid::from_u128(u as u128)
+            } else if let Ok(wide) = n.to_string().parse::<u128>() {
+                // `uuid.UUID(int=)` takes any `0 <= i < 2**128`
+                // (probed live); the raw literal is exact under
+                // `arbitrary_precision`.
+                uuid::Uuid::from_u128(wide)
             } else {
-                let display = n.to_string();
-                return Err(format!("“{display}” is not a valid UUID."));
+                return Err(format!("“{}” is not a valid UUID.", py_num_str(n)));
             }
         }
         Value::String(s) => match s.parse::<uuid::Uuid>() {
@@ -1649,7 +1698,8 @@ async fn validate_patch_user(pool: &PgPool, value: &Value) -> Result<Option<uuid
         // `pk_value=data`: the ORIGINAL input, not the normalized UUID.
         let display = match value {
             Value::String(s) => s.clone(),
-            Value::Number(n) => n.to_string(),
+            // Only ints reach here (parsed OK above); `str(int)`.
+            Value::Number(n) => py_num_str(n),
             _ => parsed.to_string(),
         };
         return Err(format!("Invalid pk \"{display}\" - object does not exist."));
@@ -2716,6 +2766,10 @@ fn classify_invitations(value: Option<&Value>) -> InvitationsInput {
                 } else if let Some(u) = n.as_u64() {
                     out.push(uuid::Uuid::from_u128(u as u128));
                     Ok(())
+                } else if let Ok(wide) = n.to_string().parse::<u128>() {
+                    // `uuid.UUID(int=)` takes any `0 <= i < 2**128`.
+                    out.push(uuid::Uuid::from_u128(wide));
+                    Ok(())
                 } else {
                     Err(())
                 }
@@ -2936,24 +2990,25 @@ async fn my_invites_create(
 // Units 4-5: join requests (`join_request.py:32-255`)
 // ---------------------------------------------------------------------------
 
-/// `TextField` driver coercion for `message` (`join_request.py:117-123`):
-/// `TextField.get_prep_value` passes values through, so the driver
-/// adapts ints/bools/floats to their Postgres text rendering while
-/// dicts/lists fail adaptation (500). Missing/null stores `NULL`.
+/// `TextField` coercion for `message` (`join_request.py:117-123`):
+/// `TextField.get_prep_value` is `str(value)` (pinned Django source,
+/// probed live) — bools store as `True`/`False`, dicts/lists store as
+/// their repr (and the endpoint 201s), numbers store as their Python
+/// rendering. Missing/null stores `NULL`.
 enum MessageValue {
     Null,
     Text(String),
-    ServerError,
 }
 
 fn coerce_message(value: Option<&Value>) -> MessageValue {
     match value {
         None | Some(Value::Null) => MessageValue::Null,
         Some(Value::String(s)) => MessageValue::Text(s.clone()),
-        Some(Value::Bool(true)) => MessageValue::Text("true".to_owned()),
-        Some(Value::Bool(false)) => MessageValue::Text("false".to_owned()),
-        Some(Value::Number(n)) => MessageValue::Text(n.to_string()),
-        Some(Value::Array(_) | Value::Object(_)) => MessageValue::ServerError,
+        Some(Value::Bool(true)) => MessageValue::Text("True".to_owned()),
+        Some(Value::Bool(false)) => MessageValue::Text("False".to_owned()),
+        Some(Value::Number(n)) => MessageValue::Text(py_num_str(n)),
+        // `str()` of a container is its repr ([`py_repr`]).
+        Some(value @ (Value::Array(_) | Value::Object(_))) => MessageValue::Text(py_repr(value)),
     }
 }
 
@@ -3059,7 +3114,6 @@ async fn user_join_requests_create(
     let message = match coerce_message(data.get("message")) {
         MessageValue::Null => None,
         MessageValue::Text(text) => Some(text),
-        MessageValue::ServerError => return Denial::ServerError.into_response(),
     };
     // Admin resolution (`:70-75`): active Admin memberships of the typed
     // email, UNION workspaces it owns.
@@ -3753,6 +3807,19 @@ mod tests {
         let huge_neg: Value =
             serde_json::from_str("\"-99999999999999999999999999\"").expect("json");
         assert!(py_int(&huge_neg).expect("parses") < i128::from(i16::MIN));
+        // Huge JSON number literals: within f64 range they saturate
+        // through the float arm; past f64 range a digit-only literal is
+        // still a Python int (saturate by sign), while a float literal
+        // is `OverflowError` (500).
+        let wide: Value = serde_json::from_str("1267650600228229401496703205376").expect("json");
+        assert!(py_int(&wide).expect("parses") > i128::from(20));
+        let past_f64: Value = serde_json::from_str(&format!("1{}", "0".repeat(400))).expect("json");
+        assert_eq!(py_int(&past_f64), Ok(i128::MAX));
+        let past_f64_neg: Value =
+            serde_json::from_str(&format!("-1{}", "0".repeat(400))).expect("json");
+        assert_eq!(py_int(&past_f64_neg), Ok(-i128::MAX));
+        let inf_lit: Value = serde_json::from_str("1e999").expect("json");
+        assert_eq!(py_int(&inf_lit), Err(()));
     }
 
     #[test]
@@ -3786,11 +3853,18 @@ mod tests {
             ("[0]", true),
             ("{}", false),
             ("{\"a\": 1}", true),
+            // ±inf literals (`as_f64` filters non-finite, so `None`
+            // means inf — and Python `bool(inf)` is `True`).
+            ("1e999", true),
+            ("-1e999", true),
         ];
         for (raw, want) in cases {
             let value: Value = serde_json::from_str(raw).expect("case is JSON");
             assert_eq!(py_truthy(&value), *want, "py_truthy({raw})");
         }
+        // A digit-only literal past f64 range is a nonzero Python int.
+        let huge: Value = serde_json::from_str(&format!("1{}", "0".repeat(400))).expect("json");
+        assert!(py_truthy(&huge));
     }
 
     #[test]
@@ -3814,6 +3888,8 @@ mod tests {
             ("{}", "{}"),
             ("[1, \"x\", null]", "[1, 'x', None]"),
             ("{\"a\": [1]}", "{'a': [1]}"),
+            ("1e16", "1e+16"),
+            ("1e999", "inf"),
         ];
         for (raw, want) in cases {
             let value: Value = serde_json::from_str(raw).expect("case is JSON");
@@ -3838,6 +3914,32 @@ mod tests {
         ] {
             assert_eq!(py_float_repr(input), want, "py_float_repr({input})");
         }
+    }
+
+    #[test]
+    fn py_num_str_matches_python_str() {
+        let wide = "1606938044258990275541962092341162602522202993782792835301376"; // 2**200
+        let cases: &[(&str, &str)] = &[
+            ("5", "5"),
+            ("-0", "0"),
+            ("5.0", "5.0"),
+            ("1e16", "1e+16"),
+            ("0.000001", "1e-06"),
+            ("1E5", "100000.0"),
+            ("1e999", "inf"),
+            ("-1e999", "-inf"),
+            (wide, wide),
+        ];
+        for (raw, want) in cases {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            let n = value.as_number().expect("number");
+            assert_eq!(py_num_str(n), *want, "py_num_str({raw})");
+        }
+        // A digit-only literal past f64 range is a Python int: exact digits.
+        let big = format!("1{}", "0".repeat(400));
+        let value: Value = serde_json::from_str(&big).expect("json");
+        let n = value.as_number().expect("number");
+        assert_eq!(py_num_str(n), big);
     }
 
     #[test]
@@ -3931,6 +4033,8 @@ mod tests {
             ("{}", Err("\"{}\" is not a valid choice.")),
             ("7", Err("\"7\" is not a valid choice.")),
             ("\" 5\"", Err("\" 5\" is not a valid choice.")),
+            ("1e16", Err("\"1e+16\" is not a valid choice.")),
+            ("1e999", Err("\"inf\" is not a valid choice.")),
         ];
         for (raw, want) in cases {
             let value: Value = serde_json::from_str(raw).expect("case is JSON");
@@ -4010,12 +4114,23 @@ mod tests {
                 .expect("parses")
                 .expect("some");
         assert_eq!(twelve.to_rfc3339(), "2026-01-02T03:04:05.123456+00:00");
+        // Django zone shapes `±HH` / `±HHMM` still parse.
+        for raw in ["\"2026-01-02T03:04:05+05\"", "\"2026-01-02T03:04:05+0500\""] {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            assert!(
+                validate_patch_deleted_at(&value).expect("parses").is_some(),
+                "deleted_at({raw})"
+            );
+        }
         for raw in [
             "\"nope\"",
             "\"\"",
             "5",
             "\"2026-13-45T99:99:99Z\"",
             "\"2026-01-02T03:04:05.1234567890123Z\"",
+            "\"2026-01-02T03:04:05+05:\"",
+            "\"2026-01-02T03:04:05+05::00\"",
+            "\"2026-01-02T03:04:05+0:500\"",
             "[]",
         ] {
             let value: Value = serde_json::from_str(raw).expect("case is JSON");
@@ -4103,6 +4218,30 @@ mod tests {
             classify_invitations(Some(&value)),
             InvitationsInput::InvalidUuid
         ));
+        // `uuid.UUID(int=)` takes any `0 <= i < 2**128`.
+        let value: Value = serde_json::from_str(
+            "[18446744073709551616, 1267650600228229401496703205376, 340282366920938463463374607431768211455]",
+        )
+        .expect("case is JSON");
+        match classify_invitations(Some(&value)) {
+            InvitationsInput::Ids(ids) => assert_eq!(ids.len(), 3),
+            InvitationsInput::InvalidUuid => panic!("expected ids, got InvalidUuid"),
+            InvitationsInput::ServerError => panic!("expected ids, got ServerError"),
+        }
+        // `2**128` and negative-huge fail prep → 400.
+        for raw in [
+            "[340282366920938463463374607431768211456]",
+            "[-1180591620717411303424]",
+        ] {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            assert!(
+                matches!(
+                    classify_invitations(Some(&value)),
+                    InvitationsInput::InvalidUuid
+                ),
+                "invitations({raw})"
+            );
+        }
     }
 
     #[test]
@@ -4185,17 +4324,27 @@ mod tests {
             _ => panic!("int stores as text"),
         }
         match coerce_message(Some(&serde_json::json!(true))) {
-            MessageValue::Text(text) => assert_eq!(text, "true"),
+            MessageValue::Text(text) => assert_eq!(text, "True"),
             _ => panic!("bool stores as text"),
         }
-        assert!(matches!(
-            coerce_message(Some(&serde_json::json!({"a": 1}))),
-            MessageValue::ServerError
-        ));
-        assert!(matches!(
-            coerce_message(Some(&serde_json::json!([1]))),
-            MessageValue::ServerError
-        ));
+        match coerce_message(Some(&serde_json::json!(false))) {
+            MessageValue::Text(text) => assert_eq!(text, "False"),
+            _ => panic!("bool stores as text"),
+        }
+        // `str()` of a container is its repr — stored, endpoint 201s.
+        match coerce_message(Some(&serde_json::json!({"a": 1}))) {
+            MessageValue::Text(text) => assert_eq!(text, "{'a': 1}"),
+            _ => panic!("dict stores as repr"),
+        }
+        match coerce_message(Some(&serde_json::json!([1, "a"]))) {
+            MessageValue::Text(text) => assert_eq!(text, "[1, 'a']"),
+            _ => panic!("list stores as repr"),
+        }
+        let float: Value = serde_json::from_str("1e16").expect("json");
+        match coerce_message(Some(&float)) {
+            MessageValue::Text(text) => assert_eq!(text, "1e+16"),
+            _ => panic!("float stores as text"),
+        }
     }
 
     // --- JWT -------------------------------------------------------------------
