@@ -147,7 +147,11 @@ pub struct AgentRun {
     pub error_code: String,
     pub tool_plan: serde_json::Value,
     pub prompt: String,
-    pub trigger: AgentRunTrigger,
+    /// The raw stored trigger, never parsed: Django's `TextChoices`
+    /// are choices-only (no DB check), so legacy or hand-written
+    /// rows can carry values outside [`AgentRunTrigger`] (runner
+    /// migration 0029) and every read path carries them through.
+    pub trigger: String,
     pub lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub llm_model: String,

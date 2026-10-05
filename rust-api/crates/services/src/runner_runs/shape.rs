@@ -835,7 +835,7 @@ mod tests {
         DevMachineMiniRow, LiveStateRow, RunnerRow, RUNNER_WIRE_FIELDS,
     };
     use pidash_types::runner_runs::{
-        AgentChatSessionStatus, AgentRunTrigger, ApprovalKind, ApprovalStatus, ToolCallStatus,
+        AgentChatSessionStatus, ApprovalKind, ApprovalStatus, ToolCallStatus,
     };
     use serde_json::json;
 
@@ -914,7 +914,7 @@ mod tests {
             terminal_hooks_applied_at: None,
             terminal_capacity_released_at: None,
             prompt: text(&body["prompt"]),
-            trigger: AgentRunTrigger::Direct,
+            trigger: "direct".to_owned(),
             prompt_manifest: None,
             phase_kind: String::new(),
             run_config: json!({}),

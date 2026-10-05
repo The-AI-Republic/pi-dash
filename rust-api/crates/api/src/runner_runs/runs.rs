@@ -67,7 +67,7 @@ use pidash_services::runner_runs::guards;
 use pidash_services::runner_runs::shape;
 use pidash_services::runner_runs::SetValue;
 use pidash_types::dispatch::AgentExecutorKind;
-use pidash_types::runner_runs::{AgentRunStatus, AgentRunTrigger, ToolCallStatus};
+use pidash_types::runner_runs::{AgentRunStatus, ToolCallStatus};
 use pidash_types::WorkspaceId;
 
 use super::{is_uuid_path_segment, json_response, pool_of, proxy_with_body, SERVER_ERROR_BODY};
@@ -506,8 +506,10 @@ pub const CANCEL_FINALIZE_COLUMNS: [&str; 9] = [
 // ---------------------------------------------------------------------------
 
 /// What can go wrong decoding a run row: transport, or a
-/// model-violating choice value (Django renders those raw; the L3
-/// shapes need typed enums, so they 500 here — documented).
+/// model-violating choice value on the still-typed enums (Django
+/// renders those raw; the L3 shapes need typed enums, so they 500
+/// here — documented). The trigger is exempt: it rides through as
+/// the raw stored string, like Django reads it.
 #[derive(Debug)]
 pub enum RowError {
     Sql(sqlx::Error),
@@ -534,11 +536,11 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
             column: "executor_kind",
             value: executor_kind,
         })?;
+    // The trigger rides through unparsed: Django's `TextChoices`
+    // are choices-only (no DB check), so the stored value may sit
+    // outside the trigger enum (runner migration 0029) and every
+    // read path must tolerate it.
     let trigger: String = row.try_get(base + 20)?;
-    let trigger = AgentRunTrigger::from_value(&trigger).ok_or_else(|| RowError::Choice {
-        column: "trigger",
-        value: trigger,
-    })?;
     Ok(AgentRun {
         id: row.try_get(base)?,
         workspace_id: row.try_get(base + 1)?,
@@ -2051,5 +2053,98 @@ mod tests {
                 "per_page"
             ]
         );
+    }
+
+    // -- live scratch-DB tests (env-gated) -------------------------------
+    // Same convention as pidash-db's orchestration runs: unset
+    // DATABASE_URL (plain `cargo test`) skips these.
+
+    async fn scratch_pool() -> Option<PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                PgPool::connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    /// Temp `agent_run` in [`agent_run::COLUMNS`] order (the 41-column
+    /// positional image [`decode_run`] reads).
+    const LIVE_DDL: &str = "CREATE TEMPORARY TABLE agent_run (
+        id UUID PRIMARY KEY, workspace_id UUID, owner_id UUID,
+        created_by_id UUID, pod_id UUID, runner_id UUID,
+        pinned_runner_id UUID, work_item_id UUID,
+        scheduler_binding_id UUID, parent_run_id UUID, status TEXT,
+        executor_kind TEXT, dispatch_attempts INTEGER,
+        cancel_requested_at TIMESTAMPTZ, cancel_reason TEXT,
+        error_code TEXT, tool_plan JSONB,
+        terminal_hooks_applied_at TIMESTAMPTZ,
+        terminal_capacity_released_at TIMESTAMPTZ, prompt TEXT,
+        trigger TEXT, prompt_manifest JSONB, phase_kind TEXT,
+        run_config JSONB, required_capabilities JSONB, thread_id TEXT,
+        agent_metadata JSONB, lease_expires_at TIMESTAMPTZ,
+        done_payload JSONB, error TEXT, refusal_category TEXT,
+        llm_model TEXT, usage JSONB, input_tokens BIGINT,
+        output_tokens BIGINT, total_tokens BIGINT, created_at TIMESTAMPTZ,
+        assigned_at TIMESTAMPTZ, queue_position SMALLINT,
+        started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ)";
+
+    /// Unknown stored trigger values decode verbatim instead of
+    /// 500ing the list / detail / cancel / release-pin reads:
+    /// Django's `TextChoices` are choices-only (no DB check), so
+    /// legacy rows (runner migration 0029 kept `blocker_completed`
+    /// values) and hand-written rows (the contract harness seeds
+    /// `human`) must render like any member.
+    #[tokio::test]
+    async fn live_unknown_trigger_values_decode_raw() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        sqlx::query(LIVE_DDL)
+            .execute(&mut *tx)
+            .await
+            .expect("create temp agent_run");
+        let select = format!(
+            "SELECT {} FROM agent_run WHERE id = $1",
+            agent_run::COLUMNS.join(", ")
+        );
+        for trigger in ["human", "blocker_completed", "direct"] {
+            let id = Uuid::new_v4();
+            let ws = Uuid::new_v4();
+            let user = Uuid::new_v4();
+            let pod = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id,
+                 status, executor_kind, dispatch_attempts, cancel_reason,
+                 error_code, tool_plan, prompt, trigger, phase_kind,
+                 run_config, required_capabilities, thread_id, agent_metadata,
+                 error, refusal_category, llm_model, usage, created_at)
+                 VALUES ($1, $2, $3, $4, 'running', 'local_runner', 0, '', '',
+                 '{}', '', $5, 'work', '{}', '{}', 't', '{}', '', '', '', '{}',
+                 now())",
+            )
+            .bind(id)
+            .bind(ws)
+            .bind(user)
+            .bind(pod)
+            .bind(trigger)
+            .execute(&mut *tx)
+            .await
+            .expect("seed run");
+            let row: sqlx::postgres::PgRow = sqlx::query(&select)
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("fetch run image");
+            let run = decode_run(&row, 0).expect("unknown trigger decodes");
+            assert_eq!(run.id, id);
+            assert_eq!(run.trigger, trigger);
+        }
     }
 }
