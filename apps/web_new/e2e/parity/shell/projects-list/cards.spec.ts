@@ -11,6 +11,7 @@ import { test, expect } from "../../fixtures";
 import {
   NETWORK,
   ROLE,
+  addProjectMembersViaApi,
   archiveProjectViaApi,
   browserSessionCookies,
   createProjectViaApi,
@@ -55,9 +56,14 @@ test(
     });
 
     await test.step("a guest sees no favorite star", async () => {
+      // Guests outside the project see an empty list, so seat the guest on
+      // the project itself: the star follows the workspace role, and a
+      // project-member guest still gets none.
       const guest = await seatFreshMember(owner, ws.slug, ROLE.GUEST, "parity-card-guest");
       await markOnboardedForProjects(guest);
       await setLastWorkspaceForProjects(guest, ws.id);
+      const secret = await projectByName(owner, ws.slug, "Secret Card");
+      await addProjectMembersViaApi(owner, ws.slug, secret!.id, [{ member_id: guest.userId, role: ROLE.GUEST }]);
       await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(guest));
       await driver.awaitProjectCard("Secret Card");
       expect(await driver.cardHasFavoriteStar("Secret Card")).toBe(false);

@@ -47,7 +47,7 @@ test(
       await expect
         .poll(() => driver.breadcrumbLabels())
         .toEqual(expect.arrayContaining([expect.stringContaining("Projects")]));
-      expect(await driver.isHeaderCreateButtonVisible()).toBe(true);
+      await expect.poll(() => driver.isHeaderCreateButtonVisible()).toBe(true);
     });
 
     await test.step("the archive view adds an Archived crumb and hides the create button", async () => {
@@ -55,7 +55,7 @@ test(
       await expect
         .poll(() => driver.breadcrumbLabels())
         .toEqual(expect.arrayContaining([expect.stringContaining("Archived")]));
-      expect(await driver.isHeaderCreateButtonVisible()).toBe(false);
+      await expect.poll(() => driver.isHeaderCreateButtonVisible()).toBe(false);
     });
 
     await test.step("a guest gets no create button", async () => {
@@ -63,8 +63,14 @@ test(
       await markOnboardedForProjects(guest);
       await setLastWorkspaceForProjects(guest, ws.id);
       await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(guest));
-      await driver.awaitProjectCard("deskhdr Card");
-      expect(await driver.isHeaderCreateButtonVisible()).toBe(false);
+      // Readiness: the guest lands on cards or the empty state depending on
+      // project membership; either way the create button must stay hidden.
+      await expect
+        .poll(
+          async () => (await driver.visibleProjectCardNames()).length > 0 || (await driver.emptyStateHeading()) !== null
+        )
+        .toBe(true);
+      await expect.poll(() => driver.isHeaderCreateButtonVisible()).toBe(false);
     });
   }
 );
@@ -79,8 +85,8 @@ test(
       await driver.setViewportWidth(400);
       await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(owner));
       await driver.awaitProjectCard("mobhdr Card");
-      expect(await driver.isMobileListHeaderVisible()).toBe(true);
-      expect(await driver.isDesktopFilterRowVisible()).toBe(false);
+      await expect.poll(() => driver.isMobileListHeaderVisible()).toBe(true);
+      await expect.poll(() => driver.isDesktopFilterRowVisible()).toBe(false);
     });
   }
 );
@@ -98,7 +104,7 @@ test(
       await expect
         .poll(() => driver.breadcrumbLabels())
         .toEqual(expect.arrayContaining([expect.stringContaining("Archived")]));
-      expect(await driver.breadcrumbTerminalIsLink()).toBe(false);
+      await expect.poll(() => driver.breadcrumbTerminalIsLink()).toBe(false);
     });
   }
 );

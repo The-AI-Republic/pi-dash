@@ -2989,6 +2989,9 @@ export class WebNewDriver implements ParityDriver {
   async contextMenuItemLabels(): Promise<string[]> {
     return todo("contextMenuItemLabels");
   }
+  async clickCardContextMenuItem(_label: string): Promise<void> {
+    return todo("clickCardContextMenuItem");
+  }
   async cardFooterLabels(_name: string): Promise<string[]> {
     return todo("cardFooterLabels");
   }
@@ -3022,7 +3025,7 @@ export class WebNewDriver implements ParityDriver {
   async isLeaveDialogVisible(): Promise<boolean> {
     return todo("isLeaveDialogVisible");
   }
-  async openArchiveProjectDialog(_projectName: string): Promise<void> {
+  async openArchiveProjectDialog(_workspaceSlug: string, _projectId: string): Promise<void> {
     return todo("openArchiveProjectDialog");
   }
   async archiveDialogBodyText(): Promise<string | null> {

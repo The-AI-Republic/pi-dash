@@ -961,10 +961,29 @@ export class WebDriver implements ParityDriver {
     }
   }
 
+  private async awaitAppBoot(path: string): Promise<void> {
+    // Boot retry (NEWFRONT-124): on noisy hosts Chromium intermittently aborts
+    // the dev server's route-module fetches (net::ERR_NETWORK_CHANGED) and the
+    // React app never boots — the body stays empty past domcontentloaded. When
+    // no rendered text appears, reload (up to four times); a healthy load pays
+    // only one innerText read.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        await this.page.waitForFunction(() => document.body.innerText.trim().length > 0, null, { timeout: 15_000 });
+        return;
+      } catch {
+        if (attempt === 4) throw new Error(`[parity] app never booted at ${path} after 5 attempts.`);
+        await this.page.reload();
+        await this.page.waitForLoadState("domcontentloaded");
+      }
+    }
+  }
+
   async openAuthenticated(path: string, cookies: ParityBrowserCookie[]): Promise<void> {
     await this.page.context().addCookies(cookies);
     await this.page.goto(path);
     await this.page.waitForLoadState("domcontentloaded");
+    await this.awaitAppBoot(path);
   }
 
   // -------------------------------------------------------------------------
@@ -8960,8 +8979,10 @@ export class WebDriver implements ParityDriver {
   }
 
   async openArchivedProjects(workspaceSlug: string): Promise<void> {
-    await this.page.goto(`/${workspaceSlug}/projects/archives`);
+    const path = `/${workspaceSlug}/projects/archives`;
+    await this.page.goto(path);
     await this.page.waitForLoadState("domcontentloaded");
+    await this.awaitAppBoot(path);
   }
 
   async visibleProjectCardNames(): Promise<string[]> {
@@ -9038,11 +9059,7 @@ export class WebDriver implements ParityDriver {
   }
 
   async breadcrumbLabels(): Promise<string[]> {
-    // Breadcrumb items render inside the app header nav; read their text.
-    const nav = this.page.getByRole("navigation").first();
-    const texts = (await this.isShown(nav))
-      ? await nav.getByRole("listitem").allTextContents()
-      : await this.page.locator('[class*="breadcrumb" i] li, nav li').allTextContents();
+    const texts = await this.breadcrumbItems().allTextContents();
     return texts.map((t) => t.trim()).filter((t) => t.length > 0);
   }
 
@@ -9057,9 +9074,18 @@ export class WebDriver implements ParityDriver {
     return this.isShown(row);
   }
 
+  private breadcrumbItems(): Locator {
+    // The shared Breadcrumbs primitive renders role-less divs: a flex-grow
+    // row whose items are h-6 rows (link or plain-text label + chevron).
+    const root = this.page
+      .locator("div.flex.flex-grow.items-center")
+      .filter({ has: this.page.locator("div.flex.h-6.items-center") })
+      .first();
+    return root.locator("div.flex.h-6.items-center");
+  }
+
   async breadcrumbTerminalIsLink(): Promise<boolean> {
-    const nav = this.page.getByRole("navigation").first();
-    const items = (await this.isShown(nav)) ? nav.getByRole("listitem") : this.page.locator("nav li");
+    const items = this.breadcrumbItems();
     const count = await items.count();
     if (count === 0) return false;
     const last = items.nth(count - 1);
@@ -9100,16 +9126,22 @@ export class WebDriver implements ParityDriver {
     await this.filterTrigger().click();
   }
 
+  private filterPanel(): Locator {
+    // The panel is the only fixed-position popover carrying a Search box
+    // (top-bar, sidebar and list searches live in non-fixed scopes).
+    return this.page.locator("div.fixed", { has: this.page.getByPlaceholder("Search") });
+  }
+
   async typeFilterSearch(text: string): Promise<void> {
-    await this.page.getByPlaceholder("Search").last().fill(text);
+    await this.filterPanel().getByPlaceholder("Search").fill(text);
   }
 
   async filterMenuHasOption(text: string): Promise<boolean> {
-    return this.isShown(this.page.getByText(text, { exact: true }));
+    return this.isShown(this.filterPanel().getByText(text, { exact: true }));
   }
 
   async selectFilterOption(label: string): Promise<void> {
-    await this.page.getByText(label, { exact: true }).first().click();
+    await this.filterPanel().getByText(label, { exact: true }).first().click();
   }
 
   async isFilterBadgeVisible(): Promise<boolean> {
@@ -9145,20 +9177,25 @@ export class WebDriver implements ParityDriver {
     return (await count.textContent())?.trim() ?? null;
   }
 
+  private listToolbar(): Locator {
+    // The list toolbar is the only @container scope holding a Search box,
+    // which tells it apart from the top-bar and sidebar search inputs.
+    return this.page.locator('[class*="@container"]');
+  }
+
   private listSearchInput(): Locator {
-    return this.page.getByPlaceholder("Search").first();
+    return this.listToolbar().getByPlaceholder("Search");
   }
 
   async openListSearch(): Promise<void> {
     if (await this.isShown(this.listSearchInput())) return;
-    await this.page
-      .getByRole("button")
-      .filter({ has: this.page.locator('svg[class*="search" i]') })
-      .first()
-      .click();
+    // Collapsed until the toolbar's icon-only search button expands it; it
+    // is the first button in the toolbar (sort, Filters, create follow).
+    await this.listToolbar().getByRole("button").first().click();
   }
 
   async typeListSearch(text: string): Promise<void> {
+    await this.openListSearch();
     await this.listSearchInput().fill(text);
   }
 
@@ -9190,8 +9227,11 @@ export class WebDriver implements ParityDriver {
   }
 
   async cardHasPrivateMark(name: string): Promise<boolean> {
+    // The lock mark is a class-less svg rendered only for private projects,
+    // as the sibling of the identifier line inside its own span.
     const card = this.cardByName(name).first();
-    return this.isShown(card.locator('svg[class*="lock" i]'));
+    const idLine = card.locator("p").first().locator("xpath=parent::*");
+    return this.isShown(idLine.locator("svg"));
   }
 
   async cardSubText(name: string): Promise<string | null> {
@@ -9223,9 +9263,28 @@ export class WebDriver implements ParityDriver {
   }
 
   async contextMenuItemLabels(): Promise<string[]> {
-    const items = this.page.getByRole("menuitem");
-    const texts = await items.allTextContents();
+    // The card context menu renders its entries as buttons inside its own
+    // container (unlike headless-ui menus, which use the menuitem role).
+    const menu = this.page.locator('[data-context-menu="true"]');
+    const texts = await menu.getByRole("button").allTextContents();
     return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async clickCardContextMenuItem(label: string): Promise<void> {
+    // The card menu opens at the viewport origin (beneath the fixed header)
+    // instead of at the cursor, so its entries fail pointer hit-testing and
+    // its ArrowDown/Enter path stays inert; dispatch the click to the verified
+    // entry directly. The menu opening, the entry list, the item action and
+    // the resulting dialog are all the real app behavior.
+    const menu = this.page.locator('[data-context-menu="true"]');
+    const entry = menu.getByRole("button", { name: label, exact: true });
+    if ((await entry.count()) === 0) {
+      const labels = await this.contextMenuItemLabels();
+      throw new Error(
+        `[parity] card menu has no ${JSON.stringify(label)} entry (open menu shows ${JSON.stringify(labels)}).`
+      );
+    }
+    await entry.first().evaluate((node) => (node as HTMLElement).click());
   }
 
   async cardFooterLabels(name: string): Promise<string[]> {
@@ -9254,19 +9313,17 @@ export class WebDriver implements ParityDriver {
   }
 
   /**
-   * The leave and archive actions are not on the projects-list card; the old
-   * app surfaces them from the sidebar project item's action menu. Open that
-   * menu for the named project and click the given action.
+   * Leave is offered from the project quick-actions menus (detail header
+   * and sidebar project item); both render it only for members without an
+   * admin/member project role, i.e. guests. The sidebar's trigger is the
+   * reachable one: hover the project link to reveal it, then open the menu.
+   * Scoped to the main sidebar so the peek twin never matches.
    */
-  private async openSidebarProjectAction(projectName: string, action: RegExp): Promise<void> {
-    const item = this.page.getByRole("link", { name: projectName, exact: false }).first();
-    await item.hover();
-    await item.locator("xpath=ancestor-or-self::*[1]").getByRole("button").last().click();
-    await this.page.getByRole("menuitem", { name: action }).first().click();
-  }
-
   async openLeaveProjectDialog(projectName: string): Promise<void> {
-    await this.openSidebarProjectAction(projectName, /Leave/i);
+    const sidebar = this.page.getByRole("complementary", { name: "Main sidebar" });
+    await sidebar.getByText(projectName, { exact: true }).first().hover();
+    await sidebar.getByLabel("Toggle quick actions menu").click();
+    await this.page.getByRole("menuitem", { name: "Leave project", exact: true }).click();
   }
 
   async fillLeaveProjectName(text: string): Promise<void> {
@@ -9296,8 +9353,17 @@ export class WebDriver implements ParityDriver {
     return this.isShown(this.page.getByRole("heading", { name: "Leave Project", exact: true }));
   }
 
-  async openArchiveProjectDialog(projectName: string): Promise<void> {
-    await this.openSidebarProjectAction(projectName, /Archive/i);
+  /**
+   * Archiving is offered from the project settings control section (the
+   * card and sidebar menus carry no Archive entry), so open the settings
+   * page for the project and start the Archive control.
+   */
+  async openArchiveProjectDialog(workspaceSlug: string, projectId: string): Promise<void> {
+    const path = `/${workspaceSlug}/settings/projects/${projectId}`;
+    await this.page.goto(path);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.awaitAppBoot(path);
+    await this.page.getByRole("button", { name: "Archive", exact: true }).click();
   }
 
   async archiveDialogBodyText(): Promise<string | null> {
@@ -9311,19 +9377,19 @@ export class WebDriver implements ParityDriver {
   }
 
   async clickCardRestore(name: string): Promise<void> {
-    await this.archivedCard(name)
-      .getByRole("button", { name: /Restore/ })
-      .first()
-      .click();
+    // The archived footer renders restore as nested clickable text nodes,
+    // not a button; the first (outer) match carries the click handler.
+    await this.archivedCard(name).getByText("Restore", { exact: true }).first().click();
   }
 
   async confirmRestore(): Promise<void> {
-    await this.page.getByRole("button", { name: "Restore", exact: true }).click();
+    // Scope to the dialog: the archived card behind it carries its own restore control.
+    await this.modalScope().getByRole("button", { name: "Restore", exact: true }).first().click();
   }
 
   async archivedCardHasAdminActions(name: string): Promise<boolean> {
     const card = this.archivedCard(name);
-    return this.isShown(card.getByRole("button", { name: /Restore/ }));
+    return this.isShown(card.getByText("Restore", { exact: true }));
   }
 
   async cardShowsArchivedMarker(name: string): Promise<boolean> {
@@ -9332,7 +9398,7 @@ export class WebDriver implements ParityDriver {
 
   async openDeleteProjectDialog(name: string): Promise<void> {
     await this.openCardContextMenu(name);
-    await this.clickContextMenuItem("Delete");
+    await this.clickCardContextMenuItem("Delete");
   }
 
   async fillDeleteProjectName(text: string): Promise<void> {

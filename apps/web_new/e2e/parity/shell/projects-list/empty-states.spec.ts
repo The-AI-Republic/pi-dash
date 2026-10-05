@@ -35,8 +35,8 @@ test(
     await test.step("admin sees the empty state with an enabled create action", async () => {
       await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(owner));
       await expect.poll(() => driver.emptyStateHeading()).toBe("No active projects");
-      expect(await driver.isEmptyStateCreateVisible()).toBe(true);
-      expect(await driver.isEmptyStateCreateEnabled()).toBe(true);
+      await expect.poll(() => driver.isEmptyStateCreateVisible()).toBe(true);
+      await expect.poll(() => driver.isEmptyStateCreateEnabled()).toBe(true);
     });
 
     await test.step("a guest sees the same empty state but the action is disabled", async () => {
@@ -45,8 +45,8 @@ test(
       await setLastWorkspaceForProjects(guest, ws.id);
       await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(guest));
       await expect.poll(() => driver.emptyStateHeading()).toBe("No active projects");
-      expect(await driver.isEmptyStateCreateVisible()).toBe(true);
-      expect(await driver.isEmptyStateCreateEnabled()).toBe(false);
+      await expect.poll(() => driver.isEmptyStateCreateVisible()).toBe(true);
+      await expect.poll(() => driver.isEmptyStateCreateEnabled()).toBe(false);
     });
   }
 );

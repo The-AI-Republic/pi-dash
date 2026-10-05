@@ -64,7 +64,7 @@ test(
       await driver.openSortMenu();
       await driver.selectSortOption("Manual");
       await driver.openSortMenu();
-      expect(await driver.isSortDirectionDisabled()).toBe(true);
+      await expect.poll(() => driver.isSortDirectionDisabled()).toBe(true);
       await driver.closeMenu();
     });
   }
@@ -84,15 +84,25 @@ test(
 
     await test.step("an internal search finds a filter value and applying it narrows the grid", async () => {
       await driver.openFilterMenu();
-      await driver.typeFilterSearch("Priv");
-      expect(await driver.filterMenuHasOption("Private")).toBe(true);
+      await driver.typeFilterSearch("riv");
+      await expect.poll(() => driver.filterMenuHasOption("Private")).toBe(true);
       await driver.selectFilterOption("Private");
       await driver.closeMenu();
       await expect.poll(() => driver.visibleProjectCardNames()).toEqual(["Secret One"]);
     });
 
+    await test.step("bug: NEWFRONT-172 a capitalized query hides its match (one-sided case fold)", async () => {
+      // The oracle lowercases the query but not the option labels, so "Priv"
+      // matches nothing while "riv" does. Intended: case-insensitive match.
+      await driver.openFilterMenu();
+      await driver.typeFilterSearch("Priv");
+      await expect.poll(() => driver.filterMenuHasOption("Private")).toBe(false);
+      await expect.poll(() => driver.filterMenuHasOption("No matches found")).toBe(true);
+      await driver.closeMenu();
+    });
+
     await test.step("the filter trigger shows its active badge", async () => {
-      expect(await driver.isFilterBadgeVisible()).toBe(true);
+      await expect.poll(() => driver.isFilterBadgeVisible()).toBe(true);
     });
   }
 );
@@ -142,7 +152,7 @@ test(
 
     await test.step("typing narrows the grid live", async () => {
       await driver.openListSearch();
-      expect(await driver.isListSearchExpanded()).toBe(true);
+      await expect.poll(() => driver.isListSearchExpanded()).toBe(true);
       await driver.typeListSearch("Apple");
       await expect.poll(() => driver.visibleProjectCardNames()).toEqual(["Findable Apple"]);
     });

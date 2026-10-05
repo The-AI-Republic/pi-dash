@@ -10,10 +10,10 @@ import { test, expect } from "../../fixtures";
 import {
   NETWORK,
   ROLE,
+  addProjectMembersViaApi,
   browserSessionCookies,
   createProjectViaApi,
   createWorkspaceForProjects,
-  joinProjectsViaApi,
   markOnboardedForProjects,
   projectMemberRole,
   seatFreshMember,
@@ -49,7 +49,7 @@ test(
 
     await test.step("confirming the join dialog routes into the issues view", async () => {
       await driver.clickCardJoin("Joinable Project");
-      expect(await driver.joinDialogHeading()).toBe("Join Project?");
+      await expect.poll(() => driver.joinDialogHeading()).toBe("Join Project?");
       await driver.confirmJoin();
       await expect.poll(() => driver.currentUrlPath()).toContain(`/projects/${projId}/issues`);
     });
@@ -74,29 +74,31 @@ test(
       network: NETWORK.PUBLIC,
     });
 
-    const member = await seatFreshMember(owner, ws.slug, ROLE.MEMBER, "parity-leave-user");
-    await markOnboardedForProjects(member);
-    await setLastWorkspaceForProjects(member, ws.id);
-    await joinProjectsViaApi(member, ws.slug, [projId]);
-    expect(await projectMemberRole(member, ws.slug, projId)).toBe(ROLE.MEMBER);
+    // The Leave entry renders only for members without an admin/member
+    // project role, so the leaver is a guest the owner seated directly.
+    const guest = await seatFreshMember(owner, ws.slug, ROLE.GUEST, "parity-leave-user");
+    await markOnboardedForProjects(guest);
+    await setLastWorkspaceForProjects(guest, ws.id);
+    await addProjectMembersViaApi(owner, ws.slug, projId, [{ member_id: guest.userId, role: ROLE.GUEST }]);
+    expect(await projectMemberRole(guest, ws.slug, projId)).toBe(ROLE.GUEST);
 
-    await driver.openAuthenticated(`/${ws.slug}/projects/${projId}/issues`, browserSessionCookies(member));
+    await driver.openAuthenticated(`/${ws.slug}/projects/${projId}/issues`, browserSessionCookies(guest));
 
     await test.step("a wrong project name is rejected with a corrective error", async () => {
       await driver.openLeaveProjectDialog("Leavable Project");
-      expect(await driver.isLeaveDialogVisible()).toBe(true);
+      await expect.poll(() => driver.isLeaveDialogVisible()).toBe(true);
       await driver.fillLeaveProjectName("Wrong Name");
       await driver.fillLeaveConfirmPhrase("Leave Project");
       await driver.submitLeave();
       await expect.poll(() => driver.leaveErrorText()).not.toBeNull();
-      expect(await projectMemberRole(member, ws.slug, projId)).toBe(ROLE.MEMBER);
+      expect(await projectMemberRole(guest, ws.slug, projId)).toBe(ROLE.GUEST);
     });
 
     await test.step("correct entries remove membership and route back to the list", async () => {
       await driver.fillLeaveProjectName("Leavable Project");
       await driver.fillLeaveConfirmPhrase("Leave Project");
       await driver.submitLeave();
-      await expect.poll(() => projectMemberRole(member, ws.slug, projId)).toBeNull();
+      await expect.poll(() => projectMemberRole(guest, ws.slug, projId)).toBeNull();
       await expect.poll(() => driver.currentUrlPath()).toContain(`/${ws.slug}/projects`);
     });
   }

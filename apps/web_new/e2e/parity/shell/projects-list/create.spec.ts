@@ -46,7 +46,7 @@ test(
     await test.step("a fresh name derives a short code and creates the project", async () => {
       await expect.poll(() => driver.emptyStateHeading()).toBe("No active projects");
       await driver.clickEmptyStateCreate();
-      expect(await driver.isCreateProjectDialogVisible()).toBe(true);
+      await expect.poll(() => driver.isCreateProjectDialogVisible()).toBe(true);
       await driver.fillCreateProjectName("Nebula Craft");
       await expect.poll(() => driver.createProjectShortCodeValue()).not.toBe("");
       await driver.submitCreateProject();
@@ -97,9 +97,16 @@ test(
     // empty state is not what we are exercising here.
     await createProjectViaApi(owner, ws.slug, { name: "Cover Anchor", identifier: "CVAN" });
 
-    // Make the asset backend unreachable so the cover upload fails.
-    await driver.page.route("**/*asset*/**", async (route) => {
-      await route.abort();
+    // Make the bundled cover images unreachable so the cover upload fails.
+    // Scoped to the cover-images path (the app's own JS chunks also live
+    // under /assets/), and letting Vite's own module-transform requests
+    // through: aborting those would stop the app from booting.
+    await driver.page.route("**/assets/cover-images/**", async (route) => {
+      if (route.request().url().includes("?import")) {
+        await route.continue();
+      } else {
+        await route.abort();
+      }
     });
 
     await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(owner));

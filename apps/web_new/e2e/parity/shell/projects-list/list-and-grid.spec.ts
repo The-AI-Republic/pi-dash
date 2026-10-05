@@ -68,16 +68,22 @@ test(
     await setLastWorkspaceForProjects(owner, ws.id);
     await createProjectViaApi(owner, ws.slug, { name: "Skeleton Only", identifier: "SKL1" });
 
-    // Throttle the collection read so the shimmer is observable before cards.
+    // Gate the collection read behind a promise we release by hand, so the
+    // shimmer window stays open deterministically instead of racing a sleep.
+    let releaseCollection!: () => void;
+    const collectionGate = new Promise<void>((resolve) => {
+      releaseCollection = resolve;
+    });
     await driver.page.route("**/projects/details/**", async (route) => {
-      await new Promise((r) => setTimeout(r, 3000));
+      await collectionGate;
       await route.continue();
     });
 
     await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(owner));
 
     await test.step("shimmer cards show first, then the real card, never an empty flash", async () => {
-      expect(await driver.isProjectsSkeletonVisible()).toBe(true);
+      await expect.poll(() => driver.isProjectsSkeletonVisible()).toBe(true);
+      releaseCollection();
       await driver.awaitProjectCard("Skeleton Only");
       await expect.poll(() => driver.visibleProjectCardNames()).toContain("Skeleton Only");
     });

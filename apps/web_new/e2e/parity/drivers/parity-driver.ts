@@ -1786,7 +1786,6 @@ export interface ParityDriver {
   // click, archive confirm — are owned by sibling areas and reused here.)
   // -------------------------------------------------------------------------
 
-
   // --- list + responsive grid (SHELL-024, SHELL-025) ---
   /** Open the archived-projects view of a workspace. */
   openArchivedProjects(workspaceSlug: string): Promise<void>;
@@ -1887,6 +1886,8 @@ export interface ParityDriver {
   openCardContextMenu(name: string): Promise<void>;
   /** Labels of the items in the currently open context menu. */
   contextMenuItemLabels(): Promise<string[]>;
+  /** Click a card context-menu entry by its visible label. */
+  clickCardContextMenuItem(label: string): Promise<void>;
   /** Labels of the inline footer actions on a card (Join / Settings / Restore / Archived …). */
   cardFooterLabels(name: string): Promise<string[]>;
   /** Click a card's inline footer "Join" control. */
@@ -1909,8 +1910,8 @@ export interface ParityDriver {
   isLeaveDialogVisible(): Promise<boolean>;
 
   // --- archive / restore (SHELL-037, SHELL-038) ---
-  /** Open the archive dialog for a project (via its reachable entry point). */
-  openArchiveProjectDialog(projectName: string): Promise<void>;
+  /** Open the archive dialog from the project's settings control section. */
+  openArchiveProjectDialog(workspaceSlug: string, projectId: string): Promise<void>;
   /** The archive/restore dialog body text, or null. */
   archiveDialogBodyText(): Promise<string | null>;
   /** Click the inline restore control on an archived card. */

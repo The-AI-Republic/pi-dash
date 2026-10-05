@@ -6341,7 +6341,6 @@ export async function deleteProjectView(
   if (!res.ok) throw new Error(`[parity] view delete failed with HTTP ${res.status}.`);
 }
 
-
 // --- Command palette / search / preferences / shared kit (NEWFRONT-127, SHELL-080-097 + 103-106).
 // --- Appended; existing helpers above are untouched per the shared driver contract.
 
@@ -6688,11 +6687,23 @@ async function sessionFetch(
     headers["referer"] = `${session.apiBase}/`;
   }
   if (jsonBody !== undefined) headers["content-type"] = "application/json";
-  return fetch(`${session.apiBase}${path}`, {
-    method,
-    headers,
-    body: jsonBody === undefined ? undefined : JSON.stringify(jsonBody),
-  });
+  // The scratch stack shares one IP throttle bucket with the frontend's own
+  // loader calls, so bursts surface as 429/503; back off and retry rather
+  // than failing setup on a transient.
+  let attempt = 0;
+  for (;;) {
+    const res = await fetch(`${session.apiBase}${path}`, {
+      method,
+      headers,
+      body: jsonBody === undefined ? undefined : JSON.stringify(jsonBody),
+    });
+    if ((res.status === 429 || res.status === 503) && attempt < 4) {
+      attempt += 1;
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
+      continue;
+    }
+    return res;
+  }
 }
 
 /** The project collection the list screen reads (`projects/details/`). */
@@ -6818,6 +6829,20 @@ export async function seatFreshMember(
   await inviteToWorkspaceForProjects(admin, slug, [{ email: member.email, role }]);
   await acceptWorkspaceInvitesForProjects(member, slug);
   return member;
+}
+
+/** Add workspace users to a project at the given roles (the admin invite endpoint). */
+export async function addProjectMembersViaApi(
+  admin: AuthedSession,
+  slug: string,
+  projectId: string,
+  members: Array<{ member_id: string; role: number }>
+): Promise<void> {
+  const res = await sessionFetch(admin, "POST", `/api/workspaces/${slug}/projects/${projectId}/members/`, {
+    members,
+  });
+  if (res.status !== 200 && res.status !== 201)
+    throw new Error(`[parity] project member add failed with HTTP ${res.status}.`);
 }
 
 /** Join projects via the same self-join POST the join modal submits. */

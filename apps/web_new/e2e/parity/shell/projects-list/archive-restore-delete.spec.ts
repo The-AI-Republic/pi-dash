@@ -37,11 +37,12 @@ test(
     await setLastWorkspaceForProjects(owner, ws.id);
     const projId = await createProjectViaApi(owner, ws.slug, { name: "Archivable Project", identifier: "ARCH" });
 
-    await driver.openAuthenticated(`/${ws.slug}/projects/${projId}/issues`, browserSessionCookies(owner));
+    await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(owner));
+    await driver.awaitProjectCard("Archivable Project");
 
     await test.step("archiving warns, then the project leaves the default list", async () => {
-      await driver.openArchiveProjectDialog("Archivable Project");
-      expect(await driver.archiveDialogBodyText()).toContain("archived");
+      await driver.openArchiveProjectDialog(ws.slug, projId);
+      await expect.poll(() => driver.archiveDialogBodyText()).toContain("archived");
       await driver.confirmArchive();
       await expect
         .poll(async () => (await projectByName(owner, ws.slug, "Archivable Project"))?.archived_at ?? null)
@@ -94,6 +95,9 @@ test(
     const ws = await createWorkspaceForProjects(owner, { name: `Del WS ${suffix}`, slug: `del-${suffix}` });
     await markOnboardedForProjects(owner);
     await setLastWorkspaceForProjects(owner, ws.id);
+    // The workspace's default (first) project is delete-protected by the
+    // server, so the doomed project is created second.
+    await createProjectViaApi(owner, ws.slug, { name: "Keeper Project", identifier: "KEEP" });
     const projId = await createProjectViaApi(owner, ws.slug, { name: "Doomed Project", identifier: "DOOM" });
     await archiveProjectViaApi(owner, ws.slug, projId);
 
@@ -102,15 +106,15 @@ test(
 
     await test.step("the destructive button stays disabled until both fields are correct", async () => {
       await driver.openDeleteProjectDialog("Doomed Project");
-      expect(await driver.isDeleteSubmitDisabled()).toBe(true);
+      await expect.poll(() => driver.isDeleteSubmitDisabled()).toBe(true);
       await driver.fillDeleteProjectName("Doomed Project");
       await driver.fillDeleteConfirmPhrase("wrong phrase");
-      expect(await driver.isDeleteSubmitDisabled()).toBe(true);
+      await expect.poll(() => driver.isDeleteSubmitDisabled()).toBe(true);
     });
 
     await test.step("correct entries remove the project", async () => {
       await driver.fillDeleteConfirmPhrase("delete my project");
-      expect(await driver.isDeleteSubmitDisabled()).toBe(false);
+      await expect.poll(() => driver.isDeleteSubmitDisabled()).toBe(false);
       await driver.submitDelete();
       await expect.poll(() => projectByName(owner, ws.slug, "Doomed Project")).toBeUndefined();
     });
