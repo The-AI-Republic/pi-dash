@@ -1015,6 +1015,8 @@ pub fn s3_target(
     scheme: &str,
     host: &str,
 ) -> (String, String, String) {
+    // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
+    let scheme = storage.endpoint_protocol(scheme);
     if storage.use_minio {
         (
             format!("{scheme}://{host}"),
@@ -1034,7 +1036,10 @@ pub fn s3_target(
         (endpoint, signed_host, format!("/{}", storage.bucket_name))
     } else {
         let region = storage.region.as_str();
-        let base = if region.is_empty() {
+        // botocore's s3 endpoint table serves us-east-1 from the global
+        // endpoint (`s3.amazonaws.com`, no region infix); every other
+        // region is virtual-hosted regional.
+        let base = if region.is_empty() || region == "us-east-1" {
             "s3.amazonaws.com".to_owned()
         } else {
             format!("s3.{region}.amazonaws.com")
@@ -2942,6 +2947,47 @@ mod tests {
         assert_eq!(
             default_issue_props_json(),
             serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true})
+        );
+    }
+
+    #[test]
+    fn s3_target_minio_ssl_and_global_east() {
+        use pidash_db::config::StorageSettings;
+        let base = StorageSettings {
+            use_minio: true,
+            minio_endpoint_ssl: false,
+            access_key_id: "access-key".to_owned(),
+            secret_access_key: "secret-key".to_owned(),
+            bucket_name: "uploads".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: None,
+            signed_url_expiration_secs: 3600,
+        };
+        // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
+        let ssl = StorageSettings {
+            minio_endpoint_ssl: true,
+            ..base.clone()
+        };
+        assert_eq!(
+            s3_target(&ssl, "http", "h:9"),
+            (
+                "https://h:9".to_owned(),
+                "h:9".to_owned(),
+                "/uploads".to_owned()
+            )
+        );
+        // us-east-1 resolves to the global endpoint (botocore probe A/L).
+        let aws = StorageSettings {
+            use_minio: false,
+            ..base
+        };
+        assert_eq!(
+            s3_target(&aws, "http", "h:9"),
+            (
+                "https://uploads.s3.amazonaws.com".to_owned(),
+                "uploads.s3.amazonaws.com".to_owned(),
+                String::new()
+            )
         );
     }
 }

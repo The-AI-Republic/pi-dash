@@ -51,9 +51,9 @@
 //! S3 presigning mirrors `S3Storage` (`settings/storage.py`): offline
 //! SigV4 (no network), `USE_MINIO` mode signing against
 //! `{scheme}://{Host}` (scheme from `X-Forwarded-Proto`, default
-//! `http`; the `MINIO_ENDPOINT_SSL` switch lives in Django-only config
-//! and is not visible to this layer), otherwise against the configured
-//! endpoint URL or the virtual-hosted AWS default. The GET redirect
+//! `http`, forced to `https` by `MINIO_ENDPOINT_SSL=1`), otherwise
+//! against the configured endpoint URL or the virtual-hosted AWS
+//! default. The GET redirect
 //! carries `response-content-disposition=inline; filename*=UTF-8''<hex>`
 //! with a fresh uuid4 hex per request
 //! (`_get_content_disposition("inline", None)`); the POST policy lists
@@ -1092,6 +1092,8 @@ fn endpoint_parts(
     scheme: &str,
     host: &str,
 ) -> (String, String) {
+    // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
+    let scheme = storage.endpoint_protocol(scheme);
     if storage.use_minio {
         (format!("{scheme}://{host}"), host.to_owned())
     } else if let Some(endpoint) = storage.endpoint_url.as_deref().filter(|e| !e.is_empty()) {
@@ -1106,7 +1108,10 @@ fn endpoint_parts(
         (endpoint.to_owned(), signed_host.to_owned())
     } else {
         let region = storage.region.as_str();
-        let base = if region.is_empty() {
+        // botocore's s3 endpoint table serves us-east-1 from the global
+        // endpoint (`s3.amazonaws.com`, no region infix); every other
+        // region is virtual-hosted regional.
+        let base = if region.is_empty() || region == "us-east-1" {
             "s3.amazonaws.com".to_owned()
         } else {
             format!("s3.{region}.amazonaws.com")
@@ -1331,6 +1336,7 @@ mod tests {
     fn test_storage() -> StorageSettings {
         StorageSettings {
             use_minio: true,
+            minio_endpoint_ssl: false,
             access_key_id: "access-key".to_owned(),
             secret_access_key: "secret-key".to_owned(),
             bucket_name: "uploads".to_owned(),
@@ -1338,6 +1344,27 @@ mod tests {
             endpoint_url: None,
             signed_url_expiration_secs: 3600,
         }
+    }
+
+    #[test]
+    fn endpoint_parts_minio_ssl_and_global_east() {
+        // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
+        let mut ssl = test_storage();
+        ssl.minio_endpoint_ssl = true;
+        assert_eq!(
+            endpoint_parts(&ssl, "http", "h:9"),
+            ("https://h:9".to_owned(), "h:9".to_owned())
+        );
+        // us-east-1 resolves to the global endpoint (botocore probe A/L).
+        let mut aws = test_storage();
+        aws.use_minio = false;
+        assert_eq!(
+            endpoint_parts(&aws, "http", "h:9"),
+            (
+                "https://uploads.s3.amazonaws.com".to_owned(),
+                "uploads.s3.amazonaws.com".to_owned()
+            )
+        );
     }
 
     fn test_now() -> DateTime<Utc> {

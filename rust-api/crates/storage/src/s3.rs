@@ -79,6 +79,8 @@ pub fn resolve_server_endpoint(
     scheme: &str,
     host: &str,
 ) -> ResolvedEndpoint {
+    // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
+    let scheme = storage.endpoint_protocol(scheme);
     if storage.use_minio {
         ResolvedEndpoint {
             url_base: format!("{scheme}://{host}"),
@@ -101,7 +103,10 @@ pub fn resolve_server_endpoint(
         }
     } else {
         let region = storage.region.as_str();
-        let base = if region.is_empty() {
+        // botocore's s3 endpoint table serves us-east-1 from the global
+        // endpoint (`s3.amazonaws.com`, no region infix); every other
+        // region is virtual-hosted regional.
+        let base = if region.is_empty() || region == "us-east-1" {
             "s3.amazonaws.com".to_owned()
         } else {
             format!("s3.{region}.amazonaws.com")
@@ -365,6 +370,7 @@ mod tests {
     fn test_storage() -> StorageSettings {
         StorageSettings {
             use_minio: false,
+            minio_endpoint_ssl: false,
             access_key_id: "AKIDEXAMPLE".to_owned(),
             secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_owned(),
             bucket_name: "examplebucket".to_owned(),
@@ -503,6 +509,20 @@ mod tests {
                 path_style: true,
             }
         );
+        // `MINIO_ENDPOINT_SSL=1` forces https in MinIO mode (`storage.py:46-51`).
+        let minio_ssl = StorageSettings {
+            use_minio: true,
+            minio_endpoint_ssl: true,
+            ..test_storage()
+        };
+        assert_eq!(
+            resolve_server_endpoint(&minio_ssl, "http", "127.0.0.1:9000"),
+            ResolvedEndpoint {
+                url_base: "https://127.0.0.1:9000".to_owned(),
+                signed_host: "127.0.0.1:9000".to_owned(),
+                path_style: true,
+            }
+        );
         // Explicit endpoint: trailing slash trimmed, host keeps its port.
         let custom = StorageSettings {
             use_minio: false,
@@ -513,22 +533,27 @@ mod tests {
         assert_eq!(resolved.url_base, "http://pi-dash-minio:9000");
         assert_eq!(resolved.signed_host, "pi-dash-minio:9000");
         assert!(resolved.path_style);
-        // No endpoint: virtual-hosted AWS default.
+        // No endpoint: virtual-hosted AWS default. us-east-1 resolves to
+        // the global endpoint (botocore probe A/L), not a regional infix.
         let aws = StorageSettings {
             use_minio: false,
             endpoint_url: None,
             ..test_storage()
         };
         let resolved = resolve_server_endpoint(&aws, "https", "public.example");
+        assert_eq!(resolved.url_base, "https://examplebucket.s3.amazonaws.com");
+        assert_eq!(resolved.signed_host, "examplebucket.s3.amazonaws.com");
+        assert!(!resolved.path_style);
+        // Other regions stay virtual-hosted regional (probe J HEAD).
+        let regional = StorageSettings {
+            region: "eu-west-1".to_owned(),
+            ..aws.clone()
+        };
+        let resolved = resolve_server_endpoint(&regional, "https", "public.example");
         assert_eq!(
             resolved.url_base,
-            "https://examplebucket.s3.us-east-1.amazonaws.com"
+            "https://examplebucket.s3.eu-west-1.amazonaws.com"
         );
-        assert_eq!(
-            resolved.signed_host,
-            "examplebucket.s3.us-east-1.amazonaws.com"
-        );
-        assert!(!resolved.path_style);
         // Empty region degrades like D-02 (global endpoint, empty scope part).
         let no_region = StorageSettings {
             region: String::new(),
