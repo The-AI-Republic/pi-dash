@@ -1218,7 +1218,7 @@ fn py_repr_string(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            ch if ch.is_control() || !ch.is_alphanumeric() && ch.is_whitespace() => {
+            ch if ch.is_control() || (ch.is_whitespace() && ch != ' ') => {
                 let code = ch as u32;
                 if code <= 0xFF {
                     out.push_str(&format!("\\x{code:02x}"));
