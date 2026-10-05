@@ -1935,17 +1935,37 @@ fn attach_request_tz(naive: &chrono::NaiveDateTime, timezone: &chrono_tz::Tz) ->
         }
         MappedLocalTime::None => {
             // DST gap: take the offset valid just before it (the fold-0
-            // attach zoneinfo performs without raising).
-            let probe = *naive - chrono::Duration::hours(1);
-            match timezone.from_local_datetime(&probe) {
-                MappedLocalTime::Single(local) | MappedLocalTime::Ambiguous(local, _) => {
-                    let shift = local.timestamp() - probe.and_utc().timestamp();
-                    naive.and_utc() - chrono::Duration::seconds(shift)
-                }
-                MappedLocalTime::None => naive.and_utc(),
+            // attach zoneinfo performs without raising). Walk back for
+            // the nearest valid wall — a single 1h probe stays inside
+            // day-scale gaps (Apia/Kwajalein skipped days) — and shift
+            // the wall by its offset.
+            match pre_transition_offset(timezone, naive) {
+                Some(offset_secs) => naive.and_utc() - chrono::Duration::seconds(offset_secs),
+                None => naive.and_utc(),
             }
         }
     }
+}
+
+/// The offset a gap wall takes: the pre-transition side. Walk back for
+/// the nearest valid wall (real gaps run ≤ 24h; 72h is plenty) and take
+/// its earliest offset.
+fn pre_transition_offset(timezone: &chrono_tz::Tz, naive: &chrono::NaiveDateTime) -> Option<i64> {
+    use chrono::{MappedLocalTime, TimeZone};
+    let mut probe = *naive;
+    for _ in 0..144 {
+        probe = probe.checked_sub_signed(chrono::Duration::minutes(30))?;
+        match timezone.from_local_datetime(&probe) {
+            MappedLocalTime::Single(local) => {
+                return Some((local.naive_local() - local.naive_utc()).num_seconds());
+            }
+            MappedLocalTime::Ambiguous(early, _) => {
+                return Some((early.naive_local() - early.naive_utc()).num_seconds());
+            }
+            MappedLocalTime::None => {}
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -4588,6 +4608,47 @@ mod tests {
         // In-range extremes still validate.
         assert!(case("\"0001-01-01T00:00:00Z\"").0.is_ok());
         assert!(case("\"9999-12-31T23:59:59Z\"").0.is_ok());
+    }
+
+    #[test]
+    fn deleted_at_gap_and_fold_take_fold_zero() {
+        use chrono_tz::Tz;
+        let york = Tz::America__New_York;
+        let instant = |json: &str, timezone: &Tz| {
+            let mut errors = FieldErrors::default();
+            let value = validate_deleted_at(
+                &serde_json::from_str(json).expect("json"),
+                timezone,
+                &mut errors,
+            );
+            assert!(errors.deleted_at.is_empty(), "{json} {timezone:?}");
+            value.expect("ok").expect("some").expect("some")
+        };
+        // The spring-forward gap takes the pre-transition offset (fold
+        // 0), like zoneinfo's non-raising attach (probed on CPython
+        // 3.12 `ZoneInfo`).
+        assert_eq!(
+            instant("\"2026-03-08T02:30\"", &york).to_string(),
+            "2026-03-08 07:30:00 UTC"
+        );
+        // The fall-back fold takes the first side (EDT, fold 0).
+        assert_eq!(
+            instant("\"2026-11-01T01:30\"", &york).to_string(),
+            "2026-11-01 05:30:00 UTC"
+        );
+        // Day-scale gaps (a whole wall date skipped) resolve through the
+        // same pre-transition walk, not the UTC fallback: Apia skipped
+        // 2011-12-30 (offset -10:00), Kwajalein 1993-08-21 (-12:00).
+        let apia = Tz::Pacific__Apia;
+        assert_eq!(
+            instant("\"2011-12-30T12:00\"", &apia).to_string(),
+            "2011-12-30 22:00:00 UTC"
+        );
+        let kwajalein = Tz::Pacific__Kwajalein;
+        assert_eq!(
+            instant("\"1993-08-21T12:00\"", &kwajalein).to_string(),
+            "1993-08-22 00:00:00 UTC"
+        );
     }
 
     #[test]
