@@ -576,15 +576,24 @@ pub fn check_description_html(
 // create() (`:110-117`)
 // ---------------------------------------------------------------------------
 
+/// Python `str.strip()` membership (`db/models/project.py:258`): Rust
+/// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
+/// `str.strip` against `char::is_whitespace` over all code points —
+/// those four are the only differences).
+fn is_py_strip_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
 /// Ports the `create()` normalisation path (`:110-117` + model
 /// `save()` at `db/models/project.py:258`): strip then upper-case.
-/// `str::trim` and `to_uppercase` are Unicode-aware like Python's
-/// `strip`/`upper`. `Project.save()` repeats the same normalisation, so
+/// `trim_matches(is_py_strip_ws)` matches Python's `strip` exactly
+/// (including U+001C-U+001F); `to_uppercase` matches `upper`.
+/// `Project.save()` repeats the same normalisation, so
 /// the row stores upper-case even though `validated_data` (and the
 /// `validate_identifier` duplicate check — B-case-dup) holds the raw
 /// stripped value.
 pub fn normalize_identifier(raw: &str) -> String {
-    raw.trim().to_uppercase()
+    raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
 
 /// Ports the `ProjectIdentifier` row `create()` writes (`:115`):
@@ -2855,5 +2864,28 @@ mod tests {
         // In fields and in the map → nested re-render, many iff list.
         assert_eq!(representation_override(true, true, true), NestedMany);
         assert_eq!(representation_override(true, true, false), NestedOne);
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_736_tests {
+    use super::normalize_identifier;
+
+    #[test]
+    fn identifier_strips_py_whitespace() {
+        assert_eq!(normalize_identifier("  eng "), "ENG");
+        // Python `str.strip()` also strips U+001C-U+001F (PIDASHCONV-736).
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let padded = format!("{sep}eng{sep}");
+            assert_eq!(
+                normalize_identifier(&padded),
+                "ENG",
+                "U+{:04X} padding must strip like Python",
+                sep as u32
+            );
+        }
+        // TAB and U+0085 padding already matched Django; pin the behavior.
+        assert_eq!(normalize_identifier("\teng\t"), "ENG");
+        assert_eq!(normalize_identifier("\u{85}eng\u{85}"), "ENG");
     }
 }

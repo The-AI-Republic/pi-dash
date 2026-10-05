@@ -100,14 +100,23 @@ pub fn contains_forbidden_chars(value: &str) -> bool {
     single_line.chars().any(|c| FORBIDDEN_CHARS.contains(&c))
 }
 
+/// Python `str.strip()` membership (`serializers/project.py:169,332`): Rust
+/// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
+/// `str.strip` against `char::is_whitespace` over all code points —
+/// those four are the only differences).
+fn is_py_strip_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
 /// Ports the `create()` normalisation
-/// (`serializers/project.py:169,332`): strip then upper-case. `str::trim`
-/// and `to_uppercase` are Unicode-aware like Python's `strip`/`upper`;
+/// (`serializers/project.py:169,332`): strip then upper-case.
+/// `trim_matches(is_py_strip_ws)` matches `strip` exactly (including
+/// U+001C-U+001F); `to_uppercase` matches `upper`.
 /// `Project.save()` (`db/models/project.py:255`) repeats the same
 /// normalisation, so an unnormalised `validated_data` identifier still
 /// lands upper-cased in the row.
 pub fn normalize_identifier(raw: &str) -> String {
-    raw.trim().to_uppercase()
+    raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
 
 /// `validate()` name check (`serializers/project.py:144-145,218-219,288-289`).
@@ -1091,5 +1100,28 @@ mod tests {
                 "cover_image_url"
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_736_tests {
+    use super::normalize_identifier;
+
+    #[test]
+    fn identifier_strips_py_whitespace() {
+        assert_eq!(normalize_identifier("  eng "), "ENG");
+        // Python `str.strip()` also strips U+001C-U+001F (PIDASHCONV-736).
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let padded = format!("{sep}eng{sep}");
+            assert_eq!(
+                normalize_identifier(&padded),
+                "ENG",
+                "U+{:04X} padding must strip like Python",
+                sep as u32
+            );
+        }
+        // TAB and U+0085 padding already matched Django; pin the behavior.
+        assert_eq!(normalize_identifier("\teng\t"), "ENG");
+        assert_eq!(normalize_identifier("\u{85}eng\u{85}"), "ENG");
     }
 }

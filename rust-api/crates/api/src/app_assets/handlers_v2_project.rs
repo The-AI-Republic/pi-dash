@@ -399,6 +399,20 @@ async fn gate_project(
     }
 }
 
+/// Python `str.strip()` membership (`db/models/project.py:210`): Rust
+/// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
+/// `str.strip` against `char::is_whitespace` over all code points —
+/// those four are the only differences).
+fn is_py_strip_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
+/// Normalize a non-UUID identifier for the equality lookup
+/// (`db/models/project.py:210`): `str(value).strip().upper()`.
+fn normalize_resolve_identifier(raw: &str) -> String {
+    raw.trim_matches(is_py_strip_ws).to_uppercase()
+}
+
 /// Resolve the `<str:project_id>` kwarg for an authenticated caller
 /// (`_rewrite_project_kwarg`, `app/views/base.py:49-77` + `Project.resolve`,
 /// `db/models/project.py:190-217`): a UUID passes through unchecked,
@@ -416,7 +430,7 @@ async fn resolve_project_id(
     if let Ok(id) = value.parse::<Uuid>() {
         return Ok(id);
     }
-    let normalized = value.trim().to_uppercase();
+    let normalized = normalize_resolve_identifier(value);
     let row: Option<(Uuid,)> = sqlx::query_as(
         r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
            WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
@@ -2667,5 +2681,29 @@ mod tests {
             Some("throttle_asset_abc".to_owned())
         );
         assert_eq!(guards::ASSET_THROTTLE_REQUESTS, 5);
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_736_tests {
+    use super::normalize_resolve_identifier;
+
+    #[test]
+    fn resolve_identifier_strips_py_whitespace() {
+        assert_eq!(normalize_resolve_identifier("  eng "), "ENG");
+        // Python `str.strip()` also strips U+001C-U+001F (PIDASHCONV-736):
+        // `%1C`-padded identifiers must resolve, not 404.
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let padded = format!("{sep}eng{sep}");
+            assert_eq!(
+                normalize_resolve_identifier(&padded),
+                "ENG",
+                "U+{:04X} padding must strip like Python",
+                sep as u32
+            );
+        }
+        // TAB and U+0085 padding already matched Django; pin the behavior.
+        assert_eq!(normalize_resolve_identifier("\teng\t"), "ENG");
+        assert_eq!(normalize_resolve_identifier("\u{85}eng\u{85}"), "ENG");
     }
 }

@@ -146,11 +146,19 @@ pub fn project_identifier(workspace_name: &str) -> String {
         .collect()
 }
 
+/// Python `str.strip()` membership (`project.py:257`): Rust
+/// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
+/// `str.strip` against `char::is_whitespace` over all code points —
+/// those four are the only differences).
+fn is_py_strip_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
 /// `Project.save` (`project.py:257`): `identifier.strip().upper()`.
-/// Python `str.strip()` strips Unicode whitespace; `trim()` is the Rust
-/// equivalent. `upper()` is full-Unicode on both sides.
+/// `trim_matches(is_py_strip_ws)` matches `strip` exactly (including
+/// U+001C-U+001F); `to_uppercase` matches `upper` (full-Unicode both).
 pub fn normalize_identifier(raw: &str) -> String {
-    raw.trim().to_uppercase()
+    raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
 
 /// `State.save` (`state.py:132`): Django `slugify` — NFKD-normalize,
@@ -1105,5 +1113,28 @@ mod tests {
             Some(vec![json!({"id": 1})])
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_736_tests {
+    use super::normalize_identifier;
+
+    #[test]
+    fn identifier_strips_py_whitespace() {
+        assert_eq!(normalize_identifier("  eng "), "ENG");
+        // Python `str.strip()` also strips U+001C-U+001F (PIDASHCONV-736).
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let padded = format!("{sep}eng{sep}");
+            assert_eq!(
+                normalize_identifier(&padded),
+                "ENG",
+                "U+{:04X} padding must strip like Python",
+                sep as u32
+            );
+        }
+        // TAB and U+0085 padding already matched Django; pin the behavior.
+        assert_eq!(normalize_identifier("\teng\t"), "ENG");
+        assert_eq!(normalize_identifier("\u{85}eng\u{85}"), "ENG");
     }
 }

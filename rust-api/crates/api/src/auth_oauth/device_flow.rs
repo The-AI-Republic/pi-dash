@@ -302,6 +302,15 @@ pub enum UserCodeRejection {
     BadLength,
 }
 
+/// Python `str.strip()` membership
+/// (`authentication/views/cli/device.py:202`): Rust `White_Space` plus
+/// U+001C-U+001F (verified by exhaustively diffing `str.strip` against
+/// `char::is_whitespace` over all code points — those four are the only
+/// differences).
+fn is_py_strip_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
 /// Normalize a raw `user_code` to the canonical `XXXX-XXXX` form
 /// (`device.py:204-216`): `strip` + `upper`, drop ASCII spaces and
 /// hyphens, require exactly 8 characters, re-insert the hyphen.
@@ -309,7 +318,7 @@ pub enum UserCodeRejection {
 /// Char-based throughout: Python's `len` counts code points and its
 /// slices cut code points, never bytes (Porting guide semantic trap).
 pub fn canonical_user_code(raw: &str) -> Result<String, UserCodeRejection> {
-    let upper = raw.trim().to_uppercase();
+    let upper = raw.trim_matches(is_py_strip_ws).to_uppercase();
     if upper.is_empty() {
         return Err(UserCodeRejection::Blank);
     }
@@ -1057,6 +1066,30 @@ mod tests {
                     .with_timezone(&chrono::Utc)
             ),
             "pidash CLI · 2026-01-02 03:04 UTC"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_736_tests {
+    use super::{canonical_user_code, UserCodeRejection};
+
+    #[test]
+    fn user_code_strips_py_whitespace() {
+        // Python `str.strip()` also strips U+001C-U+001F (PIDASHCONV-736).
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let padded = format!("{sep}WXYZ1234{sep}");
+            assert_eq!(
+                canonical_user_code(&padded).as_deref(),
+                Ok("WXYZ-1234"),
+                "U+{:04X} padding must strip like Python",
+                sep as u32
+            );
+        }
+        // Control-char-only padding strips to empty → Blank (device.py:202-203).
+        assert_eq!(
+            canonical_user_code("\u{1c} \u{1d}"),
+            Err(UserCodeRejection::Blank)
         );
     }
 }
