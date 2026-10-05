@@ -3287,10 +3287,16 @@ async fn home_prefs_get(
     // one insert per missing key in plan order, each with its own clock
     // read (the `-created_at` response order depends on it).
     for (key, sort_order) in queries_extras::home_autocreate_plan(&borrowed) {
+        // `bulk_create` binds every column: `is_enabled`/`config` ride the
+        // Python-side field defaults (`True`/`{}`, `workspace.py:457-458`),
+        // which have no DB-level DEFAULT — omitting them violates NOT NULL.
+        // `bulk_create` skips `save()`, so `created_by`/`updated_by` stay
+        // NULL (matching the omitted columns here).
         sqlx::query(
             r#"INSERT INTO workspace_home_preferences
-               (id, created_at, updated_at, "key", user_id, workspace_id, sort_order)
-               VALUES ($1,$2,$3,$4,$5,$6,$7)
+               (id, created_at, updated_at, "key", user_id, workspace_id, sort_order,
+                is_enabled, config)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
                ON CONFLICT DO NOTHING"#,
         )
         .bind(Uuid::new_v4())
@@ -3300,6 +3306,8 @@ async fn home_prefs_get(
         .bind(user_id)
         .bind(workspace_id)
         .bind(f64::from(sort_order))
+        .bind(true)
+        .bind(Value::Object(Map::new()))
         .execute(&pool)
         .await
         .map_err(|_| Denial::ServerError)?;
