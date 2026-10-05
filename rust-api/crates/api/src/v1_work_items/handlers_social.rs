@@ -94,7 +94,7 @@
 
 use std::collections::HashMap;
 
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{OriginalUri, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, TimeZone, Utc};
@@ -328,7 +328,10 @@ fn owned(
             };
         }
     }
-    router
+    // DRF runs `initial()` (auth → permissions) before its method check, so
+    // exotic methods (TRACE et al.) answer 401/403/405 JSON. The fallback
+    // proxies them with the original request (the `app_issues` precedent).
+    router.fallback(crate::edge::proxy)
 }
 
 /// The link list paths own GET + POST (`urls/work_item.py:60-63`,
@@ -1406,6 +1409,32 @@ async fn expand_actor(pool: &PgPool, user_id: &Uuid) -> Result<Value, Denial> {
     serde_json::to_value(&view).map_err(|_| Denial::ServerError)
 }
 
+/// `expand=parent`: `IssueLiteSerializer` over the parent COMMENT
+/// (`serializers/issue.py:505-508`): `id`, `sequence_id` (skipped —
+/// comments have none), `project_id`, in field order. No live scope:
+/// Django renders soft-deleted parents (verified live). A hard-missing
+/// row is unreachable (`CASCADE`) and renders `{}` via `None`.
+async fn expand_parent_comment(pool: &PgPool, parent_id: &Uuid) -> Result<Option<Value>, Denial> {
+    let row: Option<(Uuid, Uuid)> =
+        sqlx::query_as(r#"SELECT "id", "project_id" FROM "issue_comments" WHERE "id" = $1"#)
+            .bind(parent_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| db_error(error, "expand-parent"))?;
+    match row {
+        Some((id, project_id)) => {
+            let mut map = Map::with_capacity(2);
+            map.insert("id".to_owned(), Value::String(id.to_string()));
+            map.insert(
+                "project_id".to_owned(),
+                Value::String(project_id.to_string()),
+            );
+            Ok(Some(Value::Object(map)))
+        }
+        None => Ok(None),
+    }
+}
+
 /// `expand=project`: `ProjectLiteSerializer` (`project.py:354-377`): `id`,
 /// `identifier`, `name`, `cover_image`, `icon_prop`, `emoji`,
 /// `description`, `is_default`, `cover_image_url` in field order. A
@@ -1813,6 +1842,23 @@ async fn link_expansions<'a>(
                     .map_err(|_| Denial::ServerError)?;
                 Some(expand_issue(pool, slug, &id, tz, web_base).await?)
             }
+            // `created_by`/`updated_by` map to `UserLiteSerializer`
+            // (`serializers/base.py:95-96`); null FKs supply `None` (the
+            // shape renders `{}`).
+            "created_by" => match decoded.created_by.as_deref() {
+                Some(raw) => {
+                    let id = raw.parse::<Uuid>().map_err(|_| Denial::ServerError)?;
+                    Some(expand_actor(pool, &id).await?)
+                }
+                None => None,
+            },
+            "updated_by" => match decoded.updated_by.as_deref() {
+                Some(raw) => {
+                    let id = raw.parse::<Uuid>().map_err(|_| Denial::ServerError)?;
+                    Some(expand_actor(pool, &id).await?)
+                }
+                None => None,
+            },
             _ => continue,
         };
         expansions.push((*name, value));
@@ -1886,9 +1932,16 @@ async fn comment_expansions<'a>(
                 None => None,
             },
             // `parent` maps to `IssueLiteSerializer` over the parent
-            // COMMENT (`base.py:104`) — rendering a comment through the
-            // issue-lite shape is undefined; no fixture or contract case
-            // sends it, so it takes the shape's default arm.
+            // COMMENT (`base.py:104`): `id`/`sequence_id`/`project_id`,
+            // with `sequence_id` skipped (comments have none). Null
+            // parents supply `None` (the shape renders `{}`).
+            "parent" => match decoded.parent.as_deref() {
+                Some(raw) => {
+                    let id = raw.parse::<Uuid>().map_err(|_| Denial::ServerError)?;
+                    expand_parent_comment(pool, &id).await?
+                }
+                None => None,
+            },
             _ => continue,
         };
         expansions.push((*name, value));
@@ -1990,58 +2043,65 @@ struct ValidatedLinkPatch {
 /// invalid → max_length → null-characters; `fields.py` `CharField` +
 /// `ProhibitNullCharactersValidator`). `max_length` is `None` for the
 /// `TextField`-backed `url`.
-fn char_field_error(
+fn char_field_errors(
     value: &Value,
     allow_blank: bool,
     allow_null: bool,
     max_length: Option<usize>,
-) -> Option<String> {
+) -> Vec<String> {
+    // `run_validation` strips before the blank check
+    // (`data == '' or (trim_whitespace and str(data).strip() == '')`).
     if let Value::String(text) = value {
-        if (text.is_empty() || text.trim().is_empty()) && !allow_blank {
-            return Some("This field may not be blank.".to_owned());
+        if (text.is_empty() || crate::runner_runs::runs::py_strip(text).is_empty()) && !allow_blank
+        {
+            return vec!["This field may not be blank.".to_owned()];
         }
     } else if value.is_null() {
         if !allow_null {
-            return Some("This field may not be null.".to_owned());
+            return vec!["This field may not be null.".to_owned()];
         }
-        return None;
+        return Vec::new();
     }
     match value {
         Value::String(text) => {
-            let stripped = text.trim();
+            let stripped = crate::runner_runs::runs::py_strip(text);
+            // `run_validators` extends ONE list across all validators, in
+            // append order: `MaxLengthValidator` before
+            // `ProhibitNullCharactersValidator`.
+            let mut out = Vec::new();
             if let Some(max) = max_length {
                 // `MaxLengthValidator`: `len()` counts code points.
                 if stripped.chars().count() > max {
-                    return Some(format!(
+                    out.push(format!(
                         "Ensure this field has no more than {max} characters."
                     ));
                 }
             }
             if stripped.contains('\0') {
-                return Some("Null characters are not allowed.".to_owned());
+                out.push("Null characters are not allowed.".to_owned());
             }
-            None
+            out
         }
-        Value::Bool(_) => Some("Not a valid string.".to_owned()),
+        Value::Bool(_) => vec!["Not a valid string.".to_owned()],
         Value::Number(number) => {
             let text = number.to_string();
             if let Some(max) = max_length {
                 if text.chars().count() > max {
-                    return Some(format!(
+                    return vec![format!(
                         "Ensure this field has no more than {max} characters."
-                    ));
+                    )];
                 }
             }
-            None
+            Vec::new()
         }
-        _ => Some("Not a valid string.".to_owned()),
+        _ => vec!["Not a valid string.".to_owned()],
     }
 }
 
 /// Coerce a validated string input (`str(data)` + strip; numbers stringify).
 fn char_field_value(value: &Value) -> String {
     match value {
-        Value::String(text) => text.trim().to_owned(),
+        Value::String(text) => crate::runner_runs::runs::py_strip(text).to_owned(),
         Value::Number(number) => number.to_string(),
         _ => String::new(),
     }
@@ -2099,10 +2159,15 @@ fn validate_link_patch(
     if let Some(raw) = map.get("title") {
         if raw.is_null() {
             title = Some(None);
-        } else if let Some(message) = char_field_error(raw, true, true, Some(255)) {
-            errors.push(("title".to_owned(), message));
         } else {
-            title = Some(Some(char_field_value(raw)));
+            let field_errors = char_field_errors(raw, true, true, Some(255));
+            if field_errors.is_empty() {
+                title = Some(Some(char_field_value(raw)));
+            } else {
+                for message in field_errors {
+                    errors.push(("title".to_owned(), message));
+                }
+            }
         }
     }
     // `url`: `TextField()` — non-blank, non-null, unbounded, NO format
@@ -2110,10 +2175,13 @@ fn validate_link_patch(
     // flag (`partial` does not change it), so a blank form value still
     // 400s (verified live).
     if let Some(raw) = map.get("url") {
-        if let Some(message) = char_field_error(raw, false, false, None) {
-            errors.push(("url".to_owned(), message));
-        } else {
+        let field_errors = char_field_errors(raw, false, false, None);
+        if field_errors.is_empty() {
             url = Some(char_field_value(raw));
+        } else {
+            for message in field_errors {
+                errors.push(("url".to_owned(), message));
+            }
         }
     }
     // `metadata`: `JSONField(default=dict)` — any JSON value, non-null.
@@ -2320,6 +2388,12 @@ fn window_rows<'a, T>(
         None,
     )
     .map_err(page_denial)?;
+    // `results[:limit]` runs on the lazy queryset, whose negative indexing
+    // raises `ValueError` into the 500 — after the offset checks above
+    // (a negative offset still 400s first).
+    if per_page < 0 {
+        return Err(page_denial(crate::paginator::PageError::NegativeSlice));
+    }
     let start = (window.offset as usize).min(rows.len());
     let stop = (window.stop as usize).min(rows.len());
     let window_rows = &rows[start..stop];
@@ -2329,9 +2403,7 @@ fn window_rows<'a, T>(
         return Err(Denial::ServerError);
     }
     let has_more = window_rows.len() as i64 > per_page;
-    let trim = usize::try_from(per_page)
-        .unwrap_or(usize::MAX)
-        .min(window_rows.len());
+    let trim = (per_page as usize).min(window_rows.len());
     Ok((&window_rows[..trim], has_more))
 }
 
@@ -2364,9 +2436,11 @@ async fn read_body(body: axum::body::Body) -> Result<Vec<u8>, Denial> {
         .map_err(|error| db_error(error, "read-body"))
 }
 
-/// Rebuild the request against the same path for the proxy (Django's
-/// `<uuid:>` converter would not match — before auth runs, as URL
-/// resolving precedes it).
+/// Rebuild the request against the ORIGINAL path for the proxy
+/// (Django's `<uuid:>` converter would not match — before auth runs, as URL
+/// resolving precedes it). The URI must be the request's own: Django's 404
+/// page echoes the path, so rebuilding the `work-items` spelling for a
+/// deprecated `issues/` twin answers the wrong bytes.
 fn proxy_request<'a>(
     state: &'a AppState,
     method: &'a str,
@@ -2383,17 +2457,13 @@ fn proxy_request<'a>(
 /// `GET .../links/` (`views/issue.py:1593-1604`).
 pub async fn get_link_list(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id)): Path<(String, String, String)>,
     Query(query): Query<QueryMap>,
     headers: HeaderMap,
 ) -> Response {
     if !crate::runner_runs::is_uuid_path_segment(&issue_id) {
-        return proxy_request(
-            &state,
-            "GET",
-            format!("/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/links/"),
-        )
-        .await;
+        return proxy_request(&state, "GET", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     match link_list_inner(&state, &headers, &slug, &project_id, &issue_id, &query).await {
@@ -2469,17 +2539,13 @@ async fn link_list_inner(
 /// `POST .../links/` (`views/issue.py:1626-1650`).
 pub async fn post_link(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id)): Path<(String, String, String)>,
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Response {
     if !crate::runner_runs::is_uuid_path_segment(&issue_id) {
-        return proxy_request(
-            &state,
-            "POST",
-            format!("/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/links/"),
-        )
-        .await;
+        return proxy_request(&state, "POST", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     let raw = match read_body(body).await {
@@ -2558,7 +2624,16 @@ async fn link_post_inner(
     .bind(serde_json::json!({}))
     .execute(&pre.pool)
     .await
-    .map_err(|error| db_error(error, "link-post-insert"))?;
+    .map_err(|error| {
+        // No issue lookup precedes the create: a bogus `issue_id`
+        // violates the FK, and `handle_exception` answers the
+        // `IntegrityError` 400 (`api/views/base.py:142-147`).
+        if is_fk_violation(&error) {
+            Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
+        } else {
+            db_error(error, "link-post-insert")
+        }
+    })?;
     // The `created_by` override (`:1637-1638`): `data.get("created_by",
     // user.id)`, saved with `update_fields=["created_by"]` — `updated_at`
     // is NOT re-stamped (Django skips `auto_now` outside `update_fields`).
@@ -2623,8 +2698,12 @@ async fn link_post_inner(
 }
 
 /// The `request.data.get("created_by", user.id)` override: absent → the
-/// actor, explicit null → NULL (clears), a UUID string → that user. Anything
-/// else fails `UUIDField.get_prep_value` → the `ValidationError` 400.
+/// actor, explicit null → NULL (clears), a UUID string → that user.
+/// `UUIDField.to_python` coerces ints AND bools via `uuid.UUID(int=…)` —
+/// in-range values proceed to the save (usually the FK-violation 400);
+/// negative ints fail with `ValueError`. Floats and anything else fail
+/// `get_prep_value` → the `ValidationError` 400 (Django wraps the
+/// `UUID(hex=…)` `AttributeError`). All verified live.
 fn override_user_id(raw: Option<&Value>, actor: &Uuid) -> Result<Option<Uuid>, Denial> {
     match raw {
         None => Ok(Some(*actor)),
@@ -2633,6 +2712,14 @@ fn override_user_id(raw: Option<&Value>, actor: &Uuid) -> Result<Option<Uuid>, D
             .parse::<Uuid>()
             .map(Some)
             .map_err(|_| Denial::FieldErrors(VALID_DETAIL_BODY.to_owned())),
+        Some(Value::Bool(flag)) => Ok(Some(Uuid::from_u128(u128::from(*flag as u8)))),
+        Some(Value::Number(number)) => {
+            if let Some(int) = number.as_u64() {
+                Ok(Some(Uuid::from_u128(u128::from(int))))
+            } else {
+                Err(Denial::FieldErrors(VALID_DETAIL_BODY.to_owned()))
+            }
+        }
         Some(_) => Err(Denial::FieldErrors(VALID_DETAIL_BODY.to_owned())),
     }
 }
@@ -2666,6 +2753,7 @@ fn soft_delete_sweep(model_name: &str, pk: &str) -> (Vec<Value>, Map<String, Val
 /// list branch (BUG-6) is unreachable: the route always binds `pk`.
 pub async fn get_link_detail(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
     Query(query): Query<QueryMap>,
     headers: HeaderMap,
@@ -2673,14 +2761,7 @@ pub async fn get_link_detail(
     if !crate::runner_runs::is_uuid_path_segment(&issue_id)
         || !crate::runner_runs::is_uuid_path_segment(&pk)
     {
-        return proxy_request(
-            &state,
-            "GET",
-            format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/links/{pk}/"
-            ),
-        )
-        .await;
+        return proxy_request(&state, "GET", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     let pk = pk.parse::<Uuid>().expect("checked segment");
@@ -2746,6 +2827,7 @@ async fn link_detail_inner(
 /// `PATCH .../links/<pk>/` (`views/issue.py:1737-1761`).
 pub async fn patch_link(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
     headers: HeaderMap,
     body: axum::body::Body,
@@ -2753,14 +2835,7 @@ pub async fn patch_link(
     if !crate::runner_runs::is_uuid_path_segment(&issue_id)
         || !crate::runner_runs::is_uuid_path_segment(&pk)
     {
-        return proxy_request(
-            &state,
-            "PATCH",
-            format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/links/{pk}/"
-            ),
-        )
-        .await;
+        return proxy_request(&state, "PATCH", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     let pk = pk.parse::<Uuid>().expect("checked segment");
@@ -2893,20 +2968,14 @@ async fn link_patch_inner(
 /// `DELETE .../links/<pk>/` (`views/issue.py:1775-1793`).
 pub async fn delete_link(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
     headers: HeaderMap,
 ) -> Response {
     if !crate::runner_runs::is_uuid_path_segment(&issue_id)
         || !crate::runner_runs::is_uuid_path_segment(&pk)
     {
-        return proxy_request(
-            &state,
-            "DELETE",
-            format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/links/{pk}/"
-            ),
-        )
-        .await;
+        return proxy_request(&state, "DELETE", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     let pk = pk.parse::<Uuid>().expect("checked segment");
@@ -2948,6 +3017,21 @@ async fn link_delete_inner(
         &[],
         &[],
     )?);
+    // The activity fans out BEFORE the write (`:1783-1792`).
+    let mut requested_map = Map::with_capacity(1);
+    requested_map.insert("link_id".to_owned(), Value::String(pk.to_string()));
+    let requested =
+        pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&Value::Object(requested_map));
+    let kwargs = work_tasks::issue_activity_kwargs(
+        work_tasks::ACTIVITY_LINK_DELETED,
+        Some(&requested),
+        &pre.actor.id.to_string(),
+        &issue_id.to_string(),
+        &project_id.to_string(),
+        Some(&current),
+        Utc::now().timestamp(),
+    );
+    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
     // `SoftDeleteModel.delete()`: `deleted_at` + full `save()` (so
     // `updated_at`/`updated_by` move) plus the related-objects sweep.
     // Two `now()` calls like `delete()`: `deleted_at` stamps first,
@@ -2964,23 +3048,6 @@ async fn link_delete_inner(
     .execute(&pre.pool)
     .await
     .map_err(|error| db_error(error, "link-delete"))?;
-    // Python enqueues the activity BEFORE the delete (`:1783-1792`); the
-    // order is unobservable in HTTP, so the write lands first and only a
-    // successful write fans out.
-    let mut requested_map = Map::with_capacity(1);
-    requested_map.insert("link_id".to_owned(), Value::String(pk.to_string()));
-    let requested =
-        pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&Value::Object(requested_map));
-    let kwargs = work_tasks::issue_activity_kwargs(
-        work_tasks::ACTIVITY_LINK_DELETED,
-        Some(&requested),
-        &pre.actor.id.to_string(),
-        &issue_id.to_string(),
-        &project_id.to_string(),
-        Some(&current),
-        Utc::now().timestamp(),
-    );
-    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
     let (sweep_args, sweep_kwargs) = soft_delete_sweep("issuelink", &pk.to_string());
     enqueue_best_effort(&pre.pool, SOFT_DELETE_TASK, sweep_args, sweep_kwargs).await;
     Ok(Response::builder()
@@ -3020,14 +3087,58 @@ fn app_origin(urls: &pidash_db::config::UrlSettings) -> Result<String, Denial> {
     Err(Denial::ServerError)
 }
 
-/// The comment external-dedupe guard input: both values truthy (Python
-/// `and`), rendered as filter strings. Truthy non-strings 500: Django
-/// binds the raw scalar against `varchar` and Postgres rejects the
-/// comparison (`DataError` → generic 500).
-fn dedupe_pair(
+/// Python `str()` for a JSON scalar, for the external-dedupe guards:
+/// `CharField.get_prep_value` stringifies filter values (ints stringify,
+/// bools spell `True`/`False`), and the PATCH guard compares
+/// `stored != str(incoming)` (`:2047`). Composites return `None`: their
+/// `repr` can only match a stored repr-string, which no API write can
+/// produce (the serializer 400s them first) — skipping the query is
+/// equivalent to the filter miss. All verified live.
+fn python_scalar_str(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(if *flag { "True" } else { "False" }.to_owned()),
+        _ => None,
+    }
+}
+
+/// The comment-PATCH dup-guard input (`:2045-2061`): `None` skips the
+/// query (falsy id, `str()`-equal to stored, or a composite the filter
+/// could never match); otherwise the `(source, id)` filter pair.
+/// `data.get("external_source", stored)` — present-null queries `IS
+/// NULL`; present-but-empty still filters; absent inherits the stored
+/// value, NULL included; composite sources skip like composite ids. All
+/// verified live.
+fn patch_external_guard(
     map: &Map<String, Value>,
-    source_default: Option<&str>,
-) -> Result<Option<(String, String)>, Denial> {
+    stored_id: Option<&str>,
+    stored_source: Option<String>,
+) -> Option<(Option<String>, String)> {
+    if !is_truthy(map.get("external_id")) {
+        return None;
+    }
+    let stored = stored_id.unwrap_or_default();
+    let incoming = match map.get("external_id").and_then(python_scalar_str) {
+        Some(text) if text == stored => return None,
+        Some(text) => text,
+        None => return None,
+    };
+    let source: Option<String> = match map.get("external_source") {
+        None => stored_source,
+        Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text.clone()),
+        // Other scalars stringify; composites skip (their filter would
+        // miss; the serializer 400s either way).
+        Some(value) => Some(python_scalar_str(value)?),
+    };
+    Some((source, incoming))
+}
+
+/// The comment external-dedupe guard input: both values truthy (Python
+/// `and`), rendered as filter strings via `get_prep_value` (`str()`).
+/// Composites skip (their filter would miss; the serializer 400s).
+fn dedupe_pair(map: &Map<String, Value>, source_default: Option<&str>) -> Option<(String, String)> {
     let id_raw = map.get("external_id");
     let source_raw = map.get("external_source");
     let id_truthy = is_truthy(id_raw);
@@ -3038,18 +3149,14 @@ fn dedupe_pair(
         None => source_default.map(|s| !s.is_empty()).unwrap_or(false),
     };
     if !(id_truthy && source_truthy) {
-        return Ok(None);
+        return None;
     }
-    let id = match id_raw {
-        Some(Value::String(text)) => text.clone(),
-        _ => return Err(Denial::ServerError),
-    };
+    let id = id_raw.and_then(python_scalar_str)?;
     let source = match source_raw {
-        Some(Value::String(text)) => text.clone(),
-        Some(_) => return Err(Denial::ServerError),
+        Some(value) => python_scalar_str(value)?,
         None => source_default.unwrap_or_default().to_owned(),
     };
-    Ok(Some((source, id)))
+    Some((source, id))
 }
 
 /// Pre-validate `comment_json` for HTML-form bodies
@@ -3078,6 +3185,11 @@ fn form_comment_json(map: &mut Map<String, Value>, from_form: bool) -> Result<()
             map.shift_remove(key);
         }
     }
+    // `get_value`: blank + `allow_null`, no `allow_blank` → None (the
+    // `UUIDField` takes no `allow_blank` from `blank=True`).
+    if map.get("speaker_agent_run_id") == Some(&Value::String(String::new())) {
+        map.insert("speaker_agent_run_id".to_owned(), Value::Null);
+    }
     Ok(())
 }
 
@@ -3095,19 +3207,13 @@ fn comment_dup_body(id: &str) -> String {
 /// `GET .../comments/` (`views/issue.py:1851-1862`).
 pub async fn get_comment_list(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id)): Path<(String, String, String)>,
     Query(query): Query<QueryMap>,
     headers: HeaderMap,
 ) -> Response {
     if !crate::runner_runs::is_uuid_path_segment(&issue_id) {
-        return proxy_request(
-            &state,
-            "GET",
-            format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/comments/"
-            ),
-        )
-        .await;
+        return proxy_request(&state, "GET", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     match comment_list_inner(&state, &headers, &slug, &project_id, &issue_id, &query).await {
@@ -3191,6 +3297,7 @@ async fn comment_list_inner(
 /// `GET .../comments/<pk>/` (`views/issue.py:2003-2010`).
 pub async fn get_comment_detail(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
     Query(query): Query<QueryMap>,
     headers: HeaderMap,
@@ -3198,14 +3305,7 @@ pub async fn get_comment_detail(
     if !crate::runner_runs::is_uuid_path_segment(&issue_id)
         || !crate::runner_runs::is_uuid_path_segment(&pk)
     {
-        return proxy_request(
-            &state,
-            "GET",
-            format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/comments/{pk}/"
-            ),
-        )
-        .await;
+        return proxy_request(&state, "GET", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     let pk = pk.parse::<Uuid>().expect("checked segment");
@@ -3285,19 +3385,13 @@ async fn comment_detail_inner(
 /// `POST .../comments/` (`views/issue.py:1885-1949`).
 pub async fn post_comment(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id)): Path<(String, String, String)>,
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Response {
     if !crate::runner_runs::is_uuid_path_segment(&issue_id) {
-        return proxy_request(
-            &state,
-            "POST",
-            format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/comments/"
-            ),
-        )
-        .await;
+        return proxy_request(&state, "POST", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     let raw = match read_body(body).await {
@@ -3338,7 +3432,7 @@ async fn comment_post_inner(
     let Some(map) = parsed.value.as_object() else {
         return Err(Denial::ServerError);
     };
-    if let Some((source, external_id)) = dedupe_pair(map, None)? {
+    if let Some((source, external_id)) = dedupe_pair(map, None) {
         if comment_external_exists(&pre.pool, &project_id, slug, Some(&source), &external_id)
             .await?
         {
@@ -3433,17 +3527,21 @@ async fn comment_post_inner(
     .bind(speaker_run_id)
     .execute(&mut *tx)
     .await
-    .map_err(|error| db_error(error, "comment-post-insert"))?;
+    .map_err(|error| {
+        // No issue lookup precedes the create: a bogus `issue_id`
+        // violates the FK, and `handle_exception` answers the
+        // `IntegrityError` 400 (`api/views/base.py:142-147`). The
+        // transaction rolls back on drop, like the failed ORM `save()`.
+        if is_fk_violation(&error) {
+            Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
+        } else {
+            db_error(error, "comment-post-insert")
+        }
+    })?;
     let description_id = Uuid::new_v4();
     let desc_created_at = now_utc();
     let desc_updated_at = now_utc();
-    // `Description.save` nulls the stripped text for empty HTML (`:22-29`,
-    // unlike the comment's `""`).
-    let desc_stripped: Option<&str> = if comment_html.is_empty() {
-        None
-    } else {
-        Some(&stripped)
-    };
+    let desc_stripped = description_stripped_for_create(&comment_html);
     sqlx::query(
         r#"INSERT INTO "descriptions" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
             "workspace_id", "project_id", "description_json", "description_html", "description_binary",
@@ -3468,9 +3566,18 @@ async fn comment_post_inner(
         .execute(&mut *tx)
         .await
         .map_err(|error| db_error(error, "comment-post-desc-link"))?;
-    tx.commit()
-        .await
-        .map_err(|error| db_error(error, "comment-post-commit"))?;
+    tx.commit().await.map_err(|error| {
+        // Every FK here is `DEFERRABLE INITIALLY DEFERRED`, so the bogus
+        // `issue_id` violation fires at COMMIT, not at the INSERT — and
+        // `handle_exception` answers the `IntegrityError` 400
+        // (`api/views/base.py:142-147`). Every other FK in this
+        // transaction references a row verified above to exist.
+        if is_fk_violation(&error) {
+            Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
+        } else {
+            db_error(error, "comment-post-commit")
+        }
+    })?;
     // The overrides (`:1921-1924`): `created_at` (or `now()`), `created_by`
     // (or the actor), `actor_id` in memory only (BUG-3) — saved with
     // `update_fields=["created_at","created_by"]`.
@@ -3577,13 +3684,29 @@ fn strip_comment_html(html: &str) -> String {
     }
 }
 
+/// The `Description` row's stripped text on comment create:
+/// `Description.save` RECOMPUTES it with Django's own `strip_tags`
+/// (`db/models/description.py:22-29`), which keeps entities verbatim —
+/// unlike the comment column's entity-decoding MLStripper. Empty HTML
+/// stores NULL. (PATCH syncs the decoded form via queryset `update()`,
+/// which runs no `save()` — that path is untouched.)
+fn description_stripped_for_create(comment_html: &str) -> Option<String> {
+    if comment_html.is_empty() {
+        None
+    } else {
+        Some(crate::space::sanitize::strip_tags(comment_html))
+    }
+}
+
 /// The `created_at` override (`:1921`): absent → `now()`; a datetime
 /// string stores its instant (naive values bypass serializer handling —
 /// direct assignment — so Postgres reads them in the session zone, UTC),
 /// while the RESPONSE renders the raw input VERBATIM: the in-memory
 /// attribute keeps the assigned string and DRF returns strings untouched.
 /// Returns `(db_value, response_text)`. Explicit null violates NOT NULL →
-/// `IntegrityError` 400; anything else unparseable → `ValidationError` 400.
+/// `IntegrityError` 400; unparseable strings → `ValidationError` 400;
+/// non-string scalars reach `parse_datetime` raw, whose `fromisoformat`
+/// raises an UNCAUGHT `TypeError` (only `ValueError` is caught) → 500.
 fn override_created_at(raw: Option<&Value>, tz: &Tz) -> Result<(DateTime<Utc>, String), Denial> {
     match raw {
         None => {
@@ -3600,7 +3723,7 @@ fn override_created_at(raw: Option<&Value>, tz: &Tz) -> Result<(DateTime<Utc>, S
             };
             Ok((db, text.clone()))
         }
-        Some(_) => Err(Denial::FieldErrors(VALID_DETAIL_BODY.to_owned())),
+        Some(_) => Err(Denial::ServerError),
     }
 }
 
@@ -3676,6 +3799,7 @@ fn parse_naive_or_aware(text: &str) -> Result<NaiveOrAware, ParseDatetimeError> 
 /// `PATCH .../comments/<pk>/` (`views/issue.py:2034-2089`).
 pub async fn patch_comment(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
     headers: HeaderMap,
     body: axum::body::Body,
@@ -3683,14 +3807,7 @@ pub async fn patch_comment(
     if !crate::runner_runs::is_uuid_path_segment(&issue_id)
         || !crate::runner_runs::is_uuid_path_segment(&pk)
     {
-        return proxy_request(
-            &state,
-            "PATCH",
-            format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/comments/{pk}/"
-            ),
-        )
-        .await;
+        return proxy_request(&state, "PATCH", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     let pk = pk.parse::<Uuid>().expect("checked segment");
@@ -3759,26 +3876,15 @@ async fn comment_patch_inner(
     // The dup guard (`:2045-2061`): truthy `external_id`, different from
     // the stored value (`str()`-compared), and an existing row under the
     // given-or-stored source. The 409 `"id"` is the CURRENT row's id.
-    if is_truthy(map.get("external_id")) {
-        let incoming = match map.get("external_id") {
-            Some(Value::String(text)) => text.clone(),
-            _ => return Err(Denial::ServerError),
-        };
-        let stored = before_decoded.external_id.clone().unwrap_or_default();
-        if stored != incoming {
-            // `data.get("external_source", stored)` — present-but-empty
-            // still filters (possibly matching `""` rows); absent inherits
-            // the stored value, NULL included.
-            let source: Option<String> = match map.get("external_source") {
-                Some(Value::String(text)) => Some(text.clone()),
-                Some(_) => return Err(Denial::ServerError),
-                None => before_decoded.external_source.clone(),
-            };
-            if comment_external_exists(&pre.pool, &project_id, slug, source.as_deref(), &incoming)
-                .await?
-            {
-                return Err(Denial::Conflict(comment_dup_body(&pk.to_string())));
-            }
+    if let Some((source, incoming)) = patch_external_guard(
+        map,
+        before_decoded.external_id.as_deref(),
+        before_decoded.external_source.clone(),
+    ) {
+        if comment_external_exists(&pre.pool, &project_id, slug, source.as_deref(), &incoming)
+            .await?
+        {
+            return Err(Denial::Conflict(comment_dup_body(&pk.to_string())));
         }
     }
     let mut shape_map = map.clone();
@@ -3869,9 +3975,16 @@ async fn comment_patch_inner(
     .map_err(|error| db_error(error, "comment-patch-update"))?;
     // The `Description` sync (`db/models/issue.py:629-647`): only changed
     // tracked fields, plus `updated_by`/`updated_at` — via queryset
-    // `update()`, so no `save()` override re-strips.
-    let html_changed = validated.comment_html.is_some();
-    let json_changed = validated.comment_json.as_ref() != Some(&before_json);
+    // `update()`, so no `save()` override re-strips. `_changes_on_save`
+    // compares VALUES: a present-but-identical key syncs nothing.
+    let html_changed = validated
+        .comment_html
+        .as_ref()
+        .is_some_and(|html| *html != before_html);
+    let json_changed = validated
+        .comment_json
+        .as_ref()
+        .is_some_and(|json| *json != before_json);
     let stripped_changed = new_stripped != before_stripped;
     // No `description_id` (legacy rows) skips the sync silently (`:631`).
     if html_changed || json_changed || stripped_changed {
@@ -3960,20 +4073,14 @@ async fn comment_patch_inner(
 /// `DELETE .../comments/<pk>/` (`views/issue.py:2103-2121`).
 pub async fn delete_comment(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
     headers: HeaderMap,
 ) -> Response {
     if !crate::runner_runs::is_uuid_path_segment(&issue_id)
         || !crate::runner_runs::is_uuid_path_segment(&pk)
     {
-        return proxy_request(
-            &state,
-            "DELETE",
-            format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/comments/{pk}/"
-            ),
-        )
-        .await;
+        return proxy_request(&state, "DELETE", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     let pk = pk.parse::<Uuid>().expect("checked segment");
@@ -4042,6 +4149,10 @@ async fn comment_delete_inner(
     .execute(&pre.pool)
     .await
     .map_err(|error| db_error(error, "comment-delete"))?;
+    // `delete()` emits the sweep before the view enqueues the activity
+    // (`:2111-2120`): write, sweep, activity.
+    let (sweep_args, sweep_kwargs) = soft_delete_sweep("issuecomment", &pk.to_string());
+    enqueue_best_effort(&pre.pool, SOFT_DELETE_TASK, sweep_args, sweep_kwargs).await;
     let mut requested_map = Map::with_capacity(1);
     requested_map.insert("comment_id".to_owned(), Value::String(pk.to_string()));
     let requested =
@@ -4056,8 +4167,6 @@ async fn comment_delete_inner(
         Utc::now().timestamp(),
     );
     enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
-    let (sweep_args, sweep_kwargs) = soft_delete_sweep("issuecomment", &pk.to_string());
-    enqueue_best_effort(&pre.pool, SOFT_DELETE_TASK, sweep_args, sweep_kwargs).await;
     Ok(Response::builder()
         .status(StatusCode::NO_CONTENT)
         .body(axum::body::Body::empty())
@@ -4765,10 +4874,13 @@ mod tests {
                 .expect_err("errors"),
             Denial::FieldErrors(VALID_DETAIL_BODY.to_owned())
         );
-        assert!(matches!(
-            override_user_id(Some(&Value::from(7)), &actor),
-            Err(Denial::FieldErrors(_))
-        ));
+        // Ints coerce via `UUID(int=…)` and proceed to the save (live
+        // Django FK-violates into the payload 400); corrected from the
+        // valid-detail pin by live probe in review.
+        assert_eq!(
+            override_user_id(Some(&Value::from(7)), &actor).expect("int"),
+            Some(Uuid::from_u128(7))
+        );
     }
 
     #[test]
@@ -4833,26 +4945,45 @@ mod tests {
             ("external_id", Value::String("1".to_owned())),
         ]);
         assert_eq!(
-            dedupe_pair(&map, None).expect("ok"),
+            dedupe_pair(&map, None),
             Some(("gh".to_owned(), "1".to_owned()))
         );
         // Either falsy → no check.
         let map = patch_map(&[("external_id", Value::String(String::new()))]);
-        assert_eq!(dedupe_pair(&map, None).expect("ok"), None);
+        assert_eq!(dedupe_pair(&map, None), None);
         let map = patch_map(&[("external_id", Value::String("1".to_owned()))]);
-        assert_eq!(dedupe_pair(&map, None).expect("ok"), None);
+        assert_eq!(dedupe_pair(&map, None), None);
         // Patch default: the stored source fills an absent key.
         let map = patch_map(&[("external_id", Value::String("1".to_owned()))]);
         assert_eq!(
-            dedupe_pair(&map, Some("gh")).expect("ok"),
+            dedupe_pair(&map, Some("gh")),
             Some(("gh".to_owned(), "1".to_owned()))
         );
-        // Truthy non-strings explode against `varchar` (500).
+        // Scalars stringify via `get_prep_value` (`str()`); the serializer
+        // then coerces numbers or 400s bools. Corrected from the 500 pin
+        // by live probe in review.
         let map = patch_map(&[
             ("external_source", Value::String("gh".to_owned())),
             ("external_id", Value::from(7)),
         ]);
-        assert!(matches!(dedupe_pair(&map, None), Err(Denial::ServerError)));
+        assert_eq!(
+            dedupe_pair(&map, None),
+            Some(("gh".to_owned(), "7".to_owned()))
+        );
+        let map = patch_map(&[
+            ("external_source", Value::from(true)),
+            ("external_id", Value::String("1".to_owned())),
+        ]);
+        assert_eq!(
+            dedupe_pair(&map, None),
+            Some(("True".to_owned(), "1".to_owned()))
+        );
+        // Composites skip (their filter would miss; the serializer 400s).
+        let map = patch_map(&[
+            ("external_source", Value::String("gh".to_owned())),
+            ("external_id", Value::Array(vec![Value::from(1)])),
+        ]);
+        assert_eq!(dedupe_pair(&map, None), None);
     }
 
     #[test]
@@ -4932,5 +5063,340 @@ mod tests {
             page_denial(PageError::ZeroLimit),
             Denial::ServerError
         ));
+    }
+
+    // --- Review regressions (live Django truth, review run) ---
+
+    #[test]
+    fn link_patch_title_collects_all_validator_errors() {
+        // 256 chars + NUL → BOTH errors: DRF `run_validators` extends one
+        // list across MaxLength then ProhibitNull (verified live).
+        let title = "T".repeat(255) + "\0";
+        let map = patch_map(&[("title", Value::String(title))]);
+        let body = validate_link_patch(&map, false, &utc_tz()).expect_err("errors");
+        assert_eq!(
+            body,
+            "{\"title\":[\"Ensure this field has no more than 255 characters.\",\"Null characters are not allowed.\"]}"
+        );
+    }
+
+    #[test]
+    fn char_field_uses_python_strip() {
+        // `str.strip()` removes U+001C-U+001F; Rust `trim()` does not.
+        let map = patch_map(&[("url", Value::String("\u{1c}".to_owned()))]);
+        let body = validate_link_patch(&map, false, &utc_tz()).expect_err("blank");
+        assert_eq!(body, "{\"url\":[\"This field may not be blank.\"]}");
+        assert_eq!(
+            char_field_value(&Value::String("\u{1c}x\u{1f}".to_owned())),
+            "x"
+        );
+    }
+
+    #[test]
+    fn override_created_at_scalar_arms() {
+        // Non-string scalars reach `parse_datetime` raw: `fromisoformat`
+        // raises an UNCAUGHT `TypeError` → 500 (verified live).
+        for raw in [
+            Value::from(5),
+            Value::from(true),
+            Value::Array(vec![Value::from(1)]),
+            Value::Object(Map::new()),
+        ] {
+            assert!(
+                matches!(
+                    override_created_at(Some(&raw), &utc_tz()),
+                    Err(Denial::ServerError)
+                ),
+                "{raw:?}"
+            );
+        }
+        // Null violates NOT NULL → 400; garbage strings → 400; absent → now.
+        assert!(matches!(
+            override_created_at(Some(&Value::Null), &utc_tz()),
+            Err(Denial::FieldErrors(body)) if body == PAYLOAD_NOT_VALID_BODY
+        ));
+        assert!(matches!(
+            override_created_at(Some(&Value::String("garbage".to_owned())), &utc_tz()),
+            Err(Denial::FieldErrors(body)) if body == VALID_DETAIL_BODY
+        ));
+        assert!(override_created_at(None, &utc_tz()).is_ok());
+    }
+
+    #[test]
+    fn override_user_id_int_bool_arms() {
+        // `UUIDField.to_python` coerces ints AND bools via `UUID(int=…)`
+        // (verified live); the save then FK-violates into the 400.
+        let actor = Uuid::nil();
+        assert_eq!(
+            override_user_id(Some(&Value::from(7)), &actor).expect("int"),
+            Some(Uuid::from_u128(7))
+        );
+        assert_eq!(
+            override_user_id(Some(&Value::from(true)), &actor).expect("bool"),
+            Some(Uuid::from_u128(1))
+        );
+        assert_eq!(
+            override_user_id(Some(&Value::from(false)), &actor).expect("bool"),
+            Some(Uuid::from_u128(0))
+        );
+        // Negative ints (`ValueError`) and floats (`ValidationError`, the
+        // `UUID(hex=…)` `AttributeError` wrapped) → valid-detail 400.
+        for raw in [Value::from(-7), Value::from(7.5), Value::from(7.0)] {
+            assert!(
+                matches!(
+                    override_user_id(Some(&raw), &actor),
+                    Err(Denial::FieldErrors(body)) if body == VALID_DETAIL_BODY
+                ),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn patch_external_guard_arms() {
+        let stored_id = Some("extA");
+        let stored_source = Some("srcA".to_owned());
+        // Falsy id skips.
+        let map = patch_map(&[("external_id", Value::String(String::new()))]);
+        assert_eq!(
+            patch_external_guard(&map, stored_id, stored_source.clone()),
+            None
+        );
+        // `str()`-equal skips — including int 5 vs stored "5".
+        let map = patch_map(&[("external_id", Value::String("extA".to_owned()))]);
+        assert_eq!(
+            patch_external_guard(&map, stored_id, stored_source.clone()),
+            None
+        );
+        let map = patch_map(&[("external_id", Value::from(5))]);
+        assert_eq!(
+            patch_external_guard(&map, Some("5"), stored_source.clone()),
+            None
+        );
+        let map = patch_map(&[("external_id", Value::from(true))]);
+        assert_eq!(
+            patch_external_guard(&map, Some("True"), stored_source.clone()),
+            None
+        );
+        // Changed id + absent source inherits the stored source.
+        let map = patch_map(&[("external_id", Value::String("extB".to_owned()))]);
+        assert_eq!(
+            patch_external_guard(&map, stored_id, stored_source.clone()),
+            Some((Some("srcA".to_owned()), "extB".to_owned()))
+        );
+        // Explicit-null source queries IS NULL; empty still filters.
+        let map = patch_map(&[
+            ("external_id", Value::String("extB".to_owned())),
+            ("external_source", Value::Null),
+        ]);
+        assert_eq!(
+            patch_external_guard(&map, stored_id, stored_source.clone()),
+            Some((None, "extB".to_owned()))
+        );
+        let map = patch_map(&[
+            ("external_id", Value::String("extB".to_owned())),
+            ("external_source", Value::String(String::new())),
+        ]);
+        assert_eq!(
+            patch_external_guard(&map, stored_id, stored_source.clone()),
+            Some((Some(String::new()), "extB".to_owned()))
+        );
+        // Differing scalars filter via `get_prep_value` (`str()`); the
+        // serializer then coerces numbers or 400s bools (verified live).
+        let map = patch_map(&[("external_id", Value::from(6))]);
+        assert_eq!(
+            patch_external_guard(&map, stored_id, None),
+            Some((None, "6".to_owned()))
+        );
+        let map = patch_map(&[
+            ("external_id", Value::String("extB".to_owned())),
+            ("external_source", Value::from(7)),
+        ]);
+        assert_eq!(
+            patch_external_guard(&map, stored_id, None),
+            Some((Some("7".to_owned()), "extB".to_owned()))
+        );
+        // Composites skip (their filter would miss; the serializer 400s).
+        for raw in [
+            Value::Array(vec![Value::from(1)]),
+            Value::Object(Map::new()),
+        ] {
+            let map = patch_map(&[("external_id", raw.clone())]);
+            assert_eq!(patch_external_guard(&map, stored_id, None), None, "{raw:?}");
+            let map = patch_map(&[
+                ("external_id", Value::String("extB".to_owned())),
+                ("external_source", raw.clone()),
+            ]);
+            assert_eq!(patch_external_guard(&map, stored_id, None), None, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn window_rows_negative_limit_500s() {
+        use crate::paginator::Cursor;
+        let rows = vec![1];
+        // `results[:-1]` on the lazy queryset → 500 (verified live).
+        let cursor = Cursor::from_string("-1:0:0").expect("cursor");
+        assert!(matches!(
+            window_rows(&rows, -1, &cursor),
+            Err(Denial::ServerError)
+        ));
+        // A negative OFFSET still 400s first (`BadPaginationError`).
+        let cursor = Cursor::from_string("-1:1:0").expect("cursor");
+        assert!(matches!(
+            window_rows(&rows, -1, &cursor),
+            Err(Denial::BadDetail(_))
+        ));
+        // Zero limit still trims (the envelope `max_hits` 500s later).
+        let cursor = Cursor::from_string("0:0:0").expect("cursor");
+        let (page, _) = window_rows(&rows, 0, &cursor).expect("window");
+        assert!(page.is_empty());
+    }
+
+    #[test]
+    fn fk_violation_arms() {
+        #[derive(Debug)]
+        struct FakeDbError {
+            code: &'static str,
+        }
+        impl std::fmt::Display for FakeDbError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "fake {}", self.code)
+            }
+        }
+        impl std::error::Error for FakeDbError {}
+        impl sqlx::error::DatabaseError for FakeDbError {
+            fn message(&self) -> &str {
+                "fake"
+            }
+            fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+                Some(self.code.into())
+            }
+            fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+            fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+            fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+                self
+            }
+            fn kind(&self) -> sqlx::error::ErrorKind {
+                sqlx::error::ErrorKind::ForeignKeyViolation
+            }
+        }
+        let fk = sqlx::Error::Database(Box::new(FakeDbError { code: "23503" }));
+        assert!(is_fk_violation(&fk));
+        let other = sqlx::Error::Database(Box::new(FakeDbError { code: "23505" }));
+        assert!(!is_fk_violation(&other));
+        assert!(!is_fk_violation(&sqlx::Error::RowNotFound));
+    }
+
+    #[tokio::test]
+    async fn link_expansions_cover_audit_fields() {
+        // `expand=created_by|updated_by` supply values (null FKs → `{}` via
+        // `None`); without them the shape 500s on `MissingExpansion`.
+        let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/nonexistent").expect("lazy pool");
+        let decoded = DecodedLink {
+            id: "id".to_owned(),
+            created_at: "ts".to_owned(),
+            updated_at: "ts".to_owned(),
+            deleted_at: None,
+            title: None,
+            url: "https://example.com".to_owned(),
+            metadata: Value::Object(Map::new()),
+            created_by: None,
+            updated_by: None,
+            project: "p".to_owned(),
+            workspace: "w".to_owned(),
+            issue: "i".to_owned(),
+        };
+        let kept = ["created_by".to_owned(), "updated_by".to_owned()];
+        let expansions = link_expansions(
+            &pool,
+            &decoded,
+            "slug",
+            &utc_tz(),
+            None,
+            &["created_by", "updated_by"],
+            &kept,
+        )
+        .await
+        .expect("expansions");
+        assert_eq!(expansions, vec![("created_by", None), ("updated_by", None)]);
+        let value = render_link_value(&decoded, None, &["created_by", "updated_by"], &expansions)
+            .expect("renders");
+        assert_eq!(value.get("created_by"), Some(&Value::Object(Map::new())));
+        assert_eq!(value.get("updated_by"), Some(&Value::Object(Map::new())));
+    }
+
+    #[tokio::test]
+    async fn comment_expansions_cover_parent() {
+        // `expand=parent` with a null parent supplies `None` (renders `{}`).
+        let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/nonexistent").expect("lazy pool");
+        let decoded = DecodedComment {
+            id: "id".to_owned(),
+            is_member: None,
+            created_at: "ts".to_owned(),
+            updated_at: "ts".to_owned(),
+            deleted_at: None,
+            comment_json: Value::Object(Map::new()),
+            comment_html: "<p></p>".to_owned(),
+            attachments: Vec::new(),
+            labels: Vec::new(),
+            access: "INTERNAL".to_owned(),
+            external_source: None,
+            external_id: None,
+            speaker_type: "human".to_owned(),
+            speaker_label: String::new(),
+            speaker_agent_run_id: None,
+            edited_at: None,
+            created_by: None,
+            updated_by: None,
+            project: "p".to_owned(),
+            workspace: "w".to_owned(),
+            description: None,
+            issue: "i".to_owned(),
+            actor: None,
+            parent: None,
+        };
+        let kept = ["parent".to_owned()];
+        let expansions =
+            comment_expansions(&pool, &decoded, "slug", &utc_tz(), None, &["parent"], &kept)
+                .await
+                .expect("expansions");
+        assert_eq!(expansions, vec![("parent", None)]);
+        let value =
+            render_comment_value(&decoded, None, None, &["parent"], &expansions).expect("renders");
+        assert_eq!(value.get("parent"), Some(&Value::Object(Map::new())));
+    }
+
+    #[test]
+    fn form_comment_json_blank_speaker_clears() {
+        // `get_value`: blank + `allow_null`, no `allow_blank` → None.
+        let mut map = patch_map(&[("speaker_agent_run_id", Value::String(String::new()))]);
+        form_comment_json(&mut map, true).expect("ok");
+        assert_eq!(map.get("speaker_agent_run_id"), Some(&Value::Null));
+        let mut map = patch_map(&[("speaker_agent_run_id", Value::String(String::new()))]);
+        form_comment_json(&mut map, false).expect("ok");
+        assert_eq!(
+            map.get("speaker_agent_run_id"),
+            Some(&Value::String(String::new()))
+        );
+    }
+
+    #[test]
+    fn description_stripped_for_create_keeps_entities() {
+        // `Description.save` recomputes with Django's `strip_tags`
+        // (verbatim entities), unlike the comment column (verified live).
+        assert_eq!(description_stripped_for_create(""), None);
+        assert_eq!(
+            description_stripped_for_create("<p>R&amp;D</p>").as_deref(),
+            Some("R&amp;D")
+        );
+        assert_eq!(
+            description_stripped_for_create("<p>hi</p>").as_deref(),
+            Some("hi")
+        );
     }
 }
