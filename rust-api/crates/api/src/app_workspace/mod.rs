@@ -29,6 +29,7 @@
 //! last-visited — PIDASHCONV-616).
 
 pub mod gates;
+pub mod handlers_favorites_drafts;
 pub mod handlers_invites;
 pub mod handlers_lists;
 pub mod handlers_members;
@@ -47,7 +48,8 @@ use crate::state::AppState;
 /// (sibling D-24 handler issues extend this merge; merges keep both
 /// sides), merged here for the F-10 overlay seam.
 pub fn routes() -> Router<AppState> {
-    handlers_invites::routes()
+    handlers_favorites_drafts::routes()
+        .merge(handlers_invites::routes())
         .merge(handlers_lists::routes())
         .merge(handlers_members::routes())
         .merge(handlers_prefs::routes())
