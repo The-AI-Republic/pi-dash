@@ -460,15 +460,16 @@ async fn load_timezone_name(
 }
 
 /// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
-/// after `super().initial()`). A missing or empty zone defaults to UTC;
-/// an unknown zone name 400s: `zoneinfo.ZoneInfo` raises
-/// `ZoneInfoNotFoundError`, which subclasses `KeyError`, so
-/// `handle_exception` answers the `KeyError` branch
-/// (`api/views/base.py:160-164`), never a 500.
+/// after `super().initial()`). A missing zone defaults to UTC; an unknown
+/// zone name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`,
+/// which subclasses `KeyError`, so `handle_exception` answers the
+/// `KeyError` branch (`api/views/base.py:160-164`). An EMPTY zone 500s:
+/// `ZoneInfo('')` raises `ValueError` (not `KeyError`), which falls
+/// through to the generic 500 (`api/views/base.py:166-171`).
 fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
-    let raw = timezone.filter(|zone| !zone.is_empty());
-    match raw {
+    match timezone {
         None => Ok(chrono_tz::UTC),
+        Some("") => Err(Denial::ServerError),
         Some(zone) => zone
             .parse::<Tz>()
             .map_err(|_| Denial::BadError("The required key does not exist.".to_owned())),
@@ -2434,6 +2435,23 @@ async fn users_me_inner(state: &AppState, headers: &HeaderMap) -> Result<Respons
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activate_timezone_empty_zone_500s() {
+        // `ZoneInfo('')` raises `ValueError` (not `KeyError`), so an
+        // empty stored zone is the generic 500 while an unknown zone is
+        // the `KeyError`-branch 400 (PIDASHCONV-747, live-probed).
+        assert!(matches!(
+            activate_timezone(Some("")),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(
+            activate_timezone(Some("Not/AZone")),
+            Err(Denial::BadError(_))
+        ));
+        assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
+        assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
+    }
 
     fn lite(id: &str) -> UserLite {
         UserLite {

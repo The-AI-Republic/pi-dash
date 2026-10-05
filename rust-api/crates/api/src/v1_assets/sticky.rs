@@ -465,21 +465,35 @@ async fn require_workspace_user(
     }
 }
 
-/// The request's render zone (`TimezoneMixin`: the acting user's
-/// `user_timezone`). A missing user row or a NULL zone is the 500
-/// Python's `DoesNotExist`/`TypeError` path becomes; an unparsable zone
-/// name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`, which
-/// subclasses `KeyError` (`api/views/base.py:160-164`).
-async fn request_timezone(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Tz, Denial> {
+/// The request's render zone name (`TimezoneMixin`: the acting user's
+/// `user_timezone`), loaded but NOT parsed — parsing happens in
+/// [`activate_timezone`].
+async fn load_timezone_name(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Option<String>, Denial> {
     let zone: Option<String> =
         sqlx::query_scalar(r#"SELECT user_timezone FROM users WHERE id = $1"#)
             .bind(user_id)
             .fetch_optional(pool)
             .await
             .map_err(|_| Denial::ServerError)?;
-    let zone = zone.ok_or(Denial::ServerError)?;
-    zone.parse::<Tz>()
-        .map_err(|_| Denial::BadError("The required key does not exist.".to_owned()))
+    Ok(zone)
+}
+
+/// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
+/// after permissions). A missing user row or a NULL zone is the 500
+/// Python's `DoesNotExist`/`TypeError` path becomes (NULL already 500s
+/// at decode); an unknown zone name 400s: `zoneinfo.ZoneInfo` raises
+/// `ZoneInfoNotFoundError`, which subclasses `KeyError`
+/// (`api/views/base.py:160-164`). An EMPTY zone 500s: `ZoneInfo('')`
+/// raises `ValueError` (not `KeyError`), which falls through to the
+/// generic 500 (`api/views/base.py:166-171`).
+fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
+    match timezone {
+        None => Err(Denial::ServerError),
+        Some("") => Err(Denial::ServerError),
+        Some(zone) => zone
+            .parse::<Tz>()
+            .map_err(|_| Denial::BadError("The required key does not exist.".to_owned())),
+    }
 }
 
 fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
@@ -1480,7 +1494,11 @@ async fn context(state: &AppState, headers: &HeaderMap, slug: &str) -> Result<Co
     let secret = state.settings().secret_key.as_bytes();
     let user_id = authenticate(&pool, secret, headers).await?;
     require_workspace_user(&pool, slug, &user_id).await?;
-    let timezone = request_timezone(&pool, &user_id).await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s and an empty zone
+    // 500s, only for survivors).
+    let zone_name = load_timezone_name(&pool, &user_id).await?;
+    let timezone = activate_timezone(zone_name.as_deref())?;
     Ok(Context {
         pool,
         user_id,
@@ -1857,6 +1875,25 @@ async fn enqueue_soft_delete(pool: &sqlx::PgPool, sticky_id: &Uuid) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activate_timezone_empty_zone_500s() {
+        // `ZoneInfo('')` raises `ValueError` (not `KeyError`), so an
+        // empty stored zone is the generic 500 while an unknown zone is
+        // the `KeyError`-branch 400 (PIDASHCONV-747, live-probed). A
+        // missing zone stays the 500 (unlike the sibling carriers'
+        // UTC default — race-only, preserved as-is).
+        assert!(matches!(activate_timezone(None), Err(Denial::ServerError)));
+        assert!(matches!(
+            activate_timezone(Some("")),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(
+            activate_timezone(Some("Not/AZone")),
+            Err(Denial::BadError(_))
+        ));
+        assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
+    }
 
     fn json_map(pairs: &[(&str, Value)]) -> Value {
         let mut map = Map::with_capacity(pairs.len());

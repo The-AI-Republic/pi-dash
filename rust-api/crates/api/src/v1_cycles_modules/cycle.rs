@@ -609,12 +609,17 @@ async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Optio
 /// after `super().initial()`). A missing zone defaults to UTC; an unknown
 /// zone name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`,
 /// which subclasses `KeyError`, so `handle_exception` answers the
-/// `KeyError` branch (`api/views/base.py:160-164`), never a 500.
+/// `KeyError` branch (`api/views/base.py:160-164`). An EMPTY zone 500s:
+/// `ZoneInfo('')` raises `ValueError` (not `KeyError`), which falls
+/// through to the generic 500 (`api/views/base.py:166-171`).
 fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
-    timezone
-        .unwrap_or("UTC")
-        .parse()
-        .map_err(|_| Denial::BadError("The required key does not exist.".to_owned()))
+    match timezone {
+        None => Ok(chrono_tz::UTC),
+        Some("") => Err(Denial::ServerError),
+        Some(zone) => zone
+            .parse()
+            .map_err(|_| Denial::BadError("The required key does not exist.".to_owned())),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7740,6 +7745,23 @@ mod tests {
     use super::*;
     use axum::http::StatusCode;
     use tower::ServiceExt;
+
+    #[test]
+    fn activate_timezone_empty_zone_500s() {
+        // `ZoneInfo('')` raises `ValueError` (not `KeyError`), so an
+        // empty stored zone is the generic 500 while an unknown zone is
+        // the `KeyError`-branch 400 (PIDASHCONV-747, live-probed).
+        assert!(matches!(
+            activate_timezone(Some("")),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(
+            activate_timezone(Some("Not/AZone")),
+            Err(Denial::BadError(_))
+        ));
+        assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
+        assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
+    }
 
     fn app() -> axum::Router {
         // Port 1 is never bound, so proxied (unowned) methods fail closed

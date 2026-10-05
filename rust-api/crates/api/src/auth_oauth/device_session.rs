@@ -764,16 +764,21 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
         Caller::Api { raw, .. } => {
             // `request.auth` is the raw token string
             // (`api_authentication.py:62`); the row is re-read so a
-            // missing or inactive token stays a silent ok.
-            let row: Option<(Uuid, bool)> =
-                match sqlx::query_as(r#"SELECT id, is_active FROM api_tokens WHERE token = $1"#)
-                    .bind(&raw)
-                    .fetch_optional(&pool)
-                    .await
-                {
-                    Ok(row) => row,
-                    Err(_) => return Failure::server_error().into_response(),
-                };
+            // missing or inactive token stays a silent ok. The
+            // `deleted_at IS NULL` conjunct is the `SoftDeletionManager`
+            // scope (`db/mixins.py:56-66`): Python re-reads via
+            // `APIToken.objects.get`, which never sees soft-deleted rows
+            // (`device.py:504`).
+            let row: Option<(Uuid, bool)> = match sqlx::query_as(
+                r#"SELECT id, is_active FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#,
+            )
+            .bind(&raw)
+            .fetch_optional(&pool)
+            .await
+            {
+                Ok(row) => row,
+                Err(_) => return Failure::server_error().into_response(),
+            };
             if let Some((id, true)) = row {
                 if sqlx::query(
                     r#"UPDATE api_tokens SET is_active = false, updated_at = $1 WHERE id = $2"#,

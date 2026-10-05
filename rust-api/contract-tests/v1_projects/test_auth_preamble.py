@@ -19,6 +19,27 @@ zones, member callers):
    400s with the ``KeyError`` branch body (``ZoneInfoNotFoundError`` is
    a ``KeyError``), it never 500s.
 
+PIDASHCONV-747 pins four adjacent latent divergences the 737 work found
+and left out of scope (each live-probed on Django first; ``''`` is
+unreachable via the API — ``choices=pytz.common_timezones`` — so these
+tests seed the zone straight into ``users``, like the 737 tests do):
+
+5. An EMPTY stored zone 500s for allowed callers: ``ZoneInfo('')``
+   raises ``ValueError`` (not ``KeyError``), which falls through
+   ``handle_exception`` to the generic 500 — while an empty zone +
+   denied caller still 403s (the gate runs first).
+6. The asset generic/user routes (``BaseAPIView`` with no further gate)
+   activate the zone too: bad zone + any authenticated caller 400s,
+   empty zone + any authenticated caller 500s, anonymous 401s.
+7. Modules / states / stickies BAD-zone controls: 737 fixed their
+   mapping but pinned no zone test for them; an invalid zone + member
+   400s there too.
+
+(Item 4 of PIDASHCONV-747 — the device-logout revoke re-read missing
+``AND deleted_at IS NULL`` — is race-only with byte-identical
+responses, so no black-box test can pin it; it is covered by code
+review and the existing revoke suite staying green.)
+
 Every test seeds its own rows and never mutates the shared session
 ``seed`` (unique tags, no teardown needed).
 """
@@ -36,7 +57,10 @@ from _harness import db, djangocrypto, http  # noqa: E402
 INVALID_TOKEN_BODY = {"detail": "Given API token is not valid"}
 GATE_DENIAL_BODY = {"detail": "You do not have permission to perform this action."}
 KEY_ERROR_BODY = {"error": "The required key does not exist."}
+SERVER_ERROR_BODY = {"error": "Something went wrong please try again later"}
+UNAUTHENTICATED_BODY = {"detail": "Authentication credentials were not provided."}
 BAD_ZONE = "Not/AZone"
+EMPTY_ZONE = ""
 
 
 def _project_list(seed):
@@ -271,3 +295,181 @@ def test_soft_deleted_token_403_device_workspaces(seed, conn):
         expect=403,
     )
     assert r.json() == INVALID_TOKEN_BODY
+
+
+# ---------------------------------------------------------------------------
+# PIDASHCONV-747: empty-zone mapping, asset zone parsing, BAD-zone controls
+# ---------------------------------------------------------------------------
+
+
+def _stickies(seed):
+    return f"/api/v1/workspaces/{seed['ws_a']['slug']}/stickies/"
+
+
+def _generic_asset(seed):
+    return f"/api/v1/workspaces/{seed['ws_a']['slug']}/assets/{uuid.uuid4()}/"
+
+
+def _user_asset():
+    return f"/api/v1/assets/user-assets/{uuid.uuid4()}/"
+
+
+def _users_me():
+    return "/api/v1/users/me/"
+
+
+def _empty_zone_outsider_key(conn):
+    tag = db.new_tag()
+    user = db.create_user(conn, tag + "e")
+    key = db.create_api_token(conn, user["id"], tag + "ek")["token"]
+    _exec(conn, "UPDATE users SET user_timezone = %s WHERE id = %s", (EMPTY_ZONE, user["id"]))
+    return key
+
+
+def _empty_zone_member_key(seed, conn):
+    tag = db.new_tag()
+    user = db.create_user(conn, tag + "e")
+    db.add_workspace_member(conn, seed["ws_a"]["id"], user["id"], db.MEMBER)
+    db.add_project_member(conn, seed["ws_a"]["id"], seed["project"]["id"], user["id"], db.MEMBER)
+    key = db.create_api_token(conn, user["id"], tag + "ek")["token"]
+    _exec(conn, "UPDATE users SET user_timezone = %s WHERE id = %s", (EMPTY_ZONE, user["id"]))
+    return key
+
+
+def test_empty_zone_member_500_projects(seed, conn):
+    r = http.get(_empty_zone_member_key(seed, conn), _project_detail(seed), expect=500)
+    assert r.json() == SERVER_ERROR_BODY
+
+
+def test_empty_zone_denied_caller_403_projects(seed, conn):
+    r = http.get(_empty_zone_outsider_key(conn), _project_detail(seed), expect=403)
+    assert r.json() == GATE_DENIAL_BODY
+
+
+def test_empty_zone_member_500_members(seed, conn):
+    r = http.get(_empty_zone_member_key(seed, conn), _project_members(seed), expect=500)
+    assert r.json() == SERVER_ERROR_BODY
+
+
+def test_empty_zone_denied_caller_403_members(seed, conn):
+    r = http.get(_empty_zone_outsider_key(conn), _project_members(seed), expect=403)
+    assert r.json() == GATE_DENIAL_BODY
+
+
+def test_empty_zone_member_500_cycles(seed, conn):
+    r = http.get(_empty_zone_member_key(seed, conn), _cycles(seed), expect=500)
+    assert r.json() == SERVER_ERROR_BODY
+
+
+def test_empty_zone_denied_caller_403_cycles(seed, conn):
+    r = http.get(_empty_zone_outsider_key(conn), _cycles(seed), expect=403)
+    assert r.json() == GATE_DENIAL_BODY
+
+
+def test_empty_zone_member_500_modules(seed, conn):
+    r = http.get(_empty_zone_member_key(seed, conn), _modules(seed), expect=500)
+    assert r.json() == SERVER_ERROR_BODY
+
+
+def test_empty_zone_denied_caller_403_modules(seed, conn):
+    r = http.get(_empty_zone_outsider_key(conn), _modules(seed), expect=403)
+    assert r.json() == GATE_DENIAL_BODY
+
+
+def test_empty_zone_member_500_states(seed, conn):
+    r = http.get(_empty_zone_member_key(seed, conn), _project_states(seed), expect=500)
+    assert r.json() == SERVER_ERROR_BODY
+
+
+def test_empty_zone_denied_caller_403_states(seed, conn):
+    r = http.get(_empty_zone_outsider_key(conn), _project_states(seed), expect=403)
+    assert r.json() == GATE_DENIAL_BODY
+
+
+def test_empty_zone_member_500_stickies(seed, conn):
+    r = http.get(_empty_zone_member_key(seed, conn), _stickies(seed), expect=500)
+    assert r.json() == SERVER_ERROR_BODY
+
+
+def test_empty_zone_denied_caller_403_stickies(seed, conn):
+    r = http.get(_empty_zone_outsider_key(conn), _stickies(seed), expect=403)
+    assert r.json() == GATE_DENIAL_BODY
+
+
+def test_empty_zone_500_users_me(seed, conn):
+    # No membership gate beyond `IsAuthenticated`: any authenticated
+    # caller with an empty zone 500s.
+    r = http.get(_empty_zone_outsider_key(conn), _users_me(), expect=500)
+    assert r.json() == SERVER_ERROR_BODY
+
+
+def test_invalid_zone_member_400_modules(seed, conn):
+    r = http.get(_zoneless_member_key(seed, conn), _modules(seed), expect=400)
+    assert r.json() == KEY_ERROR_BODY
+
+
+def test_invalid_zone_member_400_states(seed, conn):
+    r = http.get(_zoneless_member_key(seed, conn), _project_states(seed), expect=400)
+    assert r.json() == KEY_ERROR_BODY
+
+
+def test_invalid_zone_member_400_stickies(seed, conn):
+    r = http.get(_zoneless_member_key(seed, conn), _stickies(seed), expect=400)
+    assert r.json() == KEY_ERROR_BODY
+
+
+def test_invalid_zone_400_generic_assets(seed, conn):
+    # The asset id is random: the zone 400 lands before the row lookup.
+    r = http.get(_zoneless_outsider_key(conn), _generic_asset(seed), expect=400)
+    assert r.json() == KEY_ERROR_BODY
+
+
+def test_empty_zone_500_generic_assets(seed, conn):
+    r = http.get(_empty_zone_outsider_key(conn), _generic_asset(seed), expect=500)
+    assert r.json() == SERVER_ERROR_BODY
+
+
+def test_anonymous_401_generic_assets(seed, conn):
+    r = http.get(None, _generic_asset(seed), expect=401)
+    assert r.json() == UNAUTHENTICATED_BODY
+
+
+def test_invalid_zone_400_user_assets(seed, conn):
+    r = http.patch(_zoneless_outsider_key(conn), _user_asset(), json={}, expect=400)
+    assert r.json() == KEY_ERROR_BODY
+
+
+def test_empty_zone_500_user_assets(seed, conn):
+    r = http.patch(_empty_zone_outsider_key(conn), _user_asset(), json={}, expect=500)
+    assert r.json() == SERVER_ERROR_BODY
+
+
+def test_anonymous_401_user_assets(seed, conn):
+    r = http.patch(None, _user_asset(), json={}, expect=401)
+    assert r.json() == UNAUTHENTICATED_BODY
+
+
+def test_invalid_zone_400_user_asset_upload(seed, conn):
+    payload = {
+        "name": "profile.jpg",
+        "type": "image/jpeg",
+        "size": 1024000,
+        "entity_type": "USER_AVATAR",
+    }
+    r = http.post(
+        _zoneless_outsider_key(conn), "/api/v1/assets/user-assets/", json=payload, expect=400
+    )
+    assert r.json() == KEY_ERROR_BODY
+
+
+def test_empty_zone_500_user_asset_upload(seed, conn):
+    payload = {
+        "name": "profile.jpg",
+        "type": "image/jpeg",
+        "size": 1024000,
+        "entity_type": "USER_AVATAR",
+    }
+    r = http.post(
+        _empty_zone_outsider_key(conn), "/api/v1/assets/user-assets/", json=payload, expect=500
+    )
+    assert r.json() == SERVER_ERROR_BODY
