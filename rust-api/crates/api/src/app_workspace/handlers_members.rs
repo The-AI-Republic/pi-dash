@@ -1078,8 +1078,8 @@ fn py_int_str(text: &str) -> Option<i64> {
 }
 
 // ---------------------------------------------------------------------------
-// Django `parse_datetime` (`django/utils/dateparse.py`, via
-// `datetime.fromisoformat` on Python 3.12)
+// Django `parse_datetime` (`django/utils/dateparse.py`, Django 4.2.30):
+// `datetime.fromisoformat` first, `datetime_re` fallback (CPython 3.12)
 // ---------------------------------------------------------------------------
 
 /// Humanized `iso-8601` input format (`rest_framework/utils/
@@ -1095,14 +1095,23 @@ enum ParsedDt {
 }
 
 /// Parse exactly what Django's `parse_datetime` accepts (pinned against
-/// CPython 3.12 empirically): calendar dates (`YYYY-MM-DD`, `YYYYMMDD`)
-/// and ISO week dates (`YYYY-Www[-d]`, `YYYYWww[d]`, weekday default 1),
-/// an optional time after any single non-digit separator (parts 1-2
-/// digits, seconds optional, `.`/`,` fraction always a seconds fraction
-/// truncated to 6 digits), and an optional `Z`/numeric offset (`±HH`,
-/// `±HHMM`, `±HH:MM`, `±HHMMSS`, `±HH:MM:SS`, total under 24h).
-/// Anything else is `None` (the caller's invalid arm).
+/// Django 4.2.30 / CPython 3.12 empirically): the `fromisoformat` ∪
+/// `datetime_re` union — `fromisoformat` first, the regex fallback when
+/// it raises. Anything else is `None` (the caller's invalid arm).
 fn parse_django_datetime(text: &str) -> Option<ParsedDt> {
+    parse_fromisoformat_datetime(text).or_else(|| parse_regex_datetime(text))
+}
+
+/// Arm 1: CPython 3.12 `datetime.fromisoformat` — calendar dates
+/// (`YYYY-MM-DD`, `YYYYMMDD`) and ISO week dates (`YYYY-Www[-d]`,
+/// `YYYYWww[d]`, weekday default 1), an optional time after any single
+/// non-digit separator (parts strictly two digits, seconds optional,
+/// `.`/`,` fraction always a seconds fraction truncated to 6 digits),
+/// one optional gap byte, and an optional `Z`/numeric offset (`±HH`,
+/// `±HHMM`, `±HH:MM`, `±HHMMSS`, `±HH:MM:SS`, optional seconds fraction
+/// after any count, total strictly under 24h). Surrounding whitespace
+/// rejects (the C parser is ASCII-strict).
+fn parse_fromisoformat_datetime(text: &str) -> Option<ParsedDt> {
     if text.is_empty() || py_strip(text).len() != text.len() {
         return None;
     }
@@ -1223,15 +1232,18 @@ fn weekday_as_monday0(weekday: u32) -> chrono::Weekday {
 }
 
 /// Parse the time tail (time + optional fraction + optional offset).
+/// Every component is strictly two digits (the C parser's 2-char
+/// windows); 1-digit times belong to the regex arm, which accepts the
+/// regex-reachable ones with identical values.
 fn parse_iso_time(date: chrono::NaiveDate, rest: &str) -> Option<ParsedDt> {
-    let (hour, rest) = parse_time_part(rest)?;
+    let (hour, rest) = take_time2(rest)?;
     if hour > 23 {
         return None;
     }
     let (minute, second, rest) = if let Some(tail) = rest.strip_prefix(':') {
-        let (minute, rest) = parse_time_part(tail)?;
+        let (minute, rest) = take_time2(tail)?;
         let (second, rest) = if let Some(tail) = rest.strip_prefix(':') {
-            let (second, rest) = parse_time_part(tail)?;
+            let (second, rest) = take_time2(tail)?;
             (second, rest)
         } else {
             (0, rest)
@@ -1256,7 +1268,7 @@ fn parse_iso_time(date: chrono::NaiveDate, rest: &str) -> Option<ParsedDt> {
     // The fraction (`.` or `,`) is always a seconds fraction — even on
     // the hour or minute (`T10.5` is 10:00:00.5, verified) — truncated
     // past 6 digits and right-padded to microseconds.
-    let (micros, rest) = match rest.strip_prefix(['.', ',']) {
+    let (micros, frac_len, rest) = match rest.strip_prefix(['.', ',']) {
         Some(frac) => {
             let digits: String = frac.chars().take_while(|c| c.is_ascii_digit()).collect();
             if digits.is_empty() {
@@ -1266,35 +1278,49 @@ fn parse_iso_time(date: chrono::NaiveDate, rest: &str) -> Option<ParsedDt> {
             while micros.len() < 6 {
                 micros.push('0');
             }
-            (micros.parse().ok()?, &frac[digits.len()..])
+            (micros.parse().ok()?, digits.len(), &frac[digits.len()..])
         }
-        None => (0, rest),
+        None => (0, 0, rest),
     };
     let naive = date.and_hms_micro_opt(hour, minute, second, micros)?;
     if rest.is_empty() {
         return Some(ParsedDt::Naive(naive));
     }
-    let offset_secs = parse_iso_offset(rest)?;
-    let utc = naive.and_utc() - chrono::Duration::seconds(offset_secs);
+    // One gap byte before the tz (the C parser ignores a single
+    // trailing time char when a tz follows) — but only past a
+    // component boundary or 6+ fraction digits: a short fraction must
+    // abut the tz, longer gaps and multibyte whitespace reject (all
+    // probed).
+    let gap_ok = frac_len == 0 || frac_len >= 6;
+    let tz_text = match rest.as_bytes().first() {
+        Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c' | 0x1c..=0x1f) if gap_ok => {
+            &rest[1..]
+        }
+        _ => rest,
+    };
+    let offset_micros = parse_iso_offset(tz_text)?;
+    let utc = naive.and_utc() - chrono::Duration::microseconds(offset_micros);
     Some(ParsedDt::Aware(utc))
 }
 
-/// One 1-2 digit time component (greedy two).
-fn parse_time_part(text: &str) -> Option<(u32, &str)> {
+/// One strictly-two-digit time component (the C parser reads 2-char
+/// windows; unlike the regex arm, nothing here backtracks narrower).
+fn take_time2(text: &str) -> Option<(u32, &str)> {
     let bytes = text.as_bytes();
-    if !bytes.first().is_some_and(|b| b.is_ascii_digit()) {
-        return None;
+    if bytes.len() >= 2 && bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit() {
+        return Some((text[..2].parse().ok()?, &text[2..]));
     }
-    let len = if bytes.get(1).is_some_and(|b| b.is_ascii_digit()) {
-        2
-    } else {
-        1
-    };
-    Some((text[..len].parse().ok()?, &text[len..]))
+    None
 }
 
-/// `Z` (uppercase only) or a numeric offset; the total must be under 24h
-/// (CPython raises past it, which DRF suppresses into the invalid arm).
+/// `Z` (uppercase only) or a numeric offset, returned as signed total
+/// microseconds; the total must stay strictly under 24h (CPython raises
+/// past it, which DRF suppresses into the invalid arm). A seconds
+/// fraction (`.`/`,`, any digit count, truncated to 6) may follow any
+/// component count — `+05.5` is 5 hours plus half a second — and a
+/// fraction-only offset (zero hours/minutes/seconds) collapses to UTC,
+/// sign included (both probed on CPython 3.12, whose C parser differs
+/// from `_pydatetime` here).
 fn parse_iso_offset(text: &str) -> Option<i64> {
     if text == "Z" {
         return Some(0);
@@ -1306,9 +1332,25 @@ fn parse_iso_offset(text: &str) -> Option<i64> {
         _ => return None,
     };
     let digits = &text[1..];
-    let (hours, minutes, seconds) = if digits.contains(':') {
+    // The fraction attaches to the offset body in any spelling; the
+    // remainder after the separator must be ASCII digits only.
+    let (clock, micros) = match digits.find(['.', ',']) {
+        Some(pos) => {
+            let frac = &digits[pos + 1..];
+            if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let mut padded = frac[..frac.len().min(6)].to_owned();
+            while padded.len() < 6 {
+                padded.push('0');
+            }
+            (&digits[..pos], padded.parse().ok()?)
+        }
+        None => (digits, 0),
+    };
+    let (hours, minutes, seconds) = if clock.contains(':') {
         // Extended form: every present part is exactly two digits.
-        let mut parts = digits.split(':');
+        let mut parts = clock.split(':');
         let hour_text = parts.next()?;
         let minute_text = parts.next()?;
         if hour_text.len() != 2 || minute_text.len() != 2 {
@@ -1330,20 +1372,20 @@ fn parse_iso_offset(text: &str) -> Option<i64> {
         }
         (hours, minutes, seconds)
     } else {
-        if digits.len() != 2 && digits.len() != 4 && digits.len() != 6 {
+        if clock.len() != 2 && clock.len() != 4 && clock.len() != 6 {
             return None;
         }
-        if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        if !clock.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        let hours: i64 = digits[..2].parse().ok()?;
-        let minutes: i64 = digits
+        let hours: i64 = clock[..2].parse().ok()?;
+        let minutes: i64 = clock
             .get(2..4)
             .map(str::parse)
             .transpose()
             .ok()?
             .unwrap_or(0);
-        let seconds: i64 = digits
+        let seconds: i64 = clock
             .get(4..6)
             .map(str::parse)
             .transpose()
@@ -1354,13 +1396,180 @@ fn parse_iso_offset(text: &str) -> Option<i64> {
     if hours < 0 || minutes < 0 || seconds < 0 {
         return None;
     }
+    // A fraction-only offset is UTC (probed: `+00:00:00.5` carries
+    // `timezone.utc`, not a half-second offset).
+    if hours == 0 && minutes == 0 && seconds == 0 {
+        return Some(0);
+    }
     // Minutes/seconds are unchecked (`+00:61` is accepted); only the
-    // total must stay strictly under a day.
-    let total = hours * 3600 + minutes * 60 + seconds;
-    if total.abs() >= 86_400 {
+    // total must stay strictly under a day, in microseconds.
+    let total = (hours * 3600 + minutes * 60 + seconds) * 1_000_000 + micros;
+    if total >= 86_400_000_000 {
         return None;
     }
     Some(sign * total)
+}
+
+/// Arm 2: Django's `datetime_re` fallback (`django/utils/dateparse.py`,
+/// tried when `fromisoformat` raises) — `YYYY-M-D[T ]H:M[:S[.ffffff]]`
+/// with 1-2 digit parts, `T`/space separator only, `.`/`,` fraction of
+/// at most 12 digits (right-padded to microseconds, Django's
+/// `ljust(6, "0")`), `re \s*` before an optional `Z`/`±HH`/`±HHMM`/
+/// `±HH:MM` zone (parts unchecked, total under 24h), and a `$` end
+/// (which also matches one trailing newline — probed).
+fn parse_regex_datetime(text: &str) -> Option<ParsedDt> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 5 || !bytes[..4].iter().all(|b| b.is_ascii_digit()) || bytes[4] != b'-' {
+        return None;
+    }
+    let year: i32 = text[..4].parse().ok()?;
+    let (month, rest) = parse_regex_part(&text[5..], b"-")?;
+    let (day, rest) = parse_regex_part(rest, b"T ")?;
+    let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+    let (hour, rest) = parse_regex_part(rest, b":")?;
+    if hour > 23 {
+        return None;
+    }
+    // Greedy two digits when present, else one: a narrower retry after
+    // a shape failure always fails on its leftover digit, so the
+    // regex backtrack is unobservable here (unlike the required
+    // followers above). A range failure rejects outright (Django
+    // matches greedily, then `datetime()` raises).
+    let (minute, rest) = take_regex_greedy(rest)?;
+    if minute > 59 {
+        return None;
+    }
+    let (second, micros, rest) = match rest.strip_prefix(':') {
+        Some(tail) => {
+            let (second, rest) = take_regex_greedy(tail)?;
+            if second > 59 {
+                return None;
+            }
+            let (micros, rest) = parse_regex_fraction(rest)?;
+            (second, micros, rest)
+        }
+        None => (0, 0, rest),
+    };
+    parse_regex_zoned(date, hour, minute, second, micros, rest)
+}
+
+/// One 1-2 digit regex part followed by one of `follows` (tries two
+/// digits, then one — the regex backtrack). All indexes are
+/// ASCII-anchored, so slicing cannot panic.
+fn parse_regex_part<'a>(text: &'a str, follows: &[u8]) -> Option<(u32, &'a str)> {
+    let bytes = text.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_digit()
+        && bytes[1].is_ascii_digit()
+        && follows.contains(&bytes[2])
+    {
+        return Some((text[..2].parse().ok()?, &text[3..]));
+    }
+    if bytes.len() >= 2 && bytes[0].is_ascii_digit() && follows.contains(&bytes[1]) {
+        return Some((text[..1].parse().ok()?, &text[2..]));
+    }
+    None
+}
+
+/// Greedy one-or-two ASCII digits (two when present).
+fn take_regex_greedy(text: &str) -> Option<(u32, &str)> {
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit() {
+        return Some((text[..2].parse().ok()?, &text[2..]));
+    }
+    if !bytes.is_empty() && bytes[0].is_ascii_digit() {
+        return Some((text[..1].parse().ok()?, &text[1..]));
+    }
+    None
+}
+
+/// Optional regex fraction (`.`/`,`, 1-12 ASCII digits, first 6 kept
+/// right-padded).
+fn parse_regex_fraction(text: &str) -> Option<(u32, &str)> {
+    let Some(frac) = text.strip_prefix(['.', ',']) else {
+        return Some((0, text));
+    };
+    let len = frac.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if len == 0 || len > 12 {
+        return None;
+    }
+    let mut padded = frac[..len.min(6)].to_owned();
+    while padded.len() < 6 {
+        padded.push('0');
+    }
+    Some((padded.parse().ok()?, &frac[len..]))
+}
+
+/// The regex tail: `re \s*` (shared [`py_is_space`]), an optional
+/// `Z`/`±HH`/`±HHMM`/`±HH:MM` zone, and the `$` end.
+fn parse_regex_zoned(
+    date: chrono::NaiveDate,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    micros: u32,
+    rest: &str,
+) -> Option<ParsedDt> {
+    let naive = date.and_hms_micro_opt(hour, minute, second, micros)?;
+    let rest = rest.trim_start_matches(py_is_space);
+    // A leading `Z`/sign commits to the zone (the zoneless end can
+    // only be empty or one newline, which neither starts).
+    if let Some(tail) = rest.strip_prefix('Z') {
+        return rest_end_ok(tail).then_some(ParsedDt::Aware(naive.and_utc()));
+    }
+    if rest.starts_with(['+', '-']) {
+        let (offset_micros, tail) = parse_regex_zone(rest)?;
+        if !rest_end_ok(tail) {
+            return None;
+        }
+        let utc = naive.and_utc() - chrono::Duration::microseconds(offset_micros);
+        return Some(ParsedDt::Aware(utc));
+    }
+    rest_end_ok(rest).then_some(ParsedDt::Naive(naive))
+}
+
+/// Regex zone (`±HH`, `±HHMM`, `±HH:MM`): parts unchecked, total under
+/// 24h (`get_fixed_timezone`). Returns signed microseconds.
+fn parse_regex_zone(text: &str) -> Option<(i64, &str)> {
+    let bytes = text.as_bytes();
+    let sign: i64 = match bytes.first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let tail = &text[1..];
+    let tail_bytes = tail.as_bytes();
+    if tail_bytes.len() < 2 || !tail_bytes[..2].iter().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i64 = tail[..2].parse().ok()?;
+    let rest = &tail[2..];
+    let (minutes, rest) = match rest.strip_prefix(':') {
+        Some(tail) => {
+            let tail_bytes = tail.as_bytes();
+            if tail_bytes.len() < 2 || !tail_bytes[..2].iter().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            (tail[..2].parse().ok()?, &tail[2..])
+        }
+        None => {
+            if rest.len() >= 2 && rest.as_bytes()[..2].iter().all(|b| b.is_ascii_digit()) {
+                (rest[..2].parse().ok()?, &rest[2..])
+            } else {
+                (0, rest)
+            }
+        }
+    };
+    let total = hours * 3600 + minutes * 60;
+    if total >= 86_400 {
+        return None;
+    }
+    Some((sign * total * 1_000_000, rest))
+}
+
+/// Regex `$`: end of input, or one trailing newline.
+fn rest_end_ok(rest: &str) -> bool {
+    rest.is_empty() || rest == "\n"
 }
 
 // ---------------------------------------------------------------------------
@@ -3816,6 +4025,9 @@ mod tests {
         let aware = |dt: NaiveDateTime, offset_secs: i64| {
             ParsedDt::Aware(dt.and_utc() - chrono::Duration::seconds(offset_secs))
         };
+        let aware_us = |dt: NaiveDateTime, offset_micros: i64| {
+            ParsedDt::Aware(dt.and_utc() - chrono::Duration::microseconds(offset_micros))
+        };
         let day = |y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32, us: u32| {
             NaiveDate::from_ymd_opt(y, m, d)
                 .expect("date")
@@ -3923,6 +4135,266 @@ mod tests {
                 "9999-12-31T23:59:59Z",
                 Some(aware(day(9999, 12, 31, 23, 59, 59, 0), 0)),
             ),
+            // Regex-fallback arm (`datetime_re`): unpadded date/time.
+            ("2026-1-2T03:04:05", Some(naive(2026, 1, 2, 3, 4, 5, 0))),
+            ("2026-1-2T3:4", Some(naive(2026, 1, 2, 3, 4, 0, 0))),
+            ("2026-1-2T03:04", Some(naive(2026, 1, 2, 3, 4, 0, 0))),
+            ("2026-1-2T03:04:5", Some(naive(2026, 1, 2, 3, 4, 5, 0))),
+            ("2026-1-2 03:04:05", Some(naive(2026, 1, 2, 3, 4, 5, 0))),
+            // Regex arm fractions: `.`/`,`, right-padded, first 6 of ≤12.
+            (
+                "2026-1-2T03:04:05.5",
+                Some(naive(2026, 1, 2, 3, 4, 5, 500_000)),
+            ),
+            (
+                "2026-1-2T03:04:05,5",
+                Some(naive(2026, 1, 2, 3, 4, 5, 500_000)),
+            ),
+            (
+                "2026-1-2T03:04:05.123456789012",
+                Some(naive(2026, 1, 2, 3, 4, 5, 123_456)),
+            ),
+            // Regex arm `\s*`: trailing whitespace without a tz.
+            ("2026-01-02T03:04:05 ", Some(naive(2026, 1, 2, 3, 4, 5, 0))),
+            ("2026-01-02T03:04:05\t", Some(naive(2026, 1, 2, 3, 4, 5, 0))),
+            ("2026-01-02T03:04:05\n", Some(naive(2026, 1, 2, 3, 4, 5, 0))),
+            ("2026-1-2T03:04:05\x0b", Some(naive(2026, 1, 2, 3, 4, 5, 0))),
+            (
+                "2026-1-2T03:04:05\u{85}",
+                Some(naive(2026, 1, 2, 3, 4, 5, 0)),
+            ),
+            ("2026-1-2 03:04:05 ", Some(naive(2026, 1, 2, 3, 4, 5, 0))),
+            (
+                "2026-01-02T03:04:05.5 ",
+                Some(naive(2026, 1, 2, 3, 4, 5, 500_000)),
+            ),
+            // Regex arm `\s*`: whitespace before the tz.
+            (
+                "2026-01-02T03:04:05  +05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-1-2T03:04:05 +05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-1-2T03:04:05\t+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05\n+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-1-2T03:04:05 Z",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 0)),
+            ),
+            // Regex arm zones: `Z`/`±HH`/`±HHMM`/`±HH:MM`, unchecked
+            // parts, total under 24h.
+            (
+                "2026-1-2T03:04:05Z",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 0)),
+            ),
+            (
+                "2026-1-2T03:04:05+05",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-1-2T03:04:05+0530",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 19_800)),
+            ),
+            (
+                "2026-1-2T03:04:05+05:30",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 19_800)),
+            ),
+            (
+                "2026-1-2T03:04:05+00:61",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 3_660)),
+            ),
+            (
+                "2026-1-2T03:04:05.5+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 500_000), 18_000)),
+            ),
+            (
+                "2026-1-2T03:04:05.123456789012+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 123_456), 18_000)),
+            ),
+            // Regex arm `$`: one trailing newline after the tz matches.
+            (
+                "2026-01-02T03:04:05+05:00\n",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05Z\n",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 0)),
+            ),
+            (
+                "2026-1-2T03:04:05+05:00\n",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-1-2T03:04:05 +05:00\n",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            // Fromisoformat arm: fractional offset seconds (seconds
+            // fraction after any component count, `.`/`,`, truncated
+            // to 6, total strictly under 24h in microseconds).
+            (
+                "2026-01-02T03:04:05+05:00:00.5",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), 18_000_500_000)),
+            ),
+            (
+                "2026-01-02T03:04:05+05:00:00,5",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), 18_000_500_000)),
+            ),
+            (
+                "2026-01-02T03:04:05+05:00:00.1",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), 18_000_100_000)),
+            ),
+            (
+                "2026-01-02T03:04:05+05:00:00.123456789",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), 18_000_123_456)),
+            ),
+            (
+                "2026-01-02T03:04:05+050000.5",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), 18_000_500_000)),
+            ),
+            (
+                "2026-01-02T03:04:05+05.5",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), 18_000_500_000)),
+            ),
+            (
+                "2026-01-02T03:04:05+05:30.5",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), 19_800_500_000)),
+            ),
+            (
+                "2026-01-02T03:04:05+0530.5",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), 19_800_500_000)),
+            ),
+            (
+                "2026-01-02T03:04:05+23:59:59.999999",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), 86_399_999_999)),
+            ),
+            (
+                "2026-01-02T03:04:05-05:00:00.5",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), -18_000_500_000)),
+            ),
+            (
+                "2026-01-02T03:04:05+00:61:00.5",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), 3_660_500_000)),
+            ),
+            (
+                "2026-01-02T03:04:05+00:00:01.5",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), 1_500_000)),
+            ),
+            (
+                "2026-01-02T03:04:05+05:00:00.000000",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            // Fromisoformat arm: a fraction-only offset (zero
+            // hours/minutes/seconds) collapses to UTC, sign included.
+            (
+                "2026-01-02T03:04:05+00:00:00.5",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 0)),
+            ),
+            (
+                "2026-01-02T03:04:05+00:00:00.000001",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 0)),
+            ),
+            (
+                "2026-01-02T03:04:05-00:00:00.5",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 0)),
+            ),
+            (
+                "2026-01-02T03:04:05+000000.5",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 0)),
+            ),
+            (
+                "2026-01-02T03:04:05+00.5",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 0)),
+            ),
+            // 1-digit times reroute through the regex arm with identical
+            // values (arm 1 reads strict 2-char windows, like the C
+            // parser).
+            ("2024-01-15T01:2:3", Some(naive(2024, 1, 15, 1, 2, 3, 0))),
+            (
+                "2024-01-15T1:2:3.5",
+                Some(naive(2024, 1, 15, 1, 2, 3, 500_000)),
+            ),
+            ("2024-01-15T10:3", Some(naive(2024, 1, 15, 10, 3, 0, 0))),
+            (
+                "2024-01-15T1:2:3+05:00",
+                Some(aware(day(2024, 1, 15, 1, 2, 3, 0), 18_000)),
+            ),
+            (
+                "2024-01-15T1:2:3+0530",
+                Some(aware(day(2024, 1, 15, 1, 2, 3, 0), 19_800)),
+            ),
+            (
+                "2024-01-15T1:2:3Z",
+                Some(aware(day(2024, 1, 15, 1, 2, 3, 0), 0)),
+            ),
+            // Fromisoformat arm: one gap byte before the tz (week and
+            // basic dates, `X` separator, 13-digit fractions — shapes
+            // the regex arm cannot spell).
+            (
+                "2024-W03T10:30:00 +05:00",
+                Some(aware(day(2024, 1, 15, 10, 30, 0, 0), 18_000)),
+            ),
+            (
+                "20260102T030405 +05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "20260102T030405\t+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-01-02X03:04:05\n+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-01-02X03:04:05\r+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-01-02X03:04:05\x1c+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-01-02X03:04:05\tZ",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 0)),
+            ),
+            (
+                "2026-01-02T03:04:05.1234567890123 +05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 123_456), 18_000)),
+            ),
+            // Gap byte past 6+ fraction digits (a short fraction must
+            // abut the tz instead).
+            (
+                "2026-01-02X03:04:05.123456\t+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 123_456), 18_000)),
+            ),
+            (
+                "2026-01-02X03:04:05.1234567\t+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 123_456), 18_000)),
+            ),
+            (
+                "2026-01-02X03:04:05.123456\tZ",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 123_456), 0)),
+            ),
+            (
+                "2026-01-02X03:04:05\t+05:00:00.5",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), 18_000_500_000)),
+            ),
+            (
+                "2026-01-02X03:04:05.1234567",
+                Some(naive(2026, 1, 2, 3, 4, 5, 123_456)),
+            ),
+            (
+                "2026-01-02T03:04:05.1234567 ",
+                Some(naive(2026, 1, 2, 3, 4, 5, 123_456)),
+            ),
         ] {
             assert_eq!(parse_django_datetime(input), expected, "{input}");
         }
@@ -3962,6 +4434,77 @@ mod tests {
             "2024-01-15T",
             "2024-0é-15",
             "2024-01-1é",
+            // Regex arm edges: 13+ fractional digits, empty fraction,
+            // hour-only, non-`T`/space separators, leading whitespace.
+            "2026-1-2T03:04:05.1234567890123",
+            "2026-1-2T03:04:05.",
+            "2026-1-2T3",
+            "2026-1-2t03:04:05",
+            "2026-1-2X03:04:05",
+            " 2026-1-2T03:04:05",
+            // Regex arm zones: 24h totals, offset seconds (no arm
+            // accepts unpadded dates with tz seconds), trailing
+            // space after the tz, garbage, lowercase `z`.
+            "2026-1-2T03:04:05+24:00",
+            "2026-1-2T03:04:05+05:00:00",
+            "2026-1-2T03:04:05+05:00:00.5",
+            "2026-1-2T03:04:05+05 ",
+            "2026-1-2T03:04:05+05:00garbage",
+            "2026-1-2T03:04:05z",
+            "2026-1-2T03:04:05+053",
+            "2026-1-2T03:04:05+05:3",
+            "2026-1-2T03:04:05.1234567890123+05:00",
+            // Regex arm `$`: only one bare trailing newline matches.
+            "2026-01-02T03:04:05+05:00\n\n",
+            "2026-01-02T03:04:05+05:00 \n",
+            "2026-01-02T03:04:05+05:00\r\n",
+            "2026-01-02T03:04:05+05:00:00.5\n",
+            // Regex arm shapes: invalid unpadded dates/times, doubled
+            // separator, 3-digit month, trailing junk, date-only with
+            // trailing space (the whitespace tolerance needs the time).
+            "2026-13-2T03:04:05",
+            "2026-1-2T25:04:05",
+            "2026-1-2  03:04:05",
+            "2026-111-2T03:04:05",
+            "2026-1-2T03:045",
+            "2026-1-2T03:04:05x",
+            "2026-1-2 ",
+            "2026-01-02 ",
+            // Fromisoformat arm: malformed tz fractions (empty,
+            // non-digit, on `Z`, after a bare colon, on 5-digit
+            // basic) and 24h totals with a fraction.
+            "2026-01-02T03:04:05+05:00:00.",
+            "2026-01-02T03:04:05+050000.",
+            "2026-01-02T03:04:05+05:00:00.5x",
+            "2026-01-02T03:04:05+24:00:00.0",
+            "2026-01-02T03:04:05Z.5",
+            "2026-01-02T03:04:05+05:.5",
+            "2026-01-02T03:04:05+05300.5",
+            // 1-digit times outside regex reach (tz seconds, week and
+            // basic dates, `X` separator, hour-only, fraction without
+            // seconds).
+            "2024-01-15T1",
+            "2024-01-15T3+05:00",
+            "2024-01-15T1.5",
+            "2024-01-15T03:4.5",
+            "2024-01-15T1:2:3+05:00:00",
+            "2024-W03T1:2:3",
+            "20260102T1:2:3",
+            "2026-01-02X1:2:3+05:00",
+            // One gap byte at most, and single-byte only.
+            "2026-01-02X03:04:05  +05:00",
+            "20260102T030405  +05:00",
+            "2026-01-02X03:04:05\u{85}+05:00",
+            "2026-01-02X03:04:05\u{2003}+05:00",
+            // A short fraction must abut the tz (no gap byte), and a
+            // gap byte needs a tz after it.
+            "2026-01-02X03:04:05.5\t+05:00",
+            "2026-01-02X03:04:05.5 +05:00",
+            "2026-01-02X03:04:05.5 Z",
+            "2026-01-02X03:04:05.55\t+05:00",
+            "2026-01-02X03:04:05,55\t+05:00",
+            "2026-01-02X03:04:05.12345\t+05:00",
+            "2026-01-02X03:04:05.1234567 ",
         ] {
             assert_eq!(parse_django_datetime(input), None, "{input}");
         }
