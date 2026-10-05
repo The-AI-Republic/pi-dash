@@ -48,6 +48,7 @@ pub mod handlers_engage;
 pub mod handlers_labels_attachments;
 pub mod handlers_reads;
 pub mod handlers_relations;
+pub mod handlers_versions_move;
 pub mod queries_core;
 pub mod queries_engage;
 pub mod render;
@@ -246,6 +247,7 @@ pub fn routes() -> Router<AppState> {
                 .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
+        .merge(handlers_versions_move::routes())
 }
 
 /// A list-family path: the GET handler owns reads, everything else falls
