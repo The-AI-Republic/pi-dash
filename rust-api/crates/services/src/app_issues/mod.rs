@@ -30,8 +30,15 @@
 //!   "state__group"]` is always true on that branch, so the `[::-1]`
 //!   alternative is dead. [`order_sql`] copies the dead branch.
 
+/// Work-item move (`utils/issue_move.py`, PIDASHCONV-650). `move` is a
+/// Rust keyword, so the module lives at `move.rs` via an explicit path
+/// (the `loop_scan` precedent).
+#[path = "move.rs"]
+pub mod issue_move;
 pub mod ordering;
 pub mod params;
+pub mod pr_links;
+pub mod relation_mapper;
 pub mod serializers_assoc;
 pub mod serializers_create;
 pub mod serializers_detail;
@@ -41,8 +48,36 @@ pub mod serializers_links;
 pub mod serializers_refs;
 pub mod shape;
 
+pub use issue_move::{
+    cancel_frame, failed_cancel_line, handoff_run_config, is_executing_run, issue_activity_kwargs,
+    move_model_activity_kwargs, move_work_item_to_project, offline_cancel_line, py_dumps,
+    repoint_sql, send_project_move_cancel, target_ref_text, AgentRunTrigger, CancelOutcome,
+    HandoffRunRow, IssueMoveError, MoveError, MoveOutcome, MovePostCommit, MoveResult, MoveStore,
+    MovedIssueFields, MovedIssueRow, PodRow, ProjectRow, RepointTarget, SourceIssueRow, StateRow,
+    AGENT_RUN_COLUMNS, ASSIGNEE_IDS_SQL, ASSIGNEE_PRUNE_SQL, ASSIGNEE_REPOINT_SQL,
+    CHILDREN_DETACH_SQL, COMMENT_IDS_SQL, CYCLE_DELETE_SQL, DESCRIPTION_IDS_SQL,
+    HANDOFF_PARENT_UPDATE_SQL, HANDOFF_RUNS_LOCK_SQL, IMMEDIATE_HANDOFF_STATUSES,
+    INERT_RUN_UPDATE_SQL, ISSUE_COLUMNS, ISSUE_MOVE_UPDATE_SQL, LABEL_DELETE_SQL, LABEL_IDS_SQL,
+    MEMBER_EXISTS_SQL, MODULE_DELETE_SQL, MOVED_ISSUE_REFETCH_SQL, MULTIPLE_ACTIVE_RUNS_MESSAGE,
+    NO_DEFAULT_POD_MESSAGE, NO_PERMISSION_MESSAGE, NO_WORKFLOW_STATE_MESSAGE,
+    PROJECT_IDENTIFIER_SQL, PROJECT_MOVE_HANDOFF_STATUSES, PROJECT_REQUIRED_MESSAGE,
+    PROJECT_RESOLVE_BY_IDENTIFIER_SQL, PROJECT_RESOLVE_BY_PK_SQL, RELATION_DELETE_SQL,
+    REPOINT_ORDER, SEQUENCE_CREATE_SQL, SEQUENCE_DETACH_SQL, SOURCE_ISSUE_LOCK_SQL,
+    SOURCE_ISSUE_SQL, WORKSPACE_SLUG_SQL,
+};
 pub use ordering::{order_sql, priority_case_sql, state_case_sql, OrderSpec};
 pub use params::{parse_per_page, raw_group_mismatch, ListParams, ParamError, ParseOptions};
+pub use pr_links::{
+    attach_pull_request, best_effort_snapshot, default_snapshot, detach_pull_request_link,
+    mirror_state, parse_pr_url, pr_snapshot_from_payload, soft_delete_enqueue, AttachError,
+    AttachOutcome, CreatePrLinkOutcome, DetachOutcome, InstallationRow, InvalidPullRequestURL,
+    IssueNotFound, NewPrLink, NewReviewLink, ParsedPrUrl, PrLinkRow, PrLinksStore, PrSnapshot,
+    PullRequestAlreadyLinked, ReviewLinkRow, ReviewMirrorFields, TaskEnqueue,
+    INSTALLATION_LOOKUP_SQL, ISSUE_EXISTS_SQL, PROJECT_WORKSPACE_LOOKUP_SQL, PR_LINK_INSERT_SQL,
+    PR_LINK_LOOKUP_SQL, PR_LINK_SOFT_DELETE_SQL, REVIEW_LINK_INSERT_SQL, REVIEW_LINK_LOOKUP_SQL,
+    REVIEW_LINK_SOFT_DELETE_SQL, REVIEW_LINK_UPDATE_SQL, SOFT_DELETE_TASK,
+};
+pub use relation_mapper::{get_actual_relation, get_inverse_relation};
 pub use serializers_create::{
     assignee_member_filter_sql, create_default_assignee_fallback, echo_initial_ids,
     issue_create_to_representation, issue_create_validate, label_filter_null_project_sql,
