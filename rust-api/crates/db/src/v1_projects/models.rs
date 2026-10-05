@@ -202,11 +202,19 @@ pub mod project {
         serde_json::Value::Object(Default::default())
     }
 
+    /// Python `str.strip()` membership (`project.py:210,258`): Rust
+    /// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
+    /// `str.strip` against `char::is_whitespace` over all code points —
+    /// those four are the only differences).
+    fn is_py_strip_ws(ch: char) -> bool {
+        ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+    }
+
     /// Ports `Project.save` identifier normalisation
-    /// (`db/models/project.py:258`): strip then upper-case. `str::trim` and
-    /// `to_uppercase` are Unicode-aware like Python's `strip`/`upper`.
+    /// (`db/models/project.py:258`): strip then upper-case.
+    /// `to_uppercase` is Unicode-aware like Python's `upper`.
     pub fn normalize_identifier(raw: &str) -> String {
-        raw.trim().to_uppercase()
+        raw.trim_matches(is_py_strip_ws).to_uppercase()
     }
 
     /// One `Project` row. `name`/`description`/`repo_url`/`base_branch` are
@@ -290,7 +298,7 @@ pub mod project {
     pub fn classify_lookup(raw: &str) -> ProjectLookup {
         match uuid::Uuid::parse_str(raw) {
             Ok(id) => ProjectLookup::Pk(id),
-            Err(_) => ProjectLookup::Identifier(raw.trim().to_uppercase()),
+            Err(_) => ProjectLookup::Identifier(raw.trim_matches(is_py_strip_ws).to_uppercase()),
         }
     }
 
@@ -1441,6 +1449,25 @@ mod tests {
             classify_lookup(" eng "),
             ProjectLookup::Identifier("ENG".to_string())
         );
+        // Python `str.strip()` also strips U+001C-U+001F (PIDASHCONV-728).
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let padded = format!("{sep}eng{sep}");
+            assert_eq!(
+                classify_lookup(&padded),
+                ProjectLookup::Identifier("ENG".to_string()),
+                "U+{:04X} padding must strip like Python",
+                sep as u32
+            );
+        }
+        // TAB and U+0085 padding already matched Django; pin the behavior.
+        assert_eq!(
+            classify_lookup("\teng\t"),
+            ProjectLookup::Identifier("ENG".to_string())
+        );
+        assert_eq!(
+            classify_lookup("\u{85}eng\u{85}"),
+            ProjectLookup::Identifier("ENG".to_string())
+        );
         assert_eq!(
             classify_lookup("my-project"),
             ProjectLookup::Identifier("MY-PROJECT".to_string())
@@ -1526,6 +1553,8 @@ mod tests {
     fn save_rule_helpers_match_python() {
         assert_eq!(project::normalize_identifier(" eng "), "ENG");
         assert_eq!(project::normalize_identifier("my-project"), "MY-PROJECT");
+        // `save` uses the same `strip().upper()` (PIDASHCONV-728).
+        assert_eq!(project::normalize_identifier("\u{1c}eng\u{1c}"), "ENG");
         assert_eq!(sequence_on_add(None), None);
         assert_eq!(sequence_on_add(Some(35000.0)), Some(50000.0));
         assert_eq!(user_favorite::sequence_on_add(None), None);

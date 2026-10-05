@@ -367,10 +367,18 @@ pub mod project {
         serde_json::Value::Object(Default::default())
     }
 
+    /// Python `str.strip()` membership (`project.py:210,258`): Rust
+    /// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
+    /// `str.strip` against `char::is_whitespace` over all code points —
+    /// those four are the only differences).
+    fn is_py_strip_ws(ch: char) -> bool {
+        ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+    }
+
     /// `Project.save` identifier rule (`project.py:258`):
     /// `self.identifier.strip().upper()`. `name` is untouched.
     pub fn normalize_identifier(raw: &str) -> String {
-        raw.trim().to_uppercase()
+        raw.trim_matches(is_py_strip_ws).to_uppercase()
     }
 
     /// `Project.cover_image_url` (`project.py:175-185`): when a cover-asset
@@ -532,7 +540,7 @@ pub mod project {
     pub fn classify_lookup(raw: &str) -> ProjectLookup {
         match uuid::Uuid::parse_str(raw) {
             Ok(id) => ProjectLookup::Pk(id),
-            Err(_) => ProjectLookup::Identifier(raw.trim().to_uppercase()),
+            Err(_) => ProjectLookup::Identifier(raw.trim_matches(is_py_strip_ws).to_uppercase()),
         }
     }
 
@@ -2295,6 +2303,8 @@ mod tests {
         // identifier upper-normalization; name untouched.
         assert_eq!(normalize_identifier("  x709770 "), "X709770");
         assert_eq!(normalize_identifier("ENG"), "ENG");
+        // `save` uses the same `strip().upper()` (PIDASHCONV-728).
+        assert_eq!(normalize_identifier("\u{1c}x709770\u{1c}"), "X709770");
         // cover_image_url precedence: asset > legacy text > None.
         assert_eq!(
             cover_image_url(true, Some("https://cdn/a.png"), Some("legacy")),
@@ -2363,6 +2373,26 @@ mod tests {
         assert_eq!(
             classify_lookup("  x709770 "),
             ProjectLookup::Identifier("X709770".to_owned())
+        );
+        // Python `str.strip()` also strips U+001C-U+001F (PIDASHCONV-728):
+        // `%1C`-padded identifiers must resolve, not 404.
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let padded = format!("{sep}r4c0{sep}");
+            assert_eq!(
+                classify_lookup(&padded),
+                ProjectLookup::Identifier("R4C0".to_owned()),
+                "U+{:04X} padding must strip like Python",
+                sep as u32
+            );
+        }
+        // TAB and U+0085 padding already matched Django; pin the behavior.
+        assert_eq!(
+            classify_lookup("\tr4c0\t"),
+            ProjectLookup::Identifier("R4C0".to_owned())
+        );
+        assert_eq!(
+            classify_lookup("\u{85}r4c0\u{85}"),
+            ProjectLookup::Identifier("R4C0".to_owned())
         );
         // Non-UUID, non-matching input still classifies as an identifier
         // lookup (the 404 comes from the empty result, never the classifier).
