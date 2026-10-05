@@ -256,6 +256,12 @@ const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `KeyError` branch (`app/views/base.py:137-141`).
 const KEY_ERROR_BODY: &str = r#"{"error":"The required key does not exist."}"#;
+/// `DraftIssueCreateSerializer.validate` project-membership messages
+/// (`app/serializers/draft.py:119,129,138`), byte-exact.
+const DRAFT_STATE_INVALID: &str = "State is not valid please pass a valid state_id";
+const DRAFT_PARENT_INVALID: &str = "Parent is not valid issue_id please pass a valid issue_id";
+const DRAFT_ESTIMATE_INVALID: &str =
+    "Estimate point is not valid please pass a valid estimate_point_id";
 /// Draft patch own-or-404 (`draft.py:165-166`).
 const DRAFT_PATCH_404_BODY: &str = r#"{"error":"Issue not found"}"#;
 /// Draft-to-issue project guard (`draft.py:209-213`).
@@ -644,12 +650,37 @@ fn python_dumps(value: &Value) -> String {
     out
 }
 
+/// A JSON integer spelling (`-` + digits): Python parses it as `int` and
+/// `dumps` echoes the digits verbatim, however large.
+fn is_plain_int_spelling(text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// One `json.dumps` number: integers echo verbatim; anything else parsed as
+/// a float renders the CPython `repr` spelling (`1e2` → `100.0`), with the
+/// `allow_nan` spellings for non-finite values.
+fn python_dump_number(out: &mut String, number: &serde_json::Number) {
+    let text = number.to_string();
+    if is_plain_int_spelling(&text) {
+        out.push_str(&text);
+        return;
+    }
+    match text.parse::<f64>() {
+        Ok(float) if float.is_finite() => out.push_str(&py_float_str(float)),
+        Ok(float) if float.is_nan() => out.push_str("NaN"),
+        Ok(_) if text.starts_with('-') => out.push_str("-Infinity"),
+        Ok(_) => out.push_str("Infinity"),
+        Err(_) => out.push_str(&text),
+    }
+}
+
 fn python_dump_into(out: &mut String, value: &Value) {
     match value {
         Value::Null => out.push_str("null"),
         Value::Bool(true) => out.push_str("true"),
         Value::Bool(false) => out.push_str("false"),
-        Value::Number(number) => out.push_str(&number.to_string()),
+        Value::Number(number) => python_dump_number(out, number),
         Value::String(text) => python_dump_str(out, text),
         Value::Array(items) => {
             out.push('[');
@@ -2643,6 +2674,22 @@ fn require_dict(input: &RequestData) -> Result<(), Response> {
     }
 }
 
+/// Guard a body the view `.get()`s BEFORE any serializer runs
+/// (draft create/patch, favorite create): a list/scalar body has no `.get`
+/// → `AttributeError` → the generic 500 (probed live; the serializer's
+/// `not_a_dict` 400 never runs because the view blows up first).
+#[allow(clippy::result_large_err)]
+fn require_data_get(input: &RequestData) -> Result<(), Response> {
+    if input.value.as_object().is_some() {
+        Ok(())
+    } else {
+        Err(json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            SERVER_ERROR_BODY.to_owned(),
+        ))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Validated-value accessors (`validated_data.get(key)`)
 // ---------------------------------------------------------------------------
@@ -3870,13 +3917,10 @@ async fn favorite_create(
     if let Some(denied) = check_allow_gate(&pool, &gate, &slug, &user_id, false).await? {
         return Ok(denied);
     }
-    let input = match negotiate_input(&headers, &body) {
-        Ok(input) => input,
-        Err(response) => return Ok(response),
-    };
-    if let Err(response) = require_dict(&input) {
-        return Ok(response);
-    }
+    // `Workspace.objects.get(slug)` runs BEFORE `request.data` is touched
+    // (`favorite.py:40` vs `:43`): a missing slug 404s even for a malformed
+    // body, and the `.get("entity_identifier")` on a non-dict body raises
+    // `AttributeError` → the generic 500 (both probed live).
     // `Workspace.objects.get(slug=slug)` — the scoped manager 404s on a
     // missing or soft-deleted slug.
     let workspace: Option<(Uuid,)> = sqlx::query_as(&positional(
@@ -3896,6 +3940,13 @@ async fn favorite_create(
             OBJECT_NOT_FOUND_BODY.to_owned(),
         ));
     };
+    let input = match negotiate_input(&headers, &body) {
+        Ok(input) => input,
+        Err(response) => return Ok(response),
+    };
+    if let Err(response) = require_data_get(&input) {
+        return Ok(response);
+    }
     // Entity dedupe (`:43-54`): a TRUTHY `entity_identifier` queries first.
     // The filter's UUID conversion raises `ValidationError` for uncoercible
     // values → 400 `{"error": "Please provide valid detail"}` BEFORE the
@@ -4103,13 +4154,10 @@ async fn favorite_patch(
     if let Some(denied) = check_allow_gate(&pool, &gate, &slug, &user_id, false).await? {
         return Ok(denied);
     }
-    let input = match negotiate_input(&headers, &body) {
-        Ok(input) => input,
-        Err(response) => return Ok(response),
-    };
-    if let Err(response) = require_dict(&input) {
-        return Ok(response);
-    }
+    // `.get(...)` runs BEFORE `request.data` is touched (`favorite.py:71`
+    // vs `:72`): a missing row 404s even for a malformed body (probed
+    // live on the sibling draft route). The serializer still 400s
+    // `not_a_dict` for non-dict bodies (no view-level `.get` here).
     let sql = positional(
         &format!(
             "SELECT user_favorites.* FROM user_favorites WHERE {}",
@@ -4130,6 +4178,13 @@ async fn favorite_patch(
             OBJECT_NOT_FOUND_BODY.to_owned(),
         ));
     };
+    let input = match negotiate_input(&headers, &body) {
+        Ok(input) => input,
+        Err(response) => return Ok(response),
+    };
+    if let Err(response) = require_dict(&input) {
+        return Ok(response);
+    }
     let mut favorite = favorite_row_from_pg(&row)?;
     let timezone = actor_timezone(&pool, &user_id).await?;
     let values = match validate_shape(&pool, &input, FAV_FIELDS, true, &timezone).await {
@@ -4277,12 +4332,30 @@ async fn favorite_delete(
             OBJECT_NOT_FOUND_BODY.to_owned(),
         ));
     }
+    // Django's `Collector` emulates `CASCADE` in Python (the FK DDL carries
+    // no `ON DELETE CASCADE`): deleting a folder deletes its whole subtree
+    // — including soft-deleted descendants (probed live) — inside one
+    // atomic block. The self-parent FK is the only edge into
+    // `user_favorites`, so one recursive CTE is the full cascade.
+    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
+    sqlx::query(
+        "WITH RECURSIVE subtree(id) AS (
+           SELECT id FROM user_favorites WHERE parent_id = $1
+           UNION ALL
+           SELECT child.id FROM user_favorites child JOIN subtree ON child.parent_id = subtree.id
+         ) DELETE FROM user_favorites WHERE id IN (SELECT id FROM subtree)",
+    )
+    .bind(favorite_pk)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| Denial::ServerError)?;
     let delete = positional(&qx::favorite_hard_delete_sql(), &["pk"]);
     sqlx::query(&delete)
         .bind(favorite_pk)
-        .execute(&pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| Denial::ServerError)?;
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
     Ok(empty_response())
 }
 
@@ -4467,6 +4540,7 @@ async fn draft_object_leg(
     pool: &sqlx::PgPool,
     values: &[(String, FieldValue)],
     project_id: Option<Uuid>,
+    context_garbage: Option<String>,
 ) -> Result<DraftObjectAttrs, Response> {
     let bad = |errors: Map<String, Value>| shape_errors_response(&errors);
     let non_field = |message: &str| {
@@ -4522,9 +4596,17 @@ async fn draft_object_leg(
     // Assignees (`:92-103`): non-empty lists filter to active project
     // members (`role >= 15`); silently dropped otherwise. A `None` context
     // project renders `IS NULL` (no rows) — no error.
+    // A garbage context id fails lazily, wherever first consumed: each
+    // context arm below 400s on it — the ORM filter's `ValidationError`,
+    // raised inside `validate()`, surfaces as `non_field_errors` carrying
+    // the `to_python` UUID message (probed live) — in arm order. A request
+    // that triggers no arm never notices it.
     let mut assignee_ids = Vec::new();
     if let Some(FieldValue::Ids(ids)) = find_value(values, "assignee_ids") {
         if !ids.is_empty() {
+            if let Some(echo) = &context_garbage {
+                return Err(non_field(&django_uuid_invalid(echo)));
+            }
             assignee_ids = match project_id {
                 None => Vec::new(),
                 Some(project) => {
@@ -4549,6 +4631,9 @@ async fn draft_object_leg(
     let mut label_ids = Vec::new();
     if let Some(FieldValue::Ids(ids)) = find_value(values, "label_ids") {
         if !ids.is_empty() {
+            if let Some(echo) = &context_garbage {
+                return Err(non_field(&django_uuid_invalid(echo)));
+            }
             let sql = match project_id {
                 Some(_) => label_filter_sql(ids.len()),
                 None => label_filter_null_project_sql(ids.len()),
@@ -4573,6 +4658,9 @@ async fn draft_object_leg(
     // and non-null ids must exist under the context project (default
     // managers); a `None` project matches nothing → the error.
     if let Some(state) = dual_uuid(values, "state_id", "state").flatten() {
+        if let Some(echo) = &context_garbage {
+            return Err(non_field(&django_uuid_invalid(echo)));
+        }
         let exists = match project_id {
             None => false,
             Some(project) => {
@@ -4591,10 +4679,13 @@ async fn draft_object_leg(
             }
         };
         if !exists {
-            return Err(non_field("State is not valid for the draft issue."));
+            return Err(non_field(DRAFT_STATE_INVALID));
         }
     }
     if let Some(parent) = dual_uuid(values, "parent_id", "parent").flatten() {
+        if let Some(echo) = &context_garbage {
+            return Err(non_field(&django_uuid_invalid(echo)));
+        }
         let exists = match project_id {
             None => false,
             Some(project) => {
@@ -4613,10 +4704,13 @@ async fn draft_object_leg(
             }
         };
         if !exists {
-            return Err(non_field("Parent is not valid for the draft issue."));
+            return Err(non_field(DRAFT_PARENT_INVALID));
         }
     }
     if let Some(estimate) = opt_uuid(values, "estimate_point") {
+        if let Some(echo) = &context_garbage {
+            return Err(non_field(&django_uuid_invalid(echo)));
+        }
         let exists = match project_id {
             None => false,
             Some(project) => {
@@ -4635,9 +4729,7 @@ async fn draft_object_leg(
             }
         };
         if !exists {
-            return Err(non_field(
-                "Estimate point is not valid for the draft issue.",
-            ));
+            return Err(non_field(DRAFT_ESTIMATE_INVALID));
         }
     }
     Ok(DraftObjectAttrs {
@@ -4647,21 +4739,36 @@ async fn draft_object_leg(
     })
 }
 
-/// The context `project_id` for draft writes (`request.data.get(...)`,
-/// RAW and unvalidated): missing/`null` → `None`; an uncoercible value →
-/// 400 `{"error": "Please provide valid detail"}` (the ORM filter's
-/// `ValidationError`, raised either by a `validate()` arm or by `save()`'s
-/// project fetch — same body, same status).
-#[allow(clippy::result_large_err)]
-fn draft_context_project(input: &RequestData, key: &str) -> Result<Option<Uuid>, Response> {
-    match input.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(raw) => match django_coerce_uuid(raw) {
-            Some(id) => Ok(Some(id)),
-            None => Err(json_response(
-                StatusCode::BAD_REQUEST,
-                INVALID_DETAIL_BODY.to_owned(),
-            )),
+/// The raw context `project_id` (`request.data.get(...)`, unvalidated):
+/// missing/`null` → the `None` context; a coercible value resolves; garbage
+/// stays lazy as its `to_python` echo — the consumer 400s wherever it first
+/// touches it (a `validate()` arm reports the UUID message as
+/// `non_field_errors`; the save path reports "valid detail").
+fn raw_context_project(raw: Option<&Value>) -> (Option<Uuid>, Option<String>) {
+    match raw {
+        None | Some(Value::Null) => (None, None),
+        Some(value) => match django_coerce_uuid(value) {
+            Some(id) => (Some(id), None),
+            None => (None, Some(pk_echo(value))),
+        },
+    }
+}
+
+/// The patch context `project_id` (`draft.py:168`,
+/// `request.data.get("project_id", issue.project_id)`): a MISSING key keeps
+/// the issue's own project, an explicit `null` means the `None` context
+/// (arms error, labels go `IS NULL`, assignees drop), and garbage stays
+/// lazy (see `raw_context_project`).
+fn patch_context_project(
+    raw: Option<&Value>,
+    issue_project: Option<Uuid>,
+) -> (Option<Uuid>, Option<String>) {
+    match raw {
+        None => (issue_project, None),
+        Some(Value::Null) => (None, None),
+        Some(value) => match django_coerce_uuid(value) {
+            Some(id) => (Some(id), None),
+            None => (None, Some(pk_echo(value))),
         },
     }
 }
@@ -4754,18 +4861,15 @@ async fn draft_create(
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
     let gate = gates::Gate::Workspace {
-        roles: &[ROLE_ADMIN, ROLE_MEMBER],
+        roles: &[ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST],
     };
     if let Some(denied) = check_allow_gate(&pool, &gate, &slug, &user_id, false).await? {
         return Ok(denied);
     }
-    let input = match negotiate_input(&headers, &body) {
-        Ok(input) => input,
-        Err(response) => return Ok(response),
-    };
-    if let Err(response) = require_dict(&input) {
-        return Ok(response);
-    }
+    // `Workspace.objects.get(slug)` runs BEFORE `request.data` is touched
+    // (`draft.py:113` vs `:115-121`): a missing slug 404s even for a
+    // malformed body, and the `.get("project_id")` on a non-dict body
+    // raises `AttributeError` → the generic 500 (both probed live).
     let workspace: Option<(Uuid,)> = sqlx::query_as(&positional(
         &format!(
             // Both views share the lookup (`Workspace.objects.get(slug)`).
@@ -4784,21 +4888,39 @@ async fn draft_create(
             OBJECT_NOT_FOUND_BODY.to_owned(),
         ));
     };
-    // The context `project_id` is RAW (`request.data.get`, unvalidated).
-    let context_project = match draft_context_project(&input, "project_id") {
-        Ok(project) => project,
+    let input = match negotiate_input(&headers, &body) {
+        Ok(input) => input,
         Err(response) => return Ok(response),
     };
+    if let Err(response) = require_data_get(&input) {
+        return Ok(response);
+    }
     let timezone = actor_timezone(&pool, &user_id).await?;
+    // Field validation runs BEFORE the context id is consumed (`is_valid`
+    // first, then `save`): field errors win over a garbage `project_id`.
     let values = match validate_shape(&pool, &input, DRAFT_FIELDS, false, &timezone).await {
         Ok(values) => values,
         Err(ShapeFailure::Errors(errors)) => return Ok(shape_errors_response(&errors)),
         Err(ShapeFailure::Denial(denial)) => return Err(denial),
     };
-    let object = match draft_object_leg(&pool, &values, context_project).await {
-        Ok(object) => object,
-        Err(response) => return Ok(response),
-    };
+    // The context `project_id` is RAW (`request.data.get`, unvalidated)
+    // and lazy: field validation above runs first, then the arms consume
+    // it (`non_field_errors` UUID message on garbage), and garbage no arm
+    // touched reaches `save()`, where `objects.create` raises OUTSIDE
+    // `is_valid()` → `handle_exception` reports "valid detail" instead
+    // (both shapes probed live; no row is created either way).
+    let (context_project, context_garbage) = raw_context_project(input.get("project_id"));
+    let object =
+        match draft_object_leg(&pool, &values, context_project, context_garbage.clone()).await {
+            Ok(object) => object,
+            Err(response) => return Ok(response),
+        };
+    if context_garbage.is_some() {
+        return Ok(json_response(
+            StatusCode::BAD_REQUEST,
+            INVALID_DETAIL_BODY.to_owned(),
+        ));
+    }
     // `create()`: the context project wins over any validated `project`
     // input (`DraftIssue(project=…, project_id=…)` keeps the latter —
     // probed live); `save()` fetches it (miss → 404) and re-points
@@ -5026,7 +5148,10 @@ fn link_items(value: &Value) -> Option<Vec<Value>> {
 }
 
 /// Batched draft m2m INSERTs (batch 10): assignees then labels, audit ids
-/// inherited from the (fresh or patch-target) issue row.
+/// inherited from the (fresh or patch-target) issue row. Each leg runs in
+/// its own transaction: `bulk_create` is atomic across batches (a late
+/// chunk's `IntegrityError` rolls the whole leg back — probed live), but
+/// the two legs are separate calls (assignees persist when labels fail).
 #[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
 async fn insert_draft_links(
@@ -5039,6 +5164,13 @@ async fn insert_draft_links(
     assignee_ids: &[Uuid],
     label_ids: &[Uuid],
 ) -> Result<(), Response> {
+    let tx_error = || {
+        json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            SERVER_ERROR_BODY.to_owned(),
+        )
+    };
+    let mut tx = pool.begin().await.map_err(|_| tx_error())?;
     for chunk in assignee_ids.chunks(10) {
         let mut query = "INSERT INTO draft_issue_assignees (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, draft_issue_id, assignee_id) VALUES ".to_owned();
         let now = utc_now_micros();
@@ -5061,7 +5193,8 @@ async fn insert_draft_links(
             })
             .collect();
         query.push_str(&tuples.join(", "));
-        if let Err(error) = sqlx::query(&query).execute(pool).await {
+        if let Err(error) = sqlx::query(&query).execute(&mut *tx).await {
+            // Drop without commit: the leg rolls back as one unit.
             if is_integrity_violation(&error) {
                 return Err(json_response(
                     StatusCode::BAD_REQUEST,
@@ -5074,6 +5207,8 @@ async fn insert_draft_links(
             ));
         }
     }
+    tx.commit().await.map_err(|_| tx_error())?;
+    let mut tx = pool.begin().await.map_err(|_| tx_error())?;
     for chunk in label_ids.chunks(10) {
         let mut query = "INSERT INTO draft_issue_labels (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, draft_issue_id, label_id) VALUES ".to_owned();
         let now = utc_now_micros();
@@ -5096,7 +5231,8 @@ async fn insert_draft_links(
             })
             .collect();
         query.push_str(&tuples.join(", "));
-        if let Err(error) = sqlx::query(&query).execute(pool).await {
+        if let Err(error) = sqlx::query(&query).execute(&mut *tx).await {
+            // Drop without commit: the leg rolls back as one unit.
             if is_integrity_violation(&error) {
                 return Err(json_response(
                     StatusCode::BAD_REQUEST,
@@ -5109,10 +5245,12 @@ async fn insert_draft_links(
             ));
         }
     }
+    tx.commit().await.map_err(|_| tx_error())?;
     Ok(())
 }
 
-/// Batched draft-module INSERTs (batch 10).
+/// Batched draft-module INSERTs (batch 10) in one transaction: like every
+/// `bulk_create`, atomic across batches (probed live).
 async fn insert_draft_modules(
     pool: &sqlx::PgPool,
     draft_id: &Uuid,
@@ -5122,6 +5260,7 @@ async fn insert_draft_modules(
     updated_by: &Option<Uuid>,
     module_ids: &[Option<Uuid>],
 ) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
     for chunk in module_ids.chunks(10) {
         let mut query = "INSERT INTO draft_issue_modules (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, draft_issue_id, module_id) VALUES ".to_owned();
         let now = utc_now_micros();
@@ -5148,8 +5287,9 @@ async fn insert_draft_modules(
             })
             .collect();
         query.push_str(&tuples.join(", "));
-        sqlx::query(&query).execute(pool).await?;
+        sqlx::query(&query).execute(&mut *tx).await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -5179,9 +5319,12 @@ async fn reread_draft(
     row.map(|row| draft_row_from_pg(&row)).transpose()
 }
 
-/// Render the create re-read in `DRAFT_CREATE_READ_KEYS` order (the same 21
-/// keys as the list shape): UTC MILLIS datetimes (`DjangoJSONEncoder`, no
-/// `user_timezone_converter`).
+/// Render the create re-read (the same 21 keys as the list shape, but NOT
+/// its order): the `.values()` compiler emits concrete columns first (in
+/// `.values()` order) and annotations LAST (in `annotate()` order) —
+/// `cycle_id, label_ids, assignee_ids, module_ids` — regardless of the
+/// interleaving at `draft.py:127-149` (probed live on the wire). UTC MILLIS
+/// datetimes (`DjangoJSONEncoder`, no `user_timezone_converter`).
 fn render_draft_reread(row: &DraftRow) -> String {
     let opt = |value: &Option<String>| match value {
         Some(text) => json_string(text),
@@ -5206,7 +5349,7 @@ fn render_draft_reread(row: &DraftRow) -> String {
         None => "null".to_owned(),
     };
     format!(
-        "{{\"id\":{},\"name\":{},\"state_id\":{},\"sort_order\":{},\"completed_at\":{},\"estimate_point\":{},\"priority\":{},\"start_date\":{},\"target_date\":{},\"project_id\":{},\"parent_id\":{},\"cycle_id\":{},\"module_ids\":{},\"label_ids\":{},\"assignee_ids\":{},\"created_at\":{},\"updated_at\":{},\"created_by\":{},\"updated_by\":{},\"type_id\":{},\"description_html\":{}}}",
+        "{{\"id\":{},\"name\":{},\"state_id\":{},\"sort_order\":{},\"completed_at\":{},\"estimate_point\":{},\"priority\":{},\"start_date\":{},\"target_date\":{},\"project_id\":{},\"parent_id\":{},\"created_at\":{},\"updated_at\":{},\"created_by\":{},\"updated_by\":{},\"type_id\":{},\"description_html\":{},\"cycle_id\":{},\"label_ids\":{},\"assignee_ids\":{},\"module_ids\":{}}}",
         json_string(&row.id),
         opt(&row.name),
         opt(&row.state_id),
@@ -5218,16 +5361,16 @@ fn render_draft_reread(row: &DraftRow) -> String {
         date(&row.target_date),
         opt(&row.project_id),
         opt(&row.parent_id),
-        opt(&row.cycle_id),
-        ids(&row.module_ids),
-        ids(&row.label_ids),
-        ids(&row.assignee_ids),
         json_string(&render_encoder_datetime(&row.created_at)),
         json_string(&render_encoder_datetime(&row.updated_at)),
         opt(&row.created_by),
         opt(&row.updated_by),
         opt(&row.type_id),
         json_string(&row.description_html),
+        opt(&row.cycle_id),
+        ids(&row.label_ids),
+        ids(&row.assignee_ids),
+        ids(&row.module_ids),
     )
 }
 
@@ -5314,39 +5457,36 @@ async fn draft_patch(
     if let Some(denied) = check_allow_gate(&pool, &gate, &slug, &user_id, is_creator).await? {
         return Ok(denied);
     }
-    let input = match negotiate_input(&headers, &body) {
-        Ok(input) => input,
-        Err(response) => return Ok(response),
-    };
-    if let Err(response) = require_dict(&input) {
-        return Ok(response);
-    }
+    // The own-or-404 fetch runs BEFORE `request.data` is touched
+    // (`draft.py:163` vs `:168`): a missing draft 404s even for a malformed
+    // body, and the `.get("project_id")` on a non-dict body raises
+    // `AttributeError` → the generic 500 (both probed live).
     let Some(issue) = draft_full_row(&pool, &slug, &draft_pk, Some(&user_id)).await? else {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
             DRAFT_PATCH_404_BODY.to_owned(),
         ));
     };
-    // Context project: raw input wins, else the issue's own (`:168`).
-    let context_project = match input.get("project_id") {
-        Some(Value::Null) | None => issue.project_id,
-        Some(raw) => match django_coerce_uuid(raw) {
-            Some(id) => Some(id),
-            None => {
-                return Ok(json_response(
-                    StatusCode::BAD_REQUEST,
-                    INVALID_DETAIL_BODY.to_owned(),
-                ))
-            }
-        },
+    let input = match negotiate_input(&headers, &body) {
+        Ok(input) => input,
+        Err(response) => return Ok(response),
     };
+    if let Err(response) = require_data_get(&input) {
+        return Ok(response);
+    }
+    // Context project (`:168`, see `patch_context_project`): resolved
+    // here but consumed lazily — field validation below runs first, so
+    // field errors win over garbage, and garbage no arm touches rides to
+    // a 204 (the patch save never consumes the context; probed live).
+    let (context_project, context_garbage) =
+        patch_context_project(input.get("project_id"), issue.project_id);
     let timezone = actor_timezone(&pool, &user_id).await?;
     let values = match validate_shape(&pool, &input, DRAFT_FIELDS, true, &timezone).await {
         Ok(values) => values,
         Err(ShapeFailure::Errors(errors)) => return Ok(shape_errors_response(&errors)),
         Err(ShapeFailure::Denial(denial)) => return Err(denial),
     };
-    let object = match draft_object_leg(&pool, &values, context_project).await {
+    let object = match draft_object_leg(&pool, &values, context_project, context_garbage).await {
         Ok(object) => object,
         Err(response) => return Ok(response),
     };
@@ -5417,6 +5557,10 @@ async fn draft_patch(
                     ))
                 }
             };
+            // `objects.create` runs `save()`, and `BaseModel.save` OVERWRITES
+            // the passed audit ids with the actor/`None` on add
+            // (`db/models/base.py:36-39`, probed live) — the instance ids
+            // `update()` passes (`draft.py:269-276`) never reach the row.
             let link = Uuid::new_v4();
             if let Err(error) = sqlx::query(
                 "INSERT INTO draft_issue_cycles (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, draft_issue_id, cycle_id) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8)",
@@ -5523,8 +5667,16 @@ async fn draft_patch(
         Some(resolved) => resolved,
         None => issue.state_id,
     };
+    // `setattr` runs before `save()`: an explicit `completed_at` input rides
+    // the instance into the state legs (the `None`-state leg keeps it); only
+    // an absent key leaves the stored value.
+    let input_completed = if has_key(&values, "completed_at") {
+        opt_datetime(&values, "completed_at")
+    } else {
+        issue.completed_at
+    };
     let (state_id, completed_at) =
-        draft_save_state(&pool, post_project, post_state, issue.completed_at, &now).await?;
+        draft_save_state(&pool, post_project, post_state, input_completed, &now).await?;
     let post_html = object
         .description_html
         .clone()
@@ -6494,9 +6646,10 @@ async fn insert_issue_row(
     Ok(())
 }
 
-/// One m2m `bulk_create(batch_size=10)` leg: a multi-row INSERT per
-/// 10-chunk in input order; an `IntegrityError` swallows the REST of the
-/// batches (`except: pass` wraps the whole call), any other error 500s.
+/// One m2m `bulk_create(batch_size=10)` leg in one transaction: a multi-row
+/// INSERT per 10-chunk in input order; an `IntegrityError` rolls the WHOLE
+/// leg back and swallows (`except: pass` wraps the atomic call — earlier
+/// batches do NOT persist), any other error 500s.
 #[allow(clippy::too_many_arguments)]
 async fn write_issue_m2m_batches(
     pool: &sqlx::PgPool,
@@ -6509,6 +6662,7 @@ async fn write_issue_m2m_batches(
     created_by_id: Option<Uuid>,
     updated_by_id: Option<Uuid>,
 ) -> Result<(), Denial> {
+    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
     for batch in m2m_batches(ids) {
         let sql = m2m_insert_sql(table, member_column, batch.len(), false);
         let mut query = sqlx::query(&sql);
@@ -6528,12 +6682,14 @@ async fn write_issue_m2m_batches(
                 .bind(issue_id)
                 .bind(member_id);
         }
-        match query.execute(pool).await {
+        match query.execute(&mut *tx).await {
             Ok(_) => {}
-            Err(error) if is_integrity_violation(&error) => break,
+            // Drop without commit: the leg rolls back, then swallows.
+            Err(error) if is_integrity_violation(&error) => return Ok(()),
             Err(_) => return Err(Denial::ServerError),
         }
     }
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -7533,6 +7689,10 @@ async fn draft_to_issue(
                 }
             }
         }
+        // One transaction: `bulk_create` is atomic across batches (a late
+        // chunk's `IntegrityError` rolls the whole leg back — the issue row
+        // itself committed pages ago and persists).
+        let mut leg_tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
         for chunk in module_ids.chunks(10) {
             let sql = m2m_insert_sql("module_issues", "module_id", chunk.len(), false);
             let mut query = sqlx::query(&sql);
@@ -7550,7 +7710,8 @@ async fn draft_to_issue(
                     .bind(row.id)
                     .bind(member_id);
             }
-            if let Err(error) = query.execute(&pool).await {
+            if let Err(error) = query.execute(&mut *leg_tx).await {
+                // Drop without commit: the leg rolls back as one unit.
                 if is_integrity_violation(&error) {
                     return Ok(json_response(
                         StatusCode::BAD_REQUEST,
@@ -7560,6 +7721,7 @@ async fn draft_to_issue(
                 return Err(Denial::ServerError);
             }
         }
+        leg_tx.commit().await.map_err(|_| Denial::ServerError)?;
         for item in &items {
             let mut ref_dump = String::from("{\"module_id\": ");
             python_dump_str(&mut ref_dump, &python_str(item));
@@ -7891,5 +8053,93 @@ mod tests {
         assert!(parse_pk("11111111-1111-1111-1111-111111111111").is_ok());
         assert!(parse_pk("AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA").is_err());
         assert!(parse_pk("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn draft_validate_messages_byte_exact() {
+        // `app/serializers/draft.py:119,129,138`, verbatim (D3).
+        assert_eq!(
+            DRAFT_STATE_INVALID,
+            "State is not valid please pass a valid state_id"
+        );
+        assert_eq!(
+            DRAFT_PARENT_INVALID,
+            "Parent is not valid issue_id please pass a valid issue_id"
+        );
+        assert_eq!(
+            DRAFT_ESTIMATE_INVALID,
+            "Estimate point is not valid please pass a valid estimate_point_id"
+        );
+    }
+
+    #[test]
+    fn patch_context_project_matrix() {
+        // `request.data.get("project_id", issue.project_id)` (D5/D7).
+        let own = uuid("11111111-1111-1111-1111-111111111111");
+        let other = uuid("22222222-2222-2222-2222-222222222222");
+        // Missing keeps the issue's own.
+        assert_eq!(patch_context_project(None, Some(own)), (Some(own), None));
+        assert_eq!(patch_context_project(None, None), (None, None));
+        // Explicit null means the None context (NOT the fallback).
+        assert_eq!(
+            patch_context_project(Some(&Value::Null), Some(own)),
+            (None, None)
+        );
+        // A valid id resolves cleanly.
+        assert_eq!(
+            patch_context_project(Some(&Value::String(other.to_string())), Some(own)),
+            (Some(other), None)
+        );
+        // Garbage stays lazy as its `to_python` echo, never resolved here.
+        assert_eq!(
+            patch_context_project(Some(&Value::String("zzz".to_owned())), Some(own)),
+            (None, Some("zzz".to_owned()))
+        );
+        assert_eq!(
+            patch_context_project(
+                Some(&Value::Number(
+                    serde_json::Number::from_f64(1.5).expect("f64")
+                )),
+                Some(own)
+            ),
+            (None, Some("1.5".to_owned()))
+        );
+        // The create twin has no fallback: missing means None.
+        assert_eq!(raw_context_project(None), (None, None));
+        assert_eq!(
+            raw_context_project(Some(&Value::String("zzz".to_owned()))),
+            (None, Some("zzz".to_owned()))
+        );
+    }
+
+    #[test]
+    fn python_dumps_number_spellings() {
+        // `json.dumps` over parsed floats: CPython `repr` spellings (D12);
+        // integers echo verbatim however large.
+        let num = |text: &str| serde_json::from_str::<Value>(text).expect("number");
+        let mut map = Map::new();
+        map.insert("exp".to_owned(), num("1e2"));
+        assert_eq!(python_dumps(&Value::Object(map)), "{\"exp\": 100.0}");
+        let mut map = Map::new();
+        map.insert("big_exp".to_owned(), num("1E3"));
+        map.insert("int".to_owned(), num("-5"));
+        map.insert("huge".to_owned(), num("1267650600228229401496703205376"));
+        map.insert("frac".to_owned(), num("0.5"));
+        assert_eq!(
+            python_dumps(&Value::Object(map)),
+            "{\"big_exp\": 1000.0, \"int\": -5, \"huge\": 1267650600228229401496703205376, \"frac\": 0.5}"
+        );
+        // Scientific-threshold spellings ride `repr`, not the source text.
+        let mut map = Map::new();
+        map.insert("big".to_owned(), num("1e16"));
+        map.insert("small".to_owned(), num("0.00001"));
+        assert_eq!(
+            python_dumps(&Value::Object(map)),
+            "{\"big\": 1e+16, \"small\": 1e-05}"
+        );
+        // Non-finite floats use the `allow_nan` spellings.
+        let mut map = Map::new();
+        map.insert("inf".to_owned(), num("1e999"));
+        assert_eq!(python_dumps(&Value::Object(map)), "{\"inf\": Infinity}");
     }
 }
