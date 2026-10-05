@@ -78,7 +78,6 @@ use sqlx::Row;
 
 use pidash_auth::permissions::membership::ProjectRoleFacts;
 use pidash_db::app_pages::strip::sync_description_stripped;
-use pidash_db::dispatch::status::AgentRunTrigger;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS, TABLE as TICKER_TABLE,
 };
@@ -118,6 +117,9 @@ use super::{
     Denial, FilteredSet, Gate, HandlerResult, ListContext, QueryMap, RELATION_JOINS,
 };
 use crate::state::AppState;
+use crate::v1_cycles_modules::json_cpython::{
+    parse_request_bytes, JVal, JsonFail, JSON_PARSE_PREFIX,
+};
 
 /// Archived collection path in `app/urls/issue.py:247-249` form.
 pub const ARCHIVED_ISSUES_PATH: &str =
@@ -144,57 +146,84 @@ const ENTITY_DENIED_BODY: &str =
     r#"{"detail":"You do not have permission to perform this action."}"#;
 /// `handle_exception`'s `ValidationError` message (bad UUID in `issue_ids`).
 const INVALID_DETAIL_MESSAGE: &str = "Please provide valid detail";
+/// `issue.save()` on archive: the `archived_at` write plus every
+/// recompute — `completed_at` from the state group, `updated_at`, the
+/// stripped description, and `updated_by_id` from crum
+/// (`BaseModel.save` sets it to the requesting user on every update).
+const ARCHIVE_UPDATE_SQL: &str = "UPDATE issues SET archived_at = $1, completed_at = $2, \
+    updated_at = $3, description_stripped = $4, updated_by_id = $5 WHERE id = $6";
+/// `issue.save()` on unarchive: the same recomputes plus the `state_id`
+/// write (the NULL-state default assignment rides the same statement).
+const UNARCHIVE_UPDATE_SQL: &str = "UPDATE issues SET archived_at = NULL, completed_at = $1, \
+    updated_at = $2, description_stripped = $3, state_id = $4, updated_by_id = $5 WHERE id = $6";
 
 /// Session auth + `_rewrite_project_kwarg` + `@allow_permission([ADMIN,
-/// MEMBER])`, in Django's order. None of the archive endpoints checks
-/// project existence (`Project.objects.get` never runs here), so unlike
-/// [`super::resolve_gate`] there is no 404 for a missing project row —
-/// only the membership 403 — and no guest scoping (guests are denied).
+/// MEMBER])`, in Django's `initial()` order (rewrite, then the permission
+/// checks, then `TimezoneMixin` activation). None of the archive endpoints
+/// checks project existence (`Project.objects.get` never runs here), so
+/// unlike [`super::resolve_gate`] there is no 404 for a missing project
+/// row — only the membership 403 — and no guest scoping (guests are
+/// denied). The tenant facts resolve after the allow check, so an unknown
+/// slug answers 403, never 500.
 async fn archive_context(
     state: &AppState,
     slug: &str,
     project_raw: &str,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Result<ArchiveContext, Denial> {
-    let context = archive_base(state, slug, project_raw, extension).await?;
-    archive_allow(
-        &context.pool,
-        &context.slug,
-        &context.gate.project_id,
-        &context.gate.user_id,
-    )
-    .await?;
-    Ok(context)
+    let base = archive_base(state, slug, project_raw, extension).await?;
+    archive_allow(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    archive_tenant(base).await
 }
 
-/// Session auth + rewrite + timezone facts without the role check, so
-/// the bulk endpoint can run `ProjectEntityPermission` first (Django
-/// checks `permission_classes` before the view body's decorator).
+/// Session auth + rewrite without the role check, so the bulk endpoint
+/// can run `ProjectEntityPermission` first (Django checks
+/// `permission_classes` before the view body's decorator).
 async fn archive_base(
     state: &AppState,
     slug: &str,
     project_raw: &str,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-) -> Result<ArchiveContext, Denial> {
+) -> Result<ArchiveBase, Denial> {
     let pool = state
         .pools()
         .map(|pools| pools.primary().clone())
         .ok_or(Denial::ServerError)?;
     let user_id = actor_user_id(extension).ok_or(Denial::Unauthorized)?;
     let project_id = resolve_project_id(&pool, slug, project_raw).await?;
-    let timezone = user_timezone(&pool, &user_id).await?;
-    let workspace_id = workspace_id(&pool, slug).await?;
-    Ok(ArchiveContext {
+    Ok(ArchiveBase {
         pool,
+        slug: slug.to_owned(),
+        project_id,
+        user_id,
+    })
+}
+
+/// The tenant facts for an allowed request: the render timezone plus the
+/// workspace row (see [`workspace_id`]).
+async fn archive_tenant(base: ArchiveBase) -> Result<ArchiveContext, Denial> {
+    let timezone = user_timezone(&base.pool, &base.user_id).await?;
+    let workspace_id = workspace_id(&base.pool, &base.slug).await?;
+    Ok(ArchiveContext {
+        pool: base.pool,
         gate: Gate {
-            user_id,
+            user_id: base.user_id,
             timezone,
             workspace_id,
-            project_id,
+            project_id: base.project_id,
             guest_scoped: false,
         },
-        slug: slug.to_owned(),
+        slug: base.slug,
     })
+}
+
+/// Session auth + the project-kwarg rewrite, before any permission or
+/// tenant lookup.
+struct ArchiveBase {
+    pool: sqlx::PgPool,
+    slug: String,
+    project_id: uuid::Uuid,
+    user_id: uuid::Uuid,
 }
 
 /// The authenticated archive request: pool, gate facts, tenant slug.
@@ -410,7 +439,7 @@ pub async fn archived_list(
         )
         .await;
     }
-    let selects = annotation_selects(true, None, false, true);
+    let selects = annotation_selects(true, None, false, true, false);
     let fields = on_results_fields(None, None);
     flat_paginated_response(
         &list_context,
@@ -530,7 +559,13 @@ pub async fn archive_retrieve(
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
 ) -> HandlerResult {
+    // Non-UUID tails never match Django's `<uuid:pk>` converter: proxy
+    // (Django 404s before auth — the labels-sibling pattern).
+    let Ok(issue_id) = pk_raw.parse::<uuid::Uuid>() else {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    };
     let context = archive_context(&state, &slug, &project_raw, extension).await?;
     let _expand: Option<Vec<String>> = query_last(&query, "expand").map(|raw| {
         raw.split(',')
@@ -538,9 +573,6 @@ pub async fn archive_retrieve(
             .map(str::to_owned)
             .collect()
     });
-    let issue_id = pk_raw
-        .parse::<uuid::Uuid>()
-        .map_err(|_| Denial::BadError(INVALID_DETAIL_MESSAGE.to_owned()))?;
     let mut binder = Binder::new();
     let sql = archive_retrieve_sql(
         &mut binder,
@@ -1202,11 +1234,14 @@ pub async fn archive_issue(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
 ) -> HandlerResult {
+    // Non-UUID tails never match Django's `<uuid:pk>` converter: proxy
+    // (Django 404s before auth — the labels-sibling pattern).
+    let Ok(issue_id) = pk_raw.parse::<uuid::Uuid>() else {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    };
     let context = archive_context(&state, &slug, &project_raw, extension).await?;
-    let issue_id = pk_raw
-        .parse::<uuid::Uuid>()
-        .map_err(|_| Denial::BadError(INVALID_DETAIL_MESSAGE.to_owned()))?;
     let row =
         fetch_archive_issue(&context.pool, &slug, &context.gate.project_id, &issue_id).await?;
     // `issue.state.group`: NULL state is `AttributeError` (500); a set id
@@ -1268,18 +1303,16 @@ pub async fn archive_issue(
         None
     };
     let stripped = sync_description_stripped(Some(&row.description_html));
-    sqlx::query(
-        "UPDATE issues SET archived_at = $1, completed_at = $2, updated_at = $3, \
-         description_stripped = $4 WHERE id = $5",
-    )
-    .bind(today)
-    .bind(completed_at)
-    .bind(now)
-    .bind(stripped)
-    .bind(issue_id)
-    .execute(&context.pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    sqlx::query(ARCHIVE_UPDATE_SQL)
+        .bind(today)
+        .bind(completed_at)
+        .bind(now)
+        .bind(stripped)
+        .bind(context.gate.user_id)
+        .bind(issue_id)
+        .execute(&context.pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     fire_after_save(
         &context.pool,
         issue_id,
@@ -1299,11 +1332,14 @@ pub async fn unarchive_issue(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
 ) -> HandlerResult {
+    // Non-UUID tails never match Django's `<uuid:pk>` converter: proxy
+    // (Django 404s before auth — the labels-sibling pattern).
+    let Ok(issue_id) = pk_raw.parse::<uuid::Uuid>() else {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    };
     let context = archive_context(&state, &slug, &project_raw, extension).await?;
-    let issue_id = pk_raw
-        .parse::<uuid::Uuid>()
-        .map_err(|_| Denial::BadError(INVALID_DETAIL_MESSAGE.to_owned()))?;
     let row =
         fetch_unarchive_issue(&context.pool, &slug, &context.gate.project_id, &issue_id).await?;
     let origin = activity_origin(&state)?;
@@ -1364,18 +1400,16 @@ pub async fn unarchive_issue(
         }
     };
     let stripped = sync_description_stripped(Some(&row.description_html));
-    sqlx::query(
-        "UPDATE issues SET archived_at = NULL, completed_at = $1, updated_at = $2, \
-         description_stripped = $3, state_id = $4 WHERE id = $5",
-    )
-    .bind(completed_at)
-    .bind(now)
-    .bind(stripped)
-    .bind(state_id)
-    .bind(issue_id)
-    .execute(&context.pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    sqlx::query(UNARCHIVE_UPDATE_SQL)
+        .bind(completed_at)
+        .bind(now)
+        .bind(stripped)
+        .bind(state_id)
+        .bind(context.gate.user_id)
+        .bind(issue_id)
+        .execute(&context.pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     fire_after_save(
         &context.pool,
         issue_id,
@@ -1529,16 +1563,7 @@ async fn default_state_for_project(
     project_id: &uuid::Uuid,
 ) -> Result<Option<uuid::Uuid>, Denial> {
     for default_only in [true, false] {
-        let extra = if default_only {
-            " AND s.\"default\""
-        } else {
-            ""
-        };
-        let sql = format!(
-            "SELECT s.id FROM states AS s WHERE s.project_id = $1 \
-             AND s.deleted_at IS NULL AND NOT s.is_triage{extra} \
-             ORDER BY s.sequence ASC LIMIT 1"
-        );
+        let sql = default_state_sql(default_only);
         let row: Option<(uuid::Uuid,)> = sqlx::query_as(&sql)
             .bind(project_id)
             .fetch_optional(pool)
@@ -1549,6 +1574,23 @@ async fn default_state_for_project(
         }
     }
     Ok(None)
+}
+
+/// The default-state lookup: triage is excluded twice over — the
+/// `is_triage` flag *and* the `StateManager` `group != 'triage'` rule
+/// (real Triage states carry `is_triage = FALSE`, so the flag alone
+/// would admit them).
+fn default_state_sql(default_only: bool) -> String {
+    let extra = if default_only {
+        " AND s.\"default\""
+    } else {
+        ""
+    };
+    format!(
+        "SELECT s.id FROM states AS s WHERE s.project_id = $1 \
+         AND s.deleted_at IS NULL AND NOT s.is_triage AND s.\"group\" != 'triage'{extra} \
+         ORDER BY s.sequence ASC LIMIT 1"
+    )
 }
 
 /// `current_instance`: the 22-key bare-instance shape over the pre-save
@@ -1675,59 +1717,35 @@ fn to_spaced_json<T: Serialize>(value: &T) -> Result<String, Denial> {
 pub async fn bulk_archive(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
-    headers: axum::http::HeaderMap,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     body: axum::body::Bytes,
 ) -> HandlerResult {
-    let context = archive_base(&state, &slug, &project_raw, extension).await?;
+    let base = archive_base(&state, &slug, &project_raw, extension).await?;
     // The entity check runs before the view body (and its decorator), so
     // its 403 carries DRF's default detail body rather than the allow
     // body.
-    if !entity_allowed(
-        &context.pool,
-        &slug,
-        &context.gate.project_id,
-        &context.gate.user_id,
-    )
-    .await?
-    {
+    if !entity_allowed(&base.pool, &slug, &base.project_id, &base.user_id).await? {
         return Ok(status_response(StatusCode::FORBIDDEN, ENTITY_DENIED_BODY));
     }
-    archive_allow(
-        &context.pool,
-        &context.slug,
-        &context.gate.project_id,
-        &context.gate.user_id,
-    )
-    .await?;
-    let is_json = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|content_type| {
-            content_type
-                .split(';')
-                .next()
-                .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("application/json"))
-        });
-    // `request.data`: an empty body form-parses to `{}` (the required
-    // 400), but under a JSON content-type it is a parse error instead.
-    let parsed: Option<Value> = if body.is_empty() {
-        if is_json {
-            let detail = "JSON parse error - Expecting value: line 1 column 1 (char 0)";
-            let body = format!("{{\"Detail\":{}}}", json_detail(detail));
-            return Ok(status_response(StatusCode::BAD_REQUEST, &body));
-        }
+    archive_allow(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    let context = archive_tenant(base).await?;
+    // `request.data`: a zero-length body short-circuits to `{}` (DRF's
+    // content-length check, whatever the content-type — the required 400).
+    // Anything else parses through the shared CPython-grammar parser, so
+    // the reason text is byte-exact (`{oops` and friends); past the depth
+    // cap Django's `RecursionError` escapes DRF into the JSON 500.
+    let parsed: Option<JVal> = if body.is_empty() {
         None
     } else {
-        match serde_json::from_slice(&body) {
+        match parse_request_bytes(&body) {
             Ok(value) => Some(value),
-            Err(error) => {
-                let body = format!(
-                    "{{\"Detail\":{}}}",
-                    json_detail(&format!("JSON parse error - {error}"))
-                );
-                return Ok(status_response(StatusCode::BAD_REQUEST, &body));
+            Err(JsonFail::Message(reason)) => {
+                return Ok(status_response(
+                    StatusCode::BAD_REQUEST,
+                    &parse_error_body(&reason),
+                ));
             }
+            Err(JsonFail::Recursion) => return Err(Denial::ServerError),
         }
     };
     let ids = parse_bulk_ids(parsed.as_ref())?;
@@ -1791,59 +1809,81 @@ pub async fn bulk_archive(
     Ok(json_response(format!("{{\"archived_at\":\"{today}\"}}")))
 }
 
+/// DRF's `ParseError` body: lowercase `detail`, the `JSON parse error -
+/// ` prefix, CPython's reason. (The shared `Denial::BadDetail` renders a
+/// capital-D key — out of this diff's paths — so the bulk arm builds its
+/// own body.)
+fn parse_error_body(reason: &str) -> String {
+    format!(
+        "{{\"detail\":{}}}",
+        json_detail(&format!("{JSON_PARSE_PREFIX}{reason}"))
+    )
+}
+
 /// `request.data.get("issue_ids", [])`, then `len()` and the `pk__in`
-/// lookup. Missing or empty is the required-400; `null`, numbers and
-/// bools `len()`-raise (500); strings iterate characters (empty is the
-/// required-400, anything else fails UUID parsing); objects iterate keys.
-/// Array items follow the UUID field: strings parse (else the invalid
-/// 400), ints coerce (bools are ints; out-of-range and floats raise),
-/// `null` matches nothing and is skipped.
-fn parse_bulk_ids(body: Option<&Value>) -> Result<Vec<uuid::Uuid>, Denial> {
+/// lookup. Missing or empty is the required-400; a non-object body has no
+/// `.get` (500); `null`, numbers and bools `len()`-raise (500); strings
+/// iterate characters (empty is the required-400, anything else fails UUID
+/// parsing); objects iterate keys. Array items follow the UUID field:
+/// strings parse (else the invalid 400), in-range ints coerce (bools are
+/// ints; floats, negatives, huge ints and nested values are the invalid
+/// 400 — `ValidationError`, not a crash), `null` matches nothing and is
+/// skipped.
+fn parse_bulk_ids(body: Option<&JVal>) -> Result<Vec<uuid::Uuid>, Denial> {
     let required = || Denial::BadError(IDS_REQUIRED_MESSAGE.to_owned());
     let invalid = || Denial::BadError(INVALID_DETAIL_MESSAGE.to_owned());
     let Some(body) = body else {
         return Err(required());
     };
-    let raw_ids = body.get("issue_ids").ok_or_else(required)?;
+    let JVal::Object(map) = body else {
+        return Err(Denial::ServerError);
+    };
+    let raw_ids = map.get("issue_ids").ok_or_else(required)?;
     match raw_ids {
-        Value::Null => Err(Denial::ServerError),
-        Value::Bool(_) | Value::Number(_) => Err(Denial::ServerError),
-        Value::String(text) => {
+        JVal::Null => Err(Denial::ServerError),
+        JVal::Bool(_) | JVal::Num(_) => Err(Denial::ServerError),
+        JVal::Str(text) => {
             if text.is_empty() {
                 return Err(required());
             }
             Err(invalid())
         }
-        Value::Object(map) => {
+        JVal::Object(map) => {
             if map.is_empty() {
                 return Err(required());
             }
-            let mut ids = Vec::with_capacity(map.len());
-            for key in map.keys() {
-                ids.push(key.parse::<uuid::Uuid>().map_err(|_| invalid())?);
+            let mut ids = Vec::with_capacity(map.iter().count());
+            for (key, _) in map.iter() {
+                let text = key.to_clean_string().ok_or_else(invalid)?;
+                ids.push(text.parse::<uuid::Uuid>().map_err(|_| invalid())?);
             }
             Ok(ids)
         }
-        Value::Array(items) => {
+        JVal::Array(items) => {
             if items.is_empty() {
                 return Err(required());
             }
             let mut ids = Vec::with_capacity(items.len());
             for item in items {
                 match item {
-                    Value::String(text) => {
+                    JVal::Str(text) => {
+                        let text = text.to_clean_string().ok_or_else(invalid)?;
                         ids.push(text.parse::<uuid::Uuid>().map_err(|_| invalid())?);
                     }
-                    Value::Number(number) => {
-                        let raw = number.to_string();
-                        let bits = raw.parse::<u128>().map_err(|_| Denial::ServerError)?;
+                    JVal::Num(number) => {
+                        let bits = number.to_u128().or_else(|| {
+                            // `-0` is the one int spelling `u128` rejects
+                            // that CPython folds to 0 (`UUID(int=0)`).
+                            (!number.is_float() && number.is_zero()).then_some(0)
+                        });
+                        let bits = bits.ok_or_else(invalid)?;
                         ids.push(uuid::Uuid::from_u128(bits));
                     }
-                    Value::Bool(flag) => {
+                    JVal::Bool(flag) => {
                         ids.push(uuid::Uuid::from_u128(u128::from(*flag)));
                     }
-                    Value::Null => {}
-                    Value::Array(_) | Value::Object(_) => return Err(Denial::ServerError),
+                    JVal::Null => {}
+                    JVal::Array(_) | JVal::Object(_) => return Err(invalid()),
                 }
             }
             Ok(ids)
@@ -2093,7 +2133,7 @@ impl CreationSeam for ArchiveSignalSeam<'_> {
         _issue_id: uuid::Uuid,
         _run_id: uuid::Uuid,
         _parent_run_id: Option<uuid::Uuid>,
-        _trigger: AgentRunTrigger,
+        _trigger: &str,
         _created_by_id: uuid::Uuid,
     ) -> Result<RenderBundle, CreationError> {
         seam_unreachable("render_bundle")
@@ -2455,77 +2495,148 @@ mod tests {
         assert_eq!(keys, ISSUE_DETAIL_ARCHIVE_FIELDS.to_vec());
     }
 
+    /// Parse one bulk body through the shared CPython-grammar parser,
+    /// then the `issue_ids` lookup — the same two steps the handler runs.
+    fn ids_of(text: &str) -> Result<Vec<uuid::Uuid>, Denial> {
+        let value = parse_request_bytes(text.as_bytes()).expect("test body parses");
+        parse_bulk_ids(Some(&value))
+    }
+
     #[test]
     fn bulk_id_matrix() {
-        let body = |ids: Value| serde_json::json!({"issue_ids": ids});
         // Missing / empty / null.
         assert!(matches!(
             parse_bulk_ids(None),
             Err(Denial::BadError(message)) if message == IDS_REQUIRED_MESSAGE
         ));
         assert!(matches!(
-            parse_bulk_ids(Some(&serde_json::json!({}))),
+            ids_of("{}"),
             Err(Denial::BadError(message)) if message == IDS_REQUIRED_MESSAGE
         ));
         assert!(matches!(
-            parse_bulk_ids(Some(&body(Value::Array(vec![])))),
+            ids_of(r#"{"issue_ids": []}"#),
             Err(Denial::BadError(message)) if message == IDS_REQUIRED_MESSAGE
         ));
         assert!(matches!(
-            parse_bulk_ids(Some(&body(Value::Null))),
+            ids_of(r#"{"issue_ids": null}"#),
             Err(Denial::ServerError)
         ));
         // Scalars: numbers and bools len-raise (500); strings iterate.
         assert!(matches!(
-            parse_bulk_ids(Some(&body(serde_json::json!(5)))),
+            ids_of(r#"{"issue_ids": 5}"#),
             Err(Denial::ServerError)
         ));
         assert!(matches!(
-            parse_bulk_ids(Some(&body(Value::Bool(true)))),
+            ids_of(r#"{"issue_ids": true}"#),
             Err(Denial::ServerError)
         ));
         assert!(matches!(
-            parse_bulk_ids(Some(&body(Value::String(String::new())))),
+            ids_of(r#"{"issue_ids": ""}"#),
             Err(Denial::BadError(message)) if message == IDS_REQUIRED_MESSAGE
         ));
         assert!(matches!(
-            parse_bulk_ids(Some(&body(Value::String("abc".to_owned())))),
+            ids_of(r#"{"issue_ids": "abc"}"#),
             Err(Denial::BadError(message)) if message == INVALID_DETAIL_MESSAGE
         ));
+        // Top-level non-object bodies have no `.get` (500).
+        for top in ["[]", "\"x\"", "5", "true", "null"] {
+            assert!(matches!(ids_of(top), Err(Denial::ServerError)), "{top}");
+        }
         // Arrays: uuid strings pass, garbage 400s, ints coerce, nulls skip.
         let one = "11111111-1111-1111-1111-111111111111";
-        let ids = parse_bulk_ids(Some(&body(serde_json::json!([one])))).expect("ids");
-        assert_eq!(ids, vec![one.parse::<uuid::Uuid>().expect("uuid")]);
+        let uuid_one = one.parse::<uuid::Uuid>().expect("uuid");
+        let ids = ids_of(&format!(r#"{{"issue_ids": ["{one}"]}}"#)).expect("ids");
+        assert_eq!(ids, vec![uuid_one]);
         assert!(matches!(
-            parse_bulk_ids(Some(&body(serde_json::json!(["not-a-uuid"])))),
+            ids_of(r#"{"issue_ids": ["not-a-uuid"]}"#),
             Err(Denial::BadError(message)) if message == INVALID_DETAIL_MESSAGE
         ));
-        let ids = parse_bulk_ids(Some(&body(serde_json::json!([5, true, one, Value::Null]))))
-            .expect("ids");
+        let ids = ids_of(&format!(
+            r#"{{"issue_ids": [5, true, "{one}", null, -0, 340282366920938463463374607431768211455]}}"#
+        ))
+        .expect("ids");
         assert_eq!(
             ids,
             vec![
                 uuid::Uuid::from_u128(5),
                 uuid::Uuid::from_u128(1),
-                one.parse::<uuid::Uuid>().expect("uuid"),
+                uuid_one,
+                uuid::Uuid::from_u128(0),
+                uuid::Uuid::from_u128(u128::MAX),
             ]
         );
-        assert!(matches!(
-            parse_bulk_ids(Some(&body(serde_json::json!([5.5])))),
-            Err(Denial::ServerError)
-        ));
-        assert!(matches!(
-            parse_bulk_ids(Some(&body(serde_json::json!([[one]])))),
-            Err(Denial::ServerError)
-        ));
+        // UUID-field edges: floats, negatives, huge ints and nested values
+        // are the invalid 400 (`ValidationError`), not a crash.
+        let nested = format!(r#"{{"issue_ids": [["{one}"]]}}"#);
+        for edge in [
+            r#"{"issue_ids": [5.5]}"#.to_owned(),
+            r#"{"issue_ids": [-5]}"#.to_owned(),
+            r#"{"issue_ids": [340282366920938463463374607431768211456]}"#.to_owned(),
+            nested,
+            r#"{"issue_ids": [{"a": 1}]}"#.to_owned(),
+        ] {
+            assert!(
+                matches!(
+                    ids_of(&edge),
+                    Err(Denial::BadError(message)) if message == INVALID_DETAIL_MESSAGE
+                ),
+                "{edge}"
+            );
+        }
         // Objects iterate keys.
-        let keyed = serde_json::json!({one: true});
-        let ids = parse_bulk_ids(Some(&body(keyed))).expect("ids");
-        assert_eq!(ids, vec![one.parse::<uuid::Uuid>().expect("uuid")]);
+        let keyed = format!(r#"{{"issue_ids": {{"{one}": true}}}}"#);
+        let ids = ids_of(&keyed).expect("ids");
+        assert_eq!(ids, vec![uuid_one]);
         assert!(matches!(
-            parse_bulk_ids(Some(&body(serde_json::json!({"nope": 1})))),
+            ids_of(r#"{"issue_ids": {"nope": 1}}"#),
             Err(Denial::BadError(message)) if message == INVALID_DETAIL_MESSAGE
         ));
+    }
+
+    #[test]
+    fn bulk_parse_error_body_is_lowercase_cpython() {
+        // A blank-but-nonempty body carries the CPython position.
+        let Err(JsonFail::Message(blank)) = parse_request_bytes(b" ") else {
+            panic!("blank body must fail");
+        };
+        assert_eq!(blank, "Expecting value: line 1 column 2 (char 1)");
+        assert_eq!(
+            parse_error_body(&blank),
+            "{\"detail\":\"JSON parse error - Expecting value: line 1 column 2 (char 1)\"}"
+        );
+        // The shared parser's reason for `{oops`, verbatim.
+        let Err(JsonFail::Message(reason)) = parse_request_bytes(b"{oops") else {
+            panic!("{{oops must fail");
+        };
+        assert_eq!(
+            reason,
+            "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+        );
+        assert_eq!(
+            parse_error_body(&reason),
+            "{\"detail\":\"JSON parse error - \
+             Expecting property name enclosed in double quotes: line 1 column 2 (char 1)\"}"
+        );
+    }
+
+    #[test]
+    fn save_updates_write_updated_by() {
+        for sql in [ARCHIVE_UPDATE_SQL, UNARCHIVE_UPDATE_SQL] {
+            assert!(sql.contains("updated_by_id = $5"), "{sql}");
+            assert!(sql.contains("WHERE id = $6"), "{sql}");
+        }
+        assert!(ARCHIVE_UPDATE_SQL.contains("archived_at = $1"));
+        assert!(UNARCHIVE_UPDATE_SQL.contains("archived_at = NULL"));
+    }
+
+    #[test]
+    fn default_state_lookup_excludes_triage_twice() {
+        for sql in [default_state_sql(true), default_state_sql(false)] {
+            assert!(sql.contains("NOT s.is_triage"), "{sql}");
+            assert!(sql.contains("s.\"group\" != 'triage'"), "{sql}");
+        }
+        assert!(default_state_sql(true).contains("AND s.\"default\""));
+        assert!(!default_state_sql(false).contains("default"));
     }
 
     #[test]
