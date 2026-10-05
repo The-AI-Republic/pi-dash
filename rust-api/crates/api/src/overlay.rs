@@ -277,7 +277,8 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // web/daemon/SSE, PIDASHCONV-543; D-13 web runners/machines/pods,
         // PIDASHCONV-591; D-13 deletes + machine commands (web),
         // PIDASHCONV-593 (its daemon result route merges under
-        // `RouteGroup::Runner` below); D-14 machine sessions,
+        // `RouteGroup::Runner` below); D-13 desktop enroll + project
+        // lists, PIDASHCONV-595; D-14 machine sessions,
         // PIDASHCONV-559; D-13 refresh + revokes, PIDASHCONV-592;
         // sibling handler issues extend the merge; merges keep both
         // sides).
@@ -288,13 +289,16 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::runner_runs::chat::web_routes())
             .merge(crate::runner_enroll::manage::routes())
             .merge(crate::runner_enroll::delete_cmds::web_routes())
-            .merge(crate::runner_enroll::teardown::web_routes()),
+            .merge(crate::runner_enroll::teardown::web_routes())
+            .merge(crate::runner_enroll::projects::web_routes()),
         RouteGroup::Runner => crate::runner_runs::run_endpoints::routes()
             .merge(crate::runner_runs::chat::daemon_routes())
             .merge(crate::runner_runs::daemon_routes())
             .merge(crate::runner_enroll::teardown::daemon_routes())
             .merge(crate::runner_sessions::routes())
-            .merge(crate::runner_enroll::delete_cmds::daemon_routes()),
+            .merge(crate::runner_enroll::delete_cmds::daemon_routes())
+            .merge(crate::runner_enroll::desktop::routes())
+            .merge(crate::runner_enroll::projects::daemon_routes()),
     }
 }
 
