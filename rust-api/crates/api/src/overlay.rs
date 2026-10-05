@@ -257,8 +257,9 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // PIDASHCONV-372, via `v1_projects::routes`; D-20 cycle routes,
         // PIDASHCONV-362, plus module routes, PIDASHCONV-406, via
         // `v1_cycles_modules::routes`; D-22 runner delete,
-        // PIDASHCONV-538, via `v1_cli_auth::routes`; D-18 PR/review-link
-        // routes, PIDASHCONV-680, via `v1_work_items::routes`; sibling
+        // PIDASHCONV-538, via `v1_cli_auth::routes`; D-18 link/comment
+        // routes, PIDASHCONV-674, plus PR/review-link routes,
+        // PIDASHCONV-680, via `v1_work_items::routes`; sibling
         // handler issues extend the merge; merges keep both sides;
         // `auth_oauth::routes` already covers the device flow.
         // Registration is the cutover granularity — sibling paths have no
