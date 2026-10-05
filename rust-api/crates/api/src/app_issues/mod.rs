@@ -39,8 +39,8 @@
 //!   `[::-1]` branch is dead) — same module.
 //! - grouped totals count a zero-count group as one
 //!   (`1 if count == 0 else count` in `__get_total_dict`).
-//! - the manager's triage exclusion drops NULL-state rows with it
-//!   (`NOT (group = 'triage')` over a left join, three-valued logic).
+//! - the manager's triage exclusion keeps NULL-state rows (Django
+//!   negates null-safely: `NOT (group = 'triage' AND group IS NOT NULL)`).
 
 pub mod handlers_archive;
 pub mod handlers_core;
@@ -76,17 +76,19 @@ use pidash_services::app_issues::{
 
 use render::v2_page;
 
-/// Register the five list-family GET routes plus the engage-handler
-/// routes and the three archive paths (PIDASHCONV-656). Nothing else:
-/// sibling paths stay unmatched and proxy to Django.
+/// Register the app-issues routes: the five list-family GETs, the
+/// engage-handler routes, the misc-reads/sub-issue routes, the D-26 core
+/// write/read set (`POST issues/`, the detail GET/PUT/PATCH/DELETE,
+/// `DELETE bulk-delete-issues/`), the labels/attachments splits' routes,
+/// and the three archive paths (PIDASHCONV-656). Sibling paths stay
+/// unmatched and proxy to Django.
 ///
 /// Non-GET methods on owned paths proxy too. DRF authenticates before it
-/// checks the method, and `POST issues/` is the create endpoint other
-/// splits own — answering 405 in Rust would break both (`POST issues/`
-/// must be Django's 401-anon / create, `POST issues/list/` Django's own
-/// 405-after-auth). Proxying every non-GET method reproduces all of that
-/// with no per-method logic; `HEAD` rides axum's `get` handling like
-/// Django's `GET`-backed `HEAD`.
+/// checks the method, so Django owns the verdict on unowned methods
+/// (`POST issues/list/` is Django's own 405-after-auth; `POST issues/`
+/// used to proxy to Django's create before handlers A took it over) —
+/// answering 405 in Rust would break both. `HEAD` rides axum's `get`
+/// handling like Django's `GET`-backed `HEAD`.
 pub fn routes() -> Router<AppState> {
     let proxy = crate::edge::proxy;
     Router::new()
@@ -2813,14 +2815,29 @@ mod tests {
         .status()
     }
 
+    async fn method_status(app: Router, method: &str, path: &str) -> StatusCode {
+        app.oneshot(
+            axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("serve")
+        .status()
+    }
+
     /// Non-GET methods on owned paths proxy (502 fail-closed with no
-    /// upstream) instead of answering 405: `POST issues/` is Django's
-    /// create, and DRF authenticates before it checks the method.
+    /// upstream) instead of answering 405: DRF authenticates before it
+    /// checks the method, so Django owns the verdict. `POST issues/` is
+    /// Rust's create now (D-26 handlers A), so it is NOT in this list —
+    /// the owned-method pins live in the routed test below.
     #[tokio::test]
     async fn non_get_methods_proxy_instead_of_405() {
         for (method, path) in [
             (
-                "POST",
+                "PUT",
                 "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues/",
             ),
             (
@@ -2830,6 +2847,10 @@ mod tests {
             (
                 "DELETE",
                 "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues-detail/",
+            ),
+            (
+                "POST",
+                "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues/00000000-0000-0000-0000-000000000001/",
             ),
         ] {
             let response = app()
@@ -2850,18 +2871,19 @@ mod tests {
         }
     }
 
-    /// The five list paths are Rust-owned (they reach the handlers: 500
-    /// here only because the test state carries no pools), while the
-    /// issue-detail sibling keeps proxying (502 fail-closed with no
-    /// upstream).
+    /// The five list paths plus the D-26 core set (detail GET, create,
+    /// bulk delete) are Rust-owned (they reach the handlers: 500 here only
+    /// because the test state carries no pools), while still-unowned
+    /// methods keep proxying (502 fail-closed with no upstream).
     #[tokio::test]
-    async fn list_paths_are_routed_and_detail_proxies() {
+    async fn list_and_core_paths_are_routed_and_bulk_get_proxies() {
         for path in [
             "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues/",
             "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues/list/?issues=1",
             "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues-detail/",
             "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/v2/issues/",
             "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/deleted-issues/",
+            "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues/00000000-0000-0000-0000-000000000001/",
         ] {
             assert_eq!(
                 status(app(), path).await,
@@ -2869,10 +2891,26 @@ mod tests {
                 "{path}"
             );
         }
+        for (method, path) in [
+            (
+                "POST",
+                "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues/",
+            ),
+            (
+                "DELETE",
+                "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/bulk-delete-issues/",
+            ),
+        ] {
+            assert_eq!(
+                method_status(app(), method, path).await,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{method} {path}"
+            );
+        }
         assert_eq!(
             status(
                 app(),
-                "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues/00000000-0000-0000-0000-000000000001/"
+                "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/bulk-delete-issues/"
             )
             .await,
             StatusCode::BAD_GATEWAY

@@ -28,9 +28,13 @@
 //! queries-A statements (PIDASHCONV-648). Guards go through the F-06
 //! [`decide_allow`](pidash_auth::permissions::allow::decide_allow) kernel
 //! only. Signals become explicit calls: orchestration via 594
-//! `capture_prior_state` + `fire_state_transition`, git-sync via the jobs
-//! `dispatch_completion_comment` helper. Tasks enqueue by name through the
-//! jobs queue; unregistered names forward Celery-format downstream.
+//! `capture_prior_state` + `fire_state_transition`. The `github_signals`
+//! completion-comment leg (`trigger_completion_comment`, which enqueues
+//! `post_completion_comment` when a mirrored issue transitions into a
+//! completed state) is NOT wired here — no merged handler wires it, and it
+//! is outside this issue's named signals scope; it needs its own issue.
+//! Tasks enqueue by name through the jobs queue; unregistered names forward
+//! Celery-format downstream.
 //!
 //! Ported bugs (also listed in the PR):
 //! - create with `is_draft=true` 500s (`user_timezone_converter(None)`);
@@ -156,6 +160,7 @@ use super::{
     actor_user_id, json_response, resolve_project_id, Denial, HandlerResult, NOT_FOUND_BODY,
 };
 use crate::middleware::SessionHandle;
+use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json_cpython::{
@@ -184,10 +189,10 @@ const ISSUE_IDS_REQUIRED_BODY: &str = r#"{"error":"Issue IDs are required"}"#;
 /// Destroy's synced-issue guard (`base.py:731-737`).
 const DESTROY_SYNCED_BODY: &str = r#"{"error":"This issue is synced from a Git provider. Unbind the project's repository to delete."}"#;
 
-/// The create post-query's 26 `.values()` keys in WIRE order (captured raw
-/// from live creates — Django emits the concrete fields first in compiler
-/// order, then the annotations in annotation-definition order; this is NOT
-/// the `.values()` call order FX-ISS-14 lists, and live wins).
+/// The create `.values()` key order (`base.py:433-461`), verbatim: the
+/// annotation keys sit between `parent_id` and `created_at`
+/// (`cycle_id`, `module_ids`, `label_ids`, `assignee_ids`,
+/// `sub_issues_count`), and `attachment_count` precedes `link_count`.
 const CREATE_RESPONSE_FIELDS: [&str; 26] = [
     "id",
     "name",
@@ -201,20 +206,20 @@ const CREATE_RESPONSE_FIELDS: [&str; 26] = [
     "sequence_id",
     "project_id",
     "parent_id",
+    "cycle_id",
+    "module_ids",
+    "label_ids",
+    "assignee_ids",
+    "sub_issues_count",
     "created_at",
     "updated_at",
     "created_by",
     "updated_by",
+    "attachment_count",
+    "link_count",
     "is_draft",
     "archived_at",
     "deleted_at",
-    "cycle_id",
-    "link_count",
-    "attachment_count",
-    "sub_issues_count",
-    "assignee_ids",
-    "label_ids",
-    "module_ids",
 ];
 
 /// Body spec for the shared DRF body pipeline: the two `ListField`s arrive
@@ -737,6 +742,7 @@ const MSG_REQUIRED: &str = "This field is required.";
 const MSG_NULL: &str = "This field may not be null.";
 const MSG_BLANK: &str = "This field may not be blank.";
 const MSG_INVALID_STR: &str = "Not a valid string.";
+const MSG_NULL_CHARACTERS: &str = "Null characters are not allowed.";
 const MSG_INVALID_INT: &str = "A valid integer is required.";
 const MSG_INVALID_FLOAT: &str = "A valid number is required.";
 const MSG_INVALID_BOOL: &str = "Must be a valid boolean.";
@@ -756,7 +762,7 @@ fn parse_char(value: &Value, max_length: Option<usize>) -> Result<String, Vec<St
     let text = match value {
         Value::Bool(_) => return Err(vec![MSG_INVALID_STR.to_owned()]),
         Value::String(text) => text.clone(),
-        Value::Number(number) => number.to_string(),
+        Value::Number(number) => json_number_str(number),
         Value::Null | Value::Array(_) | Value::Object(_) => {
             return Err(vec![MSG_INVALID_STR.to_owned()])
         }
@@ -768,6 +774,12 @@ fn parse_char(value: &Value, max_length: Option<usize>) -> Result<String, Vec<St
                 "Ensure this field has no more than {max} characters."
             )]);
         }
+    }
+    // `ProhibitNullCharactersValidator` (runs after `MaxLengthValidator`,
+    // before model validators): without it a NUL would reach Postgres,
+    // which rejects it with a 500 instead of Django's 400.
+    if trimmed.contains('\0') {
+        return Err(vec![MSG_NULL_CHARACTERS.to_owned()]);
     }
     Ok(trimmed)
 }
@@ -808,6 +820,16 @@ fn parse_integer(value: &Value) -> Result<IntegerValue, Vec<String>> {
                     return Ok(IntegerValue::Int(int));
                 }
                 return Ok(IntegerValue::TooBig);
+            }
+            // Int-shaped literals past `u64`/`i64` are out of range (never
+            // `invalid` — CPython ints are unbounded, so DRF reports
+            // min/max); only float shapes fall through to `repr`.
+            if let Some(literal) = int_literal(number) {
+                return Ok(if literal.starts_with('-') {
+                    IntegerValue::TooSmall
+                } else {
+                    IntegerValue::TooBig
+                });
             }
             match number.as_f64() {
                 Some(float) => {
@@ -946,15 +968,36 @@ fn choice_stringify(value: &Value) -> String {
     }
 }
 
-/// `str()` over a JSON number: ints spell exactly; floats use CPython
-/// `repr` ([`py_float_str`]), not serde's rendering (exponent `+` and
-/// zero-padding differ: `1e+16`, `1e-05`).
-fn json_number_str(number: &serde_json::Number) -> String {
+/// Exact digits for an int-shaped JSON literal. `arbitrary_precision`
+/// preserves the source spelling in [`ToString`], so literals beyond
+/// `u64`/`i64` (which `as_f64` would render lossy, e.g. `"1e+23"`) echo
+/// exactly like CPython's `str(int)`.
+fn int_literal(number: &serde_json::Number) -> Option<String> {
+    // In-range magnitudes format numerically (`-0` → `"0"`, like CPython).
     if let Some(int) = number.as_i64() {
-        return int.to_string();
+        return Some(int.to_string());
     }
     if let Some(uint) = number.as_u64() {
-        return uint.to_string();
+        return Some(uint.to_string());
+    }
+    // Past `i64`/`u64` the literal is exact (`arbitrary_precision`); only
+    // int-shaped spellings qualify — exponent/fraction shapes are floats.
+    let literal = number.to_string();
+    let digits = literal.strip_prefix('-').unwrap_or(&literal);
+    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        Some(literal)
+    } else {
+        None
+    }
+}
+
+/// `str()` over a JSON number: ints spell exactly (even past `u64`, via
+/// the preserved literal); floats use CPython `repr` ([`py_float_str`]),
+/// not serde's rendering (exponent `+` and zero-padding differ: `1e+16`,
+/// `1e-05`).
+fn json_number_str(number: &serde_json::Number) -> String {
+    if let Some(literal) = int_literal(number) {
+        return literal;
     }
     match number.as_f64() {
         Some(float) => py_float_str(float),
@@ -1122,17 +1165,7 @@ fn py_repr(value: &Value) -> String {
         Value::Null => "None".to_owned(),
         Value::Bool(true) => "True".to_owned(),
         Value::Bool(false) => "False".to_owned(),
-        Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                int.to_string()
-            } else if let Some(uint) = number.as_u64() {
-                uint.to_string()
-            } else if let Some(float) = number.as_f64() {
-                py_float_str(float)
-            } else {
-                number.to_string()
-            }
-        }
+        Value::Number(number) => json_number_str(number),
         Value::String(text) => text.clone(),
         Value::Array(items) => {
             let inner: Vec<String> = items
@@ -1160,15 +1193,28 @@ fn py_repr(value: &Value) -> String {
     }
 }
 
-/// CPython single-quoted string `repr`: `'...'` with `\n`/`\r`/`\t`
-/// escapes, backslash/quote escaping, and non-printables as `\xNN`/`\uNNNN`.
-/// `str()`-style bare rendering is the caller's choice (see [`py_repr`]).
+/// CPython string `repr`: single quotes unless the text holds `'` but no
+/// `"`, in which case double quotes wrap it (`repr("it's") ==
+/// `"it's"`); `\n`/`\r`/`\t` escapes, backslash/quote escaping, and
+/// non-printables as `\xNN`/`\uNNNN`. `str()`-style bare rendering is the
+/// caller's choice (see [`py_repr`]).
 fn py_repr_string(text: &str) -> String {
+    // CPython `repr` picks `"` when the text contains `'` but no `"` (so
+    // the inner quote needs no escape); otherwise `'`, escaping inner `'`.
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
     let mut out = String::with_capacity(text.len() + 2);
-    out.push('\'');
+    out.push(quote);
     for ch in text.chars() {
+        if ch == quote {
+            out.push('\\');
+            out.push(ch);
+            continue;
+        }
         match ch {
-            '\'' => out.push_str("\\'"),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
@@ -1186,7 +1232,7 @@ fn py_repr_string(text: &str) -> String {
             ch => out.push(ch),
         }
     }
-    out.push('\'');
+    out.push(quote);
     out
 }
 
@@ -1209,7 +1255,26 @@ fn parse_drf_date(text: &str) -> Option<NaiveDate> {
     if !(1..=2).contains(&month.len()) || !(1..=2).contains(&day.len()) {
         return None;
     }
-    NaiveDate::from_ymd_opt(year.parse().ok()?, month.parse().ok()?, day.parse().ok()?)
+    NaiveDate::from_ymd_opt(
+        parse_digits(year)? as i32,
+        parse_digits(month)?,
+        parse_digits(day)?,
+    )
+}
+
+/// Strict ASCII-digits `u32` parse: Rust's `parse` accepts a leading
+/// `+`, which `fromisoformat` (and the Django `date_re`s) reject.
+fn parse_digits(text: &str) -> Option<u32> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// ISO weekday 1-7 → `chrono::Weekday` (day 0 or 8+ reject; day 0 must
+/// not underflow the `- 1`).
+fn iso_weekday(day: u32) -> Option<chrono::Weekday> {
+    chrono::Weekday::try_from(u8::try_from(day).ok()?.checked_sub(1)?).ok()
 }
 
 /// The `fromisoformat` date half: `YYYY-MM-DD`, `YYYYMMDD`, `YYYY-Www[-D]`,
@@ -1217,45 +1282,51 @@ fn parse_drf_date(text: &str) -> Option<NaiveDate> {
 /// (verified live).
 fn parse_iso_date_part(text: &str) -> Option<NaiveDate> {
     if text.len() >= 4 && text.as_bytes().get(4) == Some(&b'W') {
-        // `YYYYWww[D]` basic week.
-        let year: i32 = text[0..4].parse().ok()?;
-        let week: u32 = text[5..7].parse().ok()?;
-        let weekday = if text.len() == 8 {
-            text[7..8].parse::<u32>().ok()?
-        } else if text.len() == 7 {
-            1
-        } else {
+        // `YYYYWww[D]` basic week. Length + ASCII first: short inputs
+        // (`"2024W"`) or multibyte bytes would panic the slices below,
+        // while `fromisoformat` just rejects them.
+        if !(text.len() == 7 || text.len() == 8) || !text.is_ascii() {
             return None;
+        }
+        let year = parse_digits(&text[0..4])? as i32;
+        let week = parse_digits(&text[5..7])?;
+        let weekday = if text.len() == 8 {
+            parse_digits(&text[7..8])?
+        } else {
+            1
         };
-        return NaiveDate::from_isoywd_opt(
-            year,
-            week,
-            chrono::Weekday::try_from(weekday as u8 - 1).ok()?,
-        );
+        return NaiveDate::from_isoywd_opt(year, week, iso_weekday(weekday)?);
     }
     if text.contains('W') {
-        // `YYYY-Www[-D]` extended week.
+        // `YYYY-Www[-D]` extended week: exactly four digits, a dash, `W`
+        // (short years like `24W05` reject).
         let mut parts = text.split('W');
-        let year: i32 = parts.next()?.parse().ok()?;
+        let year_text = parts.next()?;
+        let year_digits = year_text.strip_suffix('-')?;
+        if year_digits.len() != 4 {
+            return None;
+        }
+        let year = parse_digits(year_digits)? as i32;
         let rest = parts.next()?;
-        if parts.next().is_some() || !(0..=9999).contains(&year) {
+        if parts.next().is_some() {
+            return None;
+        }
+        // ASCII first: a multibyte `rest` of byte-length 3 would panic
+        // the `[0..2]` slice below (`fromisoformat` rejects it instead).
+        if !rest.is_ascii() {
             return None;
         }
         let (week_text, weekday) = match rest.split_once('-') {
-            Some((week, day)) => (week, day.parse::<u32>().ok()?),
+            Some((week, day)) => (week, parse_digits(day)?),
             None if rest.len() == 2 => (rest, 1),
-            None if rest.len() == 3 => (&rest[0..2], rest[2..3].parse::<u32>().ok()?),
+            None if rest.len() == 3 => (&rest[0..2], parse_digits(&rest[2..3])?),
             None => return None,
         };
         if week_text.len() != 2 {
             return None;
         }
-        let week: u32 = week_text.parse().ok()?;
-        return NaiveDate::from_isoywd_opt(
-            year,
-            week,
-            chrono::Weekday::try_from(weekday as u8 - 1).ok()?,
-        );
+        let week = parse_digits(week_text)?;
+        return NaiveDate::from_isoywd_opt(year, week, iso_weekday(weekday)?);
     }
     if text.len() == 8 && text.bytes().all(|b| b.is_ascii_digit()) {
         // `YYYYMMDD` basic.
@@ -1271,9 +1342,9 @@ fn parse_iso_date_part(text: &str) -> Option<NaiveDate> {
         let bytes = text.as_bytes();
         if bytes[4] == b'-' && bytes[7] == b'-' {
             return NaiveDate::from_ymd_opt(
-                text[0..4].parse().ok()?,
-                text[5..7].parse().ok()?,
-                text[8..10].parse().ok()?,
+                parse_digits(&text[0..4])? as i32,
+                parse_digits(&text[5..7])?,
+                parse_digits(&text[8..10])?,
             );
         }
     }
@@ -1370,15 +1441,42 @@ fn split_tz_suffix(text: &str) -> (&str, Option<i64>) {
     }
     let sign: i64 = if bytes[at] == b'-' { -1 } else { 1 };
     let digits: String = tail.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    // Colon offsets are strict: exactly-two-digit hours/minutes, and
+    // seconds of exactly two digits plus an optional `.`/`,` fraction
+    // (truncated — `+00:00:00.5` is `+00:00`).
     let offset = if tail.contains(':') {
         let mut parts = tail.split(':');
-        let hours: i64 = parts.next().unwrap_or("").parse().unwrap_or(-1);
-        let minutes: i64 = parts.next().unwrap_or("").parse().unwrap_or(-1);
-        let seconds: f64 = parts.next().unwrap_or("0").parse().unwrap_or(-1.0);
-        if parts.next().is_some() || hours < 0 || minutes < 0 || seconds < 0.0 {
+        let (Some(hours_text), Some(minutes_text)) = (parts.next(), parts.next()) else {
+            return (text, None);
+        };
+        let seconds_text = parts.next();
+        if parts.next().is_some() || hours_text.len() != 2 || minutes_text.len() != 2 {
             return (text, None);
         }
-        hours * 3600 + minutes * 60 + seconds.trunc() as i64
+        let (Some(hours), Some(minutes)) = (parse_digits(hours_text), parse_digits(minutes_text))
+        else {
+            return (text, None);
+        };
+        let seconds: i64 = match seconds_text {
+            None => 0,
+            Some(sec_text) => {
+                let (int, frac) = match sec_text.split_once(['.', ',']) {
+                    None => (sec_text, None),
+                    Some((int, frac)) => (int, Some(frac)),
+                };
+                if int.len() != 2 {
+                    return (text, None);
+                }
+                let Some(seconds) = parse_digits(int) else {
+                    return (text, None);
+                };
+                if frac.is_some_and(|f| f.is_empty() || !f.bytes().all(|b| b.is_ascii_digit())) {
+                    return (text, None);
+                }
+                seconds as i64
+            }
+        };
+        hours as i64 * 3600 + minutes as i64 * 60 + seconds
     } else if digits.len() == tail.len() && (tail.len() == 2 || tail.len() == 4) {
         let hours: i64 = tail[0..2].parse().unwrap_or(-1);
         let minutes: i64 = if tail.len() == 4 {
@@ -1435,7 +1533,13 @@ fn split_date_time(head: &str) -> Option<(&str, char, &str)> {
         if head.len() <= len {
             continue;
         }
-        let (date_text, rest) = head.split_at(len);
+        // Checked split: a multibyte char straddling the cut is never a
+        // valid date lead here — skip the length (shorter ones may still
+        // match with a multibyte separator, which `fromisoformat`
+        // accepts), it must not panic.
+        let Some((date_text, rest)) = head.split_at_checked(len) else {
+            continue;
+        };
         if parse_iso_date_part(date_text).is_none() {
             continue;
         }
@@ -1474,9 +1578,9 @@ fn parse_iso_time(text: &str) -> Option<chrono::NaiveTime> {
     };
     if clock.contains(':') {
         let mut parts = clock.split(':');
-        let hour: u32 = parts.next()?.parse().ok()?;
-        let minute: u32 = parts.next().map(|p| p.parse().ok()).unwrap_or(Some(0))?;
-        let second: u32 = parts.next().map(|p| p.parse().ok()).unwrap_or(Some(0))?;
+        let hour: u32 = parse_digits(parts.next()?)?;
+        let minute: u32 = parts.next().map(parse_digits).unwrap_or(Some(0))?;
+        let second: u32 = parts.next().map(parse_digits).unwrap_or(Some(0))?;
         if parts.next().is_some() {
             return None;
         }
@@ -1489,19 +1593,24 @@ fn parse_iso_time(text: &str) -> Option<chrono::NaiveTime> {
         }
         NaiveTime::from_hms_micro_opt(hour, minute, second, micros)
     } else {
-        // Basic `HH[MM[SS]]`: exactly 2/4/6 digits.
+        // Basic `HH[MM[SS]]`: exactly 2/4/6 digits. ASCII first: a
+        // multibyte clock of byte-length 4/6 would panic the slices
+        // (`fromisoformat` rejects it instead).
+        if !clock.is_ascii() {
+            return None;
+        }
         match clock.len() {
-            2 => NaiveTime::from_hms_micro_opt(clock.parse().ok()?, 0, 0, micros),
+            2 => NaiveTime::from_hms_micro_opt(parse_digits(clock)?, 0, 0, micros),
             4 => NaiveTime::from_hms_micro_opt(
-                clock[0..2].parse().ok()?,
-                clock[2..4].parse().ok()?,
+                parse_digits(&clock[0..2])?,
+                parse_digits(&clock[2..4])?,
                 0,
                 micros,
             ),
             6 => NaiveTime::from_hms_micro_opt(
-                clock[0..2].parse().ok()?,
-                clock[2..4].parse().ok()?,
-                clock[4..6].parse().ok()?,
+                parse_digits(&clock[0..2])?,
+                parse_digits(&clock[2..4])?,
+                parse_digits(&clock[4..6])?,
                 micros,
             ),
             _ => None,
@@ -1537,7 +1646,11 @@ fn parse_fallback_datetime(text: &str) -> Option<(NaiveDateTime, Option<i64>)> {
     if !(1..=2).contains(&month.len()) || !(1..=2).contains(&day.len()) {
         return None;
     }
-    let date = NaiveDate::from_ymd_opt(year.parse().ok()?, month.parse().ok()?, day.parse().ok()?)?;
+    let date = NaiveDate::from_ymd_opt(
+        parse_digits(year)? as i32,
+        parse_digits(month)?,
+        parse_digits(day)?,
+    )?;
     let (clock, micros) = match time_text.find(['.', ',']) {
         Some(dot) => {
             let (clock, frac) = time_text.split_at(dot);
@@ -1565,9 +1678,9 @@ fn parse_fallback_datetime(text: &str) -> Option<(NaiveDateTime, Option<i64>)> {
         return None;
     }
     let time = NaiveTime::from_hms_micro_opt(
-        hour.parse().ok()?,
-        minute.parse().ok()?,
-        second.parse().ok()?,
+        parse_digits(hour)?,
+        parse_digits(minute)?,
+        parse_digits(second)?,
         micros,
     )?;
     Some((NaiveDateTime::new(date, time), offset))
@@ -1606,6 +1719,21 @@ fn parse_uuid_pk(value: &Value) -> Result<Uuid, Vec<String>> {
                 number.as_u64().unwrap_or(0) as u128
             };
             Ok(Uuid::from_u128(magnitude))
+        }
+        // Int-shaped literals past `u64` still take the `int=` path:
+        // valid 128-bit magnitudes parse (then miss the existence
+        // lookup); negatives, magnitudes past 2^128, and non-integers
+        // are invalid.
+        Value::Number(number) => {
+            if let Some(literal) = int_literal(number) {
+                if let Ok(magnitude) = literal.parse::<u128>() {
+                    return Ok(Uuid::from_u128(magnitude));
+                }
+            }
+            Err(vec![format!(
+                "“{0}” is not a valid UUID.",
+                uuid_echo(value)
+            )])
         }
         Value::String(text) => match Uuid::parse_str(text) {
             Ok(uuid) => Ok(uuid),
@@ -1661,7 +1789,7 @@ enum ListOutcome {
     /// Parsed ids (empty when the input list was empty — `allow_empty`).
     Ids(Vec<Uuid>),
     /// Index-keyed item failures: rendered as a dict.
-    Indexed(BTreeMap<String, Vec<String>>),
+    Indexed(BTreeMap<usize, Vec<String>>),
 }
 
 fn parse_uuid_list(value: &Value) -> ListOutcome {
@@ -1675,16 +1803,13 @@ fn parse_uuid_list(value: &Value) -> ListOutcome {
     let mut errors = BTreeMap::new();
     for (index, item) in items.iter().enumerate() {
         if item.is_null() {
-            errors.insert(
-                index.to_string(),
-                vec!["This field may not be null.".to_owned()],
-            );
+            errors.insert(index, vec!["This field may not be null.".to_owned()]);
             continue;
         }
         match parse_uuid_pk(item) {
             Ok(pk) => parsed.push(pk),
             Err(messages) => {
-                errors.insert(index.to_string(), messages);
+                errors.insert(index, messages);
             }
         }
     }
@@ -1695,14 +1820,16 @@ fn parse_uuid_list(value: &Value) -> ListOutcome {
     }
 }
 
-/// `type(value).__name__` for the `not_a_list` echo (`dict`/`str`/`int`/
-/// `float`/`bool` — DRF renders the Python type name).
+/// `type(value).__name__` (`NoneType`/`bool`/`int`/`float`/`str`/`list`/
+/// `dict` — DRF renders the Python type name). Huge int literals classify
+/// as `int` (CPython ints are unbounded — `json.loads` never produces a
+/// float from one).
 fn json_type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "NoneType",
         Value::Bool(_) => "bool",
         Value::Number(number) => {
-            if number.is_i64() || number.is_u64() {
+            if int_literal(number).is_some() {
                 "int"
             } else {
                 "float"
@@ -1712,6 +1839,18 @@ fn json_type_name(value: &Value) -> &'static str {
         Value::Array(_) => "list",
         Value::Object(_) => "dict",
     }
+}
+
+/// `to_internal_value`'s non-`Mapping` arm (`serializers.py:483-489`): a
+/// non-dict body fails the WHOLE serializer as `non_field_errors`, before
+/// any field runs (so no `required` errors join it).
+fn non_dict_response(value: &Value) -> Response {
+    let message = format!(
+        "Invalid data. Expected a dictionary, but got {}.",
+        json_type_name(value)
+    );
+    let detail = serde_json::to_string(&message).expect("non-dict detail");
+    json_bad_request(&format!("{{\"non_field_errors\":[{detail}]}}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -2018,6 +2157,29 @@ impl RequestShape {
     }
 }
 
+/// One field's shape failure: `Invalid` carries its 400 detail;
+/// `Db` is a pk-probe database failure (Django's 500 — the database
+/// raised mid-`is_valid()`; it must never render as a field error).
+enum ShapeError {
+    Invalid(Value),
+    Db,
+}
+
+/// Field-pass failure: `Invalid` renders the 400 error object; `Db` maps
+/// to the 500 body.
+enum FieldPassFailure {
+    Invalid(BTreeMap<String, Value>),
+    Db,
+}
+
+/// Map a field-pass failure to its response.
+fn field_pass_response(failure: FieldPassFailure) -> HandlerResult {
+    match failure {
+        FieldPassFailure::Invalid(errors) => Ok(json_bad_request(&render_field_errors(&errors))),
+        FieldPassFailure::Db => Err(Denial::ServerError),
+    }
+}
+
 /// `is_valid()`'s field pass: walk the table in order, `get_value` per
 /// key (JSON + HTML-input rules), null verdicts, shape parsers, then the
 /// pk existence legs. Unknown keys are silently ignored (DRF default).
@@ -2028,7 +2190,7 @@ async fn validate_issue_body(
     data: &RequestData,
     shape: RequestShape,
     timezone: &Tz,
-) -> Result<BTreeMap<&'static str, Validated>, BTreeMap<String, Value>> {
+) -> Result<BTreeMap<&'static str, Validated>, FieldPassFailure> {
     let mut validated: BTreeMap<&'static str, Validated> = BTreeMap::new();
     let mut errors: BTreeMap<String, Value> = BTreeMap::new();
     // NOTE: `BTreeMap` sorts error keys alphabetically, but DRF emits them
@@ -2059,9 +2221,10 @@ async fn validate_issue_body(
                     Ok(value) => {
                         validated.insert(spec.name, value);
                     }
-                    Err(detail) => {
+                    Err(ShapeError::Invalid(detail)) => {
                         errors.insert(spec.name.to_owned(), detail);
                     }
+                    Err(ShapeError::Db) => return Err(FieldPassFailure::Db),
                 }
             }
         }
@@ -2069,7 +2232,7 @@ async fn validate_issue_body(
     if errors.is_empty() {
         Ok(validated)
     } else {
-        Err(errors)
+        Err(FieldPassFailure::Invalid(errors))
     }
 }
 
@@ -2216,9 +2379,12 @@ async fn validate_shape(
     spec: &FieldSpec,
     raw: &Value,
     timezone: &Tz,
-) -> Result<Validated, Value> {
-    let failed =
-        |messages: Vec<String>| Value::Array(messages.into_iter().map(Value::String).collect());
+) -> Result<Validated, ShapeError> {
+    let failed = |messages: Vec<String>| {
+        ShapeError::Invalid(Value::Array(
+            messages.into_iter().map(Value::String).collect(),
+        ))
+    };
     match spec.shape {
         FieldShape::UuidPk(queryset) => {
             let parsed = parse_uuid_pk(raw).map_err(failed)?;
@@ -2234,7 +2400,7 @@ async fn validate_shape(
                             does_not_exist_echo(raw, &parsed)
                         )]));
                     }
-                    Err(_) => return Err(Value::String(MSG_SERVER.to_owned())),
+                    Err(_) => return Err(ShapeError::Db),
                 }
             }
             if spec.name == "state" || spec.name == "state_id" {
@@ -2246,7 +2412,7 @@ async fn validate_shape(
                             does_not_exist_echo(raw, &parsed)
                         )]));
                     }
-                    Err(_) => return Err(Value::String(MSG_SERVER.to_owned())),
+                    Err(_) => return Err(ShapeError::Db),
                 }
             }
             match pk_exists(pool, queryset, &parsed).await {
@@ -2255,7 +2421,7 @@ async fn validate_shape(
                     "Invalid pk \"{0}\" - object does not exist.",
                     does_not_exist_echo(raw, &parsed)
                 )])),
-                Err(_) => Err(Value::String(MSG_SERVER.to_owned())),
+                Err(_) => Err(ShapeError::Db),
             }
         }
         FieldShape::UuidList(queryset) => match parse_uuid_list(raw) {
@@ -2269,22 +2435,22 @@ async fn validate_shape(
                         Ok(false) => {
                             let echo = list_item_echo(raw, index);
                             errors.insert(
-                                index.to_string(),
+                                index,
                                 vec![format!("Invalid pk \"{echo}\" - object does not exist.")],
                             );
                         }
                         Err(_) => {
-                            return Err(Value::String(MSG_SERVER.to_owned()));
+                            return Err(ShapeError::Db);
                         }
                     }
                 }
                 if errors.is_empty() {
                     Ok(Validated::UuidList(checked))
                 } else {
-                    Err(indexed_errors(errors))
+                    Err(ShapeError::Invalid(indexed_errors(errors)))
                 }
             }
-            ListOutcome::Indexed(indexed) => Err(indexed_errors(indexed)),
+            ListOutcome::Indexed(indexed) => Err(ShapeError::Invalid(indexed_errors(indexed))),
         },
         FieldShape::Char {
             max_length,
@@ -2367,13 +2533,13 @@ async fn validate_shape(
 }
 
 /// Index-keyed list failures as a JSON dict.
-fn indexed_errors(indexed: BTreeMap<String, Vec<String>>) -> Value {
+fn indexed_errors(indexed: BTreeMap<usize, Vec<String>>) -> Value {
     Value::Object(
         indexed
             .into_iter()
-            .map(|(key, messages)| {
+            .map(|(index, messages)| {
                 (
-                    key,
+                    index.to_string(),
                     Value::Array(messages.into_iter().map(Value::String).collect()),
                 )
             })
@@ -2400,10 +2566,6 @@ fn branch_name_valid(text: &str) -> bool {
 }
 
 const BRANCH_MESSAGE: &str = "Branch name may contain only letters, numbers, and . _ / -";
-
-/// Internal server-error marker for DB failures inside validation (the
-/// caller maps it to the 500 body — it must never leak as a field error).
-const MSG_SERVER: &str = "\u{0}server-error";
 
 /// The `does_not_exist` echo: `str()` of the ORIGINAL input spelling
 /// (uppercase/braced UUIDs echo verbatim; ints echo as ints).
@@ -2733,10 +2895,20 @@ async fn run_validate(
         Some(Validated::State(id, _)) => Some(*id),
         _ => None,
     };
-    // Dual sources: the auto field (`state`/`parent`, declared later) wins
-    // over its explicit twin when present — verified live, both key orders.
-    let state_value = uuid("state").or_else(|| uuid("state_id"));
-    let parent_value = uuid("parent").or_else(|| uuid("parent_id"));
+    // Dual sources: the auto field (`state`/`parent`, declared later)
+    // overwrites its explicit twin's `attrs` slot whenever the KEY is
+    // present — even when null (DRF loops fields in order, `set_value`
+    // overwrites). Value-fallback would wrongly resurrect the twin.
+    let state_value = if validated.contains_key("state") {
+        uuid("state")
+    } else {
+        uuid("state_id")
+    };
+    let parent_value = if validated.contains_key("parent") {
+        uuid("parent")
+    } else {
+        uuid("parent_id")
+    };
     let state_touched = state_value.is_some();
     let parent_touched = parent_value.is_some();
     let assignee_ids: Option<Vec<Uuid>> = match validated.get("assignee_ids") {
@@ -4365,14 +4537,16 @@ async fn fetch_clock_policy(
     let row: Option<ClockRow> = sqlx::query_as(
         "SELECT agent_ticking_enabled, agent_default_max_ticks, agent_default_interval_seconds, \
              agent_review_default_interval_seconds, agent_test_default_interval_seconds \
-             FROM projects WHERE id = $1",
+             FROM projects WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(project_id)
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
+    // A missing project row raises on Django (`ticker.issue.project`
+    // re-fetches through the live-only manager) → 500, never a default.
     let Some((ticking, max_ticks, interval, review_interval, test_interval)) = row else {
-        return Ok(ProjectClockPolicy::default());
+        return Err(Denial::ServerError);
     };
     Ok(ProjectClockPolicy {
         agent_ticking_enabled: ticking,
@@ -4565,6 +4739,7 @@ async fn fetch_blocker_summary(
 async fn render_detail_body(
     pool: &sqlx::PgPool,
     row: &CoreIssueRow,
+    timezone: &Tz,
     with_subscribed: bool,
     touch_prefetches: bool,
     spaced: bool,
@@ -4613,11 +4788,15 @@ async fn render_detail_body(
     let module_refs: Vec<&str> = module_ids.iter().map(String::as_str).collect();
     let label_refs: Vec<&str> = label_ids.iter().map(String::as_str).collect();
     let assignee_refs: Vec<&str> = assignee_ids.iter().map(String::as_str).collect();
-    // Base datetimes ride as RAW objects through DRF's Z-rewriting
-    // `JSONEncoder`; runs/ticker pre-stringify (`+00:00`) and bypass it.
-    let created_at = serialize_drf_datetime(save.created_at);
-    let updated_at = serialize_drf_datetime(save.updated_at);
-    let completed_at = save.completed_at.map(serialize_drf_datetime);
+    // Base datetimes are DRF `DateTimeField` output: the request user's
+    // zone (`enforce_timezone` over the `TimezoneMixin`-activated tz) with
+    // `+00:00` rewritten to `Z`. Runs/ticker legs instead `_serialize_datetime`
+    // (raw `.isoformat()`, always UTC `+00:00`) and bypass this.
+    let created_at = render_datetime_in(&save.created_at, timezone);
+    let updated_at = render_datetime_in(&save.updated_at, timezone);
+    let completed_at = save
+        .completed_at
+        .map(|moment| render_datetime_in(&moment, timezone));
     let archived_at = save.archived_at.map(|date| date.to_string());
     let start_date = save.start_date.map(|date| date.to_string());
     let target_date = save.target_date.map(|date| date.to_string());
@@ -4804,7 +4983,13 @@ fn v_state(validated: &BTreeMap<&'static str, Validated>) -> (bool, Option<Uuid>
 
 /// The dual-source parent resolution (same precedence, no group needed).
 fn v_parent(validated: &BTreeMap<&'static str, Validated>) -> Option<Uuid> {
-    v_uuid(validated, "parent").or_else(|| v_uuid(validated, "parent_id"))
+    // Key precedence like `v_state`: a present-but-null `parent` clears,
+    // it must not fall back to `parent_id`.
+    if validated.contains_key("parent") {
+        v_uuid(validated, "parent")
+    } else {
+        v_uuid(validated, "parent_id")
+    }
 }
 
 /// The effective m2m list: the `validate()`-filtered ids when the input
@@ -5210,15 +5395,18 @@ fn render_create_response_body(
 // ---------------------------------------------------------------------------
 
 /// Fresh m2m members for the PUT body, in M2M-manager order (target
-/// `-created_at`): `serializer.data` renders the live links off the saved
-/// instance.
+/// `-created_at`): `serializer.data` renders the links off the saved
+/// instance. The through table carries NO soft-delete filter — the m2m
+/// manager joins it raw (verified from the generated SQL), so replaced
+/// links still list (even twice after a delete + re-add); only the target
+/// side (`labels.deleted_at`) filters.
 async fn fetch_put_m2m(
     pool: &sqlx::PgPool,
     issue_id: &Uuid,
 ) -> Result<(Vec<Uuid>, Vec<Uuid>), Denial> {
     let assignees: Vec<(Uuid,)> = sqlx::query_as(
         "SELECT u.id FROM users AS u JOIN issue_assignees AS ia ON ia.assignee_id = u.id \
-         WHERE ia.issue_id = $1 AND ia.deleted_at IS NULL ORDER BY u.created_at DESC",
+         WHERE ia.issue_id = $1 ORDER BY u.created_at DESC",
     )
     .bind(issue_id)
     .fetch_all(pool)
@@ -5226,8 +5414,7 @@ async fn fetch_put_m2m(
     .map_err(|_| Denial::ServerError)?;
     let labels: Vec<(Uuid,)> = sqlx::query_as(
         "SELECT l.id FROM labels AS l JOIN issue_labels AS il ON il.label_id = l.id \
-         WHERE il.issue_id = $1 AND il.deleted_at IS NULL AND l.deleted_at IS NULL \
-         ORDER BY l.created_at DESC",
+         WHERE il.issue_id = $1 AND l.deleted_at IS NULL ORDER BY l.created_at DESC",
     )
     .bind(issue_id)
     .fetch_all(pool)
@@ -5246,6 +5433,7 @@ async fn fetch_put_m2m(
 async fn render_put_body(
     pool: &sqlx::PgPool,
     row: &IssueSaveRow,
+    timezone: &Tz,
     initial_assignees: Option<&Value>,
     initial_labels: Option<&Value>,
 ) -> Result<String, Denial> {
@@ -5260,10 +5448,15 @@ async fn render_put_body(
     let estimate_point = row.estimate_point_id.map(|value| value.to_string());
     let issue_type = row.type_id.map(|value| value.to_string());
     let assigned_pod_id = row.assigned_pod_id.map(|value| value.to_string());
-    let created_at = serialize_drf_datetime(row.created_at);
-    let updated_at = serialize_drf_datetime(row.updated_at);
-    let deleted_at = row.deleted_at.map(serialize_drf_datetime);
-    let completed_at = row.completed_at.map(serialize_drf_datetime);
+    // `DateTimeField` output like the detail body: request-user zone.
+    let created_at = render_datetime_in(&row.created_at, timezone);
+    let updated_at = render_datetime_in(&row.updated_at, timezone);
+    let deleted_at = row
+        .deleted_at
+        .map(|moment| render_datetime_in(&moment, timezone));
+    let completed_at = row
+        .completed_at
+        .map(|moment| render_datetime_in(&moment, timezone));
     let archived_at = row.archived_at.map(|date| date.to_string());
     let start_date = row.start_date.map(|date| date.to_string());
     let target_date = row.target_date.map(|date| date.to_string());
@@ -5453,10 +5646,15 @@ pub async fn create_issue(
         Ok(data) => data,
         Err(response) => return Ok(response),
     };
+    // A non-dict body fails the whole serializer (`non_field_errors`) —
+    // the field loop never runs, so no `required` error joins it.
+    if data.value.as_object().is_none() {
+        return Ok(non_dict_response(&data.value));
+    }
     let validated =
         match validate_issue_body(&pool, &data, RequestShape::Create, &tenant.timezone).await {
             Ok(validated) => validated,
-            Err(errors) => return Ok(json_bad_request(&render_field_errors(&errors))),
+            Err(failure) => return field_pass_response(failure),
         };
     let filtered = match run_validate(
         &pool,
@@ -5704,6 +5902,12 @@ pub async fn partial_update_issue(
         Ok(data) => data,
         Err(response) => return Ok(response),
     };
+    // `request.data.pop(...)` runs before the lookup: on a non-dict body
+    // the pop itself raises (`TypeError`/`AttributeError`) → Django's 500,
+    // regardless of whether the issue exists.
+    if data.value.as_object().is_none() {
+        return Err(Denial::ServerError);
+    }
     // `request.data.pop("skip_activity", False)` mutates the parsed body —
     // both dumps below exclude the key.
     let skip_activity = data.pop_skip_activity();
@@ -5717,12 +5921,13 @@ pub async fn partial_update_issue(
         ));
     };
     tenant.workspace_id = looked_up.save.workspace_id;
-    let current_instance = render_detail_body(&pool, &looked_up, false, false, true).await?;
+    let current_instance =
+        render_detail_body(&pool, &looked_up, &tenant.timezone, false, false, true).await?;
     let requested = to_spaced_json(&data.value)?;
     let validated =
         match validate_issue_body(&pool, &data, RequestShape::Patch, &tenant.timezone).await {
             Ok(validated) => validated,
-            Err(errors) => return Ok(json_bad_request(&render_field_errors(&errors))),
+            Err(failure) => return field_pass_response(failure),
         };
     let instance = looked_up.write_instance();
     let filtered = match run_validate(
@@ -5819,10 +6024,10 @@ pub async fn partial_update_issue(
 /// `PUT .../issues/<pk>/` (DRF's default `update` — deliberately
 /// undecorated, so any authenticated member including guests and
 /// non-members 200s: the recorded outsider hole): full validation with a
-/// project-less context (the assignee `KeyError`, silent label wipe and
-/// state/parent/estimate `non_field` arms), explicit capture + save +
-/// always-immediate fire, no task enqueues, 200 + the create
-/// representation.
+/// project-less context (the assignee `KeyError`, ignored `label_ids` — the
+/// rows are kept, there is no wipe — and state/parent/estimate `non_field`
+/// arms), explicit capture + save + always-immediate fire, no task
+/// enqueues, 200 + the create representation.
 pub async fn put_update_issue(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
@@ -5858,10 +6063,15 @@ pub async fn put_update_issue(
         default_assignee_id: None,
         guest_view_all_features: false,
     };
+    // `get_object` already ran: a non-dict body now fails the whole
+    // serializer (`non_field_errors`), same as create.
+    if data.value.as_object().is_none() {
+        return Ok(non_dict_response(&data.value));
+    }
     let validated =
         match validate_issue_body(&pool, &data, RequestShape::Put, &tenant.timezone).await {
             Ok(validated) => validated,
-            Err(errors) => return Ok(json_bad_request(&render_field_errors(&errors))),
+            Err(failure) => return field_pass_response(failure),
         };
     let instance = looked_up.write_instance();
     let filtered =
@@ -5918,6 +6128,7 @@ pub async fn put_update_issue(
     let body = render_put_body(
         &pool,
         &row,
+        &tenant.timezone,
         initial.and_then(|object| object.get("assignee_ids")),
         initial.and_then(|object| object.get("label_ids")),
     )
@@ -6086,7 +6297,7 @@ pub async fn retrieve_issue(
         return Err(Denial::ServerError);
     }
     Ok(json_response(
-        render_detail_body(&pool, &looked_up, true, true, false).await?,
+        render_detail_body(&pool, &looked_up, &tenant.timezone, true, true, false).await?,
     ))
 }
 
@@ -6169,12 +6380,19 @@ pub async fn bulk_delete_issues(
         // only in-scope rows; out-of-scope ids still count as misses).
         // The triage span is a null-safe `NOT EXISTS` (Django's
         // `LEFT JOIN` scope keeps null-state rows; the spanned manager
-        // only joins live states).
+        // only joins live states). Project + workspace scoping is load
+        // bearing: without it a foreign id in the list would soft-delete
+        // another project's issue, which Django's filtered queryset never
+        // touches.
+        let project_bind = survivors.len() + 2;
+        let slug_bind = survivors.len() + 3;
         let sql = format!(
             "UPDATE issues AS issue SET deleted_at = $1 \
-             FROM projects AS project \
+             FROM projects AS project JOIN workspaces AS workspace \
+             ON workspace.id = issue.workspace_id \
              WHERE issue.deleted_at IS NULL AND issue.id IN ({placeholders}) \
-             AND issue.project_id = project.id \
+             AND issue.project_id = ${project_bind} AND issue.project_id = project.id \
+             AND workspace.slug = ${slug_bind} \
              AND NOT EXISTS (SELECT 1 FROM states AS state \
              WHERE state.id = issue.state_id AND state.deleted_at IS NULL \
              AND state.\"group\" = 'triage') \
@@ -6185,6 +6403,7 @@ pub async fn bulk_delete_issues(
         for id in &survivors {
             query = query.bind(id);
         }
+        query = query.bind(tenant.project_id).bind(slug.as_str());
         query
             .execute(&pool)
             .await
@@ -6260,4 +6479,210 @@ async fn count_bulk_issues(
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(rows.len() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn num(literal: &str) -> Value {
+        serde_json::from_str(literal).expect("number")
+    }
+
+    #[test]
+    fn int_literals_spell_exactly() {
+        let huge = num("99999999999999999999999");
+        let number = huge.as_number().expect("number");
+        assert_eq!(
+            int_literal(number).as_deref(),
+            Some("99999999999999999999999")
+        );
+        assert_eq!(json_number_str(number), "99999999999999999999999");
+        // In-range magnitudes format numerically (`-0` → `"0"`).
+        assert_eq!(json_number_str(num("-0").as_number().unwrap()), "0");
+        assert_eq!(json_number_str(num("5").as_number().unwrap()), "5");
+        // Exponent shapes are floats (`str(1000.0)`), never int literals.
+        assert!(int_literal(num("1e3").as_number().unwrap()).is_none());
+        assert_eq!(json_number_str(num("1e3").as_number().unwrap()), "1000.0");
+        assert_eq!(json_type_name(&num("99999999999999999999999")), "int");
+        assert_eq!(json_type_name(&num("1e3")), "float");
+    }
+
+    #[test]
+    fn huge_integers_report_min_max_not_invalid() {
+        assert!(matches!(
+            parse_integer(&num("99999999999999999999999")),
+            Ok(IntegerValue::TooBig)
+        ));
+        assert!(matches!(
+            parse_integer(&num("-99999999999999999999999")),
+            Ok(IntegerValue::TooSmall)
+        ));
+        assert!(matches!(
+            parse_integer(&num("1e3")),
+            Ok(IntegerValue::Int(1000))
+        ));
+    }
+
+    #[test]
+    fn char_fields_reject_nul_and_stringify_exponents() {
+        assert_eq!(
+            parse_char(&Value::String("a\0b".to_owned()), None),
+            Err(vec![MSG_NULL_CHARACTERS.to_owned()])
+        );
+        assert_eq!(parse_char(&num("1e3"), None).as_deref(), Ok("1000.0"));
+        assert_eq!(parse_char(&num("123"), None).as_deref(), Ok("123"));
+    }
+
+    #[test]
+    fn py_repr_picks_quotes_like_cpython() {
+        assert_eq!(py_repr_string("it's"), "\"it's\"");
+        assert_eq!(py_repr_string("say \"hi\""), "'say \"hi\"'");
+        assert_eq!(py_repr_string("both'and\"q"), "'both\\'and\"q'");
+        assert_eq!(py_repr_string("plain"), "'plain'");
+    }
+
+    #[test]
+    fn indexed_item_errors_order_numerically() {
+        // Eleven items, indices 2 and 10 invalid: `"10"` must not sort
+        // before `"2"` (Django dicts follow loop order).
+        let items: Vec<Value> = (0..11)
+            .map(|index| {
+                if index == 2 || index == 10 {
+                    Value::String("nope".to_owned())
+                } else {
+                    Value::String("00000000-0000-0000-0000-000000000000".to_owned())
+                }
+            })
+            .collect();
+        let ListOutcome::Indexed(errors) = parse_uuid_list(&Value::Array(items)) else {
+            panic!("expected indexed errors");
+        };
+        let keys: Vec<usize> = errors.keys().copied().collect();
+        assert_eq!(keys, vec![2, 10]);
+        let rendered = serde_json::to_string(&indexed_errors(errors)).expect("render");
+        assert!(rendered.find("\"2\"").unwrap() < rendered.find("\"10\"").unwrap());
+    }
+
+    #[test]
+    fn short_and_multibyte_dates_reject_without_panicking() {
+        // Short basic-week inputs panicked the `[5..7]` slice.
+        assert_eq!(parse_drf_date("2024W"), None);
+        assert_eq!(parse_drf_date("2024W1"), None);
+        // Multibyte bytes straddling a cut panicked the slices.
+        assert_eq!(parse_drf_date("2024-W5ä"), None);
+        assert_eq!(split_date_time("2024-01-1äT00:00"), None);
+        assert_eq!(parse_iso_time("1ä3"), None);
+        // Valid shapes still parse, including multibyte separators
+        // (`fromisoformat` accepts any single char there).
+        assert!(parse_drf_date("2024W05").is_some());
+        assert!(parse_drf_date("2024W053").is_some());
+        assert!(parse_drf_date("2024-W05-3").is_some());
+        assert!(split_date_time("20240101é00:00").is_some());
+        assert!(parse_iso_time("1234").is_some());
+    }
+
+    #[test]
+    fn extended_weeks_parse_and_plus_fields_reject() {
+        // `YYYY-Www[-D]` is valid `fromisoformat` (the year half keeps its
+        // dash before the `W` split).
+        assert!(parse_drf_date("2024-W05").is_some());
+        assert!(parse_drf_date("2024-W05-3").is_some());
+        // Short years, day 0 (no underflow), and `+`-signed fields reject.
+        assert_eq!(parse_drf_date("24W05"), None);
+        assert_eq!(parse_drf_date("2024-W05-0"), None);
+        assert_eq!(parse_drf_date("2024-+1-01"), None);
+        assert_eq!(parse_drf_date("2024W+1"), None);
+    }
+
+    #[test]
+    fn tz_offsets_are_strict_two_digit() {
+        assert_eq!(
+            split_tz_suffix("2024-01-01T00:00:00+05:30:05"),
+            ("2024-01-01T00:00:00", Some(5 * 3600 + 30 * 60 + 5))
+        );
+        // One-digit fields reject; fractions truncate.
+        assert_eq!(
+            split_tz_suffix("2024-01-01T00:00:00+1:00"),
+            ("2024-01-01T00:00:00+1:00", None)
+        );
+        assert_eq!(
+            split_tz_suffix("2024-01-01T00:00:00+05:30:5"),
+            ("2024-01-01T00:00:00+05:30:5", None)
+        );
+        assert_eq!(
+            split_tz_suffix("2024-01-01T00:00:00+00:00:00.5"),
+            ("2024-01-01T00:00:00", Some(0))
+        );
+        assert_eq!(
+            split_tz_suffix("2024-01-01T00:00:00+00:00:99"),
+            ("2024-01-01T00:00:00", Some(99))
+        );
+    }
+
+    #[test]
+    fn uuid_int_path_covers_128_bits() {
+        // `2^100` takes `int=` (then misses the lookup); past-`2^128`
+        // magnitudes and negatives are invalid, echoing exactly.
+        let big = num("1267650600228229401496703205376");
+        assert_eq!(parse_uuid_pk(&big), Ok(Uuid::from_u128(1 << 100)));
+        let past = num("340282366920938463463374607431768211456");
+        assert!(parse_uuid_pk(&past).is_err());
+        assert!(parse_uuid_pk(&num("-5")).is_err());
+    }
+
+    #[test]
+    fn null_twins_win_over_explicit_ids() {
+        // `{"parent": null, "parent_id": "<uuid>"}` clears (DRF's later
+        // field overwrites `attrs`, even with null) — it must not fall
+        // back to the twin's value.
+        let twin = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let other = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let mut validated: BTreeMap<&'static str, Validated> = BTreeMap::new();
+        validated.insert("parent", Validated::Null);
+        validated.insert("parent_id", Validated::Uuid(twin));
+        assert_eq!(v_parent(&validated), None);
+        validated.insert("parent", Validated::Uuid(other));
+        assert_eq!(v_parent(&validated), Some(other));
+        validated.remove("parent");
+        assert_eq!(v_parent(&validated), Some(twin));
+    }
+
+    #[test]
+    fn create_response_follows_values_order() {
+        // `base.py:433-461` verbatim: annotations between `parent_id` and
+        // `created_at`, `attachment_count` before `link_count`.
+        assert_eq!(
+            CREATE_RESPONSE_FIELDS.as_slice(),
+            [
+                "id",
+                "name",
+                "state_id",
+                "sort_order",
+                "completed_at",
+                "estimate_point",
+                "priority",
+                "start_date",
+                "target_date",
+                "sequence_id",
+                "project_id",
+                "parent_id",
+                "cycle_id",
+                "module_ids",
+                "label_ids",
+                "assignee_ids",
+                "sub_issues_count",
+                "created_at",
+                "updated_at",
+                "created_by",
+                "updated_by",
+                "attachment_count",
+                "link_count",
+                "is_draft",
+                "archived_at",
+                "deleted_at",
+            ]
+            .as_slice()
+        );
+    }
 }
