@@ -1272,7 +1272,7 @@ const DATETIME_FORMAT_HINT: &str = "YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM
 /// One validated partial write: `None` per field means "not present".
 #[derive(Default)]
 struct MemberPatch {
-    deleted_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
+    deleted_at: Option<Option<ParsedMemberDatetime>>,
     comment: Option<Option<String>>,
     role: Option<i64>,
     view_props: Option<Value>,
@@ -1387,13 +1387,15 @@ fn datetime_invalid() -> FieldFail {
 
 /// `DateTimeField` (`deleted_at`, nullable): ISO-8601 via the
 /// `fromisoformat`-then-fallback grammar, naive values made aware in the
-/// request timezone, aware values converted into it.
+/// request timezone, aware values converted into it. The parsed value
+/// carries the gap arm's verbatim echo (if any) through to the PATCH
+/// response renderer.
 fn validate_deleted_at(
     value: Option<&JVal>,
     file: Option<&shared_body::FilePart>,
     tz: &Tz,
     tz_name: &str,
-) -> Result<Option<chrono::DateTime<chrono::Utc>>, FieldFail> {
+) -> Result<Option<ParsedMemberDatetime>, FieldFail> {
     if file.is_some() {
         return Err(datetime_invalid());
     }
@@ -2061,11 +2063,45 @@ fn offset_before_gap(tz: &Tz, naive: &chrono::NaiveDateTime) -> Option<chrono::F
     None
 }
 
+/// A parsed `deleted_at` input: the stored instant, plus the echo
+/// override for the DST-gap arm only (`None` everywhere else, where the
+/// normalized render is already correct).
+struct ParsedMemberDatetime {
+    utc: chrono::DateTime<chrono::Utc>,
+    echo: Option<String>,
+}
+
+/// Render a gap wall time exactly like DRF renders the in-memory
+/// `make_aware` value: wall parts plus the pre-transition offset, with
+/// `+00:00` rewritten to `Z`. DRF's `enforce_timezone` calls
+/// `value.astimezone(field_timezone)`, and CPython's `astimezone`
+/// returns `self` unchanged when `tzinfo is tz` — which always holds
+/// here, since `make_aware` attached the cached `ZoneInfo` object —
+/// so the echo is the non-normalized local form, never the instant
+/// re-rendered (`2026-03-08T02:30:00-05:00`, not `03:30:00-04:00`).
+fn render_gap_echo(naive: &chrono::NaiveDateTime, offset: &chrono::FixedOffset) -> String {
+    let suffix = offset
+        .from_local_datetime(naive)
+        .single()
+        .map(|local| local.format("%:z").to_string())
+        .unwrap_or_else(|| "+00:00".to_owned());
+    let suffix = if suffix == "+00:00" { "Z" } else { &suffix };
+    let base = naive.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let nanos = naive.and_utc().timestamp_subsec_nanos();
+    if nanos == 0 {
+        format!("{base}{suffix}")
+    } else if nanos.is_multiple_of(1000) {
+        format!("{base}.{:06}{suffix}", nanos / 1000)
+    } else {
+        format!("{base}.{nanos:09}{suffix}")
+    }
+}
+
 fn parse_member_datetime(
     text: &str,
     tz: &Tz,
     tz_name: &str,
-) -> Result<chrono::DateTime<chrono::Utc>, FieldFail> {
+) -> Result<ParsedMemberDatetime, FieldFail> {
     let (naive, offset) = split_member_datetime(text).ok_or_else(datetime_invalid)?;
     match offset {
         Some(fixed) => {
@@ -2085,16 +2121,26 @@ fn parse_member_datetime(
             if !(1..=9999).contains(&local.date().year()) {
                 return Err(FieldFail::one("Datetime value out of range.".to_owned()));
             }
-            Ok(zoned.with_timezone(&chrono::Utc))
+            Ok(ParsedMemberDatetime {
+                utc: zoned.with_timezone(&chrono::Utc),
+                echo: None,
+            })
         }
         None => match tz.from_local_datetime(&naive) {
-            chrono::MappedLocalTime::Single(local) => Ok(local.with_timezone(&chrono::Utc)),
-            chrono::MappedLocalTime::Ambiguous(first, _) => Ok(first.with_timezone(&chrono::Utc)),
+            chrono::MappedLocalTime::Single(local) => Ok(ParsedMemberDatetime {
+                utc: local.with_timezone(&chrono::Utc),
+                echo: None,
+            }),
+            chrono::MappedLocalTime::Ambiguous(first, _) => Ok(ParsedMemberDatetime {
+                utc: first.with_timezone(&chrono::Utc),
+                echo: None,
+            }),
             // Spring-forward gaps: Django's `make_aware` under ZoneInfo
             // is a bare `replace(tzinfo)` (never raises) and DRF's
             // `valid_datetime` only rejects ambiguous times, so gap wall
             // times 200 and store with the pre-transition (fold=0)
-            // offset — never the `make_aware` 400.
+            // offset — never the `make_aware` 400. The PATCH echo must
+            // render that same non-normalized local form (D6).
             chrono::MappedLocalTime::None => {
                 let offset = offset_before_gap(tz, &naive).ok_or_else(|| {
                     FieldFail::one(format!("Invalid datetime for the timezone \"{tz_name}\"."))
@@ -2107,7 +2153,11 @@ fn parse_member_datetime(
                         chrono::DateTime::from_naive_utc_and_offset(naive_utc, chrono::Utc)
                     })
                     .ok_or_else(|| FieldFail::one("Datetime value out of range.".to_owned()))?;
-                Ok(utc)
+                let echo = render_gap_echo(&naive, &offset);
+                Ok(ParsedMemberDatetime {
+                    utc,
+                    echo: Some(echo),
+                })
             }
         },
     }
@@ -3112,8 +3162,8 @@ async fn member_partial_update_inner(
         sets.join(", ")
     );
     let mut query = sqlx::query(&sql).bind(saved_at).bind(user_id);
-    if let Some(deleted_at) = patch.deleted_at {
-        query = query.bind(deleted_at);
+    if let Some(deleted_at) = patch.deleted_at.as_ref() {
+        query = query.bind(deleted_at.as_ref().map(|parsed| parsed.utc));
     }
     if let Some(comment) = patch.comment.as_ref() {
         query = query.bind(comment);
@@ -3148,7 +3198,11 @@ async fn member_partial_update_inner(
     merged.updated_at = crate::serializer::render_datetime_in(&saved_at, &tz);
     merged.updated_by = Some(user_id.to_string());
     if let Some(deleted_at) = patch.deleted_at {
-        merged.deleted_at = deleted_at.map(|dt| crate::serializer::render_datetime_in(&dt, &tz));
+        merged.deleted_at = deleted_at.map(|parsed| {
+            parsed
+                .echo
+                .unwrap_or_else(|| crate::serializer::render_datetime_in(&parsed.utc, &tz))
+        });
     }
     if let Some(comment) = patch.comment {
         merged.comment = comment;
@@ -3966,7 +4020,7 @@ mod tests {
         let tz: Tz = "UTC".parse().unwrap();
         let parse = |text: &str| {
             parse_member_datetime(text, &tz, "UTC")
-                .map(|dt| dt.to_rfc3339())
+                .map(|parsed| parsed.utc.to_rfc3339())
                 .map_err(|fail| match fail {
                     FieldFail::Messages(messages) => messages.join(";"),
                     FieldFail::ServerError => "500".to_owned(),
@@ -4091,7 +4145,7 @@ mod tests {
         let ny: Tz = "America/New_York".parse().unwrap();
         let parse = |text: &str| {
             parse_member_datetime(text, &ny, "America/New_York")
-                .map(|dt| dt.to_rfc3339())
+                .map(|parsed| parsed.utc.to_rfc3339())
                 .map_err(|fail| match fail {
                     FieldFail::Messages(messages) => messages.join(";"),
                     FieldFail::ServerError => "500".to_owned(),
@@ -4113,6 +4167,47 @@ mod tests {
             parse("2024-01-02T03:04:05").unwrap(),
             "2024-01-02T08:04:05+00:00"
         );
+    }
+
+    #[test]
+    fn dst_gap_echo_renders_local_form() {
+        // D6: the PATCH echo of a gap wall time is the non-normalized
+        // local form, not the stored instant re-rendered (DRF's
+        // `astimezone` returns `self` when `tzinfo is tz`, and ZoneInfo
+        // objects are cached). Live oracle: NY 2026-03-08 02:30 stores
+        // 07:30Z and echoes `02:30:00-05:00`.
+        let ny: Tz = "America/New_York".parse().unwrap();
+        let london: Tz = "Europe/London".parse().unwrap();
+        let parse = |text: &str, zone: &Tz| {
+            parse_member_datetime(text, zone, "test").map_err(|fail| match fail {
+                FieldFail::Messages(messages) => messages.join(";"),
+                FieldFail::ServerError => "500".to_owned(),
+            })
+        };
+        let gap = parse("2026-03-08T02:30:00", &ny).unwrap();
+        assert_eq!(gap.utc.to_rfc3339(), "2026-03-08T07:30:00+00:00");
+        assert_eq!(gap.echo.as_deref(), Some("2026-03-08T02:30:00-05:00"));
+        // Fractions survive the echo; a pre-transition `+00:00` offset
+        // (London springs forward out of GMT) takes the `Z` rewrite.
+        let micro = parse("2026-03-08T02:30:00.5", &ny).unwrap();
+        assert_eq!(
+            micro.echo.as_deref(),
+            Some("2026-03-08T02:30:00.500000-05:00")
+        );
+        let zed = parse("2026-03-29T01:30:00", &london).unwrap();
+        assert_eq!(zed.utc.to_rfc3339(), "2026-03-29T01:30:00+00:00");
+        assert_eq!(zed.echo.as_deref(), Some("2026-03-29T01:30:00Z"));
+        // Every other arm echoes `None`: the normalized render is
+        // already correct there (naive single/ambiguous local forms
+        // equal it; aware inputs normalize through `astimezone`).
+        for text in [
+            "2024-01-02T03:04:05",
+            "2024-11-03T01:30:00",
+            "2024-01-02T05:04:05+02:00",
+        ] {
+            let parsed = parse(text, &ny).unwrap();
+            assert_eq!(parsed.echo, None, "{text}");
+        }
     }
 
     #[test]
