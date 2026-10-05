@@ -36,6 +36,9 @@
 //!   parent validation + fetch-or-error + detail select + archive reads;
 //!   `api/views/issue.py:2654-2917`, `search/issue.py:128-198`,
 //!   `api/views/page.py:173-232,480-553`, PIDASHCONV-670).
+//! * [`shape_links`] — link shapes (`IssueLinkCreate` / `Update` / Show,
+//!   `GithubPullRequestLink`, `GitCodeReviewLink`;
+//!   `api/serializers/issue.py:580-728`, PIDASHCONV-662).
 //! * Sibling issues extend this file with their own `pub mod shape_*;` /
 //!   `queries_*` lines (PIDASHCONV-661…663,665…672); on rebase keep both sides,
 //!   never fork a helper.
@@ -56,6 +59,7 @@ pub mod queries_search;
 pub mod queries_sub;
 pub mod shape_expand_search;
 pub mod shape_issue;
+pub mod shape_links;
 pub mod shape_pages;
 pub mod shape_relations;
 pub mod shape_social;
