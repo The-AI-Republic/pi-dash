@@ -45,6 +45,7 @@
 pub mod handlers_engage;
 pub mod handlers_labels_attachments;
 pub mod handlers_reads;
+pub mod handlers_relations;
 pub mod queries_core;
 pub mod queries_engage;
 pub mod render;
@@ -188,6 +189,7 @@ pub fn routes() -> Router<AppState> {
         // Misc reads + sub-issues (handlers-B): sibling handler issues
         // merge their routers here the same way; merges keep both sides.
         .merge(handlers_reads::routes())
+        .merge(handlers_relations::routes())
 }
 
 /// A list-family path: the GET handler owns reads, everything else falls
