@@ -455,12 +455,15 @@ pub const PATH_ARCHIVED_LIST: &str = "workspaces/<slug>/projects/<id>/archived-c
 pub const PATH_CYCLE_UNARCHIVE: &str =
     "workspaces/<slug>/projects/<id>/archived-cycles/<uuid>/unarchive/";
 
-/// The authenticated actor: user id plus active time zone
-/// (`TimezoneMixin.initial` activates `request.user.user_timezone`,
-/// `api/views/base.py:43-48`).
+/// The authenticated actor: user id plus the RAW stored time-zone name.
+/// The zone is NOT parsed here — `TimezoneMixin.initial`
+/// (`api/views/base.py:43-48`) calls `super().initial()`
+/// (auth + permissions) first and only then activates the zone, so a
+/// denying gate answers 403 even when the stored zone is unknown (which
+/// 400s only for survivors, via [`activate_timezone`]).
 pub struct Actor {
     pub id: uuid::Uuid,
-    pub timezone: Tz,
+    pub timezone: Option<String>,
 }
 
 /// `APIKeyAuthentication` (`api/middleware/api_authentication.py:19-88`):
@@ -482,7 +485,7 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
             resolve_machine_token(pool, raw, secret_key).await?
         }
     };
-    let timezone = request_timezone(pool, &user_id).await?;
+    let timezone = load_timezone_name(pool, &user_id).await?;
     // `api_tokens.last_used` is stamped on every validated call
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
@@ -499,9 +502,12 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
 }
 
 /// The `api_tokens` columns the validator reads (`db/models/api.py:35-57`).
+/// The `deleted_at IS NULL` conjunct is the `SoftDeletionManager` scope
+/// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
+/// rows, so a soft-deleted token 403s instead of authenticating.
 async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
     let row: Option<ApiTokenLookup> = sqlx::query_as(
-        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1"#,
+        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
     )
     .bind(presented)
     .fetch_optional(pool)
@@ -586,20 +592,29 @@ async fn resolve_machine_token(
     Ok(user_id)
 }
 
-/// The request time zone (`TimezoneMixin.initial`): the user's stored zone;
-/// an invalid stored zone 500s like `zoneinfo.ZoneInfo` raising.
-async fn request_timezone(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Tz, Denial> {
+/// The request time zone (`TimezoneMixin.initial`): the user's stored zone
+/// name, loaded but NOT parsed — parsing happens after the gate in
+/// [`activate_timezone`].
+async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
     let name: Option<Option<String>> =
         sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
             .bind(user_id)
             .fetch_optional(pool)
             .await
             .map_err(|error| db_error(error, "request-timezone"))?;
-    let name: Option<String> = name.unwrap_or(None);
-    name.as_deref()
+    Ok(name.unwrap_or(None))
+}
+
+/// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
+/// after `super().initial()`). A missing zone defaults to UTC; an unknown
+/// zone name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`,
+/// which subclasses `KeyError`, so `handle_exception` answers the
+/// `KeyError` branch (`api/views/base.py:160-164`), never a 500.
+fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
+    timezone
         .unwrap_or("UTC")
-        .parse::<Tz>()
-        .map_err(|error| db_error(error, "request-timezone"))
+        .parse()
+        .map_err(|_| Denial::BadError("The required key does not exist.".to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -4862,6 +4877,9 @@ pub async fn list_cycles_inner(
         PATH_CYCLES,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     fetch_project(&pre.pool, &project_id, &workspace_id).await?;
     let view = shapes::parse_cycle_view(query_last(query, "cycle_view").as_deref());
     let sql = compact_binds(&queries::cycle_list_filtered_sql(
@@ -4891,7 +4909,7 @@ pub async fn list_cycles_inner(
                 render_cycle(
                     &pre.pool,
                     &detail,
-                    &pre.actor.timezone,
+                    &timezone,
                     fields.as_deref(),
                     expand.as_deref(),
                 )
@@ -4911,7 +4929,7 @@ pub async fn list_cycles_inner(
             render_cycle(
                 &pre.pool,
                 &detail,
-                &pre.actor.timezone,
+                &timezone,
                 fields.as_deref(),
                 expand.as_deref(),
             )
@@ -4945,6 +4963,9 @@ pub async fn retrieve_cycle_inner(
         PATH_CYCLE_DETAIL,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     fetch_project(&pre.pool, &project_id, &workspace_id).await?;
     let sql = queries::cycle_detail_sql(&queries::OrderBy::default_cycle());
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
@@ -4965,7 +4986,7 @@ pub async fn retrieve_cycle_inner(
     let value = render_cycle(
         &pre.pool,
         &detail,
-        &pre.actor.timezone,
+        &timezone,
         fields.as_deref(),
         expand.as_deref(),
     )
@@ -4998,6 +5019,9 @@ pub async fn list_archived_cycles_inner(
         PATH_ARCHIVED_LIST,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let sql = compact_binds(&queries::archived_cycle_list_sql(
         &queries::OrderBy::default_cycle(),
     ));
@@ -5019,7 +5043,7 @@ pub async fn list_archived_cycles_inner(
             render_cycle(
                 &pre.pool,
                 &detail,
-                &pre.actor.timezone,
+                &timezone,
                 fields.as_deref(),
                 expand.as_deref(),
             )
@@ -5214,6 +5238,10 @@ pub async fn create_cycle_inner(
         PATH_CYCLES,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    // (Named `render_tz`: the cycle write below has its own `timezone`.)
+    let render_tz = activate_timezone(pre.actor.timezone.as_deref())?;
     // The both-or-neither gate runs on `request.data` BEFORE any
     // serializer (`views/cycle.py:305`), so a non-object body 500s on
     // `.get` instead of answering serializer errors.
@@ -5234,7 +5262,7 @@ pub async fn create_cycle_inner(
             shapes::CREATE_DATES_SHAPE_MESSAGE.to_owned(),
         ));
     }
-    let write = coerce_write(&pre.pool, &raw, false, &pre.actor.timezone, &files, html).await?;
+    let write = coerce_write(&pre.pool, &raw, false, &render_tz, &files, html).await?;
     // `validate()` (`serializers/cycle.py:61-106`): the project row comes
     // from `filter().first()` (missing → the 400 arm, unreachable past the
     // gate but ported), the legacy body id from the raw `project_id` key.
@@ -5265,7 +5293,7 @@ pub async fn create_cycle_inner(
         write.end_date.flatten(),
         write.owned_by.flatten(),
         &pre.actor.id,
-        &pre.actor.timezone,
+        &render_tz,
         &now,
     )?;
     let project = project.ok_or(Denial::ServerError)?;
@@ -5380,7 +5408,7 @@ pub async fn create_cycle_inner(
         return Err(Denial::ServerError);
     };
     let detail = CycleDetail::decode(&row, "cycle-create-reread")?;
-    let value = render_cycle(&pre.pool, &detail, &pre.actor.timezone, None, None).await?;
+    let value = render_cycle(&pre.pool, &detail, &render_tz, None, None).await?;
     serde_json::to_string(&value)
         .map(json_created)
         .map_err(|error| db_error(error, "cycle-create-render"))
@@ -5465,6 +5493,9 @@ pub async fn patch_cycle_inner(
         PATH_CYCLE_DETAIL,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT c."id", c."created_at", c."updated_at", c."created_by_id", c."updated_by_id", c."deleted_at",
                   c."project_id", c."workspace_id", c."name", c."description", c."start_date", c."end_date", c."owned_by_id",
@@ -5486,7 +5517,7 @@ pub async fn patch_cycle_inner(
     // `current_instance`: `json.dumps(CycleSerializer(cycle).data)` of the
     // BARE pre-save instance (no annotations), Python separators — taken
     // BEFORE the archived check (`views/cycle.py:502`).
-    let snapshot = render_cycle(&pre.pool, &before, &pre.actor.timezone, None, None).await?;
+    let snapshot = render_cycle(&pre.pool, &before, &timezone, None, None).await?;
     let snapshot_text = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&snapshot);
     if before.archived_at.is_some() {
         return Err(Denial::BadError(
@@ -5504,7 +5535,7 @@ pub async fn patch_cycle_inner(
         }
     }
     let raw = coerce_body_object(value)?;
-    let write = coerce_write(&pre.pool, &raw, true, &pre.actor.timezone, &files, html).await?;
+    let write = coerce_write(&pre.pool, &raw, true, &timezone, &files, html).await?;
     // `validate()`: the project row comes from `filter().first()`; the
     // instance arm carries the cycle's own project id (same value here).
     let project: Option<ProjectRow> = sqlx::query(
@@ -5533,7 +5564,7 @@ pub async fn patch_cycle_inner(
         write.end_date.flatten(),
         write.owned_by.flatten(),
         &pre.actor.id,
-        &pre.actor.timezone,
+        &timezone,
         &now,
     )?;
     // PATCH external-dup (`views/cycle.py:529-545`): the RAW external id
@@ -5633,7 +5664,7 @@ pub async fn patch_cycle_inner(
         return Err(Denial::ServerError);
     };
     let after = CycleDetail::decode(&row, "cycle-patch-reread")?;
-    let value = render_cycle(&pre.pool, &after, &pre.actor.timezone, None, None).await?;
+    let value = render_cycle(&pre.pool, &after, &timezone, None, None).await?;
     serde_json::to_string(&value)
         .map(json_ok)
         .map_err(|error| db_error(error, "cycle-patch-render"))
@@ -5759,6 +5790,9 @@ pub async fn delete_cycle_inner(
         PATH_CYCLE_DETAIL,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT c."id", c."name", c."owned_by_id" FROM "cycles" c
            INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
@@ -5891,6 +5925,9 @@ pub async fn list_cycle_issues_inner(
         PATH_CYCLE_ISSUES,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let order = resolve_cycle_issue_order(query_last(query, "order_by").as_deref());
     let sql = pidash_db::v1_cycles_modules::cycle_queries::cycle_issue_list_get_sql(&order);
     let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
@@ -5930,7 +5967,7 @@ pub async fn list_cycle_issues_inner(
                 &assignees,
                 &labels,
                 url,
-                &pre.actor.timezone,
+                &timezone,
                 fields.as_deref(),
                 expand.as_deref(),
             )
@@ -6122,6 +6159,9 @@ pub async fn add_cycle_issues_inner(
         PATH_CYCLE_ISSUES,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     // Raw `request.data` (no serializer): empty is `{}`, unparseable is the
     // DRF `ParseError`, a non-object 500s on `.get`.
     let (raw, files, _) = parse_object_or_500_ct(headers, body)?;
@@ -6372,8 +6412,7 @@ pub async fn add_cycle_issues_inner(
     for row in &rows {
         let detail = BridgeDetail::decode(row, "cycle-issues-add-reread")?
             .with_sub_issues_count(row, "cycle-issues-add-reread")?;
-        results
-            .push(render_bridge(&pre.pool, state, &detail, &pre.actor.timezone, None, None).await?);
+        results.push(render_bridge(&pre.pool, state, &detail, &timezone, None, None).await?);
     }
     serde_json::to_string(&Value::Array(results))
         .map(json_ok)
@@ -6508,6 +6547,9 @@ pub async fn get_cycle_issue_inner(
         PATH_CYCLE_ISSUE_DETAIL,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT ci."id", ci."created_at", ci."updated_at", ci."deleted_at", ci."created_by_id", ci."updated_by_id",
                   ci."project_id", ci."workspace_id", ci."cycle_id", ci."issue_id" FROM "cycle_issues" ci
@@ -6532,7 +6574,7 @@ pub async fn get_cycle_issue_inner(
         &pre.pool,
         state,
         &detail,
-        &pre.actor.timezone,
+        &timezone,
         fields.as_deref(),
         expand.as_deref(),
     )
@@ -6567,6 +6609,9 @@ pub async fn remove_cycle_issue_inner(
         PATH_CYCLE_ISSUE_DETAIL,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT ci."id", ci."cycle_id", ci."issue_id" FROM "cycle_issues" ci
            INNER JOIN "workspaces" w ON ci."workspace_id" = w."id"
@@ -6640,6 +6685,9 @@ pub async fn archive_cycle_inner(
         PATH_CYCLE_ARCHIVE,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT c."id", c."end_date" FROM "cycles" c
            INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
@@ -6720,6 +6768,9 @@ pub async fn unarchive_cycle_inner(
         PATH_CYCLE_UNARCHIVE,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT c."id" FROM "cycles" c
            INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
@@ -6999,6 +7050,9 @@ pub async fn transfer_cycle_issues_inner(
         PATH_CYCLE_TRANSFER,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     // Raw `request.data` (no serializer): `.get("new_cycle_id", False)`
     // 500s on a non-object body; falsy answers the 400.
     let (raw, files, _) = parse_object_or_500_ct(headers, body)?;
@@ -7098,7 +7152,7 @@ pub async fn transfer_cycle_issues_inner(
     // `burndown_plot` compares each chart day against
     // `timezone.now().date()` with the ACTOR zone active
     // (`TimezoneMixin`, `analytics_plot.py:247-257`) — not the UTC day.
-    let today = micros_now().with_timezone(&pre.actor.timezone).date_naive();
+    let today = micros_now().with_timezone(&timezone).date_naive();
     // Estimate gate (`:153-159`): the EXISTS the snapshot branch reads.
     let estimate_type: bool = sqlx::query_scalar::<_, i32>(queries::TRANSFER_ESTIMATE_TYPE_SQL)
         .bind(slug)
@@ -7125,7 +7179,7 @@ pub async fn transfer_cycle_issues_inner(
     )
     .await?;
     let issues_burndown =
-        fetch_burndown_issues(&pre.pool, slug, &project_id, cycle_id, &pre.actor.timezone).await?;
+        fetch_burndown_issues(&pre.pool, slug, &project_id, cycle_id, &timezone).await?;
     let completion_chart = burndown_chart(
         ChartNumber::Int(counts.total),
         &issues_burndown,
@@ -7161,8 +7215,7 @@ pub async fn transfer_cycle_issues_inner(
     };
     let points_chart = if estimate_type {
         let points_burndown =
-            fetch_burndown_points(&pre.pool, slug, &project_id, cycle_id, &pre.actor.timezone)
-                .await?;
+            fetch_burndown_points(&pre.pool, slug, &project_id, cycle_id, &timezone).await?;
         let points_total =
             fetch_burndown_points_total(&pre.pool, slug, &project_id, cycle_id).await?;
         burndown_chart(points_total, &points_burndown, start_date, end_date, today)

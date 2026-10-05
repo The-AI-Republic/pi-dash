@@ -461,8 +461,11 @@ async fn authenticate(
 /// (`api_authentication.py:32-45` returns `api_token.user` unchecked, and
 /// DRF `IsAuthenticated` passes inactive users on to the permission path).
 async fn authenticate_api_token(pool: &sqlx::PgPool, raw: &str) -> Result<Identity, HandlerError> {
+    // `deleted_at IS NULL` is the `SoftDeletionManager` scope
+    // (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
+    // rows, so a soft-deleted token 403s instead of authenticating.
     let row: Option<(Uuid, bool, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as(r#"SELECT user_id, is_active, expired_at FROM api_tokens WHERE token = $1"#)
+        sqlx::query_as(r#"SELECT user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#)
             .bind(raw)
             .fetch_optional(pool)
             .await
@@ -578,12 +581,14 @@ async fn load_identity(pool: &sqlx::PgPool, user_id: Uuid) -> Result<Identity, H
 
 /// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
 /// after `super().initial()`). A missing zone defaults to UTC; an unknown
-/// zone name 500s (`ZoneInfo(...)` raises; no `try/except`).
+/// zone name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`,
+/// which subclasses `KeyError`, so `handle_exception` answers the
+/// `KeyError` branch (`api/views/base.py:160-164`), never a 500.
 fn activate_timezone(timezone: Option<&str>) -> Result<Tz, HandlerError> {
     timezone
         .unwrap_or("UTC")
         .parse()
-        .map_err(|_| HandlerError::ServerError)
+        .map_err(|_| HandlerError::BadError("The required key does not exist.".to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -2746,14 +2751,17 @@ mod tests {
 
     #[test]
     fn timezone_parses_after_the_gate() {
-        // Missing zone defaults to UTC; unknown zones fail (500 for
-        // survivors, never ahead of a denial — ordering lives in
-        // `authorize`, this only pins the parse itself).
+        // Missing zone defaults to UTC; unknown zones 400 through the
+        // `KeyError` branch (`ZoneInfoNotFoundError` subclasses
+        // `KeyError`; verified live against Django) — never ahead of a
+        // denial (ordering lives in `authorize`, this only pins the
+        // parse itself).
         assert!(activate_timezone(None).is_ok());
         assert!(activate_timezone(Some("UTC")).is_ok());
         assert!(matches!(
             activate_timezone(Some("Not/AZone")),
-            Err(HandlerError::ServerError)
+            Err(HandlerError::BadError(message))
+            if message == "The required key does not exist."
         ));
     }
 }

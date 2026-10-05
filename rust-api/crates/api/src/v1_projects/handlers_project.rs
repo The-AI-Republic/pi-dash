@@ -345,12 +345,15 @@ fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
     Denial::ServerError
 }
 
-/// The authenticated actor: user id plus active time zone
-/// (`TimezoneMixin.initial` activates `request.user.user_timezone`,
-/// `api/views/base.py:43-48`).
+/// The authenticated actor: user id plus the RAW stored time-zone name.
+/// The zone is NOT parsed here — `TimezoneMixin.initial`
+/// (`api/views/base.py:43-48`) calls `super().initial()`
+/// (auth + permissions) first and only then activates the zone, so a
+/// denying gate answers 403 even when the stored zone is unknown (which
+/// 400s only for survivors, via [`activate_timezone`]).
 pub struct Actor {
     pub id: uuid::Uuid,
-    pub timezone: Tz,
+    pub timezone: Option<String>,
 }
 
 /// `APIKeyAuthentication` (`api/middleware/api_authentication.py:19-88`):
@@ -372,7 +375,7 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
             resolve_machine_token(pool, raw, secret_key).await?
         }
     };
-    let timezone = request_timezone(pool, &user_id).await?;
+    let timezone = load_timezone_name(pool, &user_id).await?;
     // `api_tokens.last_used` is stamped on every validated call
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
@@ -389,9 +392,12 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
 }
 
 /// The `api_tokens` columns the validator reads (`db/models/api.py:35-57`).
+/// The `deleted_at IS NULL` conjunct is the `SoftDeletionManager` scope
+/// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
+/// rows, so a soft-deleted token 403s instead of authenticating.
 async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
     let row: Option<ApiTokenLookup> = sqlx::query_as(
-        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1"#,
+        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
     )
     .bind(presented)
     .fetch_optional(pool)
@@ -408,17 +414,10 @@ async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid,
     };
     pidash_auth::token::validate_api_token(Some(&row), presented, now_unix)
         .map_err(|_| Denial::InvalidToken)?;
-    // Inactive users cannot authenticate (the `users` table has no
-    // `deleted_at`; `is_active` is the only liveness signal).
-    let active: Option<bool> =
-        sqlx::query_scalar(r#"SELECT TRUE FROM "users" WHERE "id" = $1 AND "is_active""#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "api-token-user"))?;
-    if active != Some(true) {
-        return Err(Denial::InvalidToken);
-    }
+    // No `users.is_active` check: `validate_api_token` returns
+    // `api_token.user` unchecked, and neither DRF `IsAuthenticated` nor
+    // the project permission classes consult it — Django serves a
+    // deactivated user's token when membership passes. Port the wart.
     Ok(user_id)
 }
 
@@ -466,14 +465,10 @@ async fn resolve_machine_token(
     .map_err(|error| db_error(error, "machine-token-member"))?
     .unwrap_or(false);
     if !member {
+        // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
+        // `last_used_at` is stamped on success only.
         let _ = sqlx::query(
             r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
-        )
-        .bind(&presented_hash)
-        .execute(pool)
-        .await;
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#,
         )
         .bind(&presented_hash)
         .execute(pool)
@@ -488,20 +483,29 @@ async fn resolve_machine_token(
     Ok(user_id)
 }
 
-/// The request time zone (`TimezoneMixin.initial`): the user's stored zone;
-/// an invalid stored zone 500s like `zoneinfo.ZoneInfo` raising.
-async fn request_timezone(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Tz, Denial> {
+/// The request time zone (`TimezoneMixin.initial`): the user's stored zone
+/// name, loaded but NOT parsed — parsing happens after the gate in
+/// [`activate_timezone`].
+async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
     let name: Option<Option<String>> =
         sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
             .bind(user_id)
             .fetch_optional(pool)
             .await
             .map_err(|error| db_error(error, "request-timezone"))?;
-    let name: Option<String> = name.unwrap_or(None);
-    name.as_deref()
+    Ok(name.unwrap_or(None))
+}
+
+/// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
+/// after `super().initial()`). A missing zone defaults to UTC; an unknown
+/// zone name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`,
+/// which subclasses `KeyError`, so `handle_exception` answers the
+/// `KeyError` branch (`api/views/base.py:160-164`), never a 500.
+fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
+    timezone
         .unwrap_or("UTC")
-        .parse::<Tz>()
-        .map_err(|error| db_error(error, "preamble-workspace"))
+        .parse()
+        .map_err(|_| Denial::BadError("The required key does not exist.".to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1826,6 +1830,9 @@ pub async fn archive_project_inner(
         "POST",
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let now = chrono::Utc::now();
     let updated: u64 = sqlx::query(
         r#"UPDATE "projects" SET "archived_at" = $1, "updated_at" = $1, "updated_by_id" = $2 WHERE "id" = $3 AND "workspace_id" = $4 AND "deleted_at" IS NULL"#,
@@ -1876,6 +1883,9 @@ pub async fn unarchive_project_inner(
         "DELETE",
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let now = chrono::Utc::now();
     let updated: u64 = sqlx::query(
         r#"UPDATE "projects" SET "archived_at" = NULL, "updated_at" = $1, "updated_by_id" = $2 WHERE "id" = $3 AND "workspace_id" = $4 AND "deleted_at" IS NULL"#,
@@ -1955,6 +1965,9 @@ pub async fn summary_inner(
             return Err(Denial::Forbidden);
         }
     }
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<(uuid::Uuid, String, String)> = sqlx::query_as(
         r#"SELECT "id", "name", "identifier" FROM "projects" WHERE "id" = $1 AND "workspace_id" = $2 AND "deleted_at" IS NULL"#,
     )
@@ -2347,6 +2360,9 @@ pub async fn list_projects_inner(
     let pre = preamble(state, headers, slug).await?;
     let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_project_base(&pre.pool, &workspace_id, slug, &pre.actor.id, None, "GET").await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let per_page =
         crate::paginator::parse_per_page(query_last(query, "per_page").as_deref(), 1000, 1000)
             .map_err(page_denial)?;
@@ -2406,7 +2422,7 @@ pub async fn list_projects_inner(
             row,
             Some(&ann),
             true,
-            &pre.actor.timezone,
+            &timezone,
             fields.as_deref(),
             expand.as_deref(),
         )
@@ -2567,6 +2583,10 @@ pub async fn create_project_inner(
     let pre = preamble(state, headers, slug).await?;
     let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_project_base(&pre.pool, &workspace_id, slug, &pre.actor.id, None, "POST").await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    // (Named `render_tz`: the write body below has its own `timezone`.)
+    let render_tz = activate_timezone(pre.actor.timezone.as_deref())?;
     // `Workspace.objects.get(slug=slug)` — unreachable after a passing
     // permission (membership implies the row), still ported.
     let ws_exists: bool =
@@ -2782,16 +2802,7 @@ pub async fn create_project_inner(
         kwargs,
     )
     .await;
-    let text = render_project(
-        &pre.pool,
-        &row,
-        Some(&ann),
-        false,
-        &pre.actor.timezone,
-        None,
-        None,
-    )
-    .await?;
+    let text = render_project(&pre.pool, &row, Some(&ann), false, &render_tz, None, None).await?;
     Ok(json_created(text))
 }
 
@@ -2882,6 +2893,9 @@ pub async fn retrieve_project_inner(
         "GET",
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     // `.get()` misses raise `DoesNotExist` into the base-handler 404.
     let row = fetch_detail_row(&pre.pool, slug, &pre.actor.id, &project_id)
         .await?
@@ -2894,7 +2908,7 @@ pub async fn retrieve_project_inner(
         &row,
         Some(&ann),
         false,
-        &pre.actor.timezone,
+        &timezone,
         fields.as_deref(),
         expand.as_deref(),
     )
@@ -2923,6 +2937,9 @@ pub async fn patch_project_inner(
         "PATCH",
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     // `Workspace.objects.get` then `Project.objects.get(pk=pk)` — either
     // miss answers `{"error":"Project does not exist"}`.
     let ws_exists: bool =
@@ -2945,16 +2962,7 @@ pub async fn patch_project_inner(
     }
     // Before-image for the activity call (`views/project.py:412`): a plain
     // instance, so the annotation keys are absent (`SkipField`).
-    let snapshot = render_project(
-        &pre.pool,
-        &plain,
-        None,
-        false,
-        &pre.actor.timezone,
-        None,
-        None,
-    )
-    .await?;
+    let snapshot = render_project(&pre.pool, &plain, None, false, &timezone, None, None).await?;
     let project_name: String = plain.try_get("name").map_err(|_| Denial::ServerError)?;
     let was_default: bool = plain
         .try_get("is_default")
@@ -3101,16 +3109,7 @@ pub async fn patch_project_inner(
         kwargs,
     )
     .await;
-    let text = render_project(
-        &pre.pool,
-        &row,
-        Some(&ann),
-        false,
-        &pre.actor.timezone,
-        None,
-        None,
-    )
-    .await?;
+    let text = render_project(&pre.pool, &row, Some(&ann), false, &timezone, None, None).await?;
     Ok(json_ok(text))
 }
 
@@ -3339,6 +3338,9 @@ pub async fn delete_project_inner(
         "DELETE",
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<(bool,)> = sqlx::query_as(
         r#"SELECT "is_default" FROM "projects" WHERE "id" = $1 AND "workspace_id" = $2 AND "deleted_at" IS NULL"#,
     )

@@ -298,12 +298,16 @@ fn created_json(value: Value) -> Response {
 // Authentication (`APIKeyAuthentication`)
 // ---------------------------------------------------------------------------
 
-/// The authenticated actor: user id plus the timezone DRF activates per
-/// request (`TimezoneMixin.initial`, `views/base.py:43-48`).
-#[derive(Debug, Clone, Copy)]
+/// The authenticated actor: user id plus the RAW stored time-zone name.
+/// The zone is NOT parsed here — `TimezoneMixin.initial`
+/// (`views/base.py:43-48`) calls `super().initial()` (auth +
+/// permissions) first and only then activates the zone, so a denying
+/// gate answers 403 even when the stored zone is unknown (which 400s
+/// only for survivors, via [`activate_timezone`]).
+#[derive(Debug, Clone)]
 pub struct Actor {
     pub id: uuid::Uuid,
-    pub timezone: Tz,
+    pub timezone: Option<String>,
 }
 
 /// Authenticate one request from its `X-Api-Key` header.
@@ -332,7 +336,7 @@ pub async fn authenticate(
             authenticate_machine_token(pool, presented, secret_key).await?
         }
     };
-    let timezone = actor_timezone(pool, &id).await?;
+    let timezone = load_timezone_name(pool, &id).await?;
     Ok(Actor { id, timezone })
 }
 
@@ -340,8 +344,11 @@ async fn authenticate_api_token(
     pool: &sqlx::PgPool,
     presented: &str,
 ) -> Result<uuid::Uuid, Denial> {
+    // `deleted_at IS NULL` is the `SoftDeletionManager` scope
+    // (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
+    // rows, so a soft-deleted token 403s instead of authenticating.
     let row: Option<(uuid::Uuid, bool, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as("SELECT user_id, is_active, expired_at FROM api_tokens WHERE token = $1")
+        sqlx::query_as("SELECT user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL")
             .bind(presented)
             .fetch_optional(pool)
             .await
@@ -436,19 +443,35 @@ struct MachineTokenLookup {
     dev_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// `request.user.user_timezone` (`TimezoneMixin`): unknown zones 500 through
-/// the fallback branch (the `space::request_tz` precedent).
-async fn actor_timezone(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<Tz, Denial> {
+/// `request.user.user_timezone` (`TimezoneMixin`): the stored zone name,
+/// loaded but NOT parsed — parsing happens after the gate in
+/// [`activate_timezone`].
+async fn load_timezone_name(
+    pool: &sqlx::PgPool,
+    user_id: &uuid::Uuid,
+) -> Result<Option<String>, Denial> {
     let zone: Option<(Option<String>,)> =
         sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
             .bind(user_id)
             .fetch_optional(pool)
             .await
             .map_err(|_| Denial::ServerError)?;
-    let raw = zone.and_then(|row| row.0).filter(|zone| !zone.is_empty());
+    Ok(zone.and_then(|row| row.0))
+}
+
+/// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
+/// after `super().initial()`). A missing or empty zone defaults to UTC;
+/// an unknown zone name 400s: `zoneinfo.ZoneInfo` raises
+/// `ZoneInfoNotFoundError`, which subclasses `KeyError`, so
+/// `handle_exception` answers the `KeyError` branch
+/// (`api/views/base.py:160-164`), never a 500.
+fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
+    let raw = timezone.filter(|zone| !zone.is_empty());
     match raw {
         None => Ok(chrono_tz::UTC),
-        Some(zone) => zone.parse::<Tz>().map_err(|_| Denial::ServerError),
+        Some(zone) => zone
+            .parse::<Tz>()
+            .map_err(|_| Denial::BadError("The required key does not exist.".to_owned())),
     }
 }
 
@@ -1439,6 +1462,9 @@ async fn ws_members_inner(
     let actor = authenticate(&pool, headers, state.settings().secret_key.as_bytes()).await?;
     let facts = load_facts(&pool, slug, &actor, None).await?;
     check_gate(V1Route::WorkspaceMembers, "GET", &facts, None)?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(actor.timezone.as_deref())?;
     require_workspace(&pool, slug).await?;
     let Some(workspace_id) = facts.workspace_id else {
         return Err(Denial::ServerError);
@@ -1506,6 +1532,9 @@ async fn pm_list_inner(
     let project_id = rewrite_project_id(&pool, slug, actor.id, project_raw).await?;
     let facts = load_facts(&pool, slug, &actor, Some(project_id)).await?;
     check_gate(V1Route::ProjectMembers, "GET", &facts, Some(project_id))?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(actor.timezone.as_deref())?;
     require_workspace(&pool, slug).await?;
     let scope = QueryScope {
         workspace_slug: slug,
@@ -1566,6 +1595,9 @@ async fn pm_create_inner(
     let project_id = rewrite_project_id(&pool, slug, actor.id, project_raw).await?;
     let facts = load_facts(&pool, slug, &actor, Some(project_id)).await?;
     check_gate(V1Route::ProjectMembers, "POST", &facts, Some(project_id))?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(actor.timezone.as_deref())?;
     // The body parses after the gate (`post()`: the serializer is built
     // from `request.data`); empty/unparseable bodies proxy for the exact
     // `ParseError` bytes.
@@ -1795,6 +1827,9 @@ async fn pm_detail_get_inner(
         &facts,
         Some(project_id),
     )?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(actor.timezone.as_deref())?;
     require_workspace(&pool, slug).await?;
     let scope = QueryScope {
         workspace_slug: slug,
@@ -1867,6 +1902,9 @@ async fn pm_detail_patch_inner(
         &facts,
         Some(project_id),
     )?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(actor.timezone.as_deref())?;
     let scope = QueryScope {
         workspace_slug: slug,
         actor_id: actor.id,
@@ -1974,6 +2012,9 @@ async fn pm_detail_delete_inner(
         &facts,
         Some(project_id),
     )?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(actor.timezone.as_deref())?;
     let scope = QueryScope {
         workspace_slug: slug,
         actor_id: actor.id,
@@ -2025,10 +2066,13 @@ async fn inv_list_inner(
     let actor = authenticate(&pool, headers, state.settings().secret_key.as_bytes()).await?;
     let facts = load_facts(&pool, slug, &actor, None).await?;
     check_gate(V1Route::Invites, "GET", &facts, None)?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(actor.timezone.as_deref())?;
     let invites = fetch_invites_full(&pool, slug).await?;
     let body: Vec<Value> = invites
         .iter()
-        .map(|inv| render_invite(inv, &actor.timezone))
+        .map(|inv| render_invite(inv, &timezone))
         .collect();
     Ok(ok_json(Value::Array(body)))
 }
@@ -2066,6 +2110,9 @@ async fn inv_create_inner(
     let actor = authenticate(&pool, &req.headers, state.settings().secret_key.as_bytes()).await?;
     let facts = load_facts(&pool, slug, &actor, None).await?;
     check_gate(V1Route::Invites, "POST", &facts, None)?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(actor.timezone.as_deref())?;
 
     // `Workspace.objects.get(slug=slug)` — miss 404s through the viewset
     // exception handler (unreachable behind the gate, ported in place).
@@ -2152,7 +2199,7 @@ async fn inv_create_inner(
     let invite = fetch_invite_full(&pool, slug, invite_id)
         .await?
         .ok_or(Denial::ServerError)?;
-    Ok(created_json(render_invite(&invite, &actor.timezone)))
+    Ok(created_json(render_invite(&invite, &timezone)))
 }
 
 /// Parse the router `pk` (`DefaultRouter`, `[^/.]+`): anything matches, so a
@@ -2182,13 +2229,16 @@ async fn inv_detail_get_inner(
     let actor = authenticate(&pool, headers, state.settings().secret_key.as_bytes()).await?;
     let facts = load_facts(&pool, slug, &actor, None).await?;
     check_gate(V1Route::Invites, "GET", &facts, None)?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(actor.timezone.as_deref())?;
     // The router pk parses after the gate (`initial()` authN/permissions
     // run before `get_object()`), so gated-out callers see 401/403 first.
     let pk = parse_invite_pk(pk_raw)?;
     let invite = fetch_invite_full(&pool, slug, pk)
         .await?
         .ok_or(Denial::InviteNotFound)?;
-    Ok(ok_json(render_invite(&invite, &actor.timezone)))
+    Ok(ok_json(render_invite(&invite, &timezone)))
 }
 
 /// `PATCH invitations/<pk>/` (`invite.py:112-124`): any truthy `email`
@@ -2227,6 +2277,9 @@ async fn inv_detail_patch_inner(
     let actor = authenticate(&pool, &req.headers, state.settings().secret_key.as_bytes()).await?;
     let facts = load_facts(&pool, slug, &actor, None).await?;
     check_gate(V1Route::Invites, "PATCH", &facts, None)?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(actor.timezone.as_deref())?;
     let pk = parse_invite_pk(pk_raw)?;
     let invite = fetch_invite_full(&pool, slug, pk)
         .await?
@@ -2288,7 +2341,7 @@ async fn inv_detail_patch_inner(
     let invite = fetch_invite_full(&pool, slug, pk)
         .await?
         .ok_or(Denial::ServerError)?;
-    Ok(ok_json(render_invite(&invite, &actor.timezone)))
+    Ok(ok_json(render_invite(&invite, &timezone)))
 }
 
 /// `DELETE invitations/<pk>/` (`invite.py:141-154`): accepted and
@@ -2311,6 +2364,9 @@ async fn inv_detail_delete_inner(
     let actor = authenticate(&pool, headers, state.settings().secret_key.as_bytes()).await?;
     let facts = load_facts(&pool, slug, &actor, None).await?;
     check_gate(V1Route::Invites, "DELETE", &facts, None)?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(actor.timezone.as_deref())?;
     let pk = parse_invite_pk(pk_raw)?;
     let invite = fetch_invite_full(&pool, slug, pk)
         .await?
@@ -2350,6 +2406,10 @@ async fn users_me(State(state): State<AppState>, headers: HeaderMap) -> Response
 async fn users_me_inner(state: &AppState, headers: &HeaderMap) -> Result<Response, Denial> {
     let pool = pool(state)?;
     let actor = authenticate(&pool, headers, state.settings().secret_key.as_bytes()).await?;
+    // No view gate beyond `IsAuthenticated`, but `TimezoneMixin.initial`
+    // still activates the zone before the body: an unknown stored zone
+    // 400s here too.
+    activate_timezone(actor.timezone.as_deref())?;
     // `request.user` straight from authentication — no manager scope, so a
     // soft-deleted row still renders (a missing row entirely 500s, as the
     // FK fetch would in Python).

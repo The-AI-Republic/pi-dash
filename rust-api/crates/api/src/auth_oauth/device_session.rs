@@ -177,12 +177,14 @@ type ApiTokenLookupRow = (Uuid, Uuid, bool, Option<DateTime<Utc>>);
 
 /// `validate_api_token` (`api_authentication.py:30-43`): exact token
 /// match, `is_active`, unexpired (`expired_at__gt=now` or null) — then
-/// stamp `last_used`.
+/// stamp `last_used`. The `deleted_at IS NULL` conjunct is the
+/// `SoftDeletionManager` scope (`db/mixins.py:56-66`): a soft-deleted
+/// token 403s instead of authenticating.
 #[allow(clippy::result_large_err)]
 async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Caller, Response> {
     let now = Utc::now();
     let row: Option<ApiTokenLookupRow> = sqlx::query_as(
-        r#"SELECT id, user_id, is_active, expired_at FROM api_tokens WHERE token = $1"#,
+        r#"SELECT id, user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#,
     )
     .bind(presented)
     .fetch_optional(pool)
