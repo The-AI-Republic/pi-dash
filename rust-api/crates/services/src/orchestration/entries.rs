@@ -846,7 +846,7 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
             creator_id: creator,
             pod_id: pod,
             fresh_session,
-            trigger: AgentRunTrigger::StateTransition,
+            trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             now: req.now,
         },
     )
@@ -973,7 +973,7 @@ pub async fn handle_issue_comment<S: EntriesSeam>(
             parent: prior,
             creator_id: actor_id,
             pod_id: pod,
-            trigger: AgentRunTrigger::CommentAndRun,
+            trigger: AgentRunTrigger::CommentAndRun.value().to_owned(),
             now: req.now,
         },
     )

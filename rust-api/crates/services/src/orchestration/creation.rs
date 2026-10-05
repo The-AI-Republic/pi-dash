@@ -1294,9 +1294,11 @@ pub struct CreateDispatchRequest {
     pub creator_id: Uuid,
     pub pod_id: Uuid,
     pub fresh_session: bool,
-    /// The trigger to stamp: requests are built from validated
-    /// members, while stored rows carry the raw string.
-    pub trigger: AgentRunTrigger,
+    /// The trigger to stamp, carried verbatim like Django's
+    /// `trigger: str` (`service.py:742`): usually a member value,
+    /// but the dispatch path forwards the stored `triggered_by`
+    /// string, which may sit outside [`AgentRunTrigger`].
+    pub trigger: String,
     /// The clock for `created_at` / `ended_at` (frozen in tests).
     pub now: DateTime<Utc>,
 }
@@ -1308,9 +1310,11 @@ pub struct ContinuationRequest {
     pub parent: RunView,
     pub creator_id: Uuid,
     pub pod_id: Uuid,
-    /// The trigger to stamp: requests are built from validated
-    /// members, while stored rows carry the raw string.
-    pub trigger: AgentRunTrigger,
+    /// The trigger to stamp, carried verbatim like Django's
+    /// `trigger: str` (`service.py:443`): usually a member value,
+    /// but the dispatch path forwards the stored `triggered_by`
+    /// string, which may sit outside [`AgentRunTrigger`].
+    pub trigger: String,
     /// The clock for `created_at` / `ended_at` (frozen in tests).
     pub now: DateTime<Utc>,
 }
@@ -1393,7 +1397,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
         .project_id
         .ok_or_else(|| CreationError::MissingRow("issue has no project".to_owned()))?;
     let project = seam.project(project_id).await?;
-    let automatic = is_automatic_issue_trigger(req.trigger.value());
+    let automatic = is_automatic_issue_trigger(&req.trigger);
     let flags = seam.user_flags(req.creator_id).await?;
     let execution = match seam
         .execution_fields(&ExecutionRequest {
@@ -1455,7 +1459,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             executor_kind: execution.executor_kind,
             error_code: execution.error_code.clone().unwrap_or_default(),
             tool_plan: execution.tool_plan.clone(),
-            trigger: req.trigger.value().to_owned(),
+            trigger: req.trigger.clone(),
             phase_kind: kind.clone(),
             run_config: run_config_for_issue(
                 project.repo_url.as_deref(),
@@ -1529,7 +1533,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
         let runner = seam.runner(runner_id).await?;
         computed_pin = pinned_runner_for(runner.as_ref(), Some(req.pod_id));
     }
-    let automatic = is_automatic_issue_trigger(req.trigger.value());
+    let automatic = is_automatic_issue_trigger(&req.trigger);
     let flags = seam.user_flags(req.creator_id).await?;
     let execution = match seam
         .execution_fields(&ExecutionRequest {
@@ -1586,7 +1590,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
             executor_kind: execution.executor_kind,
             error_code: execution.error_code.clone().unwrap_or_default(),
             tool_plan: execution.tool_plan.clone(),
-            trigger: req.trigger.value().to_owned(),
+            trigger: req.trigger.clone(),
             phase_kind: kind.clone(),
             run_config,
             now: req.now,
@@ -2807,7 +2811,7 @@ mod tests {
             creator_id: uid(0x40),
             pod_id: uid(0x50),
             fresh_session: false,
-            trigger: AgentRunTrigger::StateTransition,
+            trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             now: now(),
         }
     }
@@ -2994,7 +2998,7 @@ mod tests {
             parent,
             creator_id: uid(0x40),
             pod_id: uid(0x50),
-            trigger: AgentRunTrigger::CommentAndRun,
+            trigger: AgentRunTrigger::CommentAndRun.value().to_owned(),
             now: now(),
         }
     }

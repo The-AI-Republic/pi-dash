@@ -2197,7 +2197,7 @@ mod tests {
             creator_id: graph.user,
             pod_id: graph.pod,
             fresh_session: false,
-            trigger: AgentRunTrigger::StateTransition,
+            trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             now: now(),
         }
     }
@@ -2391,7 +2391,7 @@ mod tests {
         settings.cloud.max_queued_per_workspace = 0;
         settings.has_usable_llm_config = llm_ok;
         let mut req = dispatch_req(&graph, None);
-        req.trigger = AgentRunTrigger::Tick;
+        req.trigger = AgentRunTrigger::Tick.value().to_owned();
         let result = create_and_dispatch_run(&pool, settings, &req)
             .await
             .expect("failed, not error");
@@ -2485,7 +2485,7 @@ mod tests {
             parent,
             creator_id: graph.user,
             pod_id: graph.pod,
-            trigger: AgentRunTrigger::CommentAndRun,
+            trigger: AgentRunTrigger::CommentAndRun.value().to_owned(),
             now: now(),
         }
     }
@@ -2593,7 +2593,7 @@ mod tests {
         let parent = continuation_parent(&pool, &graph).await;
         let parent_id = parent.id;
         let mut req = continuation_req(&graph, parent);
-        req.trigger = AgentRunTrigger::Tick;
+        req.trigger = AgentRunTrigger::Tick.value().to_owned();
         let result = create_continuation_run(&pool, settings, &req)
             .await
             .expect("failed, not error");

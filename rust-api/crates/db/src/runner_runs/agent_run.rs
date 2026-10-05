@@ -332,10 +332,14 @@ pub const TOTAL_TOKENS_READ_EXPR: &str = "(\"agent_run\".\"usage\" ->> 'total'):
 /// nullable generated bigints (`fields.py:43` forces
 /// `null=True`). `refusal_category` stays a `String`: its default
 /// is `""` (`models.py:1013`), which is not a `RefusalCategory`
-/// value. Writes are impossible on the token columns by
-/// construction (`pre_save` sends `DEFAULT`, `fields.py:60-61`) —
-/// inserts must omit them or send `DEFAULT`, and read the computed
-/// values back.
+/// value. `trigger` is a `String`: Django never parses it —
+/// `TextChoices` are choices-only (no DB check), so legacy or
+/// hand-written rows can carry values outside [`AgentRunTrigger`]
+/// (runner migration 0029) and every read path carries them
+/// through. Writes are impossible on the token
+/// columns by construction (`pre_save` sends `DEFAULT`,
+/// `fields.py:60-61`) — inserts must omit them or send `DEFAULT`,
+/// and read the computed values back.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentRun {
     pub id: uuid::Uuid,
@@ -358,7 +362,7 @@ pub struct AgentRun {
     pub terminal_hooks_applied_at: Option<chrono::DateTime<chrono::Utc>>,
     pub terminal_capacity_released_at: Option<chrono::DateTime<chrono::Utc>>,
     pub prompt: String,
-    pub trigger: AgentRunTrigger,
+    pub trigger: String,
     pub prompt_manifest: Option<serde_json::Value>,
     pub phase_kind: String,
     pub run_config: serde_json::Value,

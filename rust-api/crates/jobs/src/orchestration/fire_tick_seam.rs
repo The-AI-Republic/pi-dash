@@ -2938,4 +2938,70 @@ mod tests {
             .expect("dispatch");
         assert!(run.is_some());
     }
+
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    #[tokio::test]
+    async fn live_unknown_triggered_by_stamps_raw() {
+        // Django passes `triggered_by` to the builders unstamped and
+        // unvalidated (`scheduling.py:1206/1214`, `trigger: str`): the
+        // fire-tick path forwards the ticker's stored
+        // `pending_entry_trigger`, which may sit outside the trigger
+        // enum, and the new run carries it verbatim.
+        let _serial = LIVE_SERIAL.lock().await;
+        let pool = pool().await;
+        let graph = seed_graph(&pool, "trigraw").await;
+        ensure_agent_user(&pool).await;
+        seed_run(
+            &pool,
+            &graph,
+            "completed",
+            "tick",
+            "local_runner",
+            "coding-task",
+            None,
+            json!({}),
+            graph.user,
+            now() - chrono::Duration::hours(1),
+        )
+        .await;
+        let states: HashMap<Uuid, StateView> = [
+            ("In Progress", "started"),
+            ("In Review", "review"),
+            ("Done", "completed"),
+        ]
+        .into_iter()
+        .map(|(name, group)| {
+            (
+                graph.states[name],
+                StateView {
+                    id: graph.states[name],
+                    name: name.to_owned(),
+                    group: group.to_owned(),
+                },
+            )
+        })
+        .collect();
+        let states = Arc::new(states);
+        let shim = FireTickShim::new(
+            pool.clone(),
+            Arc::new(deps),
+            Arc::new(FakeMatcher { answer: true }),
+            {
+                let states = states.clone();
+                Arc::new(move |id: Option<Uuid>| id.and_then(|id| states.get(&id).cloned()))
+            },
+        );
+        use crate::tasks_ticker::fire_tick::FireTickSeam as _;
+        let run = shim
+            .dispatch_continuation_run(graph.issue, "human", None)
+            .await
+            .expect("dispatch tolerates unknown triggered_by");
+        let run = run.expect("run created");
+        let trigger: String = sqlx::query_scalar("SELECT trigger FROM agent_run WHERE id = $1")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .expect("read stamped trigger");
+        assert_eq!(trigger, "human");
+    }
 }

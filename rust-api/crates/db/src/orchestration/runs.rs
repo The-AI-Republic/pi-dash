@@ -35,7 +35,7 @@ use sqlx::postgres::PgRow;
 use sqlx::Row;
 
 use crate::dispatch::agent_run::{AgentRun, READ_COLUMNS};
-use crate::dispatch::status::{AgentRunStatus, AgentRunTrigger};
+use crate::dispatch::status::AgentRunStatus;
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::{parse, DoneSignal};
 
@@ -96,14 +96,16 @@ fn decode_error(column: &str, value: &str) -> sqlx::Error {
     sqlx::Error::Decode(format!("unknown agent_run.{column} {value:?}").into())
 }
 
-/// Map one lookup row onto the dispatch read shape.
+/// Map one lookup row onto the dispatch read shape. The trigger
+/// rides through unparsed: Django's `TextChoices` are
+/// choices-only (no DB check), so the stored value may sit outside
+/// `AgentRunTrigger` (runner migration 0029) and every read path
+/// must tolerate it.
 pub fn map_agent_run(row: &PgRow) -> Result<AgentRun, sqlx::Error> {
     let status: String = row.try_get("status")?;
     let status =
         AgentRunStatus::from_value(&status).ok_or_else(|| decode_error("status", &status))?;
     let trigger: String = row.try_get("trigger")?;
-    let trigger =
-        AgentRunTrigger::from_value(&trigger).ok_or_else(|| decode_error("trigger", &trigger))?;
     let executor_kind: String = row.try_get("executor_kind")?;
     let executor_kind = AgentExecutorKind::from_value(&executor_kind)
         .ok_or_else(|| decode_error("executor_kind", &executor_kind))?;
@@ -654,9 +656,11 @@ mod tests {
             .is_none());
     }
 
-    /// Unknown stored enum values fail the mapping loudly instead of
-    /// silently defaulting. (The unfiltered lookup reads them: the
-    /// active lookup's `IN` list would simply not match.)
+    /// Unknown stored status / executor values fail the mapping
+    /// loudly instead of silently defaulting. (The unfiltered lookup
+    /// reads them: the active lookup's `IN` list would simply not
+    /// match.) The trigger is exempt: it rides through unparsed (see
+    /// the next test).
     #[tokio::test]
     async fn live_unknown_status_value_is_a_decode_error() {
         let Some(pool) = scratch_pool().await else {
@@ -669,18 +673,7 @@ mod tests {
             .await
             .expect_err("bogus status fails");
         assert!(matches!(err, sqlx::Error::Decode(_)), "got {err:?}");
-        // Same for the other two mapped enums.
-        let trigger_issue = live_uuid(3201);
-        let trigger_run = seed_run(&mut tx, 4021, trigger_issue, "queued", live_time(31)).await;
-        sqlx::query("UPDATE agent_run SET trigger = 'bogus' WHERE id = $1")
-            .bind(trigger_run)
-            .execute(&mut *tx)
-            .await
-            .expect("stage bogus trigger");
-        let err = latest_prior_run(&mut *tx, trigger_issue)
-            .await
-            .expect_err("bogus trigger fails");
-        assert!(matches!(err, sqlx::Error::Decode(_)), "got {err:?}");
+        // Same for the remaining mapped enum.
         let kind_issue = live_uuid(3202);
         let kind_run = seed_run(&mut tx, 4022, kind_issue, "queued", live_time(32)).await;
         sqlx::query("UPDATE agent_run SET executor_kind = 'bogus' WHERE id = $1")
@@ -692,6 +685,47 @@ mod tests {
             .await
             .expect_err("bogus kind fails");
         assert!(matches!(err, sqlx::Error::Decode(_)), "got {err:?}");
+    }
+
+    /// Unknown stored trigger values ride through verbatim: Django's
+    /// `TextChoices` are choices-only (no DB check), so legacy rows
+    /// (runner migration 0029 kept `blocker_completed` values) and
+    /// hand-written rows (the contract harness seeds `human`) must
+    /// read back instead of failing to decode.
+    #[tokio::test]
+    async fn live_unknown_trigger_values_carry_raw() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        for (index, trigger) in ["human", "blocker_completed", "tick"].iter().enumerate() {
+            let issue = live_uuid(3210 + index as u32);
+            let id = seed_run(
+                &mut tx,
+                4040 + index as u32,
+                issue,
+                "running",
+                live_time(30),
+            )
+            .await;
+            sqlx::query("UPDATE agent_run SET trigger = $1 WHERE id = $2")
+                .bind(*trigger)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .expect("stage trigger");
+            let active = active_run_for(&mut *tx, issue)
+                .await
+                .expect("active read tolerates unknown trigger")
+                .expect("one active run");
+            assert_eq!(active.id, id);
+            assert_eq!(active.trigger, *trigger);
+            let latest = latest_prior_run(&mut *tx, issue)
+                .await
+                .expect("latest read tolerates unknown trigger")
+                .expect("one run");
+            assert_eq!(latest.trigger, *trigger);
+        }
     }
 
     /// `ingest.before_after.json` replay against live rows: completed

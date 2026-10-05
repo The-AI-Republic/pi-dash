@@ -60,9 +60,6 @@
 //! * The bounce bodies are `format_html` calls with no args — plain
 //!   literals, pinned byte-verbatim ([`BOUNCE_BODY_DEFAULT`],
 //!   [`BOUNCE_BODY_NO_LLM_CONFIG`]).
-//! * An unknown `triggered_by` string answers
-//!   [`DispatchError::UnknownTrigger`] (Python would store it raw; the L6
-//!   request types carry the typed [`AgentRunTrigger`]).
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -72,7 +69,6 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use pidash_auth::permissions::membership::{check_project_role, ProjectRoleFacts};
-use pidash_db::dispatch::status::AgentRunTrigger;
 use pidash_db::orchestration::workpad::AgentUserCollisionError;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS,
@@ -590,10 +586,6 @@ pub enum DispatchError {
     /// (`workpad.py:44-71`).
     #[error(transparent)]
     AgentUserCollision(#[from] AgentUserCollisionError),
-    /// `triggered_by` names no [`AgentRunTrigger`] (Python would store
-    /// it raw; the L6 request types are typed).
-    #[error("unknown run trigger '{0}'")]
-    UnknownTrigger(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -834,13 +826,6 @@ pub struct PauseOutcome {
 // ---------------------------------------------------------------------------
 // Drivers (Python control flow, verbatim order)
 // ---------------------------------------------------------------------------
-
-/// Parse `triggered_by` for the L6 builder requests (which carry the
-/// typed trigger).
-fn parse_trigger(triggered_by: &str) -> Result<AgentRunTrigger, DispatchError> {
-    AgentRunTrigger::from_value(triggered_by)
-        .ok_or_else(|| DispatchError::UnknownTrigger(triggered_by.to_owned()))
-}
 
 /// Resolve the issue's clock inputs: the state row plus the project
 /// policy (a project-less issue answers the `getattr` defaults, like
@@ -1434,7 +1419,11 @@ pub async fn dispatch_continuation_run<S: DispatchSeam>(
     }
     logs.extend(preflight.logs);
 
-    let trigger = parse_trigger(triggered_by)?;
+    // Django passes `triggered_by` to the builders unstamped and
+    // unvalidated (`scheduling.py:1206/1214`, `trigger: str`): the
+    // stored value may sit outside the trigger enum, and the new run
+    // carries it verbatim.
+    let trigger = triggered_by.to_owned();
     let run_id = match (parent, fresh_session) {
         (Some(parent), false) => {
             creation::create_continuation_run(
@@ -1444,7 +1433,7 @@ pub async fn dispatch_continuation_run<S: DispatchSeam>(
                     parent,
                     creator_id: creator,
                     pod_id: pod,
-                    trigger,
+                    trigger: trigger.clone(),
                     now,
                 },
             )
@@ -1461,7 +1450,7 @@ pub async fn dispatch_continuation_run<S: DispatchSeam>(
                     creator_id: creator,
                     pod_id: pod,
                     fresh_session: true,
-                    trigger,
+                    trigger: trigger.clone(),
                     now,
                 },
             )
@@ -1580,7 +1569,7 @@ pub async fn dispatch_run_ai_run_with_reason<S: DispatchSeam>(
                     parent,
                     creator_id: creator,
                     pod_id: pod,
-                    trigger: AgentRunTrigger::RunAi,
+                    trigger: TRIGGER_RUN_AI.to_owned(),
                     now,
                 },
             )
@@ -1597,7 +1586,7 @@ pub async fn dispatch_run_ai_run_with_reason<S: DispatchSeam>(
                     creator_id: creator,
                     pod_id: pod,
                     fresh_session,
-                    trigger: AgentRunTrigger::RunAi,
+                    trigger: TRIGGER_RUN_AI.to_owned(),
                     now,
                 },
             )
@@ -2060,7 +2049,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    use pidash_db::dispatch::status::AgentRunStatus;
+    use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
     use pidash_types::orchestration::{TRIGGER_COMMENT_AND_RUN, TRIGGER_TICK, WAIT_ACTIVITY_FIELD};
 
     use super::super::creation::{
