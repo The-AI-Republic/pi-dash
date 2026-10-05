@@ -33,7 +33,7 @@
 //!   workspace member with the FIXED `display_filters`/`display_properties`
 //!   literals below (`:115-168`). Empty seeds → empty map + warning (`:91`).
 //! * `Project.save` side effects, applied by the jobs layer in the same
-//!   order: `identifier.strip().upper()` (`project.py:257`); timezone copied
+//!   order: `identifier.strip().upper()` (`project.py:258`); timezone copied
 //!   from the workspace when the seed row carries none
 //!   (`project.py:259-261` — seed rows never carry one, so the copy always
 //!   fires); first project in the workspace becomes `is_default`
@@ -146,7 +146,7 @@ pub fn project_identifier(workspace_name: &str) -> String {
         .collect()
 }
 
-/// Python `str.strip()` membership (`project.py:257`): Rust
+/// Python `str.strip()` membership (`project.py:258`): Rust
 /// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
 /// `str.strip` against `char::is_whitespace` over all code points —
 /// those four are the only differences).
@@ -154,7 +154,7 @@ fn is_py_strip_ws(ch: char) -> bool {
     ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
 }
 
-/// `Project.save` (`project.py:257`): `identifier.strip().upper()`.
+/// `Project.save` (`project.py:258`): `identifier.strip().upper()`.
 /// `trim_matches(is_py_strip_ws)` matches `strip` exactly (including
 /// U+001C-U+001F); `to_uppercase` matches `upper` (full-Unicode both).
 pub fn normalize_identifier(raw: &str) -> String {
