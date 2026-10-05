@@ -6388,11 +6388,10 @@ pub async fn bulk_delete_issues(
         let slug_bind = survivors.len() + 3;
         let sql = format!(
             "UPDATE issues AS issue SET deleted_at = $1 \
-             FROM projects AS project JOIN workspaces AS workspace \
-             ON workspace.id = issue.workspace_id \
+             FROM projects AS project, workspaces AS workspace \
              WHERE issue.deleted_at IS NULL AND issue.id IN ({placeholders}) \
              AND issue.project_id = ${project_bind} AND issue.project_id = project.id \
-             AND workspace.slug = ${slug_bind} \
+             AND issue.workspace_id = workspace.id AND workspace.slug = ${slug_bind} \
              AND NOT EXISTS (SELECT 1 FROM states AS state \
              WHERE state.id = issue.state_id AND state.deleted_at IS NULL \
              AND state.\"group\" = 'triage') \
