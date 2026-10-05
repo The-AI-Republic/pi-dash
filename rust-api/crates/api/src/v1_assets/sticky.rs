@@ -201,6 +201,9 @@ pub enum Denial {
     NotFoundDetail,
     /// 400, `{"detail": ...}` (`ParseError`: per_page / cursor).
     BadDetail(String),
+    /// 400, `{"error": ...}` (`handle_exception` `KeyError` branch:
+    /// unknown stored time zone).
+    BadError(String),
     /// 400, serializer `errors` dict.
     FieldErrors(Value),
     /// 415, unhandled content type with a non-empty body.
@@ -220,6 +223,10 @@ impl Denial {
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::BadError(message) => (
+                StatusCode::BAD_REQUEST,
+                format!("{{\"error\":{}}}", json_string(message)),
             ),
             Denial::FieldErrors(body) => (
                 StatusCode::BAD_REQUEST,
@@ -304,11 +311,13 @@ async fn authenticate(
 }
 
 /// `validate_api_token` (`api_authentication.py:30-43`): exact token match,
-/// `is_active`, unexpired — then stamp `last_used`.
+/// `is_active`, unexpired — then stamp `last_used`. The `deleted_at IS
+/// NULL` conjunct is the `SoftDeletionManager` scope
+/// (`db/mixins.py:56-66`): a soft-deleted token 403s.
 async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, Denial> {
     let now = Utc::now();
     let row: Option<(Uuid, Uuid, bool, Option<DateTime<Utc>>)> = sqlx::query_as(
-        r#"SELECT id, user_id, is_active, expired_at FROM api_tokens WHERE token = $1"#,
+        r#"SELECT id, user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#,
     )
     .bind(presented)
     .fetch_optional(pool)
@@ -457,8 +466,10 @@ async fn require_workspace_user(
 }
 
 /// The request's render zone (`TimezoneMixin`: the acting user's
-/// `user_timezone`, default `UTC`). A missing user row or an unparsable
-/// zone is the 500 Python's `activate`/`DoesNotExist` path becomes.
+/// `user_timezone`). A missing user row or a NULL zone is the 500
+/// Python's `DoesNotExist`/`TypeError` path becomes; an unparsable zone
+/// name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`, which
+/// subclasses `KeyError` (`api/views/base.py:160-164`).
 async fn request_timezone(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Tz, Denial> {
     let zone: Option<String> =
         sqlx::query_scalar(r#"SELECT user_timezone FROM users WHERE id = $1"#)
@@ -467,7 +478,8 @@ async fn request_timezone(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Tz, Den
             .await
             .map_err(|_| Denial::ServerError)?;
     let zone = zone.ok_or(Denial::ServerError)?;
-    zone.parse::<Tz>().map_err(|_| Denial::ServerError)
+    zone.parse::<Tz>()
+        .map_err(|_| Denial::BadError("The required key does not exist.".to_owned()))
 }
 
 fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {

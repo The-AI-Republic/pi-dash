@@ -415,12 +415,15 @@ pub const PATH_ARCHIVED_LIST: &str = "workspaces/<slug>/projects/<id>/archived-m
 pub const PATH_MODULE_UNARCHIVE: &str =
     "workspaces/<slug>/projects/<id>/archived-modules/<uuid>/unarchive/";
 
-/// The authenticated actor: user id plus active time zone
-/// (`TimezoneMixin.initial` activates `request.user.user_timezone`,
-/// `api/views/base.py:43-48`).
+/// The authenticated actor: user id plus the RAW stored time-zone name.
+/// The zone is NOT parsed here — `TimezoneMixin.initial`
+/// (`api/views/base.py:43-48`) calls `super().initial()`
+/// (auth + permissions) first and only then activates the zone, so a
+/// denying gate answers 403 even when the stored zone is unknown (which
+/// 400s only for survivors, via [`activate_timezone`]).
 pub struct Actor {
     pub id: uuid::Uuid,
-    pub timezone: Tz,
+    pub timezone: Option<String>,
 }
 
 /// `APIKeyAuthentication` (`api/middleware/api_authentication.py:19-88`):
@@ -442,7 +445,7 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
             resolve_machine_token(pool, raw, secret_key).await?
         }
     };
-    let timezone = request_timezone(pool, &user_id).await?;
+    let timezone = load_timezone_name(pool, &user_id).await?;
     // `api_tokens.last_used` is stamped on every validated call
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
@@ -459,9 +462,12 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
 }
 
 /// The `api_tokens` columns the validator reads (`db/models/api.py:35-57`).
+/// The `deleted_at IS NULL` conjunct is the `SoftDeletionManager` scope
+/// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
+/// rows, so a soft-deleted token 403s instead of authenticating.
 async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
     let row: Option<ApiTokenLookup> = sqlx::query_as(
-        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1"#,
+        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
     )
     .bind(presented)
     .fetch_optional(pool)
@@ -546,20 +552,29 @@ async fn resolve_machine_token(
     Ok(user_id)
 }
 
-/// The request time zone (`TimezoneMixin.initial`): the user's stored zone;
-/// an invalid stored zone 500s like `zoneinfo.ZoneInfo` raising.
-async fn request_timezone(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Tz, Denial> {
+/// The request time zone (`TimezoneMixin.initial`): the user's stored zone
+/// name, loaded but NOT parsed — parsing happens after the gate in
+/// [`activate_timezone`].
+async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
     let name: Option<Option<String>> =
         sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
             .bind(user_id)
             .fetch_optional(pool)
             .await
             .map_err(|error| db_error(error, "request-timezone"))?;
-    let name: Option<String> = name.unwrap_or(None);
-    name.as_deref()
+    Ok(name.unwrap_or(None))
+}
+
+/// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
+/// after `super().initial()`). A missing zone defaults to UTC; an unknown
+/// zone name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`,
+/// which subclasses `KeyError`, so `handle_exception` answers the
+/// `KeyError` branch (`api/views/base.py:160-164`), never a 500.
+fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
+    timezone
         .unwrap_or("UTC")
-        .parse::<Tz>()
-        .map_err(|error| db_error(error, "request-timezone"))
+        .parse()
+        .map_err(|_| Denial::BadError("The required key does not exist.".to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -3729,6 +3744,9 @@ pub async fn list_modules_inner(
         PATH_MODULES,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let sql = pidash_db::v1_cycles_modules::module_queries::module_list_sql(
         &pidash_db::v1_cycles_modules::module_queries::OrderBy::default_module(),
         pidash_db::v1_cycles_modules::module_queries::ArchivedFilter::Live,
@@ -3752,7 +3770,7 @@ pub async fn list_modules_inner(
                 &pre.pool,
                 &detail,
                 &members,
-                &pre.actor.timezone,
+                &timezone,
                 fields.as_deref(),
                 expand.as_deref(),
             )
@@ -3784,6 +3802,9 @@ pub async fn retrieve_module_inner(
         PATH_MODULE_DETAIL,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let sql = pidash_db::v1_cycles_modules::module_queries::module_detail_sql(
         &pidash_db::v1_cycles_modules::module_queries::OrderBy::default_module(),
     );
@@ -3806,7 +3827,7 @@ pub async fn retrieve_module_inner(
         &pre.pool,
         &detail,
         &members,
-        &pre.actor.timezone,
+        &timezone,
         fields.as_deref(),
         expand.as_deref(),
     )
@@ -3837,6 +3858,9 @@ pub async fn list_archived_modules_inner(
         PATH_ARCHIVED_LIST,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let sql = pidash_db::v1_cycles_modules::module_queries::archived_module_list_sql(
         &pidash_db::v1_cycles_modules::module_queries::OrderBy::default_module(),
     );
@@ -3859,7 +3883,7 @@ pub async fn list_archived_modules_inner(
                 &pre.pool,
                 &detail,
                 &members,
-                &pre.actor.timezone,
+                &timezone,
                 fields.as_deref(),
                 expand.as_deref(),
             )
@@ -3929,6 +3953,9 @@ pub async fn create_module_inner(
         PATH_MODULES,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let project = fetch_project(&pre.pool, &project_id, &workspace_id).await?;
     let ((raw, files), field_surr, members_dirty, html) = parse_body_ct(headers, body)?;
     let write = coerce_write(
@@ -4114,15 +4141,7 @@ pub async fn create_module_inner(
     };
     let detail = ModuleDetail::decode(&row, "module-create-reread")?;
     let members = fetch_members(&pre.pool, &detail.id).await?;
-    let value = render_module(
-        &pre.pool,
-        &detail,
-        &members,
-        &pre.actor.timezone,
-        None,
-        None,
-    )
-    .await?;
+    let value = render_module(&pre.pool, &detail, &members, &timezone, None, None).await?;
     serde_json::to_string(&value)
         .map(json_created)
         .map_err(|error| db_error(error, "module-create-render"))
@@ -4153,6 +4172,9 @@ pub async fn patch_module_inner(
         PATH_MODULE_DETAIL,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT m."id", m."created_at", m."updated_at", m."created_by_id", m."updated_by_id", m."deleted_at",
                   m."project_id", m."workspace_id", m."name", m."description", m."description_text", m."description_html",
@@ -4174,15 +4196,8 @@ pub async fn patch_module_inner(
     // `current_instance`: `json.dumps(ModuleSerializer(module).data)` of
     // the BARE pre-save instance (no annotations), Python separators.
     let before_members = fetch_members(&pre.pool, &before.id).await?;
-    let snapshot = render_module(
-        &pre.pool,
-        &before,
-        &before_members,
-        &pre.actor.timezone,
-        None,
-        None,
-    )
-    .await?;
+    let snapshot =
+        render_module(&pre.pool, &before, &before_members, &timezone, None, None).await?;
     let snapshot_text = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&snapshot);
     if before.archived_at.is_some() {
         return Err(Denial::BadError(
@@ -4486,6 +4501,9 @@ pub async fn delete_module_inner(
         PATH_MODULE_DETAIL,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT m."id", m."name", m."created_by_id" FROM "modules" m
            INNER JOIN "workspaces" w ON m."workspace_id" = w."id"
@@ -4605,6 +4623,9 @@ pub async fn list_module_issues_inner(
         PATH_MODULE_ISSUES,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let order = resolve_issue_order(query_last(query, "order_by").as_deref());
     let sql = pidash_db::v1_cycles_modules::module_queries::module_issue_list_get_sql(&order);
     let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
@@ -4642,7 +4663,7 @@ pub async fn list_module_issues_inner(
                 &assignees,
                 &labels,
                 url,
-                &pre.actor.timezone,
+                &timezone,
                 fields.as_deref(),
                 expand.as_deref(),
             )
@@ -4819,6 +4840,9 @@ pub async fn add_module_issues_inner(
         PATH_MODULE_ISSUES,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     // Raw `request.data` (no serializer): empty is `{}`, unparseable is the
     // DRF `ParseError`, a non-object 500s on `.get`.
     let (raw, files) = parse_object_or_500_ct(headers, body)?;
@@ -4954,7 +4978,7 @@ pub async fn add_module_issues_inner(
     let mut results = Vec::with_capacity(rows.len());
     for row in &rows {
         let detail = BridgeDetail::decode(row, "module-issues-add-reread")?;
-        results.push(render_bridge(&detail, &pre.actor.timezone));
+        results.push(render_bridge(&detail, &timezone));
     }
     serde_json::to_string(&Value::Array(results))
         .map(json_ok)
@@ -4985,6 +5009,9 @@ pub async fn remove_module_issue_inner(
         PATH_MODULE_ISSUE_DETAIL,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT mi."id", mi."module_id", mi."issue_id" FROM "module_issues" mi
            INNER JOIN "workspaces" w ON mi."workspace_id" = w."id"
@@ -5064,6 +5091,9 @@ pub async fn archive_module_inner(
         PATH_MODULE_ARCHIVE,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT m."id", m."status" FROM "modules" m
            INNER JOIN "workspaces" w ON m."workspace_id" = w."id"
@@ -5134,6 +5164,9 @@ pub async fn unarchive_module_inner(
         PATH_MODULE_UNARCHIVE,
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT m."id" FROM "modules" m
            INNER JOIN "workspaces" w ON m."workspace_id" = w."id"

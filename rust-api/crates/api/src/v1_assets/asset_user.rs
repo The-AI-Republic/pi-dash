@@ -284,8 +284,11 @@ pub async fn authenticate(
 }
 
 async fn authenticate_api_token(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, Denial> {
+    // `deleted_at IS NULL` is the `SoftDeletionManager` scope
+    // (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
+    // rows, so a soft-deleted token 403s instead of authenticating.
     let row: Option<(Uuid, bool, Option<DateTime<Utc>>)> =
-        sqlx::query_as("SELECT user_id, is_active, expired_at FROM api_tokens WHERE token = $1")
+        sqlx::query_as("SELECT user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL")
             .bind(presented)
             .fetch_optional(pool)
             .await
