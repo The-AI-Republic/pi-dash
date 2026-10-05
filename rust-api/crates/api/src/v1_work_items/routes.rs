@@ -1,10 +1,18 @@
-//! PR / code-review link route registration (D-18 handlers H, PIDASHCONV-680).
+//! D-18 work-item route registration: link + comment routes
+//! (handlers B, PIDASHCONV-674) plus PR / code-review link routes
+//! (handlers H, PIDASHCONV-680).
 //!
-//! Ports `apps/api/pi_dash/api/urls/work_item.py:218-236` (4 entries) onto
-//! the merged D-18 foundation. Cutover granularity is the route + method
-//! (the pilot `owned()` pattern): the owned methods serve from Rust, every
-//! other method on these paths proxies to Django so its 405-after-auth and
-//! metadata responses are preserved byte for byte.
+//! Ports `apps/api/pi_dash/api/urls/work_item.py:60-77,154-171` (the eight
+//! link/comment paths: four `work-items/` routes plus their deprecated
+//! `issues/` twins, which share the view classes and therefore the
+//! handlers) and `urls/work_item.py:218-236` (the four PR/review-link
+//! paths) onto the merged D-18 foundation. Cutover granularity is the
+//! route + method (the pilot `owned()` pattern): the owned methods serve
+//! from Rust, every other method on these paths proxies to Django so its
+//! 405-after-auth and metadata responses are preserved byte for byte.
+//!
+//! Sibling D-18 handler issues register their own routes here; on rebase
+//! keep both sides, never fork this file.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
@@ -16,7 +24,15 @@ use super::handlers_pr_links::{
     pr_create, pr_destroy, pr_list, review_create, review_destroy, review_list,
 };
 
-/// Register the four PR/review-link paths (`urls/work_item.py:218-236`).
+use super::handlers_social::{
+    delete_comment, delete_link, get_comment_detail, get_comment_list, get_link_detail,
+    get_link_list, owned_comment_detail, owned_comment_list, owned_link_detail, owned_link_list,
+    patch_comment, patch_link, post_comment, post_link,
+};
+
+/// Register the D-18 link/comment paths (`urls/work_item.py:60-77,154-171`,
+/// PIDASHCONV-674) and the PR/review-link paths
+/// (`urls/work_item.py:218-236`, PIDASHCONV-680).
 ///
 /// Sibling `v1_work_items` paths have no Rust route yet and keep proxying
 /// to Django through the fallback; on rebase keep both sides.
@@ -41,6 +57,62 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/code-reviews/{pk}/",
             super::handlers_pr_links::owned_detail(axum::routing::delete(review_destroy)),
+        )
+        // `work_item.py:60-63` — link list (get + post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/links/",
+            owned_link_list(axum::routing::get(get_link_list).post(post_link)),
+        )
+        // `work_item.py:154-157` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/links/",
+            owned_link_list(axum::routing::get(get_link_list).post(post_link)),
+        )
+        // `work_item.py:64-67` — link detail (get + patch + delete).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/links/{pk}/",
+            owned_link_detail(
+                axum::routing::get(get_link_detail)
+                    .patch(patch_link)
+                    .delete(delete_link),
+            ),
+        )
+        // `work_item.py:158-162` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/links/{pk}/",
+            owned_link_detail(
+                axum::routing::get(get_link_detail)
+                    .patch(patch_link)
+                    .delete(delete_link),
+            ),
+        )
+        // `work_item.py:68-72` — comment list (get + post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/comments/",
+            owned_comment_list(axum::routing::get(get_comment_list).post(post_comment)),
+        )
+        // `work_item.py:163-167` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/comments/",
+            owned_comment_list(axum::routing::get(get_comment_list).post(post_comment)),
+        )
+        // `work_item.py:73-77` — comment detail (get + patch + delete).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/comments/{pk}/",
+            owned_comment_detail(
+                axum::routing::get(get_comment_detail)
+                    .patch(patch_comment)
+                    .delete(delete_comment),
+            ),
+        )
+        // `work_item.py:168-172` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/comments/{pk}/",
+            owned_comment_detail(
+                axum::routing::get(get_comment_detail)
+                    .patch(patch_comment)
+                    .delete(delete_comment),
+            ),
         )
 }
 
