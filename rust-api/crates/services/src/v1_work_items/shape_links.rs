@@ -1127,14 +1127,21 @@ fn punycode_netloc(authority: &str) -> Option<String> {
 }
 
 /// The 400 body for the create/update duplicate guard: the `create()` /
-/// `update()` raise is `ValidationError({"error": …})`, which DRF renders
-/// as `{"error": ["URL already exists for this Issue"]}` (F18-02
-/// `duplicate_create.detail` / `update_save_duplicate.detail`).
+/// `update()` raise is `ValidationError({"error": …})` out of
+/// `create()`/`update()` (`issue.py:617-622,638-648`), which DRF's
+/// `exception_handler` returns as-is — a dict detail keeps its scalar
+/// value, so the wire body is `{"error": "URL already exists for this
+/// Issue"}` (STRING form), unlike `is_valid()` field errors, which take
+/// the list form.
+///
+/// F18-02 `duplicate_create.detail` / `update_save_duplicate.detail`
+/// record the exception *internals* (`{"error": [{"message", "code"}]}`),
+/// not the wire bytes: `ErrorDetail` subclasses `str` and serializes as a
+/// bare string. Live-verified 2026-10-05 (Django runserver, stock test
+/// settings; PIDASHCONV-674 differential): POST duplicate URL → 400
+/// `{"error":"URL already exists for this Issue"}`.
 pub fn duplicate_url_body() -> String {
-    field_errors_body(&[(
-        "error",
-        Value::Array(vec![Value::String(MSG_DUPLICATE_URL.to_string())]),
-    )])
+    field_errors_body(&[("error", Value::String(MSG_DUPLICATE_URL.to_string()))])
 }
 
 fn opt_str(value: Option<&str>) -> Value {
@@ -1534,17 +1541,26 @@ mod tests {
         let fx = fixture(F18_02);
         let create = unit(&fx, "IssueLinkCreateSerializer");
         let update = unit(&fx, "IssueLinkUpdateSerializer");
+        // F18-02 records the exception internals ({message, code}); the wire
+        // body carries the message as a bare string (DRF exception_handler
+        // returns the dict detail as-is — see the helper docs), so replay
+        // the golden message into the string form, not the list form.
+        for detail in [
+            &create["duplicate_create"]["detail"],
+            &update["update_save_duplicate"]["detail"],
+        ] {
+            let message = detail["error"][0]["message"]
+                .as_str()
+                .expect("golden error carries a message");
+            let want = format!(
+                "{{\"error\":{}}}",
+                serde_json::to_string(message).expect("message serializes")
+            );
+            assert_eq!(duplicate_url_body(), want);
+        }
         assert_eq!(
             duplicate_url_body(),
-            expected_field_body(&create["duplicate_create"]["detail"], "error")
-        );
-        assert_eq!(
-            duplicate_url_body(),
-            expected_field_body(&update["update_save_duplicate"]["detail"], "error")
-        );
-        assert_eq!(
-            duplicate_url_body(),
-            r#"{"error":["URL already exists for this Issue"]}"#
+            r#"{"error":"URL already exists for this Issue"}"#
         );
     }
 
