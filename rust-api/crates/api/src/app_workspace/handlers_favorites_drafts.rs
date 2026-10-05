@@ -650,19 +650,30 @@ fn python_dumps(value: &Value) -> String {
     out
 }
 
-/// A JSON integer spelling (`-` + digits): Python parses it as `int` and
-/// `dumps` echoes the digits verbatim, however large.
+/// A JSON integer spelling (`-` + digits): Python parses it as `int`
+/// (rendered by value; only `-0` differs from its spelling).
 fn is_plain_int_spelling(text: &str) -> bool {
     let digits = text.strip_prefix('-').unwrap_or(text);
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// One `json.dumps` number: integers echo verbatim; anything else parsed as
-/// a float renders the CPython `repr` spelling (`1e2` → `100.0`), with the
-/// `allow_nan` spellings for non-finite values.
+/// One `json.dumps` number: integers render their VALUE (`-0` → `0` —
+/// the only non-canonical JSON int spelling, since leading zeros are
+/// invalid); bignums beyond `u64`/`i64` echo verbatim (no normalization
+/// exists for them). Anything else parsed as a float renders the CPython
+/// `repr` spelling (`1e2` → `100.0`), with the `allow_nan` spellings for
+/// non-finite values.
 fn python_dump_number(out: &mut String, number: &serde_json::Number) {
     let text = number.to_string();
     if is_plain_int_spelling(&text) {
+        if let Some(int) = number.as_i64() {
+            out.push_str(&int.to_string());
+            return;
+        }
+        if let Some(uint) = number.as_u64() {
+            out.push_str(&uint.to_string());
+            return;
+        }
         out.push_str(&text);
         return;
     }
@@ -8141,5 +8152,19 @@ mod tests {
         let mut map = Map::new();
         map.insert("inf".to_owned(), num("1e999"));
         assert_eq!(python_dumps(&Value::Object(map)), "{\"inf\": Infinity}");
+    }
+
+    #[test]
+    fn python_dumps_negative_zero_int() {
+        // `-0` is valid JSON but parses to int `0`: `dumps` renders the
+        // value, not the source spelling (review 2).
+        let num = |text: &str| serde_json::from_str::<Value>(text).expect("number");
+        let mut map = Map::new();
+        map.insert("negzero".to_owned(), num("-0"));
+        map.insert("zero".to_owned(), num("0"));
+        assert_eq!(
+            python_dumps(&Value::Object(map)),
+            "{\"negzero\": 0, \"zero\": 0}"
+        );
     }
 }
