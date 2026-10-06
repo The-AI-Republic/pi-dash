@@ -2503,6 +2503,22 @@ export interface ParityDriver {
    * next page fetched. The delay is test-only network shaping.
    */
   ganttLoadMoreObservedOnScroll(): Promise<boolean>;
+
+  // --- Root document shell + not-found (NEWFRONT-173, SHELL-107/108) ---
+  /** Structured read of the document head: metadata, icons, installability markers. */
+  documentShellFacts(): Promise<DocumentShellFacts>;
+  /** Whether the global overlay portal roots for menus and editors exist. */
+  overlayPortalsPresent(): Promise<{ contextMenu: boolean; editor: boolean }>;
+  /** Whether a session-recorder snippet is present in the document. */
+  sessionRecorderPresent(): Promise<boolean>;
+  /** HTTP statuses of the installability assets (manifests, icons) the head links to. */
+  installAssetStatuses(): Promise<{ href: string; status: number }[]>;
+  /** Facts about the rendered not-found surface, or null when none shows. */
+  notFoundFacts(): Promise<NotFoundFacts | null>;
+  /** Activate the not-found surface's way home; resolves once navigation lands. */
+  notFoundGoHome(): Promise<void>;
+  /** Presence markers in the served (pre-hydration) document for a path. */
+  servedShellMarkers(path: string): Promise<ServedShellMarkers>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */
@@ -2544,3 +2560,91 @@ export interface GanttSidebarRow {
 
 /** Canonical issue-layout keys shared by both frontend drivers. */
 export type LayoutsLayoutKey = "list" | "kanban" | "calendar" | "spreadsheet" | "gantt_chart";
+
+/** Observed document-shell head facts (NEWFRONT-173, SHELL-107). */
+export interface DocumentShellFacts {
+  /** The document language tag, or null when absent. */
+  lang: string | null;
+  /** The rendered tab title. */
+  title: string;
+  /** Meta description content, or null when absent. */
+  description: string | null;
+  /** Whether a keywords meta tag is present. */
+  keywordsPresent: boolean;
+  /** Meta viewport content, or null when absent. */
+  viewport: string | null;
+  /** Meta theme-color content, or null when absent. */
+  themeColor: string | null;
+  /** Meta robots content (crawl directives), or null when absent. */
+  robots: string | null;
+  /** Open-graph title, or null when absent. */
+  ogTitle: string | null;
+  /** Open-graph description, or null when absent. */
+  ogDescription: string | null;
+  /** Open-graph canonical URL, or null when absent. */
+  ogUrl: string | null;
+  /** Open-graph image reference, or null when absent. */
+  ogImage: string | null;
+  /** Open-graph image pixel size, or null when absent. */
+  ogImageSize: { width: number; height: number } | null;
+  /** Open-graph image alternative text, or null when absent. */
+  ogImageAlt: string | null;
+  /** Twitter card handle, or null when absent. */
+  twitterSite: string | null;
+  /** Twitter card layout token, or null when absent. */
+  twitterCard: string | null;
+  /** PWA capability markers (application name, mobile-web flags), or null when absent. */
+  installability: {
+    applicationName: string | null;
+    appleMobileCapable: string | null;
+    mobileWebCapable: string | null;
+  };
+  /** Hrefs of tab-icon links (rel icon / shortcut icon). */
+  iconHrefs: string[];
+  /** Hrefs of home-screen icon links (rel apple-touch-icon). */
+  appleTouchIconHrefs: string[];
+  /** Hrefs of install-manifest links (rel manifest). */
+  manifestHrefs: string[];
+  /** The color-scheme style the theme provider sets on the root element, or null. */
+  rootColorScheme: string | null;
+  /** Whether the shell mounts a main content landmark for the page. */
+  mainMounted: boolean;
+}
+
+/** Observed not-found surface facts (NEWFRONT-173, SHELL-108). */
+export interface NotFoundFacts {
+  /** The rendered tab title while the surface shows. */
+  title: string;
+  /** The surface heading text, or null when absent. */
+  heading: string | null;
+  /** The explanatory body text, or null when absent. */
+  body: string | null;
+  /** The way-home link target, or null when absent. */
+  homeHref: string | null;
+  /** The way-home link label, or null when absent. */
+  homeLabel: string | null;
+  /** The explanatory illustration, or null when absent. */
+  illustration: { src: string; alt: string; status: number } | null;
+  /** Meta robots content while the surface shows, or null when absent. */
+  robots: string | null;
+}
+
+/** Served-document shell markers (NEWFRONT-173, SHELL-107). */
+export interface ServedShellMarkers {
+  /** HTTP status of the served document. */
+  status: number;
+  /** Whether the served markup carries a non-empty tab title. */
+  hasTitle: boolean;
+  /** Whether the served markup carries a non-empty description meta tag. */
+  hasDescription: boolean;
+  /** Whether the served markup carries the social-card meta set. */
+  hasSocial: boolean;
+  /** Whether the served markup links tab icons. */
+  hasIcons: boolean;
+  /** Whether the served markup links install manifests. */
+  hasManifests: boolean;
+  /** Whether the served markup mounts both overlay portal roots. */
+  hasPortals: boolean;
+  /** Whether the served markup loads a session-recorder snippet. */
+  hasRecorder: boolean;
+}

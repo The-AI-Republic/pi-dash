@@ -23,10 +23,13 @@ import type {
   KanbanCard,
   KanbanColumn,
   LayoutsLayoutKey,
+  DocumentShellFacts,
+  NotFoundFacts,
   ParityBrowserCookie,
   ParityDriver,
   ParityTarget,
   RulesCommentMenuOption,
+  ServedShellMarkers,
   WorkspaceOnboardingView,
 } from "./parity-driver";
 
@@ -13556,6 +13559,60 @@ export class WebDriver implements ParityDriver {
     });
   }
 
+  // --- Root document shell + not-found (NEWFRONT-173, SHELL-107/108). ---
+  // --- Every read below was observed on the running oracle: the head ---
+  // --- carries product metadata plus PWA markers, two portal roots sit ---
+  // --- above the provider tree, and no recorder snippet loads. ---
+
+  async documentShellFacts(): Promise<DocumentShellFacts> {
+    return await this.page.evaluate(() => {
+      const meta = (key: string): string | null => {
+        const byName = document.querySelector<HTMLMetaElement>(`meta[name="${key}"]`);
+        if (byName !== null) return byName.content || null;
+        return document.querySelector<HTMLMetaElement>(`meta[property="${key}"]`)?.content ?? null;
+      };
+      const links = (rel: string): string[] =>
+        [...document.querySelectorAll<HTMLLinkElement>(`link[rel="${rel}"]`)]
+          .map((link) => link.getAttribute("href") ?? "")
+          .filter((href) => href.length > 0);
+      const sizeOf = (key: "og:image:width" | "og:image:height"): number | null => {
+        const raw = meta(key);
+        if (raw === null) return null;
+        const parsed = Number.parseInt(raw, 10);
+        return Number.isNaN(parsed) ? null : parsed;
+      };
+      const width = sizeOf("og:image:width");
+      const height = sizeOf("og:image:height");
+      return {
+        lang: document.documentElement.getAttribute("lang"),
+        title: document.title,
+        description: meta("description"),
+        keywordsPresent: document.querySelector('meta[name="keywords"]') !== null,
+        viewport: meta("viewport"),
+        themeColor: meta("theme-color"),
+        robots: meta("robots"),
+        ogTitle: meta("og:title"),
+        ogDescription: meta("og:description"),
+        ogUrl: meta("og:url"),
+        ogImage: meta("og:image"),
+        ogImageSize: width === null || height === null ? null : { width, height },
+        ogImageAlt: meta("og:image:alt"),
+        twitterSite: meta("twitter:site"),
+        twitterCard: meta("twitter:card"),
+        installability: {
+          applicationName: meta("application-name"),
+          appleMobileCapable: meta("apple-mobile-web-app-capable"),
+          mobileWebCapable: meta("mobile-web-app-capable"),
+        },
+        iconHrefs: [...links("icon"), ...links("shortcut icon")],
+        appleTouchIconHrefs: links("apple-touch-icon"),
+        manifestHrefs: links("manifest"),
+        rootColorScheme: document.documentElement.style.getPropertyValue("color-scheme").trim() || null,
+        mainMounted: document.querySelector("main") !== null,
+      };
+    });
+  }
+
   async ganttHoverBar(issueName: string): Promise<void> {
     const issueId = await this.ganttIssueIdByName(issueName);
     const bar = this.ganttBar(issueId);
@@ -13686,5 +13743,121 @@ export class WebDriver implements ParityDriver {
     } finally {
       await this.page.unroute(pattern);
     }
+  }
+
+  async overlayPortalsPresent(): Promise<{ contextMenu: boolean; editor: boolean }> {
+    return await this.page.evaluate(() => ({
+      contextMenu: document.getElementById("context-menu-portal") !== null,
+      editor: document.getElementById("editor-portal") !== null,
+    }));
+  }
+
+  async sessionRecorderPresent(): Promise<boolean> {
+    // Absence marker read from the old sources (an absence cannot be
+    // observed on a passing run): a tagged loader script plus any script
+    // fetched from the recorder host. Verified absent on the oracle.
+    return await this.page.evaluate(() => {
+      if (document.getElementById("clarity-tracking") !== null) return true;
+      return [...document.scripts].some((script) => script.src.includes("clarity.ms"));
+    });
+  }
+
+  async installAssetStatuses(): Promise<{ href: string; status: number }[]> {
+    const facts = await this.documentShellFacts();
+    const hrefs = [...new Set([...facts.manifestHrefs, ...facts.iconHrefs, ...facts.appleTouchIconHrefs])];
+    const out: { href: string; status: number }[] = [];
+    for (const href of hrefs) {
+      const url = new URL(href, this.page.url()).toString();
+      try {
+        out.push({ href, status: (await this.page.request.get(url)).status() });
+      } catch {
+        out.push({ href, status: 0 });
+      }
+    }
+    return out;
+  }
+
+  async notFoundFacts(): Promise<NotFoundFacts | null> {
+    const title = await this.page.title();
+    if (!title.includes("404")) return null;
+    const surface = await this.page.evaluate(() => {
+      const scope = document.querySelector("main") ?? document.body;
+      const heading =
+        scope.querySelector("h1, h2, h3")?.textContent?.trim() ||
+        document.querySelector("h1, h2, h3")?.textContent?.trim() ||
+        null;
+      const body =
+        [...scope.querySelectorAll("p")]
+          .map((node) => node.textContent?.trim() ?? "")
+          .filter((text) => text.length > 0)
+          .sort((a, b) => b.length - a.length)[0] ?? null;
+      const home = scope.querySelector<HTMLAnchorElement>('a[href="/"]');
+      const img = scope.querySelector("img");
+      return {
+        heading,
+        body,
+        homeHref: home?.getAttribute("href") ?? null,
+        homeLabel: home?.textContent?.trim() || null,
+        illustrationSrc: img?.getAttribute("src") ?? null,
+        illustrationAlt: img?.getAttribute("alt") ?? null,
+        robots: document.querySelector<HTMLMetaElement>('meta[name="robots"]')?.content ?? null,
+      };
+    });
+    let illustration: NotFoundFacts["illustration"] = null;
+    if (surface.illustrationSrc !== null) {
+      const url = new URL(surface.illustrationSrc, this.page.url()).toString();
+      let status = 0;
+      try {
+        status = (await this.page.request.get(url)).status();
+      } catch {
+        status = 0;
+      }
+      illustration = { src: surface.illustrationSrc, alt: surface.illustrationAlt ?? "", status };
+    }
+    return {
+      title,
+      heading: surface.heading,
+      body: surface.body,
+      homeHref: surface.homeHref,
+      homeLabel: surface.homeLabel,
+      illustration,
+      robots: surface.robots,
+    };
+  }
+
+  async notFoundGoHome(): Promise<void> {
+    const before = this.page.url();
+    const scope = this.page.locator("main");
+    const home = scope.locator('a[href="/"]').first();
+    await home.click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.page.url(), { timeout: WebDriver.WAIT_MS }).not.toBe(before);
+  }
+
+  async servedShellMarkers(path: string): Promise<ServedShellMarkers> {
+    // Marker presence only: the served document is the crawler-facing
+    // layer, so the scenario pins which markers it carries without
+    // repeating its copy.
+    const url = new URL(path, this.page.url()).toString();
+    const response = await this.page.request.get(url, { timeout: WebDriver.WAIT_MS });
+    const markup = await response.text();
+    const nonEmpty = (pattern: RegExp): boolean => {
+      const match = pattern.exec(markup);
+      return match !== null && (match[1] ?? "").trim().length > 0;
+    };
+    const present = (needle: string): boolean => markup.includes(needle);
+    return {
+      status: response.status(),
+      hasTitle: nonEmpty(/<title>([^<]*)<\/title>/),
+      hasDescription: nonEmpty(/<meta[^>]*name="description"[^>]*content="([^"]*)"/),
+      hasSocial:
+        present('property="og:title"') &&
+        present('property="og:description"') &&
+        present('property="og:image"') &&
+        present('name="twitter:card"'),
+      hasIcons: present('rel="icon"'),
+      hasManifests: present('rel="manifest"'),
+      hasPortals: present('id="context-menu-portal"') && present('id="editor-portal"'),
+      hasRecorder: present("clarity-tracking") || present("clarity.ms"),
+    };
   }
 }
