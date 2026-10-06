@@ -10,6 +10,7 @@ mod desktop_http;
 mod ipc;
 mod managed_runner;
 mod pidash_cli;
+mod process_tree;
 mod updates;
 
 use std::sync::Mutex;
