@@ -5440,4 +5440,25 @@ mod tests {
         let neghuge: Value = serde_json::from_str("-1e999").expect("parses");
         assert_eq!(char_field_value(&neghuge), "-inf");
     }
+
+    #[test]
+    fn form_write_body_requested_data_keeps_first_seen_order() {
+        // PIDASHCONV-757: link PATCH / comment writes dump the parsed body
+        // with `django_dumps` into the activity `requested_data`. Form keys
+        // must keep QueryDict first-seen order, never alphabetical.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        let raw = b"url=https://example.com/x&title=hello";
+        headers.insert("content-length", raw.len().to_string().parse().unwrap());
+        let parsed = parse_write_body(&headers, raw).expect("form parses");
+        assert!(parsed.from_form);
+        let dumped = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&parsed.value);
+        assert_eq!(
+            dumped,
+            r#"{"url": "https://example.com/x", "title": "hello"}"#
+        );
+    }
 }
