@@ -1138,9 +1138,10 @@ fn parse_django_datetime(text: &str) -> Option<ParsedDt> {
 /// (`YYYY-MM-DD`, `YYYYMMDD`) and ISO week dates (`YYYY-Www[-d]`,
 /// `YYYYWww[d]`, weekday default 1), an optional time after any single
 /// non-digit separator (parts strictly two digits, seconds optional,
-/// `.`/`,` fraction always a seconds fraction truncated to 6 digits,
-/// a 4th `:` part or basic digits past `HHMMSS` read as that
-/// same fraction), one optional gap byte, and an optional `Z`/
+/// `.`/`,` fraction always a seconds fraction truncated to 6 digits
+/// (a 4th `:` part or basic digits past `HHMMSS` read as that
+/// same fraction; empty only when a tz follows immediately),
+/// one optional gap byte, and an optional `Z`/
 /// numeric offset (`±HH`,
 /// `±HHMM`, `±HH:MM`, `±HHMMSS`, `±HH:MM:SS`, optional seconds fraction
 /// after any count — including a fourth `:` part or trailing basic
@@ -1346,9 +1347,19 @@ fn parse_iso_time(date: chrono::NaiveDate, rest: &str) -> Option<ParsedDt> {
             Some(frac) => {
                 let digits: String = frac.chars().take_while(|c| c.is_ascii_digit()).collect();
                 if digits.is_empty() {
-                    return None;
+                    // An empty fraction parses only with an immediately
+                    // following tz (`T03:04:05.+05:00` → 0 micros); a bare
+                    // trailing `./,` rejects, and the tz must abut the
+                    // separator (no gap byte — probed on CPython 3.12). It
+                    // counts as a short fraction below so the gap byte
+                    // stays disallowed.
+                    if frac.is_empty() {
+                        return None;
+                    }
+                    (0, 1, frac)
+                } else {
+                    (frac_micros(&digits)?, digits.len(), &frac[digits.len()..])
                 }
-                (frac_micros(&digits)?, digits.len(), &frac[digits.len()..])
             }
             None => (0, 0, rest),
         }
@@ -4860,6 +4871,52 @@ mod tests {
             ("0001-01-01", Some(naive(1, 1, 1, 0, 0, 0, 0))),
             ("0001-W01-1", Some(naive(1, 1, 1, 0, 0, 0, 0))),
             ("9999-12-31", Some(naive(9999, 12, 31, 0, 0, 0, 0))),
+            // Empty time fraction before a tz: CPython accepts with 0
+            // micros at hour/minute/second level (PIDASHCONV-764).
+            (
+                "2026-01-02T03:04:05.+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05,+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05.Z",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 0)),
+            ),
+            (
+                "2026-01-02T03:04:05,Z",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 0)),
+            ),
+            (
+                "2026-01-02T03:04:05.+05",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-01-02T030405.+0500",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 0), 18_000)),
+            ),
+            (
+                "2026-01-02T03.+05:00",
+                Some(aware(day(2026, 1, 2, 3, 0, 0, 0), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04.+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 0, 0), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05.+05:00:00.5",
+                Some(aware_us(day(2026, 1, 2, 3, 4, 5, 0), 18_000_500_000)),
+            ),
+            (
+                "2026-01-02T03:04,Z",
+                Some(aware(day(2026, 1, 2, 3, 4, 0, 0), 0)),
+            ),
+            (
+                "2024-W03T10:30:00.+05:00",
+                Some(aware(day(2024, 1, 15, 10, 30, 0, 0), 18_000)),
+            ),
         ] {
             assert_eq!(parse_django_datetime(input), expected, "{input}");
         }
@@ -5096,6 +5153,15 @@ mod tests {
             "0000-1-2T03:04:05",
             "0000-01-02T03:04:05",
             "0000-1-2 03:04:05+05:00",
+            // Empty time fraction: accepted only with an immediately
+            // following tz — a bare trailing `./,`, a second dot, any
+            // gap byte, or a lowercase `z` all reject (PIDASHCONV-764).
+            "2026-01-02T03:04:05.",
+            "2026-01-02T03:04:05,",
+            "2026-01-02T03:04:05..+05:00",
+            "2026-01-02T03:04:05. +05:00",
+            "2026-01-02T03:04:05.\t+05:00",
+            "2026-01-02T03:04:05.z",
         ] {
             assert_eq!(parse_django_datetime(input), None, "{input}");
         }
