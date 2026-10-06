@@ -716,7 +716,22 @@ fn parse_drf_datetime(
         Some((naive_raw, offset)) => (naive_raw, Some(offset)),
         None => (raw.as_str(), None),
     };
-    let naive = parse_naive_datetime(naive_raw).ok_or_else(invalid)?;
+    // DRF's `strptime(value, 'iso-8601')` fallthrough (`to_internal_value`
+    // runs it when `parse_datetime` returns `None` — PIDASHCONV-773):
+    // the literal matches case-insensitively and yields naive
+    // 1900-01-01 through the zone-attach arm below (never the offset
+    // arm — `strptime` knows no offsets). Exact match: padding fails
+    // on both sides (probed); ASCII-only (765 unicode-gap family).
+    let (naive, offset) = match parse_naive_datetime(naive_raw) {
+        Some(naive) => (naive, offset),
+        None if raw.eq_ignore_ascii_case("iso-8601") => {
+            let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .expect("1900-01-01 valid");
+            (naive, None)
+        }
+        None => return Err(invalid()),
+    };
     if let Some(offset) = offset {
         return Ok(naive.and_utc() - chrono::Duration::seconds(i64::from(offset)));
     }
@@ -4276,6 +4291,39 @@ mod tests {
         // Unpadded parts with a time part parse (Django's \d{1,2} arm).
         let loose = parse_drf_datetime(&json!("2024-1-5T1:2"), &tz, "UTC").unwrap();
         assert_eq!(loose.to_rfc3339(), "2024-01-05T01:02:00+00:00");
+    }
+
+    #[test]
+    fn drf_datetime_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01 in the request zone — never through the offset arm
+        // (probed live both backends).
+        let tz: chrono_tz::Tz = "UTC".parse().unwrap();
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let parsed = parse_drf_datetime(&json!(text), &tz, "UTC").expect(text);
+            assert_eq!(parsed.to_rfc3339(), "1900-01-01T00:00:00+00:00", "{text:?}");
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert_eq!(
+                parse_drf_datetime(&json!(text), &tz, "UTC").unwrap_err(),
+                DATETIME_INVALID_MESSAGE,
+                "{text:?}"
+            );
+        }
     }
 
     // -- Save derivation ---------------------------------------------------------------

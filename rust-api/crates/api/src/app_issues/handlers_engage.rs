@@ -2630,7 +2630,22 @@ fn check_datetime(
                 Presence::Missing
             }
         }
-        Some(Value::String(text)) => match parse_input_datetime(text) {
+        // DRF runs `strptime(value, 'iso-8601')` when `parse_datetime`
+        // returns `None` (PIDASHCONV-773): the literal matches
+        // case-insensitively and yields naive 1900-01-01, read as UTC
+        // like every naive input here. Kept at this DRF caller — the
+        // shared parser also serves the `?created_at__gt=` query path
+        // (model `to_python`, no `strptime` step), which must stay
+        // invalid there. Exact match: padding fails on both sides
+        // (probed); ASCII-only (765 unicode-gap family).
+        Some(Value::String(text)) => match parse_input_datetime(text).or_else(|| {
+            text.eq_ignore_ascii_case("iso-8601").then(|| {
+                let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+                    .and_then(|date| date.and_hms_opt(0, 0, 0))
+                    .expect("1900-01-01 valid");
+                naive.and_utc()
+            })
+        }) {
             Some(dt) => Presence::Value(dt),
             None => {
                 push_error(errors, field, DATETIME_FORMAT_MESSAGE.to_owned());
@@ -7247,6 +7262,57 @@ mod tests {
         ] {
             assert!(parse_input_datetime(bad).is_none(), "{bad}");
         }
+    }
+
+    #[test]
+    fn check_datetime_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01, read as UTC (probed live both backends).
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let mut errors = Map::new();
+            let body: Map<String, Value> =
+                serde_json::from_value(json!({"deleted_at": text})).unwrap();
+            let Presence::Value(dt) = check_datetime(&mut errors, &body, "deleted_at", true) else {
+                panic!("{text:?} rejected: {errors:?}");
+            };
+            assert_eq!(
+                dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+                "1900-01-01T00:00:00Z",
+                "{text:?}"
+            );
+            assert!(errors.is_empty(), "{text:?}: {errors:?}");
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            let mut errors = Map::new();
+            let body: Map<String, Value> =
+                serde_json::from_value(json!({"deleted_at": text})).unwrap();
+            assert!(
+                matches!(
+                    check_datetime(&mut errors, &body, "deleted_at", true),
+                    Presence::Missing
+                ),
+                "{text:?}"
+            );
+        }
+        // The shared parser also serves the `?created_at__gt=` query path
+        // (model `to_python`, no `strptime` step): the literal stays
+        // invalid there.
+        assert!(parse_input_datetime("iso-8601").is_none());
+        assert!(parse_input_datetime("ISO-8601").is_none());
     }
 
     #[test]

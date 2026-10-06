@@ -892,7 +892,8 @@ struct ParsedDate {
 
 /// Parse a serializer date input the way DRF does with
 /// `DATETIME_INPUT_FORMATS = ['iso-8601']` (Django 4.2
-/// `parse_datetime`, `datetime.fromisoformat` first): full ISO datetimes
+/// `parse_datetime`, `datetime.fromisoformat` first, then the
+/// `strptime(value, 'iso-8601')` fallthrough): full ISO datetimes
 /// and date-only strings parse; anything else fails `invalid` with the
 /// `DATETIME_FORMAT_HINT` message. Naive results are made aware in the
 /// actor zone (`enforce_timezone` under `USE_TZ`); aware results are
@@ -943,6 +944,21 @@ fn parse_serializer_date(value: &Value, timezone: &Tz) -> Result<ParsedDate, &'s
         });
     }
     if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&normalized, "%Y-%m-%dT%H:%M:%S") {
+        return Ok(ParsedDate {
+            instant: naive_to_actor(naive, timezone),
+            date: naive.date(),
+        });
+    }
+    // DRF's `strptime(value, 'iso-8601')` fallthrough (`to_internal_value`
+    // runs it when `parse_datetime` returns `None` — PIDASHCONV-773):
+    // the literal matches case-insensitively and yields naive
+    // 1900-01-01 through the actor-zone arm above. Exact match:
+    // padding fails on both sides (probed); ASCII-only (765
+    // unicode-gap family).
+    if text.eq_ignore_ascii_case("iso-8601") {
+        let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("1900-01-01 valid");
         return Ok(ParsedDate {
             instant: naive_to_actor(naive, timezone),
             date: naive.date(),
@@ -2361,6 +2377,46 @@ mod tests {
         assert!(parse_serializer_date(&json!("not-a-date"), &tz).is_err());
         assert!(parse_serializer_date(&json!(123), &tz).is_err());
         assert!(parse_serializer_date(&json!(true), &tz).is_err());
+    }
+
+    #[test]
+    fn date_inputs_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01 in the actor zone (probed live both backends).
+        let tz = UTC;
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let parsed = parse_serializer_date(&json!(text), &tz).expect(text);
+            assert_eq!(
+                parsed.instant.to_rfc3339(),
+                "1900-01-01T00:00:00+00:00",
+                "{text:?}"
+            );
+            assert_eq!(
+                parsed.date,
+                chrono::NaiveDate::from_ymd_opt(1900, 1, 1).expect("date"),
+                "{text:?}"
+            );
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert!(
+                parse_serializer_date(&json!(text), &tz).is_err(),
+                "{text:?}"
+            );
+        }
     }
 
     #[test]

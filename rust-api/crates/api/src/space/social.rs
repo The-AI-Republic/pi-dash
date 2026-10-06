@@ -1538,7 +1538,9 @@ fn check_choice(
 }
 
 /// Parse an input datetime the way DRF `DateTimeField` does: offset-aware
-/// RFC-3339, or a naive `YYYY-MM-DDThh:mm:ss` read in UTC.
+/// RFC-3339, a naive `YYYY-MM-DDThh:mm:ss` read in UTC, or the
+/// `strptime(value, 'iso-8601')` fallthrough literal (naive 1900-01-01
+/// read in UTC).
 fn parse_input_datetime(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
         return Some(dt.with_timezone(&chrono::Utc));
@@ -1547,6 +1549,19 @@ fn parse_input_datetime(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S"))
         .ok()
         .map(|naive| naive.and_utc())
+        .or_else(|| {
+            // DRF's `strptime(value, 'iso-8601')` fallthrough
+            // (`to_internal_value` runs it when `parse_datetime` returns
+            // `None` — PIDASHCONV-773): the literal matches
+            // case-insensitively. Exact match: padding fails on both
+            // sides (probed); ASCII-only (765 unicode-gap family).
+            text.eq_ignore_ascii_case("iso-8601").then(|| {
+                let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+                    .and_then(|date| date.and_hms_opt(0, 0, 0))
+                    .expect("1900-01-01 valid");
+                naive.and_utc()
+            })
+        })
 }
 
 /// Optional string-array input (`attachments`, `labels`). Both columns are
@@ -3417,6 +3432,33 @@ mod tests {
 
     fn object_keys(value: &Value) -> Vec<String> {
         value.as_object().expect("object").keys().cloned().collect()
+    }
+
+    #[test]
+    fn input_datetime_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01, read as UTC (probed live both backends).
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let parsed = parse_input_datetime(text).expect(text);
+            assert_eq!(parsed.to_rfc3339(), "1900-01-01T00:00:00+00:00", "{text:?}");
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert!(parse_input_datetime(text).is_none(), "{text:?}");
+        }
     }
 
     #[test]

@@ -1422,6 +1422,20 @@ enum ParsedDateTime {
 /// before the zone (a trailing colon, stray letters/digits, or
 /// non-space chars after a 6+ digit fraction are skipped).
 fn parse_drf_datetime(text: &str) -> Option<ParsedDateTime> {
+    // DRF's `strptime(value, 'iso-8601')` fallthrough (`to_internal_value`
+    // runs it when `parse_datetime` returns `None` — PIDASHCONV-773):
+    // the literal matches case-insensitively and yields naive
+    // 1900-01-01 (the caller attaches the request zone). Every core arm
+    // below needs leading date digits, which the letter-led literal
+    // never has, so checking it first is order-exact. Exact match:
+    // padding fails on both sides (probed); ASCII-only (765
+    // unicode-gap family).
+    if text.eq_ignore_ascii_case("iso-8601") {
+        let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("1900-01-01 valid");
+        return Some(ParsedDateTime::Naive(naive));
+    }
     // Week dates first (strict arm only: the regex needs dashes).
     if let Some(parsed) = parse_week_datetime(text) {
         return Some(parsed);
@@ -5415,6 +5429,50 @@ mod tests {
         // Export twin of the `\n` gap (D2): `date_re$` matches before
         // it, so Django 200s; this port 400s.
         assert!(parse_export_date("2026-09-24\n").is_none());
+    }
+
+    #[test]
+    fn datetime_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01 (the caller attaches the request zone; probed live
+        // both backends).
+        let utc = chrono_tz::UTC;
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            match parse_drf_datetime(text).expect(text) {
+                ParsedDateTime::Naive(naive) => assert_eq!(
+                    naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                    "1900-01-01T00:00:00",
+                    "{text:?}"
+                ),
+                ParsedDateTime::Aware(_) => panic!("{text:?} is naive"),
+            }
+            let value = Value::String(text.to_owned());
+            match validate_datetime_field(InputValue::Value(&value), false, true, &utc) {
+                DateTimeOutcome::Value(instant) => assert_eq!(
+                    instant.to_rfc3339(),
+                    "1900-01-01T00:00:00+00:00",
+                    "{text:?}"
+                ),
+                _ => panic!("{text:?} validates"),
+            }
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert!(parse_drf_datetime(text).is_none(), "{text:?}");
+        }
     }
 
     #[test]

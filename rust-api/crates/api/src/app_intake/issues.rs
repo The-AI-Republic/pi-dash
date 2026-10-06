@@ -638,25 +638,37 @@ fn validate_datetime(
         }
         return None;
     }
-    let text = match value {
-        serde_json::Value::String(text) => text.trim().to_string(),
+    let raw = match value {
+        serde_json::Value::String(text) => text,
         _ => {
             push_error(errors, field, datetime_format_message());
             return None;
         }
     };
+    let text = raw.trim().to_string();
     if let Ok(date) = chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d") {
         return Some(date.and_hms_opt(0, 0, 0).expect("midnight").and_utc());
     }
-    match chrono::DateTime::parse_from_rfc3339(&text) {
-        Ok(dt) => Some(dt.with_timezone(&Utc)),
-        Err(_) => {
-            // DRF also accepts the `+HHMM`/`+HH:MM` offsets and fractional
-            // forms RFC 3339 covers; anything else is the format error.
-            push_error(errors, field, datetime_format_message());
-            None
-        }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&text) {
+        return Some(dt.with_timezone(&Utc));
     }
+    // DRF's `strptime(value, 'iso-8601')` fallthrough (`to_internal_value`
+    // runs it when `parse_datetime` returns `None` — PIDASHCONV-773):
+    // the literal matches case-insensitively and yields naive
+    // 1900-01-01, read as UTC like the date arm above. Checked on the RAW
+    // text — Django's `strptime` sees the value before any strip (this
+    // port's trim is a pre-existing quirk), so a padded literal still
+    // fails. Exact match (probed); ASCII-only (765 unicode-gap family).
+    if raw.eq_ignore_ascii_case("iso-8601") {
+        let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("1900-01-01 valid");
+        return Some(naive.and_utc());
+    }
+    // DRF also accepts the `+HHMM`/`+HH:MM` offsets and fractional
+    // forms RFC 3339 covers; anything else is the format error.
+    push_error(errors, field, datetime_format_message());
+    None
 }
 
 fn datetime_format_message() -> String {
@@ -6268,4 +6280,45 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
         serde_json::Value::Bool(false),
     );
     serde_json::Value::Object(issue)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn validate_datetime_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01, read as UTC (probed live both backends).
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let mut errs = FieldErrors::new();
+            let parsed =
+                validate_datetime(&mut errs, "completed_at", &json!(text), false).expect(text);
+            assert_eq!(parsed.to_rfc3339(), "1900-01-01T00:00:00+00:00", "{text:?}");
+            assert!(errs.is_empty(), "{text:?}");
+        }
+        // Near-misses stay invalid (exact match on the raw text, both
+        // sides probed — padding fails even though this port trims).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            let mut errs = FieldErrors::new();
+            assert!(
+                validate_datetime(&mut errs, "completed_at", &json!(text), false).is_none(),
+                "{text:?}"
+            );
+        }
+    }
 }

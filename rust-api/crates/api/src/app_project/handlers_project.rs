@@ -2487,7 +2487,26 @@ impl DttmParse {
 }
 
 fn parse_drf_datetime(text: &str, timezone: Tz) -> DttmParse {
-    let Some(parsed) = parse_iso_core(text).or_else(|| parse_iso_regex(text)) else {
+    let Some(parsed) = parse_iso_core(text)
+        .or_else(|| parse_iso_regex(text))
+        .or_else(|| {
+            // DRF's `strptime(value, 'iso-8601')` fallthrough
+            // (`to_internal_value` runs it when `parse_datetime` returns
+            // `None` — PIDASHCONV-773): the literal matches
+            // case-insensitively and yields naive 1900-01-01 through the
+            // naive arm below. Exact match: padding fails on both sides
+            // (probed); ASCII-only (765 unicode-gap family).
+            text.eq_ignore_ascii_case("iso-8601").then(|| {
+                let naive = NaiveDate::from_ymd_opt(1900, 1, 1)
+                    .and_then(|date| date.and_hms_opt(0, 0, 0))
+                    .expect("1900-01-01 valid");
+                ParsedDateTime {
+                    naive,
+                    offset_micros: None,
+                }
+            })
+        })
+    else {
         return DttmParse::Invalid;
     };
     match parsed.offset_micros {
@@ -6655,6 +6674,34 @@ mod tests {
                 matches!(parse_get_body(raw), Err(Denial::ServerError)),
                 "shape {raw:?} must 500"
             );
+        }
+    }
+
+    #[test]
+    fn datetime_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01 in the request zone (probed live both backends).
+        let utc = chrono_tz::UTC;
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let parsed = parse_drf_datetime(text, utc).ok().expect(text);
+            assert_eq!(parsed.to_rfc3339(), "1900-01-01T00:00:00+00:00", "{text:?}");
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert!(parse_drf_datetime(text, utc).ok().is_none(), "{text:?}");
         }
     }
 
