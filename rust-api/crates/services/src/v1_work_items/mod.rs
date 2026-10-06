@@ -48,7 +48,8 @@
 //! * [`filter_fields`] — `api/serializers/base.py:32-70`
 //!   (`BaseSerializer._filter_fields`, the `?fields=` filter).
 //! * [`python_number_str`] — Python `str()` of a JSON number (every
-//!   `CharField` `str()` coercion, PIDASHCONV-758).
+//!   `CharField` `str()` coercion plus the `IntegerField` number arm,
+//!   PIDASHCONV-758/766).
 //!
 //! Wiring note: the crate root declares `pub mod v1_work_items;` (seam for
 //! this issue's new files); every file under this module is new.
@@ -141,7 +142,8 @@ pub fn filter_fields(
 }
 
 /// Python `str()` of a JSON number, shared by every `CharField` `str()`
-/// coercion in this domain (PIDASHCONV-758): ints render decimally
+/// coercion and the `IntegerField` number arm in this domain
+/// (PIDASHCONV-758, PIDASHCONV-766): ints render decimally
 /// (arbitrary precision kept), floats via [`python_float_repr`].
 /// `Number::to_string` is not enough: under `arbitrary_precision` it
 /// echoes the literal's layout (`1.5e+3`, `1e-7`, `0.00001`), and without

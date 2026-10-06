@@ -847,10 +847,11 @@ fn validate_integer(value: Option<&Value>) -> Result<i64, IntegerError> {
             parse_py_int(strip_decimal_suffix(text)).ok_or(IntegerError::Invalid)
         }
         Value::Number(number) => {
-            // `str(int)` is decimal; `str(float)` shortest-roundtrip — the
-            // exponent-spelling nuance cannot flip a verdict (exponent forms
-            // never parse as int in either engine).
-            parse_py_int(strip_decimal_suffix(&number.to_string())).ok_or(IntegerError::Invalid)
+            // `str()` sees the VALUE's layout, not the literal's: render via
+            // the shared helper first (`1e3` → `1000.0` → valid;
+            // `10000000000000000.0` → `1e+16` → invalid).
+            parse_py_int(strip_decimal_suffix(&python_number_str(number)))
+                .ok_or(IntegerError::Invalid)
         }
         // `str(True)`/`str([...])` never parse as int — invalid without
         // building the string.
