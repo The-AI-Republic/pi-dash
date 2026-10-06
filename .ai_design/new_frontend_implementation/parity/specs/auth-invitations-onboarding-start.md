@@ -70,8 +70,9 @@ build from.
   one shell command, "Windows" with two), preselecting the tab matching the
   browser OS but leaving it switchable. Each command block has a copy
   action with copied confirmation and a manual-copy fallback message.
-- Nothing is stored. Both "skip for now" and "done, continue" advance to
-  the profile step identically.
+- Nothing is stored: both "skip for now" and "done, continue" leave
+  the profile's onboarding flags at their signup default (all false) and
+  advance to the profile step identically.
 
 ## Profile-setup step (AUTH-031)
 

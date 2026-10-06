@@ -359,13 +359,17 @@ test(
 
     await test.step("skip reaches the profile step too and stores nothing", async () => {
       const second = await freshAccount("parish-cli-skip");
+      // The server initializes every fresh profile with all-false
+      // onboarding flags (model default), so "stores nothing" means the
+      // flags are unchanged from the signup baseline — not null.
+      const baseline = (await userProfile(second.session)).onboarding_step;
       await driver.openEntry();
       await driver.signInWithPassword(second.email, FRESH_PASSWORD);
       await driver.openOnboarding();
       await expect.poll(() => driver.pageText(), { timeout: 60_000 }).toContain("Install the Pi Dash CLI");
       await driver.skipCliInstall();
       await expect.poll(() => driver.pageText(), { timeout: 60_000 }).toContain("Create your profile");
-      expect((await userProfile(second.session)).onboarding_step ?? {}).toEqual({});
+      expect((await userProfile(second.session)).onboarding_step).toEqual(baseline);
     });
   }
 );
