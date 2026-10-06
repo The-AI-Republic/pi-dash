@@ -16,6 +16,7 @@ use std::sync::Mutex;
 
 use tauri::{
     Manager, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    webview::NewWindowResponse,
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
 };
@@ -36,6 +37,9 @@ struct AppConfig {
     /// hot-reload mode, where the webview *is* the server host and there is
     /// no bundle to bounce back to.
     bundle_root: Option<Url>,
+    /// Public origin of the hosted web app — what an in-app path becomes
+    /// when it has to leave the window (see `browser_url_for_new_window`).
+    web_base: Url,
 }
 
 /// Where Tauri serves `WebviewUrl::App` from. Windows is plain `http`
@@ -77,6 +81,35 @@ fn bundle_redirect_for(url: &Url, server: &Url, bundle_root: &Url) -> Option<Url
         None => url.path().to_string(),
     };
     Some(bundle_url(bundle_root, &path_and_query))
+}
+
+/// Where a new-window request (`window.open(…, "_blank")`, a
+/// `target="_blank"` link) goes in the user's default browser.
+///
+/// The desktop app is a single window: the webview has no tab or popup
+/// surface, and without a handler wry drops these requests on every
+/// platform, so "Open in new tab" silently did nothing. An in-app path
+/// resolves against the bundle origin, which nothing outside the app can
+/// load — map it to the same path on the hosted web app, as
+/// `desktop-overlay`'s `desktopWebUrl` does for copied links. Any other
+/// http(s) URL opens unchanged. `None` means refuse: the same http/https
+/// restriction as `open_in_browser`.
+fn browser_url_for_new_window(url: &Url, bundle_root: Option<&Url>, web_base: &Url) -> Option<Url> {
+    // Checked first: on Windows the bundle origin is itself an http URL.
+    let on_bundle = bundle_root.is_some_and(|root| {
+        url.scheme() == root.scheme()
+            && url.host_str() == root.host_str()
+            && url.port_or_known_default() == root.port_or_known_default()
+    });
+    let target = if on_bundle {
+        let mut target = web_base.join(url.path()).ok()?;
+        target.set_query(url.query());
+        target.set_fragment(url.fragment());
+        target
+    } else {
+        url.clone()
+    };
+    matches!(target.scheme(), "http" | "https").then_some(target)
 }
 
 /// Whether this executable runs from an installed MSIX package; Windows
@@ -286,6 +319,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         WebviewUrl::App("index.html".into())
     };
+    // Same fallback as `dev-prep.sh` and build.rs's `validate_baked_web_base`:
+    // the web app lives on the sign-in origin unless the build says otherwise.
+    let web_base = option_env!("VITE_WEB_BASE_URL")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|v| Url::parse(v).ok())
+        .unwrap_or_else(|| target_url.clone());
     let bundle_root: Option<Url> = if hot_reload {
         None
     } else {
@@ -345,7 +385,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .manage(ZoomState(Mutex::new(1.0)))
         .manage(desktop_http)
-        .manage(AppConfig { target_url, bundle_root })
+        .manage(AppConfig { target_url, bundle_root, web_base })
         .manage(managed_runner::DaemonState::default())
         .manage(chat::ChatState::default())
         .manage(updates::UpdateState::default())
@@ -422,6 +462,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .inner_size(1400.0, 900.0)
                 .min_inner_size(800.0, 600.0)
                 .resizable(true);
+            let open_app = app.handle().clone();
+            window = window.on_new_window(move |url, _features| {
+                let config = open_app.state::<AppConfig>();
+                match browser_url_for_new_window(&url, config.bundle_root.as_ref(), &config.web_base) {
+                    Some(target) => {
+                        if let Err(e) = open_app.opener().open_url(target.as_str(), None::<&str>) {
+                            eprintln!("new-window: opening {target} in the browser failed: {e}");
+                        }
+                    }
+                    None => eprintln!("new-window: refused {url}"),
+                }
+                // Never a second in-app window: the request is either handed
+                // to the browser or dropped.
+                NewWindowResponse::Deny
+            });
             if !hot_reload {
                 let bounce_app = app.handle().clone();
                 window = window.on_navigation(move |url| {
@@ -609,6 +664,67 @@ mod tests {
     }
     fn root() -> Url {
         Url::parse("tauri://localhost").unwrap()
+    }
+
+    fn web() -> Url {
+        Url::parse("https://pidash.airepublic.com").unwrap()
+    }
+    fn new_window(url: &str, bundle_root: &str) -> Option<String> {
+        let root = Url::parse(bundle_root).unwrap();
+        browser_url_for_new_window(&Url::parse(url).unwrap(), Some(&root), &web()).map(String::from)
+    }
+
+    #[test]
+    fn open_in_new_tab_on_an_in_app_path_goes_to_the_hosted_web_app() {
+        // `window.open("/acme/browse/PROJ-12/", "_blank")` as the webview
+        // resolves it on macOS/Linux and on Windows.
+        for (url, bundle_root) in [
+            ("tauri://localhost/acme/browse/PROJ-12/", "tauri://localhost"),
+            ("http://tauri.localhost/acme/browse/PROJ-12/", "http://tauri.localhost"),
+        ] {
+            assert_eq!(
+                new_window(url, bundle_root).as_deref(),
+                Some("https://pidash.airepublic.com/acme/browse/PROJ-12/"),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_window_in_app_path_keeps_query_and_fragment() {
+        assert_eq!(
+            new_window("tauri://localhost/acme/projects/p1/cycles/c1?peek=1#comment", "tauri://localhost").as_deref(),
+            Some("https://pidash.airepublic.com/acme/projects/p1/cycles/c1?peek=1#comment")
+        );
+    }
+
+    #[test]
+    fn new_window_external_links_open_unchanged() {
+        for u in ["https://example.com/docs?a=1#b", "http://intranet.example/wiki"] {
+            assert_eq!(new_window(u, "tauri://localhost").as_deref(), Some(u), "{u}");
+            assert_eq!(new_window(u, "http://tauri.localhost").as_deref(), Some(u), "{u}");
+        }
+    }
+
+    #[test]
+    fn new_window_refuses_non_web_schemes() {
+        for u in ["file:///etc/passwd", "javascript:alert(1)", "mailto:sales@example.com", "tauri://elsewhere/x"] {
+            assert_eq!(new_window(u, "tauri://localhost"), None, "{u}");
+        }
+    }
+
+    #[test]
+    fn new_window_in_hot_reload_mode_opens_the_server_url_as_is() {
+        // No bundle: the webview is already on the server host.
+        let url = Url::parse("http://localhost:3000/acme/browse/PROJ-12/").unwrap();
+        assert_eq!(browser_url_for_new_window(&url, None, &web()), Some(url));
+    }
+
+    #[test]
+    fn new_window_in_app_path_is_refused_when_the_web_base_is_not_http() {
+        let root = Url::parse("tauri://localhost").unwrap();
+        let url = Url::parse("tauri://localhost/acme/").unwrap();
+        assert_eq!(browser_url_for_new_window(&url, Some(&root), &root), None);
     }
 
     #[test]
