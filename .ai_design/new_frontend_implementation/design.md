@@ -46,15 +46,15 @@ built for our product, our license, or our desktop app.
 
 About 300k lines of TS/TSX:
 
-| Layer | Location | Size |
-|---|---|---|
-| Routes (React Router 7, framework mode, `ssr: false`) | `apps/web/app/` (75 `page.tsx`) | ~15k |
-| Feature UI | `apps/web/core/components/` (~50 folders) | ~133k |
-| Edition seams (`@/pi-dash-web/*` alias) | `apps/web/ce/` | ~10k |
-| Store hooks | `apps/web/core/hooks/store/` (38 hooks) | ~6k |
-| MobX stores | `apps/web/core/store/` + `packages/shared-state` | ~26k |
-| Services (axios) | `apps/web/core/services/` **and** `packages/services/` | ~11k |
-| Shared libs | `packages/{ui,propel,editor,utils,constants,types,i18n,…}` | ~90k |
+| Layer                                                 | Location                                                   | Size  |
+| ----------------------------------------------------- | ---------------------------------------------------------- | ----- |
+| Routes (React Router 7, framework mode, `ssr: false`) | `apps/web/app/` (75 `page.tsx`)                            | ~15k  |
+| Feature UI                                            | `apps/web/core/components/` (~50 folders)                  | ~133k |
+| Edition seams (`@/pi-dash-web/*` alias)               | `apps/web/ce/`                                             | ~10k  |
+| Store hooks                                           | `apps/web/core/hooks/store/` (38 hooks)                    | ~6k   |
+| MobX stores                                           | `apps/web/core/store/` + `packages/shared-state`           | ~26k  |
+| Services (axios)                                      | `apps/web/core/services/` **and** `packages/services/`     | ~11k  |
+| Shared libs                                           | `packages/{ui,propel,editor,utils,constants,types,i18n,…}` | ~90k  |
 
 The intended flow is route → component → store hook → MobX store →
 service → axios. In practice:
@@ -108,15 +108,15 @@ service → axios. In practice:
 
 ## 4. Decisions already settled
 
-| # | Decision |
-|---|---|
-| D1 | Stay on **React** (team familiarity, ecosystem; the weight is architectural, not React's). |
-| D2 | New app lives at **`apps/web_new/`**, package name `web_new`. |
-| D3 | Stack: **Vite + React 19 (+ React Compiler), TanStack Router, TanStack Query, Zustand, Tailwind 4, Base UI** (§7). |
-| D4 | **Not** a 1:1 translation of Plane's React code. The old code is a reference (read to learn behavior, edge cases and API usage), never a source (no imports, no copying). §12. |
-| D5 | Side-by-side migration: desktop switches first, web routes move via Caddy path routing, then `apps/web` is deleted. |
-| D6 | `apps/web` is frozen to bug fixes once the `web_new` shell exists. New features are built only in `web_new`. |
-| D7 | **Full functional parity** with `apps/web`, OSS and cloud edition. No area is dropped. Done = every item in the feature inventory passes the parity suite on `web_new` (§15). |
+| #   | Decision                                                                                                                                                                       |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| D1  | Stay on **React** (team familiarity, ecosystem; the weight is architectural, not React's).                                                                                     |
+| D2  | New app lives at **`apps/web_new/`**, package name `web_new`.                                                                                                                  |
+| D3  | Stack: **Vite + React 19 (+ React Compiler), TanStack Router, TanStack Query, Zustand, Tailwind 4, Base UI** (§7).                                                             |
+| D4  | **Not** a 1:1 translation of Plane's React code. The old code is a reference (read to learn behavior, edge cases and API usage), never a source (no imports, no copying). §12. |
+| D5  | Side-by-side migration: desktop switches first, web routes move via Caddy path routing, then `apps/web` is deleted.                                                            |
+| D6  | `apps/web` is frozen to bug fixes once the `web_new` shell exists. New features are built only in `web_new`.                                                                   |
+| D7  | **Full functional parity** with `apps/web`, OSS and cloud edition. No area is dropped. Done = every item in the feature inventory passes the parity suite on `web_new` (§15).  |
 
 ## 5. Architecture overview
 
@@ -170,40 +170,40 @@ Only two new shared packages. Everything else stays inside
 
 ## 6. What each old piece becomes
 
-| Old | New |
-|---|---|
-| React 18, React Router 7 framework mode | React 19 + Compiler, TanStack Router |
-| MobX root store (~30 stores) | TanStack Query cache (server data) + URL search params (filters, view) + small Zustand stores (UI only) |
-| SWR as fetch trigger | Route loaders + `useQuery` |
-| axios `APIService` ×2 | One `fetch`-based client in `@pidash/api-client` |
-| `@pi-dash/ui` + `@pi-dash/propel` | `@pidash/kit` |
-| Base UI + Headless UI + Radix + Blueprint | Base UI only |
-| Popper + Floating UI + tippy | Floating UI only (via Base UI) |
-| Tiptap loaded widely, with Yjs + markdown pipeline | Tiptap lazy-loaded for editing only; HTML viewer elsewhere; collaboration as a separate chunk |
-| lodash-es | Native JS |
-| Material Symbols font + lucide | lucide only, per-icon imports |
-| `ce/` alias, `ee-overlay/`, `desktop-overlay/` | `core/edition` and `core/platform` interfaces |
-| MobX-backed i18n | Lightweight i18n, active locale loaded on demand |
+| Old                                                | New                                                                                                     |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| React 18, React Router 7 framework mode            | React 19 + Compiler, TanStack Router                                                                    |
+| MobX root store (~30 stores)                       | TanStack Query cache (server data) + URL search params (filters, view) + small Zustand stores (UI only) |
+| SWR as fetch trigger                               | Route loaders + `useQuery`                                                                              |
+| axios `APIService` ×2                              | One `fetch`-based client in `@pidash/api-client`                                                        |
+| `@pi-dash/ui` + `@pi-dash/propel`                  | `@pidash/kit`                                                                                           |
+| Base UI + Headless UI + Radix + Blueprint          | Base UI only                                                                                            |
+| Popper + Floating UI + tippy                       | Floating UI only (via Base UI)                                                                          |
+| Tiptap loaded widely, with Yjs + markdown pipeline | Tiptap lazy-loaded for editing only; HTML viewer elsewhere; collaboration as a separate chunk           |
+| lodash-es                                          | Native JS                                                                                               |
+| Material Symbols font + lucide                     | lucide only, per-icon imports                                                                           |
+| `ce/` alias, `ee-overlay/`, `desktop-overlay/`     | `core/edition` and `core/platform` interfaces                                                           |
+| MobX-backed i18n                                   | Lightweight i18n, active locale loaded on demand                                                        |
 
 ## 7. Stack
 
-| Concern | Choice | Why |
-|---|---|---|
-| Build | Vite | Static output that drops into Tauri `dist/`; already used |
-| UI runtime | React 19 + React Compiler | Automatic memoization; Actions and `useOptimistic` for forms |
-| Routing | TanStack Router (file routes) | Typed paths **and typed, validated search params** (filters live in the URL); loaders; per-route code splitting; intent preloading |
-| Server data | TanStack Query | Cache, dedupe, background refresh, optimistic mutations, invalidation, persistence |
-| Client state | Zustand | ~1 KB, per-feature stores, usable outside React (Tauri events, shortcuts) |
-| Styling | Tailwind 4 + CSS variable tokens | No runtime cost |
-| Primitives | Base UI | Headless, accessible, tree-shakable; one system |
-| Lists/boards | TanStack Virtual | Large issue lists and boards |
-| Tables | TanStack Table (headless) | Only where a real table is needed |
-| Drag and drop | Atlassian pragmatic-drag-and-drop | Small, framework-agnostic; lazy per board |
-| Forms | react-hook-form + zod (`zod/mini` in runtime paths) | Small; schemas shared with API contracts |
-| Dates | date-fns | Tree-shakable |
-| Editor | Tiptap (lazy) | `description_html` compatibility |
-| Charts | Chosen before analytics is built (§18); lazy | Not on any startup path |
-| Tests | Vitest, Testing Library, Playwright | Vitest already in the repo |
+| Concern       | Choice                                              | Why                                                                                                                                |
+| ------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Build         | Vite                                                | Static output that drops into Tauri `dist/`; already used                                                                          |
+| UI runtime    | React 19 + React Compiler                           | Automatic memoization; Actions and `useOptimistic` for forms                                                                       |
+| Routing       | TanStack Router (file routes)                       | Typed paths **and typed, validated search params** (filters live in the URL); loaders; per-route code splitting; intent preloading |
+| Server data   | TanStack Query                                      | Cache, dedupe, background refresh, optimistic mutations, invalidation, persistence                                                 |
+| Client state  | Zustand                                             | ~1 KB, per-feature stores, usable outside React (Tauri events, shortcuts)                                                          |
+| Styling       | Tailwind 4 + CSS variable tokens                    | No runtime cost                                                                                                                    |
+| Primitives    | Base UI                                             | Headless, accessible, tree-shakable; one system                                                                                    |
+| Lists/boards  | TanStack Virtual                                    | Large issue lists and boards                                                                                                       |
+| Tables        | TanStack Table (headless)                           | Only where a real table is needed                                                                                                  |
+| Drag and drop | Atlassian pragmatic-drag-and-drop                   | Small, framework-agnostic; lazy per board                                                                                          |
+| Forms         | react-hook-form + zod (`zod/mini` in runtime paths) | Small; schemas shared with API contracts                                                                                           |
+| Dates         | date-fns                                            | Tree-shakable                                                                                                                      |
+| Editor        | Tiptap (lazy)                                       | `description_html` compatibility                                                                                                   |
+| Charts        | Chosen before analytics is built (§18); lazy        | Not on any startup path                                                                                                            |
+| Tests         | Vitest, Testing Library, Playwright                 | Vitest already in the repo                                                                                                         |
 
 ## 8. Directory layout
 
@@ -407,15 +407,15 @@ Replaces `desktop-overlay/` and the axios desktop adapter.
 ```ts
 export interface Platform {
   kind: "web" | "desktop";
-  fetch: typeof fetch;                         // desktop: Rust HTTP via invoke (desktop_http.rs)
-  stream(url: string, init?: StreamInit): EventStream;  // SSE; desktop: desktop_api_stream
+  fetch: typeof fetch; // desktop: Rust HTTP via invoke (desktop_http.rs)
+  stream(url: string, init?: StreamInit): EventStream; // SSE; desktop: desktop_api_stream
   openExternal(url: string): Promise<void>;
-  storage: KeyValueStore;                      // cache persistence, UI prefs
+  storage: KeyValueStore; // cache persistence, UI prefs
   onFocusChange(cb: (focused: boolean) => void): Unsubscribe;
-  window?: TitleBarApi;                        // drag region, traffic-light inset, fullscreen
-  menu?: MenuApi;                              // native menu → command registry
-  deepLinks?: DeepLinkApi;                     // pidash:// scheme
-  agentRuntime?: AgentRuntimeApi;              // bundled runner / managed runner controls
+  window?: TitleBarApi; // drag region, traffic-light inset, fullscreen
+  menu?: MenuApi; // native menu → command registry
+  deepLinks?: DeepLinkApi; // pidash:// scheme
+  agentRuntime?: AgentRuntimeApi; // bundled runner / managed runner controls
   updates?: UpdaterApi;
 }
 ```
@@ -438,13 +438,13 @@ Replaces `ce/` + `ee-overlay/` file swapping.
 ```ts
 export interface Edition {
   id: "oss" | string;
-  routes?: RouteExtension[];          // extra route subtrees
+  routes?: RouteExtension[]; // extra route subtrees
   sidebar?: SidebarItem[];
   settingsSections?: SettingsSection[];
-  auth?: AuthProviderExtension[];     // extra sign-in methods
-  api?: ApiMiddleware[];              // e.g. token refresh
+  auth?: AuthProviderExtension[]; // extra sign-in methods
+  api?: ApiMiddleware[]; // e.g. token refresh
   flags: Record<string, boolean>;
-  slots?: Partial<SlotComponents>;    // named UI slots, e.g. "issue.detail.sidebar.after"
+  slots?: Partial<SlotComponents>; // named UI slots, e.g. "issue.detail.sidebar.after"
 }
 ```
 
@@ -611,14 +611,14 @@ Plane-derived and stay AGPL until handled separately.
 
 ### 13.1 Budgets (CI-enforced)
 
-| Metric | Budget | Check |
-|---|---|---|
-| Initial JS (shell + first route), gzipped | ≤ 150 KB | `size-limit` on build output |
-| Any route chunk, gzipped | ≤ 50 KB (excl. named heavy chunks) | `size-limit` |
-| Editor chunk, gzipped | tracked, alert on +10% | `size-limit` |
-| Initial CSS, gzipped | ≤ 30 KB | `size-limit` |
-| Desktop first meaningful paint, warm cache | ≤ 500 ms | Tauri smoke test (Playwright/WebDriver) |
-| Issue list, 2 000 rows, scroll | no frame > 50 ms | Playwright trace |
+| Metric                                     | Budget                             | Check                                   |
+| ------------------------------------------ | ---------------------------------- | --------------------------------------- |
+| Initial JS (shell + first route), gzipped  | ≤ 150 KB                           | `size-limit` on build output            |
+| Any route chunk, gzipped                   | ≤ 50 KB (excl. named heavy chunks) | `size-limit`                            |
+| Editor chunk, gzipped                      | tracked, alert on +10%             | `size-limit`                            |
+| Initial CSS, gzipped                       | ≤ 30 KB                            | `size-limit`                            |
+| Desktop first meaningful paint, warm cache | ≤ 500 ms                           | Tauri smoke test (Playwright/WebDriver) |
+| Issue list, 2 000 rows, scroll             | no frame > 50 ms                   | Playwright trace                        |
 
 A PR over budget fails; raising a budget needs a note in this doc.
 
@@ -635,16 +635,16 @@ A PR over budget fails; raising a budget needs a note in this doc.
 
 ## 14. Testing
 
-| Level | Tool | What |
-|---|---|---|
-| Unit | Vitest | query key factories, optimistic updaters, search schemas, reducers, utils |
-| Component | Vitest + Testing Library | kit components, feature components with a mocked client |
-| Contract | Vitest against Django test server | every `@pidash/api-client` contract parses real responses |
-| Editor compat | Vitest | fixture set of stored `description_html` round-trips without loss |
-| **Parity** | Playwright, two drivers | every feature inventory item, run against `apps/web` (oracle) and `web_new` (§15.3) |
-| E2E | Playwright (web) | smoke flows for `web_new`-only behavior (shell, peek, keyboard, cache) |
-| Desktop smoke | Tauri + WebDriver | launch, sign-in, cached start, runner controls, deep link |
-| Performance | size-limit, Playwright traces | §13 budgets |
+| Level         | Tool                              | What                                                                                |
+| ------------- | --------------------------------- | ----------------------------------------------------------------------------------- |
+| Unit          | Vitest                            | query key factories, optimistic updaters, search schemas, reducers, utils           |
+| Component     | Vitest + Testing Library          | kit components, feature components with a mocked client                             |
+| Contract      | Vitest against Django test server | every `@pidash/api-client` contract parses real responses                           |
+| Editor compat | Vitest                            | fixture set of stored `description_html` round-trips without loss                   |
+| **Parity**    | Playwright, two drivers           | every feature inventory item, run against `apps/web` (oracle) and `web_new` (§15.3) |
+| E2E           | Playwright (web)                  | smoke flows for `web_new`-only behavior (shell, peek, keyboard, cache)              |
+| Desktop smoke | Tauri + WebDriver                 | launch, sign-in, cached start, runner controls, deep link                           |
+| Performance   | size-limit, Playwright traces     | §13 budgets                                                                         |
 
 ## 15. Functional parity
 
@@ -659,31 +659,31 @@ test suite.
 
 ### 15.1 Areas
 
-| Area | Old routes / source | Phase |
-|---|---|---|
-| Auth, sign-up, invitations, onboarding, create workspace | `accounts`, `auth`, `sign-up`, `invitations`, `workspace-invitations`, `onboarding`, `create-workspace` | 1 |
-| Workspace shell, home, projects list, command palette / Power K, search | `(projects)/page`, `projects/(list)`, `power-k`, `command-palette` | 1 |
-| Issues: list, board, spreadsheet, calendar, gantt; detail, peek, filters, display options, bulk edit, sub-issues, relations, links, attachments, reactions, subscriptions | `projects/…/issues`, `browse/[workItem]` | 1 |
-| Comments, activity, mentions | issue detail | 1 |
-| Drafts | `drafts` | 1 |
-| Runners, runs, approvals, runner chat, AI dev machines | `runners/*`, `ai-dev-machines`, project `runners` | 2 |
-| Schedulers, prompts, assistant | `schedulers`, `prompts`, `assistant/*`, project `schedulers` | 2 |
-| Notifications | `notifications` | 2 |
-| Desktop: agent runtime, bare sign-in, updater, deep links | `desktop-overlay/`, `ce/components/desktop` | 2 |
-| Views (project and workspace) | `views`, `workspace-views` | 3 |
-| Archives | `archives/*` | 3 |
-| Intake | `intake` | 3 |
-| Cycles, active cycles | `cycles`, `active-cycles` | 3 |
-| Modules | `modules` | 3 |
-| Pages (collaborative documents) | `pages` | 3 |
-| Estimates | project settings `estimates` | 3 |
-| Analytics | `analytics/[tabId]` | 3 |
-| Stickies | `stickies` | 3 |
-| Exports (CSV, PDF) | `exporter`, settings `exports` | 3 |
-| Project settings: general, members, states, labels, features, GitHub, automations, schedulers | `settings/projects/[projectId]/*` | 3 |
-| Workspace settings: general, members, integrations, webhooks, API tokens, billing | `settings/(workspace)/*` | 3 |
-| Profile, account settings, appearance, notifications preferences | `profile/[userId]`, `settings/account`, `settings/profile/*` | 3 |
-| Cloud edition: marketing/home, docs, downloads, pricing, login, apps, profile tabs | `ee-overlay/apps/web/app/**` | 3 (via `core/edition`) |
+| Area                                                                                                                                                                      | Old routes / source                                                                                     | Phase                  |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------- |
+| Auth, sign-up, invitations, onboarding, create workspace                                                                                                                  | `accounts`, `auth`, `sign-up`, `invitations`, `workspace-invitations`, `onboarding`, `create-workspace` | 1                      |
+| Workspace shell, home, projects list, command palette / Power K, search                                                                                                   | `(projects)/page`, `projects/(list)`, `power-k`, `command-palette`                                      | 1                      |
+| Issues: list, board, spreadsheet, calendar, gantt; detail, peek, filters, display options, bulk edit, sub-issues, relations, links, attachments, reactions, subscriptions | `projects/…/issues`, `browse/[workItem]`                                                                | 1                      |
+| Comments, activity, mentions                                                                                                                                              | issue detail                                                                                            | 1                      |
+| Drafts                                                                                                                                                                    | `drafts`                                                                                                | 1                      |
+| Runners, runs, approvals, runner chat, AI dev machines                                                                                                                    | `runners/*`, `ai-dev-machines`, project `runners`                                                       | 2                      |
+| Schedulers, prompts, assistant                                                                                                                                            | `schedulers`, `prompts`, `assistant/*`, project `schedulers`                                            | 2                      |
+| Notifications                                                                                                                                                             | `notifications`                                                                                         | 2                      |
+| Desktop: agent runtime, bare sign-in, updater, deep links                                                                                                                 | `desktop-overlay/`, `ce/components/desktop`                                                             | 2                      |
+| Views (project and workspace)                                                                                                                                             | `views`, `workspace-views`                                                                              | 3                      |
+| Archives                                                                                                                                                                  | `archives/*`                                                                                            | 3                      |
+| Intake                                                                                                                                                                    | `intake`                                                                                                | 3                      |
+| Cycles, active cycles                                                                                                                                                     | `cycles`, `active-cycles`                                                                               | 3                      |
+| Modules                                                                                                                                                                   | `modules`                                                                                               | 3                      |
+| Pages (collaborative documents)                                                                                                                                           | `pages`                                                                                                 | 3                      |
+| Estimates                                                                                                                                                                 | project settings `estimates`                                                                            | 3                      |
+| Analytics                                                                                                                                                                 | `analytics/[tabId]`                                                                                     | 3                      |
+| Stickies                                                                                                                                                                  | `stickies`                                                                                              | 3                      |
+| Exports (CSV, PDF)                                                                                                                                                        | `exporter`, settings `exports`                                                                          | 3                      |
+| Project settings: general, members, states, labels, features, GitHub, automations, schedulers                                                                             | `settings/projects/[projectId]/*`                                                                       | 3                      |
+| Workspace settings: general, members, integrations, webhooks, API tokens, billing                                                                                         | `settings/(workspace)/*`                                                                                | 3                      |
+| Profile, account settings, appearance, notifications preferences                                                                                                          | `profile/[userId]`, `settings/account`, `settings/profile/*`                                            | 3                      |
+| Cloud edition: marketing/home, docs, downloads, pricing, login, apps, profile tabs                                                                                        | `ee-overlay/apps/web/app/**`                                                                            | 3 (via `core/edition`) |
 
 In scope as well (NEWFRONT-4): `apps/admin` (instance admin, route subtree
 `/god-mode/*`) and `apps/space` (public boards, route subtree `/spaces/*`),
@@ -694,17 +694,17 @@ both web build only, removed together with `apps/web` in Phase 4.
 `.ai_design/new_frontend_implementation/parity/inventory/<area>.md`
 lists every capability as a row with a stable ID:
 
-| Field | Example |
-|---|---|
-| ID | `ISS-042` |
-| Capability | Bulk-change state of selected issues in list layout |
-| Who | member+, not guest |
-| Edition | oss / cloud / desktop / all |
-| Old entry point | `projects/…/issues` list, selection bar |
-| API | `POST /api/workspaces/{ws}/projects/{pid}/bulk-operation-issues/` |
-| Acceptance | all selected issues move; activity entry per issue; list regroups |
-| Parity test | `parity/issues/bulk-state.spec.ts` |
-| Status | not started / oracle green / new green |
+| Field           | Example                                                           |
+| --------------- | ----------------------------------------------------------------- |
+| ID              | `ISS-042`                                                         |
+| Capability      | Bulk-change state of selected issues in list layout               |
+| Who             | member+, not guest                                                |
+| Edition         | oss / cloud / desktop / all                                       |
+| Old entry point | `projects/…/issues` list, selection bar                           |
+| API             | `POST /api/workspaces/{ws}/projects/{pid}/bulk-operation-issues/` |
+| Acceptance      | all selected issues move; activity entry per issue; list regroups |
+| Parity test     | `parity/issues/bulk-state.spec.ts`                                |
+| Status          | not started / oracle green / new green                            |
 
 - The inventory is built in Phase 0 by agents reading the old code and
   running the old app, one area per issue, and **reviewed by a human**
@@ -741,12 +741,12 @@ Like the Rust port's contract tests, the old app is the **oracle**.
 
 ### 15.4 Gates
 
-| Gate | Condition |
-|---|---|
-| Area implementation may start | the area's inventory is reviewed; its oracle scenarios are green on `apps/web` |
-| Area route moves to `web_new` in Caddy / desktop | 100% of the area's inventory rows green on `web_new` |
-| Desktop switches to `web_new` (end of Phase 2) | all Phase 1–2 areas and all desktop rows green |
-| `apps/web` is removed (Phase 4) | 100% of all inventory rows green on `web_new` for both editions and desktop; a human acceptance pass signed off |
+| Gate                                             | Condition                                                                                                       |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| Area implementation may start                    | the area's inventory is reviewed; its oracle scenarios are green on `apps/web`                                  |
+| Area route moves to `web_new` in Caddy / desktop | 100% of the area's inventory rows green on `web_new`                                                            |
+| Desktop switches to `web_new` (end of Phase 2)   | all Phase 1–2 areas and all desktop rows green                                                                  |
+| `apps/web` is removed (Phase 4)                  | 100% of all inventory rows green on `web_new` for both editions and desktop; a human acceptance pass signed off |
 
 ## 16. Phases
 
@@ -836,18 +836,18 @@ keeps running on `web_new` only, as its regression suite.
 
 ## 17. Risks
 
-| Risk | Mitigation |
-|---|---|
-| The rewrite takes longer than planned while the old app keeps moving | Freeze policy (§11.3); desktop-first ordering delivers value mid-way; progress is measurable from the parity report |
-| Full parity is a large scope (cycles, modules, pages with collaboration, analytics, gantt, exports, cloud edition) | Everything heavy is lazy (§13); areas are independent epics that run in parallel once Phase 1 patterns exist |
-| A feature is missed because nobody listed it | Inventory built from code *and* running app, human review, "easy to miss" row categories (§15.2), acceptance pass before removal |
-| Parity scenarios encode old bugs as required behavior | A scenario that asserts a bug is marked `bug:` with a linked issue; `web_new` may fix it, and the row records the intended behavior |
-| Two UIs drift, users confused during transition | Same URLs where possible, one route list driving proxy + links, short Phase 3 |
-| Undocumented internal API behavior | Contracts + contract tests (§9.1); dev-mode schema validation surfaces drift early |
-| Editor output incompatible with stored HTML or `apps/web` | Fixture round-trip tests (§9.6); minimal extension set |
-| Performance regresses feature by feature | CI budgets and import rules (§13) from the first PR |
-| Reading old code turns into copying it (people or agents) | Read → spec → write (§12.3), similarity check in CI, import bans, review checklist (§12.4) |
-| Real-time expectations (others' edits appearing live) not met without MobX-style sockets | §18 decision on issue push events; focus/interval refetch as baseline |
+| Risk                                                                                                               | Mitigation                                                                                                                          |
+| ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| The rewrite takes longer than planned while the old app keeps moving                                               | Freeze policy (§11.3); desktop-first ordering delivers value mid-way; progress is measurable from the parity report                 |
+| Full parity is a large scope (cycles, modules, pages with collaboration, analytics, gantt, exports, cloud edition) | Everything heavy is lazy (§13); areas are independent epics that run in parallel once Phase 1 patterns exist                        |
+| A feature is missed because nobody listed it                                                                       | Inventory built from code _and_ running app, human review, "easy to miss" row categories (§15.2), acceptance pass before removal    |
+| Parity scenarios encode old bugs as required behavior                                                              | A scenario that asserts a bug is marked `bug:` with a linked issue; `web_new` may fix it, and the row records the intended behavior |
+| Two UIs drift, users confused during transition                                                                    | Same URLs where possible, one route list driving proxy + links, short Phase 3                                                       |
+| Undocumented internal API behavior                                                                                 | Contracts + contract tests (§9.1); dev-mode schema validation surfaces drift early                                                  |
+| Editor output incompatible with stored HTML or `apps/web`                                                          | Fixture round-trip tests (§9.6); minimal extension set                                                                              |
+| Performance regresses feature by feature                                                                           | CI budgets and import rules (§13) from the first PR                                                                                 |
+| Reading old code turns into copying it (people or agents)                                                          | Read → spec → write (§12.3), similarity check in CI, import bans, review checklist (§12.4)                                          |
+| Real-time expectations (others' edits appearing live) not met without MobX-style sockets                           | §18 decision on issue push events; focus/interval refetch as baseline                                                               |
 
 ## 18. Open questions
 
@@ -896,20 +896,31 @@ save
 
 ## Appendix B — Baseline measurements
 
-`apps/web` figures come from the local desktop build in
-`desktop/src-tauri/dist` (2026-09-20), counting the entry plus every
-module and import the React Router manifest lists for the route chain.
-That build's `index.html` references a different manifest hash than the
-one shipped next to it, so CSS is not counted. Re-measure on a fresh
-build in Phase 0.
+Measured 2026-10-06 (NEWFRONT-21) with
+`apps/web_new/e2e/perf/measure.mjs` against fresh production bundles of
+both apps. One method throughout: each bundle is served by `e2e/perf/
+serve.mjs` with `/api` and `/auth` proxied to the same seeded Django;
+the harness signs in through that origin, then loads a project's issue
+list cold (fresh profile, ×3) and warm (primed HTTP cache, ×3) in
+headless Chromium and records the JS fetched over the network (raw plus
+gzip of each body) and the time to painted rows. Timings below are
+medians; cold runs agree within ~10%, warm within ~30%. Desktop
+launches load the desktop bundle the same way (the Tauri shell loads
+these files from disk; native window overhead is outside frontend
+code). The old desktop serves the same client bundle: the overlay swaps
+desktop chrome outside the issue-list route chain, so the measured
+route loads identical files. The 2026-09-20 static figures this
+replaces agreed within 5% (245 files, 7.6 MB raw / 2.3 MB gzipped),
+which cross-validates the method.
 
-| Metric | `apps/web` | `apps/web_new` |
-|---|---|---|
-| Desktop `dist/` size | 29 MB | |
-| JS chunks | ~700 | |
-| JS to open a project's issue list | 245 files, 7.6 MB raw / 2.3 MB gzipped (7 routes in chain) | target ≤ ~200 KB gzipped |
-| JS to open an issue's full page | 210 files, 5.9 MB raw / 1.8 MB gzipped | |
-| Loaded on issue list but not needed there | editor chunks (1.6 MB + 1.3 MB raw), recharts (351 KB raw) | none |
-| Largest chunk | 1.6 MB (`use-editor-flagging`) | |
-| Web: time to issue list (cold / warm) | | |
-| Desktop: launch → issue list (cold / warm) | | |
+| Metric                                                                   | `apps/web`                                                                                | `apps/web_new`                                                                            |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Production bundle size                                                   | 27 MB (`build/client`, 467 JS files)                                                      | 668 KB per target (`dist/web`, `dist/desktop`, 12 JS files each)                          |
+| JS to open a project's issue list (cold)                                 | 257 files, 8.0 MB raw / 2.3 MB gzipped                                                    | web: 7 files, 590 KB raw / 196 KB gzipped · desktop: 7 files, 593 KB raw / 197 KB gzipped |
+| JS to open an issue's full page                                          | 210 files, 5.9 MB raw / 1.8 MB gzipped (2026-09-20 static count, not re-measured)         | not built yet                                                                             |
+| Loaded on issue list but not needed there                                | editor chunks (1.6 MB + 1.3 MB raw), recharts (351 KB raw) — confirmed on the fresh build | none (all 7 files are shell + route chain)                                                |
+| Largest chunk                                                            | 1.6 MB raw (`use-editor-flagging`)                                                        | 364 KB raw / 117 KB gzipped (web shell chunk)                                             |
+| Web: time to issue list (cold / warm)                                    | 1.51 s / 1.49 s                                                                           | 0.34 s / 0.21 s                                                                           |
+| Desktop: launch → issue list (cold / warm)                               | 1.50 s / 1.64 s                                                                           | 0.37 s / 0.22 s                                                                           |
+| Desktop relaunch from warm cache, API blocked (CI check, budget ≤ 0.5 s) | — (warm ≈ cold: the old app refetches on every load)                                      | 0.07 s (local reading; enforced in CI)                                                    |
+| 2,000-row scroll, worst frame (CI check, budget ≤ 50 ms)                 | not measured                                                                              | 22 ms (local reading; enforced in CI)                                                     |
