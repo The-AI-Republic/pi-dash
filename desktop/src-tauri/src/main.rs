@@ -4,6 +4,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod account_settings;
 mod chat;
 mod chat_history;
 mod desktop_http;
@@ -405,6 +406,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chat_history::chat_delete_session,
             chat_history::chat_clear_history,
             chat_history::chat_working_dir,
+            // Per-account settings kept outside the webview's storage, which
+            // sign-out wipes.
+            account_settings::chat_approval_modes_save,
+            account_settings::chat_approval_modes_load,
         ])
         // Fallback for the navigation policy below: if a server-host page
         // does get through (e.g. a redirect the policy hook didn't see),

@@ -7,6 +7,7 @@
 import { API_BASE_URL } from "@pi-dash/constants";
 import { APIService } from "@pi-dash/services";
 import { AGENT_RUNTIME_REASON_MESSAGES, CSRF_TOKEN_PATH } from "@/pi-dash-web/components/desktop/agent-runtime-edition";
+import { restoreApprovalModes } from "@/services/desktop-approval-modes";
 
 // Shares the SPA's axios setup — including any edition 401 -> refresh ->
 // retry interceptor — so a normal access-cookie expiry does not revoke the
@@ -145,6 +146,9 @@ export function resumeAgentRuntime(userId?: string) {
     } catch {
       clearEnrollmentCache();
     }
+    // A sign-out wiped the webview's storage; put this account's approval
+    // mode back before the user can reach a chat.
+    void restoreApprovalModes(userId).catch(() => {});
   }
   stopped = false;
 }

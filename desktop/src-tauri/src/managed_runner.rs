@@ -795,7 +795,7 @@ fn toml_value(raw: &str) -> String {
 
 /// Write via a temp file and rename, so a reader never sees a half-written
 /// config or a truncated credential.
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("{} has no parent", path.display()))?;
