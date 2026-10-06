@@ -36,10 +36,12 @@ Endpoint shorthand (backend contracts, also used by the inventory): `BASE` =
   sub-group name, and the cumulative issue count across all its columns.
 - The board scrolls vertically in swimlane mode. Lanes with zero issues are
   hidden when the show-empty display filter is off.
-- Live recon (NEWFRONT-118 run 4): on the seeded stack, seed-created rows
-  without labels never reach a labels sub-grouped board — the None lane
-  renders empty (old bug NEWFRONT-158, pinned by a bug scenario); API-made
-  rows behave. Oracle swimlane scenarios use scratch projects.
+- Live recon (NEWFRONT-118 runs 4–11): labels sub-grouping renders
+  correctly on clean data, but deleting a label ghosts its formerly
+  labeled rows out of later grouped reads — the rows exist and are
+  unlabeled, yet render in no lane (old bug NEWFRONT-158, pinned by a bug
+  scenario on a scratch project). Oracle swimlane scenarios use scratch
+  projects so no label history leaks between them.
 
 ### Collapse and empty groups (ISS-030–ISS-032)
 

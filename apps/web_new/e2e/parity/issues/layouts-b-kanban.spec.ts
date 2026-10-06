@@ -353,9 +353,9 @@ test(
   specTitle(["ISS-031"], "collapse and expand a kanban swimlane"),
   { tag: specTags(["ISS-031"]) },
   async ({ driver, seed }) => {
-    // A scratch project keeps the lanes exact: the seed's unlabeled rows
-    // never reach a labels sub-grouped board (NEWFRONT-158); same
-    // workaround as ISS-029 for NEWFRONT-153.
+    // A scratch project keeps the lanes exact: label history on the seed
+    // would ghost rows out of the grouped reads for later scenarios
+    // (NEWFRONT-158); same workaround as ISS-029 for NEWFRONT-153.
     const owner = await signInFreshUser(seed.email, seed.password);
     const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
     const projectId = await serverCreateProject(seed.workspaceSlug, owner.cookie, `KB fold ${suffix}`, `KF${suffix}`);
@@ -398,68 +398,68 @@ test(
 );
 
 test(
-  specTitle(["ISS-031"], "bug: labels sub-grouping drops unlabeled seed issues (NEWFRONT-158)"),
+  specTitle(["ISS-031"], "bug: deleting a label ghosts its issue from labels sub-grouping (NEWFRONT-158)"),
   { tag: specTags(["ISS-031"]) },
   async ({ driver, seed }) => {
+    // A scratch project keeps the ghost contained: the deleted label's
+    // through-row would otherwise haunt the seed's grouped reads for every
+    // later scenario (NEWFRONT-158).
     const owner = await signInFreshUser(seed.email, seed.password);
-    const suffix = uniqueSuffix().slice(0, 6);
-    const label = await serverCreateLabel(
-      seed.workspaceSlug,
-      seed.projectId,
-      `KB fold ${suffix}`,
-      "#666666",
-      owner.cookie
-    );
-    const firstId = await issueIdByName(seed, seed.projectId, owner.cookie, seed.issueNames[0] ?? "");
-    await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { label_ids: [label.id] }, owner.cookie);
-    const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "state", sub_group_by: "labels" });
-    // Cleanup runs even when an assertion fails: a leaked KB fold label
-    // self-cascades into the retry (test-3: the retry died on attempt 1's
-    // label because the cleanup step never ran).
+    const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
+    const projectId = await serverCreateProject(seed.workspaceSlug, owner.cookie, `KB ghost ${suffix}`, `KG${suffix}`);
     try {
-      await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(2);
+      const states = await serverListStates(seed.workspaceSlug, projectId, owner.cookie);
+      const home = states.find((state) => state.isDefault) ?? states[0];
+      if (!home) throw new Error("[parity] scratch project has no states.");
+      const ghostName = `KB ghost a ${suffix}`;
+      const ghostId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, ghostName, home.id);
+      const keptName = `KB ghost b ${suffix}`;
+      const keptId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, keptName, home.id);
+      const plainName = `KB ghost c ${suffix}`;
+      await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, plainName, home.id);
+      const doomed = await serverCreateLabel(seed.workspaceSlug, projectId, `KB doomed ${suffix}`, "#666666", owner.cookie);
+      await serverPatchIssue(seed.workspaceSlug, projectId, ghostId, { label_ids: [doomed.id] }, owner.cookie);
+      await serverDeleteLabel(seed.workspaceSlug, projectId, doomed.id, owner.cookie);
+      const live = await serverCreateLabel(seed.workspaceSlug, projectId, `KB live ${suffix}`, "#777777", owner.cookie);
+      await serverPatchIssue(seed.workspaceSlug, projectId, keptId, { label_ids: [live.id] }, owner.cookie);
+      await openBoard(driver, seed, projectId, { group_by: "state", sub_group_by: "labels" });
 
-      await test.step("the None lane stays empty on the seed project", async () => {
-        // Intended: the two unlabeled seed issues render here (count 2).
-        // Pinned: the labels sub-grouped query drops seed rows without
-        // labels, so the lane shows count 0 and no cards (NEWFRONT-158).
-        // The first render can briefly show the flat-grouped rows (None at
-        // count 2 with the seed cards) before the grouped response replaces
-        // them — the post-rebase re-verify read exactly that transient — so
-        // poll until the lane settles instead of reading it once.
-        await expect
-          .poll(async () => (await driver.kanbanCards()).map((card) => card.name), { timeout: 120_000 })
-          .toContain(seed.issueNames[0] ?? "");
+      await test.step("the ghosted issue is missing from every lane", async () => {
+        // Intended: the ghost renders under None (lanes live:1, None:2).
+        // Pinned: the deleted label's through-row still excludes it from
+        // the grouped read, so None holds only the never-labeled issue and
+        // the ghost card renders nowhere (NEWFRONT-158).
+        // The delete can settle a beat after its 204 — a lane for the
+        // deleted label lingered past two consecutive reads in two of eight
+        // probes — so poll until the lanes settle instead of reading once.
+        // The pin fails closed: a failed label, patch, or delete leaves the
+        // ghost visible, which never matches the pinned shape.
         const laneSettled = async () => {
           const lanes = await driver.kanbanSwimlanes();
           const names = (await driver.kanbanCards()).map((card) => card.name);
           return {
-            none: lanes.find((entry) => entry.name === "None")?.count,
-            hasFirst: names.includes(seed.issueNames[0] ?? ""),
-            hasSecond: names.includes(seed.issueNames[1] ?? ""),
-            hasThird: names.includes(seed.issueNames[2] ?? ""),
+            lanes: lanes.map((entry) => `${entry.name}:${entry.count}`).sort(),
+            hasGhost: names.includes(ghostName),
+            hasKept: names.includes(keptName),
+            hasPlain: names.includes(plainName),
           };
         };
-        const settled = { none: 0, hasFirst: true, hasSecond: false, hasThird: false };
-        try {
-          await expect.poll(laneSettled, { timeout: 120_000 }).toEqual(settled);
-        } catch {
-          // The grouped fetch itself can stall under contention: test-3
-          // held the flat pre-grouped render (None at 2) for the whole
-          // 120s window while the server deterministically drops the rows
-          // (10/10 direct reads). One reload re-issues the fetch; a
-          // genuinely changed behavior still fails its second window.
-          await kanbanReloadWithRetry(driver);
-          await expect.poll(laneSettled, { timeout: 120_000 }).toEqual(settled);
-        }
-        const rows = await serverIssues(seed.workspaceSlug, seed.projectId, owner.cookie);
+        await expect.poll(laneSettled, { timeout: 120_000 }).toEqual({
+          lanes: [`${live.name}:1`, "None:1"].sort(),
+          hasGhost: false,
+          hasKept: true,
+          hasPlain: true,
+        });
+        // Server state: the ghost row exists and is unlabeled — only the
+        // grouped read drops it.
+        const rows = await serverIssues(seed.workspaceSlug, projectId, owner.cookie);
         expect(rows).toHaveLength(3);
+        const ghost = await serverIssueDetails(seed.workspaceSlug, projectId, ghostId, owner.cookie);
+        expect(ghost.labelIds).toEqual([]);
       });
     } finally {
-      await test.step("cleanup removes the label and restores preferences", async () => {
-        await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { label_ids: [] }, owner.cookie);
-        await serverDeleteLabel(seed.workspaceSlug, seed.projectId, label.id, owner.cookie);
-        await restoreBoard(seed, seed.projectId, ctx);
+      await test.step("cleanup removes the scratch project", async () => {
+        await serverDeleteProject(seed.workspaceSlug, projectId, owner.cookie);
       });
     }
   }
@@ -858,9 +858,9 @@ test(
   specTitle(["ISS-038"], "membership moves across label, module and cycle columns"),
   { tag: specTags(["ISS-038"]) },
   async ({ driver, seed }) => {
-    // A scratch project keeps None exact: labels-grouped boards drop
-    // unlabeled seed rows entirely (NEWFRONT-158), so the None column
-    // only renders for API-made issues.
+    // A scratch project keeps None exact: deleted labels on the seed
+    // would ghost their rows out of the grouped reads (NEWFRONT-158), so
+    // membership moves run where no label history exists.
     const owner = await signInFreshUser(seed.email, seed.password);
     const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
     const projectId = await serverCreateProject(seed.workspaceSlug, owner.cookie, `KB member ${suffix}`, `KE${suffix}`);
@@ -998,9 +998,9 @@ test(
   specTitle(["ISS-039"], "move a card across swimlanes"),
   { tag: specTags(["ISS-039"]) },
   async ({ driver, seed }) => {
-    // A scratch project keeps the lanes exact: the seed's unlabeled rows
-    // never reach a labels sub-grouped board (NEWFRONT-158); same
-    // workaround as ISS-029.
+    // A scratch project keeps the lanes exact: label history on the seed
+    // would ghost rows out of the grouped reads for later scenarios
+    // (NEWFRONT-158); same workaround as ISS-029.
     const owner = await signInFreshUser(seed.email, seed.password);
     const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
     const projectId = await serverCreateProject(seed.workspaceSlug, owner.cookie, `KB move ${suffix}`, `KM${suffix}`);
