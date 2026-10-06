@@ -9,6 +9,11 @@
 import type { Page } from "@playwright/test";
 import type {
   LayoutsLayoutKey,
+  BoardLayoutKey,
+  GanttSidebarRow,
+  GanttZoom,
+  KanbanCard,
+  KanbanColumn,
   ParityBrowserCookie,
   ParityDriver,
   ParityTarget,
@@ -3711,5 +3716,367 @@ export class WebNewDriver implements ParityDriver {
 
   async layoutsSheetToggleSubIssues(_issueName: string): Promise<void> {
     return todo("layoutsSheetToggleSubIssues");
+  }
+  // --- NEWFRONT-118 (layouts B): kanban board + gantt timeline stubs.
+  // --- Appended; existing stubs above are untouched.
+
+  async kanbanOpenBoard(): Promise<void> {
+    return todo("kanbanOpenBoard");
+  }
+
+  async kanbanBoardVisible(): Promise<boolean> {
+    return todo("kanbanBoardVisible");
+  }
+
+  async ganttOpenTimeline(): Promise<void> {
+    return todo("ganttOpenTimeline");
+  }
+
+  async ganttTimelineVisible(): Promise<boolean> {
+    return todo("ganttTimelineVisible");
+  }
+
+  async boardActiveLayout(): Promise<BoardLayoutKey> {
+    return todo("boardActiveLayout");
+  }
+
+  async boardReloadIssues(): Promise<void> {
+    return todo("boardReloadIssues");
+  }
+
+  async kanbanColumns(): Promise<KanbanColumn[]> {
+    return todo("kanbanColumns");
+  }
+
+  async kanbanSwimlanes(): Promise<KanbanColumn[]> {
+    return todo("kanbanSwimlanes");
+  }
+
+  async kanbanCards(): Promise<KanbanCard[]> {
+    return todo("kanbanCards");
+  }
+
+  async kanbanColumnCards(_columnName: string): Promise<string[]> {
+    return todo("kanbanColumnCards");
+  }
+
+  async kanbanToggleColumn(_columnName: string): Promise<void> {
+    return todo("kanbanToggleColumn");
+  }
+
+  async kanbanColumnCollapsed(_columnName: string): Promise<boolean> {
+    return todo("kanbanColumnCollapsed");
+  }
+
+  async kanbanToggleSwimlane(_laneName: string): Promise<void> {
+    return todo("kanbanToggleSwimlane");
+  }
+
+  async kanbanSwimlaneCollapsed(_laneName: string): Promise<boolean> {
+    return todo("kanbanSwimlaneCollapsed");
+  }
+
+  async kanbanCardIdentifier(_issueName: string): Promise<string | null> {
+    return todo("kanbanCardIdentifier");
+  }
+
+  async kanbanCardShowsProperties(_issueName: string): Promise<boolean> {
+    return todo("kanbanCardShowsProperties");
+  }
+
+  async kanbanCardHover(_issueName: string): Promise<void> {
+    return todo("kanbanCardHover");
+  }
+
+  async kanbanCardQuickActionsVisible(_issueName: string): Promise<boolean> {
+    return todo("kanbanCardQuickActionsVisible");
+  }
+
+  async kanbanCardHref(_issueName: string): Promise<string | null> {
+    return todo("kanbanCardHref");
+  }
+
+  async kanbanOpenCardPeek(_issueName: string): Promise<void> {
+    return todo("kanbanOpenCardPeek");
+  }
+
+  async issuePeekVisible(): Promise<boolean> {
+    return todo("issuePeekVisible");
+  }
+
+  async issuePeekTitle(): Promise<string | null> {
+    return todo("issuePeekTitle");
+  }
+
+  async issuePeekClose(): Promise<void> {
+    return todo("issuePeekClose");
+  }
+
+  async kanbanColumnHasQuickAdd(_columnName: string): Promise<boolean> {
+    return todo("kanbanColumnHasQuickAdd");
+  }
+
+  async kanbanQuickAdd(_columnName: string, _title: string): Promise<void> {
+    return todo("kanbanQuickAdd");
+  }
+
+  async kanbanHeaderCreateVisible(_columnName: string): Promise<boolean> {
+    return todo("kanbanHeaderCreateVisible");
+  }
+
+  async kanbanHeaderCreate(_columnName: string): Promise<void> {
+    return todo("kanbanHeaderCreate");
+  }
+
+  async kanbanCreateModalVisible(): Promise<boolean> {
+    return todo("kanbanCreateModalVisible");
+  }
+
+  async kanbanHeaderMenuItems(_columnName: string): Promise<string[]> {
+    return todo("kanbanHeaderMenuItems");
+  }
+
+  async kanbanHeaderMenuChoose(_columnName: string, _item: string): Promise<void> {
+    return todo("kanbanHeaderMenuChoose");
+  }
+
+  async kanbanDragCardBefore(_sourceName: string, _targetName: string): Promise<void> {
+    return todo("kanbanDragCardBefore");
+  }
+
+  async kanbanAttemptCardBefore(_sourceName: string, _targetName: string): Promise<void> {
+    return todo("kanbanAttemptCardBefore");
+  }
+
+  async kanbanDragCardToColumnEnd(_sourceName: string, _columnName: string): Promise<void> {
+    return todo("kanbanDragCardToColumnEnd");
+  }
+
+  async kanbanDragCardToDelete(_sourceName: string): Promise<void> {
+    return todo("kanbanDragCardToDelete");
+  }
+
+  async kanbanDeleteModalVisible(): Promise<boolean> {
+    return todo("kanbanDeleteModalVisible");
+  }
+
+  async kanbanConfirmDelete(): Promise<void> {
+    return todo("kanbanConfirmDelete");
+  }
+
+  async kanbanDragHoldOverColumn(_sourceName: string, _columnName: string): Promise<{ overlay: string | null }> {
+    return todo("kanbanDragHoldOverColumn");
+  }
+
+  async boardLastToast(): Promise<{ title: string; message: string } | null> {
+    return todo("boardLastToast");
+  }
+
+  async kanbanColumnScrollEnd(_columnName: string): Promise<void> {
+    return todo("kanbanColumnScrollEnd");
+  }
+
+  async kanbanColumnHasLoadMore(_columnName: string): Promise<boolean> {
+    return todo("kanbanColumnHasLoadMore");
+  }
+
+  async kanbanColumnLoadMore(_columnName: string): Promise<void> {
+    return todo("kanbanColumnLoadMore");
+  }
+
+  async kanbanColumnLoading(_columnName: string): Promise<boolean> {
+    return todo("kanbanColumnLoading");
+  }
+
+  async kanbanCellCards(_columnName: string, _laneName: string): Promise<string[]> {
+    return todo("kanbanCellCards");
+  }
+
+  async kanbanCellHasLoadMore(_columnName: string, _laneName: string): Promise<boolean> {
+    return todo("kanbanCellHasLoadMore");
+  }
+
+  async kanbanCellLoadMore(_columnName: string, _laneName: string): Promise<void> {
+    return todo("kanbanCellLoadMore");
+  }
+
+  async kanbanBoardScroll(): Promise<{ x: number; y: number }> {
+    return todo("kanbanBoardScroll");
+  }
+
+  async kanbanColumnScroll(_columnName: string): Promise<{ x: number; y: number }> {
+    return todo("kanbanColumnScroll");
+  }
+
+  async kanbanDragHoldNearEdge(
+    _sourceName: string,
+    _edge: "left" | "right" | "top" | "bottom",
+    _holdMs: number
+  ): Promise<void> {
+    return todo("kanbanDragHoldNearEdge");
+  }
+
+  async ganttHeader(): Promise<{ count: number | null; views: string[]; hasToday: boolean; hasFullscreen: boolean }> {
+    return todo("ganttHeader");
+  }
+
+  async ganttActiveZoom(): Promise<GanttZoom | "unknown"> {
+    return todo("ganttActiveZoom");
+  }
+
+  async ganttSetZoom(_view: GanttZoom): Promise<void> {
+    return todo("ganttSetZoom");
+  }
+
+  async ganttDayWidth(): Promise<number> {
+    return todo("ganttDayWidth");
+  }
+
+  async ganttWeekendTinted(): Promise<boolean> {
+    return todo("ganttWeekendTinted");
+  }
+
+  async ganttWeekRowStarts(): Promise<string[]> {
+    return todo("ganttWeekRowStarts");
+  }
+
+  async ganttClickToday(): Promise<void> {
+    return todo("ganttClickToday");
+  }
+
+  async ganttTodayVisible(): Promise<boolean> {
+    return todo("ganttTodayVisible");
+  }
+
+  async ganttTodayHighlighted(): Promise<boolean> {
+    return todo("ganttTodayHighlighted");
+  }
+
+  async ganttToggleFullscreen(): Promise<void> {
+    return todo("ganttToggleFullscreen");
+  }
+
+  async ganttFullscreenActive(): Promise<boolean> {
+    return todo("ganttFullscreenActive");
+  }
+
+  async ganttTimelineWidth(): Promise<number> {
+    return todo("ganttTimelineWidth");
+  }
+
+  async ganttScrollLeft(): Promise<number> {
+    return todo("ganttScrollLeft");
+  }
+
+  async ganttScrollTo(_x: number): Promise<void> {
+    return todo("ganttScrollTo");
+  }
+
+  async ganttSidebarRows(): Promise<GanttSidebarRow[]> {
+    return todo("ganttSidebarRows");
+  }
+
+  async ganttOpenRowPeek(_issueName: string): Promise<void> {
+    return todo("ganttOpenRowPeek");
+  }
+
+  async ganttSidebarOrder(): Promise<string[]> {
+    return todo("ganttSidebarOrder");
+  }
+
+  async ganttDragRowBefore(_sourceName: string, _targetName: string): Promise<void> {
+    return todo("ganttDragRowBefore");
+  }
+
+  async ganttAttemptRowBefore(_sourceName: string, _targetName: string): Promise<void> {
+    return todo("ganttAttemptRowBefore");
+  }
+
+  async ganttBarExists(_issueName: string): Promise<boolean> {
+    return todo("ganttBarExists");
+  }
+
+  async ganttDragBar(_issueName: string, _dayDelta: number): Promise<void> {
+    return todo("ganttDragBar");
+  }
+
+  async ganttAttemptBarMove(_issueName: string, _dayDelta: number): Promise<void> {
+    return todo("ganttAttemptBarMove");
+  }
+
+  async ganttResizeBar(_issueName: string, _side: "left" | "right", _dayDelta: number): Promise<void> {
+    return todo("ganttResizeBar");
+  }
+
+  async ganttResizePreview(_issueName: string, _side: "left" | "right"): Promise<string | null> {
+    return todo("ganttResizePreview");
+  }
+
+  async ganttHandlesVisible(_issueName: string): Promise<boolean> {
+    return todo("ganttHandlesVisible");
+  }
+
+  async ganttRowAddVisible(_issueName: string): Promise<boolean> {
+    return todo("ganttRowAddVisible");
+  }
+
+  async ganttAddBlock(_issueName: string, _dayOffset: number): Promise<void> {
+    return todo("ganttAddBlock");
+  }
+
+  async ganttQuickAdd(_title: string): Promise<void> {
+    return todo("ganttQuickAdd");
+  }
+
+  async ganttHasQuickAdd(): Promise<boolean> {
+    return todo("ganttHasQuickAdd");
+  }
+
+  async ganttBarInfo(_issueName: string): Promise<{ tinted: boolean; masked: boolean; namePinned: boolean } | null> {
+    return todo("ganttBarInfo");
+  }
+
+  async ganttHoverBar(_issueName: string): Promise<void> {
+    return todo("ganttHoverBar");
+  }
+
+  async ganttPreviewVisible(): Promise<boolean> {
+    return todo("ganttPreviewVisible");
+  }
+
+  async ganttOpenBarPeek(_issueName: string): Promise<void> {
+    return todo("ganttOpenBarPeek");
+  }
+
+  async ganttScrollArrowVisible(_issueName: string): Promise<boolean> {
+    return todo("ganttScrollArrowVisible");
+  }
+
+  async ganttClickScrollArrow(_issueName: string): Promise<void> {
+    return todo("ganttClickScrollArrow");
+  }
+
+  async ganttBarInView(_issueName: string): Promise<boolean> {
+    return todo("ganttBarInView");
+  }
+
+  async ganttSidebarLoading(): Promise<boolean> {
+    return todo("ganttSidebarLoading");
+  }
+
+  async ganttLoadMoreVisible(): Promise<boolean> {
+    return todo("ganttLoadMoreVisible");
+  }
+
+  async ganttLoadingObservedOnReload(): Promise<boolean> {
+    return todo("ganttLoadingObservedOnReload");
+  }
+
+  async ganttEmptyVisible(): Promise<boolean> {
+    return todo("ganttEmptyVisible");
+  }
+
+  async ganttLoadMoreObservedOnScroll(): Promise<boolean> {
+    return todo("ganttLoadMoreObservedOnScroll");
   }
 }

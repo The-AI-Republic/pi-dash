@@ -5531,7 +5531,14 @@ export async function serverMe(
     throw new Error("[parity] users/me carried no string id/display_name.");
   return { id: rec["id"] as string, displayName: rec["display_name"] as string };
 }
-/** Patch an issue through the public REST API (state moves, priority changes). */
+/**
+ * Patch an issue through the public REST API (state moves, priority changes).
+ *
+ * WARNING (NEWFRONT-160): patching state_id to In Progress, In Review, or
+ * In Test answers 204 but silently keeps the default state instead — the
+ * same happens through UI drags. Fixtures must only target verified
+ * states (Backlog, Todo, Done, and created states); Cancelled is untested.
+ */
 export async function serverPatchIssue(
   workspaceSlug: string,
   projectId: string,
@@ -6662,6 +6669,85 @@ export async function serverUserProfile(
   return (await res.json()) as Record<string, unknown>;
 }
 
+
+// --- NEWFRONT-118 (layouts B): sign in an existing user into the shared
+// --- authenticated-user handle, so kanban/gantt scenarios enter the app
+// --- pre-authenticated instead of paying the UI sign-in cost per test.
+// --- Appended; existing helpers above are untouched per the shared harness
+// --- contract.
+
+/**
+ * Sign in an existing account through the native credential endpoint and
+ * return the authenticated-user handle (live session cookie plus CSRF
+ * token) that `browserCookies` and the authed API helpers consume.
+ */
+export async function signInFreshUser(
+  email: string,
+  password: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<FreshUser> {
+  const cookie = await signInSession(email, password, apiBase);
+  const jar = cookieJar(cookie.split(";").map((pair) => pair.trim()));
+  const csrfToken = jar.get("csrftoken") ?? "";
+  const meRes = await fetchTolerant(`${apiBase}/api/users/me/`, { headers: { cookie } });
+  if (!meRes.ok) throw new Error(`[parity] users/me read failed with HTTP ${meRes.status} after sign-in.`);
+  const me = (await meRes.json()) as { id?: unknown };
+  const userId = typeof me.id === "string" ? me.id : "";
+  return { email, password, userId, cookie, csrfToken, apiBase };
+}
+
+// --- NEWFRONT-118 (layouts B): kanban/gantt-only API helpers
+// --- (cycle-member removal, label deletion). Shared issue/state/
+// --- preference fixtures live in the NEWFRONT-117 block below (same
+// --- names, adopted, never forked); `cycleId`/`moduleIds` extend the
+// --- shared issue details because the kanban cross-column scenarios
+// --- assert cycle/module moves through them.
+
+/**
+ * Remove one issue from a cycle; throws unless the server accepts.
+ * Cycle cleanup must call this before deleting the cycle: deleting a
+ * non-empty cycle leaves its members pointing at the deleted id, and
+ * those issues then vanish from cycle-grouped boards.
+ */
+export async function serverRemoveIssueFromCycle(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/cycle-issues/${issueId}/`,
+    { method: "DELETE", headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle-issues remove failed with HTTP ${res.status}.`);
+}
+
+/** Delete a project label; throws unless the server accepts. */
+export async function serverDeleteLabel(
+  workspaceSlug: string,
+  projectId: string,
+  labelId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issue-labels/${labelId}/`,
+    {
+      method: "DELETE",
+      headers: { cookie: sessionCookie },
+    }
+  );
+  if (res.status !== 200 && res.status !== 204) {
+    throw new Error(`[parity] label delete failed with HTTP ${res.status}.`);
+  }
+}
+
+// Scratch-project scenarios use the base harness' serverCreateProject
+// (workspace, session, name, identifier) and serverDeleteProject;
+// deleted-issue cleanup uses the base serverDeleteIssue.
+
 // ---------------------------------------------------------------------------
 // Projects list + lifecycle parity helpers (NEWFRONT-124, rows SHELL-024..045).
 //
@@ -7116,6 +7202,10 @@ export interface LayoutsIssueDetails {
   parentId: string | null;
   sequenceId: number;
   sortOrder: number;
+  // NEWFRONT-118: kanban cross-column scenarios assert cycle/module moves
+  // through these; layouts-A readers ignore them.
+  cycleId: string | null;
+  moduleIds: string[];
 }
 
 /** One issue row as the server reports it. */
@@ -7147,6 +7237,9 @@ export async function serverIssueDetails(
     parent?: unknown;
     sequence_id?: unknown;
     sort_order?: unknown;
+    cycle_id?: unknown;
+    cycle?: unknown;
+    module_ids?: unknown;
   };
   if (typeof record.id !== "string" || typeof record.name !== "string") {
     throw new Error("[parity] issue row carried no string id and name.");
@@ -7157,6 +7250,7 @@ export async function serverIssueDetails(
   if (typeof sequenceId !== "number") throw new Error("[parity] issue row carried no numeric sequence_id.");
   const sortOrder = record.sort_order;
   if (typeof sortOrder !== "number") throw new Error("[parity] issue row carried no numeric sort_order.");
+  const cycleId = record.cycle_id ?? record.cycle;
   return {
     id: record.id,
     name: record.name,
@@ -7176,6 +7270,10 @@ export async function serverIssueDetails(
           : null,
     sequenceId,
     sortOrder,
+    cycleId: typeof cycleId === "string" ? cycleId : null,
+    moduleIds: Array.isArray(record.module_ids)
+      ? record.module_ids.filter((v): v is string => typeof v === "string")
+      : [],
   };
 }
 
@@ -7611,4 +7709,24 @@ export async function serverPatchModuleUserProperties(
     }
   );
   if (!res.ok) throw new Error(`[parity] module user-properties patch failed with HTTP ${res.status}.`);
+}
+
+/**
+ * The signed-in user's week-start day (0 = Sunday) from the profile the
+ * timeline reads. Gantt scenarios cross-check the rendered week rows
+ * against it.
+ */
+export async function serverProfileStartOfWeek(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetchTolerant(`${apiBase}/api/users/me/profile/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] profile read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as { start_of_the_week?: unknown };
+  if (typeof record.start_of_the_week !== "number") {
+    throw new Error("[parity] profile carried no numeric start_of_the_week.");
+  }
+  return record.start_of_the_week;
 }
