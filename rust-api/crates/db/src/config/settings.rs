@@ -164,6 +164,10 @@ pub struct LoopSettings {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StorageSettings {
     pub use_minio: bool,
+    /// `MINIO_ENDPOINT_SSL == "1"`: sign `https://{Host}` in MinIO mode
+    /// (`storage.py:46-51`); otherwise the request scheme. Deployments
+    /// ship `0`; only TLS-MinIO operators set it.
+    pub minio_endpoint_ssl: bool,
     pub access_key_id: String,
     pub secret_access_key: String,
     pub bucket_name: String,
@@ -366,6 +370,34 @@ impl<'a> Ctx<'a> {
         Ok(self.req_string(key, inline)?.to_ascii_lowercase().as_str() == "true")
     }
 
+    /// S3 scope region (`S3Storage.__init__`, `storage.py:40,64`): Django
+    /// passes `get_config("AWS_REGION", None)` to boto3, so unset is None
+    /// (botocore's default-region chain) while set — even empty — is
+    /// verbatim (botocore signs an empty scope part against a custom
+    /// endpoint, and raises `ValueError` when deriving one). The inline
+    /// Null default preserves the distinction: unset resolves to it, set
+    /// resolves to the value. Unset then follows the env portion of
+    /// botocore's chain — `AWS_DEFAULT_REGION` verbatim (even `""`), else
+    /// the S3 partition default `us-east-1`. botocore reads
+    /// `AWS_DEFAULT_REGION` straight from the environment rather than
+    /// through `get_config`, so this is a direct map lookup, not a
+    /// registry read (and stays out of `read_keys`). The chain's
+    /// shared-config-file tail (`~/.aws/config`) is not ported
+    /// (PIDASHCONV-760).
+    fn s3_scope_region(&self) -> Result<String, ConfigError> {
+        match self.raw("AWS_REGION", Some(&ConfigValue::Null))? {
+            ConfigValue::Null => Ok(self
+                .lookup("AWS_DEFAULT_REGION")
+                .unwrap_or_else(|| "us-east-1".to_owned())),
+            ConfigValue::Str(s) => Ok(s),
+            other => Err(ConfigError::TypeMismatch {
+                key: "AWS_REGION".to_owned(),
+                expected: "string or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
     fn csv_stripped(&self, key: &str, inline: &str) -> Result<Vec<String>, ConfigError> {
         Ok(self
             .req_string(key, inline)?
@@ -410,6 +442,21 @@ fn generate_secret_key() -> String {
         .take(64)
         .map(char::from)
         .collect()
+}
+
+impl StorageSettings {
+    /// `S3Storage.__init__` `endpoint_protocol` (`storage.py:46-51`):
+    /// `MINIO_ENDPOINT_SSL=1` signs `https://{Host}` in MinIO mode,
+    /// otherwise the request scheme (`X-Forwarded-Proto` here, Django's
+    /// `request.scheme` there). Gated on MinIO mode like the Python
+    /// nesting; non-MinIO branches ignore the scheme either way.
+    pub fn endpoint_protocol<'a>(&self, request_scheme: &'a str) -> &'a str {
+        if self.use_minio && self.minio_endpoint_ssl {
+            "https"
+        } else {
+            request_scheme
+        }
+    }
 }
 
 impl Settings {
@@ -640,10 +687,12 @@ impl Settings {
             },
             storage: StorageSettings {
                 use_minio: ctx.req_int("USE_MINIO", ConfigValue::from(0))? == 1,
+                // `storage.py:48`: `get_config("MINIO_ENDPOINT_SSL", None) == "1"`.
+                minio_endpoint_ssl: ctx.flag_1("MINIO_ENDPOINT_SSL", "")?,
                 access_key_id: ctx.req_string("AWS_ACCESS_KEY_ID", "access-key")?,
                 secret_access_key: ctx.req_string("AWS_SECRET_ACCESS_KEY", "secret-key")?,
                 bucket_name: ctx.req_string("AWS_S3_BUCKET_NAME", "uploads")?,
-                region: ctx.req_string("AWS_REGION", "")?,
+                region: ctx.s3_scope_region()?,
                 endpoint_url: s3_or_minio,
                 signed_url_expiration_secs: ctx
                     .req_int("SIGNED_URL_EXPIRATION", ConfigValue::from("3600"))?,
@@ -908,6 +957,7 @@ impl Settings {
             "AWS_REGION",
             "AWS_S3_ENDPOINT_URL",
             "MINIO_ENDPOINT_URL",
+            "MINIO_ENDPOINT_SSL",
             "SIGNED_URL_EXPIRATION",
             "WEB_URL",
             "RABBITMQ_HOST",
@@ -1250,5 +1300,81 @@ mod tests {
         )
         .expect("resolves");
         assert_eq!(s.allowed_hosts, vec!["a.example", " b.example"]);
+    }
+
+    #[test]
+    fn s3_scope_region_preserves_unset_vs_empty() {
+        // Django passes get_config("AWS_REGION", None) to boto3: unset is
+        // None (botocore chain -> us-east-1, probe A/E), set is verbatim —
+        // even "" (probe D2/F). AWS_DEFAULT_REGION is the chain's middle
+        // link, also verbatim (probe B/C2); explicit AWS_REGION wins (by
+        // construction: Django passes it, botocore never consults the env).
+        let unset = Settings::from_map_with(&HashMap::new(), Profile::Common, &NoOverlay)
+            .expect("resolves");
+        assert_eq!(unset.storage.region, "us-east-1");
+        for (pairs, want) in [
+            (vars(&[("AWS_DEFAULT_REGION", "eu-west-1")]), "eu-west-1"),
+            (vars(&[("AWS_DEFAULT_REGION", "")]), ""),
+            (vars(&[("AWS_REGION", "")]), ""),
+            (vars(&[("AWS_REGION", "eu-central-1")]), "eu-central-1"),
+            (
+                vars(&[
+                    ("AWS_REGION", "ap-south-1"),
+                    ("AWS_DEFAULT_REGION", "eu-west-1"),
+                ]),
+                "ap-south-1",
+            ),
+        ] {
+            let s = Settings::from_map_with(&pairs, Profile::Common, &NoOverlay).expect("resolves");
+            assert_eq!(s.storage.region, want);
+        }
+    }
+
+    #[test]
+    fn minio_endpoint_ssl_is_exact_1() {
+        // `storage.py:48`: only the exact string "1" forces https.
+        let unset = Settings::from_map_with(&HashMap::new(), Profile::Common, &NoOverlay)
+            .expect("resolves");
+        assert!(!unset.storage.minio_endpoint_ssl);
+        for (value, want) in [
+            ("1", true),
+            ("0", false),
+            ("", false),
+            ("true", false),
+            ("https", false),
+            ("01", false),
+        ] {
+            let s = Settings::from_map_with(
+                &vars(&[("MINIO_ENDPOINT_SSL", value)]),
+                Profile::Common,
+                &NoOverlay,
+            )
+            .expect("resolves");
+            assert_eq!(s.storage.minio_endpoint_ssl, want, "value={value:?}");
+        }
+    }
+
+    #[test]
+    fn endpoint_protocol_forces_https_only_for_minio_ssl() {
+        let base = Settings::test_defaults().storage;
+        for (use_minio, ssl, request, want) in [
+            (true, true, "http", "https"),
+            (true, true, "https", "https"),
+            (true, false, "http", "http"),
+            (true, false, "https", "https"),
+            (false, true, "http", "http"),
+            (false, false, "http", "http"),
+        ] {
+            let storage = StorageSettings {
+                use_minio,
+                minio_endpoint_ssl: ssl,
+                ..base.clone()
+            };
+            assert_eq!(
+                storage.endpoint_protocol(request),
+                want,
+                "minio={use_minio} ssl={ssl} request={request}"
+            );
+        }
     }
 }
