@@ -14,10 +14,13 @@ import type {
   GanttZoom,
   KanbanCard,
   KanbanColumn,
+  DocumentShellFacts,
+  NotFoundFacts,
   ParityBrowserCookie,
   ParityDriver,
   ParityTarget,
   RulesCommentMenuOption,
+  ServedShellMarkers,
   WorkspaceOnboardingView,
 } from "./parity-driver";
 
@@ -4078,5 +4081,30 @@ export class WebNewDriver implements ParityDriver {
 
   async ganttLoadMoreObservedOnScroll(): Promise<boolean> {
     return todo("ganttLoadMoreObservedOnScroll");
+  }
+
+  // --- Root document shell + not-found (NEWFRONT-173). Throwing stubs
+  // --- per the shared driver contract; the document area fills these in.
+
+  async documentShellFacts(): Promise<DocumentShellFacts> {
+    return todo("documentShellFacts");
+  }
+  async overlayPortalsPresent(): Promise<{ contextMenu: boolean; editor: boolean }> {
+    return todo("overlayPortalsPresent");
+  }
+  async sessionRecorderPresent(): Promise<boolean> {
+    return todo("sessionRecorderPresent");
+  }
+  async installAssetStatuses(): Promise<{ href: string; status: number }[]> {
+    return todo("installAssetStatuses");
+  }
+  async notFoundFacts(): Promise<NotFoundFacts | null> {
+    return todo("notFoundFacts");
+  }
+  async notFoundGoHome(): Promise<void> {
+    return todo("notFoundGoHome");
+  }
+  async servedShellMarkers(_path: string): Promise<ServedShellMarkers> {
+    return todo("servedShellMarkers");
   }
 }
