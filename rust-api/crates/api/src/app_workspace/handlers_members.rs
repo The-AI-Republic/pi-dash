@@ -1138,8 +1138,10 @@ fn parse_django_datetime(text: &str) -> Option<ParsedDt> {
 /// (`YYYY-MM-DD`, `YYYYMMDD`) and ISO week dates (`YYYY-Www[-d]`,
 /// `YYYYWww[d]`, weekday default 1), an optional time after any single
 /// non-digit separator (parts strictly two digits, seconds optional,
-/// `.`/`,` fraction always a seconds fraction truncated to 6 digits),
-/// one optional gap byte, and an optional `Z`/numeric offset (`±HH`,
+/// `.`/`,` fraction always a seconds fraction truncated to 6 digits,
+/// a 4th `:` part or basic digits past `HHMMSS` read as that
+/// same fraction), one optional gap byte, and an optional `Z`/
+/// numeric offset (`±HH`,
 /// `±HHMM`, `±HH:MM`, `±HHMMSS`, `±HH:MM:SS`, optional seconds fraction
 /// after any count — including a fourth `:` part or trailing basic
 /// digits past `HHMMSS` — total strictly under 24h). Surrounding
@@ -1267,13 +1269,17 @@ fn weekday_as_monday0(weekday: u32) -> chrono::Weekday {
 /// Parse the time tail (time + optional fraction + optional offset).
 /// Every component is strictly two digits (the C parser's 2-char
 /// windows); 1-digit times belong to the regex arm, which accepts the
-/// regex-reachable ones with identical values.
+/// regex-reachable ones with identical values. A 4th `:` part after
+/// extended `HH:MM:SS`, or basic-form digits past `HHMMSS`, is the
+/// seconds fraction instead (any digit count, pad/truncate 6), and
+/// excludes the `.`/`,` fraction (all probed on CPython 3.12).
 fn parse_iso_time(date: chrono::NaiveDate, rest: &str) -> Option<ParsedDt> {
     let (hour, rest) = take_time2(rest)?;
     if hour > 23 {
         return None;
     }
-    let (minute, second, rest) = if let Some(tail) = rest.strip_prefix(':') {
+    let (minute, second, rest, extra_micros, extra_len) = if let Some(tail) = rest.strip_prefix(':')
+    {
         let (minute, rest) = take_time2(tail)?;
         let (second, rest) = if let Some(tail) = rest.strip_prefix(':') {
             let (second, rest) = take_time2(tail)?;
@@ -1281,39 +1287,66 @@ fn parse_iso_time(date: chrono::NaiveDate, rest: &str) -> Option<ParsedDt> {
         } else {
             (0, rest)
         };
-        (minute, second, rest)
+        // A 4th `:` part needs a leading digit; anything else (empty,
+        // sign, tz) falls through to the no-fraction path, which
+        // rejects. (A bare `:` before a tz is the single-gap-byte
+        // mechanism, still unported — same bucket as 741's non-WS gaps.)
+        let fourth = rest
+            .strip_prefix(':')
+            .filter(|tail| tail.as_bytes().first().is_some_and(|b| b.is_ascii_digit()));
+        let (extra_micros, extra_len, rest) = match fourth {
+            Some(tail) => {
+                let len = tail.bytes().take_while(|b| b.is_ascii_digit()).count();
+                (frac_micros(&tail[..len])?, len, &tail[len..])
+            }
+            None => (0, 0, rest),
+        };
+        (minute, second, rest, extra_micros, extra_len)
     } else if rest.len() >= 2 && rest.as_bytes()[..2].iter().all(|b| b.is_ascii_digit()) {
         // Basic `HHMM[SS]` (no colon after the hour).
         let minute: u32 = rest[..2].parse().ok()?;
         let tail = &rest[2..];
         if tail.len() >= 2 && tail.as_bytes()[..2].iter().all(|b| b.is_ascii_digit()) {
             let second: u32 = tail[..2].parse().ok()?;
-            (minute, second, &tail[2..])
+            let tail = &tail[2..];
+            // Trailing basic digits past `HHMMSS` are the fraction —
+            // but exactly one (a 7-digit clock) rejects outright.
+            let len = tail.bytes().take_while(|b| b.is_ascii_digit()).count();
+            if len == 1 {
+                return None;
+            }
+            let (extra_micros, extra_len, rest) = if len >= 2 {
+                (frac_micros(&tail[..len])?, len, &tail[len..])
+            } else {
+                (0, 0, tail)
+            };
+            (minute, second, rest, extra_micros, extra_len)
         } else {
-            (minute, 0, tail)
+            (minute, 0, tail, 0, 0)
         }
     } else {
-        (0, 0, rest)
+        (0, 0, rest, 0, 0)
     };
     if minute > 59 || second > 59 {
         return None;
     }
     // The fraction (`.` or `,`) is always a seconds fraction — even on
     // the hour or minute (`T10.5` is 10:00:00.5, verified) — truncated
-    // past 6 digits and right-padded to microseconds.
-    let (micros, frac_len, rest) = match rest.strip_prefix(['.', ',']) {
-        Some(frac) => {
-            let digits: String = frac.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if digits.is_empty() {
-                return None;
+    // past 6 digits and right-padded to microseconds. A 4th-part or
+    // basic-trailing fraction takes its place instead (never both).
+    let (micros, frac_len, rest) = if extra_len > 0 {
+        (extra_micros, extra_len, rest)
+    } else {
+        match rest.strip_prefix(['.', ',']) {
+            Some(frac) => {
+                let digits: String = frac.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if digits.is_empty() {
+                    return None;
+                }
+                (frac_micros(&digits)?, digits.len(), &frac[digits.len()..])
             }
-            let mut micros = digits[..digits.len().min(6)].to_owned();
-            while micros.len() < 6 {
-                micros.push('0');
-            }
-            (micros.parse().ok()?, digits.len(), &frac[digits.len()..])
+            None => (0, 0, rest),
         }
-        None => (0, 0, rest),
     };
     let naive = date.and_hms_micro_opt(hour, minute, second, micros)?;
     if rest.is_empty() {
@@ -1334,6 +1367,17 @@ fn parse_iso_time(date: chrono::NaiveDate, rest: &str) -> Option<ParsedDt> {
     let offset_micros = parse_iso_offset(tz_text)?;
     let utc = naive.and_utc() - chrono::Duration::microseconds(offset_micros);
     Some(ParsedDt::Aware(utc))
+}
+
+/// An ASCII-digit seconds fraction as microseconds: the first 6
+/// digits kept, right-padded with zeros. All callers pass ASCII-only
+/// runs, so the byte slice cannot panic.
+fn frac_micros(digits: &str) -> Option<u32> {
+    let mut micros = digits[..digits.len().min(6)].to_owned();
+    while micros.len() < 6 {
+        micros.push('0');
+    }
+    micros.parse().ok()
 }
 
 /// One strictly-two-digit time component (the C parser reads 2-char
@@ -4654,6 +4698,153 @@ mod tests {
                 Some(naive(2026, 1, 2, 3, 4, 5, 0)),
             ),
             ("2026-०१-०२T०३:०४:०५", Some(naive(2026, 1, 2, 3, 4, 5, 0))),
+            // Time-side 4th `:` part as the seconds fraction (PIDASHCONV-761):
+            // any digit count, right-padded / truncated to microseconds.
+            (
+                "2026-01-02T03:04:05:6",
+                Some(naive(2026, 1, 2, 3, 4, 5, 600_000)),
+            ),
+            (
+                "2026-01-02T03:04:05:06",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_000)),
+            ),
+            (
+                "2026-01-02T03:04:05:060",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_000)),
+            ),
+            (
+                "2026-01-02T03:04:05:0607",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_700)),
+            ),
+            (
+                "2026-01-02T03:04:05:06070",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_700)),
+            ),
+            (
+                "2026-01-02T03:04:05:060708",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_708)),
+            ),
+            (
+                "2026-01-02T03:04:05:0607080",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_708)),
+            ),
+            (
+                "2026-01-02T03:04:05:06070809",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_708)),
+            ),
+            (
+                "2026-01-02T03:04:05:060708091234567890",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_708)),
+            ),
+            // Basic-form trailing digits past `HHMMSS` as the seconds
+            // fraction (8+ digits total; 7 rejects, pinned below).
+            (
+                "2026-01-02T03040506",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_000)),
+            ),
+            (
+                "2026-01-02T030405060",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_000)),
+            ),
+            (
+                "2026-01-02T0304050607",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_700)),
+            ),
+            (
+                "2026-01-02T030405060708",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_708)),
+            ),
+            (
+                "2026-01-02T03040506070809",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_708)),
+            ),
+            (
+                "2026-01-02T030405060708091234",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_708)),
+            ),
+            (
+                "2026-01-02T030405060708091234567890",
+                Some(naive(2026, 1, 2, 3, 4, 5, 60_708)),
+            ),
+            // Colon/basic fractions with an abutting tz.
+            (
+                "2026-01-02T03:04:05:06+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_000), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05:06-05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_000), -18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05:06+05",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_000), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05:06+0500",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_000), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05:6+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 600_000), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05:06Z",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_000), 0)),
+            ),
+            (
+                "2026-01-02T03:04:05:060708+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_708), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05:06070809Z",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_708), 0)),
+            ),
+            (
+                "2026-01-02T03040506+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_000), 18_000)),
+            ),
+            (
+                "2026-01-02T03040506+0500",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_000), 18_000)),
+            ),
+            (
+                "2026-01-02T03040506-0500",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_000), -18_000)),
+            ),
+            (
+                "2026-01-02T030405060708+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_708), 18_000)),
+            ),
+            (
+                "2026-01-02T030405060708Z",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_708), 0)),
+            ),
+            // Gap byte after a 6+ digit colon/basic fraction (shorter
+            // ones must abut the tz, pinned below).
+            (
+                "2026-01-02T03:04:05:060708 +05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_708), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05:06070809 +05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_708), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05:060708\t+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_708), 18_000)),
+            ),
+            (
+                "2026-01-02T03:04:05:060708\n+05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_708), 18_000)),
+            ),
+            (
+                "2026-01-02T030405060708 +05:00",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_708), 18_000)),
+            ),
+            (
+                "2026-01-02T030405060708 Z",
+                Some(aware(day(2026, 1, 2, 3, 4, 5, 60_708), 0)),
+            ),
         ] {
             assert_eq!(parse_django_datetime(input), expected, "{input}");
         }
@@ -4819,6 +5010,58 @@ mod tests {
             "2026-01-02T03:04:05+05²:00",
             "2026-01-02T03:04:05+05：00",
             "2026-1-2T03:04:05.١٢٣٤٥٦٧٨٩٠١٢٣",
+            // Time-side 4th part / basic trailing fraction edges
+            // (PIDASHCONV-761): short clocks, 5 parts, trailing space,
+            // dot fractions beside a colon/basic fraction, non-digit
+            // and empty 4th parts, trailing junk.
+            "2026-01-02T0304050",
+            "2026-01-02T0304055",
+            "2026-01-02T03040",
+            "2026-01-02T030",
+            "2026-01-02T03:04:05:06:07",
+            "2026-01-02T03:04:05:060708:07",
+            "2026-01-02T03:04:05:06 ",
+            "2026-01-02T03:04:05:06\t",
+            "2026-01-02T03:04:05:6 ",
+            "2026-01-02T03:04:05:060708 ",
+            "2026-01-02T03:04:05:06070809 ",
+            "2026-01-02T0304050607 ",
+            "2026-01-02T030405060708 ",
+            "2026-01-02T03:04:05:06.5",
+            "2026-01-02T03:04:05:06,5",
+            "2026-01-02T03:04:05:060708.5",
+            "2026-01-02T03040506.5",
+            "2026-01-02T03040506,5",
+            "2026-01-02T03:04:05.5:06",
+            "2026-01-02T03:04:05:0a",
+            "2026-01-02T03:04:05:-1",
+            "2026-01-02T03:04:05:+1",
+            "2026-01-02T03:04:05:",
+            "2026-01-02T03:04:05:06:",
+            "2026-01-02T03:04:05:06x",
+            "2026-01-02T03040506x",
+            "2026-01-02T03040506 ",
+            "2026-01-02T030405a",
+            "2026-01-02T0304050.5",
+            // No basic/extended mixing around the seconds.
+            "2026-01-02T03:04:050",
+            "2026-01-02T03:04:0506",
+            "2026-01-02T03:04:050.5",
+            "2026-01-02T03:0405",
+            "2026-01-02T03:040506",
+            "2026-01-02T0304:05",
+            "2026-01-02T0304:0506",
+            "2026-01-02T0304:050607",
+            "2026-01-02T030405:06",
+            "2026-01-02T03040506:07",
+            // A short colon/basic fraction must abut the tz.
+            "2026-01-02T03:04:05:06 +05:00",
+            "2026-01-02T03:04:05:06\t+05:00",
+            "2026-01-02T03:04:05:06\n+05:00",
+            "2026-01-02T03:04:05:06 Z",
+            "2026-01-02T03040506 +05:00",
+            "2026-01-02T03:04:05:06:07+05:00",
+            "2026-01-02T03:04:05:06:+05:00",
         ] {
             assert_eq!(parse_django_datetime(input), None, "{input}");
         }
