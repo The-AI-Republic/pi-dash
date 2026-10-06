@@ -2942,8 +2942,25 @@ fn parse_datere_arm(text: &str) -> Option<NaiveDateTime> {
     date.and_hms_opt(0, 0, 0)
 }
 
+/// DRF `DateTimeField.to_internal_value` over `DATETIME_INPUT_FORMATS =
+/// ['iso-8601']`: `parse_datetime`, then the `strptime(value, 'iso-8601')`
+/// fallback, then `enforce_timezone`.
 fn parse_django_datetime(text: &str, tz: &Tz) -> Result<DateTime<Utc>, ParseDatetimeError> {
-    let (naive, offset) = parse_iso8601_core(text).ok_or(ParseDatetimeError::Invalid)?;
+    let (naive, offset) = parse_iso8601_core(text)
+        .or_else(|| {
+            // `strptime` compiles the literal format with `re.IGNORECASE`,
+            // so the input `iso-8601` in any letter case yields naive
+            // 1900-01-01. Exact match: padding fails on both sides (probed).
+            // Python's fold also accepts İ/ı/ſ letter variants; the port is
+            // ASCII-only (same family as the 765 unicode gap).
+            text.eq_ignore_ascii_case("iso-8601").then(|| {
+                let naive = NaiveDate::from_ymd_opt(1900, 1, 1)
+                    .and_then(|date| date.and_hms_opt(0, 0, 0))
+                    .expect("1900-01-01 valid");
+                (naive, None)
+            })
+        })
+        .ok_or(ParseDatetimeError::Invalid)?;
     match offset {
         Some(off) => {
             let utc = naive.and_utc() - chrono::Duration::microseconds(off.total_micros());
@@ -5765,6 +5782,59 @@ mod tests {
         assert_eq!(
             validate_link_patch(&map, false, &utc_tz()).expect_err("errors"),
             "{\"deleted_at\":[\"Datetime value out of range.\"]}",
+        );
+    }
+
+    #[test]
+    fn link_patch_deleted_at_iso8601_literal_fallback() {
+        // PIDASHCONV-772: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01 in the request zone (probed live both backends).
+        let utc = utc_tz();
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text, &utc)
+                    .expect("parses")
+                    .to_rfc3339(),
+                "1900-01-01T00:00:00+00:00",
+                "{text:?}"
+            );
+            let map = patch_map(&[("deleted_at", Value::String(text.to_owned()))]);
+            let validated = validate_link_patch(&map, false, &utc).expect("valid");
+            assert_eq!(
+                validated
+                    .deleted_at
+                    .expect("set")
+                    .expect("some")
+                    .to_rfc3339(),
+                "1900-01-01T00:00:00+00:00",
+                "{text:?}"
+            );
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text, &utc),
+                Err(ParseDatetimeError::Invalid),
+                "{text:?}"
+            );
+        }
+        // Model path has no `strptime` step: still invalid there.
+        assert_eq!(
+            parse_naive_or_aware("iso-8601"),
+            Err(ParseDatetimeError::Invalid)
         );
     }
 
