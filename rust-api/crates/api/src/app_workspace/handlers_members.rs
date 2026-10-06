@@ -1184,6 +1184,11 @@ fn parse_fromisoformat_datetime(text: &str) -> Option<ParsedDt> {
 
 /// Parse the date head, returning the day and the unparsed tail.
 fn parse_iso_date(text: &str, year: i32) -> Option<(chrono::NaiveDate, &str)> {
+    // chrono accepts the proleptic year 0; CPython raises (`ValueError:
+    // year 0 is out of range`), so Django rejects — match it.
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
     let bytes = text.as_bytes();
     // Week dates contain an uppercase `W` (`2024-W03[-1]`, `2024W03[1]`).
     // The basic form takes no dash-day (`2024W03-1` is rejected outright —
@@ -1525,6 +1530,11 @@ fn parse_regex_datetime(text: &str) -> Option<ParsedDt> {
     let mut year: i32 = 0;
     for _ in 0..4 {
         year = year * 10 + py_digit_value(chars.next()?)? as i32;
+    }
+    // Same year-0 clamp as the fromisoformat arm: `datetime(0, ...)`
+    // raises, which lands in the invalid arm.
+    if !(1..=9999).contains(&year) {
+        return None;
     }
     let rest = chars.as_str().strip_prefix('-')?;
     let (month, rest) = parse_regex_part(rest, b"-")?;
@@ -4845,6 +4855,11 @@ mod tests {
                 "2026-01-02T030405060708 Z",
                 Some(aware(day(2026, 1, 2, 3, 4, 5, 60_708), 0)),
             ),
+            // Year-range boundaries (PIDASHCONV-762): 1 and 9999 still
+            // parse — only 0 rejects.
+            ("0001-01-01", Some(naive(1, 1, 1, 0, 0, 0, 0))),
+            ("0001-W01-1", Some(naive(1, 1, 1, 0, 0, 0, 0))),
+            ("9999-12-31", Some(naive(9999, 12, 31, 0, 0, 0, 0))),
         ] {
             assert_eq!(parse_django_datetime(input), expected, "{input}");
         }
@@ -5062,6 +5077,25 @@ mod tests {
             "2026-01-02T03040506 +05:00",
             "2026-01-02T03:04:05:06:07+05:00",
             "2026-01-02T03:04:05:06:+05:00",
+            // Year 0 (PIDASHCONV-762): CPython raises (`ValueError: year
+            // 0 is out of range`) in both arms — `fromisoformat`, and
+            // the regex fallback's `datetime(0, ...)` — so Django lands
+            // in the invalid arm while chrono's proleptic year 0 would
+            // accept.
+            "0000-01-01",
+            "00000101",
+            "0000-01-01T00:00:00",
+            "0000-01-01 00:00:00",
+            "0000-01-01T00:00:00+00:00",
+            "0000-01-01T00:00:00Z",
+            "0000-W01-1",
+            "0000-W01",
+            "0000W011",
+            "0000W01",
+            "0000-W01-1T00:00:00+00:00",
+            "0000-1-2T03:04:05",
+            "0000-01-02T03:04:05",
+            "0000-1-2 03:04:05+05:00",
         ] {
             assert_eq!(parse_django_datetime(input), None, "{input}");
         }
