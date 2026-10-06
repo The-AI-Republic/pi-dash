@@ -47,9 +47,13 @@ test(
     test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     await resetPrefs(seed.workspaceSlug, seed.projectId, session);
+    // Open unstalled first: the shared openAuthenticated boot check reloads
+    // a textless page, which would abort the stalled request below. The
+    // asserted initial load is the reload under the stall.
+    await driver.openAuthenticated(projectIssuesPath(seed), sessionBrowserCookies(session));
     await driver.layoutsStallIssuesGet(15_000);
     try {
-      await driver.openAuthenticated(projectIssuesPath(seed), sessionBrowserCookies(session));
+      await driver.layoutsReloadIssues();
       await expect.poll(async () => driver.layoutsSkeletonVisible(), { timeout: 300_000 }).toEqual(true);
     } finally {
       await driver.layoutsReleaseStalls();
