@@ -14,6 +14,7 @@ import type { RootStore } from "@/pi-dash-web/store/root.store";
 import type { IUserPermissionStore } from "@/pi-dash-web/store/user/permission.store";
 import { UserPermissionStore } from "@/pi-dash-web/store/user/permission.store";
 // services
+import { confirmSignOut } from "@/services/agent-runtime";
 import { AuthService } from "@/services/auth.service";
 import { UserService } from "@/services/user.service";
 // stores
@@ -50,7 +51,7 @@ export interface IUserStore {
     payload: { old_password?: string; new_password: string }
   ) => Promise<IUser | undefined>;
   reset: () => void;
-  signOut: () => Promise<void>;
+  signOut: (options?: { skipConfirmation?: boolean }) => Promise<void>;
   // computed
   canPerformAnyCreateAction: boolean;
   projectsWithCreatePermissions: { [projectId: string]: number } | null;
@@ -249,11 +250,15 @@ export class UserStore implements IUserStore {
   };
 
   /**
-   * @description signs out the current user
+   * @description signs out the current user. The desktop app first asks the user to confirm (see
+   * `confirmSignOut`); cancelling there resolves without signing out. Pass `skipConfirmation` when sign-out is the
+   * consequence of an action the user already confirmed, not a choice of its own.
    * @returns {Promise<void>}
    */
-  signOut = async (): Promise<void> => {
-    await this.authService.signOut(API_BASE_URL);
+  signOut = async (options?: { skipConfirmation?: boolean }): Promise<void> => {
+    const choice = options?.skipConfirmation ? undefined : await confirmSignOut();
+    if (choice === null) return;
+    await this.authService.signOut(API_BASE_URL, choice);
     this.store.resetOnSignOut();
   };
 
