@@ -221,9 +221,12 @@ pub fn negotiate_body(
 fn build_form_body(mut form: FormBody, spec: &BodySpec) -> NegotiatedBody {
     let mut map = Map::new();
     let mut surr: BTreeMap<String, Vec<Vec<(usize, u16)>>> = BTreeMap::new();
-    let mut keys: Vec<&String> = form.texts.keys().collect();
-    keys.sort();
-    for key in keys {
+    // QueryDict key order is first-seen (`MultiValueDict` is a plain dict
+    // underneath, so keys sit at their first-insertion position and
+    // `json.dumps(request.data)` emits them in that order — PIDASHCONV-757).
+    // The parsers record that order in `text_order`; iterating the map's
+    // sorted keys here would alphabetize the task-payload bytes.
+    for key in &form.text_order {
         let values = &form.texts[key.as_str()];
         if spec.list_fields.contains(&key.as_str()) {
             let mut items: Vec<Value> = values
@@ -2346,6 +2349,61 @@ mod codec_tests {
         assert_eq!(map["name"], Value::String(String::new()));
         assert_eq!(map["description"], Value::String(String::new()));
         assert_eq!(map["owned_by"], Value::String(String::new()));
+    }
+
+    #[test]
+    fn form_key_order_first_seen() {
+        // QueryDict keeps keys at their first-seen position (PIDASHCONV-757):
+        // `zebra=1&apple=2` lists `["zebra", "apple"]` live, and
+        // `json.dumps(request.data)` emits that order into the task
+        // payloads — never alphabetical.
+        let keys_of =
+            |ct: &str, body: &[u8], spec: &BodySpec| match negotiate(ct, body, spec).unwrap() {
+                NegotiatedBody::Form { map, .. } => map.keys().cloned().collect::<Vec<_>>(),
+                other => panic!("expected form, got {other:?}"),
+            };
+        let ct = "application/x-www-form-urlencoded";
+        assert_eq!(
+            keys_of(ct, b"zebra=1&apple=2&mango=3", &CYCLE_BODY_SPEC),
+            ["zebra", "apple", "mango"]
+        );
+        // Repeated keys keep their first position with the last value.
+        let map = match negotiate(ct, b"b=1&a=2&b=3", &CYCLE_BODY_SPEC).unwrap() {
+            NegotiatedBody::Form { map, .. } => map,
+            other => panic!("expected form, got {other:?}"),
+        };
+        assert_eq!(
+            map.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["b", "a"]
+        );
+        assert_eq!(map["b"], Value::String("3".to_owned()));
+        // Blank skips drop the key without moving the survivors.
+        assert_eq!(
+            keys_of(ct, b"b=1&timezone=&a=2", &CYCLE_BODY_SPEC),
+            ["b", "a"]
+        );
+        // List fields sit at their first-seen position too.
+        let map = match negotiate(ct, b"z=1&members=a&members=b", &MODULE_BODY_SPEC).unwrap() {
+            NegotiatedBody::Form { map, .. } => map,
+            other => panic!("expected form, got {other:?}"),
+        };
+        assert_eq!(
+            map.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["z", "members"]
+        );
+        assert_eq!(
+            map["members"],
+            Value::Array(vec![
+                Value::String("a".to_owned()),
+                Value::String("b".to_owned())
+            ])
+        );
+        // Multipart parts keep arrival order as well.
+        let mp = b"------b\r\nContent-Disposition: form-data; name=\"zebra\"\r\n\r\n1\r\n------b\r\nContent-Disposition: form-data; name=\"apple\"\r\n\r\n2\r\n------b--\r\n";
+        assert_eq!(
+            keys_of("multipart/form-data; boundary=----b", mp, &CYCLE_BODY_SPEC),
+            ["zebra", "apple"]
+        );
     }
 
     #[test]
