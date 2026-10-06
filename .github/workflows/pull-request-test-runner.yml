@@ -14,6 +14,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "runner/**"
+      - "pidash-ipc/**"
       - ".github/workflows/pull-request-test-runner.yml"
   # Post-merge validation: GitHub re-runs PR checks on synchronize, not when
   # the base moves, so two PRs green against an older main can merge into a
@@ -27,6 +28,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "runner/**"
+      - "pidash-ipc/**"
       - ".github/workflows/pull-request-test-runner.yml"
 
 concurrency:
@@ -55,8 +57,10 @@ jobs:
         with:
           workspaces: runner -> target
 
+      # --workspace: from runner/ a bare cargo invocation only compiles
+      # pidash-ipc as a dependency; its own tests and lints would be skipped.
       - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
-        run: cargo test --all-targets --locked
+        run: cargo test --workspace --all-targets --locked
