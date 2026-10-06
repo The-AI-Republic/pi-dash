@@ -1129,9 +1129,25 @@ enum ParsedDt {
 /// Parse exactly what Django's `parse_datetime` accepts (pinned against
 /// Django 4.2.30 / CPython 3.12 empirically): the `fromisoformat` ∪
 /// `datetime_re` union — `fromisoformat` first, the regex fallback when
-/// it raises. Anything else is `None` (the caller's invalid arm).
+/// it raises — plus DRF's `strptime(value, 'iso-8601')` fallthrough
+/// (`to_internal_value` runs it when `parse_datetime` returns `None`).
+/// Anything else is `None` (the caller's invalid arm).
 fn parse_django_datetime(text: &str) -> Option<ParsedDt> {
-    parse_fromisoformat_datetime(text).or_else(|| parse_regex_datetime(text))
+    parse_fromisoformat_datetime(text)
+        .or_else(|| parse_regex_datetime(text))
+        .or_else(|| {
+            // `strptime` compiles the literal format with `re.IGNORECASE`,
+            // so the input `iso-8601` in any letter case yields naive
+            // 1900-01-01. Exact match: padding fails on both sides (probed).
+            // Python's fold also accepts İ/ı/ſ letter variants; the port is
+            // ASCII-only (same family as the 765 unicode gap).
+            text.eq_ignore_ascii_case("iso-8601").then(|| {
+                let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+                    .and_then(|date| date.and_hms_opt(0, 0, 0))
+                    .expect("1900-01-01 valid");
+                ParsedDt::Naive(naive)
+            })
+        })
 }
 
 /// Arm 1: CPython 3.12 `datetime.fromisoformat` — calendar dates
@@ -5168,6 +5184,50 @@ mod tests {
             "2026-01-02T03:04:05.z",
         ] {
             assert_eq!(parse_django_datetime(input), None, "{input}");
+        }
+    }
+
+    #[test]
+    fn deleted_at_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01 in the request zone (probed live both backends).
+        use chrono_tz::Tz;
+        let utc = Tz::UTC;
+        let expected = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("1900-01-01 valid");
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text),
+                Some(ParsedDt::Naive(expected)),
+                "{text:?}"
+            );
+            let mut errors = FieldErrors::default();
+            let validated = validate_deleted_at(&Value::String(text.to_owned()), &utc, &mut errors)
+                .expect("no denial");
+            assert_eq!(
+                validated.map(|inner| inner.map(|dt| dt.to_rfc3339())),
+                Some(Some("1900-01-01T00:00:00+00:00".to_owned())),
+                "{text:?}"
+            );
+            assert!(errors.deleted_at.is_empty(), "{text:?}");
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert_eq!(parse_django_datetime(text), None, "{text:?}");
         }
     }
 
