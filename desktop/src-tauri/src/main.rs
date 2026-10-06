@@ -9,6 +9,7 @@ mod chat_history;
 mod desktop_http;
 mod ipc;
 mod managed_runner;
+mod menubar;
 mod pidash_cli;
 mod updates;
 
@@ -16,7 +17,7 @@ use std::sync::Mutex;
 
 use tauri::{
     Manager, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
-    menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -446,41 +447,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             window.build()?;
 
-            // View menu: browser-style zoom shortcuts. The Tauri webview
-            // doesn't bind these by default, so we register them as menu
-            // accelerators. muda's accelerator parser has no `Plus` token
-            // (it would silently bind the `P` key); the numpad `+` is
-            // spelled `NumpadPlus`. We register three variants routed to
-            // the same `zoom_in` id; alternates are Linux/Windows only —
-            // on macOS, `Cmd+=` is the conventional shortcut and the
-            // duplicates would visibly clutter the menubar.
-            let zoom_in = MenuItemBuilder::with_id("zoom_in", "Zoom In")
-                .accelerator("CmdOrCtrl+=")
-                .build(app)?;
-            let zoom_out = MenuItemBuilder::with_id("zoom_out", "Zoom Out")
-                .accelerator("CmdOrCtrl+-")
-                .build(app)?;
-            let zoom_reset = MenuItemBuilder::with_id("zoom_reset", "Actual Size")
-                .accelerator("CmdOrCtrl+0")
-                .build(app)?;
-            #[cfg(not(target_os = "macos"))]
-            let zoom_in_shift = MenuItemBuilder::with_id("zoom_in", "Zoom In")
-                .accelerator("CmdOrCtrl+Shift+=")
-                .build(app)?;
-            #[cfg(not(target_os = "macos"))]
-            let zoom_in_numpad = MenuItemBuilder::with_id("zoom_in", "Zoom In")
-                .accelerator("CmdOrCtrl+NumpadPlus")
-                .build(app)?;
-
-            let view = {
-                let b = SubmenuBuilder::new(app, "View")
-                    .items(&[&zoom_in, &zoom_out, &zoom_reset]);
-                #[cfg(not(target_os = "macos"))]
-                let b = b.items(&[&zoom_in_shift, &zoom_in_numpad]);
-                b.build()?
-            };
-            let menu = MenuBuilder::new(app).items(&[&view]).build()?;
-            app.set_menu(menu)?;
+            app.set_menu(menubar::build(app.handle())?)?;
 
             let tray_show = MenuItemBuilder::with_id("tray_show", "Show Pi Dash").build(app)?;
             let tray_quit = MenuItemBuilder::with_id("tray_quit", "Quit Pi Dash").build(app)?;
