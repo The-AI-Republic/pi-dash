@@ -497,24 +497,37 @@ fn is_valid_url(s: &str) -> bool {
     }
 }
 
-/// Close an open INI pair: a multi-line `region` value fails (botocore
-/// parses it as a nested dict and dies downstream — `ConfigParseError`
-/// for `k = v`-less lines, `TypeError` past `validate_region_name`
-/// otherwise); other keys' continuations must be well-formed nested
-/// `k = v` lines or botocore's `_parse_nested` fails there instead —
-/// but only when the base value is empty (the `startswith('\n')` gate
-/// in `raw_config_parse`): continuations under a non-empty value stay
-/// a plain string and never fail. Either way the failure is loud on
-/// both sides.
-fn close_ini_key(key: &str, base_empty: bool, conts: &[String]) -> Result<(), String> {
+/// Close an open INI pair (`raw_config_parse` + `_parse_nested`):
+/// continuations under a non-empty value stay a plain string —
+/// botocore joins them with newlines (the `startswith('\n')` gate
+/// skips nested parsing), so `'dd'` + `'  ee'` resolves `'dd\nee'`
+/// and fails downstream region validation (`InvalidRegionError`),
+/// exactly like the endpoint check here. Only an empty base
+/// nested-parses: an empty-base `region` with continuations fails
+/// (`ConfigParseError` for `k = v`-less lines, an unrepresentable
+/// dict otherwise); other empty-base keys need well-formed nested
+/// `k = v` lines or `_parse_nested` fails there instead.
+fn close_ini_key(
+    sections: &mut IniSections,
+    sec: usize,
+    key: &str,
+    base_empty: bool,
+    conts: &[String],
+) -> Result<(), String> {
     if conts.is_empty() {
+        return Ok(());
+    }
+    if !base_empty {
+        if let Some((_, value)) = sections[sec].1.iter_mut().find(|(k, _)| k == key) {
+            for line in conts {
+                value.push('\n');
+                value.push_str(line);
+            }
+        }
         return Ok(());
     }
     if key == "region" {
         return Err("multi-line value for \"region\"".to_owned());
-    }
-    if !base_empty {
-        return Ok(());
     }
     for line in conts {
         if !line.contains('=') {
@@ -574,8 +587,8 @@ fn parse_shared_ini(text: &str) -> Result<IniSections, String> {
             continue;
         }
         if let Some(rest) = stripped.strip_prefix('[') {
-            if let Some((key, base_empty)) = open_key.take() {
-                close_ini_key(&key, base_empty, &conts)?;
+            if let (Some((key, base_empty)), Some(sec)) = (open_key.take(), current) {
+                close_ini_key(&mut sections, sec, &key, base_empty, &conts)?;
                 conts.clear();
             }
             // `SECTCRE` is greedy: the header runs to the LAST bracket.
@@ -612,7 +625,7 @@ fn parse_shared_ini(text: &str) -> Result<IniSections, String> {
             return Err(format!("malformed line {stripped:?}"));
         }
         if let Some((open, base_empty)) = open_key.take() {
-            close_ini_key(&open, base_empty, &conts)?;
+            close_ini_key(&mut sections, sec, &open, base_empty, &conts)?;
             conts.clear();
         }
         if sections[sec].1.iter().any(|(k, _)| k == &key) {
@@ -623,8 +636,8 @@ fn parse_shared_ini(text: &str) -> Result<IniSections, String> {
         sections[sec].1.push((key.clone(), value));
         open_key = Some((key, base_empty));
     }
-    if let Some((key, base_empty)) = open_key.take() {
-        close_ini_key(&key, base_empty, &conts)?;
+    if let (Some((key, base_empty)), Some(sec)) = (open_key.take(), current) {
+        close_ini_key(&mut sections, sec, &key, base_empty, &conts)?;
     }
     Ok(sections)
 }
@@ -2084,6 +2097,34 @@ mod tests {
             ]))
             .expect("resolves"),
             "tilde"
+        );
+    }
+
+    #[test]
+    fn s3_scope_region_nonempty_base_continuation_joins() {
+        // Test-run probe against live botocore 1.34.162: a continuation
+        // under a non-empty `region` base is not a parse error —
+        // botocore joins it (`'dd'` + `'  ee'` -> `'dd\nee'`) and the
+        // joined value fails downstream region validation
+        // (`InvalidRegionError`), exactly like `is_valid_region_name`
+        // rejects it here. Only an empty base nested-parses (and fails
+        // loud, covered above).
+        let dir = tmp_aws_dir();
+        let cont = write_scratch(&dir, "cont-region", "[default]\nregion = dd\n  ee\n");
+        let resolved = region_of(&vars(&[("AWS_CONFIG_FILE", cont.as_str())])).expect("resolves");
+        assert_eq!(resolved, "dd\nee");
+        assert!(
+            !is_valid_region_name(&resolved),
+            "joined region fails downstream validation"
+        );
+        // `k = v` continuation lines join verbatim too (no nested
+        // parse under a non-empty base).
+        let kv = write_scratch(&dir, "cont-region-kv", "[default]\nregion = dd\n  a = b\n");
+        let resolved = region_of(&vars(&[("AWS_CONFIG_FILE", kv.as_str())])).expect("resolves");
+        assert_eq!(resolved, "dd\na = b");
+        assert!(
+            !is_valid_region_name(&resolved),
+            "joined region fails downstream validation"
         );
     }
 
