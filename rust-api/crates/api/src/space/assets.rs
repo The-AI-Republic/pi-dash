@@ -539,13 +539,15 @@ async fn get_asset(
     let Some(host) = host_of(&headers) else {
         return server_error();
     };
-    let url = presigned_get_url(
+    let Ok(url) = presigned_get_url(
         storage,
         &scheme_of(&headers),
         &host,
         &asset.asset_key,
         &Utc::now(),
-    );
+    ) else {
+        return server_error();
+    };
     // `HttpResponseRedirect`: empty body, default content type.
     Response::builder()
         .status(StatusCode::FOUND)
@@ -657,7 +659,7 @@ async fn post_asset(
     let Some(host) = host_of(&headers) else {
         return server_error();
     };
-    let upload_data = presigned_post(
+    let Ok(upload_data) = presigned_post(
         storage,
         &scheme_of(&headers),
         &host,
@@ -665,7 +667,9 @@ async fn post_asset(
         mime,
         size,
         &now,
-    );
+    ) else {
+        return server_error();
+    };
     json_status(
         StatusCode::OK,
         serde_json::json!({
@@ -1082,20 +1086,42 @@ fn credential_scope(date: &str, region: &str) -> String {
     format!("{date}/{region}/s3/aws4_request")
 }
 
+/// `S3Storage.__init__` failure (`ValueError: Invalid endpoint: ...` /
+/// `InvalidRegionError`): the region cannot be signed — not a valid
+/// host label, or empty with no endpoint URL to derive from. Python
+/// raises from the constructor, so every use site propagates it to the
+/// 500 fallback (`handle_exception`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InvalidEndpoint;
+
+impl std::fmt::Display for InvalidEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("s3 region cannot be signed against the derived endpoint")
+    }
+}
+
+impl std::error::Error for InvalidEndpoint {}
+
 /// Endpoint + host/path split for signing, mirroring
 /// `S3Storage.__init__` with a request (`is_server=False`):
 /// MinIO mode signs `{scheme}://{Host}` path-style; an explicit
 /// endpoint URL signs path-style against it; otherwise the
-/// virtual-hosted AWS default.
+/// virtual-hosted AWS default. Presigned URLs resolve the global
+/// endpoint for every region (`use_global_endpoint`,
+/// `botocore/signers.py:859`); header auth keeps the regional host.
 fn endpoint_parts(
     storage: &pidash_db::config::StorageSettings,
     scheme: &str,
     host: &str,
-) -> (String, String) {
+    presign: bool,
+) -> Result<(String, String), InvalidEndpoint> {
+    if !pidash_db::config::is_valid_region_name(&storage.region) {
+        return Err(InvalidEndpoint);
+    }
     // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
     let scheme = storage.endpoint_protocol(scheme);
     if storage.use_minio {
-        (format!("{scheme}://{host}"), host.to_owned())
+        Ok((format!("{scheme}://{host}"), host.to_owned()))
     } else if let Some(endpoint) = storage.endpoint_url.as_deref().filter(|e| !e.is_empty()) {
         let endpoint = endpoint.trim_end_matches('/');
         let signed_host = endpoint
@@ -1105,21 +1131,26 @@ fn endpoint_parts(
             .split('/')
             .next()
             .unwrap_or(endpoint);
-        (endpoint.to_owned(), signed_host.to_owned())
+        Ok((endpoint.to_owned(), signed_host.to_owned()))
     } else {
         let region = storage.region.as_str();
+        if region.is_empty() {
+            // botocore derives `https://s3..amazonaws.com` and rejects
+            // it (`ValueError: Invalid endpoint`).
+            return Err(InvalidEndpoint);
+        }
         // botocore's s3 endpoint table serves us-east-1 from the global
-        // endpoint (`s3.amazonaws.com`, no region infix); every other
-        // region is virtual-hosted regional.
-        let base = if region.is_empty() || region == "us-east-1" {
+        // endpoint (`s3.amazonaws.com`, no region infix); presigned
+        // URLs use it for every region, header auth stays regional.
+        let base = if presign || region == "us-east-1" {
             "s3.amazonaws.com".to_owned()
         } else {
             format!("s3.{region}.amazonaws.com")
         };
-        (
+        Ok((
             format!("https://{}.{base}", storage.bucket_name),
             format!("{}.{base}", storage.bucket_name),
-        )
+        ))
     }
 }
 
@@ -1132,9 +1163,9 @@ fn presigned_get_url(
     host: &str,
     object_name: &str,
     now: &DateTime<Utc>,
-) -> String {
+) -> Result<String, InvalidEndpoint> {
     let region = storage.region.as_str();
-    let (endpoint, signed_host) = endpoint_parts(storage, scheme, host);
+    let (endpoint, signed_host) = endpoint_parts(storage, scheme, host, true)?;
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date = now.format("%Y%m%d").to_string();
     let scope = credential_scope(&date, region);
@@ -1185,7 +1216,9 @@ fn presigned_get_url(
         &signing_key(&storage.secret_access_key, &date, region),
         string_to_sign.as_bytes(),
     ));
-    format!("{endpoint}{canonical_path}?{canonical_query}&X-Amz-Signature={signature}")
+    Ok(format!(
+        "{endpoint}{canonical_path}?{canonical_query}&X-Amz-Signature={signature}"
+    ))
 }
 
 /// Path encoding for the canonical URI: slashes survive, every
@@ -1209,9 +1242,9 @@ fn presigned_post(
     file_type: &str,
     file_size: i64,
     now: &DateTime<Utc>,
-) -> Value {
+) -> Result<Value, InvalidEndpoint> {
     let region = storage.region.as_str();
-    let (endpoint, _) = endpoint_parts(storage, scheme, host);
+    let (endpoint, _) = endpoint_parts(storage, scheme, host, true)?;
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date = now.format("%Y%m%d").to_string();
     let scope = credential_scope(&date, region);
@@ -1274,7 +1307,7 @@ fn presigned_post(
     fields.insert("x-amz-date".to_owned(), Value::String(amz_date));
     fields.insert("policy".to_owned(), Value::String(policy_b64));
     fields.insert("x-amz-signature".to_owned(), Value::String(signature));
-    serde_json::json!({"url": url, "fields": fields})
+    Ok(serde_json::json!({"url": url, "fields": fields}))
 }
 
 /// CPython `json.dumps` string encoding (`ensure_ascii`): `"` and
@@ -1352,17 +1385,65 @@ mod tests {
         let mut ssl = test_storage();
         ssl.minio_endpoint_ssl = true;
         assert_eq!(
-            endpoint_parts(&ssl, "http", "h:9"),
+            endpoint_parts(&ssl, "http", "h:9", true).expect("minio"),
             ("https://h:9".to_owned(), "h:9".to_owned())
         );
         // us-east-1 resolves to the global endpoint (botocore probe A/L).
         let mut aws = test_storage();
         aws.use_minio = false;
         assert_eq!(
-            endpoint_parts(&aws, "http", "h:9"),
+            endpoint_parts(&aws, "http", "h:9", true).expect("aws"),
             (
                 "https://uploads.s3.amazonaws.com".to_owned(),
                 "uploads.s3.amazonaws.com".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn endpoint_parts_presign_global_and_invalid_region() {
+        // Presigned URLs resolve the global endpoint for every region
+        // (`use_global_endpoint`, botocore probe J); header auth keeps
+        // the regional host (probe J HEAD).
+        let mut regional = test_storage();
+        regional.use_minio = false;
+        regional.region = "eu-west-1".to_owned();
+        assert_eq!(
+            endpoint_parts(&regional, "http", "h:9", true).expect("presign"),
+            (
+                "https://uploads.s3.amazonaws.com".to_owned(),
+                "uploads.s3.amazonaws.com".to_owned()
+            )
+        );
+        assert_eq!(
+            endpoint_parts(&regional, "http", "h:9", false).expect("header auth"),
+            (
+                "https://uploads.s3.eu-west-1.amazonaws.com".to_owned(),
+                "uploads.s3.eu-west-1.amazonaws.com".to_owned()
+            )
+        );
+        // Empty region with a derived endpoint fails (`ValueError`,
+        // probe D); garbage regions fail everywhere (`InvalidRegionError`).
+        let mut empty = test_storage();
+        empty.use_minio = false;
+        empty.region = String::new();
+        assert_eq!(
+            endpoint_parts(&empty, "http", "h:9", true),
+            Err(InvalidEndpoint)
+        );
+        let mut garbage = test_storage();
+        garbage.region = "!!".to_owned();
+        assert_eq!(
+            endpoint_parts(&garbage, "http", "h:9", true),
+            Err(InvalidEndpoint)
+        );
+        // Empty region against a custom endpoint still signs (probe F).
+        empty.endpoint_url = Some("http://127.0.0.1:9000".to_owned());
+        assert_eq!(
+            endpoint_parts(&empty, "http", "h:9", true).expect("custom"),
+            (
+                "http://127.0.0.1:9000".to_owned(),
+                "127.0.0.1:9000".to_owned()
             )
         );
     }
@@ -1383,7 +1464,8 @@ mod tests {
             "image/png",
             10,
             &test_now(),
-        );
+        )
+        .expect("minio signs");
         let fields = post["fields"].as_object().expect("fields object");
         let keys: Vec<&str> = fields.keys().map(String::as_str).collect();
         assert_eq!(
@@ -1452,7 +1534,8 @@ mod tests {
             "127.0.0.1:8486",
             "ws-id/ab12-shot.png",
             &test_now(),
-        );
+        )
+        .expect("minio signs");
         assert!(
             url.starts_with("http://127.0.0.1:8486/uploads/ws-id/ab12-shot.png?"),
             "{url}"

@@ -1056,7 +1056,7 @@ pub(crate) async fn handle_post(
         return server_error("missing Host");
     };
     let storage = &state.settings().storage;
-    let upload_data = presigned_post(
+    let upload_data = match presigned_post(
         storage,
         &scheme_of(&headers),
         &host,
@@ -1065,7 +1065,10 @@ pub(crate) async fn handle_post(
         size_limit,
         &now,
         is_server,
-    );
+    ) {
+        Ok(data) => data,
+        Err(error) => return server_error(error),
+    };
     json_body(
         StatusCode::OK,
         serde_json::json!({
@@ -1280,21 +1283,44 @@ fn credential_scope(date: &str, region: &str) -> String {
     format!("{date}/{region}/s3/aws4_request")
 }
 
+/// `S3Storage.__init__` failure (`ValueError: Invalid endpoint: ...` /
+/// `InvalidRegionError`): the region cannot be signed — not a valid
+/// host label, or empty with no endpoint URL to derive from. Python
+/// raises from the constructor, so every use site propagates it to the
+/// 500 fallback (`handle_exception`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InvalidEndpoint;
+
+impl std::fmt::Display for InvalidEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("s3 region cannot be signed against the derived endpoint")
+    }
+}
+
+impl std::error::Error for InvalidEndpoint {}
+
 /// Endpoint for signing, mirroring `S3Storage.__init__` with a request:
 /// MinIO user mode signs `{scheme}://{Host}`; MinIO server mode
 /// (`is_server=True`) signs the configured endpoint URL; an explicit
 /// endpoint URL signs against it; otherwise the virtual-hosted AWS
 /// default. Credentials never differ — only the endpoint does.
+/// Presigned URLs resolve the global endpoint for every region
+/// (`use_global_endpoint`, `botocore/signers.py:859`); header auth
+/// keeps the regional host.
 fn endpoint_parts(
     storage: &pidash_db::config::StorageSettings,
     scheme: &str,
     host: &str,
     is_server: bool,
-) -> (String, String) {
+    presign: bool,
+) -> Result<(String, String), InvalidEndpoint> {
+    if !pidash_db::config::is_valid_region_name(&storage.region) {
+        return Err(InvalidEndpoint);
+    }
     // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
     let scheme = storage.endpoint_protocol(scheme);
     if storage.use_minio && !is_server {
-        (format!("{scheme}://{host}"), host.to_owned())
+        Ok((format!("{scheme}://{host}"), host.to_owned()))
     } else if let Some(endpoint) = storage.endpoint_url.as_deref().filter(|e| !e.is_empty()) {
         let endpoint = endpoint.trim_end_matches('/');
         let signed_host = endpoint
@@ -1304,21 +1330,26 @@ fn endpoint_parts(
             .split('/')
             .next()
             .unwrap_or(endpoint);
-        (endpoint.to_owned(), signed_host.to_owned())
+        Ok((endpoint.to_owned(), signed_host.to_owned()))
     } else {
         let region = storage.region.as_str();
+        if region.is_empty() {
+            // botocore derives `https://s3..amazonaws.com` and rejects
+            // it (`ValueError: Invalid endpoint`).
+            return Err(InvalidEndpoint);
+        }
         // botocore's s3 endpoint table serves us-east-1 from the global
-        // endpoint (`s3.amazonaws.com`, no region infix); every other
-        // region is virtual-hosted regional.
-        let base = if region.is_empty() || region == "us-east-1" {
+        // endpoint (`s3.amazonaws.com`, no region infix); presigned
+        // URLs use it for every region, header auth stays regional.
+        let base = if presign || region == "us-east-1" {
             "s3.amazonaws.com".to_owned()
         } else {
             format!("s3.{region}.amazonaws.com")
         };
-        (
+        Ok((
             format!("https://{}.{}", storage.bucket_name, base),
             format!("{}.{}", storage.bucket_name, base),
-        )
+        ))
     }
 }
 
@@ -1337,9 +1368,9 @@ fn presigned_post(
     file_size: i64,
     now: &DateTime<Utc>,
     is_server: bool,
-) -> Value {
+) -> Result<Value, InvalidEndpoint> {
     let region = storage.region.as_str();
-    let (endpoint, _) = endpoint_parts(storage, scheme, host, is_server);
+    let (endpoint, _) = endpoint_parts(storage, scheme, host, is_server, true)?;
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date = now.format("%Y%m%d").to_string();
     let scope = credential_scope(&date, region);
@@ -1396,7 +1427,7 @@ fn presigned_post(
     fields.insert("x-amz-date".to_owned(), Value::String(amz_date));
     fields.insert("policy".to_owned(), Value::String(policy_b64));
     fields.insert("x-amz-signature".to_owned(), Value::String(signature));
-    serde_json::json!({"url": url, "fields": fields})
+    Ok(serde_json::json!({"url": url, "fields": fields}))
 }
 
 /// CPython `json.dumps` string encoding (`ensure_ascii`): `"` and
@@ -1506,7 +1537,7 @@ mod tests {
         let mut ssl = test_storage();
         ssl.minio_endpoint_ssl = true;
         assert_eq!(
-            endpoint_parts(&ssl, "http", "h:9", false),
+            endpoint_parts(&ssl, "http", "h:9", false, true).expect("minio"),
             ("https://h:9".to_owned(), "h:9".to_owned())
         );
         // us-east-1 resolves to the global endpoint (botocore probe A/L).
@@ -1514,11 +1545,60 @@ mod tests {
         aws.use_minio = false;
         aws.endpoint_url = None;
         assert_eq!(
-            endpoint_parts(&aws, "http", "h:9", false),
+            endpoint_parts(&aws, "http", "h:9", false, true).expect("aws"),
             (
                 "https://uploads.s3.amazonaws.com".to_owned(),
                 "uploads.s3.amazonaws.com".to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn endpoint_parts_presign_global_and_invalid_region() {
+        // Presigned URLs resolve the global endpoint for every region
+        // (`use_global_endpoint`, botocore probe J); header auth keeps
+        // the regional host (probe J HEAD).
+        let mut regional = test_storage();
+        regional.use_minio = false;
+        regional.endpoint_url = None;
+        regional.region = "eu-west-1".to_owned();
+        assert_eq!(
+            endpoint_parts(&regional, "http", "h:9", false, true).expect("presign"),
+            (
+                "https://uploads.s3.amazonaws.com".to_owned(),
+                "uploads.s3.amazonaws.com".to_owned()
+            )
+        );
+        assert_eq!(
+            endpoint_parts(&regional, "http", "h:9", false, false).expect("header auth"),
+            (
+                "https://uploads.s3.eu-west-1.amazonaws.com".to_owned(),
+                "uploads.s3.eu-west-1.amazonaws.com".to_owned()
+            )
+        );
+        // Empty region with a derived endpoint fails (`ValueError`,
+        // probe D); garbage regions fail everywhere
+        // (`InvalidRegionError`).
+        let mut empty = test_storage();
+        empty.use_minio = false;
+        empty.endpoint_url = None;
+        empty.region = String::new();
+        assert_eq!(
+            endpoint_parts(&empty, "http", "h:9", false, true),
+            Err(InvalidEndpoint)
+        );
+        // Server mode without a configured endpoint derives too, so it
+        // fails the same way.
+        empty.use_minio = true;
+        assert_eq!(
+            endpoint_parts(&empty, "http", "h:9", true, true),
+            Err(InvalidEndpoint)
+        );
+        let mut garbage = test_storage();
+        garbage.region = "!!".to_owned();
+        assert_eq!(
+            endpoint_parts(&garbage, "http", "h:9", false, true),
+            Err(InvalidEndpoint)
         );
     }
 
@@ -1777,7 +1857,8 @@ mod tests {
             100,
             &now,
             false,
-        );
+        )
+        .expect("minio signs");
         let second = presigned_post(
             &storage,
             "http",
@@ -1787,7 +1868,8 @@ mod tests {
             100,
             &now,
             false,
-        );
+        )
+        .expect("minio signs");
         assert_eq!(first, second);
         assert_eq!(
             first["url"],
@@ -1818,8 +1900,10 @@ mod tests {
     fn server_mode_signs_endpoint_url() {
         let storage = test_storage();
         let now = test_now();
-        let (user_endpoint, _) = endpoint_parts(&storage, "http", "example.test", false);
-        let (server_endpoint, _) = endpoint_parts(&storage, "http", "example.test", true);
+        let (user_endpoint, _) =
+            endpoint_parts(&storage, "http", "example.test", false, true).expect("user");
+        let (server_endpoint, _) =
+            endpoint_parts(&storage, "http", "example.test", true, true).expect("server");
         assert_eq!(user_endpoint, "http://example.test");
         assert_eq!(server_endpoint, "https://minio.internal:9000");
         let user_post = presigned_post(
@@ -1831,7 +1915,8 @@ mod tests {
             100,
             &now,
             false,
-        );
+        )
+        .expect("user signs");
         let server_post = presigned_post(
             &storage,
             "http",
@@ -1841,7 +1926,8 @@ mod tests {
             100,
             &now,
             true,
-        );
+        )
+        .expect("server signs");
         assert_eq!(
             user_post["url"],
             serde_json::json!("http://example.test/uploads")

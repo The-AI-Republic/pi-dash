@@ -1458,7 +1458,7 @@ pub async fn download_and_upload_avatar(
     }
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date_stamp = now.format("%Y%m%d").to_string();
-    let signed = pidash_storage::sign_put(
+    let Ok(signed) = pidash_storage::sign_put(
         storage,
         scheme,
         host,
@@ -1467,7 +1467,10 @@ pub async fn download_and_upload_avatar(
         &content,
         &amz_date,
         &date_stamp,
-    );
+    ) else {
+        tracing::warn!("avatar storage endpoint invalid; falling back to provider URL");
+        return None;
+    };
     let put = match client
         .put(signed.url)
         .header("Authorization", signed.authorization)
@@ -1528,8 +1531,11 @@ pub async fn head_storage_metadata(
 ) -> Option<serde_json::Value> {
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date_stamp = now.format("%Y%m%d").to_string();
-    let signed =
-        pidash_storage::sign_head(storage, scheme, host, object_key, &amz_date, &date_stamp);
+    let Ok(signed) =
+        pidash_storage::sign_head(storage, scheme, host, object_key, &amz_date, &date_stamp)
+    else {
+        return None;
+    };
     let head = client
         .head(signed.url)
         .header("Authorization", signed.authorization)
@@ -1658,7 +1664,12 @@ pub async fn delete_old_avatar(
     }
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date_stamp = now.format("%Y%m%d").to_string();
-    let signed = pidash_storage::sign_delete(storage, scheme, host, &key, &amz_date, &date_stamp);
+    let Ok(signed) =
+        pidash_storage::sign_delete(storage, scheme, host, &key, &amz_date, &date_stamp)
+    else {
+        tracing::warn!("delete_old_avatar storage endpoint invalid; keeping old avatar");
+        return;
+    };
     match client
         .delete(signed.url)
         .header("Authorization", signed.authorization)

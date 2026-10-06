@@ -28,9 +28,9 @@ pub use registry::{
     global, try_init_global, ConfigEntry, ConfigRegistry, ConfigSource, ENV_KEYS_OVERRIDE_VAR,
 };
 pub use settings::{
-    AssistantSettings, CloudAgentSettings, DatabaseSettings, LoopSettings, ManagedRunnerSettings,
-    NoOverlay, Profile, RabbitSettings, RedisSettings, ReplicaSettings, RunnerSettings,
-    SessionSettings, Settings, SettingsOverlay, StorageSettings, UrlSettings,
+    is_valid_region_name, AssistantSettings, CloudAgentSettings, DatabaseSettings, LoopSettings,
+    ManagedRunnerSettings, NoOverlay, Profile, RabbitSettings, RedisSettings, ReplicaSettings,
+    RunnerSettings, SessionSettings, Settings, SettingsOverlay, StorageSettings, UrlSettings,
 };
 pub use value::ConfigValue;
 
