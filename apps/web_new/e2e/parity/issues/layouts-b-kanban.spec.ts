@@ -571,6 +571,21 @@ test(
       expect(await driver.kanbanColumnHasQuickAdd(done.name)).toBe(true);
       await driver.kanbanQuickAdd(done.name, title);
       expect(await driver.kanbanColumnCards(done.name)).toContain(title);
+      // The card can render before the create POST lands: wait until the
+      // server lists the row before asserting its fields.
+      await expect
+        .poll(
+          async () => {
+            try {
+              await issueIdByName(seed, seed.projectId, owner.cookie, title);
+              return true;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 60_000 }
+        )
+        .toBe(true);
       const id = await issueIdByName(seed, seed.projectId, owner.cookie, title);
       const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie);
       // The column group wins over the seeded default: the card lands Done.
@@ -698,15 +713,26 @@ test(
     await test.step("dropping above the first card moves it first", async () => {
       await driver.kanbanDragCardBefore(third, first);
       await expect.poll(() => driver.kanbanColumnCards(column), { timeout: 60_000 }).toEqual([third, first, second]);
-      expect(await orderOf(third)).toBeLessThan(beforeFirst);
+      // The UI settles optimistically while the reorder PATCH lands
+      // asynchronously: poll until the persisted order holds (same race as
+      // the 038 column move) instead of reading once.
+      await expect.poll(async () => orderOf(third), { timeout: 60_000 }).toBeLessThan(beforeFirst);
     });
 
     await test.step("dropping between cards takes the midpoint order", async () => {
       await driver.kanbanDragCardBefore(second, first);
       await expect.poll(() => driver.kanbanColumnCards(column), { timeout: 60_000 }).toEqual([third, second, first]);
-      const middle = await orderOf(second);
-      expect(middle).toBeGreaterThan(await orderOf(third));
-      expect(middle).toBeLessThan(await orderOf(first));
+      // Same optimistic-render race as the first drop: poll until the
+      // persisted midpoint order holds instead of reading once.
+      await expect
+        .poll(
+          async () => {
+            const middle = await orderOf(second);
+            return middle > (await orderOf(third)) && middle < (await orderOf(first));
+          },
+          { timeout: 60_000 }
+        )
+        .toBe(true);
     });
 
     await test.step("cleanup restores orders and preferences", async () => {
@@ -758,7 +784,9 @@ test(
     await test.step("the release persists server-side with no visible change", async () => {
       expect(await driver.kanbanColumnCards(column)).toEqual(placed);
       expect(await driver.boardLastToast()).toBeNull();
-      expect(await orderOf(top)).not.toBe(before);
+      // The silent persist races the assertion exactly like a normal
+      // reorder: poll until the server order moves instead of reading once.
+      await expect.poll(async () => orderOf(top), { timeout: 60_000 }).not.toBe(before);
     });
 
     await test.step("cleanup restores orders and preferences", async () => {
@@ -806,7 +834,16 @@ test(
       const sortBefore = (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).sortOrder;
       await driver.kanbanDragCardToColumnEnd(alpha, doneName);
       await expect.poll(() => driver.kanbanColumnCards(doneName), { timeout: 60_000 }).toContain(alpha);
-      expect((await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).stateId).toBe(doneId);
+      // The card renders in the destination column optimistically while the
+      // state PATCH lands asynchronously (the fix2h sweep read Todo here
+      // although the PATCH landed moments later): poll until it persists.
+      await expect
+        .poll(
+          async () =>
+            (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).stateId,
+          { timeout: 60_000 }
+        )
+        .toBe(doneId);
       // Restore both fields: later seed scenarios assume the pristine order.
       await serverPatchIssue(
         seed.workspaceSlug,
@@ -1036,9 +1073,17 @@ test(
     await test.step("dropping across lanes updates both values", async () => {
       await driver.kanbanDragCardBefore(alpha, gamma);
       await expect.poll(() => driver.kanbanCellCards(doneName, label.name), { timeout: 60_000 }).toContain(alpha);
-      const details = await serverIssueDetails(seed.workspaceSlug, projectId, alphaId, owner.cookie);
-      expect(details.stateId).toBe(doneId);
-      expect(details.labelIds).toContain(label.id);
+      // Same optimistic-render race as the 038 column move: the lane shows
+      // the card before the state+labels PATCH lands. Poll until both persist.
+      await expect
+        .poll(
+          async () => {
+            const details = await serverIssueDetails(seed.workspaceSlug, projectId, alphaId, owner.cookie);
+            return details.stateId === doneId && details.labelIds.includes(label.id);
+          },
+          { timeout: 60_000 }
+        )
+        .toBe(true);
     });
 
     await test.step("a non-draggable dimension refuses the move", async () => {
@@ -1141,9 +1186,26 @@ test(
     await test.step("confirming deletes the issue", async () => {
       await driver.kanbanConfirmDelete();
       await expect.poll(() => driver.kanbanCards(), { timeout: 60_000 }).toHaveLength(3);
-      await expect(serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).rejects.toThrow();
-      const rows = await serverIssues(seed.workspaceSlug, seed.projectId, owner.cookie);
-      expect(rows).toHaveLength(3);
+      // The card unmounts optimistically while the DELETE lands
+      // asynchronously: poll until the row is gone instead of reading once.
+      await expect
+        .poll(
+          async () => {
+            try {
+              await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie);
+              return "alive";
+            } catch {
+              return "gone";
+            }
+          },
+          { timeout: 60_000 }
+        )
+        .toBe("gone");
+      await expect
+        .poll(async () => (await serverIssues(seed.workspaceSlug, seed.projectId, owner.cookie)).length, {
+          timeout: 60_000,
+        })
+        .toBe(3);
     });
 
     await test.step("cleanup restores the seed preferences", async () => {
