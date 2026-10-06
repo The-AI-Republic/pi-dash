@@ -6696,212 +6696,12 @@ export async function signInFreshUser(
   return { email, password, userId, cookie, csrfToken, apiBase };
 }
 
-// --- NEWFRONT-118 (layouts B): issue, state, and preference fixtures
-// --- for the kanban/gantt scenarios, plus cycle/module/label attach
-// --- helpers. Appended; existing helpers above are untouched per the
-// --- shared harness contract. Cycle/module/label/state create/delete and
-// --- issue patch reuse the shared helpers (same names); `cycleId`/
-// --- `moduleIds` extend the issue details because the kanban
-// --- cross-column scenarios assert cycle/module moves through them.
-
-/** An issue row the layout scenarios assert or build on. */
-export interface LayoutsIssueDetails {
-  id: string;
-  name: string;
-  stateId: string;
-  priority: string | null;
-  targetDate: string | null;
-  startDate: string | null;
-  assigneeIds: string[];
-  labelIds: string[];
-  parentId: string | null;
-  sequenceId: number;
-  sortOrder: number;
-  cycleId: string | null;
-  moduleIds: string[];
-}
-
-/** Read one issue's server-side row; throws unless it parses. */
-export async function serverIssueDetails(
-  workspaceSlug: string,
-  projectId: string,
-  issueId: string,
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<LayoutsIssueDetails> {
-  const res = await fetchTolerant(
-    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/`,
-    {
-      headers: { cookie: sessionCookie },
-    }
-  );
-  if (!res.ok) throw new Error(`[parity] issue read failed with HTTP ${res.status}.`);
-  const record = (await res.json()) as {
-    id?: unknown;
-    name?: unknown;
-    state_id?: unknown;
-    state?: unknown;
-    priority?: unknown;
-    target_date?: unknown;
-    start_date?: unknown;
-    assignee_ids?: unknown;
-    label_ids?: unknown;
-    parent_id?: unknown;
-    parent?: unknown;
-    sequence_id?: unknown;
-    sort_order?: unknown;
-    cycle_id?: unknown;
-    cycle?: unknown;
-    module_ids?: unknown;
-  };
-  if (typeof record.id !== "string" || typeof record.name !== "string") {
-    throw new Error("[parity] issue row carried no string id and name.");
-  }
-  const stateId = record.state_id ?? record.state;
-  if (typeof stateId !== "string") throw new Error("[parity] issue row carried no state id.");
-  const sequenceId = record.sequence_id;
-  if (typeof sequenceId !== "number") throw new Error("[parity] issue row carried no numeric sequence_id.");
-  const sortOrder = record.sort_order;
-  if (typeof sortOrder !== "number") throw new Error("[parity] issue row carried no numeric sort_order.");
-  const cycleId = record.cycle_id ?? record.cycle;
-  return {
-    id: record.id,
-    name: record.name,
-    stateId,
-    priority: typeof record.priority === "string" ? record.priority : null,
-    targetDate: typeof record.target_date === "string" ? record.target_date : null,
-    startDate: typeof record.start_date === "string" ? record.start_date : null,
-    assigneeIds: Array.isArray(record.assignee_ids)
-      ? record.assignee_ids.filter((v): v is string => typeof v === "string")
-      : [],
-    labelIds: Array.isArray(record.label_ids) ? record.label_ids.filter((v): v is string => typeof v === "string") : [],
-    parentId:
-      typeof record.parent_id === "string"
-        ? record.parent_id
-        : typeof record.parent === "string"
-          ? record.parent
-          : null,
-    sequenceId,
-    sortOrder,
-    cycleId: typeof cycleId === "string" ? cycleId : null,
-    moduleIds: Array.isArray(record.module_ids)
-      ? record.module_ids.filter((v): v is string => typeof v === "string")
-      : [],
-  };
-}
-
-/** A project state row the layout scenarios assert or build on. */
-export interface LayoutsState {
-  id: string;
-  name: string;
-  group: string;
-  isDefault: boolean;
-}
-
-/** Every state of a project, in API order. */
-export async function serverListStates(
-  workspaceSlug: string,
-  projectId: string,
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<LayoutsState[]> {
-  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/states/`, {
-    headers: { cookie: sessionCookie },
-  });
-  if (!res.ok) throw new Error(`[parity] states read failed with HTTP ${res.status}.`);
-  const payload: unknown = await res.json();
-  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
-  return rows.map((row) => {
-    const record = row as { id?: unknown; name?: unknown; group?: unknown; default?: unknown };
-    if (typeof record.id !== "string" || typeof record.name !== "string" || typeof record.group !== "string") {
-      throw new Error("[parity] state row carried no string id, name and group.");
-    }
-    return { id: record.id, name: record.name, group: record.group, isDefault: record.default === true };
-  });
-}
-
-/** Per-user layout preferences the server stores for one entity. */
-export interface LayoutsUserProperties {
-  displayFilters: Record<string, unknown>;
-  displayProperties: Record<string, unknown>;
-}
-
-/** Read the caller's project-level layout preferences. */
-export async function serverProjectUserProperties(
-  workspaceSlug: string,
-  projectId: string,
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<LayoutsUserProperties> {
-  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/user-properties/`, {
-    headers: { cookie: sessionCookie },
-  });
-  if (!res.ok) throw new Error(`[parity] user-properties read failed with HTTP ${res.status}.`);
-  const record = (await res.json()) as { display_filters?: unknown; display_properties?: unknown };
-  const displayFilters = record.display_filters;
-  const displayProperties = record.display_properties;
-  if (typeof displayFilters !== "object" || displayFilters === null) {
-    throw new Error("[parity] user-properties carried no display_filters object.");
-  }
-  if (typeof displayProperties !== "object" || displayProperties === null) {
-    throw new Error("[parity] user-properties carried no display_properties object.");
-  }
-  return {
-    displayFilters: displayFilters as Record<string, unknown>,
-    displayProperties: displayProperties as Record<string, unknown>,
-  };
-}
-
-/**
- * Write the caller's project-level layout preferences (scenario setup and
- * teardown). Pass the full objects: the endpoint merges them over the
- * stored row.
- */
-export async function serverPatchProjectUserProperties(
-  workspaceSlug: string,
-  projectId: string,
-  sessionCookie: string,
-  patch: { display_filters?: Record<string, unknown>; display_properties?: Record<string, unknown> },
-  apiBase: string = apiBaseFromEnv()
-): Promise<void> {
-  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/user-properties/`, {
-    method: "PATCH",
-    headers: { cookie: sessionCookie, "content-type": "application/json" },
-    body: JSON.stringify(patch),
-  });
-  if (!res.ok) throw new Error(`[parity] user-properties patch failed with HTTP ${res.status}.`);
-}
-
-/** Seed-equivalent project preferences; scenarios restore these when done. */
-export function seedProjectUserProperties(): {
-  display_filters: Record<string, unknown>;
-  display_properties: Record<string, unknown>;
-} {
-  return {
-    display_filters: { layout: "list", group_by: null, order_by: "sort_order" },
-    display_properties: {},
-  };
-}
-
-/** Attach issues to a cycle; throws unless the server accepts. */
-export async function serverAddIssuesToCycle(
-  workspaceSlug: string,
-  projectId: string,
-  cycleId: string,
-  issueIds: string[],
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<void> {
-  const res = await fetchTolerant(
-    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/cycle-issues/`,
-    {
-      method: "POST",
-      headers: { cookie: sessionCookie, "content-type": "application/json" },
-      body: JSON.stringify({ issues: issueIds }),
-    }
-  );
-  if (!res.ok) throw new Error(`[parity] cycle-issues add failed with HTTP ${res.status}.`);
-}
+// --- NEWFRONT-118 (layouts B): kanban/gantt-only API helpers
+// --- (cycle-member removal, label deletion). Shared issue/state/
+// --- preference fixtures live in the NEWFRONT-117 block below (same
+// --- names, adopted, never forked); `cycleId`/`moduleIds` extend the
+// --- shared issue details because the kanban cross-column scenarios
+// --- assert cycle/module moves through them.
 
 /**
  * Remove one issue from a cycle; throws unless the server accepts.
@@ -6922,26 +6722,6 @@ export async function serverRemoveIssueFromCycle(
     { method: "DELETE", headers: { cookie: sessionCookie } }
   );
   if (!res.ok) throw new Error(`[parity] cycle-issues remove failed with HTTP ${res.status}.`);
-}
-
-/** Attach issues to a module; throws unless the server accepts. */
-export async function serverAddIssuesToModule(
-  workspaceSlug: string,
-  projectId: string,
-  moduleId: string,
-  issueIds: string[],
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<void> {
-  const res = await fetchTolerant(
-    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/module-issues/`,
-    {
-      method: "POST",
-      headers: { cookie: sessionCookie, "content-type": "application/json" },
-      body: JSON.stringify({ issues: issueIds }),
-    }
-  );
-  if (!res.ok) throw new Error(`[parity] module-issues add failed with HTTP ${res.status}.`);
 }
 
 /** Delete a project label; throws unless the server accepts. */
@@ -7422,6 +7202,10 @@ export interface LayoutsIssueDetails {
   parentId: string | null;
   sequenceId: number;
   sortOrder: number;
+  // NEWFRONT-118: kanban cross-column scenarios assert cycle/module moves
+  // through these; layouts-A readers ignore them.
+  cycleId: string | null;
+  moduleIds: string[];
 }
 
 /** One issue row as the server reports it. */
@@ -7453,6 +7237,9 @@ export async function serverIssueDetails(
     parent?: unknown;
     sequence_id?: unknown;
     sort_order?: unknown;
+    cycle_id?: unknown;
+    cycle?: unknown;
+    module_ids?: unknown;
   };
   if (typeof record.id !== "string" || typeof record.name !== "string") {
     throw new Error("[parity] issue row carried no string id and name.");
@@ -7463,6 +7250,7 @@ export async function serverIssueDetails(
   if (typeof sequenceId !== "number") throw new Error("[parity] issue row carried no numeric sequence_id.");
   const sortOrder = record.sort_order;
   if (typeof sortOrder !== "number") throw new Error("[parity] issue row carried no numeric sort_order.");
+  const cycleId = record.cycle_id ?? record.cycle;
   return {
     id: record.id,
     name: record.name,
@@ -7482,6 +7270,10 @@ export async function serverIssueDetails(
           : null,
     sequenceId,
     sortOrder,
+    cycleId: typeof cycleId === "string" ? cycleId : null,
+    moduleIds: Array.isArray(record.module_ids)
+      ? record.module_ids.filter((v): v is string => typeof v === "string")
+      : [],
   };
 }
 
