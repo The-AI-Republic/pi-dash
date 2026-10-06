@@ -7595,7 +7595,18 @@ async fn draft_to_issue(
     let actor_text = user_id.to_string();
     let issue_text = row.id.to_string();
     let project_text = draft_project.to_string();
-    let requested = python_dumps(&input.value);
+    // Task bytes render the raw QueryDict (PIDASHCONV-763): form list
+    // fields dump as last-wins scalars. A projected COPY — `input`
+    // still feeds the cycle/module branches below.
+    let requested = if input.is_html {
+        let mut projected = input.value.clone();
+        if let Value::Object(map) = &mut projected {
+            shared_body::project_list_scalars(map, BODY_SPEC.list_fields);
+        }
+        python_dumps(&projected)
+    } else {
+        python_dumps(&input.value)
+    };
     enqueue_activity_emit(
         &pool,
         &wtask::draft_issue_created_activity(
@@ -8166,5 +8177,32 @@ mod tests {
             python_dumps(&Value::Object(map)),
             "{\"negzero\": 0, \"zero\": 0}"
         );
+    }
+
+    #[test]
+    fn form_arrays_dump_as_querydict_scalars() {
+        // Task payloads render the raw QueryDict (PIDASHCONV-763): the
+        // draft-create dump projects form `assignee_ids` / `label_ids`
+        // arrays to last-wins scalars; validation keeps the arrays.
+        let raw = b"title=t&assignee_ids=a&assignee_ids=b&label_ids=x";
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        headers.insert("content-length", raw.len().to_string().parse().unwrap());
+        let input = match negotiate_input(&headers, raw) {
+            Ok(input) => input,
+            Err(_) => panic!("parses"),
+        };
+        assert!(input.is_html);
+        assert_eq!(input.value["assignee_ids"], serde_json::json!(["a", "b"]));
+        let mut projected = input.value.clone();
+        let Value::Object(map) = &mut projected else {
+            panic!("object");
+        };
+        shared_body::project_list_scalars(map, BODY_SPEC.list_fields);
+        assert_eq!(projected["assignee_ids"], serde_json::json!("b"));
+        assert_eq!(projected["label_ids"], serde_json::json!("x"));
     }
 }

@@ -5011,7 +5011,10 @@ async fn comment_create(
         Ok(request_body) => request_body,
         Err(error) => return error.into_response(),
     };
-    let RequestBody { map: body, is_html } = request_body;
+    let RequestBody {
+        map: mut body,
+        is_html,
+    } = request_body;
     let attrs = match validate_comment_input(&pool, &body, is_html).await {
         Ok(attrs) => attrs,
         Err(error) => return error.into_response(),
@@ -5136,6 +5139,12 @@ async fn comment_create(
         Value::String("issue_comment".to_owned()),
     );
     model.insert("model_id".to_owned(), Value::String(base.id.to_string()));
+    // Task bytes render the raw QueryDict (PIDASHCONV-763): form list
+    // fields dump as last-wins scalars. In place — validation is done
+    // and `body` moves into the payload below.
+    if is_html {
+        shared_body::project_list_scalars(&mut body, ENGAGE_BODY_SPEC.list_fields);
+    }
     model.insert("requested_data".to_owned(), Value::Object(body));
     model.insert("current_instance".to_owned(), Value::Null);
     model.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
@@ -5366,8 +5375,20 @@ async fn comment_partial_update(
         Ok(request_body) => request_body,
         Err(error) => return error.into_response(),
     };
-    let RequestBody { map: body, is_html } = request_body;
-    let requested_data = python_dumps(&Value::Object(body.clone()));
+    let RequestBody {
+        map: mut body,
+        is_html,
+    } = request_body;
+    // Task bytes render the raw QueryDict (PIDASHCONV-763): form list
+    // fields dump as last-wins scalars. A projected COPY — validation
+    // below keeps the arrays.
+    let requested_data = if is_html {
+        let mut projected = body.clone();
+        shared_body::project_list_scalars(&mut projected, ENGAGE_BODY_SPEC.list_fields);
+        python_dumps(&Value::Object(projected))
+    } else {
+        python_dumps(&Value::Object(body.clone()))
+    };
     let current_rendered = match render_base_comment(&pool, &stored, &tenant.timezone, None).await {
         Ok(value) => value,
         Err(error) => return error.into_response(),
@@ -5473,6 +5494,11 @@ async fn comment_partial_update(
         Value::String("issue_comment".to_owned()),
     );
     model.insert("model_id".to_owned(), Value::String(pk.to_string()));
+    // Same QueryDict projection as `requested_data` above (PIDASHCONV-763).
+    // In place — validation is done and `body` moves below.
+    if is_html {
+        shared_body::project_list_scalars(&mut body, ENGAGE_BODY_SPEC.list_fields);
+    }
     model.insert("requested_data".to_owned(), Value::Object(body));
     model.insert(
         "current_instance".to_owned(),
@@ -5779,11 +5805,13 @@ async fn comment_reaction_create(
         Ok(request_body) => request_body,
         Err(error) => return error.into_response(),
     };
-    let RequestBody { map: body, is_html } = request_body;
+    let RequestBody {
+        map: mut body,
+        is_html,
+    } = request_body;
     let mut errors = Map::new();
-    // Text-only validation: `is_html` is irrelevant (no choice, FK or
-    // file-sensitive field reads it here).
-    let _ = is_html;
+    // Text-only validation takes no `is_html` (no choice, FK or
+    // file-sensitive field); the flag still selects the task-bytes shape.
     let reaction = require_text(&mut errors, &body, "reaction", false);
     if !errors.is_empty() {
         return Denial::BadJson(Value::Object(errors)).into_response();
@@ -5839,6 +5867,12 @@ async fn comment_reaction_create(
         "type".to_owned(),
         Value::String("comment_reaction.activity.created".to_owned()),
     );
+    // Task bytes render the raw QueryDict (PIDASHCONV-763): form list
+    // fields dump as last-wins scalars. In place — validation is done
+    // and `body` moves into the dump below.
+    if is_html {
+        shared_body::project_list_scalars(&mut body, ENGAGE_BODY_SPEC.list_fields);
+    }
     activity.insert(
         "requested_data".to_owned(),
         Value::String(python_dumps(&Value::Object(body))),
@@ -6063,7 +6097,10 @@ async fn issue_reaction_create(
         Ok(request_body) => request_body,
         Err(error) => return error.into_response(),
     };
-    let RequestBody { map: body, is_html } = request_body;
+    let RequestBody {
+        map: mut body,
+        is_html,
+    } = request_body;
     let mut errors = Map::new();
     let reaction = require_text(&mut errors, &body, "reaction", false);
     // Writable-but-ignored audit FKs: garbage UUIDs are per-field
@@ -6144,6 +6181,12 @@ async fn issue_reaction_create(
         "type".to_owned(),
         Value::String("issue_reaction.activity.created".to_owned()),
     );
+    // Task bytes render the raw QueryDict (PIDASHCONV-763): form list
+    // fields dump as last-wins scalars. In place — validation is done
+    // and `body` moves into the dump below.
+    if is_html {
+        shared_body::project_list_scalars(&mut body, ENGAGE_BODY_SPEC.list_fields);
+    }
     activity.insert(
         "requested_data".to_owned(),
         Value::String(python_dumps(&Value::Object(body))),
@@ -7826,6 +7869,29 @@ mod tests {
             ),
             other => panic!("expected invalid JSON error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn form_arrays_dump_as_querydict_scalars() {
+        // Task payloads render the raw QueryDict (PIDASHCONV-763): the
+        // engage comment/reaction dumps project form `attachments` /
+        // `labels` arrays to last-wins scalars; validation keeps arrays.
+        let raw = b"reaction=hooray&labels=a&labels=b&attachments=f1&attachments=f2";
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("http://test/x")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("content-length", raw.len().to_string())
+            .body(axum::body::Body::from(raw.to_vec()))
+            .expect("request");
+        let RequestBody { mut map, is_html } = read_body(req).await.expect("parses");
+        assert!(is_html);
+        assert_eq!(map["labels"], json!(["a", "b"]));
+        assert_eq!(map["attachments"], json!(["f1", "f2"]));
+        shared_body::project_list_scalars(&mut map, ENGAGE_BODY_SPEC.list_fields);
+        assert_eq!(map["labels"], json!("b"));
+        assert_eq!(map["attachments"], json!("f2"));
+        assert_eq!(map["reaction"], json!("hooray"));
     }
 }
 

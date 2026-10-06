@@ -2015,6 +2015,36 @@ fn parse_write_body(headers: &HeaderMap, body: &[u8]) -> Result<WriteBody, Denia
     }
 }
 
+/// The activity `requested_data` text for a parsed write body
+/// (PIDASHCONV-763): form bodies dump list fields as `QueryDict`
+/// last-wins scalars, while validation keeps the `getlist` arrays. JSON
+/// bodies dump as-is (arrays are real data there) without a copy.
+fn requested_data_text(parsed: &WriteBody) -> String {
+    if parsed.from_form {
+        let mut projected = parsed.value.clone();
+        if let Value::Object(map) = &mut projected {
+            crate::v1_cycles_modules::body::project_list_scalars(map, WRITE_BODY_SPEC.list_fields);
+        }
+        pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&projected)
+    } else {
+        pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&parsed.value)
+    }
+}
+
+/// The `model_activity` `requested_data` object for a parsed write body:
+/// the same scalar-last projection as [`requested_data_text`], as a value.
+fn requested_data_value(parsed: &WriteBody) -> Value {
+    if parsed.from_form {
+        let mut projected = parsed.value.clone();
+        if let Value::Object(map) = &mut projected {
+            crate::v1_cycles_modules::body::project_list_scalars(map, WRITE_BODY_SPEC.list_fields);
+        }
+        projected
+    } else {
+        parsed.value.clone()
+    }
+}
+
 /// The non-object body for the link PATCH path: DRF answers the same
 /// `non_field_errors` shape as the create serializer, so reuse its exact
 /// bytes (null → `No data provided`, else the JSON type name).
@@ -2876,7 +2906,7 @@ async fn link_patch_inner(
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
     let parsed = parse_write_body(headers, raw_body)?;
-    let requested = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&parsed.value);
+    let requested = requested_data_text(&parsed);
     let before_decoded = decode_link(&before, &tz)?;
     let current = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&render_link_value(
         &before_decoded,
@@ -3649,7 +3679,7 @@ async fn comment_post_inner(
     let origin = app_origin(&state.settings().urls)?;
     let webhook = work_tasks::comment_model_activity_kwargs(
         &comment_id.to_string(),
-        parsed.value.clone(),
+        requested_data_value(&parsed),
         None,
         &pre.actor.id.to_string(),
         slug,
@@ -3849,7 +3879,7 @@ async fn comment_patch_inner(
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
     let parsed = parse_write_body(headers, raw_body)?;
-    let requested = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&parsed.value);
+    let requested = requested_data_text(&parsed);
     // The before-image renders the direct (un-annotated) row with its real
     // `get_url`: no `is_member` key.
     let before_decoded = decode_comment(&before, &tz)?;
@@ -4042,7 +4072,7 @@ async fn comment_patch_inner(
     let origin = app_origin(&state.settings().urls)?;
     let webhook = work_tasks::comment_model_activity_kwargs(
         &pk.to_string(),
-        parsed.value.clone(),
+        requested_data_value(&parsed),
         Some(&current),
         &pre.actor.id.to_string(),
         slug,
@@ -5459,6 +5489,48 @@ mod tests {
         assert_eq!(
             dumped,
             r#"{"url": "https://example.com/x", "title": "hello"}"#
+        );
+    }
+
+    #[test]
+    fn form_list_fields_dump_as_querydict_scalars() {
+        // Task payloads render the raw QueryDict (PIDASHCONV-763):
+        // form list fields dump as last-wins scalars, while the parsed
+        // map keeps the arrays for validation. JSON dumps untouched.
+        let parse = |ct: &str, raw: &[u8]| {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", ct.parse().unwrap());
+            headers.insert("content-length", raw.len().to_string().parse().unwrap());
+            parse_write_body(&headers, raw).expect("parses")
+        };
+        let ct = "application/x-www-form-urlencoded";
+        // Repeats collapse to the last scalar; validation keeps the array.
+        let parsed = parse(ct, b"labels=a&labels=b");
+        assert!(parsed.from_form);
+        assert_eq!(parsed.value["labels"], serde_json::json!(["a", "b"]));
+        assert_eq!(requested_data_text(&parsed), r#"{"labels": "b"}"#);
+        assert_eq!(
+            requested_data_value(&parsed),
+            serde_json::json!({"labels": "b"})
+        );
+        // A single value is a scalar too, not a one-item array.
+        let parsed = parse(ct, b"labels=x");
+        assert_eq!(requested_data_text(&parsed), r#"{"labels": "x"}"#);
+        // Other keys pass through (order-agnostic: key order itself is
+        // PIDASHCONV-757's property, pinned by that issue's own tests).
+        let parsed = parse(ct, b"url=u&labels=a&labels=b");
+        let dumped: Value = serde_json::from_str(&requested_data_text(&parsed)).expect("json");
+        assert_eq!(dumped, serde_json::json!({"url": "u", "labels": "b"}));
+        // JSON bodies dump untouched — arrays are real data there.
+        let parsed = parse("application/json", br#"{"labels": ["a", "b"], "url": "u"}"#);
+        assert!(!parsed.from_form);
+        assert_eq!(
+            requested_data_text(&parsed),
+            r#"{"labels": ["a", "b"], "url": "u"}"#
+        );
+        assert_eq!(
+            requested_data_value(&parsed),
+            serde_json::json!({"labels": ["a", "b"], "url": "u"})
         );
     }
 }

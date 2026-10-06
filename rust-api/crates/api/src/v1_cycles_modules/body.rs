@@ -324,6 +324,46 @@ fn build_form_body(mut form: FormBody, spec: &BodySpec) -> NegotiatedBody {
     }
 }
 
+/// Project a negotiated form map to the `QueryDict` scalar-last shape for
+/// task payloads (PIDASHCONV-763).
+///
+/// Django's task bytes render the RAW `request.data`: `json.dumps` over a
+/// `QueryDict` sees last-value-wins scalars — `labels=a&labels=b` dumps as
+/// `{"labels": "b"}`, and even a single `labels=x` dumps as the scalar
+/// `{"labels": "x"}` (probed live). The negotiated `map` instead carries
+/// DRF `getlist` arrays under `list_fields`, which validation needs.
+/// Callers that dump the raw map into a task payload (`requested_data` /
+/// `model_activity` kwargs) run the DUMPED copy through this helper when
+/// the body came from a form; validation inputs keep the arrays.
+///
+/// Only `Array` values under `list_fields` change (the last element wins,
+/// replaced in place so key order is preserved). Anything else under a
+/// list field is left alone — form parsing never emits it, and JSON
+/// callers must not pass their maps here at all (JSON arrays are real
+/// data on both sides). An empty array drops the key: that is the
+/// files-only edge, where Django dies serializing the upload at
+/// `.delay()` time (unpinned — module callers 500 on files before they
+/// dump; social callers ignore uploads).
+pub fn project_list_scalars(map: &mut Map<String, Value>, list_fields: &[&str]) {
+    for field in list_fields {
+        let Some(value) = map.get(*field) else {
+            continue;
+        };
+        let Value::Array(items) = value else {
+            continue;
+        };
+        let last = items.last().cloned();
+        match last {
+            Some(scalar) => {
+                map.insert((*field).to_owned(), scalar);
+            }
+            None => {
+                map.remove(*field);
+            }
+        }
+    }
+}
+
 /// One assembled indexed-list entry, in index order.
 enum IndexedEntry {
     Text(FormValue),
@@ -2404,6 +2444,71 @@ mod codec_tests {
             keys_of("multipart/form-data; boundary=----b", mp, &CYCLE_BODY_SPEC),
             ["zebra", "apple"]
         );
+    }
+
+    #[test]
+    fn form_task_bytes_use_querydict_scalars() {
+        // Task payloads render the raw QueryDict, not the validated map
+        // (PIDASHCONV-763): list-field arrays project to last-wins
+        // scalars, in place, before the dump. Validation keeps the
+        // arrays — only the dumped copy is projected.
+        let spec = BodySpec {
+            list_fields: &["labels"],
+            skip_blank_fields: &[],
+        };
+        let form = |body: &[u8]| match negotiate("application/x-www-form-urlencoded", body, &spec)
+            .unwrap()
+        {
+            NegotiatedBody::Form { map, .. } => map,
+            other => panic!("expected form, got {other:?}"),
+        };
+        // Repeats collapse to the last value; whatever key order the
+        // map arrived in is preserved (order itself is PIDASHCONV-757's
+        // property, not this helper's).
+        let mut map = form(b"url=u&labels=a&labels=b");
+        assert_eq!(
+            map["labels"],
+            Value::Array(vec![
+                Value::String("a".to_owned()),
+                Value::String("b".to_owned())
+            ])
+        );
+        let before = map.keys().cloned().collect::<Vec<_>>();
+        project_list_scalars(&mut map, spec.list_fields);
+        assert_eq!(map.keys().cloned().collect::<Vec<_>>(), before);
+        assert_eq!(map["labels"], Value::String("b".to_owned()));
+        // A single value is a scalar too, not a one-item array.
+        let mut map = form(b"labels=x");
+        project_list_scalars(&mut map, spec.list_fields);
+        assert_eq!(map["labels"], Value::String("x".to_owned()));
+        // Non-list keys pass through untouched.
+        let mut map = form(b"name=a&name=b");
+        project_list_scalars(&mut map, spec.list_fields);
+        assert_eq!(map["name"], Value::String("b".to_owned()));
+        // A non-array under a list field is left alone (JSON callers
+        // must not project at all — arrays are real data there).
+        let mut map = Map::from_iter([("labels".to_owned(), Value::String("kept".to_owned()))]);
+        project_list_scalars(&mut map, spec.list_fields);
+        assert_eq!(map["labels"], Value::String("kept".to_owned()));
+        // The files-only edge (empty array) drops the key.
+        let mut map = Map::from_iter([("labels".to_owned(), Value::Array(vec![]))]);
+        project_list_scalars(&mut map, spec.list_fields);
+        assert!(!map.contains_key("labels"));
+        // The module spec projects `members` the same way.
+        let mut map = match negotiate(
+            "application/x-www-form-urlencoded",
+            b"z=1&members=a&members=b",
+            &MODULE_BODY_SPEC,
+        )
+        .unwrap()
+        {
+            NegotiatedBody::Form { map, .. } => map,
+            other => panic!("expected form, got {other:?}"),
+        };
+        let before = map.keys().cloned().collect::<Vec<_>>();
+        project_list_scalars(&mut map, MODULE_BODY_SPEC.list_fields);
+        assert_eq!(map.keys().cloned().collect::<Vec<_>>(), before);
+        assert_eq!(map["members"], Value::String("b".to_owned()));
     }
 
     #[test]

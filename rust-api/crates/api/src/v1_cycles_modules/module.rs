@@ -3976,7 +3976,7 @@ pub async fn create_module_inner(
     // runs after permissions; an unknown zone 400s only for survivors).
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let project = fetch_project(&pre.pool, &project_id, &workspace_id).await?;
-    let ((raw, files), field_surr, members_dirty, html) = parse_body_ct(headers, body)?;
+    let ((mut raw, files), field_surr, members_dirty, html) = parse_body_ct(headers, body)?;
     let write = coerce_write(
         &pre.pool,
         &raw,
@@ -4133,6 +4133,13 @@ pub async fn create_module_inner(
     if !files.is_empty() {
         return Err(Denial::ServerError);
     }
+    // Task bytes render the raw QueryDict (PIDASHCONV-763): form
+    // `members` arrays project to last-wins scalars. In place — the map
+    // can nest to the request cap and `Map::clone` recurses (626) — after
+    // validation, which keeps the arrays (`raw` moves into the job).
+    if html {
+        super::body::project_list_scalars(&mut raw, super::body::MODULE_BODY_SPEC.list_fields);
+    }
     let job = pidash_jobs::v1_cycles_modules::publish::model_created_job(
         "module",
         &module_id.to_string(),
@@ -4223,7 +4230,7 @@ pub async fn patch_module_inner(
             "Archived module cannot be edited".to_owned(),
         ));
     }
-    let ((raw, files), field_surr, members_dirty, html) = parse_body_ct(headers, body)?;
+    let ((mut raw, files), field_surr, members_dirty, html) = parse_body_ct(headers, body)?;
     let write = coerce_write(
         &pre.pool,
         &raw,
@@ -4367,6 +4374,13 @@ pub async fn patch_module_inner(
     // serialization *after* the update (PIDASHCONV-627).
     if !files.is_empty() {
         return Err(Denial::ServerError);
+    }
+    // Task bytes render the raw QueryDict (PIDASHCONV-763): form
+    // `members` arrays project to last-wins scalars. In place — the map
+    // can nest to the request cap and `Map::clone` recurses (626) — after
+    // validation, which keeps the arrays (`raw` moves into the job).
+    if html {
+        super::body::project_list_scalars(&mut raw, super::body::MODULE_BODY_SPEC.list_fields);
     }
     let job = pidash_jobs::v1_cycles_modules::publish::model_updated_job(
         "module",
@@ -6545,6 +6559,28 @@ mod tests {
             fields_param(&query, "fields"),
             Some(vec!["name".to_owned(), "status".to_owned()])
         );
+    }
+
+    #[test]
+    fn form_members_dump_as_querydict_scalars() {
+        // Task payloads render the raw QueryDict (PIDASHCONV-763): the
+        // module create/patch `model_activity` dumps project form
+        // `members` arrays to last-wins scalars; validation keeps arrays.
+        let raw = b"name=m&members=a&members=b";
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        headers.insert("content-length", raw.len().to_string().parse().unwrap());
+        let ((mut map, _), _, _, html) = parse_body_ct(&headers, raw).expect("parses");
+        assert!(html);
+        assert_eq!(map["members"], serde_json::json!(["a", "b"]));
+        crate::v1_cycles_modules::body::project_list_scalars(
+            &mut map,
+            crate::v1_cycles_modules::body::MODULE_BODY_SPEC.list_fields,
+        );
+        assert_eq!(map["members"], serde_json::json!("b"));
     }
 }
 
