@@ -21,6 +21,16 @@ let projectExecutor = "managed_runner";
 let accessExpired = false;
 let refreshFailure: number | "network" | undefined;
 let deleteFailure: number | "network" | undefined;
+type ListedProject = { identifier: string; created_at: string; is_default?: boolean; archived_at?: string | null };
+// The workspace project list, in the order the server happens to return it.
+let projectList: ListedProject[] = [];
+const ALPHA = { identifier: "ALPHA", created_at: "2026-01-01T00:00:00Z" };
+const BETA = { identifier: "BETA", created_at: "2026-02-01T00:00:00Z" };
+const GAMMA = { identifier: "GAMMA", created_at: "2026-03-01T00:00:00Z" };
+const enrolledProjects = () =>
+  (invoke.mock.calls as unknown as [string, { project?: string }][])
+    .filter(([command]) => command === "managed_enroll")
+    .map(([, args]) => args.project);
 
 beforeEach(async () => {
   vi.resetModules();
@@ -32,6 +42,7 @@ beforeEach(async () => {
   accessExpired = false;
   refreshFailure = undefined;
   deleteFailure = undefined;
+  projectList = [];
   sessionStorage.clear();
   Object.assign(window, { __TAURI__: { core: { invoke } } });
   const { default: axios, AxiosError } = await import("axios");
@@ -74,6 +85,7 @@ beforeEach(async () => {
       };
     else if (path.endsWith("desktop-enroll/"))
       data = { machine_token: "machine-test-token", dev_machine_id: "server-machine-id" };
+    else if (/workspaces\/[^/]+\/projects\/$/.test(path)) data = projectList;
     else if (/projects\/project-\d\/$/.test(path))
       data = {
         identifier: "TEST",
@@ -217,5 +229,77 @@ describe("desktop agent lifecycle", () => {
       executor === "managed_runner"
     );
     expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
+});
+
+describe("local chat enrolment project", () => {
+  it("keeps the project it enrolled when a newer project appears between messages", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    projectList = [BETA, ALPHA];
+    await runtime.ensureChatRuntime("workspace-a");
+    // Someone creates GAMMA; the list now leads with it.
+    projectList = [GAMMA, BETA, ALPHA];
+    await runtime.ensureChatRuntime("workspace-a");
+    await runtime.ensureChatRuntime("workspace-a");
+    expect(new Set(enrolledProjects()).size).toBe(1);
+    expect(calls.filter((call) => call.path.endsWith("workspaces/workspace-a/projects/"))).toHaveLength(1);
+  });
+
+  it("keeps that project across a page reload", async () => {
+    const first = await import("../../core/services/agent-runtime");
+    first.resumeAgentRuntime("user-a");
+    projectList = [BETA, ALPHA];
+    await first.ensureChatRuntime("workspace-a");
+    vi.resetModules();
+    const reloaded = await import("../../core/services/agent-runtime");
+    reloaded.resumeAgentRuntime("user-a");
+    projectList = [GAMMA, BETA, ALPHA];
+    await reloaded.ensureChatRuntime("workspace-a");
+    expect(new Set(enrolledProjects()).size).toBe(1);
+  });
+
+  it.each([
+    ["the oldest project, whatever order the list arrives in", [GAMMA, ALPHA, BETA], "ALPHA"],
+    ["the workspace default project over an older one", [ALPHA, { ...BETA, is_default: true }, GAMMA], "BETA"],
+    [
+      "an active project over an archived one",
+      [{ ...ALPHA, archived_at: "2026-04-01T00:00:00Z" }, GAMMA, BETA],
+      "BETA",
+    ],
+  ] as [string, ListedProject[], string][])("enrols %s", async (_name, listed, expected) => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    projectList = listed;
+    await runtime.ensureChatRuntime("workspace-a");
+    expect(enrolledProjects()).toEqual([expected]);
+  });
+
+  it("reuses the project the user already connected instead of enrolling another", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.connectAgentProject("workspace-a", "project-1");
+    projectList = [GAMMA, BETA, ALPHA];
+    await runtime.ensureChatRuntime("workspace-a");
+    expect(new Set(enrolledProjects())).toEqual(new Set(["TEST"]));
+  });
+
+  it("re-resolves the project after sign-out", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    projectList = [ALPHA];
+    await runtime.ensureChatRuntime("workspace-a");
+    await runtime.disposeAgentRuntime();
+    runtime.resumeAgentRuntime("user-a");
+    projectList = [BETA];
+    await runtime.ensureChatRuntime("workspace-a");
+    expect(enrolledProjects()).toEqual(["ALPHA", "BETA"]);
+  });
+
+  it("still asks for a project when the workspace has none", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await expect(runtime.ensureChatRuntime("workspace-a")).rejects.toThrow("Create a project");
+    expect(enrolledProjects()).toEqual([]);
   });
 });
