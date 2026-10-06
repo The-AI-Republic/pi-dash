@@ -35,6 +35,8 @@ vi.mock("@/hooks/store/use-project", () => ({
     getProjectById: mocks.getProject,
   }),
 }));
+// The sign-out dialog has its own test; here it only needs to mount.
+vi.mock("@/components/desktop-sign-out-dialog", () => ({ DesktopSignOutDialog: () => null }));
 vi.mock("@/services/agent-runtime", () => ({
   connectAgentProject: mocks.connect,
   refreshAgentRuntime: mocks.refresh,
