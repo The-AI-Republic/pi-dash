@@ -16,6 +16,7 @@
 // workspace main so sidebar rows and issue rows never leak in.
 import { expect, type ElementHandle, type Locator, type Page, type Route } from "@playwright/test";
 import type {
+  ApprovalCard,
   ArchivesFilterExpression,
   ArchivesListQuery,
   AddRunnerFormState,
@@ -64,6 +65,7 @@ import type {
   PromptRevertDialog,
   PromptSectionCard,
   RulesCommentMenuOption,
+  RunsListRow,
   SchedulerBindingHeader,
   SchedulerBindingRunRow,
   SchedulerBindingValues,
@@ -25062,5 +25064,578 @@ export class WebDriver implements ParityDriver {
     const dialog = await this.runnersWaitForConfirm("Revoke runner?");
     const revoke = dialog.getByRole("button", { name: "Revoke", exact: true });
     await expect.poll(() => revoke.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  // --- Runs, approvals, run dispatch, re-tick (NEWFRONT-180). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+
+  /** Runs-area route base: workspace aggregate or the project-scoped twin. */
+  private runsBase(workspaceSlug: string, projectId?: string): string {
+    return projectId === undefined ? `/${workspaceSlug}/runners` : `/${workspaceSlug}/projects/${projectId}/runners`;
+  }
+
+  /** The runs-list table: the grid on the page headed Started/Status/Prompt. */
+  private runsTable(): Locator {
+    return this.page.locator("table", {
+      has: this.page.getByRole("columnheader", { name: "Started" }),
+    });
+  }
+
+  /** Run-detail pane state, polled until it leaves `loading`. */
+  private async waitRunsDetailSettled(): Promise<void> {
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const state = await this.runDetailState();
+      if (state !== "loading") return;
+      if (Date.now() > deadline) throw new Error("[parity] run detail never settled.");
+      await this.page.waitForTimeout(1_000);
+    }
+  }
+
+  async openRunsList(workspaceSlug: string, projectId?: string): Promise<void> {
+    await this.page.goto(`${this.runsBase(workspaceSlug, projectId)}/runs`);
+    await this.page.waitForLoadState("domcontentloaded");
+    const deadline = Date.now() + 90_000;
+    for (;;) {
+      if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
+        throw new Error("[parity] session lost while opening the runs list.");
+      }
+      // The header row renders for populated and empty lists alike, so it
+      // gates both; rows or the empty text prove the first fetch landed.
+      if ((await this.runsTable().getByRole("columnheader", { name: "Prompt" }).count()) > 0) {
+        const rows = await this.runsTable().locator("tbody tr").count();
+        if (rows > 0) return;
+      }
+      if (Date.now() > deadline) throw new Error("[parity] runs list never settled.");
+      await this.page.waitForTimeout(2_000);
+    }
+  }
+
+  async openRunsListAtPage(workspaceSlug: string, page: number, projectId?: string): Promise<void> {
+    await this.page.goto(`${this.runsBase(workspaceSlug, projectId)}/runs?page=${page}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    const deadline = Date.now() + 90_000;
+    for (;;) {
+      if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
+        throw new Error("[parity] session lost while opening the runs list.");
+      }
+      if ((await this.runsTable().getByRole("columnheader", { name: "Prompt" }).count()) > 0) {
+        const rows = await this.runsTable().locator("tbody tr").count();
+        if (rows > 0) return;
+      }
+      if (Date.now() > deadline) throw new Error("[parity] runs list never settled.");
+      await this.page.waitForTimeout(2_000);
+    }
+  }
+
+  async runsHistoryLength(): Promise<number> {
+    return await this.page.evaluate(() => window.history.length);
+  }
+
+  async openRunDetail(workspaceSlug: string, runId: string, projectId?: string): Promise<void> {
+    await this.page.goto(`${this.runsBase(workspaceSlug, projectId)}/runs/${runId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.waitRunsDetailSettled();
+  }
+
+  async openApprovals(workspaceSlug: string, projectId?: string): Promise<void> {
+    await this.page.goto(`${this.runsBase(workspaceSlug, projectId)}/approvals`);
+    await this.page.waitForLoadState("domcontentloaded");
+    const deadline = Date.now() + 90_000;
+    for (;;) {
+      if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
+        throw new Error("[parity] session lost while opening the approvals queue.");
+      }
+      if (await this.approvalsEmptyVisible()) return;
+      if ((await this.page.locator("pre").count()) > 0) return;
+      if (Date.now() > deadline) throw new Error("[parity] approvals queue never settled.");
+      await this.page.waitForTimeout(2_000);
+    }
+  }
+
+  async runsRows(): Promise<RunsListRow[]> {
+    const out: RunsListRow[] = [];
+    const rows = this.runsTable().locator("tbody tr");
+    const count = await rows.count();
+    for (let index = 0; index < count; index++) {
+      const row = rows.nth(index);
+      const cells = row.locator(":scope > td");
+      // The empty state is a single colspan cell, not a run row.
+      if ((await cells.count()) < 3) continue;
+      const statusLabel = (
+        (await cells
+          .nth(1)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const prompt = (
+        (await cells
+          .nth(2)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      out.push({ statusLabel, prompt });
+    }
+    return out;
+  }
+
+  async runsPager(): Promise<{ label: string; prevDisabled: boolean; nextDisabled: boolean } | null> {
+    const label = this.page.getByText(/^Page \d+ of \d+$/);
+    if ((await label.count()) === 0) return null;
+    const prev = this.page.getByRole("button", { name: "Previous" });
+    const next = this.page.getByRole("button", { name: "Next" });
+    return {
+      label: ((await label.first().innerText()) ?? "").trim(),
+      prevDisabled: await prev.first().isDisabled(),
+      nextDisabled: await next.first().isDisabled(),
+    };
+  }
+
+  async runsEmptyVisible(): Promise<boolean> {
+    const empty = this.page.getByText("No runs yet.");
+    if ((await empty.count()) === 0) return false;
+    return await empty
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  /** Click a pager control and wait for the page label to turn over. */
+  private async runsTurnPage(name: "Previous" | "Next"): Promise<void> {
+    const before = await this.runsPager();
+    if (before === null) throw new Error("[parity] no pager to turn (empty list).");
+    await this.page.getByRole("button", { name }).first().click({ timeout: WebDriver.OPEN_MS });
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      const now = await this.runsPager();
+      if (now !== null && now.label !== before.label) return;
+      if (Date.now() > deadline) {
+        throw new Error(`[parity] pager never turned past ${JSON.stringify(before.label)}.`);
+      }
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async runsNextPage(): Promise<void> {
+    await this.runsTurnPage("Next");
+  }
+
+  async runsPrevPage(): Promise<void> {
+    await this.runsTurnPage("Previous");
+  }
+
+  async runsSelectRun(promptMarker: string): Promise<void> {
+    const row = this.runsTable().locator("tbody tr", { hasText: promptMarker }).first();
+    await row.click({ timeout: WebDriver.OPEN_MS });
+    await this.waitRunsDetailSettled();
+  }
+
+  async runDetailState(): Promise<"none" | "loading" | "loaded" | "unavailable"> {
+    if ((await this.page.getByText("This run is not available.").count()) > 0) return "unavailable";
+    if ((await this.page.getByText("Loading run details…").count()) > 0) return "loading";
+    // The loaded header renders the run id as a lone UUID in a mono block;
+    // list prompts never take that shape, so the match needs no pane scope.
+    const idDiv = this.page.locator(
+      "xpath=//div[normalize-space(text()) and string-length(normalize-space(text()))=36 and translate(substring(normalize-space(text()),9,1),'ABCDEFabcdef0123456789','')='' and substring(normalize-space(text()),9,1)!='' and contains(normalize-space(text()),'-')]"
+    );
+    if ((await idDiv.count()) > 0) {
+      const text = (
+        (await idDiv
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) return "loaded";
+    }
+    if ((await this.page.getByText("Select a run on the left.").count()) > 0) return "none";
+    return "loading";
+  }
+
+  /** The loaded detail's UUID block; null unless the detail loaded. */
+  private async runDetailIdDiv(): Promise<Locator | null> {
+    const candidates = this.page.locator("div.font-mono");
+    const count = await candidates.count();
+    for (let index = 0; index < count; index++) {
+      const text = (
+        (await candidates
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) {
+        return candidates.nth(index);
+      }
+    }
+    return null;
+  }
+
+  async runDetailHeader(): Promise<{ id: string; statusLabel: string; executor: string } | null> {
+    const idDiv = await this.runDetailIdDiv();
+    if (idDiv === null) return null;
+    const id = ((await idDiv.innerText()) ?? "").trim();
+    // The badge row follows the id: status badge first, executor badge next.
+    const badges = idDiv.locator("xpath=following-sibling::div[1]").getByRole("button");
+    if ((await badges.count()) < 2) return null;
+    const statusLabel = ((await badges.nth(0).innerText()) ?? "").trim();
+    const executor = ((await badges.nth(1).innerText()) ?? "").trim();
+    return { id, statusLabel, executor };
+  }
+
+  async runDetailPrompt(): Promise<string | null> {
+    const pre = this.page.locator("xpath=//div[normalize-space(text())='Prompt']/following-sibling::pre[1]");
+    if ((await pre.count()) === 0) return null;
+    return (((await pre.first().innerText()) ?? "").trim() || null) as string | null;
+  }
+
+  async runDetailScheduler(): Promise<{ name: string; href: string } | null> {
+    const link = this.page.locator('a[href*="/schedulers/"]').first();
+    if ((await link.count()) === 0) return null;
+    const href = await link.getAttribute("href");
+    if (href === null) return null;
+    return { name: ((await link.innerText()) ?? "").trim(), href };
+  }
+
+  async runDetailError(): Promise<{
+    raw: string;
+    source: string | null;
+    kind: string | null;
+    summary: string | null;
+    action: string | null;
+  } | null> {
+    const rawPre = this.page.locator("xpath=//div[normalize-space(text())='Error']/following-sibling::pre[1]");
+    if ((await rawPre.count()) === 0) return null;
+    const raw = ((await rawPre.first().innerText()) ?? "").trim();
+    const box = this.page.locator(
+      "xpath=//div[normalize-space(text())='Error']/following-sibling::div[.//text()[contains(.,'Failure source')]][1]"
+    );
+    if ((await box.count()) === 0) {
+      return { raw, source: null, kind: null, summary: null, action: null };
+    }
+    const scoped = box.first();
+    const header = scoped.locator(":scope > div").first();
+    const sourceBadge = header.getByRole("button").first();
+    const source = (await sourceBadge.count()) > 0 ? ((await sourceBadge.innerText()) ?? "").trim() || null : null;
+    const kindSpan = header.locator("span.text-11").first();
+    const kind = (await kindSpan.count()) > 0 ? ((await kindSpan.innerText()) ?? "").trim() || null : null;
+    const kids = scoped.locator(":scope > div");
+    const kidCount = await kids.count();
+    const summary =
+      kidCount > 1
+        ? (((
+            (await kids
+              .nth(1)
+              .innerText()
+              .catch(() => "")) ?? ""
+          ).trim() || null) as string | null)
+        : null;
+    const action =
+      kidCount > 2
+        ? (((
+            (await kids
+              .nth(2)
+              .innerText()
+              .catch(() => "")) ?? ""
+          ).trim() || null) as string | null)
+        : null;
+    return { raw, source, kind, summary, action };
+  }
+
+  async runDetailResult(): Promise<{ summary: string | null; raw: string } | null> {
+    const rawPre = this.page.locator("xpath=//div[normalize-space(text())='Result']/following-sibling::pre[1]");
+    if ((await rawPre.count()) === 0) return null;
+    const raw = ((await rawPre.first().innerText()) ?? "").trim();
+    const summaryDiv = this.page.locator("xpath=//div[normalize-space(text())='Result']/following-sibling::div[1]");
+    const summary =
+      (await summaryDiv.count()) > 0
+        ? ((((await summaryDiv.first().innerText()) ?? "").trim() || null) as string | null)
+        : null;
+    return { summary, raw };
+  }
+
+  async runCloudPanel(): Promise<{
+    tools: string[];
+    calls: Array<{ tool: string; risk: string; status: string }>;
+  } | null> {
+    const heading = this.page.locator("xpath=//div[normalize-space(text())='Cloud execution']");
+    if ((await heading.count()) === 0) return null;
+    const panel = heading.first().locator("xpath=..");
+    const toolButtons = panel.getByRole("button");
+    const tools: string[] = [];
+    const toolCount = await toolButtons.count();
+    for (let index = 0; index < toolCount; index++) {
+      tools.push(((await toolButtons.nth(index).innerText()) ?? "").trim());
+    }
+    const calls: Array<{ tool: string; risk: string; status: string }> = [];
+    const rows = panel.locator("div.mt-3 > div");
+    const rowCount = await rows.count();
+    for (let index = 0; index < rowCount; index++) {
+      const row = rows.nth(index);
+      const tool = (
+        (await row
+          .locator("span.font-mono")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const rest = (
+        (await row
+          .locator(":scope > span")
+          .last()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const [risk = "", status = ""] = rest.split("·").map((part) => part.trim());
+      calls.push({ tool, risk, status });
+    }
+    return { tools, calls };
+  }
+
+  async runEvents(): Promise<Array<{ seq: string; kind: string; narrative: string | null }>> {
+    const table = this.page.locator("table", {
+      has: this.page.getByRole("columnheader", { name: "seq" }),
+    });
+    if ((await table.count()) === 0) return [];
+    const out: Array<{ seq: string; kind: string; narrative: string | null }> = [];
+    const rows = table.first().locator("tbody tr");
+    const count = await rows.count();
+    for (let index = 0; index < count; index++) {
+      const row = rows.nth(index);
+      const pre = row.locator("pre").first();
+      // Narrative rows carry a pre and attach to the previous event.
+      if ((await pre.count()) > 0) {
+        const last = out[out.length - 1];
+        if (last !== undefined) last.narrative = ((await pre.innerText()) ?? "").trim();
+        continue;
+      }
+      const cells = row.locator(":scope > td");
+      if ((await cells.count()) < 3) continue;
+      const seq = (
+        (await cells
+          .nth(0)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const kind = (
+        (await cells
+          .nth(1)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (seq === "" && kind === "") continue;
+      out.push({ seq, kind, narrative: null });
+    }
+    return out;
+  }
+
+  async runCancelAvailable(): Promise<boolean> {
+    const button = this.page.getByRole("button", { name: "Cancel run", exact: true });
+    if ((await button.count()) === 0) return false;
+    return await button
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  /** The open cancel dialog, scoped by its heading. */
+  private runCancelModal(): Locator {
+    return this.page.getByRole("dialog").filter({ has: this.page.getByRole("heading", { name: "Cancel run?" }) });
+  }
+
+  async runCancelOpen(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: "Cancel run", exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("heading", { name: "Cancel run?" }).first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async runCancelDialog(): Promise<{ title: string; body: string } | null> {
+    const modal = this.runCancelModal();
+    if ((await modal.count()) === 0) return null;
+    const title = (
+      (await modal.first().getByRole("heading", { name: "Cancel run?" }).first().innerText()) ?? ""
+    ).trim();
+    const body = (
+      (await modal
+        .first()
+        .locator("h3 + div")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return { title, body };
+  }
+
+  async runCancelConfirm(): Promise<void> {
+    const modal = this.runCancelModal();
+    await modal.first().getByRole("button", { name: "Cancel run", exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    await modal.first().waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+    await this.waitRunsDetailSettled();
+  }
+
+  /** Count GET requests matching `match` over `windowMs`. */
+  private async countRequests(windowMs: number, match: (url: string) => boolean): Promise<number> {
+    let hits = 0;
+    const onRequest = (request: { url(): string; method(): string }): void => {
+      if (request.method() === "GET" && match(request.url())) hits += 1;
+    };
+    this.page.on("request", onRequest);
+    try {
+      await this.page.waitForTimeout(windowMs);
+    } finally {
+      this.page.off("request", onRequest);
+    }
+    return hits;
+  }
+
+  async runsListPollCount(windowMs: number): Promise<number> {
+    // List hits carry no run id; the detail path nests one deeper.
+    return await this.countRequests(windowMs, (url) => /\/api\/runners\/runs\/\?/.test(url));
+  }
+
+  async runDetailPollCount(runId: string, windowMs: number): Promise<number> {
+    const needle = `/api/runners/runs/${runId}/`;
+    return await this.countRequests(windowMs, (url) => url.includes(needle));
+  }
+
+  /** Approval cards: the pre payload's parent is the card root. */
+  private approvalsPres(): Locator {
+    return this.page.locator("pre");
+  }
+
+  async approvalsCards(): Promise<ApprovalCard[]> {
+    const out: ApprovalCard[] = [];
+    const pres = this.approvalsPres();
+    const count = await pres.count();
+    for (let index = 0; index < count; index++) {
+      const pre = pres.nth(index);
+      const payload = ((await pre.innerText().catch(() => "")) ?? "").trim();
+      // Only queue cards pair a payload pre with decision buttons.
+      const card = pre.locator("xpath=..");
+      if ((await card.getByRole("button", { name: "Decline" }).count()) === 0) continue;
+      const header = (
+        (await card
+          .locator("div.text-11")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const kindLabel = (
+        (await card
+          .locator("div.font-medium")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const reasonLoc = card.locator("div.mt-1");
+      const reason =
+        (await reasonLoc.count()) > 0
+          ? (((
+              (await reasonLoc
+                .first()
+                .innerText()
+                .catch(() => "")) ?? ""
+            ).trim() || null) as string | null)
+          : null;
+      const expiryLoc = card.getByText(/expires /);
+      const expiry =
+        (await expiryLoc.count()) > 0
+          ? (((
+              (await expiryLoc
+                .first()
+                .innerText()
+                .catch(() => "")) ?? ""
+            ).trim() || null) as string | null)
+          : null;
+      out.push({ header, kindLabel, reason, expiry, payload });
+    }
+    return out;
+  }
+
+  async approvalsEmptyVisible(): Promise<boolean> {
+    const empty = this.page.getByText("No pending approvals.");
+    if ((await empty.count()) === 0) return false;
+    return await empty
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  async approvalsDecide(payloadMarker: string, decision: "accept" | "accept_for_session" | "decline"): Promise<void> {
+    const names = { accept: "Accept once", accept_for_session: "Accept for session", decline: "Decline" } as const;
+    const card = this.approvalsPres().filter({ hasText: payloadMarker }).first().locator("xpath=..");
+    await card.getByRole("button", { name: names[decision] }).click({ timeout: WebDriver.OPEN_MS });
+    // Success drops the card on refetch; a refused decision leaves it with
+    // a toast instead, so a card that stays is data, not a driver failure.
+    const gone = this.approvalsPres().filter({ hasText: payloadMarker });
+    try {
+      await gone.first().waitFor({ state: "detached", timeout: 15_000 });
+    } catch {
+      await this.page.waitForTimeout(2_000);
+    }
+  }
+
+  async issueRunAiDispatch(): Promise<{ toast: string | null; requestUrls: string[] }> {
+    const seen: string[] = [];
+    const onRequest = (request: { url(): string }): void => {
+      const url = request.url();
+      if (url.includes("/api/")) seen.push(url);
+    };
+    const before = await this.lastToast();
+    this.page.on("request", onRequest);
+    try {
+      await this.page.getByRole("button", { name: "Manually Run AI" }).first().click({ timeout: WebDriver.OPEN_MS });
+      const deadline = Date.now() + 90_000;
+      for (;;) {
+        const toast = await this.lastToast();
+        if (toast !== null && toast !== before) return { toast, requestUrls: [...new Set(seen)] };
+        if (Date.now() > deadline) return { toast, requestUrls: [...new Set(seen)] };
+        await this.page.waitForTimeout(1_000);
+      }
+    } finally {
+      this.page.off("request", onRequest);
+    }
+  }
+
+  async issueReTickVisible(): Promise<boolean> {
+    const button = this.page.getByRole("button", { name: "Re-tick" });
+    if ((await button.count()) === 0) return false;
+    return await button
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  async issueReTickClick(): Promise<string | null> {
+    const before = await this.lastToast();
+    await this.page.getByRole("button", { name: "Re-tick" }).first().click({ timeout: WebDriver.OPEN_MS });
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const toast = await this.lastToast();
+      if (toast !== null && toast !== before) return toast;
+      if (Date.now() > deadline) return toast;
+      await this.page.waitForTimeout(1_000);
+    }
+  }
+
+  async runDetailLoadingObserved(workspaceSlug: string, runId: string): Promise<boolean> {
+    // Hold the detail fetch so the loading row paints long enough to see.
+    const pattern = `**/api/runners/runs/${runId}/**`;
+    await this.page.route(pattern, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.page.goto(`${this.runsBase(workspaceSlug)}/runs/${runId}`);
+      const deadline = Date.now() + 90_000;
+      for (;;) {
+        if ((await this.page.getByText("Loading run details…").count()) > 0) return true;
+        if ((await this.runDetailState()) !== "loading") return false;
+        if (Date.now() > deadline) return false;
+        await this.page.waitForTimeout(250);
+      }
+    } finally {
+      await this.page.unroute(pattern);
+    }
   }
 }

@@ -7,6 +7,7 @@
 // fill these in method by method; the oracle driver stays untouched.
 import type { Page } from "@playwright/test";
 import type {
+  ApprovalCard,
   ArchivesArchiveDialog,
   ArchivesFilterExpression,
   ArchivesListQuery,
@@ -46,6 +47,7 @@ import type {
   PromptRevertDialog,
   PromptSectionCard,
   RulesCommentMenuOption,
+  RunsListRow,
   SchedulerBindingHeader,
   SchedulerBindingRunRow,
   SchedulerBindingValues,
@@ -7156,5 +7158,145 @@ export class WebNewDriver implements ParityDriver {
 
   async runnersWaitRunnerRevokeWorking(): Promise<void> {
     return todo("runnersWaitRunnerRevokeWorking");
+  }
+
+  // --- Runs, approvals, run dispatch, re-tick (NEWFRONT-180). Stubs until
+  // --- the area lands in apps/web_new; the oracle driver stays untouched.
+
+  async openRunsList(_workspaceSlug: string, _projectId?: string): Promise<void> {
+    return todo("openRunsList");
+  }
+
+  async openRunsListAtPage(_workspaceSlug: string, _page: number, _projectId?: string): Promise<void> {
+    return todo("openRunsListAtPage");
+  }
+
+  async runsHistoryLength(): Promise<number> {
+    return todo("runsHistoryLength");
+  }
+
+  async openRunDetail(_workspaceSlug: string, _runId: string, _projectId?: string): Promise<void> {
+    return todo("openRunDetail");
+  }
+
+  async openApprovals(_workspaceSlug: string, _projectId?: string): Promise<void> {
+    return todo("openApprovals");
+  }
+
+  async runsRows(): Promise<RunsListRow[]> {
+    return todo("runsRows");
+  }
+
+  async runsPager(): Promise<{ label: string; prevDisabled: boolean; nextDisabled: boolean } | null> {
+    return todo("runsPager");
+  }
+
+  async runsEmptyVisible(): Promise<boolean> {
+    return todo("runsEmptyVisible");
+  }
+
+  async runsNextPage(): Promise<void> {
+    return todo("runsNextPage");
+  }
+
+  async runsPrevPage(): Promise<void> {
+    return todo("runsPrevPage");
+  }
+
+  async runsSelectRun(_promptMarker: string): Promise<void> {
+    return todo("runsSelectRun");
+  }
+
+  async runDetailState(): Promise<"none" | "loading" | "loaded" | "unavailable"> {
+    return todo("runDetailState");
+  }
+
+  async runDetailHeader(): Promise<{ id: string; statusLabel: string; executor: string } | null> {
+    return todo("runDetailHeader");
+  }
+
+  async runDetailPrompt(): Promise<string | null> {
+    return todo("runDetailPrompt");
+  }
+
+  async runDetailScheduler(): Promise<{ name: string; href: string } | null> {
+    return todo("runDetailScheduler");
+  }
+
+  async runDetailError(): Promise<{
+    raw: string;
+    source: string | null;
+    kind: string | null;
+    summary: string | null;
+    action: string | null;
+  } | null> {
+    return todo("runDetailError");
+  }
+
+  async runDetailResult(): Promise<{ summary: string | null; raw: string } | null> {
+    return todo("runDetailResult");
+  }
+
+  async runCloudPanel(): Promise<{
+    tools: string[];
+    calls: Array<{ tool: string; risk: string; status: string }>;
+  } | null> {
+    return todo("runCloudPanel");
+  }
+
+  async runEvents(): Promise<Array<{ seq: string; kind: string; narrative: string | null }>> {
+    return todo("runEvents");
+  }
+
+  async runCancelAvailable(): Promise<boolean> {
+    return todo("runCancelAvailable");
+  }
+
+  async runCancelOpen(): Promise<void> {
+    return todo("runCancelOpen");
+  }
+
+  async runCancelDialog(): Promise<{ title: string; body: string } | null> {
+    return todo("runCancelDialog");
+  }
+
+  async runCancelConfirm(): Promise<void> {
+    return todo("runCancelConfirm");
+  }
+
+  async runsListPollCount(_windowMs: number): Promise<number> {
+    return todo("runsListPollCount");
+  }
+
+  async runDetailPollCount(_runId: string, _windowMs: number): Promise<number> {
+    return todo("runDetailPollCount");
+  }
+
+  async approvalsCards(): Promise<ApprovalCard[]> {
+    return todo("approvalsCards");
+  }
+
+  async approvalsEmptyVisible(): Promise<boolean> {
+    return todo("approvalsEmptyVisible");
+  }
+
+  async approvalsDecide(_payloadMarker: string, _decision: "accept" | "accept_for_session" | "decline"): Promise<void> {
+    return todo("approvalsDecide");
+  }
+
+  async issueRunAiDispatch(): Promise<{ toast: string | null; requestUrls: string[] }> {
+    return todo("issueRunAiDispatch");
+  }
+
+  async issueReTickVisible(): Promise<boolean> {
+    return todo("issueReTickVisible");
+  }
+
+  async issueReTickClick(): Promise<string | null> {
+    return todo("issueReTickClick");
+  }
+
+  async runDetailLoadingObserved(_workspaceSlug: string, _runId: string): Promise<boolean> {
+    return todo("runDetailLoadingObserved");
   }
 }

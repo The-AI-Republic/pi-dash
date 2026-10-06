@@ -4675,6 +4675,84 @@ export interface ParityDriver {
   runnersWaitRunnerDeleteWorking(): Promise<void>;
   /** Wait until the revoke-runner confirm shows its in-flight state. */
   runnersWaitRunnerRevokeWorking(): Promise<void>;
+  // --- Runs, approvals, run dispatch, re-tick (NEWFRONT-180, RUN-016-024,
+  // --- RUN-046, RUN-048). Appended; existing methods above are untouched
+  // --- per the shared driver contract.
+
+  /** Open the runs tab; project-scoped when `projectId` is given. Ends with the list settled. */
+  openRunsList(workspaceSlug: string, projectId?: string): Promise<void>;
+  /** Open the runs tab deep-linked to `page` via `?page=`; project-scoped when `projectId` is given. */
+  openRunsListAtPage(workspaceSlug: string, page: number, projectId?: string): Promise<void>;
+  /** Current session-history length, for proving pager turns rewrite rather than push. */
+  runsHistoryLength(): Promise<number>;
+  /** Open one run's detail; project-scoped when `projectId` is given. Ends with the detail settled. */
+  openRunDetail(workspaceSlug: string, runId: string, projectId?: string): Promise<void>;
+  /** Open the approvals tab; project-scoped when `projectId` is given. Ends with the queue settled. */
+  openApprovals(workspaceSlug: string, projectId?: string): Promise<void>;
+  /** Runs-list rows top to bottom: badge label plus prompt text (rows render no id; specs join prompts via the API). */
+  runsRows(): Promise<RunsListRow[]>;
+  /** Footer pager state; null when the list is empty and the footer hides. */
+  runsPager(): Promise<{ label: string; prevDisabled: boolean; nextDisabled: boolean } | null>;
+  /** Whether the runs list shows its empty state. */
+  runsEmptyVisible(): Promise<boolean>;
+  /** Activate the pager Next control; resolves once the new page settles. */
+  runsNextPage(): Promise<void>;
+  /** Activate the pager Previous control; resolves once the new page settles. */
+  runsPrevPage(): Promise<void>;
+  /** Click the row whose prompt contains `promptMarker`; resolves once the detail settles. */
+  runsSelectRun(promptMarker: string): Promise<void>;
+  /** Which detail pane state is showing. */
+  runDetailState(): Promise<"none" | "loading" | "loaded" | "unavailable">;
+  /** Loaded detail header: run id, badge label, executor badge. Null unless loaded. */
+  runDetailHeader(): Promise<{ id: string; statusLabel: string; executor: string } | null>;
+  /** Full prompt text of the loaded detail; null unless loaded. */
+  runDetailPrompt(): Promise<string | null>;
+  /** Scheduler link of the loaded detail; null when the run has no binding. */
+  runDetailScheduler(): Promise<{ name: string; href: string } | null>;
+  /** Error block of the loaded detail; null when the run has no error. Diagnostic fields are null when no structured diagnostic is present. */
+  runDetailError(): Promise<{
+    raw: string;
+    source: string | null;
+    kind: string | null;
+    summary: string | null;
+    action: string | null;
+  } | null>;
+  /** Result block of the loaded detail; null when the run produced no result payload. */
+  runDetailResult(): Promise<{ summary: string | null; raw: string } | null>;
+  /** Cloud-execution panel of the loaded detail; null when the panel is absent (non-cloud runs). */
+  runCloudPanel(): Promise<{ tools: string[]; calls: Array<{ tool: string; risk: string; status: string }> } | null>;
+  /** Event rows of the loaded detail in order: seq, kind, inline narrative (null for metadata rows). */
+  runEvents(): Promise<Array<{ seq: string; kind: string; narrative: string | null }>>;
+  /** Whether the detail header offers the cancel control. */
+  runCancelAvailable(): Promise<boolean>;
+  /** Open the cancel confirmation; resolves once the dialog shows. */
+  runCancelOpen(): Promise<void>;
+  /** Cancel dialog title and body; null when no dialog shows. */
+  runCancelDialog(): Promise<{ title: string; body: string } | null>;
+  /** Confirm the open cancel dialog; resolves once the detail settles again. */
+  runCancelConfirm(): Promise<void>;
+  /** Count runs-list API hits observed over `windowMs` while the list shows. */
+  runsListPollCount(windowMs: number): Promise<number>;
+  /** Count run-detail API hits for `runId` observed over `windowMs` while the detail shows. */
+  runDetailPollCount(runId: string, windowMs: number): Promise<number>;
+  /** Approval cards top to bottom. */
+  approvalsCards(): Promise<ApprovalCard[]>;
+  /** Whether the approvals queue shows its empty state. */
+  approvalsEmptyVisible(): Promise<boolean>;
+  /** Click one decision button on the card whose payload contains `payloadMarker`; resolves once the queue settles again. */
+  approvalsDecide(payloadMarker: string, decision: "accept" | "accept_for_session" | "decline"): Promise<void>;
+  /** Click the issue's Run-AI control and report the toast plus API request URLs seen during dispatch. */
+  issueRunAiDispatch(): Promise<{ toast: string | null; requestUrls: string[] }>;
+  /** Whether the issue detail offers the re-tick control. */
+  issueReTickVisible(): Promise<boolean>;
+  /** Click the issue's re-tick control; resolves once the toast shows. Returns the toast text. */
+  issueReTickClick(): Promise<string | null>;
+  /**
+   * Reload the run detail with its API delayed and report whether the
+   * loading state showed before the detail did. The delay is test-only
+   * network shaping; the loader itself is the behavior under test.
+   */
+  runDetailLoadingObserved(workspaceSlug: string, runId: string): Promise<boolean>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -5344,4 +5422,19 @@ export interface ArchivesTrafficCounts {
   detailReads: number;
   /** POST/DELETE archive and restore writes. */
   writes: number;
+}
+
+/** One runs-list row: badge label plus prompt text. */
+export interface RunsListRow {
+  statusLabel: string;
+  prompt: string;
+}
+
+/** One pending-approval card: owning-run header, kind label, reason, expiry, payload. */
+export interface ApprovalCard {
+  header: string;
+  kindLabel: string;
+  reason: string | null;
+  expiry: string | null;
+  payload: string;
 }

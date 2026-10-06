@@ -12253,3 +12253,471 @@ export async function serverUnpinIssuePod(
 ): Promise<void> {
   await patchIssue(workspaceSlug, projectId, issueId, sessionCookie, { assigned_pod_id: null }, apiBase);
 }
+
+// --- Runs/approvals oracle fixtures (NEWFRONT-180). Appended; existing
+// --- helpers above are untouched per the shared harness contract.
+// ---
+// --- The web API can create a run (queued), cancel it, decide an approval
+// --- and re-tick an issue — but no web endpoint sets a run's status, posts
+// --- run events, files approval requests, or exhausts a ticker budget
+// --- (those are runner-daemon or scheduler writes). Scenarios that need
+// --- those states build scenario-owned rows through the stack's Django
+// --- shell instead, and delete them afterward. The container name honors
+// --- PARITY_CONTAINER_PREFIX so slot-private stacks work.
+
+/** The stack's api container, honoring slot-private prefixes. */
+function runsApiContainer(): string {
+  const prefix = (process.env["PARITY_CONTAINER_PREFIX"] ?? "parity19").trim() || "parity19";
+  return `${prefix}-api`;
+}
+
+/** Run a Django shell snippet inside the stack's api container; resolves with stdout. */
+export async function runsShell(python: string): Promise<string> {
+  const { stdout } = await execFileAsync(
+    "docker",
+    ["exec", "-i", runsApiContainer(), "python", "manage.py", "shell", "-c", python],
+    {
+      timeout: 120_000,
+    }
+  );
+  return stdout;
+}
+
+/** Workspace + user ids backing the seed slug/email, for direct run creation. */
+export async function runsLookupIds(
+  workspaceSlug: string,
+  email: string
+): Promise<{ workspaceId: string; userId: string }> {
+  const out = await runsShell(
+    `import json\n` +
+      `from pi_dash.db.models import User, Workspace\n` +
+      `ws = Workspace.objects.get(slug=${JSON.stringify(workspaceSlug)})\n` +
+      `user = User.objects.get(email=${JSON.stringify(email)})\n` +
+      `print("PARITY_RUN_IDS:" + json.dumps({"workspace": str(ws.id), "user": str(user.id)}))\n`
+  );
+  const line = /^PARITY_RUN_IDS:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  const parsed = (line === "" ? null : (JSON.parse(line) as { workspace?: unknown; user?: unknown })) ?? null;
+  if (parsed === null || typeof parsed.workspace !== "string" || typeof parsed.user !== "string") {
+    throw new Error("[parity] runs id lookup returned no workspace/user ids.");
+  }
+  return { workspaceId: parsed.workspace, userId: parsed.user };
+}
+
+/** One page of the caller's runs, newest first. */
+export async function runsListPage(
+  sessionCookie: string,
+  options: { page?: number; perPage?: number; workspaceId?: string; projectId?: string } = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ results: Record<string, unknown>[]; total_count: number; total_pages: number; page: number }> {
+  const params = new URLSearchParams();
+  params.set("page", String(options.page ?? 1));
+  if (options.perPage !== undefined) params.set("per_page", String(options.perPage));
+  if (options.workspaceId !== undefined) params.set("workspace", options.workspaceId);
+  if (options.projectId !== undefined) params.set("project", options.projectId);
+  const res = await authedApi(`/runners/runs/?${params.toString()}`, sessionCookie, undefined, apiBase);
+  requireOk(res, "runs list");
+  const payload = (await res.json()) as {
+    results?: unknown[];
+    total_count?: unknown;
+    total_pages?: unknown;
+    page?: unknown;
+  };
+  if (
+    !Array.isArray(payload.results) ||
+    typeof payload.total_count !== "number" ||
+    typeof payload.total_pages !== "number" ||
+    typeof payload.page !== "number"
+  ) {
+    throw new Error("[parity] runs list envelope carried no results/counts.");
+  }
+  return {
+    results: payload.results as Record<string, unknown>[],
+    total_count: payload.total_count,
+    total_pages: payload.total_pages,
+    page: payload.page,
+  };
+}
+
+/** One run by id, optionally with its events (detail serializer). */
+export async function runsGet(
+  runId: string,
+  sessionCookie: string,
+  includeEvents = false,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const suffix = includeEvents ? "?include_events=1" : "";
+  const res = await authedApi(`/runners/runs/${runId}/${suffix}`, sessionCookie, undefined, apiBase);
+  requireOk(res, "run read");
+  return (await res.json()) as Record<string, unknown>;
+}
+
+/** Create a run through the direct (prompt-body) web path; resolves with the created row. */
+export async function runsCreateDirect(
+  sessionCookie: string,
+  input: { workspace: string; prompt: string; pod?: string; work_item?: string },
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await authedApi(
+    `/runners/runs/`,
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+    apiBase
+  );
+  requireOk(res, "run create");
+  return (await res.json()) as Record<string, unknown>;
+}
+
+/** Cancel a run through the web path; resolves with the updated row. */
+export async function runsCancel(
+  runId: string,
+  sessionCookie: string,
+  reason = "parity oracle",
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await authedApi(
+    `/runners/runs/${runId}/cancel/`,
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
+    apiBase
+  );
+  requireOk(res, "run cancel");
+  return (await res.json()) as Record<string, unknown>;
+}
+
+/** Pending approvals routed to the caller, optionally project-scoped. */
+export async function runsApprovalsList(
+  sessionCookie: string,
+  projectId?: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>[]> {
+  const suffix = projectId !== undefined ? `?project=${projectId}` : "";
+  const res = await authedApi(`/runners/approvals/${suffix}`, sessionCookie, undefined, apiBase);
+  return collectionRows(res, "approvals read");
+}
+
+/** Decide one approval; resolves with the HTTP status plus the row when accepted. */
+export async function runsApprovalDecide(
+  approvalId: string,
+  decision: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; record: Record<string, unknown> | null }> {
+  const res = await authedApi(
+    `/runners/approvals/${approvalId}/decide/`,
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decision }),
+    },
+    apiBase
+  );
+  if (!res.ok) return { status: res.status, record: null };
+  return { status: res.status, record: (await res.json()) as Record<string, unknown> };
+}
+
+/** Re-tick an issue's agent-run budget; granted/refuse both resolve (never throw). */
+export async function runsReTick(
+  workItemId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await authedApi(
+    `/runners/re-tick/`,
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ work_item: workItemId }),
+    },
+    apiBase
+  );
+  requireOk(res, "re-tick");
+  return (await res.json()) as Record<string, unknown>;
+}
+
+/** The issue's execution-target pin (`agent_executor`), null when it inherits the project default. */
+export async function runsIssueExecutor(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string | null> {
+  const record = await fetchIssue(workspaceSlug, projectId, issueId, sessionCookie, apiBase);
+  const value = record["agent_executor"];
+  if (value !== null && typeof value !== "string") throw new Error("[parity] issue row carried no agent_executor.");
+  return value;
+}
+
+/** The project's default execution target, null when the serializer omits it. */
+export async function runsProjectDefaultExecutor(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string | null> {
+  const { record } = await projectFacts(workspaceSlug, projectId, sessionCookie, apiBase);
+  const value = record["default_agent_executor"];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new Error("[parity] project row carried a non-string executor default.");
+  return value;
+}
+
+/** One run-event fixture: kind plus payload (seq assigned in order). */
+export interface RunsEventFixture {
+  kind: string;
+  payload?: Record<string, unknown>;
+}
+
+/** One tool-call fixture for a cloud run's inspection list. */
+export interface RunsToolCallFixture {
+  tool_name: string;
+  risk?: string;
+  status?: string;
+}
+
+/** One approval-request fixture on a run. */
+export interface RunsApprovalFixture {
+  kind?: string;
+  payload?: Record<string, unknown>;
+  reason?: string;
+  expires_in_seconds?: number | null;
+}
+
+/** One scenario-owned run row, with optional children. */
+export interface RunsRunFixture {
+  prompt: string;
+  status?: string;
+  executor?: string;
+  work_item?: string | null;
+  scheduler_binding?: string | null;
+  error?: string;
+  done_payload?: Record<string, unknown> | null;
+  tool_plan?: Record<string, unknown> | null;
+  events?: RunsEventFixture[];
+  tool_calls?: RunsToolCallFixture[];
+  approvals?: RunsApprovalFixture[];
+}
+
+/**
+ * Create scenario-owned run rows (plus events, tool calls, approvals) in one
+ * shell call. `podId` anchors every row's project. Resolves with the created
+ * run ids in input order. Callers delete them with {@link runsDeleteRuns}.
+ */
+export async function runsCreateFixtures(
+  workspaceSlug: string,
+  email: string,
+  podId: string,
+  runs: RunsRunFixture[]
+): Promise<string[]> {
+  const spec = JSON.stringify(runs);
+  const out = await runsShell(
+    `import json\n` +
+      `from pi_dash.db.models import User, Workspace\n` +
+      `from pi_dash.runner.models import AgentRun, AgentRunEvent, AgentRunToolCall, ApprovalRequest, Pod\n` +
+      `ws = Workspace.objects.get(slug=${JSON.stringify(workspaceSlug)})\n` +
+      `user = User.objects.get(email=${JSON.stringify(email)})\n` +
+      `pod = Pod.objects.get(pk=${JSON.stringify(podId)})\n` +
+      `made = []\n` +
+      `for index, item in enumerate(json.loads(${JSON.stringify(spec)})):\n` +
+      `    run = AgentRun.objects.create(workspace=ws, created_by=user, pod=pod,\n` +
+      `        prompt=item.get("prompt", ""), status=item.get("status", "queued"),\n` +
+      `        executor_kind=item.get("executor", "local_runner"),\n` +
+      `        work_item_id=item.get("work_item"), scheduler_binding_id=item.get("scheduler_binding"),\n` +
+      `        error=item.get("error", ""),\n` +
+      `        done_payload=item.get("done_payload"), tool_plan=item.get("tool_plan") or {})\n` +
+      `    for seq, event in enumerate(item.get("events") or [], start=1):\n` +
+      `        AgentRunEvent.objects.create(agent_run=run, seq=seq, kind=event.get("kind", ""),\n` +
+      `            payload=event.get("payload") or {})\n` +
+      `    for position, call in enumerate(item.get("tool_calls") or []):\n` +
+      `        AgentRunToolCall.objects.create(agent_run=run,\n` +
+      `            tool_call_id=f"parity-{run.id}-{position}", source="internal",\n` +
+      `            tool_name=call.get("tool_name", ""), risk=call.get("risk", "read"),\n` +
+      `            status=call.get("status", "prepared"), request_fingerprint="parity")\n` +
+      `    for approval in item.get("approvals") or []:\n` +
+      `        expires = approval.get("expires_in_seconds")\n` +
+      `        from datetime import timedelta\n` +
+      `        from django.utils import timezone\n` +
+      `        AgentRunApproval = ApprovalRequest\n` +
+      `        AgentRunApproval.objects.create(agent_run=run, kind=approval.get("kind", "other"),\n` +
+      `            payload=approval.get("payload") or {}, reason=approval.get("reason", ""),\n` +
+      `            expires_at=(timezone.now() + timedelta(seconds=expires)) if expires else None)\n` +
+      `    made.append(str(run.id))\n` +
+      `print("PARITY_RUN_MADE:" + json.dumps(made))\n`
+  );
+  const line = /^PARITY_RUN_MADE:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  const ids = (line === "" ? null : (JSON.parse(line) as unknown)) as string[] | null;
+  if (!Array.isArray(ids) || ids.length !== runs.length || ids.some((id) => typeof id !== "string")) {
+    throw new Error("[parity] run fixture create returned no ids.");
+  }
+  return ids;
+}
+
+/** Read one approval's stored decision state (status/source/decider email). */
+export async function runsApprovalStatus(approvalId: string): Promise<{
+  status: string;
+  decision_source: string;
+  decided_by: string | null;
+}> {
+  const out = await runsShell(
+    `import json\n` +
+      `from pi_dash.runner.models import ApprovalRequest\n` +
+      `approval = ApprovalRequest.objects.select_related("decided_by").get(pk=${JSON.stringify(approvalId)})\n` +
+      `print("PARITY_APPROVAL:" + json.dumps({"status": approval.status,\n` +
+      `    "decision_source": approval.decision_source,\n` +
+      `    "decided_by": approval.decided_by.email if approval.decided_by_id else None}))\n`
+  );
+  const line = /^PARITY_APPROVAL:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  const parsed =
+    (line === ""
+      ? null
+      : (JSON.parse(line) as { status?: unknown; decision_source?: unknown; decided_by?: unknown })) ?? null;
+  if (parsed === null || typeof parsed.status !== "string" || typeof parsed.decision_source !== "string") {
+    throw new Error("[parity] approval read returned no decision state.");
+  }
+  return {
+    status: parsed.status,
+    decision_source: parsed.decision_source,
+    decided_by: typeof parsed.decided_by === "string" ? parsed.decided_by : null,
+  };
+}
+
+/** Delete scenario-owned runs (events, tool calls and approvals cascade). Best effort per row. */
+export async function runsDeleteRuns(runIds: string[]): Promise<void> {
+  if (runIds.length === 0) return;
+  await runsShell(
+    `from pi_dash.runner.models import AgentRun\n` +
+      `AgentRun.objects.filter(pk__in=${JSON.stringify(runIds)}).delete()\n` +
+      `print("PARITY_RUN_DELETED")\n`
+  );
+}
+
+/** Move one run to another status mid-test (poll-stop proofs); resolves with the stored status. */
+export async function runsSetStatus(runId: string, status: string): Promise<string> {
+  const out = await runsShell(
+    `from pi_dash.runner.models import AgentRun\n` +
+      `run = AgentRun.objects.get(pk=${JSON.stringify(runId)})\n` +
+      `run.status = ${JSON.stringify(status)}\n` +
+      `run.save(update_fields=["status"])\n` +
+      `print("PARITY_RUN_STATUS:" + run.status)\n`
+  );
+  const stored = /^PARITY_RUN_STATUS:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (stored === "") throw new Error("[parity] run status write returned nothing.");
+  return stored;
+}
+
+/** Read one run's stored status (cancel/decision server-state checks). */
+export async function runsStoredStatus(runId: string): Promise<string> {
+  const out = await runsShell(
+    `from pi_dash.runner.models import AgentRun\n` +
+      `print("PARITY_RUN_STATUS:" + AgentRun.objects.get(pk=${JSON.stringify(runId)}).status)\n`
+  );
+  const stored = /^PARITY_RUN_STATUS:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (stored === "") throw new Error("[parity] run status read returned nothing.");
+  return stored;
+}
+
+/**
+ * Exhaust an issue's ticker budget (used := cap) so re-tick has something to
+ * grant. The ticker row must already exist (the issue entered a ticking state
+ * through the API first). Resolves with used/cap after the write.
+ */
+export async function runsExhaustTicker(issueId: string): Promise<{ used: number; cap: number }> {
+  const out = await runsShell(
+    `import json\n` +
+      `from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker\n` +
+      `ticker = IssueAgentTicker.objects.get(issue_id=${JSON.stringify(issueId)})\n` +
+      `cap = ticker.effective_max_ticks()\n` +
+      `ticker.used = cap\n` +
+      `ticker.save(update_fields=["used"])\n` +
+      `print("PARITY_TICKER:" + json.dumps({"used": ticker.used, "cap": cap}))\n`
+  );
+  const line = /^PARITY_TICKER:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  const parsed = (line === "" ? null : (JSON.parse(line) as { used?: unknown; cap?: unknown })) ?? null;
+  if (parsed === null || typeof parsed.used !== "number" || typeof parsed.cap !== "number") {
+    throw new Error("[parity] ticker exhaust returned no used/cap.");
+  }
+  return { used: parsed.used, cap: parsed.cap };
+}
+
+/**
+ * Create a scenario-owned scheduler definition plus one project binding.
+ * Resolves with the binding id and scheduler name for run-detail link
+ * assertions. Callers delete both with {@link runsDeleteScheduler}.
+ */
+export async function runsCreateScheduler(
+  workspaceSlug: string,
+  projectId: string,
+  email: string,
+  slug: string,
+  name: string
+): Promise<{ schedulerId: string; bindingId: string; schedulerName: string }> {
+  const out = await runsShell(
+    `import json\n` +
+      `from django.utils import timezone\n` +
+      `from pi_dash.db.models import Project, User, Workspace\n` +
+      `from pi_dash.db.models.scheduler import Scheduler, SchedulerBinding\n` +
+      `ws = Workspace.objects.get(slug=${JSON.stringify(workspaceSlug)})\n` +
+      `project = Project.objects.get(pk=${JSON.stringify(projectId)})\n` +
+      `user = User.objects.get(email=${JSON.stringify(email)})\n` +
+      `scheduler = Scheduler.objects.create(workspace=ws, slug=${JSON.stringify(slug)},\n` +
+      `    name=${JSON.stringify(name)}, prompt="parity scheduler prompt")\n` +
+      `binding = SchedulerBinding.objects.create(project=project, scheduler=scheduler,\n` +
+      `    dtstart=timezone.now(), actor=user)\n` +
+      `print("PARITY_SCHED:" + json.dumps({"scheduler": str(scheduler.id),\n` +
+      `    "binding": str(binding.id), "name": scheduler.name}))\n`
+  );
+  const line = /^PARITY_SCHED:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  const parsed =
+    (line === "" ? null : (JSON.parse(line) as { scheduler?: unknown; binding?: unknown; name?: unknown })) ?? null;
+  if (
+    parsed === null ||
+    typeof parsed.scheduler !== "string" ||
+    typeof parsed.binding !== "string" ||
+    typeof parsed.name !== "string"
+  ) {
+    throw new Error("[parity] scheduler create returned no ids.");
+  }
+  return { schedulerId: parsed.scheduler, bindingId: parsed.binding, schedulerName: parsed.name };
+}
+
+/** Delete a scenario-owned scheduler (its binding cascades). */
+export async function runsDeleteScheduler(schedulerId: string): Promise<void> {
+  await runsShell(
+    `from pi_dash.db.models.scheduler import Scheduler\n` +
+      `Scheduler.objects.filter(pk=${JSON.stringify(schedulerId)}).delete()\n` +
+      `print("PARITY_SCHED_DELETED")\n`
+  );
+}
+
+/** Read an issue's ticker budget (used/granted/cap) for grant assertions. */
+export async function runsTickerBudget(issueId: string): Promise<{ used: number; granted: number; cap: number }> {
+  const out = await runsShell(
+    `import json\n` +
+      `from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker\n` +
+      `ticker = IssueAgentTicker.objects.get(issue_id=${JSON.stringify(issueId)})\n` +
+      `print("PARITY_TICKER:" + json.dumps({"used": ticker.used, "granted": ticker.granted,\n` +
+      `    "cap": ticker.effective_max_ticks()}))\n`
+  );
+  const line = /^PARITY_TICKER:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  const parsed =
+    (line === "" ? null : (JSON.parse(line) as { used?: unknown; granted?: unknown; cap?: unknown })) ?? null;
+  if (
+    parsed === null ||
+    typeof parsed.used !== "number" ||
+    typeof parsed.granted !== "number" ||
+    typeof parsed.cap !== "number"
+  ) {
+    throw new Error("[parity] ticker read returned no budget.");
+  }
+  return { used: parsed.used, granted: parsed.granted, cap: parsed.cap };
+}
