@@ -380,8 +380,9 @@ impl<'a> Ctx<'a> {
     /// `std::env`, so explicit maps (and tests) stay hermetic. A set-but
     /// missing profile fails (`ProfileNotFound`); a malformed file fails
     /// (`ConfigParseError`); both escape boto3 client creation in Django
-    /// and fail the boot here instead. `$VAR` expansion in the paths and
-    /// `~user` homes are not ported (documented deviations).
+    /// and fail the boot here instead. `$VAR` expansion in the paths,
+    /// `~user` homes, and the `pwd` fallback when `HOME` is unset are
+    /// not ported (documented deviations).
     fn shared_config_region(&self) -> Result<Option<String>, ConfigError> {
         let (profile_var, profile) = match self.lookup("AWS_DEFAULT_PROFILE") {
             some @ Some(_) => ("AWS_DEFAULT_PROFILE", some),
@@ -390,9 +391,11 @@ impl<'a> Ctx<'a> {
         let home = self.lookup("HOME");
         let config_path = self
             .lookup("AWS_CONFIG_FILE")
+            .map(|p| expand_home_prefix(&p, home.as_deref()))
             .or_else(|| home.clone().map(|h| format!("{h}/.aws/config")));
         let creds_path = self
             .lookup("AWS_SHARED_CREDENTIALS_FILE")
+            .map(|p| expand_home_prefix(&p, home.as_deref()))
             .or_else(|| home.map(|h| format!("{h}/.aws/credentials")));
         let profiles = load_shared_profiles(config_path.as_deref(), creds_path.as_deref())?;
         match profile {
@@ -498,14 +501,20 @@ fn is_valid_url(s: &str) -> bool {
 /// parses it as a nested dict and dies downstream — `ConfigParseError`
 /// for `k = v`-less lines, `TypeError` past `validate_region_name`
 /// otherwise); other keys' continuations must be well-formed nested
-/// `k = v` lines or botocore's `_parse_nested` fails there instead.
-/// Either way the failure is loud on both sides.
-fn close_ini_key(key: &str, conts: &[String]) -> Result<(), String> {
+/// `k = v` lines or botocore's `_parse_nested` fails there instead —
+/// but only when the base value is empty (the `startswith('\n')` gate
+/// in `raw_config_parse`): continuations under a non-empty value stay
+/// a plain string and never fail. Either way the failure is loud on
+/// both sides.
+fn close_ini_key(key: &str, base_empty: bool, conts: &[String]) -> Result<(), String> {
     if conts.is_empty() {
         return Ok(());
     }
     if key == "region" {
         return Err("multi-line value for \"region\"".to_owned());
+    }
+    if !base_empty {
+        return Ok(());
     }
     for line in conts {
         if !line.contains('=') {
@@ -519,6 +528,24 @@ fn close_ini_key(key: &str, conts: &[String]) -> Result<(), String> {
 /// its lowercased keys in file order.
 type IniSections = Vec<(String, Vec<(String, String)>)>;
 
+/// Leading-`~` expansion for explicit shared-config paths
+/// (`os.path.expanduser`, minus `~user` and the `pwd` fallback): `~/...`
+/// and bare `~` resolve against the map's `HOME`; anything else —
+/// including `~user/...` and an unset `HOME` — passes through verbatim
+/// (and then misses the filesystem, like a missing file).
+fn expand_home_prefix(path: &str, home: Option<&str>) -> String {
+    let Some(home) = home else {
+        return path.to_owned();
+    };
+    if path == "~" {
+        return home.to_owned();
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return format!("{home}/{rest}");
+    }
+    path.to_owned()
+}
+
 /// AWS shared-config INI (`botocore/configloader.py:raw_config_parse`):
 /// `[section]` headers, `key = value` / `key: value` pairs, `#`/`;`
 /// full-line comments (indented or not), blank lines. Keys are lowercased
@@ -527,10 +554,11 @@ type IniSections = Vec<(String, Vec<(String, String)>)>;
 /// sections in file order. Fails exactly where botocore raises
 /// `ConfigParseError`: duplicate sections/keys, garbage lines, keys
 /// before any section, and indented lines with no key to continue.
+/// A repeated `[DEFAULT]` reopens the defaults instead of failing.
 fn parse_shared_ini(text: &str) -> Result<IniSections, String> {
     let mut sections: IniSections = Vec::new();
     let mut current: Option<usize> = None;
-    let mut open_key: Option<String> = None;
+    let mut open_key: Option<(String, bool)> = None;
     let mut conts: Vec<String> = Vec::new();
     for raw in text.lines() {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
@@ -546,8 +574,8 @@ fn parse_shared_ini(text: &str) -> Result<IniSections, String> {
             continue;
         }
         if let Some(rest) = stripped.strip_prefix('[') {
-            if let Some(key) = open_key.take() {
-                close_ini_key(&key, &conts)?;
+            if let Some((key, base_empty)) = open_key.take() {
+                close_ini_key(&key, base_empty, &conts)?;
                 conts.clear();
             }
             // `SECTCRE` is greedy: the header runs to the LAST bracket.
@@ -555,6 +583,16 @@ fn parse_shared_ini(text: &str) -> Result<IniSections, String> {
                 return Err(format!("unclosed section header {stripped:?}"));
             };
             let name = rest[..end].to_owned();
+            // A repeated `[DEFAULT]` reopens the defaults (configparser
+            // exempts it from the duplicate-section error and merges);
+            // routing to the existing entry keeps the duplicate-key
+            // check across repeats too.
+            if name == "DEFAULT" {
+                if let Some(idx) = sections.iter().position(|(n, _)| n == "DEFAULT") {
+                    current = Some(idx);
+                    continue;
+                }
+            }
             if sections.iter().any(|(n, _)| n == &name) {
                 return Err(format!("duplicate section {name:?}"));
             }
@@ -573,19 +611,20 @@ fn parse_shared_ini(text: &str) -> Result<IniSections, String> {
         if key.is_empty() {
             return Err(format!("malformed line {stripped:?}"));
         }
-        if let Some(open) = open_key.take() {
-            close_ini_key(&open, &conts)?;
+        if let Some((open, base_empty)) = open_key.take() {
+            close_ini_key(&open, base_empty, &conts)?;
             conts.clear();
         }
         if sections[sec].1.iter().any(|(k, _)| k == &key) {
             return Err(format!("duplicate key {key:?}"));
         }
         let value = stripped[cut + 1..].trim().to_owned();
+        let base_empty = value.is_empty();
         sections[sec].1.push((key.clone(), value));
-        open_key = Some(key);
+        open_key = Some((key, base_empty));
     }
-    if let Some(key) = open_key.take() {
-        close_ini_key(&key, &conts)?;
+    if let Some((key, base_empty)) = open_key.take() {
+        close_ini_key(&key, base_empty, &conts)?;
     }
     Ok(sections)
 }
@@ -631,13 +670,27 @@ fn split_profile_name(name: &str) -> Option<Vec<String>> {
     Some(tokens)
 }
 
+/// `[DEFAULT]` keys of one parsed file: configparser falls back to
+/// them for every section (`cp.get`), so each profile starts from a
+/// copy with its own keys overlaid. The section itself is never a
+/// profile (`cp.sections()` excludes it).
+fn ini_defaults(sections: &IniSections) -> HashMap<String, String> {
+    sections
+        .iter()
+        .find(|(name, _)| name == "DEFAULT")
+        .map(|(_, keys)| keys.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
 /// Profile map over one parsed config file
 /// (`configloader.py:build_profile_map`): `[default]` is the `default`
 /// profile; `[profile NAME]` (exactly two whitespace/quote-separated
 /// tokens — `shlex.split`, so `[profilefoo bar]` maps `bar`) is `NAME`;
 /// anything else is ignored. Later sections overwrite earlier ones.
+/// Every profile inherits `[DEFAULT]` (explicit keys win).
 fn config_profile_map(sections: &IniSections) -> HashMap<String, HashMap<String, String>> {
     let mut profiles: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let defaults = ini_defaults(sections);
     for (name, keys) in sections {
         let profile = if name == "default" {
             Some("default".to_owned())
@@ -650,7 +703,9 @@ fn config_profile_map(sections: &IniSections) -> HashMap<String, HashMap<String,
             None
         };
         if let Some(profile) = profile {
-            profiles.insert(profile, keys.iter().cloned().collect());
+            let mut merged = defaults.clone();
+            merged.extend(keys.iter().cloned());
+            profiles.insert(profile, merged);
         }
     }
     profiles
@@ -692,8 +747,14 @@ fn load_shared_profiles(
     };
     if let Some(path) = creds_path {
         if let Some(sections) = load_one(path)? {
-            for (name, keys) in sections {
-                profiles.entry(name).or_default().extend(keys);
+            let defaults = ini_defaults(&sections);
+            for (name, keys) in &sections {
+                if name == "DEFAULT" {
+                    continue;
+                }
+                let mut merged = defaults.clone();
+                merged.extend(keys.iter().cloned());
+                profiles.entry(name.clone()).or_default().extend(merged);
             }
         }
     }
@@ -1922,6 +1983,108 @@ mod tests {
         );
         assert!(!map.contains_key("preview"));
         assert_eq!(map.len(), 5, "unbalanced quotes drop the section");
+    }
+
+    #[test]
+    fn s3_scope_region_shared_config_corners() {
+        // Review probes against live botocore 1.34.162: `[DEFAULT]`
+        // keys inherit into every parsed section (`cp.get` fallback)
+        // but never form a profile; nested validation only applies to
+        // empty-base values (`startswith('\n')` gate); leading `~/`
+        // expands against the map's `HOME`.
+        let dir = tmp_aws_dir();
+        // `[DEFAULT]` region feeds an empty `[default]` ...
+        let inherited = write_scratch(&dir, "inherited", "[DEFAULT]\nregion = xx\n[default]\n");
+        assert_eq!(
+            region_of(&vars(&[("AWS_CONFIG_FILE", inherited.as_str())])).expect("resolves"),
+            "xx"
+        );
+        // ... but creates no profile on its own ...
+        let defaults_only = write_scratch(&dir, "defaults-only", "[DEFAULT]\nregion = xx\n");
+        assert_eq!(
+            region_of(&vars(&[("AWS_CONFIG_FILE", defaults_only.as_str())])).expect("resolves"),
+            "us-east-1"
+        );
+        // ... and explicit keys win over it.
+        let explicit = write_scratch(
+            &dir,
+            "explicit",
+            "[DEFAULT]\nregion = xx\n[default]\nregion = dd\n",
+        );
+        assert_eq!(
+            region_of(&vars(&[("AWS_CONFIG_FILE", explicit.as_str())])).expect("resolves"),
+            "dd"
+        );
+        // Credentials `[DEFAULT]` merges the same way (per-file only).
+        let cfg_empty = write_scratch(&dir, "cfg-empty", "[default]\n");
+        let creds_defaults = write_scratch(
+            &dir,
+            "creds-defaults",
+            "[DEFAULT]\nregion = cc\n[default]\n",
+        );
+        assert_eq!(
+            region_of(&vars(&[
+                ("AWS_CONFIG_FILE", cfg_empty.as_str()),
+                ("AWS_SHARED_CREDENTIALS_FILE", creds_defaults.as_str())
+            ]))
+            .expect("resolves"),
+            "cc"
+        );
+        // No phantom `DEFAULT` profile: a set profile of that name
+        // fails like any other missing profile (`ProfileNotFound`).
+        assert!(
+            region_of(&vars(&[
+                ("AWS_CONFIG_FILE", inherited.as_str()),
+                ("AWS_PROFILE", "DEFAULT")
+            ]))
+            .is_err(),
+            "DEFAULT is not a profile"
+        );
+        // A repeated `[DEFAULT]` merges (no duplicate-section
+        // error), but a repeated key still fails loud.
+        let repdef = write_scratch(
+            &dir,
+            "repdef",
+            "[DEFAULT]\nregion = xx\n[default]\n[DEFAULT]\noutput = json\n",
+        );
+        assert_eq!(
+            region_of(&vars(&[("AWS_CONFIG_FILE", repdef.as_str())])).expect("resolves"),
+            "xx"
+        );
+        let repdef_dup = write_scratch(
+            &dir,
+            "repdef-dup",
+            "[DEFAULT]\nregion = xx\n[DEFAULT]\nregion = yy\n",
+        );
+        assert!(
+            region_of(&vars(&[("AWS_CONFIG_FILE", repdef_dup.as_str())])).is_err(),
+            "repeated DEFAULT key fails"
+        );
+        // A continuation under a non-empty non-region value is a
+        // plain string, not a nested block: no failure.
+        let cont = write_scratch(
+            &dir,
+            "cont",
+            "[default]\nregion = dd\noutput = json\n  plaincont\n",
+        );
+        assert_eq!(
+            region_of(&vars(&[("AWS_CONFIG_FILE", cont.as_str())])).expect("resolves"),
+            "dd"
+        );
+        // Leading `~/` in an explicit path expands against `HOME`.
+        let home_cfg = write_scratch(&dir, "home2/.aws/config", "[default]\nregion = tilde\n");
+        let home_dir = std::path::Path::new(&home_cfg)
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("home dir");
+        assert_eq!(
+            region_of(&vars(&[
+                ("HOME", home_dir.to_str().expect("utf8")),
+                ("AWS_CONFIG_FILE", "~/.aws/config")
+            ]))
+            .expect("resolves"),
+            "tilde"
+        );
     }
 
     #[test]
