@@ -36,10 +36,14 @@ pub enum StorageError {
     /// swallowed (`storage.py`, every method).
     #[error("s3 service error {status}: {message}")]
     Service { status: u16, message: String },
-    /// The configured storage cannot be used (empty bucket or credentials).
-    /// Python surfaces this lazily as a `ClientError`/`ParamValidationError`
-    /// on first use and swallows it the same way; this variant lets the
-    /// caller pre-flight into the fallback branch without network I/O.
+    /// The configured storage cannot be used (empty bucket or
+    /// credentials, or a region that cannot be signed — invalid host
+    /// label, or empty with no endpoint URL to derive from, which
+    /// Python raises as `ValueError`/`InvalidRegionError` from the
+    /// `S3Storage` constructor). Python surfaces these lazily as a
+    /// `ClientError`/`ParamValidationError` on first use and swallows
+    /// them the same way; this variant lets the caller pre-flight into
+    /// the fallback branch without network I/O.
     #[error("s3 misconfigured: {0}")]
     Config(String),
 }
@@ -73,20 +77,27 @@ pub struct ResolvedEndpoint {
 }
 
 /// Endpoint + host split mirroring `S3Storage.__init__` with a request
-/// (`is_server=False`) and the D-02 `endpoint_parts` helper.
+/// (`is_server=False`) and the D-02 `endpoint_parts` helper. Server-side
+/// signing is header auth, so regional clients keep the regional host
+/// (no `use_global_endpoint` rewrite — that is presigning only).
 pub fn resolve_server_endpoint(
     storage: &StorageSettings,
     scheme: &str,
     host: &str,
-) -> ResolvedEndpoint {
+) -> Result<ResolvedEndpoint, StorageError> {
+    if !pidash_db::config::is_valid_region_name(&storage.region) {
+        return Err(StorageError::Config(
+            "region is not a valid host label".to_owned(),
+        ));
+    }
     // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
     let scheme = storage.endpoint_protocol(scheme);
     if storage.use_minio {
-        ResolvedEndpoint {
+        Ok(ResolvedEndpoint {
             url_base: format!("{scheme}://{host}"),
             signed_host: host.to_owned(),
             path_style: true,
-        }
+        })
     } else if let Some(endpoint) = storage.endpoint_url.as_deref().filter(|e| !e.is_empty()) {
         let endpoint = endpoint.trim_end_matches('/');
         let signed_host = endpoint
@@ -96,26 +107,33 @@ pub fn resolve_server_endpoint(
             .split('/')
             .next()
             .unwrap_or(endpoint);
-        ResolvedEndpoint {
+        Ok(ResolvedEndpoint {
             url_base: endpoint.to_owned(),
             signed_host: signed_host.to_owned(),
             path_style: true,
-        }
+        })
     } else {
         let region = storage.region.as_str();
+        if region.is_empty() {
+            // botocore derives `https://s3..amazonaws.com` and rejects
+            // it (`ValueError: Invalid endpoint`).
+            return Err(StorageError::Config(
+                "empty region with no endpoint URL to derive from".to_owned(),
+            ));
+        }
         // botocore's s3 endpoint table serves us-east-1 from the global
         // endpoint (`s3.amazonaws.com`, no region infix); every other
         // region is virtual-hosted regional.
-        let base = if region.is_empty() || region == "us-east-1" {
+        let base = if region == "us-east-1" {
             "s3.amazonaws.com".to_owned()
         } else {
             format!("s3.{region}.amazonaws.com")
         };
-        ResolvedEndpoint {
+        Ok(ResolvedEndpoint {
             url_base: format!("https://{}.{base}", storage.bucket_name),
             signed_host: format!("{}.{base}", storage.bucket_name),
             path_style: false,
-        }
+        })
     }
 }
 
@@ -159,9 +177,9 @@ pub fn sign_put(
     payload: &[u8],
     amz_datetime: &str,
     date_stamp: &str,
-) -> SignedRequest {
+) -> Result<SignedRequest, StorageError> {
     let payload_hash = sha256_hex(payload);
-    let endpoint = resolve_server_endpoint(storage, scheme, host);
+    let endpoint = resolve_server_endpoint(storage, scheme, host)?;
     let path = canonical_path(&endpoint, &storage.bucket_name, object_key);
     // SigV4 requires canonical headers sorted by name (botocore sorts too).
     let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
@@ -176,14 +194,14 @@ pub fn sign_put(
         date_stamp,
         signed_headers,
     );
-    SignedRequest {
+    Ok(SignedRequest {
         method: "PUT",
         url: format!("{}{path}", endpoint.url_base),
         authorization,
         amz_date: amz_datetime.to_owned(),
         content_sha256: payload_hash,
         content_type: Some(content_type.to_owned()),
-    }
+    })
 }
 
 /// Sign a server-side HEAD of `object_key`.
@@ -200,9 +218,9 @@ pub fn sign_head(
     object_key: &str,
     amz_datetime: &str,
     date_stamp: &str,
-) -> SignedRequest {
+) -> Result<SignedRequest, StorageError> {
     let payload_hash = sha256_hex(&[]);
-    let endpoint = resolve_server_endpoint(storage, scheme, host);
+    let endpoint = resolve_server_endpoint(storage, scheme, host)?;
     let path = canonical_path(&endpoint, &storage.bucket_name, object_key);
     let signed_headers = "host;x-amz-content-sha256;x-amz-date";
     let canonical = format!(
@@ -216,14 +234,14 @@ pub fn sign_head(
         date_stamp,
         signed_headers,
     );
-    SignedRequest {
+    Ok(SignedRequest {
         method: "HEAD",
         url: format!("{}{path}", endpoint.url_base),
         authorization,
         amz_date: amz_datetime.to_owned(),
         content_sha256: payload_hash,
         content_type: None,
-    }
+    })
 }
 
 /// Sign a server-side DELETE of `object_key`.
@@ -238,9 +256,9 @@ pub fn sign_delete(
     object_key: &str,
     amz_datetime: &str,
     date_stamp: &str,
-) -> SignedRequest {
+) -> Result<SignedRequest, StorageError> {
     let payload_hash = sha256_hex(&[]);
-    let endpoint = resolve_server_endpoint(storage, scheme, host);
+    let endpoint = resolve_server_endpoint(storage, scheme, host)?;
     let path = canonical_path(&endpoint, &storage.bucket_name, object_key);
     let signed_headers = "host;x-amz-content-sha256;x-amz-date";
     let canonical = format!(
@@ -254,14 +272,14 @@ pub fn sign_delete(
         date_stamp,
         signed_headers,
     );
-    SignedRequest {
+    Ok(SignedRequest {
         method: "DELETE",
         url: format!("{}{path}", endpoint.url_base),
         authorization,
         amz_date: amz_datetime.to_owned(),
         content_sha256: payload_hash,
         content_type: None,
-    }
+    })
 }
 
 fn canonical_path(endpoint: &ResolvedEndpoint, bucket: &str, object_key: &str) -> String {
@@ -411,7 +429,8 @@ mod tests {
             b"hello",
             "20260928T120000Z",
             "20260928",
-        );
+        )
+        .expect("custom endpoint signs");
         assert_eq!(req.method, "PUT");
         assert_eq!(
             req.url,
@@ -444,7 +463,8 @@ mod tests {
             "ab12cd34-user-avatar.png",
             "20260928T120000Z",
             "20260928",
-        );
+        )
+        .expect("custom endpoint signs");
         assert_eq!(req.method, "DELETE");
         assert_eq!(
             req.url,
@@ -475,7 +495,8 @@ mod tests {
             "ab12cd34-user-avatar.png",
             "20260928T120000Z",
             "20260928",
-        );
+        )
+        .expect("custom endpoint signs");
         assert_eq!(req.method, "HEAD");
         assert_eq!(
             req.url,
@@ -502,7 +523,7 @@ mod tests {
             ..test_storage()
         };
         assert_eq!(
-            resolve_server_endpoint(&minio, "http", "127.0.0.1:9000"),
+            resolve_server_endpoint(&minio, "http", "127.0.0.1:9000").expect("minio"),
             ResolvedEndpoint {
                 url_base: "http://127.0.0.1:9000".to_owned(),
                 signed_host: "127.0.0.1:9000".to_owned(),
@@ -516,7 +537,7 @@ mod tests {
             ..test_storage()
         };
         assert_eq!(
-            resolve_server_endpoint(&minio_ssl, "http", "127.0.0.1:9000"),
+            resolve_server_endpoint(&minio_ssl, "http", "127.0.0.1:9000").expect("minio"),
             ResolvedEndpoint {
                 url_base: "https://127.0.0.1:9000".to_owned(),
                 signed_host: "127.0.0.1:9000".to_owned(),
@@ -529,7 +550,7 @@ mod tests {
             endpoint_url: Some("http://pi-dash-minio:9000/".to_owned()),
             ..test_storage()
         };
-        let resolved = resolve_server_endpoint(&custom, "https", "public.example");
+        let resolved = resolve_server_endpoint(&custom, "https", "public.example").expect("custom");
         assert_eq!(resolved.url_base, "http://pi-dash-minio:9000");
         assert_eq!(resolved.signed_host, "pi-dash-minio:9000");
         assert!(resolved.path_style);
@@ -540,7 +561,7 @@ mod tests {
             endpoint_url: None,
             ..test_storage()
         };
-        let resolved = resolve_server_endpoint(&aws, "https", "public.example");
+        let resolved = resolve_server_endpoint(&aws, "https", "public.example").expect("aws");
         assert_eq!(resolved.url_base, "https://examplebucket.s3.amazonaws.com");
         assert_eq!(resolved.signed_host, "examplebucket.s3.amazonaws.com");
         assert!(!resolved.path_style);
@@ -549,18 +570,34 @@ mod tests {
             region: "eu-west-1".to_owned(),
             ..aws.clone()
         };
-        let resolved = resolve_server_endpoint(&regional, "https", "public.example");
+        let resolved =
+            resolve_server_endpoint(&regional, "https", "public.example").expect("regional");
         assert_eq!(
             resolved.url_base,
             "https://examplebucket.s3.eu-west-1.amazonaws.com"
         );
-        // Empty region degrades like D-02 (global endpoint, empty scope part).
+        // Empty region with a derived endpoint fails (`ValueError`,
+        // probe D); garbage regions fail everywhere
+        // (`InvalidRegionError`). The caller maps both into its
+        // provider-URL fallback branch, never a 500.
         let no_region = StorageSettings {
             region: String::new(),
+            ..aws.clone()
+        };
+        assert!(resolve_server_endpoint(&no_region, "https", "public.example").is_err());
+        let garbage = StorageSettings {
+            region: "!!".to_owned(),
             ..aws
         };
-        let resolved = resolve_server_endpoint(&no_region, "https", "public.example");
-        assert_eq!(resolved.url_base, "https://examplebucket.s3.amazonaws.com");
+        assert!(resolve_server_endpoint(&garbage, "https", "public.example").is_err());
+        // Empty region against a custom endpoint still signs (probe F).
+        let custom_empty = StorageSettings {
+            region: String::new(),
+            ..custom
+        };
+        let resolved =
+            resolve_server_endpoint(&custom_empty, "https", "public.example").expect("custom");
+        assert_eq!(resolved.url_base, "http://pi-dash-minio:9000");
     }
 
     #[test]
@@ -572,7 +609,8 @@ mod tests {
             "a b/c+d.png",
             "20260928T120000Z",
             "20260928",
-        );
+        )
+        .expect("custom endpoint signs");
         assert!(
             req.url.ends_with("/examplebucket/a%20b/c%2Bd.png"),
             "{}",

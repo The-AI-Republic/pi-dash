@@ -1009,20 +1009,28 @@ pub fn avatar_extension(content_type: &str) -> Option<&'static str> {
 /// signs `{scheme}://{host}` path-style; an explicit endpoint URL signs
 /// path-style against it; otherwise the virtual-hosted AWS default.
 /// Returns `(endpoint, signed_host, key_prefix)` where `key_prefix` is
-/// `"/{bucket}"` for path-style and `""` for virtual-hosted.
+/// `"/{bucket}"` for path-style and `""` for virtual-hosted. `None`
+/// when the region cannot be signed — invalid host label, or empty
+/// with no endpoint URL to derive from (`ValueError` /
+/// `InvalidRegionError` from the constructor); the avatar callers fold
+/// it into the provider-URL fallback. Avatar signing is header auth,
+/// so regional clients keep the regional host (no presign rewrite).
 pub fn s3_target(
     storage: &pidash_db::config::StorageSettings,
     scheme: &str,
     host: &str,
-) -> (String, String, String) {
+) -> Option<(String, String, String)> {
+    if !pidash_db::config::is_valid_region_name(&storage.region) {
+        return None;
+    }
     // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
     let scheme = storage.endpoint_protocol(scheme);
     if storage.use_minio {
-        (
+        Some((
             format!("{scheme}://{host}"),
             host.to_owned(),
             format!("/{}", storage.bucket_name),
-        )
+        ))
     } else if let Some(endpoint) = storage.endpoint_url.as_deref().filter(|e| !e.is_empty()) {
         let endpoint = endpoint.trim_end_matches('/').to_owned();
         let signed_host = endpoint
@@ -1033,22 +1041,27 @@ pub fn s3_target(
             .next()
             .unwrap_or(endpoint.as_str())
             .to_owned();
-        (endpoint, signed_host, format!("/{}", storage.bucket_name))
+        Some((endpoint, signed_host, format!("/{}", storage.bucket_name)))
     } else {
         let region = storage.region.as_str();
+        if region.is_empty() {
+            // botocore derives `https://s3..amazonaws.com` and rejects
+            // it (`ValueError: Invalid endpoint`).
+            return None;
+        }
         // botocore's s3 endpoint table serves us-east-1 from the global
         // endpoint (`s3.amazonaws.com`, no region infix); every other
         // region is virtual-hosted regional.
-        let base = if region.is_empty() || region == "us-east-1" {
+        let base = if region == "us-east-1" {
             "s3.amazonaws.com".to_owned()
         } else {
             format!("s3.{region}.amazonaws.com")
         };
-        (
+        Some((
             format!("https://{}.{base}", storage.bucket_name),
             format!("{}.{base}", storage.bucket_name),
             String::new(),
-        )
+        ))
     }
 }
 
@@ -1243,7 +1256,7 @@ pub async fn download_and_upload_avatar(
         let filename = format!("{}-user-avatar.{extension}", uuid::Uuid::new_v4().simple());
         // `upload_to` with no workspace (`asset.py:17-20`).
         let stored_key = format!("user-{}-{filename}", uuid::Uuid::new_v4().simple());
-        let (endpoint, signed_host, prefix) = s3_target(storage, scheme, host);
+        let (endpoint, signed_host, prefix) = s3_target(storage, scheme, host).ok_or(())?;
         let payload_hash = sha256_hex(&content);
         let canonical_uri = format!("{prefix}/{stored_key}");
         let (amz_date, authorization) = s3_authorization(
@@ -1392,7 +1405,9 @@ pub async fn delete_old_avatar(
     let Some((key,)) = row else {
         return;
     };
-    let (endpoint, signed_host, prefix) = s3_target(storage, scheme, host);
+    let Some((endpoint, signed_host, prefix)) = s3_target(storage, scheme, host) else {
+        return;
+    };
     let payload_hash = sha256_hex(&[]);
     let canonical_uri = format!("{prefix}/{key}");
     if let Some((amz_date, authorization)) = s3_authorization(
@@ -2969,7 +2984,7 @@ mod tests {
             ..base.clone()
         };
         assert_eq!(
-            s3_target(&ssl, "http", "h:9"),
+            s3_target(&ssl, "http", "h:9").expect("minio"),
             (
                 "https://h:9".to_owned(),
                 "h:9".to_owned(),
@@ -2979,15 +2994,45 @@ mod tests {
         // us-east-1 resolves to the global endpoint (botocore probe A/L).
         let aws = StorageSettings {
             use_minio: false,
-            ..base
+            ..base.clone()
         };
         assert_eq!(
-            s3_target(&aws, "http", "h:9"),
+            s3_target(&aws, "http", "h:9").expect("aws"),
             (
                 "https://uploads.s3.amazonaws.com".to_owned(),
                 "uploads.s3.amazonaws.com".to_owned(),
                 String::new()
             )
         );
+        // Header auth keeps the regional host for regional clients
+        // (botocore probe J HEAD — no presign rewrite).
+        let regional = StorageSettings {
+            use_minio: false,
+            region: "eu-west-1".to_owned(),
+            ..base.clone()
+        };
+        assert_eq!(
+            s3_target(&regional, "http", "h:9").expect("regional"),
+            (
+                "https://uploads.s3.eu-west-1.amazonaws.com".to_owned(),
+                "uploads.s3.eu-west-1.amazonaws.com".to_owned(),
+                String::new()
+            )
+        );
+        // Empty region with a derived endpoint is `None` (`ValueError`,
+        // probe D); garbage regions are `None` everywhere
+        // (`InvalidRegionError`). Both fold into the provider-URL
+        // fallback, never a 500.
+        let empty = StorageSettings {
+            use_minio: false,
+            region: String::new(),
+            ..base.clone()
+        };
+        assert_eq!(s3_target(&empty, "http", "h:9"), None);
+        let garbage = StorageSettings {
+            region: "!!".to_owned(),
+            ..base
+        };
+        assert_eq!(s3_target(&garbage, "http", "h:9"), None);
     }
 }

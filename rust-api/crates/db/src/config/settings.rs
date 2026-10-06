@@ -370,25 +370,70 @@ impl<'a> Ctx<'a> {
         Ok(self.req_string(key, inline)?.to_ascii_lowercase().as_str() == "true")
     }
 
+    /// Shared-config-file region: the tail of botocore's default-region
+    /// chain (`configprovider.py:56` + `session.py:full_config`), consulted
+    /// only when neither `AWS_REGION` nor `AWS_DEFAULT_REGION` is set.
+    /// Profile is `AWS_DEFAULT_PROFILE`, else `AWS_PROFILE`, else
+    /// `default`; paths are `AWS_CONFIG_FILE` /
+    /// `AWS_SHARED_CREDENTIALS_FILE`, else `$HOME/.aws/config` /
+    /// `$HOME/.aws/credentials` — all direct map lookups, never
+    /// `std::env`, so explicit maps (and tests) stay hermetic. A set-but
+    /// missing profile fails (`ProfileNotFound`); a malformed file fails
+    /// (`ConfigParseError`); both escape boto3 client creation in Django
+    /// and fail the boot here instead. `$VAR` expansion in the paths and
+    /// `~user` homes are not ported (documented deviations).
+    fn shared_config_region(&self) -> Result<Option<String>, ConfigError> {
+        let (profile_var, profile) = match self.lookup("AWS_DEFAULT_PROFILE") {
+            some @ Some(_) => ("AWS_DEFAULT_PROFILE", some),
+            None => ("AWS_PROFILE", self.lookup("AWS_PROFILE")),
+        };
+        let home = self.lookup("HOME");
+        let config_path = self
+            .lookup("AWS_CONFIG_FILE")
+            .or_else(|| home.clone().map(|h| format!("{h}/.aws/config")));
+        let creds_path = self
+            .lookup("AWS_SHARED_CREDENTIALS_FILE")
+            .or_else(|| home.map(|h| format!("{h}/.aws/credentials")));
+        let profiles = load_shared_profiles(config_path.as_deref(), creds_path.as_deref())?;
+        match profile {
+            None => Ok(profiles
+                .get("default")
+                .and_then(|p| p.get("region"))
+                .cloned()),
+            Some(name) => match profiles.get(&name) {
+                Some(scoped) => Ok(scoped.get("region").cloned()),
+                None => Err(ConfigError::TypeMismatch {
+                    key: profile_var.to_owned(),
+                    expected: "a profile present in the AWS shared config",
+                    actual: name,
+                }),
+            },
+        }
+    }
+
     /// S3 scope region (`S3Storage.__init__`, `storage.py:40,64`): Django
     /// passes `get_config("AWS_REGION", None)` to boto3, so unset is None
     /// (botocore's default-region chain) while set — even empty — is
     /// verbatim (botocore signs an empty scope part against a custom
     /// endpoint, and raises `ValueError` when deriving one). The inline
     /// Null default preserves the distinction: unset resolves to it, set
-    /// resolves to the value. Unset then follows the env portion of
-    /// botocore's chain — `AWS_DEFAULT_REGION` verbatim (even `""`), else
-    /// the S3 partition default `us-east-1`. botocore reads
-    /// `AWS_DEFAULT_REGION` straight from the environment rather than
-    /// through `get_config`, so this is a direct map lookup, not a
-    /// registry read (and stays out of `read_keys`). The chain's
-    /// shared-config-file tail (`~/.aws/config`) is not ported
-    /// (PIDASHCONV-760).
+    /// resolves to the value. Unset then follows botocore's chain —
+    /// `AWS_DEFAULT_REGION` verbatim (even `""`), else the shared-config
+    /// tail above, else the S3 partition default `us-east-1`. botocore
+    /// reads `AWS_DEFAULT_REGION` straight from the environment rather
+    /// than through `get_config`, so this is a direct map lookup, not a
+    /// registry read (and stays out of `read_keys`).
     fn s3_scope_region(&self) -> Result<String, ConfigError> {
         match self.raw("AWS_REGION", Some(&ConfigValue::Null))? {
-            ConfigValue::Null => Ok(self
-                .lookup("AWS_DEFAULT_REGION")
-                .unwrap_or_else(|| "us-east-1".to_owned())),
+            ConfigValue::Null => {
+                if let Some(region) = self.lookup("AWS_DEFAULT_REGION") {
+                    return Ok(region);
+                }
+                if let Some(region) = self.shared_config_region()? {
+                    return Ok(region);
+                }
+                Ok("us-east-1".to_owned())
+            }
             ConfigValue::Str(s) => Ok(s),
             other => Err(ConfigError::TypeMismatch {
                 key: "AWS_REGION".to_owned(),
@@ -409,6 +454,30 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// `validate_region_name` (`botocore/utils.py:1311`, called unconditionally
+/// from `session.py:1014` during client creation): the resolved region
+/// must be a valid host label —
+/// `^(?![0-9]+$)(?!-)[a-zA-Z0-9-]{,63}(?<!-)$` — else `InvalidRegionError`.
+/// The empty name matches (the class repeats zero times), so `""` passes
+/// here and fails later at endpoint derivation (`ValueError`) when no
+/// endpoint URL is configured. Manual port: the `regex` crate has no
+/// lookaround.
+pub fn is_valid_region_name(region: &str) -> bool {
+    if region.len() > 63
+        || !region
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return false;
+    }
+    if region.starts_with('-') || region.ends_with('-') {
+        return false;
+    }
+    // `(?![0-9]+$)`: all-digit names are rejected, but the empty name
+    // has no digits to match.
+    region.is_empty() || !region.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// `is_valid_url` (`pi_dash/utils/url.py`): scheme and host both present.
 /// This covers the base-URL guards; full URL parsing is a consumer concern.
 fn is_valid_url(s: &str) -> bool {
@@ -423,6 +492,212 @@ fn is_valid_url(s: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// Close an open INI pair: a multi-line `region` value fails (botocore
+/// parses it as a nested dict and dies downstream — `ConfigParseError`
+/// for `k = v`-less lines, `TypeError` past `validate_region_name`
+/// otherwise); other keys' continuations must be well-formed nested
+/// `k = v` lines or botocore's `_parse_nested` fails there instead.
+/// Either way the failure is loud on both sides.
+fn close_ini_key(key: &str, conts: &[String]) -> Result<(), String> {
+    if conts.is_empty() {
+        return Ok(());
+    }
+    if key == "region" {
+        return Err("multi-line value for \"region\"".to_owned());
+    }
+    for line in conts {
+        if !line.contains('=') {
+            return Err(format!("malformed nested line under {key:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// Parsed shared-config INI: section names in file order, each with
+/// its lowercased keys in file order.
+type IniSections = Vec<(String, Vec<(String, String)>)>;
+
+/// AWS shared-config INI (`botocore/configloader.py:raw_config_parse`):
+/// `[section]` headers, `key = value` / `key: value` pairs, `#`/`;`
+/// full-line comments (indented or not), blank lines. Keys are lowercased
+/// (`optionxform`); section names are case-sensitive and untrimmed;
+/// trailing text after a header's closing bracket is ignored. Returns
+/// sections in file order. Fails exactly where botocore raises
+/// `ConfigParseError`: duplicate sections/keys, garbage lines, keys
+/// before any section, and indented lines with no key to continue.
+fn parse_shared_ini(text: &str) -> Result<IniSections, String> {
+    let mut sections: IniSections = Vec::new();
+    let mut current: Option<usize> = None;
+    let mut open_key: Option<String> = None;
+    let mut conts: Vec<String> = Vec::new();
+    for raw in text.lines() {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let stripped = line.trim();
+        if stripped.is_empty() || stripped.starts_with('#') || stripped.starts_with(';') {
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            match open_key {
+                Some(_) => conts.push(stripped.to_owned()),
+                None => return Err("indented line with no key to continue".to_owned()),
+            }
+            continue;
+        }
+        if let Some(rest) = stripped.strip_prefix('[') {
+            if let Some(key) = open_key.take() {
+                close_ini_key(&key, &conts)?;
+                conts.clear();
+            }
+            // `SECTCRE` is greedy: the header runs to the LAST bracket.
+            let Some(end) = rest.rfind(']') else {
+                return Err(format!("unclosed section header {stripped:?}"));
+            };
+            let name = rest[..end].to_owned();
+            if sections.iter().any(|(n, _)| n == &name) {
+                return Err(format!("duplicate section {name:?}"));
+            }
+            sections.push((name, Vec::new()));
+            current = Some(sections.len() - 1);
+            continue;
+        }
+        let Some(sec) = current else {
+            return Err(format!("keys before any section: {stripped:?}"));
+        };
+        let cut = stripped.find(['=', ':']);
+        let Some(cut) = cut else {
+            return Err(format!("malformed line {stripped:?}"));
+        };
+        let key = stripped[..cut].trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return Err(format!("malformed line {stripped:?}"));
+        }
+        if let Some(open) = open_key.take() {
+            close_ini_key(&open, &conts)?;
+            conts.clear();
+        }
+        if sections[sec].1.iter().any(|(k, _)| k == &key) {
+            return Err(format!("duplicate key {key:?}"));
+        }
+        let value = stripped[cut + 1..].trim().to_owned();
+        sections[sec].1.push((key.clone(), value));
+        open_key = Some(key);
+    }
+    if let Some(key) = open_key.take() {
+        close_ini_key(&key, &conts)?;
+    }
+    Ok(sections)
+}
+
+/// Minimal `shlex.split` for profile headers (`configloader.py:203`):
+/// whitespace-separated tokens honoring single/double quotes. Backslash
+/// escapes are literal here (botocore processes them; a profile name
+/// with a backslash is not a real input). `None` on unbalanced quotes,
+/// which botocore also drops.
+fn split_profile_name(name: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_token = false;
+    let mut quote: Option<char> = None;
+    for c in name.chars() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else {
+                current.push(c);
+            }
+            continue;
+        }
+        if c == '\'' || c == '"' {
+            quote = Some(c);
+            in_token = true;
+        } else if c.is_whitespace() {
+            if in_token {
+                tokens.push(std::mem::take(&mut current));
+                in_token = false;
+            }
+        } else {
+            current.push(c);
+            in_token = true;
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if in_token {
+        tokens.push(current);
+    }
+    Some(tokens)
+}
+
+/// Profile map over one parsed config file
+/// (`configloader.py:build_profile_map`): `[default]` is the `default`
+/// profile; `[profile NAME]` (exactly two whitespace/quote-separated
+/// tokens — `shlex.split`, so `[profilefoo bar]` maps `bar`) is `NAME`;
+/// anything else is ignored. Later sections overwrite earlier ones.
+fn config_profile_map(sections: &IniSections) -> HashMap<String, HashMap<String, String>> {
+    let mut profiles: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for (name, keys) in sections {
+        let profile = if name == "default" {
+            Some("default".to_owned())
+        } else if name.starts_with("profile") {
+            match split_profile_name(name) {
+                Some(tokens) if tokens.len() == 2 => Some(tokens[1].clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(profile) = profile {
+            profiles.insert(profile, keys.iter().cloned().collect());
+        }
+    }
+    profiles
+}
+
+/// Merged profile map (`session.py:full_config`): config-file profiles
+/// plus the credentials file's raw sections (bare `[name]` headers, no
+/// `profile` prefix), credentials winning per key. A missing file is an
+/// empty map (`ConfigNotFound` is swallowed); a present-but-unreadable
+/// or malformed file fails (botocore lets `OSError`/`ConfigParseError`
+/// escape client creation; the boot fails here instead).
+fn load_shared_profiles(
+    config_path: Option<&str>,
+    creds_path: Option<&str>,
+) -> Result<HashMap<String, HashMap<String, String>>, ConfigError> {
+    fn load_one(path: &str) -> Result<Option<IniSections>, ConfigError> {
+        if !std::path::Path::new(path).is_file() {
+            return Ok(None);
+        }
+        let text = std::fs::read_to_string(path).map_err(|e| ConfigError::TypeMismatch {
+            key: path.to_owned(),
+            expected: "a readable AWS shared-config file",
+            actual: e.to_string(),
+        })?;
+        parse_shared_ini(&text)
+            .map(Some)
+            .map_err(|detail| ConfigError::TypeMismatch {
+                key: path.to_owned(),
+                expected: "valid AWS shared-config ini",
+                actual: detail,
+            })
+    }
+    let mut profiles = match config_path {
+        Some(path) => match load_one(path)? {
+            Some(sections) => config_profile_map(&sections),
+            None => HashMap::new(),
+        },
+        None => HashMap::new(),
+    };
+    if let Some(path) = creds_path {
+        if let Some(sections) = load_one(path)? {
+            for (name, keys) in sections {
+                profiles.entry(name).or_default().extend(keys);
+            }
+        }
+    }
+    Ok(profiles)
 }
 
 fn validated_base_url(v: Option<String>) -> Option<String> {
@@ -1352,6 +1627,301 @@ mod tests {
             .expect("resolves");
             assert_eq!(s.storage.minio_endpoint_ssl, want, "value={value:?}");
         }
+    }
+
+    static SHARED_CONFIG_TMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Hermetic scratch dir for shared-config tests (no `tempfile` dep;
+    /// unique per call so parallel tests never share a file).
+    fn tmp_aws_dir() -> std::path::PathBuf {
+        let n = SHARED_CONFIG_TMP.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("pidash760-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn write_scratch(dir: &std::path::Path, name: &str, text: &str) -> String {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("scratch parent");
+        }
+        std::fs::write(&path, text).expect("scratch file");
+        path.to_str().expect("utf8 path").to_owned()
+    }
+
+    fn region_of(map: &HashMap<String, String>) -> Result<String, ConfigError> {
+        Ok(Settings::from_map_with(map, Profile::Common, &NoOverlay)?
+            .storage
+            .region)
+    }
+
+    #[test]
+    fn s3_region_name_validation_matches_botocore() {
+        // `validate_region_name` (`utils.py:1311`): valid host label,
+        // max 63 chars, no leading/trailing dash, not all digits. `""`
+        // matches (empty repetition) — it fails later at endpoint
+        // derivation instead.
+        for valid in [
+            "",
+            "us-east-1",
+            "eu-west-1",
+            "DD",
+            "a",
+            "a-b",
+            "a1",
+            "1a",
+            &"a".repeat(63),
+        ] {
+            assert!(is_valid_region_name(valid), "{valid:?} valid");
+        }
+        for invalid in [
+            "!!",
+            "dd # trailing",
+            "a b",
+            "a_b",
+            "a.b",
+            "-ab",
+            "ab-",
+            "-",
+            "123",
+            "0",
+            &"a".repeat(64),
+            "a/b",
+            "a:b",
+        ] {
+            assert!(!is_valid_region_name(invalid), "{invalid:?} invalid");
+        }
+    }
+
+    #[test]
+    fn s3_scope_region_shared_config_tail() {
+        let dir = tmp_aws_dir();
+        let cfg = write_scratch(
+            &dir,
+            "cfg",
+            "[default]\nregion = ca-central-1\n[profile foo]\nregion = ff\n",
+        );
+        // Neither var set: config-file [default] wins (probe H).
+        assert_eq!(
+            region_of(&vars(&[("AWS_CONFIG_FILE", cfg.as_str())])).expect("resolves"),
+            "ca-central-1"
+        );
+        // Named profile (probe P13).
+        assert_eq!(
+            region_of(&vars(&[
+                ("AWS_CONFIG_FILE", cfg.as_str()),
+                ("AWS_PROFILE", "foo")
+            ]))
+            .expect("resolves"),
+            "ff"
+        );
+        // `AWS_DEFAULT_PROFILE` wins over `AWS_PROFILE` (probe P1).
+        let both = write_scratch(
+            &dir,
+            "both",
+            "[profile a]\nregion = aa\n[profile b]\nregion = bb\n",
+        );
+        assert_eq!(
+            region_of(&vars(&[
+                ("AWS_CONFIG_FILE", both.as_str()),
+                ("AWS_PROFILE", "a"),
+                ("AWS_DEFAULT_PROFILE", "b")
+            ]))
+            .expect("resolves"),
+            "bb"
+        );
+        // Missing file falls through to us-east-1 (probe P22).
+        assert_eq!(
+            region_of(&vars(&[(
+                "AWS_CONFIG_FILE",
+                dir.join("absent").to_str().expect("utf8")
+            )]))
+            .expect("resolves"),
+            "us-east-1"
+        );
+        // `$HOME/.aws/config` fallback (probe P21).
+        let home = write_scratch(&dir, "home/.aws/config", "[default]\nregion = home\n");
+        let home_dir = std::path::Path::new(&home)
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("home dir");
+        assert_eq!(
+            region_of(&vars(&[("HOME", home_dir.to_str().expect("utf8"))])).expect("resolves"),
+            "home"
+        );
+        // Set-empty `AWS_CONFIG_FILE` skips the home file too (probe Q1).
+        assert_eq!(
+            region_of(&vars(&[
+                ("HOME", home_dir.to_str().expect("utf8")),
+                ("AWS_CONFIG_FILE", "")
+            ]))
+            .expect("resolves"),
+            "us-east-1"
+        );
+        // Set-empty file region is verbatim `""` (probe P9; the crash
+        // lands downstream at endpoint derivation).
+        let empty = write_scratch(&dir, "empty", "[default]\nregion =\n");
+        assert_eq!(
+            region_of(&vars(&[("AWS_CONFIG_FILE", empty.as_str())])).expect("resolves"),
+            ""
+        );
+        // `[Default]` is ignored but `Region` and `:` are honored
+        // (probes P7/P8/P11).
+        let quirks = write_scratch(
+            &dir,
+            "quirks",
+            "[Default]\nregion = dd\n[profile q]\nRegion: qq\n",
+        );
+        assert_eq!(
+            region_of(&vars(&[
+                ("AWS_CONFIG_FILE", quirks.as_str()),
+                ("AWS_PROFILE", "q")
+            ]))
+            .expect("resolves"),
+            "qq"
+        );
+        assert_eq!(
+            region_of(&vars(&[("AWS_CONFIG_FILE", quirks.as_str())])).expect("resolves"),
+            "us-east-1"
+        );
+        // Credentials-only profile validates (probe P5); credentials
+        // win per key (probes P6/P20).
+        let creds = write_scratch(
+            &dir,
+            "creds",
+            "[foo]\naws_access_key_id = X\n[default]\nregion = cc\n",
+        );
+        assert_eq!(
+            region_of(&vars(&[
+                ("AWS_CONFIG_FILE", cfg.as_str()),
+                ("AWS_SHARED_CREDENTIALS_FILE", creds.as_str())
+            ]))
+            .expect("resolves"),
+            "cc"
+        );
+        assert_eq!(
+            region_of(&vars(&[
+                ("AWS_CONFIG_FILE", cfg.as_str()),
+                ("AWS_SHARED_CREDENTIALS_FILE", creds.as_str()),
+                ("AWS_PROFILE", "foo")
+            ]))
+            .expect("resolves"),
+            "ff"
+        );
+        // Env links beat the file (chain order).
+        assert_eq!(
+            region_of(&vars(&[
+                ("AWS_CONFIG_FILE", cfg.as_str()),
+                ("AWS_DEFAULT_REGION", "eu-west-1")
+            ]))
+            .expect("resolves"),
+            "eu-west-1"
+        );
+        assert_eq!(
+            region_of(&vars(&[
+                ("AWS_CONFIG_FILE", cfg.as_str()),
+                ("AWS_REGION", "ap-south-1")
+            ]))
+            .expect("resolves"),
+            "ap-south-1"
+        );
+    }
+
+    #[test]
+    fn s3_scope_region_shared_config_errors_are_loud() {
+        let dir = tmp_aws_dir();
+        // Malformed config / credentials (probes P3/Q3), duplicate key
+        // (P12) / section (P23), garbage line (P24), multi-line region
+        // (P15), indented line with no key, keys before any section.
+        for (name, text) in [
+            ("bad", "[default\nregion = dd\n"),
+            ("dupkey", "[default]\nregion = aa\nregion = bb\n"),
+            ("dupsec", "[default]\nregion = aa\n[default]\nregion = bb\n"),
+            ("garbage", "[default]\nnotakeyvalue\n"),
+            ("multiline", "[default]\nregion =\n  dd\n"),
+            ("nested", "[default]\nregion =\n  a = b\n"),
+            ("indented", "[default]\n  ee\n"),
+            ("nosection", "region = dd\n"),
+        ] {
+            let path = write_scratch(&dir, name, text);
+            assert!(
+                region_of(&vars(&[("AWS_CONFIG_FILE", path.as_str())])).is_err(),
+                "{name} fails"
+            );
+        }
+        let cfg = write_scratch(&dir, "ok", "[default]\nregion = dd\n");
+        let bad_creds = write_scratch(&dir, "badcreds", "[default\nx = 1\n");
+        assert!(
+            region_of(&vars(&[
+                ("AWS_CONFIG_FILE", cfg.as_str()),
+                ("AWS_SHARED_CREDENTIALS_FILE", bad_creds.as_str())
+            ]))
+            .is_err(),
+            "malformed credentials fail"
+        );
+        // Set-but-missing profiles fail (probes P2/P14/Q7/Q8),
+        // including set-empty and whitespace (no trimming).
+        for (var, profile) in [
+            ("AWS_PROFILE", "nope"),
+            ("AWS_PROFILE", ""),
+            ("AWS_PROFILE", "  "),
+            ("AWS_DEFAULT_PROFILE", ""),
+            ("AWS_PROFILE", "default"),
+        ] {
+            let only_foo = write_scratch(&dir, "onlyfoo", "[profile foo]\nregion = ff\n");
+            assert!(
+                region_of(&vars(&[
+                    ("AWS_CONFIG_FILE", only_foo.as_str()),
+                    (var, profile)
+                ]))
+                .is_err(),
+                "{var}={profile:?} fails"
+            );
+        }
+        // No profile env + no `[default]` section falls through
+        // (probes P7/P22), it does not fail.
+        let only_foo = write_scratch(&dir, "onlyfoo2", "[profile foo]\nregion = ff\n");
+        assert_eq!(
+            region_of(&vars(&[("AWS_CONFIG_FILE", only_foo.as_str())])).expect("resolves"),
+            "us-east-1"
+        );
+    }
+
+    #[test]
+    fn shared_ini_profile_headers_match_botocore() {
+        // Greedy bracket, quoted multiword, unbalanced quotes dropped,
+        // the `[profilefoo bar]` quirk, later-section-wins (probe P19),
+        // non-profile sections ignored.
+        let sections = parse_shared_ini(
+            "[preview]\nregion = xx\n\
+             [profile foo]\nregion = ff\n\
+             [profile \"bar baz\"]\nregion = bb\n\
+             [profile broken]\nregion = br\n\
+             [profilefoo qux]\nregion = qq\n\
+             [default]\nregion = dd\n\
+             [profile default]\nregion = pp\n\
+             [profile \"unbalanced]\nregion = uu\n",
+        )
+        .expect("parses");
+        let map = config_profile_map(&sections);
+        assert_eq!(
+            map.get("foo").and_then(|p| p.get("region")).cloned(),
+            Some("ff".to_owned())
+        );
+        assert_eq!(
+            map.get("bar baz").and_then(|p| p.get("region")).cloned(),
+            Some("bb".to_owned())
+        );
+        assert_eq!(
+            map.get("qux").and_then(|p| p.get("region")).cloned(),
+            Some("qq".to_owned())
+        );
+        assert_eq!(
+            map.get("default").and_then(|p| p.get("region")).cloned(),
+            Some("pp".to_owned())
+        );
+        assert!(!map.contains_key("preview"));
+        assert_eq!(map.len(), 5, "unbalanced quotes drop the section");
     }
 
     #[test]
