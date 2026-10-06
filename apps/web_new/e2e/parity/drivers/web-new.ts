@@ -3097,4 +3097,79 @@ export class WebNewDriver implements ParityDriver {
   async createFormIconVisible(): Promise<boolean> {
     return todo("createFormIconVisible");
   }
+
+  // --- Invitation inbox + onboarding start (NEWFRONT-110, AUTH-026/033).
+  // --- Throwing stubs per the shared driver contract; the invitations and
+  // --- onboarding areas fill these in when they land.
+  async openInvitations(): Promise<void> {
+    return todo("openInvitations");
+  }
+
+  async invitationWorkspaceNames(): Promise<string[]> {
+    return todo("invitationWorkspaceNames");
+  }
+
+  async toggleInvitation(_workspaceName: string): Promise<void> {
+    return todo("toggleInvitation");
+  }
+
+  async acceptSelectedInvitations(): Promise<void> {
+    return todo("acceptSelectedInvitations");
+  }
+
+  async invitationsEmptyStateVisible(): Promise<boolean> {
+    return todo("invitationsEmptyStateVisible");
+  }
+
+  async openInvitationLink(_workspaceSlug: string, _invitationId: string, _token: string): Promise<void> {
+    return todo("openInvitationLink");
+  }
+
+  async pageText(): Promise<string> {
+    return todo("pageText");
+  }
+
+  async acceptSingleInvitation(): Promise<void> {
+    return todo("acceptSingleInvitation");
+  }
+
+  async declineSingleInvitation(): Promise<void> {
+    return todo("declineSingleInvitation");
+  }
+
+  async openOnboarding(): Promise<void> {
+    return todo("openOnboarding");
+  }
+
+  async advanceCliInstall(): Promise<void> {
+    return todo("advanceCliInstall");
+  }
+
+  async skipCliInstall(): Promise<void> {
+    return todo("skipCliInstall");
+  }
+
+  async submitProfileStep(_displayName: string): Promise<void> {
+    return todo("submitProfileStep");
+  }
+
+  async submitRoleStep(_roleLabel: string): Promise<void> {
+    return todo("submitRoleStep");
+  }
+
+  async skipRoleStep(): Promise<void> {
+    return todo("skipRoleStep");
+  }
+
+  async submitUseCaseStep(_useCaseLabels: string[]): Promise<void> {
+    return todo("submitUseCaseStep");
+  }
+
+  async skipUseCaseStep(): Promise<void> {
+    return todo("skipUseCaseStep");
+  }
+
+  async goBackOnboardingStep(): Promise<void> {
+    return todo("goBackOnboardingStep");
+  }
 }
