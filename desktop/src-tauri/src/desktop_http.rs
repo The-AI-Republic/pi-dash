@@ -150,6 +150,12 @@ fn same_origin(a: &Url, b: &Url) -> bool {
         && a.port_or_known_default() == b.port_or_known_default()
 }
 
+/// Only the main window showing the app UI may make native API requests.
+fn from_app_ui(label: &str, source: &Url, config: &crate::AppConfig) -> bool {
+    let trusted = config.bundle_root.as_ref().unwrap_or(&config.target_url);
+    label == "main" && same_origin(source, trusted)
+}
+
 fn allowed_api_url(url: &Url, api: &Url) -> bool {
     matches!(url.scheme(), "http" | "https")
         && same_origin(url, api)
@@ -288,8 +294,7 @@ async fn send(
     let source = window
         .url()
         .map_err(|_| "cannot determine request source")?;
-    let trusted = config.bundle_root.as_ref().unwrap_or(&config.target_url);
-    if window.label() != "main" || !same_origin(&source, trusted) {
+    if !from_app_ui(window.label(), &source, &config) {
         return Err("native API requests require the app UI".into());
     }
     let mut url = request.url;
@@ -676,6 +681,42 @@ mod tests {
             &Url::parse("tauri://evil.test/").unwrap()
         ));
         assert!(!same_origin(&bundle, &api()));
+    }
+
+    // `cargo tauri dev` serves the bundled SPA from the CLI's dev server, not
+    // the `tauri://` protocol, so that is the app UI's origin in bundled-dev.
+    #[test]
+    fn bundled_dev_app_ui_served_by_the_cli_dev_server_is_trusted() {
+        let dev_url = Url::parse("http://127.0.0.1:1430/").unwrap();
+        let config = crate::AppConfig {
+            target_url: Url::parse("http://localhost:8000").unwrap(),
+            bundle_root: Some(crate::bundle_root_for(Some(&dev_url))),
+            web_base: Url::parse("http://localhost:8000").unwrap(),
+        };
+        let page = Url::parse("http://127.0.0.1:1430/acme/projects/").unwrap();
+        assert!(from_app_ui("main", &page, &config));
+        assert!(!from_app_ui("other", &page, &config));
+        for foreign in [
+            "http://127.0.0.1:1431/",
+            "http://localhost:8000/",
+            "https://evil.test/",
+        ] {
+            let source = Url::parse(foreign).unwrap();
+            assert!(!from_app_ui("main", &source, &config), "{foreign}");
+        }
+    }
+
+    #[test]
+    fn release_app_ui_is_trusted_only_on_the_bundle_origin() {
+        let config = crate::AppConfig {
+            target_url: Url::parse("https://pidash.example.com").unwrap(),
+            bundle_root: Some(crate::bundle_root_for(None)),
+            web_base: Url::parse("https://pidash.example.com").unwrap(),
+        };
+        let page = Url::parse(crate::BUNDLE_ORIGIN).unwrap().join("/acme/").unwrap();
+        assert!(from_app_ui("main", &page, &config));
+        let dev = Url::parse("http://127.0.0.1:1430/").unwrap();
+        assert!(!from_app_ui("main", &dev, &config));
     }
 
     // A deployment with AIREPUBLIC_COOKIE_DOMAIN set (production does: see
