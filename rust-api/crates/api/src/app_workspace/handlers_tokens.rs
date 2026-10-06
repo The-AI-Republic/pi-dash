@@ -594,8 +594,9 @@ fn parse_django_date(text: &str) -> Option<NaiveDate> {
 /// CPython 3.12 `datetime.fromisoformat` accept set (pinned against the
 /// interpreter, PIDASHCONV-624 probe): calendar dates (extended
 /// `YYYY-MM-DD`, basic `YYYYMMDD`, zero-padded only), ISO week dates
-/// (extended `YYYY-Www-D`, basic `YYYYWwwD`) — never ordinal or
-/// non-padded — then end of string (midnight), or exactly ONE
+/// (extended `YYYY-Www[-D]`, basic `YYYYWww[D]`, weekday defaulting to
+/// Monday) — never ordinal or non-padded — then end of string (midnight),
+/// or exactly ONE
 /// separator scalar (any character, `X`/`\t`/`é` alike) plus a time
 /// (extended `HH[:MM[:SS]]`, basic `HH[MM[SS]]`, hour-only), an
 /// optional `[.,]` fraction (1+ ASCII digits, truncated past 6, always
@@ -604,7 +605,8 @@ fn parse_django_date(text: &str) -> Option<NaiveDate> {
 /// whitespace anywhere.
 fn parse_fromisoformat(text: &str) -> Option<ParsedInput> {
     let bytes = text.as_bytes();
-    // Date part at position 0: 10-char extended/week, 8-char basic.
+    // Date part at position 0: 10-char extended, 8-char extended-week or
+    // basic, 7-char basic-week.
     let (date, rest) = parse_iso_date_prefix(bytes)?;
     if rest.is_empty() {
         return Some(ParsedInput::Naive(date.and_hms_opt(0, 0, 0)?));
@@ -620,29 +622,36 @@ fn parse_fromisoformat(text: &str) -> Option<ParsedInput> {
 }
 
 /// The `fromisoformat` date prefix: returns the date plus the
-/// unconsumed tail. Strictly padded; Basic and week forms included.
+/// unconsumed tail. Strictly padded; basic and week forms included, the
+/// weekday defaulting to Monday on day-less week dates.
 fn parse_iso_date_prefix(bytes: &[u8]) -> Option<(NaiveDate, &[u8])> {
-    if bytes.len() >= 10 && bytes[4] == b'-' {
-        // Extended `YYYY-MM-DD` or `YYYY-Www-D`.
+    if bytes.len() >= 8 && bytes[4] == b'-' {
+        // Extended `YYYY-MM-DD` or `YYYY-Www[-D]`.
         let year = digits_to_u32(bytes.get(0..4)?)?;
         if bytes.get(5) == Some(&b'W') {
             let week = digits_to_u32(bytes.get(6..8)?)?;
-            if bytes.get(8) != Some(&b'-') {
-                return None;
-            }
-            let weekday = *bytes.get(9)?;
-            if !(b'1'..=b'7').contains(&weekday) {
-                return None;
-            }
             if year == 0 {
                 return None;
             }
+            let (weekday, rest) = match bytes.get(8) {
+                Some(b'-') => {
+                    let day = *bytes.get(9)?;
+                    if !(b'1'..=b'7').contains(&day) {
+                        return None;
+                    }
+                    (day - b'1', bytes.get(10..)?)
+                }
+                _ => (0, bytes.get(8..)?),
+            };
             let date = NaiveDate::from_isoywd_opt(
                 year as i32,
                 week,
-                chrono::Weekday::try_from(weekday - b'1').ok()?,
+                chrono::Weekday::try_from(weekday).ok()?,
             )?;
-            return Some((date, bytes.get(10..)?));
+            return Some((date, rest));
+        }
+        if bytes.len() < 10 {
+            return None;
         }
         let month = digits_to_u32(bytes.get(5..7)?)?;
         if bytes.get(7) != Some(&b'-') {
@@ -655,26 +664,32 @@ fn parse_iso_date_prefix(bytes: &[u8]) -> Option<(NaiveDate, &[u8])> {
         let date = NaiveDate::from_ymd_opt(year as i32, month, day)?;
         return Some((date, bytes.get(10..)?));
     }
-    if bytes.len() >= 8 && bytes[0..4].iter().all(|b| b.is_ascii_digit()) {
+    if bytes.len() >= 7 && bytes[0..4].iter().all(|b| b.is_ascii_digit()) {
         if bytes.get(4) == Some(&b'W') {
-            // Basic `YYYYWwwD`.
+            // Basic `YYYYWww[D]`.
             let year = digits_to_u32(bytes.get(0..4)?)?;
             let week = digits_to_u32(bytes.get(5..7)?)?;
-            let weekday = *bytes.get(7)?;
-            if !(b'1'..=b'7').contains(&weekday) {
-                return None;
-            }
             if year == 0 {
                 return None;
             }
+            let (weekday, rest) = match bytes.get(7) {
+                Some(digit) if digit.is_ascii_digit() => {
+                    let day = *digit;
+                    if !(b'1'..=b'7').contains(&day) {
+                        return None;
+                    }
+                    (day - b'1', bytes.get(8..)?)
+                }
+                _ => (0, bytes.get(7..)?),
+            };
             let date = NaiveDate::from_isoywd_opt(
                 year as i32,
                 week,
-                chrono::Weekday::try_from(weekday - b'1').ok()?,
+                chrono::Weekday::try_from(weekday).ok()?,
             )?;
-            return Some((date, bytes.get(8..)?));
+            return Some((date, rest));
         }
-        if bytes.get(0..8)?.iter().all(|b| b.is_ascii_digit()) {
+        if bytes.len() >= 8 && bytes.get(0..8)?.iter().all(|b| b.is_ascii_digit()) {
             // Basic `YYYYMMDD`.
             let year = digits_to_u32(bytes.get(0..4)?)?;
             let month = digits_to_u32(bytes.get(4..6)?)?;
@@ -2519,6 +2534,9 @@ mod tests {
             Some("2030-06-04T00:00:00"),
             Some("2030-06-04"),
         ),
+        // Week date without a day: weekday defaults to Monday (PIDASHCONV-770).
+        ("2030-W23", Some("2030-06-03T00:00:00"), Some("2030-06-03")),
+        ("2030W23", Some("2030-06-03T00:00:00"), Some("2030-06-03")),
         ("2030-153", None, None),
         ("2030-06-01T12:00:60Z", None, None),
         (
