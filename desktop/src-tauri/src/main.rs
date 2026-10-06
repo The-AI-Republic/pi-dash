@@ -81,6 +81,7 @@ fn bundle_redirect_for(url: &Url, server: &Url, bundle_root: &Url) -> Option<Url
 
 /// Whether this executable runs from an installed MSIX package; Windows
 /// installs package files under `...\WindowsApps\<package>\`.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 fn is_msix_install(exe: &std::path::Path) -> bool {
     exe.components()
         .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
