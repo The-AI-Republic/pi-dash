@@ -18,6 +18,9 @@ const agentAPI = new AgentAPI(API_BASE_URL);
 export type AgentRunTarget = { workspaceSlug: string; projectId: string; issueId: string };
 type Profile = { available: boolean; reason_code: string; base_url: string; model: string };
 type Native = { core: { invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> } };
+/** What the user chose in the sign-out dialog. */
+export type SignOutChoice = { deleteChatHistory: boolean };
+type SignOutPrompt = (resolve: (choice: SignOutChoice | null) => void) => void;
 
 export function isDesktop() {
   return typeof window !== "undefined" && "__TAURI__" in window;
@@ -30,6 +33,39 @@ export function isDesktop() {
  */
 export function getAgentAccount(): string {
   return activeUserId;
+}
+
+/**
+ * The account every engine command is scoped to. The engine keeps its own copy
+ * of each conversation, so its home directory is per account; a command with
+ * no account has nowhere safe to point it.
+ */
+function requireAccount(): string {
+  if (!activeUserId) throw new Error("Pi Dash Agent is signed out.");
+  return activeUserId;
+}
+
+let signOutPrompt: SignOutPrompt | null = null;
+
+/**
+ * Mounts (or, with `null`, unmounts) the dialog that {@link confirmSignOut}
+ * opens. Owned by the `AgentRuntime` component.
+ */
+export function registerSignOutPrompt(prompt: SignOutPrompt | null) {
+  signOutPrompt = prompt;
+}
+
+/**
+ * Ask the user to confirm a sign-out they started, and whether to delete this
+ * account's chat history with it. Resolves `null` when they cancel.
+ *
+ * Deletion is opt-in: with no dialog to ask through, sign-out proceeds and
+ * keeps the history.
+ */
+export function confirmSignOut(): Promise<SignOutChoice | null> {
+  const prompt = signOutPrompt;
+  if (!isDesktop() || !prompt) return Promise.resolve({ deleteChatHistory: false });
+  return new Promise((resolve) => prompt(resolve));
 }
 
 function invoke<T>(command: string, args?: Record<string, unknown>) {
@@ -123,7 +159,7 @@ async function configure() {
     await invoke("managed_stop_daemon", { graceSeconds: 5 });
     throw new Error(AGENT_RUNTIME_REASON_MESSAGES[profile.reason_code] ?? profile.reason_code);
   }
-  await invoke("managed_write_engine_config", { profile });
+  await invoke("managed_write_engine_config", { account: requireAccount(), profile });
   if (tokenExpiresAt < Date.now() + 120_000) {
     const credential = await api<{ token: string; expires_at: string }>(
       "/api/users/me/ai-assistant/agent-token/",
@@ -175,12 +211,13 @@ export async function connectAgentProject(workspaceSlug: string, projectId: stri
     }
     const project = await api<{ identifier: string }>(`/api/workspaces/${workspaceSlug}/projects/${projectId}/`);
     await invoke("managed_enroll", {
+      account: requireAccount(),
       workspace: workspaceSlug,
       project: project.identifier,
       hostLabel,
     });
     if (stopped || current !== generation) return;
-    await invoke("managed_start_daemon", { workspace: workspaceSlug });
+    await invoke("managed_start_daemon", { account: requireAccount(), workspace: workspaceSlug });
   });
 }
 
@@ -268,9 +305,14 @@ export async function ensureChatRuntime(workspaceSlug: string): Promise<void> {
     if (!identifier) {
       throw new Error("Create a project in this workspace before chatting with the built-in agent.");
     }
-    await invoke("managed_enroll", { workspace: workspaceSlug, project: identifier, hostLabel });
+    await invoke("managed_enroll", {
+      account: requireAccount(),
+      workspace: workspaceSlug,
+      project: identifier,
+      hostLabel,
+    });
     if (stopped || current !== generation) return;
-    await invoke("managed_start_daemon", { workspace: workspaceSlug });
+    await invoke("managed_start_daemon", { account: requireAccount(), workspace: workspaceSlug });
   });
 }
 
@@ -311,18 +353,30 @@ export async function refreshAgentRuntime() {
       if (tokenExpiresAt <= Date.now()) await invoke("managed_stop_daemon", { graceSeconds: 5 });
       throw error;
     }
+    if (stopped) return;
+    const account = requireAccount();
     // eslint-disable-next-line no-await-in-loop -- Serialize daemon lifecycle commands.
-    if (!stopped) for (const workspace of workspaces) await invoke("managed_start_daemon", { workspace });
+    for (const workspace of workspaces) await invoke("managed_start_daemon", { account, workspace });
   });
 }
 
-export async function disposeAgentRuntime(): Promise<void> {
+/**
+ * Tear the runtime down for a sign-out.
+ *
+ * `choice` comes from the sign-out dialog and is the only thing that can make
+ * a sign-out delete chat history. The session-expiry teardown in `api` and the
+ * second cleanup pass below never pass it.
+ */
+export async function disposeAgentRuntime(choice?: SignOutChoice): Promise<void> {
   if (!isDesktop()) return;
   stopped = true;
   generation++;
   clearEnrollmentCache();
   // Stop immediately, then clean again after any in-flight enrollment finishes.
-  await invoke("managed_sign_out");
+  await invoke(
+    "managed_sign_out",
+    choice?.deleteChatHistory && activeUserId ? { clearChatHistory: { account: activeUserId } } : undefined
+  );
   await enqueue(async () => {
     try {
       if (hostLabel)

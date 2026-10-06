@@ -48,6 +48,16 @@ const BUNDLE_ORIGIN: &str = "http://tauri.localhost";
 #[cfg(not(windows))]
 const BUNDLE_ORIGIN: &str = "tauri://localhost";
 
+/// Origin the bundled SPA is actually served from. `cargo tauri dev` has no
+/// `tauri://` bundle: the CLI serves `dist/` from its own dev server and
+/// bakes that address in as `build.devUrl`, which Tauri then resolves
+/// `WebviewUrl::App` against. Everywhere else it is `BUNDLE_ORIGIN`.
+fn bundle_root_for(dev_url: Option<&Url>) -> Url {
+    dev_url
+        .cloned()
+        .unwrap_or_else(|| Url::parse(BUNDLE_ORIGIN).expect("BUNDLE_ORIGIN is a valid URL"))
+}
+
 /// Bundle URL for an in-app path: same path and query, bundle origin.
 /// Tauri's asset resolver falls back to `index.html` for any path that
 /// isn't a file in `dist/`, so React Router boots the right route from a
@@ -287,11 +297,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         WebviewUrl::App("index.html".into())
     };
-    let bundle_root: Option<Url> = if hot_reload {
-        None
-    } else {
-        Some(Url::parse(BUNDLE_ORIGIN)?)
-    };
 
     // Loud-warning safety net for the cargo-not-tauri-cli debug path. A
     // dev who runs `cargo build` / `cargo run` / IDE Run-binary on a fresh
@@ -310,6 +315,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let context = tauri::generate_context!();
+    let bundle_root: Option<Url> = if hot_reload {
+        None
+    } else {
+        // Same condition Tauri uses to pick the dev server over `tauri://`.
+        let dev_url = context.config().build.dev_url.as_ref().filter(|_| tauri::is_dev());
+        Some(bundle_root_for(dev_url))
+    };
     // Auto-update is opt-in per build: a distributor that publishes signed
     // updates supplies `plugins.updater` (pubkey + endpoints) through a
     // `--config` overlay. Without that section the plugin cannot initialise
@@ -628,6 +640,13 @@ mod tests {
             let url = Url::parse(u).unwrap();
             assert_eq!(bundle_redirect_for(&url, &server(), &root()), None, "{u}");
         }
+    }
+
+    #[test]
+    fn bundle_root_is_the_dev_server_only_when_tauri_serves_from_one() {
+        let dev_url = Url::parse("http://127.0.0.1:1430/").unwrap();
+        assert_eq!(bundle_root_for(Some(&dev_url)), dev_url);
+        assert_eq!(bundle_root_for(None).as_str().trim_end_matches('/'), BUNDLE_ORIGIN);
     }
 
     #[test]
