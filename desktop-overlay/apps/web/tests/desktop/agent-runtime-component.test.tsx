@@ -138,6 +138,44 @@ describe("desktop project availability refresh", () => {
     expect(screen.getByRole("status").textContent).toContain("Runs on this computer");
   });
 
+  it("recovers from a failed focus re-check after polling stopped", async () => {
+    mocks.fetchProject.mockResolvedValue({ agent_executor_options: [{ kind: "managed_runner", available: true }] });
+    await act(async () => {
+      render(<AgentRuntime />);
+    });
+    expect(screen.getByRole("status").textContent).toContain("Runs on this computer");
+    mocks.fetchProject.mockRejectedValueOnce(new Error("Network request failed"));
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(screen.getByRole("status").textContent).toContain("Network request failed");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(screen.getByRole("status").textContent).toContain("Runs on this computer");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(mocks.fetchProject).toHaveBeenCalledTimes(3);
+  });
+
+  it("recovers from a failed focus reconnect after polling stopped", async () => {
+    mocks.fetchProject.mockResolvedValue({ agent_executor_options: [{ kind: "managed_runner", available: true }] });
+    await act(async () => {
+      render(<AgentRuntime />);
+    });
+    mocks.connect.mockRejectedValueOnce(new Error("Network request failed"));
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(screen.getByRole("status").textContent).toContain("Network request failed");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(65_000);
+    });
+    expect(screen.getByRole("status").textContent).toContain("Runs on this computer");
+    expect(mocks.fetchProject).toHaveBeenCalledTimes(2);
+  });
+
   it("does not claim connectivity when enrollment fails", async () => {
     mocks.connect.mockRejectedValue(new Error("Configure a model first"));
     await act(async () => {

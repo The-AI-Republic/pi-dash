@@ -97,6 +97,8 @@ export const AgentRuntime = observer(function AgentRuntime() {
         );
       } catch (error) {
         if (active) setMessage(String(error instanceof Error ? error.message : error));
+        // A failed re-check must not strand the strip on the error.
+        startPolling();
       } finally {
         refreshing = false;
       }
@@ -124,6 +126,7 @@ export const AgentRuntime = observer(function AgentRuntime() {
         },
         (error: unknown) => {
           if (active) setMessage(String(error instanceof Error ? error.message : error));
+          startPolling();
         }
       );
     };
