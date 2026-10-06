@@ -144,10 +144,10 @@ pub const COMMENT_DUP_MESSAGE: &str =
 /// Link create duplicate 400 (`serializers/issue.py:617-620`): the guard
 /// raises `ValidationError({"error": ...})` out of `save()`, and DRF
 /// renders the dict as-is — a STRING value, not the list form that
-/// `is_valid()` errors take (verified live). NOTE:
-/// `shape_links::duplicate_url_body` renders the list form (it follows the
-/// F18-02 exception internals, not the wire body) — do not use it here;
-/// its fix is PIDASHCONV-755 so this handler stays byte-identical.
+/// `is_valid()` errors take (verified live). NOTE: this stays inline
+/// rather than calling `shape_links::duplicate_url_body` (byte-identical
+/// since PIDASHCONV-755 fixed it to the string form); a later touch may
+/// switch the handler to the helper.
 pub const LINK_DUP_BODY: &str = r#"{"error":"URL already exists for this Issue"}"#;
 /// The related-objects sweep enqueued by `SoftDeleteModel.delete()`
 /// (`db/mixins.py:72-78` over `bgtasks/deletion_task.py:18`).
