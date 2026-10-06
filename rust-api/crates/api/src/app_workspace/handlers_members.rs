@@ -1192,14 +1192,13 @@ fn parse_iso_date(text: &str, year: i32) -> Option<(chrono::NaiveDate, &str)> {
     }
     let bytes = text.as_bytes();
     // Week dates contain an uppercase `W` (`2024-W03[-1]`, `2024W03[1]`).
-    // The basic form takes no dash-day (`2024W03-1` is rejected outright —
-    // the dash is not retried as a time separator).
+    // A `-` after day-less basic `YYYYWww` is the time separator, not a
+    // rejected dash-day: it falls through to the Monday-default arm below
+    // and the caller's generic separator logic (`2030W23-12:00:00` parses;
+    // `2030W23-1` still rejects on its 1-char time).
     if bytes.len() > 4 && bytes[4] == b'W' {
         let tail = &text[5..];
         if tail.len() < 2 || !tail.as_bytes()[..2].iter().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        if tail.as_bytes().get(2) == Some(&b'-') {
             return None;
         }
         let week: u32 = tail[..2].parse().ok()?;
@@ -4257,6 +4256,9 @@ mod tests {
             ("2024W03T10:30", Some(naive(2024, 1, 15, 10, 30, 0, 0))),
             ("2024-W03T10:30", Some(naive(2024, 1, 15, 10, 30, 0, 0))),
             ("2024W031T10:30", Some(naive(2024, 1, 15, 10, 30, 0, 0))),
+            // Basic week-date + dash time (PIDASHCONV-771): the `-`
+            // is the time separator when a valid time follows.
+            ("2030W23-12:00:00", Some(naive(2030, 6, 3, 12, 0, 0, 0))),
             (
                 "2024-W03-1T10:30:00+05:30",
                 Some(aware(day(2024, 1, 15, 10, 30, 0, 0), 19_800)),
@@ -4945,6 +4947,8 @@ mod tests {
             "2024-01-15T10:30:60",
             "2024-W03-8",
             "2024W03-1",
+            // Dash + 1-char tail stays invalid (PIDASHCONV-771).
+            "2030W23-1",
             "2024-W031",
             "2024w03",
             "2024-01-15T930",

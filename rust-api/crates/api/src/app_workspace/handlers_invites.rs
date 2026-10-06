@@ -1598,14 +1598,13 @@ fn parse_iso_date(text: &str, year: i32) -> Option<(chrono::NaiveDate, &str)> {
     }
     let bytes = text.as_bytes();
     // Week dates contain an uppercase `W` (`2024-W03[-1]`, `2024W03[1]`).
-    // The basic form takes no dash-day (`2024W03-1` is rejected outright —
-    // the dash is not retried as a time separator).
+    // A `-` after day-less basic `YYYYWww` is the time separator, not a
+    // rejected dash-day: it falls through to the Monday-default arm below
+    // and the caller's generic separator logic (`2030W23-12:00:00` parses;
+    // `2030W23-1` still rejects on its 1-char time).
     if bytes.len() > 4 && bytes[4] == b'W' {
         let tail = &text[5..];
         if tail.len() < 2 || !tail.as_bytes()[..2].iter().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        if tail.as_bytes().get(2) == Some(&b'-') {
             return None;
         }
         let week: u32 = tail[..2].parse().ok()?;
@@ -5507,5 +5506,21 @@ mod tests {
             ),
             "SELECT * FROM t WHERE a = $1 AND b = $2"
         );
+    }
+
+    #[test]
+    fn datetime_basic_week_dash_time_matches_django() {
+        // PIDASHCONV-771: `-` after day-less basic `YYYYWww` is the
+        // time separator when a valid time follows (Django 6.0.5 /
+        // CPython 3.12.3: `2030W23-12:00:00` → 2030-06-03 12:00:00),
+        // while a 1-char tail stays invalid (`2030W23-1` → None).
+        let expected = ParsedDt::Naive(
+            chrono::NaiveDate::from_ymd_opt(2030, 6, 3)
+                .expect("date")
+                .and_hms_micro_opt(12, 0, 0, 0)
+                .expect("time"),
+        );
+        assert_eq!(parse_django_datetime("2030W23-12:00:00"), Some(expected));
+        assert_eq!(parse_django_datetime("2030W23-1"), None);
     }
 }
