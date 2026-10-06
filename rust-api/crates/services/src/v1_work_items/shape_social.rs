@@ -98,11 +98,11 @@
 //! * `int()` inputs with non-ASCII decimal digits (e.g. fullwidth `１２`, which
 //!   CPython accepts) fail `invalid`; ASCII digits, signs, underscores and
 //!   int-whitespace are exact.
-//! * `CharField` numeric coercion and the `invalid_choice` input rendering go
-//!   through `serde_json` shortest-roundtrip: JSON floats spell exponents as
-//!   `1e22` where Python spells `1e+22`, and integers beyond `u64` arrive as
-//!   `f64` (Python keeps them exact). Strings, bools, `None` and in-range
-//!   integers are exact.
+//! * `CharField` numeric coercion and the `invalid_choice` input rendering
+//!   use Python `str()` spelling (`super::python_number_str`); integers
+//!   beyond `u64` keep their digits in the unified workspace build and
+//!   demote to `f64` only when `serde_json` lacks `arbitrary_precision`
+//!   (standalone services builds). Strings, bools and `None` are exact.
 //! * `invalid_choice` messages for exotic composite inputs escape only
 //!   `Cc` controls for the non-ASCII range (Python also escapes `Zl`/`Zp` and
 //!   other non-printables); ASCII and printable text are exact.
@@ -114,7 +114,7 @@
 use serde_json::{Map, Value};
 
 use super::shape_issue::{field_errors_body, BASE_EXPANSION_NAMES, INVALID_HTML_BODY};
-use super::{filter_fields, FieldSpec, FilterError};
+use super::{filter_fields, python_number_str, FieldSpec, FilterError};
 
 /// `IssueAttachmentSerializer` read order (`issue.py:907-927`,
 /// `fields="__all__"`): declared `id`, then plain model fields in model
@@ -292,15 +292,14 @@ fn py_strip(text: &str) -> &str {
 
 /// Render a parsed-JSON value the way Python `str(data)` would, for the
 /// `invalid_choice` message. Strings verbatim; bools `True`/`False`; `None`;
-/// numbers shortest-roundtrip (the float-exponent nuance, documented above);
-/// arrays/objects recurse with Python `repr` separators (`, `, `: `) and
-/// [`py_repr_str`] quoting.
+/// numbers via [`super::python_number_str`]; arrays/objects recurse with
+/// Python `repr` separators (`, `, `: `) and [`py_repr_str`] quoting.
 fn py_str(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
         Value::Bool(true) => "True".to_owned(),
         Value::Bool(false) => "False".to_owned(),
-        Value::Number(number) => number.to_string(),
+        Value::Number(number) => python_number_str(number),
         Value::Null => "None".to_owned(),
         Value::Array(items) => {
             let inner: Vec<String> = items.iter().map(py_repr).collect();
@@ -467,7 +466,7 @@ fn validate_char(
     // the arms stay exact.
     let raw = match value {
         Value::String(text) => text.clone(),
-        Value::Number(number) => number.to_string(),
+        Value::Number(number) => python_number_str(number),
         _ => return Err(CharError::InvalidType),
     };
     // The blank check runs on the raw value: `data == '' or
@@ -537,7 +536,7 @@ fn validate_choice(value: Option<&Value>, choices: &[&str]) -> Result<ChoiceOutc
     // miss (no numeric choice exists); composites stringify to their `str()`.
     let key = match value {
         Value::String(text) => text.clone(),
-        Value::Number(number) => number.to_string(),
+        Value::Number(number) => python_number_str(number),
         Value::Bool(true) => "True".to_owned(),
         Value::Bool(false) => "False".to_owned(),
         Value::Array(_) | Value::Object(_) => py_str(value),
@@ -3317,5 +3316,31 @@ mod tests {
             err,
             SocialRenderError::MissingExpansion("actor".to_string())
         );
+    }
+
+    #[test]
+    fn char_validators_use_python_float_spelling() {
+        // `str(1e100)` is `1e+100` (PIDASHCONV-758). `serde` keeps
+        // non-canonical layouts verbatim; the small-exponent cases
+        // diverge even without `arbitrary_precision` (`zmij` spells
+        // `0.00001` and `1e-7`).
+        let float: Value = serde_json::from_str("1e100").expect("parses");
+        assert_eq!(
+            validate_char(Some(&float), false, false, false, None),
+            Ok(CharOutcome::Text("1e+100".to_owned()))
+        );
+        let tiny: Value = serde_json::from_str("0.00001").expect("parses");
+        assert_eq!(
+            validate_char(Some(&tiny), false, false, false, None),
+            Ok(CharOutcome::Text("1e-05".to_owned()))
+        );
+        assert_eq!(
+            validate_choice(Some(&float), &["a"]),
+            Err(ChoiceError::InvalidChoice("1e+100".to_owned()))
+        );
+        let neg: Value = serde_json::from_str("1e-7").expect("parses");
+        assert_eq!(py_str(&float), "1e+100");
+        assert_eq!(py_str(&tiny), "1e-05");
+        assert_eq!(py_str(&neg), "1e-07");
     }
 }

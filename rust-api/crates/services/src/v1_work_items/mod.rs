@@ -47,6 +47,8 @@
 //!
 //! * [`filter_fields`] — `api/serializers/base.py:32-70`
 //!   (`BaseSerializer._filter_fields`, the `?fields=` filter).
+//! * [`python_number_str`] — Python `str()` of a JSON number (every
+//!   `CharField` `str()` coercion, PIDASHCONV-758).
 //!
 //! Wiring note: the crate root declares `pub mod v1_work_items;` (seam for
 //! this issue's new files); every file under this module is new.
@@ -138,6 +140,138 @@ pub fn filter_fields(
         .collect())
 }
 
+/// Python `str()` of a JSON number, shared by every `CharField` `str()`
+/// coercion in this domain (PIDASHCONV-758): ints render decimally
+/// (arbitrary precision kept), floats via [`python_float_repr`].
+/// `Number::to_string` is not enough: under `arbitrary_precision` it
+/// echoes the literal's layout (`1.5e+3`, `1e-7`, `0.00001`), and without
+/// it `zmij` `Display` pads no 1-digit exponent and fixes `1e-5`.
+/// Overflow float literals (`1e999`) spell `inf` like Python's `float()`.
+pub fn python_number_str(number: &serde_json::Number) -> String {
+    if let Some(int) = number.as_i64() {
+        return int.to_string();
+    }
+    if let Some(int) = number.as_u64() {
+        return int.to_string();
+    }
+    if let Some(float) = number.as_f64() {
+        if number.is_f64() {
+            return python_float_repr(float);
+        }
+    }
+    // Past-`u64` ints and overflow floats only survive parsing under
+    // `arbitrary_precision`, which preserves the literal.
+    python_literal_str(&number.to_string())
+}
+
+/// Python `str()` of a preserved number literal (see [`python_number_str`]):
+/// int grammar normalizes to digits (`-0…0` is `0`), float grammar
+/// overflowed to `inf` like Python's `float()`.
+fn python_literal_str(text: &str) -> String {
+    if text.bytes().any(|b| matches!(b, b'.' | b'e' | b'E')) {
+        return if text.starts_with('-') { "-inf" } else { "inf" }.to_owned();
+    }
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return "0".to_owned();
+    }
+    if negative {
+        return format!("-{digits}");
+    }
+    digits.to_owned()
+}
+
+/// Python `repr(float)` spelling for an `f64` (== `str(float)`):
+/// shortest roundtrip digits (via serde), then CPython's layout rule —
+/// scientific `d[.ddd]e±XX` (two-digit minimum exponent) when the
+/// normalized decimal exponent is `< -4` or `>= 16`, else fixed with a
+/// forced `.0` (`float_repr_style short`, `PyOS_double_to_string 'r'`).
+/// `nan` is unreachable from parsed JSON but renders exactly anyway.
+fn python_float_repr(value: f64) -> String {
+    if value.is_nan() {
+        return "nan".to_owned();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "inf" } else { "-inf" }.to_owned();
+    }
+    let text = serde_json::to_string(&value).expect("finite float");
+    let (negative, text) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.as_str()),
+    };
+    let (mantissa, exponent): (&str, i32) = match text.split_once('e') {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse().expect("serde exponent")),
+        None => (text, 0),
+    };
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some((int, frac)) => (int, frac),
+        None => (mantissa, ""),
+    };
+    let digits: String = format!("{int_part}{frac_part}");
+    let point = int_part.len() as i32;
+    let Some(first) = digits.find(|c| c != '0') else {
+        return if negative { "-0.0" } else { "0.0" }.to_owned();
+    };
+    // Normalized exponent: d.ddd × 10^power.
+    let power = point - first as i32 - 1 + exponent;
+    let significant = &digits[first..];
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    if !(-4..16).contains(&power) {
+        out.push_str(&significant[..1]);
+        let rest = significant[1..].trim_end_matches('0');
+        if !rest.is_empty() {
+            out.push('.');
+            out.push_str(rest);
+        }
+        out.push('e');
+        if power < 0 {
+            out.push('-');
+            let digits = (-power).to_string();
+            if digits.len() < 2 {
+                out.push('0');
+            }
+            out.push_str(&digits);
+        } else {
+            out.push('+');
+            let digits = power.to_string();
+            if digits.len() < 2 {
+                out.push('0');
+            }
+            out.push_str(&digits);
+        }
+        return out;
+    }
+    if power >= 0 {
+        let int_len = power as usize + 1;
+        if significant.len() >= int_len {
+            out.push_str(&significant[..int_len]);
+            let rest = significant[int_len..].trim_end_matches('0');
+            out.push('.');
+            if rest.is_empty() {
+                out.push('0');
+            } else {
+                out.push_str(rest);
+            }
+        } else {
+            out.push_str(significant);
+            out.push_str(&"0".repeat(int_len - significant.len()));
+            out.push_str(".0");
+        }
+        return out;
+    }
+    out.push_str("0.");
+    out.push_str(&"0".repeat((-power - 1) as usize));
+    out.push_str(significant.trim_end_matches('0'));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +323,75 @@ mod tests {
             filter_fields(FIELDS, Some(&specs)),
             Err(FilterError::NestedNotSupported("state".to_string()))
         );
+    }
+
+    // The over-precise literals are deliberate: the same source text as
+    // the CPython probe, so both sides parse the identical `f64`.
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn python_number_str_matches_cpython() {
+        // `str(v)` for each JSON number, generated by CPython
+        // (PIDASHCONV-758). Constructed values behave identically with
+        // and without `arbitrary_precision`; the literal spellings pin
+        // the parse shapes (`-0`/huge-int/overflow literals are covered
+        // in the api crate, where the feature is always on).
+        for (value, expected) in [
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (12.0, "12.0"),
+            (-2.5, "-2.5"),
+            (1e16, "1e+16"),
+            (1e15, "1000000000000000.0"),
+            (0.0001, "0.0001"),
+            (0.00001, "1e-05"),
+            (1e100, "1e+100"),
+            (-1e100, "-1e+100"),
+            (0.1 + 0.2, "0.30000000000000004"),
+            (1.0 / 3.0, "0.3333333333333333"),
+            (999999999999999.0, "999999999999999.0"),
+            (1.5e-7, "1.5e-07"),
+            (5e-324, "5e-324"),
+            (1.7976931348623157e308, "1.7976931348623157e+308"),
+            (100.0, "100.0"),
+            (0.5, "0.5"),
+            (123.456, "123.456"),
+            (1e21, "1e+21"),
+            (123456789012345680.0, "1.2345678901234568e+17"),
+        ] {
+            let number = serde_json::Number::from_f64(value).expect("finite");
+            assert_eq!(python_number_str(&number), expected, "{value}");
+        }
+        for (int, expected) in [
+            (0i64, "0"),
+            (-7i64, "-7"),
+            (42i64, "42"),
+            (i64::MIN, "-9223372036854775808"),
+            (i64::MAX, "9223372036854775807"),
+        ] {
+            assert_eq!(python_number_str(&int.into()), expected);
+        }
+        assert_eq!(python_number_str(&u64::MAX.into()), "18446744073709551615");
+        for (raw, expected) in [
+            ("7", "7"),
+            ("-7", "-7"),
+            ("0", "0"),
+            ("100.0", "100.0"),
+            ("1e100", "1e+100"),
+            ("1E100", "1e+100"),
+            ("1.5e3", "1500.0"),
+            ("1.50", "1.5"),
+            ("0.00001", "1e-05"),
+            ("1e-7", "1e-07"),
+        ] {
+            let value: serde_json::Value = serde_json::from_str(raw).expect("parses");
+            assert_eq!(
+                python_number_str(value.as_number().expect("number")),
+                expected,
+                "{raw}"
+            );
+        }
+        assert_eq!(python_float_repr(f64::INFINITY), "inf");
+        assert_eq!(python_float_repr(f64::NEG_INFINITY), "-inf");
+        assert_eq!(python_float_repr(f64::NAN), "nan");
     }
 }

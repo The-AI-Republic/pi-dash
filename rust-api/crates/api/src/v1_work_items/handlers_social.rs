@@ -115,7 +115,7 @@ use pidash_services::v1_work_items::shape_social::{
     CommentWriteInput,
 };
 use pidash_services::v1_work_items::tasks as work_tasks;
-use pidash_services::v1_work_items::{filter_fields, FieldSpec};
+use pidash_services::v1_work_items::{filter_fields, python_number_str, FieldSpec};
 
 use crate::state::AppState;
 
@@ -2084,7 +2084,7 @@ fn char_field_errors(
         }
         Value::Bool(_) => vec!["Not a valid string.".to_owned()],
         Value::Number(number) => {
-            let text = number.to_string();
+            let text = python_number_str(number);
             if let Some(max) = max_length {
                 if text.chars().count() > max {
                     return vec![format!(
@@ -2102,7 +2102,7 @@ fn char_field_errors(
 fn char_field_value(value: &Value) -> String {
     match value {
         Value::String(text) => crate::runner_runs::runs::py_strip(text).to_owned(),
-        Value::Number(number) => number.to_string(),
+        Value::Number(number) => python_number_str(number),
         _ => String::new(),
     }
 }
@@ -3097,7 +3097,7 @@ fn app_origin(urls: &pidash_db::config::UrlSettings) -> Result<String, Denial> {
 fn python_scalar_str(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
-        Value::Number(number) => Some(number.to_string()),
+        Value::Number(number) => Some(python_number_str(number)),
         Value::Bool(flag) => Some(if *flag { "True" } else { "False" }.to_owned()),
         _ => None,
     }
@@ -5398,5 +5398,46 @@ mod tests {
             description_stripped_for_create("<p>hi</p>").as_deref(),
             Some("hi")
         );
+    }
+
+    #[test]
+    fn char_field_float_inputs_use_python_spelling() {
+        // `str(1e100)` is `1e+100`: stored values, the 255 check and the
+        // guard compares all see the Python spelling (PIDASHCONV-758).
+        // `serde` keeps non-canonical layouts verbatim (`1.5e+3`, `1e-7`,
+        // `0.00001`); only the shared helper spells them like Python.
+        let float: Value = serde_json::from_str("1e100").expect("parses");
+        assert_eq!(char_field_value(&float), "1e+100");
+        assert!(char_field_errors(&float, true, true, Some(255)).is_empty());
+        assert_eq!(python_scalar_str(&float).as_deref(), Some("1e+100"));
+        let tiny: Value = serde_json::from_str("0.00001").expect("parses");
+        assert_eq!(char_field_value(&tiny), "1e-05");
+        let sci: Value = serde_json::from_str("1.5e3").expect("parses");
+        assert_eq!(char_field_value(&sci), "1500.0");
+        assert_eq!(python_scalar_str(&sci).as_deref(), Some("1500.0"));
+        let fixed: Value = serde_json::from_str("100.0").expect("parses");
+        assert_eq!(char_field_value(&fixed), "100.0");
+        let map = patch_map(&[("title", float)]);
+        let patch = validate_link_patch(&map, false, &utc_tz()).expect("float title coerces");
+        assert_eq!(patch.title, Some(Some("1e+100".to_owned())));
+    }
+
+    #[test]
+    fn char_field_big_int_renders_full_digits() {
+        // Python ints are unbounded: `str(10**30)` is the full digits.
+        let big: Value = serde_json::from_str("123456789012345678901234567890").expect("parses");
+        assert_eq!(char_field_value(&big), "123456789012345678901234567890");
+    }
+
+    #[test]
+    fn char_field_number_edge_literals_match_python() {
+        // `arbitrary_precision` is always on in this crate: `-0` is int
+        // `0`, and overflow floats spell `inf` like Python's `float()`.
+        let negzero: Value = serde_json::from_str("-0").expect("parses");
+        assert_eq!(char_field_value(&negzero), "0");
+        let huge: Value = serde_json::from_str("1e999").expect("parses");
+        assert_eq!(char_field_value(&huge), "inf");
+        let neghuge: Value = serde_json::from_str("-1e999").expect("parses");
+        assert_eq!(char_field_value(&neghuge), "-inf");
     }
 }

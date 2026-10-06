@@ -139,7 +139,7 @@ use crate::app_project::ser_workflow::{state_lite_to_representation, StateLiteRo
 use crate::v1_projects::ser_collab::{user_lite_to_representation, UserLiteRow};
 
 use super::shape_issue::{IssueRow, BASE_EXPANSION_NAMES};
-use super::{filter_fields, FieldSpec, FilterError};
+use super::{filter_fields, python_number_str, FieldSpec, FilterError};
 
 /// Failure modes of the renders in this module. None of these are 400 wire
 /// bodies — handlers map them (the binary/NaN arms reproduce Django 500s;
@@ -829,9 +829,8 @@ pub fn validate_issue_search(
                 Err(fail("Not a valid string.", "invalid"))
             }
             // `str(data)` coercion (`fields.py:765`): a JSON number's
-            // shortest round-trip spells exactly what Python `str()` spells
-            // for the same value, and is never blank.
-            Value::Number(number) => Ok(number.to_string()),
+            // Python spelling, never blank.
+            Value::Number(number) => Ok(python_number_str(number)),
             Value::String(text) => {
                 // `data == '' or str(data).strip() == ''` (`fields.py:753`);
                 // `str::trim` is Unicode whitespace like Python's `strip`
@@ -1710,5 +1709,22 @@ mod tests {
             render_advanced_result(&row),
             Err(ExpandSearchError::NonFiniteFloat("rank")),
         );
+    }
+
+    #[test]
+    fn search_float_inputs_use_python_spelling() {
+        // `str(1e100)` is `1e+100` (PIDASHCONV-758). `serde` keeps
+        // non-canonical layouts verbatim; the small-exponent cases
+        // diverge even without `arbitrary_precision` (`zmij` spells
+        // `0.00001` and `1e-7`).
+        for (raw, expected) in [("1e100", "1e+100"), ("0.00001", "1e-05"), ("1e-7", "1e-07")] {
+            let mut input = Map::new();
+            let float: Value = serde_json::from_str(raw).expect("parses");
+            for field in SEARCH_FIELDS {
+                input.insert(field.to_string(), float.clone());
+            }
+            let validated = validate_issue_search(&input).expect("floats coerce");
+            assert_eq!(validated.sequence_id, expected, "{raw}");
+        }
     }
 }
