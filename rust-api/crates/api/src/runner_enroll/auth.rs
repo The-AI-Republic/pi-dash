@@ -59,7 +59,8 @@
 //! contract suite already allows both
 //! (`test_daemon_runner_create_requires_auth` asserts `(401, 403)`).
 //! [`auth_failure_response`] takes the view's
-//! `get_authenticate_header` output so handlers render exactly this.
+//! `get_authenticate_header` output plus its `Allow` value so handlers
+//! render exactly this (`finalize_response` stamps `Allow` on denials).
 //!
 //! ## Intentional deviations from sibling ports (all closer to Python)
 //!
@@ -125,38 +126,60 @@ pub const CODE_CREDENTIALS_NOT_PROVIDED: &str = "Authentication credentials were
 /// every 401 they produce.
 pub const AUTHENTICATE_HEADER_BEARER: &str = "Bearer";
 
+/// DRF `Allow` response values (`APIView.default_response_headers`,
+/// `views.py:154-160`, applied to error responses too via
+/// `finalize_response`, `views.py:418-446,508`): the view's
+/// `allowed_methods` joined with `", "`. `APIView` always serves
+/// `OPTIONS`, so every value ends with `, OPTIONS`.
+pub const ALLOW_GET: &str = "GET, OPTIONS";
+/// DRF `Allow` for POST-only views (see [`ALLOW_GET`]).
+pub const ALLOW_POST: &str = "POST, OPTIONS";
+/// DRF `Allow` for DELETE-only views (see [`ALLOW_GET`]).
+pub const ALLOW_DELETE: &str = "DELETE, OPTIONS";
+
 /// Render an `AuthenticationFailed(code)` denial exactly like DRF's
 /// `APIView.handle_exception` + `exception_handler`
 /// (`views.py:458-466,71-101`): `{"detail": code}` (lowercase `d`, compact
 /// JSON), 401 plus `WWW-Authenticate` when the view's first authenticator
 /// supplies a challenge, else coerced to 403 with no challenge header.
 /// (`NotAuthenticated` differs — see [`not_authenticated_response`].)
+/// The consuming view's `Allow` value rides along: `finalize_response`
+/// applies `default_response_headers` to error responses too
+/// (`views.py:418-446,508`).
 ///
 /// Pass the consuming view's `get_authenticate_header` output: `Some("Bearer")`
 /// for every view whose first class is one of the three
 /// `runner/authentication.py` classes (self-revoke, refresh, machine-command
 /// result, projects, and the D-14 bearer-first views), `None` for the create
-/// endpoint (`[APIKeyAuthentication]`).
-pub fn auth_failure_response(code: &str, first_authenticate_header: Option<&str>) -> Response {
+/// endpoint (`[APIKeyAuthentication]`); and its `Allow` value
+/// ([`ALLOW_GET`]/[`ALLOW_POST`]/[`ALLOW_DELETE`]).
+pub fn auth_failure_response(
+    code: &str,
+    first_authenticate_header: Option<&str>,
+    allow: &str,
+) -> Response {
     let body = serde_json::json!({ "detail": code }).to_string();
     match first_authenticate_header {
         Some(challenge) => Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::WWW_AUTHENTICATE, challenge)
+            .header(header::ALLOW, allow)
             .body(axum::body::Body::from(body)),
         None => Response::builder()
             .status(StatusCode::FORBIDDEN)
             .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ALLOW, allow)
             .body(axum::body::Body::from(body)),
     }
     .expect("auth denial builds")
 }
 
 /// [`auth_failure_response`] for the bearer classes: all their consuming
-/// views are bearer-first, so the challenge is always `Bearer`.
-pub fn bearer_failure_response(code: &str) -> Response {
-    auth_failure_response(code, Some(AUTHENTICATE_HEADER_BEARER))
+/// views are bearer-first, so the challenge is always `Bearer`. `allow` is
+/// still per consuming view ([`ALLOW_GET`]/[`ALLOW_POST`]/[`ALLOW_DELETE`]).
+pub fn bearer_failure_response(code: &str, allow: &str) -> Response {
+    auth_failure_response(code, Some(AUTHENTICATE_HEADER_BEARER), allow)
 }
 
 /// The missing-credential denial (`NotAuthenticated` via `permission_denied`
@@ -168,11 +191,18 @@ pub fn bearer_failure_response(code: &str) -> Response {
 /// authenticator. Only the `WWW-Authenticate` challenge is conditional
 /// (present iff the first authenticator supplies one). F4 pins this
 /// (`drf_failure_shapes.NotAuthenticated`: "custom handler forces 401").
-pub fn not_authenticated_response(first_authenticate_header: Option<&str>) -> Response {
+/// `allow` is the consuming view's `Allow` value, always present
+/// (`finalize_response` applies `default_response_headers` to error
+/// responses too).
+pub fn not_authenticated_response(
+    first_authenticate_header: Option<&str>,
+    allow: &str,
+) -> Response {
     let body = serde_json::json!({ "detail": CODE_CREDENTIALS_NOT_PROVIDED }).to_string();
     let mut builder = Response::builder()
         .status(StatusCode::UNAUTHORIZED)
-        .header(header::CONTENT_TYPE, "application/json");
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ALLOW, allow);
     if let Some(challenge) = first_authenticate_header {
         builder = builder.header(header::WWW_AUTHENTICATE, challenge);
     }
@@ -612,7 +642,10 @@ async fn member_or_revoke(pool: &PgPool, token: &MachineTokenAuthRow) -> Result<
 /// route has one (`None` on unscoped routes): it wins over `X-Runner-Id` on
 /// the `mt_` branch and gates the JWT match. `ring` verifies legacy JWTs
 /// (handlers build it from settings; stock settings carry no
-/// `RUNNER_ACCESS_TOKEN_KEYS`, i.e. the derived `"default"` key).
+/// `RUNNER_ACCESS_TOKEN_KEYS`, i.e. the derived `"default"` key). `allow` is
+/// the consuming view's `Allow` value, stamped on every denial (DRF's
+/// `finalize_response` applies `default_response_headers` to error
+/// responses too).
 #[allow(clippy::result_large_err)]
 pub async fn authenticate_access_token(
     pool: &PgPool,
@@ -620,16 +653,24 @@ pub async fn authenticate_access_token(
     ring: &KeyRing,
     headers: &HeaderMap,
     url_runner_id: Option<&str>,
+    allow: &str,
 ) -> Result<Option<AccessAuth>, Response> {
     let raw = bearer_token(authorization_bytes(headers))?;
     let Some(raw) = raw else {
         return Ok(None);
     };
     if raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        return authenticate_access_machine_token(pool, secret_key, headers, &raw, url_runner_id)
-            .await;
+        return authenticate_access_machine_token(
+            pool,
+            secret_key,
+            headers,
+            &raw,
+            url_runner_id,
+            allow,
+        )
+        .await;
     }
-    authenticate_access_jwt(pool, ring, &raw, url_runner_id).await
+    authenticate_access_jwt(pool, ring, &raw, url_runner_id, allow).await
 }
 
 /// Legacy per-runner JWT path (`authentication.py:85-118`), in order:
@@ -641,10 +682,11 @@ async fn authenticate_access_jwt(
     ring: &KeyRing,
     raw: &str,
     url_runner_id: Option<&str>,
+    allow: &str,
 ) -> Result<Option<AccessAuth>, Response> {
     let payload = match pidash_auth::jwt::decode_access_token(raw, ring) {
         Ok(claims) => claims,
-        Err(error) => return Err(bearer_failure_response(error.code())),
+        Err(error) => return Err(bearer_failure_response(error.code(), allow)),
     };
     // `Runner.objects...get(id=sub)` (`:91-94`): a non-UUID `sub` is the
     // source's `ValidationError` (500); a missing row is `runner_not_found`.
@@ -653,16 +695,16 @@ async fn authenticate_access_jwt(
         .await
         .map_err(|_| server_error())?;
     let Some(row) = row else {
-        return Err(bearer_failure_response(CODE_RUNNER_NOT_FOUND));
+        return Err(bearer_failure_response(CODE_RUNNER_NOT_FOUND, allow));
     };
     if row.revoked_at.is_some() {
-        return Err(bearer_failure_response(CODE_RUNNER_REVOKED));
+        return Err(bearer_failure_response(CODE_RUNNER_REVOKED, allow));
     }
     if row.dev_machine_id.is_some() && row.dev_machine_revoked {
-        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED));
+        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
     }
     if !rtg_fresh(payload.rtg, row.refresh_token_generation) {
-        return Err(bearer_failure_response(CODE_ACCESS_TOKEN_STALE_RTG));
+        return Err(bearer_failure_response(CODE_ACCESS_TOKEN_STALE_RTG, allow));
     }
     // `RunnerForceRefresh.objects.filter(runner=runner).first()` (`:108`):
     // PK lookup, at most one row, so no ordering/limit is needed.
@@ -674,11 +716,11 @@ async fn authenticate_access_jwt(
     .await
     .map_err(|_| server_error())?;
     if !force_refresh_ok(payload.rtg, min_rtg) {
-        return Err(bearer_failure_response(CODE_FORCE_REFRESH_REQUIRED));
+        return Err(bearer_failure_response(CODE_FORCE_REFRESH_REQUIRED, allow));
     }
     if let Some(url) = url_runner_id {
         if !url_runner_matches(url, row.id) {
-            return Err(bearer_failure_response(CODE_RUNNER_ID_MISMATCH));
+            return Err(bearer_failure_response(CODE_RUNNER_ID_MISMATCH, allow));
         }
     }
     Ok(Some(AccessAuth {
@@ -701,26 +743,27 @@ async fn authenticate_access_machine_token(
     headers: &HeaderMap,
     raw: &str,
     url_runner_id: Option<&str>,
+    allow: &str,
 ) -> Result<Option<AccessAuth>, Response> {
     let token_hash = pidash_auth::token::hash_token(raw, secret_key);
     let token = fetch_machine_token(pool, &token_hash)
         .await
         .map_err(|_| server_error())?;
     let Some(token) = token else {
-        return Err(bearer_failure_response(CODE_MACHINE_TOKEN_INVALID));
+        return Err(bearer_failure_response(CODE_MACHINE_TOKEN_INVALID, allow));
     };
     if token.revoked_at.is_some() {
-        return Err(bearer_failure_response(CODE_MACHINE_TOKEN_REVOKED));
+        return Err(bearer_failure_response(CODE_MACHINE_TOKEN_REVOKED, allow));
     }
     if token.dev_machine_id.is_some() && token.dev_machine_revoked {
-        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED));
+        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
     }
     if !member_or_revoke(pool, &token).await? {
-        return Err(bearer_failure_response(CODE_MEMBERSHIP_REVOKED));
+        return Err(bearer_failure_response(CODE_MEMBERSHIP_REVOKED, allow));
     }
     let runner_raw = request_runner_id(url_runner_id, headers)?;
     let Some(runner_raw) = runner_raw else {
-        return Err(bearer_failure_response(CODE_RUNNER_ID_REQUIRED));
+        return Err(bearer_failure_response(CODE_RUNNER_ID_REQUIRED, allow));
     };
     // `Runner.objects...get(id=runner_id)` (`:137-140`): a non-UUID id
     // (only reachable via `X-Runner-Id`; the URL converter 404s first) is
@@ -730,13 +773,13 @@ async fn authenticate_access_machine_token(
         .await
         .map_err(|_| server_error())?;
     let Some(row) = row else {
-        return Err(bearer_failure_response(CODE_RUNNER_NOT_FOUND));
+        return Err(bearer_failure_response(CODE_RUNNER_NOT_FOUND, allow));
     };
     if row.revoked_at.is_some() {
-        return Err(bearer_failure_response(CODE_RUNNER_REVOKED));
+        return Err(bearer_failure_response(CODE_RUNNER_REVOKED, allow));
     }
     if row.dev_machine_id.is_some() && row.dev_machine_revoked {
-        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED));
+        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
     }
     if !runner_bound_to_token(
         row.owner_id,
@@ -750,6 +793,7 @@ async fn authenticate_access_machine_token(
     ) {
         return Err(bearer_failure_response(
             CODE_RUNNER_NOT_BOUND_TO_MACHINE_TOKEN,
+            allow,
         ));
     }
     bump_machine_token_last_used(pool, token.id)
@@ -795,12 +839,14 @@ pub fn parse_refresh_token(headers: &HeaderMap) -> Result<Option<String>, Respon
 ///
 /// The `last_used_at` bump is best-effort (`:230-235`): failures are
 /// swallowed with a debug log and the request continues — unlike the plain
-/// update on the access-token `mt_` branch.
+/// update on the access-token `mt_` branch. `allow` is the consuming view's
+/// `Allow` value, stamped on every denial.
 #[allow(clippy::result_large_err)]
 pub async fn authenticate_machine_token(
     pool: &PgPool,
     secret_key: &[u8],
     headers: &HeaderMap,
+    allow: &str,
 ) -> Result<Option<MachineAuth>, Response> {
     let raw = bearer_token(authorization_bytes(headers))?;
     let Some(raw) = raw else {
@@ -814,16 +860,16 @@ pub async fn authenticate_machine_token(
         .await
         .map_err(|_| server_error())?;
     let Some(token) = token else {
-        return Err(bearer_failure_response(CODE_MACHINE_TOKEN_INVALID));
+        return Err(bearer_failure_response(CODE_MACHINE_TOKEN_INVALID, allow));
     };
     if token.revoked_at.is_some() {
-        return Err(bearer_failure_response(CODE_MACHINE_TOKEN_REVOKED));
+        return Err(bearer_failure_response(CODE_MACHINE_TOKEN_REVOKED, allow));
     }
     if token.dev_machine_id.is_some() && token.dev_machine_revoked {
-        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED));
+        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
     }
     if !member_or_revoke(pool, &token).await? {
-        return Err(bearer_failure_response(CODE_MEMBERSHIP_REVOKED));
+        return Err(bearer_failure_response(CODE_MEMBERSHIP_REVOKED, allow));
     }
     if let Err(error) = bump_machine_token_last_used(pool, token.id).await {
         tracing::debug!(%error, "runner_enroll.auth: last_used_at bump failed; continuing");
@@ -861,7 +907,7 @@ fn api_key_value(headers: &HeaderMap) -> Option<String> {
 /// revoked token/machine, non-member (revoked first), and expired/inactive
 /// `APIToken`. Handlers render it through [`auth_failure_response`] with
 /// their view's first `authenticate_header` (403 on create, 401 + `Bearer`
-/// on projects).
+/// on projects) and `Allow` value.
 #[allow(clippy::result_large_err)]
 pub async fn authenticate_api_key(
     pool: &PgPool,
@@ -1276,33 +1322,46 @@ mod tests {
     /// Denial bytes (`views.py:71-101`, F4 `drf_failure_shapes`): lowercase-`d`
     /// `{"detail": code}`, compact JSON, `application/json`; 401 plus the
     /// challenge when the view's first authenticator supplies one, else the
-    /// 403 coercion with no challenge.
+    /// 403 coercion with no challenge. Every denial carries the consuming
+    /// view's `Allow` (`finalize_response` applies `default_response_headers`
+    /// to error responses too).
     #[tokio::test]
     async fn denial_status_follows_first_authenticate_header() {
-        let (status, headers, body) =
-            response_parts(bearer_failure_response("machine_token_invalid")).await;
+        let (status, headers, body) = response_parts(bearer_failure_response(
+            "machine_token_invalid",
+            ALLOW_DELETE,
+        ))
+        .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(headers.get(header::WWW_AUTHENTICATE).unwrap(), "Bearer");
+        assert_eq!(headers.get(header::ALLOW).unwrap(), "DELETE, OPTIONS");
         assert_eq!(
             headers.get(header::CONTENT_TYPE).unwrap(),
             "application/json"
         );
         assert_eq!(body, r#"{"detail":"machine_token_invalid"}"#);
 
-        let (status, headers, body) =
-            response_parts(auth_failure_response(CODE_GIVEN_API_TOKEN_NOT_VALID, None)).await;
+        let (status, headers, body) = response_parts(auth_failure_response(
+            CODE_GIVEN_API_TOKEN_NOT_VALID,
+            None,
+            ALLOW_POST,
+        ))
+        .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert!(headers.get(header::WWW_AUTHENTICATE).is_none());
+        assert_eq!(headers.get(header::ALLOW).unwrap(), "POST, OPTIONS");
         assert_eq!(body, r#"{"detail":"Given API token is not valid"}"#);
 
         // Same API-key failure on a bearer-first view (projects): 401.
         let (status, headers, body) = response_parts(auth_failure_response(
             CODE_GIVEN_API_TOKEN_NOT_VALID,
             Some("Bearer"),
+            ALLOW_GET,
         ))
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(headers.get(header::WWW_AUTHENTICATE).unwrap(), "Bearer");
+        assert_eq!(headers.get(header::ALLOW).unwrap(), "GET, OPTIONS");
         assert_eq!(body, r#"{"detail":"Given API token is not valid"}"#);
     }
 
@@ -1311,13 +1370,15 @@ mod tests {
     /// (`authentication/adapter/exception.py:22-24`), undoing the 403
     /// coercion `handle_exception` applies when the first authenticator
     /// supplies no challenge. Only the `WWW-Authenticate` header follows
-    /// the first authenticator (F4 `NotAuthenticated`).
+    /// the first authenticator (F4 `NotAuthenticated`); `Allow` is the
+    /// consuming view's value on both arms.
     #[tokio::test]
     async fn not_authenticated_is_always_401() {
         let (status, headers, body) =
-            response_parts(not_authenticated_response(Some("Bearer"))).await;
+            response_parts(not_authenticated_response(Some("Bearer"), ALLOW_GET)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(headers.get(header::WWW_AUTHENTICATE).unwrap(), "Bearer");
+        assert_eq!(headers.get(header::ALLOW).unwrap(), "GET, OPTIONS");
         assert_eq!(
             body,
             r#"{"detail":"Authentication credentials were not provided."}"#
@@ -1325,9 +1386,11 @@ mod tests {
 
         // The create endpoint's `[APIKeyAuthentication]`: still 401 (the
         // adapter override), just without a challenge.
-        let (status, headers, body) = response_parts(not_authenticated_response(None)).await;
+        let (status, headers, body) =
+            response_parts(not_authenticated_response(None, ALLOW_POST)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert!(headers.get(header::WWW_AUTHENTICATE).is_none());
+        assert_eq!(headers.get(header::ALLOW).unwrap(), "POST, OPTIONS");
         assert_eq!(
             body,
             r#"{"detail":"Authentication credentials were not provided."}"#
@@ -1371,15 +1434,17 @@ mod tests {
         let ring = KeyRing::dev_from_secret(b"secret");
         let headers = HeaderMap::new();
         assert!(
-            authenticate_access_token(&pool, b"secret", &ring, &headers, None)
+            authenticate_access_token(&pool, b"secret", &ring, &headers, None, ALLOW_GET)
                 .await
                 .expect("anonymous")
                 .is_none()
         );
-        assert!(authenticate_machine_token(&pool, b"secret", &headers)
-            .await
-            .expect("anonymous")
-            .is_none());
+        assert!(
+            authenticate_machine_token(&pool, b"secret", &headers, ALLOW_POST)
+                .await
+                .expect("anonymous")
+                .is_none()
+        );
         assert!(matches!(
             authenticate_api_key(&pool, b"secret", &headers)
                 .await
@@ -1388,10 +1453,12 @@ mod tests {
         ));
         // Non-mt_ Bearer [REDACTED] through the machine-token class untouched.
         let headers = bearer_headers("Bearer some-jwt");
-        assert!(authenticate_machine_token(&pool, b"secret", &headers)
-            .await
-            .expect("fall-through")
-            .is_none());
+        assert!(
+            authenticate_machine_token(&pool, b"secret", &headers, ALLOW_POST)
+                .await
+                .expect("fall-through")
+                .is_none()
+        );
     }
 
     /// Missing/empty `X-Api-Key` is anonymous (`api_authentication.py:68-69`)

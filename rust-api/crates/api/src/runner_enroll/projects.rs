@@ -259,7 +259,16 @@ async fn get_projects(
     // ring is the derived `"default"` key (`tokens.py:108-110`).
     let secret_str = String::from_utf8_lossy(secret.as_bytes()).into_owned();
     let ring = pidash_services::runner_enroll::tokens::build_key_ring(&[], &secret_str);
-    match auth::authenticate_access_token(&pool, secret.as_bytes(), &ring, &headers, None).await {
+    match auth::authenticate_access_token(
+        &pool,
+        secret.as_bytes(),
+        &ring,
+        &headers,
+        None,
+        auth::ALLOW_GET,
+    )
+    .await
+    {
         Err(denial) => return denial,
         Ok(Some(authenticated)) => {
             let rows = match serialize_projects(&pool, authenticated.runner.workspace_id).await {
@@ -282,6 +291,7 @@ async fn get_projects(
             return auth::auth_failure_response(
                 auth::CODE_GIVEN_API_TOKEN_NOT_VALID,
                 Some(auth::AUTHENTICATE_HEADER_BEARER),
+                auth::ALLOW_GET,
             );
         }
         Ok(auth::ApiKeyOutcome::Missing) => {
