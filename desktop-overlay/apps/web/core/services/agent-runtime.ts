@@ -49,8 +49,7 @@ async function api<T>(path: string, method = "GET", body?: unknown): Promise<T> 
     if (response?.status === 401) {
       stopped = true;
       generation++;
-      workspaces.clear();
-      clearEnrollmentCache();
+      forgetEnrollments();
       tokenExpiresAt = 0;
       await invoke("managed_sign_out");
     }
@@ -64,6 +63,10 @@ let pending: Promise<unknown> = Promise.resolve();
 let generation = 0;
 let stopped = false;
 const workspaces = new Set<string>();
+// The one project each workspace's local chat is enrolled against. Sticky:
+// every extra project is another runner in the daemon, so it is chosen once
+// and reused rather than re-read from the project list on each message.
+const chatProjects = new Map<string, string>();
 let tokenExpiresAt = 0;
 let hostLabel = "";
 let activeUserId = "";
@@ -75,7 +78,10 @@ function enrollmentKey() {
 function saveEnrollmentCache() {
   if (!activeUserId) return;
   try {
-    sessionStorage.setItem(enrollmentKey(), JSON.stringify({ hostLabel, workspaces: [...workspaces] }));
+    sessionStorage.setItem(
+      enrollmentKey(),
+      JSON.stringify({ hostLabel, workspaces: [...workspaces], chatProjects: Object.fromEntries(chatProjects) })
+    );
   } catch {
     // Storage can be unavailable; enrollment still works for this page.
   }
@@ -90,6 +96,12 @@ function clearEnrollmentCache() {
   }
 }
 
+function forgetEnrollments() {
+  workspaces.clear();
+  chatProjects.clear();
+  clearEnrollmentCache();
+}
+
 function enqueue<T>(action: () => Promise<T>): Promise<T> {
   const next = pending.then(action, action);
   pending = next.catch(() => {});
@@ -100,11 +112,14 @@ export function resumeAgentRuntime(userId?: string) {
   if (userId && userId !== activeUserId) {
     activeUserId = userId;
     workspaces.clear();
+    chatProjects.clear();
     try {
       const cached = JSON.parse(sessionStorage.getItem(enrollmentKey()) ?? "null");
       if (typeof cached?.hostLabel === "string" && Array.isArray(cached.workspaces)) {
         hostLabel = cached.hostLabel;
         for (const workspace of cached.workspaces) if (typeof workspace === "string") workspaces.add(workspace);
+        for (const [workspace, project] of Object.entries(cached.chatProjects ?? {}))
+          if (typeof project === "string") chatProjects.set(workspace, project);
       }
     } catch {
       clearEnrollmentCache();
@@ -147,10 +162,7 @@ export async function connectAgentProject(workspaceSlug: string, projectId: stri
     }>("managed_doctor");
     if (!doctor.runner_present || !doctor.engine_present)
       throw new Error("Pi Dash Agent needs repair. Reinstall the desktop app to restore its bundled engine.");
-    if (hostLabel && hostLabel !== doctor.host_label) {
-      workspaces.clear();
-      clearEnrollmentCache();
-    }
+    if (hostLabel && hostLabel !== doctor.host_label) forgetEnrollments();
     hostLabel = doctor.host_label;
     await configure();
     if (stopped || current !== generation) return;
@@ -175,9 +187,44 @@ export async function connectAgentProject(workspaceSlug: string, projectId: stri
       project: project.identifier,
       hostLabel,
     });
+    // A project the user connected themselves is the one chat should ride on.
+    if (!chatProjects.has(workspaceSlug)) {
+      chatProjects.set(workspaceSlug, project.identifier);
+      saveEnrollmentCache();
+    }
     if (stopped || current !== generation) return;
     await invoke("managed_start_daemon", { workspace: workspaceSlug });
   });
+}
+
+type ListedProject = { identifier?: string; is_default?: boolean; archived_at?: string | null; created_at?: string };
+
+/**
+ * The project a workspace's local chat enrols against, resolved once.
+ *
+ * The project list comes back in no guaranteed order (the endpoint groups, so
+ * the model's default ordering is dropped), which is why position is never
+ * used: the workspace default wins, then the oldest project — neither moves
+ * when someone creates a new one.
+ */
+async function resolveChatProject(workspaceSlug: string): Promise<string> {
+  const known = chatProjects.get(workspaceSlug);
+  if (known) return known;
+  const projects = await api<{ results?: ListedProject[] } | ListedProject[]>(
+    `/api/workspaces/${workspaceSlug}/projects/`
+  );
+  const list = (Array.isArray(projects) ? projects : (projects.results ?? [])).filter((project) => project?.identifier);
+  const active = list.filter((project) => !project.archived_at);
+  const candidates = active.length ? active : list;
+  let oldest = candidates[0];
+  for (const project of candidates) if ((project.created_at ?? "") < (oldest.created_at ?? "")) oldest = project;
+  const identifier = (candidates.find((project) => project.is_default) ?? oldest)?.identifier;
+  if (!identifier) {
+    throw new Error("Create a project in this workspace before chatting with the built-in agent.");
+  }
+  chatProjects.set(workspaceSlug, identifier);
+  saveEnrollmentCache();
+  return identifier;
 }
 
 /**
@@ -191,10 +238,10 @@ export async function connectAgentProject(workspaceSlug: string, projectId: stri
  * "connecting to managed daemon" and the turn never arrived.
  *
  * Same sequence as {@link connectAgentProject}, minus the caller-supplied
- * project: enrolment still registers this machine against one project, so the
- * workspace's first project is used. It is idempotent and serialised through
- * the same queue, so calling it before every warm/send is cheap once the
- * daemon is up.
+ * project: enrolment still registers this machine against one project, so one
+ * is picked per workspace and kept (see {@link resolveChatProject}). It is
+ * idempotent and serialised through the same queue, so calling it before every
+ * warm/send is cheap once the daemon is up.
  */
 /**
  * Whether this server will let the bundled agent run, and why not when it
@@ -232,10 +279,7 @@ export async function ensureChatRuntime(workspaceSlug: string): Promise<void> {
     }>("managed_doctor");
     if (!doctor.runner_present || !doctor.engine_present)
       throw new Error("Pi Dash Agent needs repair. Reinstall the desktop app to restore its bundled engine.");
-    if (hostLabel && hostLabel !== doctor.host_label) {
-      workspaces.clear();
-      clearEnrollmentCache();
-    }
+    if (hostLabel && hostLabel !== doctor.host_label) forgetEnrollments();
     hostLabel = doctor.host_label;
     // Writes the engine config and a fresh model credential — chat cannot
     // reach a model without it.
@@ -256,14 +300,7 @@ export async function ensureChatRuntime(workspaceSlug: string): Promise<void> {
       workspaces.add(workspaceSlug);
       saveEnrollmentCache();
     }
-    const projects = await api<{ results?: { identifier: string }[] } | { identifier: string }[]>(
-      `/api/workspaces/${workspaceSlug}/projects/`
-    );
-    const list = Array.isArray(projects) ? projects : (projects.results ?? []);
-    const identifier = list.find((project) => project?.identifier)?.identifier;
-    if (!identifier) {
-      throw new Error("Create a project in this workspace before chatting with the built-in agent.");
-    }
+    const identifier = await resolveChatProject(workspaceSlug);
     await invoke("managed_enroll", { workspace: workspaceSlug, project: identifier, hostLabel });
     if (stopped || current !== generation) return;
     await invoke("managed_start_daemon", { workspace: workspaceSlug });
@@ -332,8 +369,7 @@ export async function disposeAgentRuntime(): Promise<void> {
       console.warn("Pi Dash Agent server enrollment cleanup failed; continuing local sign-out.");
     } finally {
       await invoke("managed_sign_out");
-      workspaces.clear();
-      clearEnrollmentCache();
+      forgetEnrollments();
       tokenExpiresAt = 0;
     }
   });
