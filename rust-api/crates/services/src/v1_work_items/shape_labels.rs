@@ -13,13 +13,15 @@
 //! expand_search.golden.json`). Every `#[test]` below replays them: golden
 //! in/out byte-identical, including validation error strings.
 //!
-//! This module is pure: the one check that needs the database in Python (the
+//! This module is pure: the two checks that need the database in Python (the
 //! `parent` pk lookup, which also performs the UUID-shape rejection inside
-//! `QuerySet.get`) takes the already-resolved existence fact as an argument.
-//! The handler layer (PIDASHCONV-679) calls [`parent_lookup_key`] for the
-//! canonical pk to look up under `Label.objects` (the soft-deleting manager)
-//! and passes the hit/miss in; the error bodies, key orders and check order
-//! here are the contract it must honor.
+//! `QuerySet.get`, and the `name` unique check) take already-resolved
+//! existence facts as arguments. The handler layer (PIDASHCONV-679) calls
+//! [`parent_lookup_key`] for the canonical pk to look up under
+//! `Label.objects` (the soft-deleting manager) and [`name_lookup_key`] for
+//! the trimmed name to check for a project-null, non-deleted clash
+//! (excluding self on PATCH), passing each hit/miss in; the error bodies,
+//! key orders and check order here are the contract it must honor.
 //!
 //! Reused, not forked: [`filter_fields`] (the shared `?fields=` kernel),
 //! [`field_errors_body`] (combined 400 bodies) and [`BASE_EXPANSION_NAMES`]
@@ -71,15 +73,24 @@
 //! * `parent=""` validates as `None` (`RelatedField` forces `""` → `None`);
 //!   only a JSON bool reaches `incorrect_type` — every other non-UUID input
 //!   fails Django's UUID parse first and surfaces its curly-quote message.
+//! * Label `name` carries a `UniqueValidator` (the single-field model
+//!   `UniqueConstraint`, `db/models/label.py:29-33`) scoped to project-null
+//!   labels — even though the endpoint always writes under a project. A
+//!   clash reports `label with this name already exists.`, FIRST among the
+//!   field's messages (model validators precede DRF's appends).
 //!
 //! Documented approximations (all outside any golden; same class as the
 //! merged `types::v1_assets` kernels):
 //!
-//! * `CharField` numeric coercion and the non-dict datatype word render
-//!   through `serde_json` shortest-roundtrip: JSON floats spell exponents as
-//!   `1e22` where Python spells `1e+22`, and integers beyond `u64` arrive as
-//!   `f64` (Python keeps them exact). Strings, bools, `None` and in-range
-//!   integers are exact.
+//! * `CharField` numeric coercion and the UUID-message number rendering go
+//!   through `serde_json` shortest-roundtrip: mantissas match Python, but
+//!   negative exponents pad differently (`1.5e-7` vs `1.5e-07`) and the
+//!   decimal/exponent switch threshold differs (`1e-5` renders `0.00001`
+//!   vs `1e-05`). Integers beyond `u64` arrive as `f64` (Python keeps them
+//!   exact), so a huge-int `parent` fails UUID parse instead of querying.
+//!   Strings, bools, `None` and in-range integers are exact.
+//! * `float()` parsing accepts Unicode decimal digits (`'١٢٣'` → `123.0`);
+//!   Rust rejects them.
 //! * The Django UUID `invalid` message embeds `str(data)`: exact for strings,
 //!   numbers and bools; JSON arrays/objects fall back to compact JSON where
 //!   Python uses `repr` (`{"a":1}` vs `{'a': 1}`).
@@ -165,6 +176,12 @@ pub const MSG_STRING_TOO_LARGE: &str = "String value too large.";
 /// the only JSON type that reaches it).
 pub const MSG_PARENT_INCORRECT_TYPE_BOOL: &str =
     "Incorrect type. Expected pk value, received bool.";
+/// Whole-body JSON null (DRF `Serializer.errors` rewrites the root `null`
+/// failure, `serializers.py:580`).
+pub const MSG_NO_DATA: &str = "No data provided";
+/// Duplicate label `name` (DRF `UniqueValidator`, from the single-field
+/// model `UniqueConstraint`, `db/models/label.py:29-33`).
+pub const MSG_NAME_UNIQUE: &str = "label with this name already exists.";
 
 /// `max_length` failure for a label text field (DRF `CharField.max_length`,
 /// checked on the stripped value before the null-characters validator).
@@ -196,11 +213,22 @@ fn json_type_name(value: &Value) -> &'static str {
 /// `serializers.py:340,484`): field validation never runs, so no DB fact is
 /// consulted.
 fn non_dict_body(json_type: &str) -> String {
-    field_errors_body(&[(
+    field_errors_body(&[field_entry(
         "non_field_errors",
-        Value::Array(vec![Value::String(format!(
+        vec![format!(
             "Invalid data. Expected a dictionary, but got {json_type}."
-        ))]),
+        )],
+    )])
+}
+
+/// Whole-body JSON null (`Serializer.errors`, DRF `serializers.py:580`):
+/// the root `null` failure is rewritten to a friendlier message instead of
+/// the `NoneType` spelling. Field validation never runs, so no DB fact is
+/// consulted.
+fn null_body() -> String {
+    field_errors_body(&[field_entry(
+        "non_field_errors",
+        vec![MSG_NO_DATA.to_owned()],
     )])
 }
 
@@ -389,8 +417,13 @@ impl CharError {
 /// Port of DRF `CharField` validation (`fields.py:CharField` +
 /// `Field.validate_empty_values`, DRF 3.15.2): absent → required/skip, null →
 /// null/None, blank check on the raw value, bool/composite rejection,
-/// numeric coercion via `str()`, whitespace trim, `max_length`, null-bytes.
-/// `value=None` is the absent key (`Field.get_value` returns `empty`).
+/// numeric coercion via `str()`, whitespace trim, then the validators.
+/// Every validator runs and failures accumulate in order
+/// (`Field.run_validators`, `fields.py:542-564`), so an over-long value with
+/// a null byte reports both messages, `max_length` first. Early failures
+/// (required, null, blank, invalid) raise before the validators and always
+/// come alone. `value=None` is the absent key (`Field.get_value` returns
+/// `empty`).
 fn validate_char(
     value: Option<&Value>,
     required: bool,
@@ -398,18 +431,18 @@ fn validate_char(
     allow_blank: bool,
     max_chars: Option<usize>,
     partial: bool,
-) -> Result<CharOutcome, CharError> {
+) -> Result<CharOutcome, Vec<CharError>> {
     let Some(value) = value else {
         if partial || !required {
             return Ok(CharOutcome::Skip);
         }
-        return Err(CharError::Required);
+        return Err(vec![CharError::Required]);
     };
     if value.is_null() {
         if allow_null {
             return Ok(CharOutcome::Null);
         }
-        return Err(CharError::Null);
+        return Err(vec![CharError::Null]);
     }
     // `isinstance(data, bool) or not isinstance(data, (str, int, float))`
     // fails `invalid`; `serde_json` keeps bools distinct from numbers, so
@@ -417,7 +450,7 @@ fn validate_char(
     let raw = match value {
         Value::String(text) => text.clone(),
         Value::Number(number) => number.to_string(),
-        _ => return Err(CharError::InvalidType),
+        _ => return Err(vec![CharError::InvalidType]),
     };
     // The blank check runs on the raw value: `data == '' or
     // str(data).strip() == ''` — whitespace-only fails unless blank is
@@ -426,18 +459,23 @@ fn validate_char(
         if allow_blank {
             return Ok(CharOutcome::Text(String::new()));
         }
-        return Err(CharError::Blank);
+        return Err(vec![CharError::Blank]);
     }
     let stripped = raw.trim().to_owned();
+    let mut failures = Vec::new();
     if let Some(max) = max_chars {
         if stripped.chars().count() > max {
-            return Err(CharError::MaxLength(max));
+            failures.push(CharError::MaxLength(max));
         }
     }
     if stripped.contains('\0') {
-        return Err(CharError::NullChars);
+        failures.push(CharError::NullChars);
     }
-    Ok(CharOutcome::Text(stripped))
+    if failures.is_empty() {
+        Ok(CharOutcome::Text(stripped))
+    } else {
+        Err(failures)
+    }
 }
 
 /// Outcome of [`validate_sort_order`].
@@ -608,6 +646,30 @@ pub fn parent_lookup_key(body: &Value) -> Option<String> {
     }
 }
 
+/// Pure pre-pass for the handler: the trimmed `name` the `UniqueValidator`
+/// queries (a project-null, non-deleted clash under `Label.objects`,
+/// excluding self on PATCH), or `None` when the name arm never reaches the
+/// validators (absent, null, blank, or bool/composite input — all fail
+/// before `run_validators` — and non-object bodies). Mirrors
+/// `CharField.to_internal_value` plus the blank check for the name flags
+/// (no null, no blank); keep in sync with `validate_char`.
+pub fn name_lookup_key(body: &Value) -> Option<String> {
+    let obj = body.as_object()?;
+    let value = obj.get("name")?;
+    if value.is_null() {
+        return None;
+    }
+    let raw = match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        _ => return None,
+    };
+    if raw.is_empty() || raw.trim().is_empty() {
+        return None;
+    }
+    Some(raw.trim().to_owned())
+}
+
 /// `LabelCreateUpdateSerializer(data, partial=...)` input
 /// (`api/views/issue.py:1362,1500`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -621,6 +683,13 @@ pub struct LabelWriteInput<'a> {
     /// [`parent_lookup_key`]; consulted only when the parent arm parsed a
     /// UUID (`None` there is a caller-contract violation).
     pub parent_exists: Option<bool>,
+    /// Whether a project-null, non-deleted `Label` named [`name_lookup_key`]
+    /// exists — the `UniqueValidator` fact (single-field model
+    /// `UniqueConstraint`, `db/models/label.py:29-33`). On PATCH the handler
+    /// excludes the row being patched (DRF excludes `self.instance`).
+    /// Consulted only when [`name_lookup_key`] returns `Some` (`None`
+    /// there is a caller-contract violation).
+    pub name_exists: Option<bool>,
 }
 
 /// Validated label write (`validated_data` shape): `None` = key omitted
@@ -656,39 +725,61 @@ pub enum LabelWriteError {
          (handler must pass Some when parent_lookup_key returns Some)"
     )]
     MissingParentFact,
+    /// Caller-contract violation: `name_exists` is `None` while the name arm
+    /// reached the validators (the handler must pass `Some` whenever
+    /// [`name_lookup_key`] returns `Some`). No wire body — the handler
+    /// maps it to a 500.
+    #[error(
+        "name_exists is None while the name arm needs it \
+         (handler must pass Some when name_lookup_key returns Some)"
+    )]
+    MissingNameFact,
 }
 
 impl LabelWriteError {
-    /// The 400 response body (`None` for the caller-contract arm).
+    /// The 400 response body (`None` for the caller-contract arms).
     pub fn body(&self) -> Option<&str> {
         match self {
             LabelWriteError::NotADict(body) | LabelWriteError::Fields(body) => Some(body),
-            LabelWriteError::MissingParentFact => None,
+            LabelWriteError::MissingParentFact | LabelWriteError::MissingNameFact => None,
         }
     }
 }
 
-/// Shape one field failure for [`field_errors_body`].
-fn field_entry(field: &'static str, message: String) -> (&'static str, Value) {
-    (field, Value::Array(vec![Value::String(message)]))
+/// Shape one field's failures for [`field_errors_body`]: a single message,
+/// or several when validators accumulate.
+fn field_entry(field: &'static str, messages: Vec<String>) -> (&'static str, Value) {
+    (
+        field,
+        Value::Array(messages.into_iter().map(Value::String).collect()),
+    )
 }
 
 /// Port of `LabelCreateUpdateSerializer` field validation
 /// (`serializers/issue.py:526-554` over DRF `ModelSerializer`, no `validate()`
 /// override): every writable field runs even after failures, errors combine
-/// in field order, unknown input keys are silently ignored, and there are no
-/// uniqueness validators (DRF ignores `Meta.constraints`).
+/// in field order, unknown input keys are silently ignored. The single-field
+/// model `UniqueConstraint` becomes a `UniqueValidator` on `name`
+/// (`utils/field_mapping.py:get_unique_validators`); the two-column
+/// constraint has no serializer validator (DRF only maps `unique_together`).
 pub fn validate_label_write(
     input: &LabelWriteInput<'_>,
 ) -> Result<ValidatedLabel, LabelWriteError> {
     let Some(obj) = input.body.as_object() else {
+        if input.body.is_null() {
+            return Err(LabelWriteError::NotADict(null_body()));
+        }
         return Err(LabelWriteError::NotADict(non_dict_body(json_type_name(
             input.body,
         ))));
     };
     let mut errors: Vec<(&'static str, Value)> = Vec::new();
 
-    // `name = CharField(max_length=255)`: required, no null, no blank.
+    // `name = CharField(max_length=255)`: required, no null, no blank. The
+    // `UniqueValidator` runs FIRST among the validators (model validators
+    // precede DRF's appends), so a duplicate over-long name reports
+    // `[unique, max_length]`.
+    let name_key = name_lookup_key(input.body);
     let name = match validate_char(
         obj.get("name"),
         true,
@@ -697,10 +788,32 @@ pub fn validate_label_write(
         Some(MAX_LABEL_CHARS),
         input.partial,
     ) {
-        Ok(CharOutcome::Text(value)) => Some(value),
+        Ok(CharOutcome::Text(value)) => {
+            // A present, coercible, non-blank name always reaches the
+            // validators, so the unique check ran too.
+            match input.name_exists {
+                Some(true) => {
+                    errors.push(field_entry("name", vec![MSG_NAME_UNIQUE.to_owned()]));
+                    None
+                }
+                Some(false) => Some(value),
+                None => return Err(LabelWriteError::MissingNameFact),
+            }
+        }
         Ok(_) => None,
-        Err(error) => {
-            errors.push(field_entry("name", error.message()));
+        Err(char_errors) => {
+            let mut messages = Vec::new();
+            if name_key.is_some() {
+                // The validators ran (the lookup key exists exactly then),
+                // so the unique check ran too.
+                match input.name_exists {
+                    Some(true) => messages.push(MSG_NAME_UNIQUE.to_owned()),
+                    Some(false) => {}
+                    None => return Err(LabelWriteError::MissingNameFact),
+                }
+            }
+            messages.extend(char_errors.into_iter().map(|error| error.message()));
+            errors.push(field_entry("name", messages));
             None
         }
     };
@@ -715,8 +828,14 @@ pub fn validate_label_write(
     ) {
         Ok(CharOutcome::Text(value)) => Some(value),
         Ok(_) => None,
-        Err(error) => {
-            errors.push(field_entry("color", error.message()));
+        Err(char_errors) => {
+            errors.push(field_entry(
+                "color",
+                char_errors
+                    .into_iter()
+                    .map(|error| error.message())
+                    .collect(),
+            ));
             None
         }
     };
@@ -731,8 +850,14 @@ pub fn validate_label_write(
     ) {
         Ok(CharOutcome::Text(value)) => Some(value),
         Ok(_) => None,
-        Err(error) => {
-            errors.push(field_entry("description", error.message()));
+        Err(char_errors) => {
+            errors.push(field_entry(
+                "description",
+                char_errors
+                    .into_iter()
+                    .map(|error| error.message())
+                    .collect(),
+            ));
             None
         }
     };
@@ -748,8 +873,14 @@ pub fn validate_label_write(
         Ok(CharOutcome::Text(value)) => Some(Some(value)),
         Ok(CharOutcome::Null) => Some(None),
         Ok(CharOutcome::Skip) => None,
-        Err(error) => {
-            errors.push(field_entry("external_source", error.message()));
+        Err(char_errors) => {
+            errors.push(field_entry(
+                "external_source",
+                char_errors
+                    .into_iter()
+                    .map(|error| error.message())
+                    .collect(),
+            ));
             None
         }
     };
@@ -764,8 +895,14 @@ pub fn validate_label_write(
         Ok(CharOutcome::Text(value)) => Some(Some(value)),
         Ok(CharOutcome::Null) => Some(None),
         Ok(CharOutcome::Skip) => None,
-        Err(error) => {
-            errors.push(field_entry("external_id", error.message()));
+        Err(char_errors) => {
+            errors.push(field_entry(
+                "external_id",
+                char_errors
+                    .into_iter()
+                    .map(|error| error.message())
+                    .collect(),
+            ));
             None
         }
     };
@@ -777,12 +914,15 @@ pub fn validate_label_write(
         Ok(ParentNeed::Query { canonical, raw }) => match input.parent_exists {
             Some(true) => parent = Some(Some(canonical)),
             Some(false) => {
-                errors.push(field_entry("parent", parent_does_not_exist_message(&raw)));
+                errors.push(field_entry(
+                    "parent",
+                    vec![parent_does_not_exist_message(&raw)],
+                ));
             }
             None => return Err(LabelWriteError::MissingParentFact),
         },
         Err(error) => {
-            errors.push(field_entry("parent", error.message()));
+            errors.push(field_entry("parent", vec![error.message()]));
         }
     }
     // `sort_order = FloatField(default=65535)`: optional (no DRF default —
@@ -792,7 +932,7 @@ pub fn validate_label_write(
         Ok(FloatOutcome::Skip) => {}
         Ok(FloatOutcome::Number(value)) => sort_order = Some(value),
         Err(error) => {
-            errors.push(field_entry("sort_order", error.message()));
+            errors.push(field_entry("sort_order", vec![error.message()]));
         }
     }
 
@@ -855,6 +995,9 @@ pub fn validate_workpad_write(
     input: &WorkpadWriteInput<'_>,
 ) -> Result<ValidatedWorkpad, WorkpadWriteError> {
     let Some(obj) = input.body.as_object() else {
+        if input.body.is_null() {
+            return Err(WorkpadWriteError::NotADict(null_body()));
+        }
         return Err(WorkpadWriteError::NotADict(non_dict_body(json_type_name(
             input.body,
         ))));
@@ -864,8 +1007,14 @@ pub fn validate_workpad_write(
             workpad: Some(value),
         }),
         Ok(_) => Ok(ValidatedWorkpad { workpad: None }),
-        Err(error) => Err(WorkpadWriteError::Fields(field_errors_body(&[
-            field_entry("body", error.message()),
+        Err(char_errors) => Err(WorkpadWriteError::Fields(field_errors_body(&[
+            field_entry(
+                "body",
+                char_errors
+                    .into_iter()
+                    .map(|error| error.message())
+                    .collect(),
+            ),
         ]))),
     }
 }
@@ -1139,6 +1288,8 @@ mod tests {
             body,
             partial: false,
             parent_exists: None,
+            // No project-null clash unless the test says otherwise.
+            name_exists: Some(false),
         }
     }
 
@@ -1505,7 +1656,6 @@ mod tests {
     fn non_dict_bodies_fail_before_field_validation() {
         for (raw, datatype) in [
             ("[1]", "list"),
-            ("null", "NoneType"),
             ("\"s\"", "str"),
             ("1", "int"),
             ("1.5", "float"),
@@ -1524,7 +1674,28 @@ mod tests {
             );
             // No lookup for non-object bodies (field validation never runs).
             assert_eq!(parent_lookup_key(&body), None);
+            assert_eq!(name_lookup_key(&body), None);
         }
+        // Whole-body null is rewritten to a friendlier message (never the
+        // `NoneType` spelling) on both write shapes.
+        let body = Value::Null;
+        assert_eq!(
+            validate_label_write(&label_input(&body))
+                .expect_err("null label body fails")
+                .body(),
+            Some("{\"non_field_errors\":[\"No data provided\"]}")
+        );
+        assert_eq!(parent_lookup_key(&body), None);
+        assert_eq!(name_lookup_key(&body), None);
+        assert_eq!(
+            validate_workpad_write(&WorkpadWriteInput {
+                body: &body,
+                partial: true
+            })
+            .expect_err("null workpad body fails")
+            .body(),
+            "{\"non_field_errors\":[\"No data provided\"]}"
+        );
         let body: Value = serde_json::from_str("[1]").expect("test body parses");
         assert_eq!(
             validate_workpad_write(&WorkpadWriteInput {
@@ -1546,6 +1717,7 @@ mod tests {
             body: &body,
             partial: true,
             parent_exists: None,
+            name_exists: None,
         })
         .expect("partial skips missing name");
         assert!(validated.name.is_none());
@@ -1587,7 +1759,7 @@ mod tests {
             Some("ux".to_string())
         );
         // Length cap counts stripped code points; `max_length` wins over the
-        // null-characters validator (append order in `CharField.__init__`).
+        // null-characters validator (every validator runs; `max_length` first).
         assert!(create(&serde_json::json!({"name": "x".repeat(255)}))
             .expect("255 chars pass")
             .name
@@ -1600,15 +1772,76 @@ mod tests {
         );
         assert_eq!(
             create(&serde_json::json!({"name": format!("{}\0", "x".repeat(256))}))
-                .expect_err("long + null byte fails max_length first")
+                .expect_err("long + null byte fails both validators")
                 .body(),
-            Some("{\"name\":[\"Ensure this field has no more than 255 characters.\"]}")
+            Some(
+                "{\"name\":[\"Ensure this field has no more than 255 characters.\",\
+                 \"Null characters are not allowed.\"]}"
+            )
         );
         assert_eq!(
             create(&serde_json::json!({"name": "ok\0"}))
                 .expect_err("null byte fails")
                 .body(),
             Some("{\"name\":[\"Null characters are not allowed.\"]}")
+        );
+    }
+
+    #[test]
+    fn label_name_unique_matrix() {
+        let create = |body: &Value, name_exists: Option<bool>| {
+            validate_label_write(&LabelWriteInput {
+                body,
+                partial: false,
+                parent_exists: None,
+                name_exists,
+            })
+        };
+        // A project-null clash fails `unique`, first among the validators.
+        assert_eq!(
+            create(&serde_json::json!({"name": "ux"}), Some(true))
+                .expect_err("duplicate fails")
+                .body(),
+            Some("{\"name\":[\"label with this name already exists.\"]}")
+        );
+        // ... combined with the other validators in run order.
+        assert_eq!(
+            create(
+                &serde_json::json!({"name": format!("{}\0", "x".repeat(256))}),
+                Some(true)
+            )
+            .expect_err("duplicate long + null fails all three")
+            .body(),
+            Some(
+                "{\"name\":[\"label with this name already exists.\",\
+                 \"Ensure this field has no more than 255 characters.\",\
+                 \"Null characters are not allowed.\"]}"
+            )
+        );
+        // Early failures never consult the fact (no query in Python): every
+        // one carries a wire body rather than the fact-less 500 arm.
+        for (tag, body) in [
+            ("absent", serde_json::json!({})),
+            ("null", serde_json::json!({"name": null})),
+            ("blank", serde_json::json!({"name": ""})),
+            ("spaces", serde_json::json!({"name": "   "})),
+            ("bool", serde_json::json!({"name": true})),
+            ("list", serde_json::json!({"name": ["x"]})),
+        ] {
+            let error = create(&body, None).expect_err("early failure");
+            assert!(error.body().is_some(), "{tag} needs no fact");
+        }
+        // Reaching the validators without a fact is loud (handler 500).
+        assert_eq!(
+            create(&serde_json::json!({"name": "ux"}), None).expect_err("missing fact errors"),
+            LabelWriteError::MissingNameFact
+        );
+        assert_eq!(LabelWriteError::MissingNameFact.body(), None);
+        // ... including when `max_length` also fails (the unique check ran).
+        assert_eq!(
+            create(&serde_json::json!({"name": "x".repeat(256)}), None)
+                .expect_err("missing fact errors despite max_length"),
+            LabelWriteError::MissingNameFact
         );
     }
 
@@ -1656,6 +1889,7 @@ mod tests {
                 body,
                 partial: false,
                 parent_exists,
+                name_exists: Some(false),
             })
         };
         let body_for = |raw: &str| -> Value {
@@ -1943,6 +2177,7 @@ mod tests {
             body: &body,
             partial: true,
             parent_exists: None,
+            name_exists: None,
         })
         .expect("partial passes");
         assert!(validated.name.is_none());
@@ -1961,6 +2196,7 @@ mod tests {
             body: &body,
             partial: false,
             parent_exists: Some(true),
+            name_exists: Some(false),
         })
         .expect("full create passes");
         assert_eq!(validated.name, Some("ux".to_string()));
@@ -2121,6 +2357,38 @@ mod tests {
         ] {
             let body: Value = serde_json::from_str(raw).expect("test body parses");
             assert_eq!(parent_lookup_key(&body), None, "{raw} needs no lookup");
+        }
+    }
+
+    #[test]
+    fn name_lookup_key_contract() {
+        // Present, coercible, non-blank names yield the trimmed key.
+        assert_eq!(
+            name_lookup_key(&serde_json::json!({"name": "  ux  "})),
+            Some("ux".to_string())
+        );
+        assert_eq!(
+            name_lookup_key(&serde_json::json!({"name": 5})),
+            Some("5".to_string())
+        );
+        assert_eq!(
+            name_lookup_key(&serde_json::json!({"name": 1.5})),
+            Some("1.5".to_string())
+        );
+        // Everything else yields no lookup (the unique check never runs).
+        for raw in [
+            "{}",
+            "{\"name\":null}",
+            "{\"name\":\"\"}",
+            "{\"name\":\"   \"}",
+            "{\"name\":true}",
+            "{\"name\":[1]}",
+            "{\"name\":{\"a\":1}}",
+            "[1]",
+            "null",
+        ] {
+            let body: Value = serde_json::from_str(raw).expect("test body parses");
+            assert_eq!(name_lookup_key(&body), None, "{raw} needs no lookup");
         }
     }
 }
