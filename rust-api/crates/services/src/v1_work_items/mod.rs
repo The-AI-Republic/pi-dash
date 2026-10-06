@@ -39,6 +39,8 @@
 //! * [`shape_links`] — link shapes (`IssueLinkCreate` / `Update` / Show,
 //!   `GithubPullRequestLink`, `GitCodeReviewLink`;
 //!   `api/serializers/issue.py:580-728`, PIDASHCONV-662).
+//! * [`shape_labels`] — issue/label lite + workpad shapes
+//!   (`api/serializers/issue.py:497-579` + `:1061-1073`, PIDASHCONV-661).
 //! * Sibling issues extend this file with their own `pub mod shape_*;` /
 //!   `queries_*` lines (PIDASHCONV-661…663,665…672); on rebase keep both sides,
 //!   never fork a helper.
@@ -62,6 +64,7 @@ pub mod queries_search;
 pub mod queries_sub;
 pub mod shape_expand_search;
 pub mod shape_issue;
+pub mod shape_labels;
 pub mod shape_links;
 pub mod shape_pages;
 pub mod shape_relations;
