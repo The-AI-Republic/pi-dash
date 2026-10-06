@@ -50,6 +50,7 @@
 //!     chronology across the two pipes — that would need a single combined
 //!     stream upstream.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -133,18 +134,20 @@ fn known_install_paths() -> Vec<PathBuf> {
 /// Tiny inline `dirs::home_dir` so we don't add the `dirs` crate just for
 /// this. Falls back to `$HOME` (Unix) or `%USERPROFILE%` (Windows).
 fn dirs_home() -> Option<PathBuf> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
+        home_from_env(cfg!(windows), |key| std::env::var_os(key))
     }
     #[cfg(not(any(unix, windows)))]
     {
         None
     }
+}
+
+/// The home directory an environment names: `USERPROFILE` on Windows, where
+/// `HOME` is normally unset, and `HOME` elsewhere.
+fn home_from_env(windows: bool, env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    env(if windows { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
 }
 
 /// On Unix, verify the executable bit is set. On Windows, file extension
@@ -232,13 +235,33 @@ fn kill_child(child: &mut Child) -> std::io::Result<()> {
 // Installing from the bundle
 // ---------------------------------------------------------------------------
 
-/// Where the standalone CLI goes, matching the official installer's
-/// destination so the two never fight over different copies.
-pub(crate) fn cli_install_dir(home: &Path, local_app_data: Option<&Path>) -> PathBuf {
-    if let Some(base) = local_app_data.filter(|_| cfg!(windows)) {
+/// Where the standalone CLI goes: the official installer's destination on
+/// Unix, so the two never fight over different copies, and on Windows the
+/// directory [`known_install_paths`] probes.
+pub(crate) fn cli_install_dir(
+    windows: bool,
+    home: &Path,
+    local_app_data: Option<&Path>,
+) -> PathBuf {
+    if let Some(base) = local_app_data.filter(|_| windows) {
         return base.join("Programs").join("pidash");
     }
     home.join(".local").join("bin")
+}
+
+/// The user's home directory and the directory a bundled install copies the
+/// CLI into, or `None` when the environment names no home directory.
+///
+/// `windows` and `env` are parameters rather than `cfg!` and `std::env` so the
+/// Windows layout is covered by tests on every host.
+pub(crate) fn bundle_install_dirs(
+    windows: bool,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> Option<(PathBuf, PathBuf)> {
+    let home = home_from_env(windows, &env)?;
+    let local_app_data = env("LOCALAPPDATA").map(PathBuf::from);
+    let dest_dir = cli_install_dir(windows, &home, local_app_data.as_deref());
+    Some((home, dest_dir))
 }
 
 /// The line appended to a shell profile so `~/.local/bin` is on PATH.
@@ -297,8 +320,8 @@ fn copy_bundled_cli(bundled: &Path, dest_dir: &Path) -> Result<PathBuf, String> 
 ///
 /// Unix only, and deliberately conservative: it appends one guarded block to
 /// the profiles that exist, and never rewrites what is already there. Windows
-/// PATH lives in the registry and the official installer owns that; the
-/// bundled path falls back to the downloader there.
+/// PATH lives in the registry, which this leaves alone: the app finds the
+/// copy through [`known_install_paths`], and the user is told where it is.
 #[cfg(unix)]
 fn ensure_on_path(dir: &Path, home: &Path) -> Vec<String> {
     let mut notes = Vec::new();
@@ -342,8 +365,11 @@ fn ensure_on_path(dir: &Path, home: &Path) -> Vec<String> {
 }
 
 #[cfg(not(unix))]
-fn ensure_on_path(_dir: &Path, _home: &Path) -> Vec<String> {
-    Vec::new()
+fn ensure_on_path(dir: &Path, _home: &Path) -> Vec<String> {
+    vec![format!(
+        "{} is not on PATH; add it to your PATH to use `pidash` in a terminal",
+        dir.display()
+    )]
 }
 
 /// Install the CLI from the app's own bundle. `Ok(None)` means there was no
@@ -353,11 +379,10 @@ fn install_from_bundle<R: Runtime>(app: &AppHandle<R>) -> Result<Option<PathBuf>
     let Some(bundled) = bundled_cli(app) else {
         return Ok(None);
     };
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some((home, dest_dir)) = bundle_install_dirs(cfg!(windows), |key| std::env::var_os(key))
+    else {
         return Ok(None);
     };
-    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    let dest_dir = cli_install_dir(&home, local_app_data.as_deref());
     let log = |line: String| {
         let _ = app.emit("pidash-install-log", serde_json::json!({ "line": line }));
     };
@@ -587,8 +612,7 @@ pub async fn install_pidash_cli<R: Runtime>(app: AppHandle<R>) -> Result<(), Str
     // daemon — so install from the bundle rather than downloading a second
     // copy. Offline, instant, and the bytes are the ones this app was tested
     // with. Falls through to the network installer when there is no bundle to
-    // copy from (a dev build, or Windows, whose PATH the official installer
-    // owns).
+    // copy from (a dev build).
     let bundle_app = app.clone();
     match tauri::async_runtime::spawn_blocking(move || install_from_bundle(&bundle_app)).await {
         Ok(Ok(Some(_))) => return Ok(()),
@@ -806,15 +830,56 @@ mod bundle_install_tests {
     #[test]
     fn install_dir_matches_the_official_installer() {
         let home = PathBuf::from("/home/dev");
-        if cfg!(windows) {
-            let lad = PathBuf::from("C:\\Users\\dev\\AppData\\Local");
-            assert_eq!(
-                cli_install_dir(&home, Some(&lad)),
-                lad.join("Programs").join("pidash")
-            );
-        } else {
-            assert_eq!(cli_install_dir(&home, None), home.join(".local").join("bin"));
+        let lad = PathBuf::from("C:\\Users\\dev\\AppData\\Local");
+        assert_eq!(
+            cli_install_dir(true, &home, Some(&lad)),
+            lad.join("Programs").join("pidash")
+        );
+        assert_eq!(
+            cli_install_dir(false, &home, None),
+            home.join(".local").join("bin")
+        );
+        // LOCALAPPDATA leaking into a Unix environment changes nothing.
+        assert_eq!(
+            cli_install_dir(false, &home, Some(&lad)),
+            home.join(".local").join("bin")
+        );
+    }
+
+    fn env_of(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        move |key| {
+            vars.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| OsString::from(v))
         }
+    }
+
+    /// A GUI process started from Explorer or the Start menu has USERPROFILE
+    /// and LOCALAPPDATA but no HOME; the bundled install must still happen.
+    #[test]
+    fn bundle_install_resolves_on_windows_without_home() {
+        let env = env_of(&[
+            ("USERPROFILE", "C:\\Users\\dev"),
+            ("LOCALAPPDATA", "C:\\Users\\dev\\AppData\\Local"),
+        ]);
+        let (home, dest_dir) = bundle_install_dirs(true, env)
+            .expect("Windows without HOME must still install from the bundle");
+        assert_eq!(home, PathBuf::from("C:\\Users\\dev"));
+        assert_eq!(
+            dest_dir,
+            PathBuf::from("C:\\Users\\dev\\AppData\\Local")
+                .join("Programs")
+                .join("pidash")
+        );
+    }
+
+    #[test]
+    fn bundle_install_resolves_from_home_on_unix() {
+        let (home, dest_dir) = bundle_install_dirs(false, env_of(&[("HOME", "/home/dev")])).unwrap();
+        assert_eq!(home, PathBuf::from("/home/dev"));
+        assert_eq!(dest_dir, PathBuf::from("/home/dev/.local/bin"));
+        // USERPROFILE is not a home directory on Unix.
+        assert!(bundle_install_dirs(false, env_of(&[("USERPROFILE", "/home/dev")])).is_none());
     }
 
     #[test]
