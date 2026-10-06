@@ -35,6 +35,10 @@ http = "1"
 # workspace crate enables it (no feature-unification rescue), so it is
 # declared here explicitly.
 http-body-util = { version = "0.1", features = ["channel"] }
+# The gzip streaming encoder (`middleware::gzip::StreamingGzip`) implements
+# `http_body::Body` directly for chunk-wise compression. Already in the
+# lockfile via axum/http-body-util, so this adds no new downloads.
+http-body = "1"
 serde = { version = "1", features = ["derive"] }
 # preserve_order: response envelopes and trimmed objects keep serializer field
 # order, which byte-identical JSON parity with DRF requires. serde_json::Map
