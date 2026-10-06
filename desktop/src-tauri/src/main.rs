@@ -348,7 +348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .manage(AppConfig { target_url, bundle_root })
         .manage(managed_runner::DaemonState::default())
         .manage(chat::ChatState::default())
-        .manage(updates::UpdateState::default())
+        .manage(<updates::UpdateState>::default())
         .invoke_handler(tauri::generate_handler![
             open_in_browser,
             desktop_http::desktop_api_request,
