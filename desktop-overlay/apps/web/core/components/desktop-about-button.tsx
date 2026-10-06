@@ -60,7 +60,10 @@ export function DesktopAboutButton() {
         />
       </Tooltip>
       <ModalCore isOpen={isOpen} handleClose={close} position={EModalPosition.CENTER} width={EModalWidth.XXXL}>
-        <div className="flex flex-col gap-4 p-5">
+        {/* The dialog portals out of the sidebar. Below 768px a press outside
+            the sidebar collapses it and unmounts this component, so presses
+            in here must not count as outside. */}
+        <div data-prevent-outside-click className="flex flex-col gap-4 p-5">
           <div className="flex flex-col gap-1">
             <h3 className="text-16 font-medium text-primary">About Pi Dash</h3>
             {about && <p className="text-13 text-tertiary">Version {about.version}</p>}

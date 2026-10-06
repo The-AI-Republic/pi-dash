@@ -4,8 +4,10 @@
  * See the LICENSE file for details.
  */
 
+import { useRef, useState } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useOutsideClickDetector } from "@pi-dash/hooks";
 
 const mocks = vi.hoisted(() => ({ isDesktop: vi.fn(() => true) }));
 
@@ -13,12 +15,16 @@ vi.mock("@/services/agent-runtime", () => ({ isDesktop: mocks.isDesktop }));
 vi.mock("@pi-dash/propel/tooltip", () => ({
   Tooltip: ({ children }: { children: React.ReactNode }) => children,
 }));
-vi.mock("@pi-dash/ui", () => ({
-  EModalPosition: { CENTER: "" },
-  EModalWidth: { XXXL: "" },
-  ModalCore: ({ isOpen, children }: { isOpen: boolean; children: React.ReactNode }) =>
-    isOpen ? <div role="dialog">{children}</div> : null,
-}));
+// Like the real modal, the stand-in portals out of the tree that opened it.
+vi.mock("@pi-dash/ui", async () => {
+  const { createPortal } = await import("react-dom");
+  return {
+    EModalPosition: { CENTER: "" },
+    EModalWidth: { XXXL: "" },
+    ModalCore: ({ isOpen, children }: { isOpen: boolean; children: React.ReactNode }) =>
+      isOpen ? createPortal(<div role="dialog">{children}</div>, document.body) : null,
+  };
+});
 
 import { DesktopAboutButton } from "../../core/components/desktop-about-button";
 
@@ -55,6 +61,14 @@ afterEach(() => {
 });
 
 const flush = () => act(async () => {});
+
+/** The sidebar footer below 768px: a press outside the sidebar collapses it, which unmounts the footer. */
+function NarrowSidebarFooter() {
+  const [collapsed, setCollapsed] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useOutsideClickDetector(ref, () => setCollapsed(true));
+  return <div ref={ref}>{!collapsed && <DesktopAboutButton />}</div>;
+}
 
 const openDialog = async () => {
   render(<DesktopAboutButton />);
@@ -109,5 +123,13 @@ describe("DesktopAboutButton", () => {
     await openDialog();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("stays open when pressed inside while the sidebar collapses on outside clicks", async () => {
+    render(<NarrowSidebarFooter />);
+    fireEvent.click(screen.getByRole("button", { name: "About Pi Dash" }));
+    await flush();
+    fireEvent.mouseDown(screen.getByText("GNU AFFERO GENERAL PUBLIC LICENSE"));
+    expect(screen.queryByRole("dialog")).not.toBeNull();
   });
 });
