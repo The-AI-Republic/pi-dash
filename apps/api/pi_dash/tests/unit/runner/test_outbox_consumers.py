@@ -118,6 +118,62 @@ def test_claim_pending_keeps_scanning_empty_nonterminal_pages(monkeypatch):
     ]
 
 
+class _RedisPyShapedRedis(_FakeRedis):
+    """Mirrors redis-py's XAUTOCLAIM reply shapes for a two-entry PEL.
+
+    With ``justid=True`` redis-py returns the bare claimed-id list (no
+    cursor); without it, ``[next_cursor, entries, deleted_ids]``.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def xautoclaim(self, **kwargs):
+        self.calls += 1
+        if self.calls > 5:
+            raise AssertionError("xautoclaim loop did not terminate")
+        if kwargs.get("justid"):
+            return [b"1-0", b"2-0"]
+        return [b"0-0", [(b"1-0", {b"k": b"v"}), (b"2-0", {b"k": b"v"})], []]
+
+
+@pytest.mark.unit
+def test_claim_pending_terminates_against_redis_py_reply_shape(monkeypatch):
+    """Regression: the JUSTID reply has no cursor, so treating its first
+    element as one re-claimed the same entry forever (prod, 2026-10-04).
+    """
+    client = _RedisPyShapedRedis()
+    monkeypatch.setattr(outbox, "redis_instance", lambda: client)
+
+    claimed = outbox.claim_pending_for_new_session(
+        "runner-1",
+        old_consumer="consumer-old",
+        new_consumer="consumer-new",
+    )
+
+    assert claimed == 2
+    assert client.calls == 1
+    assert len(client.deleted) == 1
+
+
+@pytest.mark.unit
+def test_claim_pending_bails_when_cursor_does_not_advance(monkeypatch):
+    client = _FakeRedis(autoclaim_results=[(b"5-0", [b"5-0"])] * 3)
+    monkeypatch.setattr(outbox, "redis_instance", lambda: client)
+
+    claimed = outbox.claim_pending_for_new_session(
+        "runner-1",
+        old_consumer="consumer-old",
+        new_consumer="consumer-new",
+    )
+
+    # First page moves the cursor 0-0 -> 5-0; the second repeats it.
+    assert claimed == 2
+    assert len(client.autoclaim_results) == 1
+    assert client.deleted == []
+
+
 @pytest.mark.unit
 def test_reap_idle_consumers_drops_only_stale_zero_pending_consumers(monkeypatch):
     client = _FakeRedis(

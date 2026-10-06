@@ -115,6 +115,7 @@ describe("desktop agent lifecycle", () => {
 
   it("enrolls once and preserves the selected executor without patching the issue", async () => {
     const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
     await Promise.all([
       runtime.connectAgentProject("workspace-a", "project-1"),
       runtime.prepareAgentRun({
@@ -129,6 +130,7 @@ describe("desktop agent lifecycle", () => {
       expect.objectContaining({ workspace: "workspace-a", devMachineId: "server-machine-id" })
     );
     expect(invoke).toHaveBeenCalledWith("managed_enroll", {
+      account: "user-a",
       workspace: "workspace-a",
       project: "TEST",
       hostLabel: "desktop-test",
@@ -139,10 +141,11 @@ describe("desktop agent lifecycle", () => {
 
   it("bootstraps separate workspaces and clears them on sign-out", async () => {
     const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
     await runtime.connectAgentProject("workspace-a", "project-1");
     await runtime.connectAgentProject("workspace-b", "project-2");
-    expect(invoke).toHaveBeenCalledWith("managed_start_daemon", { workspace: "workspace-a" });
-    expect(invoke).toHaveBeenCalledWith("managed_start_daemon", { workspace: "workspace-b" });
+    expect(invoke).toHaveBeenCalledWith("managed_start_daemon", { account: "user-a", workspace: "workspace-a" });
+    expect(invoke).toHaveBeenCalledWith("managed_start_daemon", { account: "user-a", workspace: "workspace-b" });
     await runtime.disposeAgentRuntime();
     expect(calls.some((call) => call.method === "DELETE" && call.body.host_label === "desktop-test")).toBe(true);
     const starts = invoke.mock.calls.filter(([command]) => command === "managed_start_daemon").length;
@@ -165,7 +168,7 @@ describe("desktop agent lifecycle", () => {
     // The next poll picks up where it left off.
     profileFailure = undefined;
     await runtime.refreshAgentRuntime();
-    expect(invoke).toHaveBeenLastCalledWith("managed_start_daemon", { workspace: "workspace-a" });
+    expect(invoke).toHaveBeenLastCalledWith("managed_start_daemon", { account: "user-a", workspace: "workspace-a" });
   });
 
   it("signs the agent out when the poll gets a 401, which means the session is over", async () => {
@@ -178,6 +181,68 @@ describe("desktop agent lifecycle", () => {
     await expect(runtime.refreshAgentRuntime()).rejects.toThrow();
     expect(invoke.mock.calls.some(([command]) => command === "managed_sign_out")).toBe(true);
     expect(sessionStorage.length).toBe(0);
+  });
+
+  it("points every engine command at the signed-in account's own engine home", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.connectAgentProject("workspace-a", "project-1");
+    runtime.resumeAgentRuntime("user-b");
+    await runtime.connectAgentProject("workspace-a", "project-1");
+    for (const command of ["managed_write_engine_config", "managed_enroll", "managed_start_daemon"]) {
+      const accounts = (invoke.mock.calls as unknown as [string, { account?: string }][])
+        .filter(([name]) => name === command)
+        .map(([, args]) => args.account);
+      expect(accounts, command).toEqual(["user-a", "user-b"]);
+    }
+  });
+
+  it("refuses to run the engine with no account to scope it to", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    await expect(runtime.connectAgentProject("workspace-a", "project-1")).rejects.toThrow("signed out");
+    expect(invoke.mock.calls.some(([command]) => command === "managed_enroll")).toBe(false);
+  });
+
+  it("deletes chat history on sign-out only when the user asked for it", async () => {
+    const signOuts = () =>
+      (invoke.mock.calls as unknown as [string, unknown][])
+        .filter(([command]) => command === "managed_sign_out")
+        .map(([, args]) => args);
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.connectAgentProject("workspace-a", "project-1");
+
+    await runtime.disposeAgentRuntime({ deleteChatHistory: true });
+    // Once, for the account that is signing out; the cleanup pass that follows
+    // only destroys credentials again.
+    expect(signOuts()).toEqual([{ clearChatHistory: { account: "user-a" } }, undefined]);
+
+    invoke.mockClear();
+    await runtime.disposeAgentRuntime({ deleteChatHistory: false });
+    await runtime.disposeAgentRuntime();
+    expect(signOuts()).toEqual([undefined, undefined, undefined, undefined]);
+  });
+
+  it("never deletes chat history when an expired session tears the runtime down", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.connectAgentProject("workspace-a", "project-1");
+    accessExpired = true;
+    await expect(runtime.connectAgentProject("workspace-a", "project-2")).rejects.toThrow();
+    const signOuts = (invoke.mock.calls as unknown as [string, unknown][]).filter(
+      ([command]) => command === "managed_sign_out"
+    );
+    expect(signOuts.length).toBeGreaterThan(0);
+    for (const [, args] of signOuts) expect(args).toBeUndefined();
+  });
+
+  it("asks through the mounted dialog, and keeps history when there is none to ask through", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    await expect(runtime.confirmSignOut()).resolves.toEqual({ deleteChatHistory: false });
+    runtime.registerSignOutPrompt((resolve) => resolve(null));
+    await expect(runtime.confirmSignOut()).resolves.toBeNull();
+    runtime.registerSignOutPrompt((resolve) => resolve({ deleteChatHistory: true }));
+    await expect(runtime.confirmSignOut()).resolves.toEqual({ deleteChatHistory: true });
   });
 
   it("explains BYOK without enrolling or pinning the issue", async () => {
@@ -240,6 +305,7 @@ describe("desktop agent lifecycle", () => {
     issueExecutor = null;
     projectExecutor = executor;
     const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
     await runtime.prepareAgentRun({
       workspaceSlug: "workspace-a",
       projectId: "project-1",

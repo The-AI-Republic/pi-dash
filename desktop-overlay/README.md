@@ -88,6 +88,10 @@ desktop/src-tauri/dist/
   `peek-overview/header.tsx` — the three copy-link paths, routed through
   `desktopWebUrl()` instead of the bundle origin. Each is otherwise identical
   to its `apps/web` original; keep them in step when that original changes.
+- `apps/web/core/services/desktop-session.ts` and
+  `desktop-approval-modes.ts` — sign-out clears the webview's own cookie jar,
+  which takes `localStorage` with it; the local-chat approval mode is handed
+  to the host first (kept per account) and restored at the next sign-in.
 - `apps/web/tests/desktop/` — tests for the above; run them with
   `bash desktop/scripts/test-overlay.sh`.
 

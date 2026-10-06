@@ -478,9 +478,12 @@ certificate during notarization (§24.2).
     config.toml             Config { runners: [...], workdirs: [...], cli: {token} }
     credentials             MachineToken
     data/ , runtime/        passed as data_override / runtime dir
-  codex-home/
-    config.toml             §12 — model provider, instructions, policy
-    (no auth.json)          model auth is read by the command-backed helper
+  accounts/
+    <account-key>/          0700; same key as chat/<account-key>
+      codex-home/           0700; the engine's CODEX_HOME for that account
+        config.toml         §12 — model provider, instructions, policy
+        (no auth.json)      model auth is read by the command-backed helper
+        sessions/, *.sqlite the engine's own transcripts and state
   workdirs/
     <workspace-slug>/<project-slug>/   working copy per project (direct mode, §9.4)
   runtime/
@@ -490,6 +493,16 @@ certificate during notarization (§24.2).
 `Paths::resolve(config_override, data_override)` (`util/paths.rs:28`)
 already supports relocating the runner's directories; the desktop passes
 both so a user-installed `pidash` and the bundled one never share state.
+
+The engine home is per account because the engine keeps its own copy of
+every conversation there and isolates by `CODEX_HOME` alone. Sign-out
+keeps it by default; the sign-out dialog's "Delete chat history" and
+`chat_clear_history` remove the account's whole `codex-home/` along with
+the app's chat store. Builds before this layout used one shared
+`managed/codex-home/`; it is deleted, not migrated, the first time a
+newer build touches the managed tree (its contents cannot be attributed
+to an account). `accounts/<account-key>/` is the root the rest of the
+per-account data is planned to move under.
 
 ### 9.3 Enrollment sequence (first launch, and per new project)
 
@@ -551,7 +564,7 @@ Sequence:
    [runner.agent]   kind = "codex"
    [runner.codex]
    binary = "<app-resources>/bin/pidash-agent-engine"
-   codex_home = "<app-data>/managed/codex-home"
+   codex_home = "<app-data>/managed/accounts/<account-key>/codex-home"
    path_prepend = "<app-resources>/bin"
    model_token_file = "<app-data>/managed/runtime/model.token"
    ```
@@ -561,8 +574,9 @@ Sequence:
    `MANAGED_RUNNER_MAX_PER_USER_PROJECT` and excludes bundled runners
    from `Runner.MAX_PER_USER`.
 
-4. **Managed Codex config.** The host writes `codex-home/config.toml`
-   (§12.1) from the profile (§12.2.1) and creates the directory before
+4. **Managed Codex config.** The host writes the account's
+   `codex-home/config.toml` (§12.1) from the profile (§12.2.1) and creates
+   the directory before
    the daemon starts (Codex refuses a missing `CODEX_HOME`).
 5. **Start the daemon.** `pidash start` delegates to systemd/launchd
    (`cli/start.rs`); the desktop instead spawns the hidden foreground
