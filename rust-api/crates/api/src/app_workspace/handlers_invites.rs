@@ -1591,6 +1591,11 @@ fn parse_iso_datetime(text: &str) -> Option<ParsedDt> {
 
 /// Parse the date head, returning the day and the unparsed tail.
 fn parse_iso_date(text: &str, year: i32) -> Option<(chrono::NaiveDate, &str)> {
+    // chrono accepts the proleptic year 0; CPython raises (`ValueError:
+    // year 0 is out of range`), so Django rejects — match it.
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
     let bytes = text.as_bytes();
     // Week dates contain an uppercase `W` (`2024-W03[-1]`, `2024W03[1]`).
     // The basic form takes no dash-day (`2024W03-1` is rejected outright —
@@ -1932,6 +1937,12 @@ fn parse_regex_datetime(text: &str) -> Option<ParsedDt> {
     {
         return None;
     }
+    let year_num: i32 = year.parse().ok()?;
+    // Same year-0 clamp as the fromisoformat arm: `datetime(0, ...)`
+    // raises, which lands in the invalid arm.
+    if !(1..=9999).contains(&year_num) {
+        return None;
+    }
     // Split the tz suffix first (`Z` or `±HH[[:]MM]` at the end;
     // uppercase `Z` only). The `\s*` gap sits between the clock and
     // the tz — never after it — so the clock trims but the zone must
@@ -2016,7 +2027,7 @@ fn parse_regex_datetime(text: &str) -> Option<ParsedDt> {
         second.parse().ok()?,
     );
     let naive = chrono::NaiveDate::from_ymd_opt(
-        year.parse().ok()?,
+        year_num,
         month.parse().ok()?,
         day.parse().ok()?,
     )?
@@ -4885,6 +4896,11 @@ mod tests {
             // Folds attach fold-0 without failing (probed live).
             ("\"2026-11-01T01:30:00\"", york, "2026-11-01T05:30:00+00:00"),
             ("\"2026-03-08T02:30:00\"", york, "2026-03-08T07:30:00+00:00"),
+            // Year-range boundaries (PIDASHCONV-768): 1 and 9999 still
+            // parse — only 0 rejects.
+            ("\"0001-01-01\"", utc, "0001-01-01T00:00:00+00:00"),
+            ("\"0001-W01-1\"", utc, "0001-01-01T00:00:00+00:00"),
+            ("\"9999-12-31\"", utc, "9999-12-31T00:00:00+00:00"),
         ] {
             assert_eq!(parsed(raw, tz), want, "deleted_at({raw})");
         }
@@ -4923,6 +4939,25 @@ mod tests {
             "\"2026-1-2T03:04:05+24:00\"",
             "\"2026-01-02T03:04:05:06.5\"",
             "\"2026-01-02T03:04:05.5xyz\"",
+            // Year 0 (PIDASHCONV-768): CPython raises (`ValueError: year
+            // 0 is out of range`) in both arms — `fromisoformat`, and
+            // the regex fallback's `datetime(0, ...)` — so Django lands
+            // in the invalid arm while chrono's proleptic year 0 would
+            // accept (same battery as PIDASHCONV-762).
+            "\"0000-01-01\"",
+            "\"00000101\"",
+            "\"0000-01-01T00:00:00\"",
+            "\"0000-01-01 00:00:00\"",
+            "\"0000-01-01T00:00:00+00:00\"",
+            "\"0000-01-01T00:00:00Z\"",
+            "\"0000-W01-1\"",
+            "\"0000-W01\"",
+            "\"0000W011\"",
+            "\"0000W01\"",
+            "\"0000-W01-1T00:00:00+00:00\"",
+            "\"0000-1-2T03:04:05\"",
+            "\"0000-01-02T03:04:05\"",
+            "\"0000-1-2 03:04:05+05:00\"",
         ] {
             let value: Value = serde_json::from_str(raw).expect("case is JSON");
             assert_eq!(
