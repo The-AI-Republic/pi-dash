@@ -47,6 +47,72 @@ const BUNDLE_ORIGIN: &str = "http://tauri.localhost";
 #[cfg(not(windows))]
 const BUNDLE_ORIGIN: &str = "tauri://localhost";
 
+/// Build-time default for [`storage_connect_sources`]: the bucket path the
+/// self-hosted proxy serves on the API origin (`AWS_S3_BUCKET_NAME`'s default).
+const DEFAULT_STORAGE_PATH: &str = "/uploads";
+
+/// Where the page may send presigned storage uploads, as CSP sources.
+///
+/// `tauri.conf.json`'s policy keeps the API origin out of `connect-src`, so
+/// the page cannot reach the server except through the native transport.
+/// Uploads are the exception that must stay on the webview's own networking;
+/// their origin depends on the deployment, so it is named at build time in
+/// `PIDASH_DESKTOP_CSP_CONNECT_SRC` (space-separated). A source that would
+/// re-open the API itself is an error, not something to drop quietly.
+fn storage_connect_sources(api: &Url, configured: Option<&str>) -> Result<Vec<String>, String> {
+    let api_origin = api.origin().ascii_serialization();
+    let Some(configured) = configured.filter(|v| !v.trim().is_empty()) else {
+        return Ok(vec![
+            format!("{api_origin}{DEFAULT_STORAGE_PATH}"),
+            format!("{api_origin}{DEFAULT_STORAGE_PATH}/"),
+        ]);
+    };
+    let mut sources = Vec::new();
+    for source in configured.split_whitespace() {
+        let reject = |why: &str| {
+            Err(format!(
+                "PIDASH_DESKTOP_CSP_CONNECT_SRC: {source:?} {why} (API origin {api_origin})"
+            ))
+        };
+        let Ok(url) = Url::parse(source) else {
+            return reject("is not an absolute URL source");
+        };
+        let Some(host) = url.host_str() else {
+            return reject("has no host");
+        };
+        if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") {
+            return reject("is not an http(s) or ws(s) source");
+        }
+        let api_host = api.host_str().unwrap_or_default();
+        let covers_api_host = match host.strip_prefix("*.") {
+            Some(suffix) => api_host.ends_with(&format!(".{suffix}")),
+            None => host == api_host && url.port_or_known_default() == api.port_or_known_default(),
+        };
+        let path = url.path();
+        let covers_api_paths = ["/api/", "/auth/"]
+            .iter()
+            .any(|api_path| api_path.starts_with(path) || path.starts_with(api_path));
+        if covers_api_host && covers_api_paths {
+            return reject("would let the page reach the API directly");
+        }
+        sources.push(source.to_owned());
+    }
+    Ok(sources)
+}
+
+/// Add `sources` to the `connect-src` of the policy in `tauri.conf.json`.
+fn allow_connect_sources(config: &mut tauri::Config, sources: Vec<String>) -> Result<(), String> {
+    match &mut config.app.security.csp {
+        Some(tauri::utils::config::Csp::DirectiveMap(policy)) => {
+            policy.entry("connect-src".into()).or_default().extend(sources);
+            Ok(())
+        }
+        // The bundle's inline scripts are only hashed into the policy when
+        // one is configured at build time, so it cannot be created here.
+        _ => Err("app.security.csp must be a directive map in the Tauri config".into()),
+    }
+}
+
 /// Bundle URL for an in-app path: same path and query, bundle origin.
 /// Tauri's asset resolver falls back to `index.html` for any path that
 /// isn't a file in `dist/`, so React Router boots the right route from a
@@ -280,7 +346,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Pi Dash: mode={mode} server target {target_url_str} (oss-sha {oss_sha})");
     let target_url = Url::parse(target_url_str)?;
     let api_url = Url::parse(option_env!("VITE_API_BASE_URL").unwrap_or(target_url_str))?;
-    let desktop_http = desktop_http::DesktopHttp::new(api_url)?;
+    let mut desktop_http = desktop_http::DesktopHttp::new(api_url.clone())?;
+    // Editions whose session is a short-lived access cookie plus a refresh
+    // endpoint name that endpoint at build time; the native transport then
+    // refreshes on a 401 itself. Unset (OSS), a 401 means signed out.
+    if let Some(path) = option_env!("PIDASH_DESKTOP_SESSION_REFRESH_PATH").filter(|p| !p.is_empty())
+    {
+        desktop_http = desktop_http.with_session_refresh(path)?;
+    }
     let initial_webview = if hot_reload {
         WebviewUrl::External(target_url.clone())
     } else {
@@ -308,7 +381,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let context = tauri::generate_context!();
+    let mut context = tauri::generate_context!();
+    allow_connect_sources(
+        context.config_mut(),
+        storage_connect_sources(&api_url, option_env!("PIDASH_DESKTOP_CSP_CONNECT_SRC"))?,
+    )?;
     // Auto-update is opt-in per build: a distributor that publishes signed
     // updates supplies `plugins.updater` (pubkey + endpoints) through a
     // `--config` overlay. Without that section the plugin cannot initialise
@@ -411,12 +488,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .setup(move |app| {
-            let api_origin = app.state::<desktop_http::DesktopHttp>()
-                .api_url.origin().ascii_serialization();
+            let http = app.state::<desktop_http::DesktopHttp>();
+            let api_origin = http.api_url.origin().ascii_serialization();
+            // What the page may assume about the native transport. `refresh`:
+            // a 401 has already been through a session refresh, so the page
+            // must not run its own. `strict`: the page is the bundle, which
+            // is cross-site to the API, so a server request that cannot take
+            // the native route must fail rather than go out without cookies.
+            // Hot-reload pages are served by the server host itself and keep
+            // the webview's own networking as a fallback.
+            let native_session = serde_json::json!({
+                "refresh": http.refreshes_session(),
+                "strict": !hot_reload,
+            });
             let mut window = WebviewWindowBuilder::new(app, "main", initial_webview)
                 .initialization_script(format!(
-                    "Object.defineProperty(window, '__PIDASH_NATIVE_HTTP__', {{ value: {} }});",
-                    serde_json::to_string(&api_origin)?
+                    "Object.defineProperty(window, '__PIDASH_NATIVE_HTTP__', {{ value: {} }});\
+                     Object.defineProperty(window, '__PIDASH_NATIVE_SESSION__', {{ value: Object.freeze({}) }});",
+                    serde_json::to_string(&api_origin)?,
+                    native_session
                 ))
                 .title("Pi Dash")
                 .inner_size(1400.0, 900.0)
@@ -609,6 +699,75 @@ mod tests {
     }
     fn root() -> Url {
         Url::parse("tauri://localhost").unwrap()
+    }
+
+    fn api() -> Url {
+        Url::parse("https://api.example.com").unwrap()
+    }
+
+    #[test]
+    fn uploads_default_to_the_self_hosted_bucket_path_on_the_api_origin() {
+        for unset in [None, Some(""), Some("  ")] {
+            assert_eq!(
+                storage_connect_sources(&api(), unset).unwrap(),
+                ["https://api.example.com/uploads", "https://api.example.com/uploads/"]
+            );
+        }
+    }
+
+    #[test]
+    fn configured_storage_sources_replace_the_default() {
+        let configured = "https://*.amazonaws.com https://api.example.com/media/ wss://live.example.com";
+        assert_eq!(
+            storage_connect_sources(&api(), Some(configured)).unwrap(),
+            ["https://*.amazonaws.com", "https://api.example.com/media/", "wss://live.example.com"]
+        );
+    }
+
+    #[test]
+    fn a_storage_source_cannot_reopen_the_api() {
+        for source in [
+            "https://api.example.com",
+            "https://api.example.com/",
+            "https://api.example.com:443/api/",
+            "https://api.example.com/api/assets/",
+            "https://api.example.com/auth/",
+            "https://*.example.com",
+            "wss://api.example.com",
+            // Scheme and wildcard sources match every host, the API included.
+            "https:",
+            "*",
+            "'self'",
+        ] {
+            let error = storage_connect_sources(&api(), Some(source)).unwrap_err();
+            assert!(error.contains("https://api.example.com"), "{source}: {error}");
+        }
+    }
+
+    // The policy that ships. `connect-src` is what keeps fetch, XHR,
+    // EventSource and WebSocket off the API: it may name hosts, never a bare
+    // scheme or wildcard, because the API origin is only known per build.
+    #[test]
+    fn shipped_policy_gives_the_page_no_direct_route_to_the_api() {
+        let mut config: tauri::Config =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        allow_connect_sources(&mut config, storage_connect_sources(&api(), None).unwrap()).unwrap();
+        let Some(tauri::utils::config::Csp::DirectiveMap(policy)) = config.app.security.csp else {
+            panic!("app.security.csp must be a directive map");
+        };
+        let sources = |directive: &str| Vec::<String>::from(policy[directive].clone());
+        assert_eq!(sources("default-src"), ["'self'"]);
+        let connect = sources("connect-src");
+        for source in &connect {
+            let named_host = Url::parse(source).is_ok_and(|url| url.has_host());
+            let local = ["'self'", "ipc:", "data:", "blob:"].contains(&source.as_str());
+            assert!(named_host || local, "connect-src must not allow {source}");
+        }
+        // Tauri's IPC, and the fallback origin it uses on Windows and Android.
+        assert!(connect.contains(&"ipc:".to_owned()));
+        assert!(connect.contains(&"http://ipc.localhost".to_owned()));
+        assert!(connect.contains(&"https://api.example.com/uploads".to_owned()));
+        assert!(!connect.contains(&"https://api.example.com".to_owned()));
     }
 
     #[test]

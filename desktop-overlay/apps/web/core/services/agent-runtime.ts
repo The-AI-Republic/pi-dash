@@ -8,9 +8,10 @@ import { API_BASE_URL } from "@pi-dash/constants";
 import { APIService } from "@pi-dash/services";
 import { AGENT_RUNTIME_REASON_MESSAGES, CSRF_TOKEN_PATH } from "@/pi-dash-web/components/desktop/agent-runtime-edition";
 
-// Shares the SPA's axios setup — including any edition 401 -> refresh ->
-// retry interceptor — so a normal access-cookie expiry does not revoke the
-// agent where the edition can refresh it.
+// Shares the SPA's axios setup and the native transport under it, which
+// refreshes an expired session before a 401 gets here where the edition can
+// refresh one. So a 401 below means the session is over, and a refresh that
+// failed for a transient reason arrives as an error without a response.
 class AgentAPI extends APIService {}
 const agentAPI = new AgentAPI(API_BASE_URL);
 

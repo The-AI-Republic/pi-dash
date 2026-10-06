@@ -29,6 +29,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   delete (window as any).__PIDASH_NATIVE_HTTP__;
+  delete (window as any).__PIDASH_NATIVE_SESSION__;
   delete (window as any).__TAURI__;
 });
 
@@ -46,6 +47,45 @@ describe("desktop API event streams", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("fails a credentialed stream the bundled app cannot carry natively", () => {
+    const Native = vi.fn();
+    vi.stubGlobal("EventSource", Native);
+    try {
+      (window as any).__PIDASH_NATIVE_SESSION__ = { refresh: true, strict: true };
+      const elsewhere = "http://localhost:8000/api/runners/chat/sessions/s1/events/";
+      let error: any;
+      try {
+        createApiEventSource(elsewhere, { withCredentials: true });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error?.name).toBe("DesktopTransportError");
+      expect(error.requestOrigin).toBe("http://localhost:8000");
+      expect(error.apiOrigin).toBe(api);
+      expect(Native).not.toHaveBeenCalled();
+      // A stream without credentials was never the native transport's.
+      createApiEventSource("https://elsewhere.test/events/");
+      expect(Native).toHaveBeenCalledOnce();
+      createApiEventSource(url, { withCredentials: true });
+      expect(streams).toHaveLength(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // The transport refreshes the session before a 401 head can get here, and
+  // rejects the command when that refresh fails for a transient reason.
+  it("reconnects after a failed native session refresh", () => {
+    const source = createApiEventSource(url, { withCredentials: true });
+    const errors = vi.fn();
+    source.addEventListener("error", errors);
+    streams[0].reject("session refresh failed");
+    return vi.advanceTimersByTimeAsync(3000).then(() => {
+      expect(errors).toHaveBeenCalledOnce();
+      expect(streams).toHaveLength(2);
+    });
   });
 
   it("parses events split across chunks and line endings", () => {

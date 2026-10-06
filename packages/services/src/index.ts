@@ -5,7 +5,9 @@
  */
 
 export { APIService } from "./api.service";
-export { getDesktopApiAdapter } from "./desktop-api-adapter";
+export { DesktopTransportError, getDesktopApiAdapter } from "./desktop-api-adapter";
+export { refreshSession, registerSessionRefresher } from "./session-refresh";
+export type { SessionRefresher } from "./session-refresh";
 export { createApiEventSource } from "./desktop-event-source";
 export type { ApiEventSource } from "./desktop-event-source";
 export * from "./ai";

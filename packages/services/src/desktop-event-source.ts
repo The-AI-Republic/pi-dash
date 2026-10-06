@@ -4,7 +4,13 @@
  * See the LICENSE file for details.
  */
 
-import { cancelNativeRequest, getNativeApi, nativeApiUrl, nextNativeRequestId } from "./desktop-api-adapter";
+import {
+  cancelNativeRequest,
+  DesktopTransportError,
+  getNativeApi,
+  nativeApiUrl,
+  nextNativeRequestId,
+} from "./desktop-api-adapter";
 import type { NativeApi, NativeResponseHead } from "./desktop-api-adapter";
 
 /** The EventSource surface the chat UIs use. */
@@ -20,13 +26,17 @@ type StreamEvent = ({ type: "head" } & NativeResponseHead) | { type: "data"; tex
  *
  * The desktop webview can omit the API's cookies on EventSource just as on
  * XHR, so desktop binaries with the native cookie transport stream through
- * it instead. Everywhere else this is a plain EventSource.
+ * it instead, and in the bundled app a credentialed stream it cannot carry
+ * throws {@link DesktopTransportError}. Everywhere else this is a plain
+ * EventSource.
  */
 export function createApiEventSource(url: string, init?: EventSourceInit): ApiEventSource {
   const native = getNativeApi();
-  const target = native && init?.withCredentials ? nativeApiUrl(native, url) : undefined;
-  if (!native || !target) return new EventSource(url, init);
-  return new NativeEventSource(native, target.href);
+  if (!native || !init?.withCredentials) return new EventSource(url, init);
+  const target = nativeApiUrl(native, url);
+  if (target) return new NativeEventSource(native, target.href);
+  if (native.strict) throw new DesktopTransportError(url, native.apiOrigin);
+  return new EventSource(url, init);
 }
 
 const CONNECTING = 0;
@@ -36,6 +46,10 @@ const CLOSED = 2;
 /** EventSource semantics (WHATWG HTML §9.2) over the native stream command:
  * reconnects with Last-Event-ID after network errors or end of stream, and
  * gives up on a non-200 or non-event-stream response.
+ *
+ * A session the transport can refresh never shows up here as a 401 head: the
+ * transport refreshes and replays first, and a refresh that fails for a
+ * transient reason rejects the command, which is a reconnect.
  */
 class NativeEventSource extends EventTarget implements ApiEventSource {
   readyState = CONNECTING;

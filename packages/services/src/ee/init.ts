@@ -7,7 +7,9 @@
 // Empty in OSS. Cloud (or other distributions) replace this file via
 // build-time overlay to call `registerAxiosSetup(...)` from
 // `../_axios-setup` and install per-instance interceptors (eg. a 401 →
-// refresh-token retry handler). Keep this file side-effect-only.
+// refresh-token retry handler), and `registerSessionRefresher(...)` from
+// `../session-refresh` so every such handler shares one refresh. Keep this
+// file side-effect-only.
 //
 // Important: import `registerAxiosSetup` from `../_axios-setup`, NOT
 // from `../api.service`. Importing from `api.service` re-enters its

@@ -19,9 +19,42 @@ type NativeCore = {
 };
 type NativeWindow = Window & {
   __PIDASH_NATIVE_HTTP__?: string;
+  __PIDASH_NATIVE_SESSION__?: { refresh?: boolean; strict?: boolean };
   __TAURI__?: { core: NativeCore };
 };
-export type NativeApi = { apiOrigin: string; core: NativeCore };
+export type NativeApi = {
+  apiOrigin: string;
+  core: NativeCore;
+  /** The transport answers a 401 with a session refresh and a replay itself,
+   * so a 401 that reaches the page is final and the page must not refresh. */
+  refreshesSession: boolean;
+  /** The page is the bundle, cross-site to the API: the webview's own
+   * networking cannot carry the session, so it is not a fallback. */
+  strict: boolean;
+};
+
+/** A credentialed request could not take the native route. In the bundled
+ * app the webview's own networking would send it without the session cookies
+ * and the server would answer 401, so it fails here instead, naming both
+ * origins: they differ when the web bundle and the binary were built for
+ * different servers (`VITE_API_BASE_URL` / `PI_DASH_URL`). */
+export class DesktopTransportError extends Error {
+  readonly requestOrigin: string;
+
+  constructor(
+    readonly url: string,
+    readonly apiOrigin: string
+  ) {
+    const target = new URL(url, window.location.href);
+    super(
+      `Credentialed request to ${target.origin}${target.pathname} cannot use the desktop app's native transport, ` +
+        `which only serves ${apiOrigin}/api/ and ${apiOrigin}/auth/. ` +
+        `Request origin: ${target.origin}; configured API origin: ${apiOrigin}.`
+    );
+    this.name = "DesktopTransportError";
+    this.requestOrigin = target.origin;
+  }
+}
 
 // Mirrors the Rust side's error strings (desktop_http.rs).
 const CANCELED = "API request canceled";
@@ -34,11 +67,17 @@ export function getNativeApi(): NativeApi | undefined {
   if (typeof window === "undefined") return undefined;
   const native = window as NativeWindow;
   if (typeof native.__PIDASH_NATIVE_HTTP__ !== "string" || !native.__TAURI__?.core) return undefined;
-  return { apiOrigin: native.__PIDASH_NATIVE_HTTP__, core: native.__TAURI__.core };
+  const session = native.__PIDASH_NATIVE_SESSION__;
+  return {
+    apiOrigin: native.__PIDASH_NATIVE_HTTP__,
+    core: native.__TAURI__.core,
+    refreshesSession: session?.refresh === true,
+    strict: session?.strict === true,
+  };
 }
 
-/** Whether `url` (resolved like the webview would) targets the native API
- * allowlist. Everything else keeps the webview's own transport. */
+/** `url` (resolved like the webview would) when it targets the native API
+ * allowlist; undefined when the native transport cannot carry it. */
 export function nativeApiUrl(native: NativeApi, url: string): URL | undefined {
   const target = new URL(url, window.location.href);
   if (target.origin !== native.apiOrigin) return undefined;
@@ -74,7 +113,13 @@ function unframe(result: ArrayBuffer | number[]): { head: NativeResponseHead; bo
 }
 
 /** Use the native cookie transport only when this binary advertises it.
- * The server's auth/refresh interceptors still run.
+ *
+ * The webview's own adapter is kept for requests that must not carry the
+ * session: presigned storage uploads and anything else sent with
+ * `withCredentials: false` (with its progress and cancellation), and
+ * requests an instance without credentials makes to other hosts. A
+ * credentialed request the native transport cannot carry throws
+ * {@link DesktopTransportError} in the bundled app.
  */
 export function getDesktopApiAdapter(): AxiosAdapter | undefined {
   const native = getNativeApi();
@@ -82,10 +127,11 @@ export function getDesktopApiAdapter(): AxiosAdapter | undefined {
   const browserAdapter = getAdapter(axios.defaults.adapter);
 
   return async (config) => {
-    const target = nativeApiUrl(native, axios.getUri(config));
-    // Presigned storage uploads and other external requests must keep the
-    // browser adapter (and its progress/cancellation), without API cookies.
-    if (config.withCredentials === false || !target) {
+    if (config.withCredentials === false) return browserAdapter(config);
+    const url = axios.getUri(config);
+    const target = nativeApiUrl(native, url);
+    if (!target) {
+      if (config.withCredentials && native.strict) throw new DesktopTransportError(url, native.apiOrigin);
       return browserAdapter(config);
     }
     if (config.signal?.aborted) throw new CanceledError();

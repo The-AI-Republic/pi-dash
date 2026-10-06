@@ -19,6 +19,7 @@ let available = true;
 let issueExecutor: string | null = "managed_runner";
 let projectExecutor = "managed_runner";
 let accessExpired = false;
+let profileFailure: string | undefined;
 let refreshFailure: number | "network" | undefined;
 let deleteFailure: number | "network" | undefined;
 
@@ -30,6 +31,7 @@ beforeEach(async () => {
   issueExecutor = "managed_runner";
   projectExecutor = "managed_runner";
   accessExpired = false;
+  profileFailure = undefined;
   refreshFailure = undefined;
   deleteFailure = undefined;
   sessionStorage.clear();
@@ -58,6 +60,7 @@ beforeEach(async () => {
       if (refreshFailure) fail(refreshFailure);
       accessExpired = false;
     } else if (accessExpired) fail(401);
+    if (profileFailure && path.endsWith("agent-profile/")) throw new AxiosError(profileFailure, "ERR_NETWORK", config);
     if (method === "DELETE" && deleteFailure) fail(deleteFailure);
     if (path.endsWith("get-csrf-token/")) data = { csrf_token: "csrf-test" };
     else if (path.endsWith("agent-profile/"))
@@ -146,6 +149,35 @@ describe("desktop agent lifecycle", () => {
     await runtime.refreshAgentRuntime();
     expect(invoke.mock.calls.filter(([command]) => command === "managed_start_daemon")).toHaveLength(starts);
     await expect(runtime.connectAgentProject("workspace-a", "project-1")).rejects.toThrow("signed out");
+  });
+
+  // The native transport refreshes the session before a 401 reaches the
+  // page, so the two outcomes the 60s poll can see are these.
+  it("keeps the agent when the poll fails without a response, like a failed session refresh", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.connectAgentProject("workspace-a", "project-1");
+    profileFailure = "session refresh failed";
+    await expect(runtime.refreshAgentRuntime()).rejects.toThrow("Could not connect Pi Dash Agent.");
+    expect(invoke.mock.calls.some(([command]) => command === "managed_sign_out")).toBe(false);
+    expect(invoke.mock.calls.some(([command]) => command === "managed_stop_daemon")).toBe(false);
+    expect(sessionStorage.length).toBe(1);
+    // The next poll picks up where it left off.
+    profileFailure = undefined;
+    await runtime.refreshAgentRuntime();
+    expect(invoke).toHaveBeenLastCalledWith("managed_start_daemon", { workspace: "workspace-a" });
+  });
+
+  it("signs the agent out when the poll gets a 401, which means the session is over", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.connectAgentProject("workspace-a", "project-1");
+    accessExpired = true;
+    // For an edition whose page refreshes the session: that is refused too.
+    refreshFailure = 401;
+    await expect(runtime.refreshAgentRuntime()).rejects.toThrow();
+    expect(invoke.mock.calls.some(([command]) => command === "managed_sign_out")).toBe(true);
+    expect(sessionStorage.length).toBe(0);
   });
 
   it("explains BYOK without enrolling or pinning the issue", async () => {
