@@ -385,11 +385,13 @@ async fn authenticate(
 }
 
 /// `validate_api_token` (`api_authentication.py:30-43`): exact token match,
-/// `is_active`, unexpired — then stamp `last_used`.
+/// `is_active`, unexpired — then stamp `last_used`. The `deleted_at IS
+/// NULL` conjunct is the `SoftDeletionManager` scope
+/// (`db/mixins.py:56-66`): a soft-deleted token 403s.
 async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, Denial> {
     let now = Utc::now();
     let row: Option<(Uuid, Uuid, bool, Option<DateTime<Utc>>)> = sqlx::query_as(
-        r#"SELECT id, user_id, is_active, expired_at FROM api_tokens WHERE token = $1"#,
+        r#"SELECT id, user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#,
     )
     .bind(presented)
     .fetch_optional(pool)
