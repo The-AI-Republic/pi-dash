@@ -2336,26 +2336,138 @@ fn is_two_digits(b: &[u8], i: usize) -> bool {
     two_digits(b, i).is_some()
 }
 
-/// One or two ASCII digits at `i`, plus the next index.
-fn one_two_digits(b: &[u8], i: usize) -> Option<(u32, usize)> {
-    if i < b.len() && b[i].is_ascii_digit() {
-        let mut value = u32::from(b[i] - b'0');
-        let mut j = i + 1;
-        if j < b.len() && b[j].is_ascii_digit() {
-            value = value * 10 + u32::from(b[j] - b'0');
-            j += 1;
-        }
-        Some((value, j))
-    } else {
-        None
-    }
-}
-
 /// Fraction digits (any length) as microseconds: first six, right-padded.
 fn frac_value(digits: &[u8]) -> u32 {
     let mut value: u32 = 0;
     for (n, d) in digits.iter().take(6).enumerate() {
         value += u32::from(d - b'0') * 10_u32.pow(5 - n as u32);
+    }
+    value
+}
+
+/// Starts of the Unicode `Decimal_Number` runs Python `\d` matches on
+/// `str`: 68 runs of 10, values 0-9 in order (probed: `re` match over
+/// U+0000-U+10FFFF, zero diff vs `unicodedata` Nd; Unicode 15.0.0,
+/// CPython 3.12). Neither `char::is_numeric` (wider: Nl/No, e.g. `½`)
+/// nor `char::to_digit(10)` (ASCII-only) matches.
+const ND_RUN_STARTS: [u32; 68] = [
+    0x00030, // U+0030 DIGIT 0-9
+    0x00660, // U+0660 ARABIC-INDIC DIGIT 0-9
+    0x006F0, // U+06F0 EXTENDED ARABIC-INDIC DIGIT 0-9
+    0x007C0, // U+07C0 NKO DIGIT 0-9
+    0x00966, // U+0966 DEVANAGARI DIGIT 0-9
+    0x009E6, // U+09E6 BENGALI DIGIT 0-9
+    0x00A66, // U+0A66 GURMUKHI DIGIT 0-9
+    0x00AE6, // U+0AE6 GUJARATI DIGIT 0-9
+    0x00B66, // U+0B66 ORIYA DIGIT 0-9
+    0x00BE6, // U+0BE6 TAMIL DIGIT 0-9
+    0x00C66, // U+0C66 TELUGU DIGIT 0-9
+    0x00CE6, // U+0CE6 KANNADA DIGIT 0-9
+    0x00D66, // U+0D66 MALAYALAM DIGIT 0-9
+    0x00DE6, // U+0DE6 SINHALA LITH DIGIT 0-9
+    0x00E50, // U+0E50 THAI DIGIT 0-9
+    0x00ED0, // U+0ED0 LAO DIGIT 0-9
+    0x00F20, // U+0F20 TIBETAN DIGIT 0-9
+    0x01040, // U+1040 MYANMAR DIGIT 0-9
+    0x01090, // U+1090 MYANMAR SHAN DIGIT 0-9
+    0x017E0, // U+17E0 KHMER DIGIT 0-9
+    0x01810, // U+1810 MONGOLIAN DIGIT 0-9
+    0x01946, // U+1946 LIMBU DIGIT 0-9
+    0x019D0, // U+19D0 NEW TAI LUE DIGIT 0-9
+    0x01A80, // U+1A80 TAI THAM HORA DIGIT 0-9
+    0x01A90, // U+1A90 TAI THAM THAM DIGIT 0-9
+    0x01B50, // U+1B50 BALINESE DIGIT 0-9
+    0x01BB0, // U+1BB0 SUNDANESE DIGIT 0-9
+    0x01C40, // U+1C40 LEPCHA DIGIT 0-9
+    0x01C50, // U+1C50 OL CHIKI DIGIT 0-9
+    0x0A620, // U+A620 VAI DIGIT 0-9
+    0x0A8D0, // U+A8D0 SAURASHTRA DIGIT 0-9
+    0x0A900, // U+A900 KAYAH LI DIGIT 0-9
+    0x0A9D0, // U+A9D0 JAVANESE DIGIT 0-9
+    0x0A9F0, // U+A9F0 MYANMAR TAI LAING DIGIT 0-9
+    0x0AA50, // U+AA50 CHAM DIGIT 0-9
+    0x0ABF0, // U+ABF0 MEETEI MAYEK DIGIT 0-9
+    0x0FF10, // U+FF10 FULLWIDTH DIGIT 0-9
+    0x104A0, // U+104A0 OSMANYA DIGIT 0-9
+    0x10D30, // U+10D30 HANIFI ROHINGYA DIGIT 0-9
+    0x11066, // U+11066 BRAHMI DIGIT 0-9
+    0x110F0, // U+110F0 SORA SOMPENG DIGIT 0-9
+    0x11136, // U+11136 CHAKMA DIGIT 0-9
+    0x111D0, // U+111D0 SHARADA DIGIT 0-9
+    0x112F0, // U+112F0 KHUDAWADI DIGIT 0-9
+    0x11450, // U+11450 NEWA DIGIT 0-9
+    0x114D0, // U+114D0 TIRHUTA DIGIT 0-9
+    0x11650, // U+11650 MODI DIGIT 0-9
+    0x116C0, // U+116C0 TAKRI DIGIT 0-9
+    0x11730, // U+11730 AHOM DIGIT 0-9
+    0x118E0, // U+118E0 WARANG CITI DIGIT 0-9
+    0x11950, // U+11950 DIVES AKURU DIGIT 0-9
+    0x11C50, // U+11C50 BHAIKSUKI DIGIT 0-9
+    0x11D50, // U+11D50 MASARAM GONDI DIGIT 0-9
+    0x11DA0, // U+11DA0 GUNJALA GONDI DIGIT 0-9
+    0x11F50, // U+11F50 KAWI DIGIT 0-9
+    0x16A60, // U+16A60 MRO DIGIT 0-9
+    0x16AC0, // U+16AC0 TANGSA DIGIT 0-9
+    0x16B50, // U+16B50 PAHAWH HMONG DIGIT 0-9
+    0x1D7CE, // U+1D7CE MATHEMATICAL BOLD DIGIT 0-9
+    0x1D7D8, // U+1D7D8 MATHEMATICAL DOUBLE-STRUCK DIGIT 0-9
+    0x1D7E2, // U+1D7E2 MATHEMATICAL SANS-SERIF DIGIT 0-9
+    0x1D7EC, // U+1D7EC MATHEMATICAL SANS-SERIF BOLD DIGIT 0-9
+    0x1D7F6, // U+1D7F6 MATHEMATICAL MONOSPACE DIGIT 0-9
+    0x1E140, // U+1E140 NYIAKENG PUACHUE HMONG DIGIT 0-9
+    0x1E2F0, // U+1E2F0 WANCHO DIGIT 0-9
+    0x1E4F0, // U+1E4F0 NAG MUNDARI DIGIT 0-9
+    0x1E950, // U+1E950 ADLAM DIGIT 0-9
+    0x1FBF0, // U+1FBF0 SEGMENTED DIGIT 0-9
+];
+
+/// Python `\d` decimal value of `c` (`unicodedata.decimal`).
+fn nd_value(c: char) -> Option<u32> {
+    let n = c as u32;
+    let i = ND_RUN_STARTS.partition_point(|&s| s <= n);
+    if i == 0 {
+        return None;
+    }
+    let v = n - ND_RUN_STARTS[i - 1];
+    if v < 10 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// One `Nd` char at byte index `i`: its decimal value plus the next
+/// index. `None` past the end, off a char boundary, or not a digit.
+fn nd_char(text: &str, i: usize) -> Option<(u32, usize)> {
+    let c = text.get(i..)?.chars().next()?;
+    nd_value(c).map(|v| (v, i + c.len_utf8()))
+}
+
+/// Exactly two `Nd` chars at `i` (regex-arm `two_digits`).
+fn nd_two(text: &str, i: usize) -> Option<(u32, usize)> {
+    let (a, j) = nd_char(text, i)?;
+    let (b, k) = nd_char(text, j)?;
+    Some((a * 10 + b, k))
+}
+
+/// One or two `Nd` chars at `i`, plus the next index.
+fn nd_one_two(text: &str, i: usize) -> Option<(u32, usize)> {
+    let (a, j) = nd_char(text, i)?;
+    match nd_char(text, j) {
+        Some((b, k)) => Some((a * 10 + b, k)),
+        None => Some((a, j)),
+    }
+}
+
+/// Fraction `Nd` chars as microseconds: first six values, right-padded
+/// (the `ljust(6, "0")` in `parse_datetime`). The slice holds only `Nd`
+/// chars (scanned with `nd_char` by the caller).
+fn nd_frac_value(digits: &str) -> u32 {
+    let mut value: u32 = 0;
+    for (n, c) in digits.chars().take(6).enumerate() {
+        if let Some(v) = nd_value(c) {
+            value += v * 10_u32.pow(5 - n as u32);
+        }
     }
     value
 }
@@ -2705,57 +2817,60 @@ fn parse_fromisoformat_arm(text: &str) -> Option<(NaiveDateTime, Option<ParsedOf
     }
 }
 
-/// `YYYY-M-D` (1-2 digit month/day, ASCII) plus the next index.
-fn parse_dashed_date(b: &[u8]) -> Option<(i32, u32, u32, usize)> {
-    if b.len() < 8 || !b[0..4].iter().all(|c| c.is_ascii_digit()) || b[4] != b'-' {
+/// `YYYY-M-D` (1-2 digit month/day, Unicode decimal digits like the
+/// regex `\d`) plus the next index.
+fn parse_dashed_date(text: &str, b: &[u8]) -> Option<(i32, u32, u32, usize)> {
+    let (d0, i0) = nd_char(text, 0)?;
+    let (d1, i1) = nd_char(text, i0)?;
+    let (d2, i2) = nd_char(text, i1)?;
+    let (d3, i3) = nd_char(text, i2)?;
+    if b.get(i3) != Some(&b'-') {
         return None;
     }
-    let year = i32::from(b[0] - b'0') * 1000
-        + i32::from(b[1] - b'0') * 100
-        + i32::from(b[2] - b'0') * 10
-        + i32::from(b[3] - b'0');
+    let year = d0 as i32 * 1000 + d1 as i32 * 100 + d2 as i32 * 10 + d3 as i32;
     if year < 1 {
         return None;
     }
-    let (month, i) = one_two_digits(b, 5)?;
+    let (month, i) = nd_one_two(text, i3 + 1)?;
     if b.get(i) != Some(&b'-') {
         return None;
     }
-    let (day, j) = one_two_digits(b, i + 1)?;
+    let (day, j) = nd_one_two(text, i + 1)?;
     Some((year, month, day, j))
 }
 
-/// The `datetime_re` fallback: non-padded `YYYY-M-D[T ]H:M[:S[.f]]` (ASCII
-/// only; the regex also takes unicode decimal digits — follow-up), Python
-/// whitespace before an optional `Z`/short offset, then end or one `\n`.
+/// The `datetime_re` fallback: non-padded `YYYY-M-D[T ]H:M[:S[.f]]`
+/// (Unicode decimal digits like the regex `\d`), Python whitespace
+/// before an optional `Z`/short offset, then end or one `\n`.
 fn parse_regex_arm(text: &str) -> Option<(NaiveDateTime, Option<ParsedOffset>)> {
     let b = text.as_bytes();
-    let (year, month, day, j) = parse_dashed_date(b)?;
+    let (year, month, day, j) = parse_dashed_date(text, b)?;
     if b.get(j) != Some(&b'T') && b.get(j) != Some(&b' ') {
         return None;
     }
-    let (hh, k) = one_two_digits(b, j + 1)?;
+    let (hh, k) = nd_one_two(text, j + 1)?;
     if b.get(k) != Some(&b':') {
         return None;
     }
-    let (mm, mut l) = one_two_digits(b, k + 1)?;
+    let (mm, mut l) = nd_one_two(text, k + 1)?;
     let mut ss = 0;
     let mut micros = 0;
     if b.get(l) == Some(&b':') {
-        let (s, n) = one_two_digits(b, l + 1)?;
+        let (s, n) = nd_one_two(text, l + 1)?;
         ss = s;
         l = n;
         if b.get(l) == Some(&b'.') || b.get(l) == Some(&b',') {
             let start = l + 1;
             let mut e = start;
-            while e < b.len() && b[e].is_ascii_digit() {
-                e += 1;
+            let mut count = 0;
+            while let Some((_, next)) = nd_char(text, e) {
+                e = next;
+                count += 1;
             }
-            let count = e - start;
             if count == 0 || count > 12 {
                 return None;
             }
-            micros = frac_value(&b[start..e]);
+            micros = nd_frac_value(&text[start..e]);
             l = e;
         }
     }
@@ -2778,15 +2893,17 @@ fn parse_regex_arm(text: &str) -> Option<(NaiveDateTime, Option<ParsedOffset>)> 
             p += 1;
         } else if b[p] == b'+' || b[p] == b'-' {
             let sign: i64 = if b[p] == b'+' { 1 } else { -1 };
-            let oh = i64::from(two_digits(b, p + 1)?);
-            p += 3;
+            let (oh, q) = nd_two(text, p + 1)?;
+            let oh = i64::from(oh);
+            p = q;
             let mut om = 0;
             if b.get(p) == Some(&b':') {
-                om = i64::from(two_digits(b, p + 1)?);
-                p += 3;
-            } else if let Some(v) = two_digits(b, p) {
+                let (v, q) = nd_two(text, p + 1)?;
                 om = i64::from(v);
-                p += 2;
+                p = q;
+            } else if let Some((v, q)) = nd_two(text, p) {
+                om = i64::from(v);
+                p = q;
             }
             let total_min = sign * (oh * 60 + om);
             if total_min.abs() > 1439 {
@@ -2812,11 +2929,12 @@ fn parse_iso8601_core(text: &str) -> Option<(NaiveDateTime, Option<ParsedOffset>
     parse_fromisoformat_arm(text).or_else(|| parse_regex_arm(text))
 }
 
-/// The model-field `parse_date` fallback (`YYYY-M-D`, ASCII only):
-/// midnight, naive. Serializer callers never reach it.
+/// The model-field `parse_date` fallback (`YYYY-M-D`, Unicode decimal
+/// digits like the regex `\d`): midnight, naive. Serializer callers
+/// never reach it.
 fn parse_datere_arm(text: &str) -> Option<NaiveDateTime> {
     let b = text.as_bytes();
-    let (year, month, day, p) = parse_dashed_date(b)?;
+    let (year, month, day, p) = parse_dashed_date(text, b)?;
     if p != b.len() && !(p + 1 == b.len() && b[p] == b'\n') {
         return None;
     }
@@ -5551,6 +5669,84 @@ mod tests {
             "2024-01-01T12:00:00+24:00",
             "garbage",
         ] {
+            assert_eq!(
+                parse_naive_or_aware(text),
+                Err(ParseDatetimeError::Invalid),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn django_datetime_unicode_digits() {
+        // PIDASHCONV-765: the `datetime_re`/`date_re` arms take Python
+        // `\d` (Unicode `Decimal_Number`, any script, mixed scripts fold
+        // per-char like `int()`); the `fromisoformat` arm stays
+        // ASCII-only, and non-decimal numerics (Nl/No) never parse.
+        // Probed against Django 4.2.30 / CPython 3.12, then pinned here.
+        let utc = utc_tz();
+        let instant = |text: &str| {
+            parse_django_datetime(text, &utc)
+                .expect("parses")
+                .to_rfc3339()
+        };
+        // Accept with exact instants: Arabic-Indic, Devanagari, mixed
+        // scripts, non-padded, Nd fractions/zones, fullwidth (Nd, not
+        // ASCII), mathematical double-struck (the joined 1D7CE-1D7FF run).
+        assert_eq!(instant("٢٠٢٤-٠١-٠١T١٢:٠٠"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("२०२४-०१-०१T१२:००"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-٠١-٠١T12:٠٠"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("٢٠٢٤-١-١T١:٢"), "2024-01-01T01:02:00+00:00");
+        assert_eq!(
+            instant("2024-01-01T12:00:00.١٢٣"),
+            "2024-01-01T12:00:00.123+00:00"
+        );
+        assert_eq!(
+            instant("٢٠٢٤-٠١-٠١T١٢:٠٠:٠٠,٥٠٠٠٠٠"),
+            "2024-01-01T12:00:00.500+00:00"
+        );
+        assert_eq!(
+            instant("٢٠٢٤-٠١-٠١T١٢:٠٠+٠٥:٣٠"),
+            "2024-01-01T06:30:00+00:00"
+        );
+        assert_eq!(
+            instant("٢٠٢٤-٠١-٠١T١٢:٠٠+٠٥٣٠"),
+            "2024-01-01T06:30:00+00:00"
+        );
+        assert_eq!(
+            instant("２０２４-０１-０１T１２:００"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        assert_eq!(instant("𝟚𝟘𝟚𝟜-01-01T12:00"), "2024-01-01T12:00:00+00:00");
+        // Date-only never parses on serializer paths (no `parse_date`
+        // fallback); Nl/No numerics and basic-track Nd dates never parse.
+        for text in [
+            "٢٠٢٤-٠١-٠١",
+            "½024-01-01T12:00",
+            "2024-01-01T12:00:0½",
+            "2024-0Ⅻ-01T12:00",
+            "٢٠٢٤٠١٠١",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text, &utc),
+                Err(ParseDatetimeError::Invalid),
+                "{text:?}"
+            );
+        }
+        // Model path: the same grammar plus the `parse_date` fallback.
+        let naive = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Naive(dt) => dt.to_string(),
+            NaiveOrAware::Aware(_) => panic!("naive expected for {text:?}"),
+        };
+        let aware = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Aware(dt) => dt.to_rfc3339(),
+            NaiveOrAware::Naive(_) => panic!("aware expected for {text:?}"),
+        };
+        assert_eq!(naive("٢٠٢٤-٠١-٠١T١٢:٠٠"), "2024-01-01 12:00:00");
+        assert_eq!(naive("٢٠٢٤-٠١-٠١"), "2024-01-01 00:00:00");
+        assert_eq!(aware("٢٠٢٤-٠١-٠١T١٢:٠٠+٠٠:٠٠"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(aware("٢٠٢٤-٠١-٠١T١٢:٠٠+٠٥٣٠"), "2024-01-01T06:30:00+00:00");
+        for text in ["٢٠٢٤٠١٠١", "½024-01-01T12:00"] {
             assert_eq!(
                 parse_naive_or_aware(text),
                 Err(ParseDatetimeError::Invalid),
