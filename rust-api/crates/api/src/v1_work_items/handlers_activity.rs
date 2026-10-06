@@ -66,7 +66,7 @@
 
 use std::collections::HashMap;
 
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{OriginalUri, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
@@ -137,6 +137,8 @@ pub enum Denial {
     /// 400, `{"detail": ...}` (DRF `ParseError`: malformed JSON, bad
     /// `per_page`/`cursor`).
     BadDetail(String),
+    /// 400, `{"error": ...}` (view-inline: unknown timezones).
+    BadError(String),
     /// 415, `{"detail": ...}` (DRF `UnsupportedMediaType`).
     UnsupportedMediaType(String),
     /// 404, view-inline `{"error": ...}` with the full body.
@@ -181,6 +183,10 @@ impl Denial {
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::BadError(message) => (
+                StatusCode::BAD_REQUEST,
+                format!("{{\"error\":{}}}", json_string(message)),
             ),
             Denial::UnsupportedMediaType(message) => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -373,12 +379,12 @@ type MachineTokenLookup = (
     Option<bool>,
 );
 
-/// The authenticated actor: user id plus active time zone
-/// (`TimezoneMixin.initial` activates `request.user.user_timezone`,
-/// `api/views/base.py:43-48`). Serializer datetimes render in this zone.
+/// The authenticated actor: user id plus the stored time zone name, loaded
+/// but NOT parsed — parsing happens after the gate in
+/// [`activate_timezone`] (the PIDASHCONV-737 fixed preamble).
 pub struct Actor {
     pub id: uuid::Uuid,
-    pub timezone: Tz,
+    pub timezone: Option<String>,
 }
 
 /// `APIKeyAuthentication` (`api/middleware/api_authentication.py:19-88`):
@@ -400,11 +406,10 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
             resolve_machine_token(pool, raw, secret_key).await?
         }
     };
-    let timezone = request_timezone(pool, &user_id).await?;
+    let timezone = load_timezone_name(pool, &user_id).await?;
     // `api_tokens.last_used` is stamped on every validated call
-    // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`
-    // inside their own resolver. Best-effort: a failed stamp must not fail
-    // the request.
+    // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
+    // Best-effort: a failed stamp must not fail the request.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
         let _ = sqlx::query(r#"UPDATE "api_tokens" SET "last_used" = now() WHERE "token" = $1"#)
             .bind(raw)
@@ -418,9 +423,12 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
 }
 
 /// The `api_tokens` columns the validator reads (`db/models/api.py:35-57`).
+/// The `deleted_at IS NULL` conjunct is the `SoftDeletionManager` scope
+/// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
+/// rows, so a soft-deleted token 403s instead of authenticating.
 async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
     let row: Option<ApiTokenLookup> = sqlx::query_as(
-        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1"#,
+        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
     )
     .bind(presented)
     .fetch_optional(pool)
@@ -437,17 +445,10 @@ async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid,
     };
     pidash_auth::token::validate_api_token(Some(&row), presented, now_unix)
         .map_err(|_| Denial::InvalidToken)?;
-    // Inactive users cannot authenticate (the `users` table has no
-    // `deleted_at`; `is_active` is the only liveness signal).
-    let active: Option<bool> =
-        sqlx::query_scalar(r#"SELECT TRUE FROM "users" WHERE "id" = $1 AND "is_active""#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "api-token-user"))?;
-    if active != Some(true) {
-        return Err(Denial::InvalidToken);
-    }
+    // No `users.is_active` check: `validate_api_token` returns
+    // `api_token.user` unchecked, and neither DRF `IsAuthenticated` nor
+    // the project permission classes consult it — Django serves a
+    // deactivated user's token when membership passes. Port the wart.
     Ok(user_id)
 }
 
@@ -495,14 +496,10 @@ async fn resolve_machine_token(
     .map_err(|error| db_error(error, "machine-token-member"))?
     .unwrap_or(false);
     if !member {
+        // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
+        // `last_used_at` is stamped on success only.
         let _ = sqlx::query(
             r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
-        )
-        .bind(&presented_hash)
-        .execute(pool)
-        .await;
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#,
         )
         .bind(&presented_hash)
         .execute(pool)
@@ -517,20 +514,35 @@ async fn resolve_machine_token(
     Ok(user_id)
 }
 
-/// The request time zone (`TimezoneMixin.initial`): the user's stored zone;
-/// an invalid stored zone 500s like `zoneinfo.ZoneInfo` raising.
-async fn request_timezone(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Tz, Denial> {
+/// The request time zone (`TimezoneMixin.initial`): the user's stored zone
+/// name, loaded but NOT parsed — parsing happens after the gate in
+/// [`activate_timezone`].
+async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
     let name: Option<Option<String>> =
         sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
             .bind(user_id)
             .fetch_optional(pool)
             .await
             .map_err(|error| db_error(error, "request-timezone"))?;
-    let name: Option<String> = name.unwrap_or(None);
-    name.as_deref()
-        .unwrap_or("UTC")
-        .parse::<Tz>()
-        .map_err(|error| db_error(error, "request-timezone"))
+    Ok(name.unwrap_or(None))
+}
+
+/// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
+/// after `super().initial()`). A missing zone defaults to UTC; an unknown
+/// zone name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`,
+/// which subclasses `KeyError`, so `handle_exception` answers the
+/// `KeyError` branch (`api/views/base.py:160-164`). An EMPTY zone 500s:
+/// `ZoneInfo('')` raises `ValueError` (not `KeyError`), so
+/// `handle_exception` falls to the generic branch (PIDASHCONV-747,
+/// live-probed).
+fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
+    match timezone {
+        None => Ok(chrono_tz::UTC),
+        Some("") => Err(Denial::ServerError),
+        Some(zone) => zone
+            .parse::<Tz>()
+            .map_err(|_| Denial::BadError("The required key does not exist.".to_owned())),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1025,8 +1037,8 @@ fn decode_activity(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedActivi
         new_value: row_string_opt(row, "new_value")?,
         comment: row_string(row, "comment")?,
         attachments,
-        old_identifier: row_string_opt(row, "old_identifier")?,
-        new_identifier: row_string_opt(row, "new_identifier")?,
+        old_identifier: row_uuid_opt(row, "old_identifier")?.map(|id| id.to_string()),
+        new_identifier: row_uuid_opt(row, "new_identifier")?.map(|id| id.to_string()),
         epoch: row.try_get("epoch").map_err(|_| Denial::ServerError)?,
         project: row_uuid(row, "project_id")?.to_string(),
         workspace: row_uuid(row, "workspace_id")?.to_string(),
@@ -2067,16 +2079,29 @@ fn credential_scope(date: &str, region: &str) -> String {
 /// `S3Storage.__init__` with a request (`is_server=False`):
 /// MinIO mode signs `{scheme}://{Host}` path-style; an explicit
 /// endpoint URL signs path-style against it; otherwise the
-/// virtual-hosted AWS default.
-/// `None` only when MinIO mode needs the request host and none was
-/// sent (Django reads `request.get_host()` solely in that branch —
-/// `storage.py:52-60` — so AWS/custom-endpoint signing never requires
-/// a `Host` header).
+/// virtual-hosted AWS default. Presigned URLs resolve the global
+/// endpoint for every region (`use_global_endpoint`,
+/// `botocore/signers.py:859`) — every caller here presigns, so there is
+/// no header-auth split.
+/// `None` when the region cannot be signed (garbage names fail
+/// everywhere — botocore `InvalidRegionError` at client creation; an
+/// empty region fails only against the derived endpoint — botocore
+/// `ValueError: Invalid endpoint`) or when MinIO mode needs the request
+/// host and none was sent (Django reads `request.get_host()` solely in
+/// that branch — `storage.py:52-60` — so AWS/custom-endpoint signing
+/// never requires a `Host` header). Python raises from the constructor,
+/// so every use site propagates it to the 500 fallback
+/// (`handle_exception`).
 fn endpoint_parts(
     storage: &pidash_db::config::StorageSettings,
     scheme: &str,
     host: Option<&str>,
 ) -> Option<(String, String)> {
+    if !pidash_db::config::is_valid_region_name(&storage.region) {
+        return None;
+    }
+    // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
+    let scheme = storage.endpoint_protocol(scheme);
     if storage.use_minio {
         let host = host?;
         return Some((format!("{scheme}://{host}"), host.to_owned()));
@@ -2092,21 +2117,18 @@ fn endpoint_parts(
             .unwrap_or(endpoint);
         return Some((endpoint.to_owned(), signed_host.to_owned()));
     }
-    {
-        let region = storage.region.as_str();
-        // botocore's s3 endpoint table serves us-east-1 from the global
-        // endpoint (`s3.amazonaws.com`, no region infix); every other
-        // region is virtual-hosted regional.
-        let base = if region.is_empty() || region == "us-east-1" {
-            "s3.amazonaws.com".to_owned()
-        } else {
-            format!("s3.{region}.amazonaws.com")
-        };
-        Some((
-            format!("https://{}.{base}", storage.bucket_name),
-            format!("{}.{base}", storage.bucket_name),
-        ))
+    if storage.region.is_empty() {
+        // botocore derives `https://s3..amazonaws.com` and rejects
+        // it (`ValueError: Invalid endpoint`).
+        return None;
     }
+    // Presigned URLs use the global endpoint for every region
+    // (`use_global_endpoint`).
+    let base = "s3.amazonaws.com".to_owned();
+    Some((
+        format!("https://{}.{base}", storage.bucket_name),
+        format!("{}.{base}", storage.bucket_name),
+    ))
 }
 
 /// Path encoding for the canonical URI: slashes survive, every
@@ -2508,6 +2530,24 @@ async fn read_body(body: axum::body::Body) -> Result<Vec<u8>, Denial> {
         .map_err(|error| db_error(error, "read-body"))
 }
 
+/// Rebuild the request against the ORIGINAL path for the proxy
+/// (Django's `<uuid:>` converter would not match — before auth runs, as URL
+/// resolving precedes it). The URI must be the request's own: Django's 404
+/// page echoes the path, so rebuilding the `work-items` spelling for a
+/// deprecated `issues/` twin answers the wrong bytes.
+fn proxy_request<'a>(
+    state: &'a AppState,
+    method: &'a str,
+    uri: String,
+) -> impl std::future::Future<Output = Response> + 'a {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(axum::body::Body::empty())
+        .expect("proxy request");
+    crate::edge::proxy(State(state.clone()), req)
+}
+
 /// Caller expansion values for one activity row: every `expand` name in
 /// the kept fields with a map hit (`project`, `workspace`, `issue`,
 /// `actor`). Null FKs supply `None` (the shape renders `{}`); dead rows
@@ -2559,22 +2599,13 @@ async fn activity_expansions<'a>(
 /// `GET .../activities/` (`views/issue.py:2150-2173`).
 pub async fn get_activity_list(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id)): Path<(String, String, String)>,
     Query(query): Query<QueryMap>,
     headers: HeaderMap,
 ) -> Response {
     if !crate::runner_runs::is_uuid_path_segment(&issue_id) {
-        // Django's `<uuid:>` converter would not match: fall through to
-        // the proxy before auth runs (URL resolving precedes it). The
-        // request is rebuilt GET against the same path.
-        let req = Request::builder()
-            .method("GET")
-            .uri(format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/activities/"
-            ))
-            .body(axum::body::Body::empty())
-            .expect("proxy request");
-        return crate::edge::proxy(State(state), req).await;
+        return proxy_request(&state, "GET", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     match activity_list_inner(&state, &headers, &slug, &project_id, &issue_id, &query).await {
@@ -2606,6 +2637,9 @@ async fn activity_list_inner(
         "GET",
     )
     .await?;
+    // `TimezoneMixin.initial` runs after the gate but before the body: a
+    // bad zone wins over pagination/row errors below.
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let per_page =
         crate::paginator::parse_per_page(query_last(query, "per_page").as_deref(), 1000, 1000)
             .map_err(page_denial)?;
@@ -2674,12 +2708,12 @@ async fn activity_list_inner(
     );
     let mut rendered: Vec<Value> = Vec::with_capacity(page_rows.len());
     for row in page_rows {
-        let decoded = decode_activity(row, &pre.actor.timezone)?;
+        let decoded = decode_activity(row, &tz)?;
         let expansions = activity_expansions(
             &pre.pool,
             row,
             slug,
-            &pre.actor.timezone,
+            &tz,
             web_base.as_deref(),
             &expand_refs,
             &kept,
@@ -2700,6 +2734,7 @@ async fn activity_list_inner(
 /// `GET .../activities/<pk>/` (`views/issue.py:2205-2232`).
 pub async fn get_activity_detail(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
     Query(query): Query<QueryMap>,
     headers: HeaderMap,
@@ -2707,14 +2742,7 @@ pub async fn get_activity_detail(
     if !crate::runner_runs::is_uuid_path_segment(&issue_id)
         || !crate::runner_runs::is_uuid_path_segment(&pk)
     {
-        let req = Request::builder()
-            .method("GET")
-            .uri(format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/activities/{pk}/"
-            ))
-            .body(axum::body::Body::empty())
-            .expect("proxy request");
-        return crate::edge::proxy(State(state), req).await;
+        return proxy_request(&state, "GET", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     let pk = pk.parse::<Uuid>().expect("checked segment");
@@ -2749,6 +2777,9 @@ async fn activity_detail_inner(
         "GET",
     )
     .await?;
+    // `TimezoneMixin.initial` runs after the gate but before the body: a
+    // bad zone wins over the row 404 below.
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let order_sql = resolve_activity_order(query_last(query, "order_by").as_deref())?;
     let row = fetch_activity_detail(
         &pre.pool,
@@ -2789,12 +2820,12 @@ async fn activity_detail_inner(
         state.settings().urls.web_url.as_deref(),
         state.settings().urls.app_base_url.as_deref(),
     );
-    let decoded = decode_activity(&row, &pre.actor.timezone)?;
+    let decoded = decode_activity(&row, &tz)?;
     let expansions = activity_expansions(
         &pre.pool,
         &row,
         slug,
-        &pre.actor.timezone,
+        &tz,
         web_base.as_deref(),
         &expand_refs,
         &kept,
@@ -2808,18 +2839,12 @@ async fn activity_detail_inner(
 /// `GET .../attachments/` (`views/issue.py:2432-2447`).
 pub async fn get_attachment_list(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response {
     if !crate::runner_runs::is_uuid_path_segment(&issue_id) {
-        let req = Request::builder()
-            .method("GET")
-            .uri(format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/attachments/"
-            ))
-            .body(axum::body::Body::empty())
-            .expect("proxy request");
-        return crate::edge::proxy(State(state), req).await;
+        return proxy_request(&state, "GET", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     match attachment_list_inner(&state, &headers, &slug, &project_id, &issue_id).await {
@@ -2839,11 +2864,13 @@ async fn attachment_list_inner(
     let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
     // No gate: the view declares no `permission_classes`, so only
     // `IsAuthenticated` runs — and no member/archived filter either
-    // (BUG-1).
+    // (BUG-1). `TimezoneMixin.initial` still activates for the
+    // authenticated caller.
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let rows = fetch_attachment_rows(&pre.pool, slug, &project_id, issue_id).await?;
     let mut rendered: Vec<Value> = Vec::with_capacity(rows.len());
     for row in rows {
-        let decoded = decode_attachment(&row, &pre.actor.timezone)?;
+        let decoded = decode_attachment(&row, &tz)?;
         rendered.push(render_attachment_value(&decoded)?);
     }
     let body = serde_json::to_string(&Value::Array(rendered)).map_err(|_| Denial::ServerError)?;
@@ -2854,19 +2881,13 @@ async fn attachment_list_inner(
 /// the `FileAsset` row, presign the upload, answer 200.
 pub async fn post_attachment(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id)): Path<(String, String, String)>,
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Response {
     if !crate::runner_runs::is_uuid_path_segment(&issue_id) {
-        let req = Request::builder()
-            .method("POST")
-            .uri(format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/attachments/"
-            ))
-            .body(axum::body::Body::empty())
-            .expect("proxy request");
-        return crate::edge::proxy(State(state), req).await;
+        return proxy_request(&state, "POST", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     let bytes = match read_body(body).await {
@@ -2906,6 +2927,9 @@ async fn attachment_post_inner(
     {
         return Err(Denial::ForbiddenUpload);
     }
+    // `TimezoneMixin.initial` runs after the gate but before the body: a
+    // bad zone wins over body errors below.
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     // The body parses here (`request.data` is first touched at `:2332`):
     // a 400/415/500 from the bytes never precedes the 404/403 above.
     let data = parse_post_data(headers, body)?;
@@ -2995,9 +3019,12 @@ async fn attachment_post_inner(
     let created_at = Utc::now();
     let updated_at = Utc::now();
     let name_text = py_str(&name_value);
+    // The key hex is an INDEPENDENT uuid4 (`:2357` mints it before the
+    // row exists — the row id comes from the DB default), never the row
+    // id.
     let key = work_tasks::attachment_asset_key(
         &workspace_id.to_string(),
-        &asset_id.simple().to_string(),
+        &Uuid::new_v4().simple().to_string(),
         &name_text,
     );
     let mut attributes = Map::with_capacity(3);
@@ -3006,9 +3033,6 @@ async fn attachment_post_inner(
     attributes.insert("size".to_owned(), size_limit.clone());
     let size_f64 = size_limit_f64(&size_limit)?;
     let storage = &state.settings().storage;
-    if !storage_can_sign(storage) {
-        return Err(Denial::ServerError);
-    }
     let insert = sqlx::query(
         r#"INSERT INTO "file_assets"
            ("id", "attributes", "asset", "size", "workspace_id", "created_by_id", "issue_id",
@@ -3046,6 +3070,13 @@ async fn attachment_post_inner(
         }
         return Err(db_error(error, "attachment-insert"));
     }
+    // The signability check runs AFTER the INSERT: Django creates the
+    // row first (`:2386-2401`), then builds the client (`S3Storage(...)`
+    // raises on empty credentials) — a broken config 500s with the row
+    // already stored.
+    if !storage_can_sign(storage) {
+        return Err(Denial::ServerError);
+    }
     let scheme = scheme_of(headers);
     let host = host_of(headers);
     let Some(upload_data) = presigned_post(
@@ -3065,8 +3096,8 @@ async fn attachment_post_inner(
     // `asset_url` in order (`:2407-2429`).
     let decoded = DecodedAttachment {
         id: asset_id.to_string(),
-        created_at: crate::serializer::render_datetime_in(&created_at, &pre.actor.timezone),
-        updated_at: crate::serializer::render_datetime_in(&updated_at, &pre.actor.timezone),
+        created_at: crate::serializer::render_datetime_in(&created_at, &tz),
+        updated_at: crate::serializer::render_datetime_in(&updated_at, &tz),
         deleted_at: None,
         attributes: Value::Object(attributes),
         asset: key,
@@ -3125,26 +3156,41 @@ fn external_text(value: Option<&Value>, file: Option<&String>) -> Option<String>
 /// 302-redirect to the object.
 pub async fn get_attachment(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
     headers: HeaderMap,
 ) -> Response {
     if !crate::runner_runs::is_uuid_path_segment(&issue_id)
         || !crate::runner_runs::is_uuid_path_segment(&pk)
     {
-        let req = Request::builder()
-            .method("GET")
-            .uri(format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/attachments/{pk}/"
-            ))
-            .body(axum::body::Body::empty())
-            .expect("proxy request");
-        return crate::edge::proxy(State(state), req).await;
+        return proxy_request(&state, "GET", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     let pk = pk.parse::<Uuid>().expect("checked segment");
     match attachment_get_inner(&state, &headers, &slug, &project_id, &issue_id, &pk).await {
         Ok(response) => response,
         Err(denial) => denial.into_response(),
+    }
+}
+
+/// `asset.attributes.get("name")` (`views/issue.py:2571-2577`) into the
+/// `filename` for [`presigned_get_url`]: a non-object `attributes` has no
+/// `.get` (`AttributeError` 500); missing/null mints a fresh hex per call
+/// (`None`); a truthy non-string hits `quote()`'s `TypeError` 500; a
+/// falsy non-string takes the bare-disposition arm (`Some("")` — `if
+/// filename:` is false, `storage.py:115-124`).
+fn download_filename(attributes: &Value) -> Result<Option<String>, Denial> {
+    let map = attributes.as_object().ok_or(Denial::ServerError)?;
+    match map.get("name") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(name)) => Ok(Some(name.clone())),
+        Some(other) => {
+            if is_truthy(other) {
+                Err(Denial::ServerError)
+            } else {
+                Ok(Some(String::new()))
+            }
+        }
     }
 }
 
@@ -3163,6 +3209,9 @@ async fn attachment_get_inner(
     if !issue_permission(&pre.pool, &pre.actor.id, None, &project_id, None, false).await? {
         return Err(Denial::ForbiddenDownload);
     }
+    // `TimezoneMixin.initial` runs after the gate (`_tz` unused: the 302
+    // carries no datetimes, but a bad zone still 400/500s like Django).
+    let _tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let Some(row) = fetch_attachment(&pre.pool, slug, &project_id, pk).await? else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
@@ -3176,13 +3225,7 @@ async fn attachment_get_inner(
         ));
     }
     let attributes: Value = row.try_get("attributes").map_err(|_| Denial::ServerError)?;
-    // `attributes.get("name")`: missing/null mints a fresh hex per call,
-    // a non-string hits `quote()`'s `TypeError` 500.
-    let filename = match attributes.get("name") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(name)) => Some(name.clone()),
-        Some(_) => return Err(Denial::ServerError),
-    };
+    let filename = download_filename(&attributes)?;
     let storage = &state.settings().storage;
     if !storage_can_sign(storage) {
         return Err(Denial::ServerError);
@@ -3213,6 +3256,7 @@ async fn attachment_get_inner(
 /// the upload, 204.
 pub async fn patch_attachment(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
     headers: HeaderMap,
     body: axum::body::Body,
@@ -3220,14 +3264,7 @@ pub async fn patch_attachment(
     if !crate::runner_runs::is_uuid_path_segment(&issue_id)
         || !crate::runner_runs::is_uuid_path_segment(&pk)
     {
-        let req = Request::builder()
-            .method("PATCH")
-            .uri(format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/attachments/{pk}/"
-            ))
-            .body(axum::body::Body::empty())
-            .expect("proxy request");
-        return crate::edge::proxy(State(state), req).await;
+        return proxy_request(&state, "PATCH", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     let pk = pk.parse::<Uuid>().expect("checked segment");
@@ -3268,12 +3305,15 @@ async fn attachment_patch_inner(
     {
         return Err(Denial::ForbiddenUpload);
     }
+    // `TimezoneMixin.initial` runs after the gate but before the body: a
+    // bad zone wins over the row 404 below.
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let Some(row) = fetch_attachment(&pre.pool, slug, &project_id, pk).await? else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
     // `current_instance` serializes the row BEFORE the update (`:2634`,
     // `:2637`): still un-uploaded, still the old creator.
-    let decoded = decode_attachment(&row, &pre.actor.timezone)?;
+    let decoded = decode_attachment(&row, &tz)?;
     let current = render_attachment_for_dump(&decoded)?;
     let current_instance = finalize_nonfinite(cpython_dumps(&current));
     let storage_metadata: Option<Value> = row
@@ -3327,6 +3367,7 @@ async fn attachment_patch_inner(
 /// delete, 204.
 pub async fn delete_attachment(
     State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
     Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
     headers: HeaderMap,
     body: axum::body::Body,
@@ -3334,14 +3375,7 @@ pub async fn delete_attachment(
     if !crate::runner_runs::is_uuid_path_segment(&issue_id)
         || !crate::runner_runs::is_uuid_path_segment(&pk)
     {
-        let req = Request::builder()
-            .method("DELETE")
-            .uri(format!(
-                "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/attachments/{pk}/"
-            ))
-            .body(axum::body::Body::empty())
-            .expect("proxy request");
-        return crate::edge::proxy(State(state), req).await;
+        return proxy_request(&state, "DELETE", original.to_string()).await;
     }
     let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
     let pk = pk.parse::<Uuid>().expect("checked segment");
@@ -3380,6 +3414,9 @@ async fn attachment_delete_inner(
     {
         return Err(Denial::ForbiddenDelete);
     }
+    // `TimezoneMixin.initial` runs after the gate (`_tz` unused: the 204
+    // carries no datetimes, but a bad zone still 400/500s like Django).
+    let _tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let Some(row) = fetch_attachment(&pre.pool, slug, &project_id, pk).await? else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
@@ -3763,6 +3800,7 @@ mod tests {
         // F18-11 presign_full inputs).
         let storage = pidash_db::config::StorageSettings {
             use_minio: true,
+            minio_endpoint_ssl: false,
             access_key_id: "conv659test".to_owned(),
             secret_access_key: "unrecorded-secret".to_owned(),
             bucket_name: "conv659".to_owned(),
@@ -3960,6 +3998,15 @@ mod tests {
             )
         );
         assert_eq!(
+            denial_response(Denial::BadError(
+                "The required key does not exist.".to_owned()
+            )),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"error":"The required key does not exist."}"#.to_owned()
+            )
+        );
+        assert_eq!(
             denial_response(Denial::UnsupportedMediaType(
                 "Unsupported media type \"text/plain\" in request.".to_owned()
             )),
@@ -3988,6 +4035,73 @@ mod tests {
                 SERVER_ERROR_BODY.to_owned()
             )
         );
+    }
+
+    #[test]
+    fn activate_timezone_zone_arms() {
+        // `ZoneInfo('')` raises `ValueError` (not `KeyError`), so an
+        // empty stored zone is the generic 500 while an unknown zone is
+        // the `KeyError`-branch 400 (PIDASHCONV-747, live-probed).
+        assert!(matches!(
+            activate_timezone(Some("")),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(
+            activate_timezone(Some("Not/AZone")),
+            Err(Denial::BadError(_))
+        ));
+        assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
+        assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
+    }
+
+    #[test]
+    fn download_filename_arms() {
+        use serde_json::json;
+        // Missing/null mints a fresh hex per call (`None`).
+        assert_eq!(
+            download_filename(&json!({"type": "application/pdf"})).expect("missing"),
+            None
+        );
+        assert_eq!(
+            download_filename(&json!({"name": null})).expect("null"),
+            None
+        );
+        // Strings pass through ("" renders bare — the kernel maps it).
+        assert_eq!(
+            download_filename(&json!({"name": "f.pdf"})).expect("string"),
+            Some("f.pdf".to_owned())
+        );
+        assert_eq!(
+            download_filename(&json!({"name": ""})).expect("empty"),
+            Some(String::new())
+        );
+        // Truthy non-strings hit `quote()`'s `TypeError` 500; falsy
+        // non-strings take the bare-disposition arm.
+        assert!(matches!(
+            download_filename(&json!({"name": 5})),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(
+            download_filename(&json!({"name": true})),
+            Err(Denial::ServerError)
+        ));
+        assert_eq!(
+            download_filename(&json!({"name": 0})).expect("zero"),
+            Some(String::new())
+        );
+        assert_eq!(
+            download_filename(&json!({"name": false})).expect("false"),
+            Some(String::new())
+        );
+        // A non-object `attributes` has no `.get` (`AttributeError` 500).
+        assert!(matches!(
+            download_filename(&json!(["name"])),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(
+            download_filename(&json!("name")),
+            Err(Denial::ServerError)
+        ));
     }
 
     #[test]
@@ -4317,6 +4431,7 @@ mod tests {
     fn test_storage() -> pidash_db::config::StorageSettings {
         pidash_db::config::StorageSettings {
             use_minio: false,
+            minio_endpoint_ssl: false,
             access_key_id: "AKID".to_owned(),
             secret_access_key: "SECRET".to_owned(),
             bucket_name: "bucket".to_owned(),
@@ -4358,26 +4473,43 @@ mod tests {
         let (endpoint, host) = endpoint_parts(&storage, "http", Some("h.example")).expect("aws");
         assert_eq!(endpoint, "https://bucket.s3.amazonaws.com");
         assert_eq!(host, "bucket.s3.amazonaws.com");
+        // Every caller here presigns, so every region resolves the global
+        // endpoint (`use_global_endpoint`).
         let mut regional = storage.clone();
         regional.region = "ap-south-1".to_owned();
         let (endpoint, host) = endpoint_parts(&regional, "http", Some("h.example")).expect("aws");
-        assert_eq!(endpoint, "https://bucket.s3.ap-south-1.amazonaws.com");
-        assert_eq!(host, "bucket.s3.ap-south-1.amazonaws.com");
+        assert_eq!(endpoint, "https://bucket.s3.amazonaws.com");
+        assert_eq!(host, "bucket.s3.amazonaws.com");
         let mut minio = storage.clone();
         minio.use_minio = true;
         let (endpoint, host) = endpoint_parts(&minio, "https", Some("minio:9000")).expect("minio");
         assert_eq!(endpoint, "https://minio:9000");
         assert_eq!(host, "minio:9000");
         assert_eq!(endpoint_parts(&minio, "https", None), None);
+        // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
+        let mut ssl = minio.clone();
+        ssl.minio_endpoint_ssl = true;
+        let (endpoint, host) = endpoint_parts(&ssl, "http", Some("h:9")).expect("minio ssl");
+        assert_eq!(endpoint, "https://h:9");
+        assert_eq!(host, "h:9");
         let mut custom = storage.clone();
         custom.endpoint_url = Some("https://s3.custom:443/prefix/".to_owned());
         let (endpoint, host) = endpoint_parts(&custom, "http", Some("h.example")).expect("custom");
         assert_eq!(endpoint, "https://s3.custom:443/prefix");
         assert_eq!(host, "s3.custom:443");
+        // Empty region with a derived endpoint fails (`ValueError`); empty
+        // region against a custom endpoint still signs.
         let mut no_region = storage.clone();
         no_region.region = String::new();
-        let (endpoint, _) = endpoint_parts(&no_region, "http", None).expect("no host needed");
-        assert_eq!(endpoint, "https://bucket.s3.amazonaws.com");
+        assert_eq!(endpoint_parts(&no_region, "http", None), None);
+        no_region.endpoint_url = Some("http://127.0.0.1:9000".to_owned());
+        let (endpoint, host) = endpoint_parts(&no_region, "http", None).expect("custom");
+        assert_eq!(endpoint, "http://127.0.0.1:9000");
+        assert_eq!(host, "127.0.0.1:9000");
+        // Garbage regions fail everywhere (`InvalidRegionError`).
+        let mut garbage = storage.clone();
+        garbage.region = "!!".to_owned();
+        assert_eq!(endpoint_parts(&garbage, "http", Some("h.example")), None);
         let mut empty = storage.clone();
         empty.secret_access_key = String::new();
         assert!(!storage_can_sign(&empty));
@@ -4524,6 +4656,7 @@ mod tests {
         use chrono::TimeZone as _;
         let storage = pidash_db::config::StorageSettings {
             use_minio: false,
+            minio_endpoint_ssl: false,
             access_key_id: "AKID675TEST".to_owned(),
             secret_access_key: "SECRET675TESTSECRET675TESTSECRET12".to_owned(),
             bucket_name: "bucket675".to_owned(),
