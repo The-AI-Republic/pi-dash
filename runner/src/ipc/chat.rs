@@ -1108,6 +1108,105 @@ mod tests {
         }
     }
 
+    /// A fake app-server that treats `turn/interrupt` the way the bundled
+    /// engine does: it needs the thread and turn ids, and answers anything
+    /// else with an error while the turn keeps running. A turn that was not
+    /// interrupted delivers its reply (`OLD`) when the next one starts.
+    fn interrupt_script() -> &'static str {
+        r#"
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read -r _
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_stop"}}'
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"turn":{"id":"turn_1"}}}'
+            printf '%s\n' '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"th_stop","turn":{"id":"turn_1"}}}'
+            read -r interrupt
+            case "$interrupt" in
+                *'"threadId":"th_stop"'*'"turnId":"turn_1"'*)
+                    printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{}}'
+                    printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"th_stop","turn":{"id":"turn_1","status":"interrupted"}}}'
+                    read -r _
+                    ;;
+                *)
+                    printf '%s\n' '{"jsonrpc":"2.0","id":4,"error":{"code":-32600,"message":"Invalid request: missing field `threadId`"}}'
+                    read -r _
+                    printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"OLD"}}'
+                    printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"th_stop","turn":{"id":"turn_1","status":"completed"}}}'
+                    ;;
+            esac
+            printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"turn":{"id":"turn_2"}}}'
+            printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"NEW"}}'
+            printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"th_stop","turn":{"id":"turn_2","status":"completed"}}}'
+            sleep 0.3
+        "#
+    }
+
+    #[tokio::test]
+    async fn stopped_turn_does_not_leak_into_the_next_one() {
+        let cfg = config();
+        let approvals = ApprovalRouter::new();
+        let cancel = Arc::new(Notify::new());
+        let mut bridge = fake_bridge(interrupt_script()).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+        let (mut seq, mut started) = (0u64, false);
+
+        let cancel2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            cancel2.notify_waiters();
+        });
+
+        let mut statuses = Vec::new();
+        let mut sink = VecSink::default();
+        for content in ["slow", "next"] {
+            sink.frames.clear();
+            let terminal = tokio::time::timeout(
+                Duration::from_secs(3),
+                drive_turn(
+                    DriveCtx {
+                        chat_session_id: Uuid::new_v4(),
+                        message_id: Uuid::new_v4(),
+                        content: content.into(),
+                        model: None,
+                        mode: ApprovalMode::Ask,
+                        runner_id: cfg.runner_id,
+                        config: &cfg,
+                        approvals: &approvals,
+                        workspace: &cfg.workspace.working_dir,
+                        cancel: &cancel,
+                    },
+                    &mut bridge,
+                    &mut seq,
+                    &mut started,
+                    &mut sink,
+                ),
+            )
+            .await
+            .expect("turn should not hang")
+            .expect("drive turn");
+            match terminal {
+                Response::ChatMessageCompleted { status, .. } => statuses.push(status),
+                other => panic!("expected ChatMessageCompleted, got {other:?}"),
+            }
+        }
+        assert_eq!(statuses, ["cancelled", "completed"]);
+
+        // Only the second turn's own reply may reach its stream.
+        let deltas: Vec<&str> = sink
+            .frames
+            .iter()
+            .filter_map(|f| match f {
+                Response::ChatEvent { kind, payload, .. } if kind == "assistant_delta" => {
+                    payload["params"]["text"].as_str()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, ["NEW"], "frames: {:?}", sink.frames);
+    }
+
     /// A fake app-server that warms, starts a turn, then requests a command
     /// approval and hangs — the turn can only end via the approval wait's
     /// cancel arm or its TTL backstop, never on its own.
