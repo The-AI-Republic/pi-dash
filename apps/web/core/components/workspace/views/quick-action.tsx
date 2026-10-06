@@ -11,11 +11,12 @@ import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { IWorkspaceView } from "@pi-dash/types";
 import { CustomMenu } from "@pi-dash/ui";
-import { copyUrlToClipboard, cn } from "@pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 // helpers
 import { useViewMenuItems } from "@/components/common/quick-actions-helper";
 // hooks
 import { useUser, useUserPermissions } from "@/hooks/store/user";
+import { copyShareUrl } from "@/utils/share-url";
 // local imports
 import { DeleteGlobalViewModal } from "./delete-view-modal";
 import { CreateUpdateWorkspaceViewModal } from "./modal";
@@ -39,7 +40,7 @@ export const WorkspaceViewQuickActions = observer(function WorkspaceViewQuickAct
 
   const viewLink = `${workspaceSlug}/workspace-views/${view.id}`;
   const handleCopyText = async () => {
-    await copyUrlToClipboard(viewLink);
+    await copyShareUrl(viewLink);
     setToast({
       type: TOAST_TYPE.SUCCESS,
       title: "Link Copied!",
