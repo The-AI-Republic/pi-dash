@@ -1918,7 +1918,7 @@ mod tests {
                 format!(
                     "{{\"error\":{message},\"reason\":{reason}}}",
                     message = serde_json::to_string(message).expect("str"),
-                    reason = serde_json::to_string(reason).expect("str"),
+                    reason = serde_json::to_string(&reason).expect("str"),
                 )
             );
         }
