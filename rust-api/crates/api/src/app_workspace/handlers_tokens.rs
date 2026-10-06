@@ -2701,6 +2701,18 @@ mod tests {
         ("0000-W01-1", None, None),
         ("00000101", None, None),
         ("0000-06-01T12:00:00Z", None, None),
+        // Year 0, full battery (PIDASHCONV-768; same shapes as 762):
+        // every path already guards `year == 0` (year is 4 digits, so
+        // that is the whole 1..=9999 clamp) — these pins prove it.
+        ("0000-06-01T12:00:00", None, None),
+        ("0000-06-01 12:00:00", None, None),
+        ("0000-06-01T12:00:00+00:00", None, None),
+        ("0000-W01", None, None),
+        ("0000W011", None, None),
+        ("0000W01", None, None),
+        ("0000-W01-1T12:00:00+00:00", None, None),
+        ("0000-6-1T12:00:00", None, None),
+        ("0000-6-1 12:00:00+05:00", None, None),
         (
             "2030-06-01T12:00:00+01:00:00.5",
             Some("2030-06-01T10:59:59.500000+00:00"),
