@@ -78,6 +78,7 @@ use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -287,14 +288,15 @@ type MachineTokenLookup = (
     Option<bool>,
 );
 
-/// The authenticated actor: user id plus active time zone
-/// (`TimezoneMixin.initial` activates `request.user.user_timezone`,
-/// `api/views/base.py:43-48`). No action response renders a zone-shifted
-/// field (ticker/run datetimes render raw isoformat), but an invalid
-/// stored zone still 500s here as `zoneinfo.ZoneInfo` raising does there.
+/// The authenticated actor: user id plus the RAW stored time-zone name.
+/// The zone is NOT parsed here — `TimezoneMixin.initial`
+/// (`api/views/base.py:43-48`) calls `super().initial()`
+/// (auth + permissions) first and only then activates the zone, so a
+/// denying gate answers 403 even when the stored zone is unknown (which
+/// 400s only for survivors, via [`activate_timezone`]).
 pub struct Actor {
     pub id: uuid::Uuid,
-    pub timezone: chrono_tz::Tz,
+    pub timezone: Option<String>,
 }
 
 /// `APIKeyAuthentication` (`api/middleware/api_authentication.py:19-88`):
@@ -316,7 +318,7 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
             resolve_machine_token(pool, raw, secret_key).await?
         }
     };
-    let timezone = request_timezone(pool, &user_id).await?;
+    let timezone = load_timezone_name(pool, &user_id).await?;
     // `api_tokens.last_used` is stamped on every validated call
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
@@ -333,9 +335,12 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
 }
 
 /// The `api_tokens` columns the validator reads (`db/models/api.py:35-57`).
+/// The `deleted_at IS NULL` conjunct is the `SoftDeletionManager` scope
+/// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
+/// rows, so a soft-deleted token 403s instead of authenticating.
 async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
     let row: Option<ApiTokenLookup> = sqlx::query_as(
-        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1"#,
+        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
     )
     .bind(presented)
     .fetch_optional(pool)
@@ -352,17 +357,10 @@ async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid,
     };
     pidash_auth::token::validate_api_token(Some(&row), presented, now_unix)
         .map_err(|_| Denial::InvalidToken)?;
-    // Inactive users cannot authenticate (the `users` table has no
-    // `deleted_at`; `is_active` is the only liveness signal).
-    let active: Option<bool> =
-        sqlx::query_scalar(r#"SELECT TRUE FROM "users" WHERE "id" = $1 AND "is_active""#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "api-token-user"))?;
-    if active != Some(true) {
-        return Err(Denial::InvalidToken);
-    }
+    // No `users.is_active` check: `validate_api_token` returns
+    // `api_token.user` unchecked, and neither DRF `IsAuthenticated` nor
+    // the project permission classes consult it — Django serves a
+    // deactivated user's token when membership passes. Port the wart.
     Ok(user_id)
 }
 
@@ -410,14 +408,10 @@ async fn resolve_machine_token(
     .map_err(|error| db_error(error, "machine-token-member"))?
     .unwrap_or(false);
     if !member {
+        // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
+        // `last_used_at` is stamped on success only.
         let _ = sqlx::query(
             r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
-        )
-        .bind(&presented_hash)
-        .execute(pool)
-        .await;
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#,
         )
         .bind(&presented_hash)
         .execute(pool)
@@ -432,20 +426,34 @@ async fn resolve_machine_token(
     Ok(user_id)
 }
 
-/// The request time zone (`TimezoneMixin.initial`): the user's stored zone;
-/// an invalid stored zone 500s like `zoneinfo.ZoneInfo` raising.
-async fn request_timezone(pool: &PgPool, user_id: &uuid::Uuid) -> Result<chrono_tz::Tz, Denial> {
+/// The request time zone (`TimezoneMixin.initial`): the user's stored zone
+/// name, loaded but NOT parsed — parsing happens after the gate in
+/// [`activate_timezone`].
+async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
     let name: Option<Option<String>> =
         sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
             .bind(user_id)
             .fetch_optional(pool)
             .await
             .map_err(|error| db_error(error, "request-timezone"))?;
-    let name: Option<String> = name.unwrap_or(None);
-    name.as_deref()
-        .unwrap_or("UTC")
-        .parse::<chrono_tz::Tz>()
-        .map_err(|error| db_error(error, "request-timezone"))
+    Ok(name.unwrap_or(None))
+}
+
+/// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
+/// after `super().initial()`). A missing zone defaults to UTC; an unknown
+/// zone name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`,
+/// which subclasses `KeyError`, so `handle_exception` answers the
+/// `KeyError` branch (`api/views/base.py:160-164`). An EMPTY zone 500s:
+/// `ZoneInfo('')` raises `ValueError` (not `KeyError`), which falls
+/// through to the generic 500 (`api/views/base.py:166-171`).
+fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
+    match timezone {
+        None => Ok(chrono_tz::UTC),
+        Some("") => Err(Denial::ServerError),
+        Some(zone) => zone
+            .parse()
+            .map_err(|_| Denial::BadError("The required key does not exist.".to_owned())),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1355,6 +1363,10 @@ async fn retick_inner(
         V1WorkItemsRoute::IssueReTick,
     )
     .await?;
+    // `TimezoneMixin.initial` runs after the gate: survivors with an
+    // unknown stored zone 400 here (an empty zone 500s). No action
+    // response renders a zone-shifted field, so the value is discarded.
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let issue = fetch_issue(&pre.pool, slug, &project_id, pk)
         .await?
         .ok_or(Denial::NotFoundError("Work item not found".to_owned()))?;
@@ -1451,6 +1463,10 @@ async fn wait_inner(
         V1WorkItemsRoute::IssueWait,
     )
     .await?;
+    // `TimezoneMixin.initial` runs after the gate: survivors with an
+    // unknown stored zone 400 here (an empty zone 500s). No action
+    // response renders a zone-shifted field, so the value is discarded.
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let issue = fetch_issue(&pre.pool, slug, &project_id, pk)
         .await?
         .ok_or(Denial::NotFoundError("Work item not found".to_owned()))?;
@@ -1557,6 +1573,10 @@ async fn run_ai_inner(
         V1WorkItemsRoute::IssueRunAi,
     )
     .await?;
+    // `TimezoneMixin.initial` runs after the gate: survivors with an
+    // unknown stored zone 400 here (an empty zone 500s). No action
+    // response renders a zone-shifted field, so the value is discarded.
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let issue = fetch_issue(&pre.pool, slug, &project_id, pk)
         .await?
         .ok_or(Denial::NotFoundError("Work item not found".to_owned()))?;
@@ -1654,6 +1674,11 @@ async fn yield_inner(
     // `AuthOnly`: the base `IsAuthenticated` already passed, so the
     // authenticated caller reaches the handler body.
     let _ = pre.workspace_id;
+    // `TimezoneMixin.initial` runs after auth, before the view body: an
+    // unknown stored zone 400s here (an empty zone 500s), even before
+    // the body parses. No action response renders a zone-shifted field,
+    // so the value is discarded.
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let data: Value = if raw_body.is_empty() {
         Value::Object(serde_json::Map::new())
     } else {
@@ -1923,6 +1948,23 @@ mod tests {
             body,
             r#"{"id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","status":"queued","executor":"local_runner"}"#
         );
+    }
+
+    #[test]
+    fn activate_timezone_empty_zone_500s() {
+        // `ZoneInfo('')` raises `ValueError` (not `KeyError`), so an
+        // empty stored zone is the generic 500 while an unknown zone is
+        // the `KeyError`-branch 400 (PIDASHCONV-747, live-probed).
+        assert!(matches!(
+            activate_timezone(Some("")),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(
+            activate_timezone(Some("Not/AZone")),
+            Err(Denial::BadError(_))
+        ));
+        assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
+        assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
     }
 
     #[test]
