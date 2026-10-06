@@ -1029,12 +1029,27 @@ fn pre_transition_instant(timezone: &Tz, naive: &chrono::NaiveDateTime) -> DateT
 }
 
 /// Django `parse_datetime` (Django 4.2 on Python 3.12): `fromisoformat`
-/// first (strict, full consumption), then the `datetime_re` fallback.
+/// first (strict, full consumption), then the `datetime_re` fallback,
+/// then DRF's `strptime(value, 'iso-8601')` fallthrough
+/// (`to_internal_value` runs it when `parse_datetime` returns `None`).
 /// Returns the naive wall time plus the fixed UTC offset (`None` when the
 /// input carries none). `ValueError`-vs-`None` is wire-invisible (both
 /// render the `invalid` message), so both are `None` here.
 fn parse_binding_datetime(text: &str) -> Option<(chrono::NaiveDateTime, Option<chrono::Duration>)> {
-    parse_fromiso_datetime(text).or_else(|| parse_regex_datetime(text))
+    parse_fromiso_datetime(text)
+        .or_else(|| parse_regex_datetime(text))
+        .or_else(|| {
+            // `strptime` compiles the literal format with `re.IGNORECASE`,
+            // so the input `iso-8601` in any letter case yields naive
+            // 1900-01-01 (PIDASHCONV-773). Exact match: padding fails on
+            // both sides (probed). ASCII-only (765 unicode-gap family).
+            text.eq_ignore_ascii_case("iso-8601").then(|| {
+                let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+                    .and_then(|date| date.and_hms_opt(0, 0, 0))
+                    .expect("1900-01-01 valid");
+                (naive, None)
+            })
+        })
 }
 
 /// Two ASCII digits as a number.
@@ -3408,6 +3423,48 @@ mod tests {
             validate_dtstart_input(&Value::String("2024-11-03T01:30:00".to_owned()), &eastern),
             Ok(utc(2024, 11, 3, 5, 30, 0))
         );
+    }
+
+    #[test]
+    fn dtstart_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01 in the request zone (probed live both backends).
+        let utc_tz: Tz = chrono_tz::UTC;
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let (naive, offset) = parse_binding_datetime(text).expect(text);
+            assert_eq!(
+                naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "1900-01-01T00:00:00",
+                "{text:?}"
+            );
+            assert_eq!(offset, None, "{text:?}");
+            assert_eq!(
+                validate_dtstart_input(&Value::String(text.to_owned()), &utc_tz),
+                Ok(utc(1900, 1, 1, 0, 0, 0)),
+                "{text:?}"
+            );
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert!(parse_binding_datetime(text).is_none(), "{text:?}");
+            assert!(
+                validate_dtstart_input(&Value::String(text.to_owned()), &utc_tz).is_err(),
+                "{text:?}"
+            );
+        }
     }
 
     #[test]

@@ -1407,6 +1407,19 @@ fn parse_drf_datetime(text: &str, timezone: &Tz) -> Result<DateTime<Utc>, Vec<St
             break;
         }
     }
+    // DRF's `strptime(value, 'iso-8601')` fallthrough (`to_internal_value`
+    // runs it when `parse_datetime` returns `None` — PIDASHCONV-773):
+    // the literal matches case-insensitively and yields naive
+    // 1900-01-01 through the zone-attach arm below. Checked on the RAW
+    // text — Django's `strptime` sees the value before any strip, so a
+    // padded literal still fails. Exact match (probed); ASCII-only (765
+    // unicode-gap family).
+    if parsed.is_none() && text.eq_ignore_ascii_case("iso-8601") {
+        let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("1900-01-01 valid");
+        parsed = Some((naive, None));
+    }
     let (naive, offset_secs) = parsed.ok_or_else(invalid)?;
     match offset_secs {
         Some(offset) => naive
@@ -7950,6 +7963,36 @@ mod tests {
         assert_eq!(render_encoder_datetime(&ms), "2024-01-02T03:04:05.999Z");
         let one = chrono::DateTime::from_timestamp(1704164645, 1_000_000).expect("ts");
         assert_eq!(render_encoder_datetime(&one), "2024-01-02T03:04:05.001Z");
+    }
+
+    #[test]
+    fn drf_datetime_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01 in the actor zone (probed live both backends).
+        let utc: Tz = "UTC".parse().unwrap();
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let parsed = parse_drf_datetime(text, &utc).expect(text);
+            assert_eq!(parsed.to_rfc3339(), "1900-01-01T00:00:00+00:00", "{text:?}");
+        }
+        // Near-misses stay invalid (exact match on the raw text, both
+        // sides probed — padding fails even though this parser trims
+        // some padded datetimes).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert!(parse_drf_datetime(text, &utc).is_err(), "{text:?}");
+        }
     }
 
     #[test]
