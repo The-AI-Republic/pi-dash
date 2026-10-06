@@ -2689,7 +2689,7 @@ export async function serverCreateProject(
     body: JSON.stringify({ name, identifier }),
   });
   const body = (await res.json().catch(() => null)) as { id?: unknown } | null;
-  if (res.status !== 201 || !body || typeof body.id !== "string")
+  if ((res.status !== 201 && res.status !== 200) || !body || typeof body.id !== "string")
     throw new Error(`[parity] project create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
   return body.id;
 }
@@ -2759,7 +2759,7 @@ export async function serverCreateIssue(
     body: JSON.stringify(stateId ? { name, state: stateId } : { name }),
   });
   const body = (await res.json().catch(() => null)) as { id?: unknown } | null;
-  if (res.status !== 201 || !body || typeof body.id !== "string")
+  if ((res.status !== 201 && res.status !== 200) || !body || typeof body.id !== "string")
     throw new Error(`[parity] issue create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
   return body.id;
 }
@@ -7090,4 +7090,525 @@ export async function projectTimezone(session: AuthedSession, slug: string, name
   const row = rows.find((r) => r["name"] === name);
   const tz = row?.["timezone"];
   return typeof tz === "string" && tz.length > 0 ? tz : null;
+}
+
+// Issues-layouts parity helpers (NEWFRONT-117, rows ISS-001..027, ISS-060..074).
+//
+// Added additively to the NEWFRONT-19 harness (never altering the helpers
+// above). Layout scenarios drive the UI for what the user sees and read
+// back through these helpers for what the server stored: issue field
+// values after inline edits, per-user layout preferences after switching,
+// and fixture builders (states, dated issues, cycles, modules, labels,
+// archived rows) with cleanup so each scenario leaves the seeded project
+// exactly as the seed left it.
+// ---------------------------------------------------------------------------
+
+/** Subset of an issue row the layout scenarios assert on. */
+export interface LayoutsIssueDetails {
+  id: string;
+  name: string;
+  stateId: string;
+  priority: string | null;
+  targetDate: string | null;
+  startDate: string | null;
+  assigneeIds: string[];
+  labelIds: string[];
+  parentId: string | null;
+  sequenceId: number;
+  sortOrder: number;
+}
+
+/** One issue row as the server reports it. */
+export async function serverIssueDetails(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<LayoutsIssueDetails> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/`,
+    {
+      headers: { cookie: sessionCookie },
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] issue read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as {
+    id?: unknown;
+    name?: unknown;
+    state_id?: unknown;
+    state?: unknown;
+    priority?: unknown;
+    target_date?: unknown;
+    start_date?: unknown;
+    assignee_ids?: unknown;
+    label_ids?: unknown;
+    parent_id?: unknown;
+    parent?: unknown;
+    sequence_id?: unknown;
+    sort_order?: unknown;
+  };
+  if (typeof record.id !== "string" || typeof record.name !== "string") {
+    throw new Error("[parity] issue row carried no string id and name.");
+  }
+  const stateId = record.state_id ?? record.state;
+  if (typeof stateId !== "string") throw new Error("[parity] issue row carried no state id.");
+  const sequenceId = record.sequence_id;
+  if (typeof sequenceId !== "number") throw new Error("[parity] issue row carried no numeric sequence_id.");
+  const sortOrder = record.sort_order;
+  if (typeof sortOrder !== "number") throw new Error("[parity] issue row carried no numeric sort_order.");
+  return {
+    id: record.id,
+    name: record.name,
+    stateId,
+    priority: typeof record.priority === "string" ? record.priority : null,
+    targetDate: typeof record.target_date === "string" ? record.target_date : null,
+    startDate: typeof record.start_date === "string" ? record.start_date : null,
+    assigneeIds: Array.isArray(record.assignee_ids)
+      ? record.assignee_ids.filter((v): v is string => typeof v === "string")
+      : [],
+    labelIds: Array.isArray(record.label_ids) ? record.label_ids.filter((v): v is string => typeof v === "string") : [],
+    parentId:
+      typeof record.parent_id === "string"
+        ? record.parent_id
+        : typeof record.parent === "string"
+          ? record.parent
+          : null,
+    sequenceId,
+    sortOrder,
+  };
+}
+
+/** A project state row the layout scenarios assert or build on. */
+export interface LayoutsState {
+  id: string;
+  name: string;
+  group: string;
+  isDefault: boolean;
+}
+
+/** Every state of a project, in API order. */
+export async function serverListStates(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<LayoutsState[]> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/states/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] states read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const record = row as { id?: unknown; name?: unknown; group?: unknown; default?: unknown };
+    if (typeof record.id !== "string" || typeof record.name !== "string" || typeof record.group !== "string") {
+      throw new Error("[parity] state row carried no string id, name and group.");
+    }
+    return { id: record.id, name: record.name, group: record.group, isDefault: record.default === true };
+  });
+}
+
+/** Per-user layout preferences the server stores for one entity. */
+export interface LayoutsUserProperties {
+  displayFilters: Record<string, unknown>;
+  displayProperties: Record<string, unknown>;
+  richFilters?: unknown;
+}
+
+/** Read the caller's project-level layout preferences. */
+export async function serverProjectUserProperties(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<LayoutsUserProperties> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/user-properties/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] user-properties read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as {
+    display_filters?: unknown;
+    display_properties?: unknown;
+    rich_filters?: unknown;
+  };
+  const displayFilters = record.display_filters;
+  const displayProperties = record.display_properties;
+  if (typeof displayFilters !== "object" || displayFilters === null) {
+    throw new Error("[parity] user-properties carried no display_filters object.");
+  }
+  if (typeof displayProperties !== "object" || displayProperties === null) {
+    throw new Error("[parity] user-properties carried no display_properties object.");
+  }
+  return {
+    displayFilters: displayFilters as Record<string, unknown>,
+    displayProperties: displayProperties as Record<string, unknown>,
+    richFilters: record.rich_filters,
+  };
+}
+
+/**
+ * Write the caller's project-level layout preferences (scenario setup and
+ * teardown). Pass the full objects: the endpoint merges them over the
+ * stored row. `filters` carries the issue filters (empty-state scenarios
+ * match nothing through it); the seed default is all nulls.
+ */
+export async function serverPatchProjectUserProperties(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  patch: {
+    filters?: Record<string, unknown>;
+    display_filters?: Record<string, unknown>;
+    display_properties?: Record<string, unknown>;
+    rich_filters?: unknown;
+  },
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/user-properties/`, {
+    method: "PATCH",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(`[parity] user-properties patch failed with HTTP ${res.status}.`);
+}
+
+/** Seed-equivalent project preferences; scenarios restore these when done. */
+export function seedProjectUserProperties(): {
+  display_filters: Record<string, unknown>;
+  display_properties: Record<string, unknown>;
+} {
+  return {
+    display_filters: { layout: "list", group_by: null, order_by: "sort_order" },
+    display_properties: {},
+  };
+}
+
+/** Restore one archived issue; throws unless the server accepts. */
+export async function serverRestoreIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/archive/`,
+    { method: "DELETE", headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok && res.status !== 204) throw new Error(`[parity] issue restore failed with HTTP ${res.status}.`);
+}
+
+/** Archived issues of a project, in API order. */
+export async function serverArchivedIssues(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; name: string }[]> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/archived-issues/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] archived-issues read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const record = row as { id?: unknown; name?: unknown };
+    if (typeof record.id !== "string" || typeof record.name !== "string") {
+      throw new Error("[parity] archived row carried no string id and name.");
+    }
+    return { id: record.id, name: record.name };
+  });
+}
+
+/** Move one issue to another project; throws unless the server accepts. */
+export async function serverMoveIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  targetProjectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/work-items/${issueId}/move/`,
+    {
+      method: "POST",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify({ project: targetProjectId }),
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] issue move failed with HTTP ${res.status}.`);
+}
+
+/** Attach issues to a cycle; throws unless the server accepts. */
+export async function serverAddIssuesToCycle(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  issueIds: string[],
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/cycle-issues/`,
+    {
+      method: "POST",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify({ issues: issueIds }),
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle-issues add failed with HTTP ${res.status}.`);
+}
+
+/**
+ * Browser cookies from a `signInSession` header, for `openAuthenticated`.
+ * Layout specs authenticate this way instead of driving the sign-in card:
+ * the card belongs to the auth rows, and skipping it keeps each scenario
+ * focused on its own area while staying immune to card-load flakiness.
+ */
+export function sessionBrowserCookies(sessionCookie: string): BrowserCookie[] {
+  const jar = cookieJar(sessionCookie.split(";").map((pair) => pair.trim()));
+  const sessionId = jar.get("session-id");
+  if (sessionId === undefined) throw new Error("[parity] session cookie carried no session-id.");
+  const domain = oracleHostFromEnv();
+  const cookies: BrowserCookie[] = [
+    { name: "session-id", value: sessionId, domain, path: "/", httpOnly: true, sameSite: "Lax" },
+  ];
+  const csrf = jar.get("csrftoken");
+  if (csrf !== undefined) {
+    cookies.push({ name: "csrftoken", value: csrf, domain, path: "/", httpOnly: true, sameSite: "Lax" });
+  }
+  return cookies;
+}
+
+/** Resolve a workspace member's user id by email; throws when absent. */
+export async function serverWorkspaceUserId(
+  workspaceSlug: string,
+  email: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  // The members read occasionally answers a partial page under host
+  // contention, so a miss retries instead of failing the scenario.
+  let lastCount = 0;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/members/`, {
+      headers: { cookie: sessionCookie },
+    });
+    if (!res.ok) throw new Error(`[parity] workspace members read failed with HTTP ${res.status}.`);
+    const payload: unknown = await res.json();
+    const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+    lastCount = rows.length;
+    for (const row of rows) {
+      // Rows nest the user record: { id: <membership>, member: { id: <user>, email } }.
+      const record = row as { member?: unknown };
+      const member =
+        typeof record.member === "object" && record.member !== null
+          ? (record.member as { id?: unknown; email?: unknown })
+          : null;
+      if (member?.email === email && typeof member.id === "string") return member.id;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  throw new Error(`[parity] no workspace member carries email ${email} (saw ${lastCount} rows).`);
+}
+
+/** Attach issues to a module; throws unless the server accepts. */
+export async function serverAddIssuesToModule(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  issueIds: string[],
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  // Add issues through .../modules/{id}/issues/ (the module service's
+  // route); .../module-issues/ is the list/detail route and 404s a POST.
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/issues/`,
+    {
+      method: "POST",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify({ issues: issueIds }),
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] module-issues add failed with HTTP ${res.status}.`);
+}
+
+/** Project feature flags the layout scenarios assert or toggle (ISS-016). */
+export interface LayoutsProjectDetails {
+  id: string;
+  name: string;
+  cycleView: boolean;
+  moduleView: boolean;
+  identifier: string;
+}
+
+/** One project's detail row: flags the column specs toggle and restore. */
+export async function serverProjectDetails(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<LayoutsProjectDetails> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as {
+    id?: unknown;
+    name?: unknown;
+    cycle_view?: unknown;
+    module_view?: unknown;
+    identifier?: unknown;
+  };
+  if (typeof record.id !== "string" || typeof record.name !== "string") {
+    throw new Error("[parity] project row missed id or name.");
+  }
+  return {
+    id: record.id,
+    name: record.name,
+    cycleView: record.cycle_view === true,
+    moduleView: record.module_view === true,
+    identifier: typeof record.identifier === "string" ? record.identifier : "",
+  };
+}
+
+/** Issue ids currently attached to a cycle (bridge list, shape-tolerant). */
+export async function serverCycleIssueIds(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string[]> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/cycle-issues/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle-issues read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const ids: string[] = [];
+  for (const row of rows) {
+    const r = row as { id?: unknown; issue?: unknown };
+    if (typeof r.id === "string") ids.push(r.id);
+    else if (typeof r.issue === "string") ids.push(r.issue);
+    else if (r.issue !== null && typeof r.issue === "object" && typeof (r.issue as { id?: unknown }).id === "string") {
+      ids.push((r.issue as { id: string }).id);
+    }
+  }
+  return ids;
+}
+
+/** Issue ids currently attached to a module (shape-tolerant). */
+export async function serverModuleIssueIds(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string[]> {
+  // The /api/ tree serves the module's issues at .../issues/ (GET);
+  // module-issues/ lives only under /api/v1/ and 404s here.
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/issues/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] module-issues read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const ids: string[] = [];
+  for (const row of rows) {
+    const r = row as { id?: unknown; issue?: unknown };
+    if (typeof r.id === "string") ids.push(r.id);
+    else if (typeof r.issue === "string") ids.push(r.issue);
+    else if (r.issue !== null && typeof r.issue === "object" && typeof (r.issue as { id?: unknown }).id === "string") {
+      ids.push((r.issue as { id: string }).id);
+    }
+  }
+  return ids;
+}
+
+/** Delete a saved project view; throws unless the server accepts. */
+export async function serverDeleteView(
+  workspaceSlug: string,
+  projectId: string,
+  viewId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/${viewId}/`, {
+    method: "DELETE",
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status !== 200 && res.status !== 204) {
+    throw new Error(`[parity] view delete failed with HTTP ${res.status}.`);
+  }
+}
+
+/** Seed-equivalent issue filters (all nulls); empty-state scenarios restore these. */
+export function seedIssueFilters(): Record<string, unknown> {
+  return {
+    priority: null,
+    state: null,
+    state_group: null,
+    assignees: null,
+    created_by: null,
+    labels: null,
+    start_date: null,
+    target_date: null,
+    subscriber: null,
+  };
+}
+
+/** Write the caller's cycle-level preferences (filters/display shape as project). */
+export async function serverPatchCycleUserProperties(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  patch: {
+    filters?: Record<string, unknown>;
+    display_filters?: Record<string, unknown>;
+    display_properties?: Record<string, unknown>;
+    rich_filters?: unknown;
+  },
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/user-properties/`,
+    {
+      method: "PATCH",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle user-properties patch failed with HTTP ${res.status}.`);
+}
+
+/** Write the caller's module-level preferences (filters/display shape as project). */
+export async function serverPatchModuleUserProperties(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  patch: {
+    filters?: Record<string, unknown>;
+    display_filters?: Record<string, unknown>;
+    display_properties?: Record<string, unknown>;
+    rich_filters?: unknown;
+  },
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/user-properties/`,
+    {
+      method: "PATCH",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] module user-properties patch failed with HTTP ${res.status}.`);
 }
