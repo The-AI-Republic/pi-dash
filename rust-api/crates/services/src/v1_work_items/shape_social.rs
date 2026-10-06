@@ -308,7 +308,7 @@ fn py_str(value: &Value) -> String {
         Value::Object(obj) => {
             let inner: Vec<String> = obj
                 .iter()
-                .map(|(key, item)| format!("{}: {}", py_repr_str(key), py_str(item)))
+                .map(|(key, item)| format!("{}: {}", py_repr_str(key), py_repr(item)))
                 .collect();
             format!("{{{}}}", inner.join(", "))
         }
@@ -2480,6 +2480,12 @@ mod tests {
                 r#"{"access":["\"{'a': 1}\" is not a valid choice."]}"#,
             ),
             (
+                // Dict string values stay quoted (PIDASHCONV-769).
+                "access",
+                serde_json::json!({"a": "b"}),
+                r#"{"access":["\"{'a': 'b'}\" is not a valid choice."]}"#,
+            ),
+            (
                 "access",
                 serde_json::json!(["x"]),
                 r#"{"access":["\"['x']\" is not a valid choice."]}"#,
@@ -2787,6 +2793,8 @@ mod tests {
     fn py_str_shapes() {
         // Container `str()` spellings used by `invalid_choice` messages.
         assert_eq!(py_str(&serde_json::json!({"a": 1})), "{'a': 1}");
+        // Dict values render with `repr()` (PIDASHCONV-769): strings quoted.
+        assert_eq!(py_str(&serde_json::json!({"a": "b"})), "{'a': 'b'}");
         assert_eq!(
             py_str(&serde_json::json!({"a": [1, true, null, "x'y"]})),
             r#"{'a': [1, True, None, "x'y"]}"#
