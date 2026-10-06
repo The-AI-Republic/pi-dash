@@ -47,6 +47,36 @@ const BUNDLE_ORIGIN: &str = "http://tauri.localhost";
 #[cfg(not(windows))]
 const BUNDLE_ORIGIN: &str = "tauri://localhost";
 
+/// API base `dev-prep.sh` bakes into the SPA when `VITE_API_BASE_URL` is
+/// unset. Must stay equal to the script's `API_BASE` default.
+const DEV_API_BASE: &str = "http://localhost:8000";
+
+/// API origin the native transport allowlists and advertises to the SPA as
+/// `__PIDASH_NATIVE_HTTP__`. It has to be the origin the SPA was built
+/// against: a request to any other origin leaves the native transport for
+/// the webview's own, which sends no API cookies.
+///
+/// `vite_api_base` is the build-time `VITE_API_BASE_URL`. Unset, a
+/// bundled-dev build follows `dev-prep.sh` and assumes a local API whatever
+/// `PI_DASH_URL` (the sign-in target) says; hot-reload has no baked SPA and
+/// keeps following the target. Release builds always have it set (build.rs
+/// refuses otherwise).
+fn api_base_for<'a>(vite_api_base: Option<&'a str>, target: &'a str, bundled_dev: bool) -> &'a str {
+    match vite_api_base {
+        Some(v) if !v.is_empty() => v,
+        _ if bundled_dev => DEV_API_BASE,
+        _ => target,
+    }
+}
+
+/// The API base recorded in `dist/bake-info.txt`, when the binary resolved a
+/// different origin than the bundled SPA was built against.
+fn baked_api_base_mismatch<'a>(baked: Option<&'a str>, api_url: &Url) -> Option<&'a str> {
+    let baked = baked?;
+    let baked_url = Url::parse(baked).ok()?;
+    (baked_url.origin() != api_url.origin()).then_some(baked)
+}
+
 /// Bundle URL for an in-app path: same path and query, bundle origin.
 /// Tauri's asset resolver falls back to `index.html` for any path that
 /// isn't a file in `dist/`, so React Router boots the right route from a
@@ -279,7 +309,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = if hot_reload { "hot-reload" } else { "bundled" };
     eprintln!("Pi Dash: mode={mode} server target {target_url_str} (oss-sha {oss_sha})");
     let target_url = Url::parse(target_url_str)?;
-    let api_url = Url::parse(option_env!("VITE_API_BASE_URL").unwrap_or(target_url_str))?;
+    let api_url = Url::parse(api_base_for(
+        option_env!("VITE_API_BASE_URL"),
+        target_url_str,
+        cfg!(debug_assertions) && !hot_reload,
+    ))?;
+    // PIDASH_BAKED_API_BASE is emitted by build.rs from dist/bake-info.txt.
+    // A mismatch (a reused dist/, or VITE_API_BASE_URL changed after the SPA
+    // was built) otherwise shows up only as unexplained 401s.
+    if !hot_reload
+        && let Some(baked) = baked_api_base_mismatch(option_env!("PIDASH_BAKED_API_BASE"), &api_url)
+    {
+        eprintln!(
+            "Pi Dash: WARNING the bundled SPA was built against API base {baked} but this \
+             binary's native transport serves {} — API requests will bypass it and go out \
+             without session cookies (401s). Rebuild both with the same VITE_API_BASE_URL \
+             (PI_DASH_URL only sets the sign-in target).",
+            api_url.origin().ascii_serialization()
+        );
+    }
     let desktop_http = desktop_http::DesktopHttp::new(api_url)?;
     let initial_webview = if hot_reload {
         WebviewUrl::External(target_url.clone())
@@ -602,6 +650,34 @@ mod tests {
         assert!(!is_msix_install(Path::new(
             "/opt/WindowsAppsBackup/pi-dash-desktop"
         )));
+    }
+
+    #[test]
+    fn bundled_dev_api_base_matches_the_origin_dev_prep_bakes() {
+        // dev-prep.sh bakes this default into the SPA when VITE_API_BASE_URL
+        // is unset, whatever PI_DASH_URL says; the two must not drift apart.
+        assert!(
+            include_str!("../../scripts/dev-prep.sh")
+                .contains(&format!("API_BASE=\"${{VITE_API_BASE_URL:-{DEV_API_BASE}}}\"")),
+            "dev-prep.sh no longer defaults API_BASE to {DEV_API_BASE}"
+        );
+        let target = "https://pidash.example.com";
+        assert_eq!(api_base_for(None, target, true), DEV_API_BASE);
+        assert_eq!(api_base_for(Some(""), target, true), DEV_API_BASE);
+        assert_eq!(api_base_for(Some("https://api.example.com"), target, true), "https://api.example.com");
+        // Hot-reload and release keep following the server target.
+        assert_eq!(api_base_for(None, target, false), target);
+    }
+
+    #[test]
+    fn baked_api_base_mismatch_compares_origins() {
+        let api = Url::parse("http://localhost:8000").unwrap();
+        assert_eq!(baked_api_base_mismatch(None, &api), None);
+        assert_eq!(baked_api_base_mismatch(Some("http://localhost:8000/"), &api), None);
+        assert_eq!(
+            baked_api_base_mismatch(Some("https://pidash.example.com"), &api),
+            Some("https://pidash.example.com")
+        );
     }
 
     fn server() -> Url {

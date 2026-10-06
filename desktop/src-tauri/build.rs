@@ -37,6 +37,16 @@ fn main() {
         if dist_valid { "1" } else { "0" }
     );
 
+    // Hand main.rs the API base dev-prep.sh recorded for this dist/, so it
+    // can warn at startup when the binary resolves a different one. Absent
+    // for a hand-managed dist/ without the sidecar.
+    if let Ok(info) = std::fs::read_to_string("dist/bake-info.txt") {
+        println!("cargo:rerun-if-changed=dist/bake-info.txt");
+        if let Some(api_base) = info.lines().find_map(|l| l.strip_prefix("api_base=")) {
+            println!("cargo:rustc-env=PIDASH_BAKED_API_BASE={api_base}");
+        }
+    }
+
     // Release builds load UI from desktop/src-tauri/dist/ via
     // WebviewUrl::App. The repo ships an 118-byte placeholder index.html
     // (so Tauri's frontendDist config target exists at compile time); a
