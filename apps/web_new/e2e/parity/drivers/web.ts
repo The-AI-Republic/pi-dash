@@ -12599,22 +12599,55 @@ export class WebDriver implements ParityDriver {
           .catch(() => undefined);
       }
     };
+    // Fingerprint of the rendered board; equal readings on consecutive polls
+    // mean the board is calm. Reads degrade to partial on churn (never
+    // throw): a churning board must quiet the loop, not fail it. The race
+    // bounds the whole read: locator waits below inherit long timeouts, and
+    // one hanging read must never starve the modal check above.
+    const fingerprint = async (): Promise<string> => {
+      const read = (async () => {
+        const columns = await this.kanbanColumns().catch(() => []);
+        const cards = await this.kanbanCards().catch(() => []);
+        return JSON.stringify({
+          columns: columns.map((entry) => [entry.name, entry.count]),
+          cards: cards.length,
+        });
+      })();
+      const timedOut = new Promise<string>((resolve) => {
+        setTimeout(() => resolve(`timeout-${Date.now()}`), 15_000);
+      });
+      return Promise.race([read, timedOut]);
+    };
     await clickEntry();
     // Re-click while nothing opened: a click that lands mid-hydration can be
-    // swallowed, and a board re-render can close the menu under us. Clicks
-    // are spaced so an open-but-undetected menu is never toggled shut.
+    // swallowed, and a board re-render can close the menu under us. Re-clicks
+    // only fire on a calm board: clicking into churn risks mis-clicks that
+    // open stray popups and keep the board churning under us. The loop never
+    // re-resolves the column: the menu locator is page-global, and a re-render
+    // between the click and the modal/menu paint would make a re-lookup
+    // throw spuriously.
     const deadline = Date.now() + WebDriver.BOARD_FIRST_WAIT_MS;
+    const menuItems = this.boardHeaderMenuItems();
     let lastClick = Date.now();
+    let lastFingerprint = "";
     for (;;) {
       if (await this.kanbanCreateModalVisible()) return;
-      const { items } = await this.boardHeaderMenuScope(columnName);
-      if ((await items.count()) > 0) return;
-      const headerText = await header.innerText().catch(() => "");
+      if ((await menuItems.count()) > 0) return;
+      // Bounded explicitly: locator waits inherit long timeouts, and the
+      // columns can vanish for minutes (a silent board unmount observed
+      // after the click) — one hanging read must never starve this loop.
+      const headerText = await header.innerText({ timeout: 10_000 }).catch(() => "");
       if (headerText.includes("Add an existing work item")) return;
       if (Date.now() > deadline) throw new Error("[parity] header create opened neither a modal nor a menu.");
-      if (Date.now() - lastClick > 4_000) {
+      const current = await fingerprint();
+      const calm = lastFingerprint !== "" && current === lastFingerprint;
+      lastFingerprint = current;
+      if (calm && Date.now() - lastClick > 4_000) {
+        // No Escape here: an open-but-slowly-painting modal must never be
+        // dismissed by its own waiter; a re-click suffices.
         await clickEntry();
         lastClick = Date.now();
+        lastFingerprint = "";
       }
       await this.page.waitForTimeout(500);
     }
@@ -12622,18 +12655,32 @@ export class WebDriver implements ParityDriver {
 
   async kanbanCreateModalVisible(): Promise<boolean> {
     // The modal title is the stable signal; the assignee placeholder covers
-    // variants that render the picker before the title paints.
+    // variants that render the picker before the title paints. Any visible
+    // title counts: the app can stage a hidden twin of the dialog whose
+    // text matches first in document order.
     const title = this.page.getByText("Create new work item", { exact: true });
-    if ((await title.count()) > 0 && (await title.first().isVisible())) return true;
+    const titleCount = await title.count();
+    for (let index = 0; index < titleCount; index += 1) {
+      if (await title.nth(index).isVisible()) return true;
+    }
     const field = this.page.getByPlaceholder("Assignees");
-    if ((await field.count()) === 0) return false;
-    return await field.first().isVisible();
+    const fieldCount = await field.count();
+    for (let index = 0; index < fieldCount; index += 1) {
+      if (await field.nth(index).isVisible()) return true;
+    }
+    return false;
+  }
+
+  private boardHeaderMenuItems(): Locator {
+    // Page-global: the header menu portals outside the column, so waiters
+    // use this directly instead of re-resolving the column mid-paint.
+    return this.page.locator('[role="menu"] [role="menuitem"], [role="menu"] button');
   }
 
   private async boardHeaderMenuScope(columnName: string): Promise<{ header: Locator; items: Locator }> {
     const outer = await this.boardFlatColumnOuterByName(columnName);
     const header = outer.locator(":scope > div.sticky").first();
-    return { header, items: this.page.locator('[role="menu"] [role="menuitem"], [role="menu"] button') };
+    return { header, items: this.boardHeaderMenuItems() };
   }
 
   async kanbanHeaderMenuItems(columnName: string): Promise<string[]> {
