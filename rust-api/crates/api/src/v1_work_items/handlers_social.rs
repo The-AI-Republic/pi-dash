@@ -97,7 +97,7 @@ use std::collections::HashMap;
 use axum::extract::{OriginalUri, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
@@ -2176,6 +2176,17 @@ fn validate_link_patch(
                     "deleted_at".to_owned(),
                     format!("Invalid datetime for the timezone \"{tz}\"."),
                 )),
+                Err(ParseDatetimeError::Overflow) => errors.push((
+                    "deleted_at".to_owned(),
+                    "Datetime value out of range.".to_owned(),
+                )),
+                // Unreachable: the serializer path converts aware values to
+                // UTC before Postgres ever sees an offset.
+                Err(ParseDatetimeError::Unstorable) => errors.push((
+                    "deleted_at".to_owned(),
+                    "Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z]."
+                        .to_owned(),
+                )),
             }
         } else {
             errors.push((
@@ -2274,76 +2285,556 @@ fn field_errors_body(errors: &[(String, String)]) -> String {
     serde_json::to_string(&map).expect("error body")
 }
 
-/// Django `parse_datetime` (`django/utils/dateparse.py`) over the default
-/// `DATETIME_INPUT_FORMATS` (`iso-8601`): date-only, `T`/space separator,
-/// optional seconds/fraction, `Z`/offset. Naive values attach the request
-/// time zone (`enforce_timezone` under `USE_TZ`); aware values convert to
-/// UTC. Returns the instant.
+/// Django `parse_datetime` (`django/utils/dateparse.py`, Django 4.2.30) over
+/// the default `DATETIME_INPUT_FORMATS` (`iso-8601`): CPython 3.12
+/// `datetime.fromisoformat` first, the `datetime_re` fallback second.
+/// Naive values attach the request time zone (`enforce_timezone` under
+/// `USE_TZ`); aware values convert to UTC, and values the conversion pushes
+/// outside years `0001..9999` take the `overflow` arm. Returns the instant.
 #[derive(Debug, PartialEq, Eq)]
 enum ParseDatetimeError {
     Invalid,
     Nonexistent,
+    /// DRF `enforce_timezone`: `astimezone` overflow → `Datetime value out
+    /// of range.` Serializer path only.
+    Overflow,
+    /// Postgres rejects the offset (fractional seconds, or `|offset| ≥ 16h`)
+    /// with a `DataError` 500; the model path passes offsets through
+    /// untouched. Model path only.
+    Unstorable,
+}
+
+/// A parsed UTC offset with the sign applied to both parts. CPython drops
+/// a tz fraction when the whole part is zero, so `micros` is zero whenever
+/// `seconds` is zero.
+struct ParsedOffset {
+    seconds: i64,
+    micros: i64,
+}
+
+impl ParsedOffset {
+    fn total_micros(&self) -> i64 {
+        self.seconds * 1_000_000 + self.micros
+    }
+}
+
+/// Python `re` `\s` (unicode): Rust's `White_Space` plus U+001C-U+001F.
+fn is_py_space(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+/// Exactly two ASCII digits at `i`.
+fn two_digits(b: &[u8], i: usize) -> Option<u32> {
+    if i + 2 <= b.len() && b[i].is_ascii_digit() && b[i + 1].is_ascii_digit() {
+        Some(u32::from(b[i] - b'0') * 10 + u32::from(b[i + 1] - b'0'))
+    } else {
+        None
+    }
+}
+
+fn is_two_digits(b: &[u8], i: usize) -> bool {
+    two_digits(b, i).is_some()
+}
+
+/// One or two ASCII digits at `i`, plus the next index.
+fn one_two_digits(b: &[u8], i: usize) -> Option<(u32, usize)> {
+    if i < b.len() && b[i].is_ascii_digit() {
+        let mut value = u32::from(b[i] - b'0');
+        let mut j = i + 1;
+        if j < b.len() && b[j].is_ascii_digit() {
+            value = value * 10 + u32::from(b[j] - b'0');
+            j += 1;
+        }
+        Some((value, j))
+    } else {
+        None
+    }
+}
+
+/// Fraction digits (any length) as microseconds: first six, right-padded.
+fn frac_value(digits: &[u8]) -> u32 {
+    let mut value: u32 = 0;
+    for (n, d) in digits.iter().take(6).enumerate() {
+        value += u32::from(d - b'0') * 10_u32.pow(5 - n as u32);
+    }
+    value
+}
+
+/// Four-digit year `0001..9999` at the start.
+fn parse_iso_year(b: &[u8]) -> Option<i32> {
+    if b.len() < 4 || !b[0..4].iter().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let year = i32::from(b[0] - b'0') * 1000
+        + i32::from(b[1] - b'0') * 100
+        + i32::from(b[2] - b'0') * 10
+        + i32::from(b[3] - b'0');
+    if year < 1 {
+        None
+    } else {
+        Some(year)
+    }
+}
+
+/// Week dates resolving outside years `0001..9999` are rejected; a missing
+/// day is Monday.
+fn resolve_iso_week(year: i32, week: u32, day: Option<u32>) -> Option<NaiveDate> {
+    let day = day.unwrap_or(1);
+    if !(1..=7).contains(&day) {
+        return None;
+    }
+    let weekday = Weekday::try_from((day - 1) as u8).ok()?;
+    let date = NaiveDate::from_isoywd_opt(year, week, weekday)?;
+    if date.year() < 1 || date.year() > 9999 {
+        return None;
+    }
+    Some(date)
+}
+
+/// After a date: end of input is midnight, else one separator char of any
+/// kind, then the time and optional zone.
+fn parse_rest_after_date(
+    text: &str,
+    b: &[u8],
+    date: NaiveDate,
+    mut i: usize,
+) -> Option<(NaiveDateTime, Option<ParsedOffset>)> {
+    if i == b.len() {
+        return Some((date.and_hms_opt(0, 0, 0)?, None));
+    }
+    let sep = text[i..].chars().next()?;
+    i += sep.len_utf8();
+    let (time, j) = parse_iso_time(b, text, i)?;
+    let naive = NaiveDateTime::new(date, time);
+    if j == b.len() {
+        return Some((naive, None));
+    }
+    let (offset, k) = parse_iso_tz(b, j)?;
+    if k != b.len() {
+        return None;
+    }
+    Some((naive, Some(offset)))
+}
+
+/// `HH[MM[SS]]` / `HH:MM[:SS]` (all two-digit, ranges checked) plus the
+/// optional fraction: one ASCII separator char (never a tz starter), then
+/// any number of ASCII digits. Digits need `[.,]` — or `:` after extended
+/// seconds; any other separator must be empty with a tz after it
+/// (`HH:`/`HH:MM:`/`HHMM:`/`HHMMSS:` all take `+tz`). A `:` not followed by
+/// two digits is that separator, not a component colon. Basic seconds
+/// instead take a 2+ digit run itself as the fraction, separator-less.
+/// Returns the time and how far the time scan ran (end of input or a tz
+/// starter).
+fn parse_iso_time(b: &[u8], text: &str, i: usize) -> Option<(NaiveTime, usize)> {
+    let hh = two_digits(b, i)?;
+    if hh > 23 {
+        return None;
+    }
+    let mut j = i + 2;
+    let (mm, ss, basic, has_ss, allow_colon_frac) =
+        if b.get(j) == Some(&b':') && is_two_digits(b, j + 1) {
+            let mm = two_digits(b, j + 1)?;
+            if mm > 59 {
+                return None;
+            }
+            j += 3;
+            if b.get(j) == Some(&b':') && is_two_digits(b, j + 1) {
+                let ss = two_digits(b, j + 1)?;
+                if ss > 59 {
+                    return None;
+                }
+                j += 3;
+                (mm, ss, false, true, true)
+            } else {
+                // Extended minutes with basic seconds is not a form; a lone
+                // `:` is the fraction separator below.
+                if is_two_digits(b, j) {
+                    return None;
+                }
+                (mm, 0, false, false, false)
+            }
+        } else if b.get(j) == Some(&b':') {
+            // Hour-only `HH:` — the colon is the fraction separator below.
+            (0, 0, false, false, false)
+        } else {
+            let mut mm = 0;
+            let mut ss = 0;
+            let mut has_ss = false;
+            if let Some(v) = two_digits(b, j) {
+                if v > 59 {
+                    return None;
+                }
+                mm = v;
+                j += 2;
+                if let Some(v) = two_digits(b, j) {
+                    if v > 59 {
+                        return None;
+                    }
+                    ss = v;
+                    j += 2;
+                    has_ss = true;
+                }
+            }
+            (mm, ss, true, has_ss, false)
+        };
+    // A 2+ digit run is only a fraction after basic seconds (the run
+    // itself, no separator); anywhere else digits cannot start one.
+    let run = digit_run_len(b, j);
+    if run >= 2 {
+        if !(basic && has_ss) {
+            return None;
+        }
+        let micros = frac_value(&b[j..j + run]);
+        let k = end_or_tz(text, b, j + run)?;
+        let time = NaiveTime::from_hms_micro_opt(hh, mm, ss, micros)?;
+        return Some((time, k));
+    }
+    let (micros, k) = parse_time_frac(text, b, j, allow_colon_frac)?;
+    let time = NaiveTime::from_hms_micro_opt(hh, mm, ss, micros)?;
+    Some((time, k))
+}
+
+/// Length of the ASCII digit run at `j`.
+fn digit_run_len(b: &[u8], j: usize) -> usize {
+    let mut k = j;
+    while k < b.len() && b[k].is_ascii_digit() {
+        k += 1;
+    }
+    k - j
+}
+
+/// End of input or a tz starter at `k` (the fraction before it may be
+/// empty); anything else fails the arm.
+fn end_or_tz(text: &str, b: &[u8], k: usize) -> Option<usize> {
+    if k == b.len() {
+        return Some(k);
+    }
+    match text[k..].chars().next() {
+        Some(c) if c == 'Z' || c == '+' || c == '-' => Some(k),
+        _ => None,
+    }
+}
+
+fn parse_time_frac(text: &str, b: &[u8], j: usize, allow_colon: bool) -> Option<(u32, usize)> {
+    let Some(ch) = text[j..].chars().next() else {
+        return Some((0, j));
+    };
+    if ch == 'Z' || ch == '+' || ch == '-' {
+        return Some((0, j));
+    }
+    if !ch.is_ascii() {
+        return None;
+    }
+    let mut k = j + ch.len_utf8();
+    let start = k;
+    while k < b.len() && b[k].is_ascii_digit() {
+        k += 1;
+    }
+    if k != start && ch != '.' && ch != ',' && !(ch == ':' && allow_colon) {
+        return None;
+    }
+    if k == b.len() {
+        if k == start {
+            return None;
+        }
+        return Some((frac_value(&b[start..k]), k));
+    }
+    match text[k..].chars().next() {
+        Some(c) if c == 'Z' || c == '+' || c == '-' => Some((frac_value(&b[start..k]), k)),
+        _ => None,
+    }
+}
+
+/// `Z` or `±HH[MM[SS]]` / `±HH:MM[:SS]` (two-digit components, no range
+/// check beyond the 24h total) plus an optional `[.,:]` fraction of any
+/// length. Returns the offset and how far the tz scan ran.
+fn parse_iso_tz(b: &[u8], j: usize) -> Option<(ParsedOffset, usize)> {
+    if b.get(j) == Some(&b'Z') {
+        return Some((
+            ParsedOffset {
+                seconds: 0,
+                micros: 0,
+            },
+            j + 1,
+        ));
+    }
+    let sign = match b.get(j) {
+        Some(b'+') => 1,
+        Some(b'-') => -1,
+        _ => return None,
+    };
+    let hh = i64::from(two_digits(b, j + 1)?);
+    let mut k = j + 3;
+    let (mm, ss) = if b.get(k) == Some(&b':') {
+        let mm = i64::from(two_digits(b, k + 1)?);
+        k += 3;
+        if b.get(k) == Some(&b':') {
+            let ss = i64::from(two_digits(b, k + 1)?);
+            k += 3;
+            (mm, ss)
+        } else {
+            if is_two_digits(b, k) {
+                return None;
+            }
+            (mm, 0)
+        }
+    } else {
+        let mut mm = 0;
+        let mut ss = 0;
+        if let Some(v) = two_digits(b, k) {
+            mm = i64::from(v);
+            k += 2;
+            if let Some(v) = two_digits(b, k) {
+                ss = i64::from(v);
+                k += 2;
+            }
+        }
+        if b.get(k) == Some(&b':') {
+            return None;
+        }
+        (mm, ss)
+    };
+    let mut frac_us: i64 = 0;
+    if k < b.len() && matches!(b[k], b'.' | b',' | b':') {
+        let start = k + 1;
+        let mut e = start;
+        while e < b.len() && b[e].is_ascii_digit() {
+            e += 1;
+        }
+        if e == start {
+            return None;
+        }
+        frac_us = i64::from(frac_value(&b[start..e]));
+        k = e;
+    }
+    let whole = hh * 3600 + mm * 60 + ss;
+    if whole >= 86400 {
+        return None;
+    }
+    if whole == 0 {
+        Some((
+            ParsedOffset {
+                seconds: 0,
+                micros: 0,
+            },
+            k,
+        ))
+    } else {
+        Some((
+            ParsedOffset {
+                seconds: sign * whole,
+                micros: sign * frac_us,
+            },
+            k,
+        ))
+    }
+}
+
+/// CPython `datetime.fromisoformat` (3.12): ASCII dates (calendar or week,
+/// extended or basic), one separator char of any kind, ASCII times
+/// (extended or basic, fractions welcome), ASCII zones.
+fn parse_fromisoformat_arm(text: &str) -> Option<(NaiveDateTime, Option<ParsedOffset>)> {
+    let b = text.as_bytes();
+    let year = parse_iso_year(b)?;
+    match b.get(4).copied() {
+        // Extended week `YYYY-Www`: `-D` counts when no digit follows it.
+        Some(b'-') if b.get(5) == Some(&b'W') => {
+            if b.len() < 8 || !b[6].is_ascii_digit() || !b[7].is_ascii_digit() {
+                return None;
+            }
+            let week = u32::from(b[6] - b'0') * 10 + u32::from(b[7] - b'0');
+            let (day, i) = if b.get(8) == Some(&b'-')
+                && b.get(9).is_some_and(|c| c.is_ascii_digit())
+                && !b.get(10).is_some_and(|c| c.is_ascii_digit())
+            {
+                (Some(u32::from(b[9] - b'0')), 10)
+            } else {
+                (None, 8)
+            };
+            let date = resolve_iso_week(year, week, day)?;
+            parse_rest_after_date(text, b, date, i)
+        }
+        // Extended calendar `YYYY-MM-DD` (fixed length).
+        Some(b'-') => {
+            if b.len() < 10
+                || !b[5].is_ascii_digit()
+                || !b[6].is_ascii_digit()
+                || b[7] != b'-'
+                || !b[8].is_ascii_digit()
+                || !b[9].is_ascii_digit()
+            {
+                return None;
+            }
+            let month = u32::from(b[5] - b'0') * 10 + u32::from(b[6] - b'0');
+            let day = u32::from(b[8] - b'0') * 10 + u32::from(b[9] - b'0');
+            let date = NaiveDate::from_ymd_opt(year, month, day)?;
+            parse_rest_after_date(text, b, date, 10)
+        }
+        // Basic week `YYYYWww[D]`: the day split goes first, Monday on
+        // any failure (a digit separator reads either way).
+        Some(b'W') => {
+            if b.len() < 7 || !b[5].is_ascii_digit() || !b[6].is_ascii_digit() {
+                return None;
+            }
+            let week = u32::from(b[5] - b'0') * 10 + u32::from(b[6] - b'0');
+            if b.get(7).is_some_and(|c| c.is_ascii_digit()) {
+                let day = u32::from(b[7] - b'0');
+                if let Some(date) = resolve_iso_week(year, week, Some(day)) {
+                    if let Some(parsed) = parse_rest_after_date(text, b, date, 8) {
+                        return Some(parsed);
+                    }
+                }
+            }
+            let date = resolve_iso_week(year, week, None)?;
+            parse_rest_after_date(text, b, date, 7)
+        }
+        // Basic calendar `YYYYMMDD`, not followed by a digit.
+        Some(c) if c.is_ascii_digit() => {
+            if b.len() < 8 || !b[4..8].iter().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            if b.len() > 8 && b[8].is_ascii_digit() {
+                return None;
+            }
+            let month = u32::from(b[4] - b'0') * 10 + u32::from(b[5] - b'0');
+            let day = u32::from(b[6] - b'0') * 10 + u32::from(b[7] - b'0');
+            let date = NaiveDate::from_ymd_opt(year, month, day)?;
+            parse_rest_after_date(text, b, date, 8)
+        }
+        _ => None,
+    }
+}
+
+/// `YYYY-M-D` (1-2 digit month/day, ASCII) plus the next index.
+fn parse_dashed_date(b: &[u8]) -> Option<(i32, u32, u32, usize)> {
+    if b.len() < 8 || !b[0..4].iter().all(|c| c.is_ascii_digit()) || b[4] != b'-' {
+        return None;
+    }
+    let year = i32::from(b[0] - b'0') * 1000
+        + i32::from(b[1] - b'0') * 100
+        + i32::from(b[2] - b'0') * 10
+        + i32::from(b[3] - b'0');
+    if year < 1 {
+        return None;
+    }
+    let (month, i) = one_two_digits(b, 5)?;
+    if b.get(i) != Some(&b'-') {
+        return None;
+    }
+    let (day, j) = one_two_digits(b, i + 1)?;
+    Some((year, month, day, j))
+}
+
+/// The `datetime_re` fallback: non-padded `YYYY-M-D[T ]H:M[:S[.f]]` (ASCII
+/// only; the regex also takes unicode decimal digits — follow-up), Python
+/// whitespace before an optional `Z`/short offset, then end or one `\n`.
+fn parse_regex_arm(text: &str) -> Option<(NaiveDateTime, Option<ParsedOffset>)> {
+    let b = text.as_bytes();
+    let (year, month, day, j) = parse_dashed_date(b)?;
+    if b.get(j) != Some(&b'T') && b.get(j) != Some(&b' ') {
+        return None;
+    }
+    let (hh, k) = one_two_digits(b, j + 1)?;
+    if b.get(k) != Some(&b':') {
+        return None;
+    }
+    let (mm, mut l) = one_two_digits(b, k + 1)?;
+    let mut ss = 0;
+    let mut micros = 0;
+    if b.get(l) == Some(&b':') {
+        let (s, n) = one_two_digits(b, l + 1)?;
+        ss = s;
+        l = n;
+        if b.get(l) == Some(&b'.') || b.get(l) == Some(&b',') {
+            let start = l + 1;
+            let mut e = start;
+            while e < b.len() && b[e].is_ascii_digit() {
+                e += 1;
+            }
+            let count = e - start;
+            if count == 0 || count > 12 {
+                return None;
+            }
+            micros = frac_value(&b[start..e]);
+            l = e;
+        }
+    }
+    // `\s*`: all Python whitespace, then an optional short zone.
+    let mut p = l;
+    while p < b.len() {
+        let ch = text[p..].chars().next()?;
+        if !is_py_space(ch) {
+            break;
+        }
+        p += ch.len_utf8();
+    }
+    let mut offset: Option<ParsedOffset> = None;
+    if p < b.len() {
+        if b[p] == b'Z' {
+            offset = Some(ParsedOffset {
+                seconds: 0,
+                micros: 0,
+            });
+            p += 1;
+        } else if b[p] == b'+' || b[p] == b'-' {
+            let sign: i64 = if b[p] == b'+' { 1 } else { -1 };
+            let oh = i64::from(two_digits(b, p + 1)?);
+            p += 3;
+            let mut om = 0;
+            if b.get(p) == Some(&b':') {
+                om = i64::from(two_digits(b, p + 1)?);
+                p += 3;
+            } else if let Some(v) = two_digits(b, p) {
+                om = i64::from(v);
+                p += 2;
+            }
+            let total_min = sign * (oh * 60 + om);
+            if total_min.abs() > 1439 {
+                return None;
+            }
+            offset = Some(ParsedOffset {
+                seconds: total_min * 60,
+                micros: 0,
+            });
+        }
+    }
+    // `$`: end of input, or one trailing newline.
+    if p != b.len() && !(p + 1 == b.len() && b[p] == b'\n') {
+        return None;
+    }
+    let date = NaiveDate::from_ymd_opt(year, month, day)?;
+    let time = NaiveTime::from_hms_micro_opt(hh, mm, ss, micros)?;
+    Some((NaiveDateTime::new(date, time), offset))
+}
+
+/// Both `parse_datetime` arms: `fromisoformat`, then `datetime_re`.
+fn parse_iso8601_core(text: &str) -> Option<(NaiveDateTime, Option<ParsedOffset>)> {
+    parse_fromisoformat_arm(text).or_else(|| parse_regex_arm(text))
+}
+
+/// The model-field `parse_date` fallback (`YYYY-M-D`, ASCII only):
+/// midnight, naive. Serializer callers never reach it.
+fn parse_datere_arm(text: &str) -> Option<NaiveDateTime> {
+    let b = text.as_bytes();
+    let (year, month, day, p) = parse_dashed_date(b)?;
+    if p != b.len() && !(p + 1 == b.len() && b[p] == b'\n') {
+        return None;
+    }
+    let date = NaiveDate::from_ymd_opt(year, month, day)?;
+    date.and_hms_opt(0, 0, 0)
 }
 
 fn parse_django_datetime(text: &str, tz: &Tz) -> Result<DateTime<Utc>, ParseDatetimeError> {
-    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-    let text = text.trim();
-    if text.is_empty() || text.len() > 100 {
-        return Err(ParseDatetimeError::Invalid);
-    }
-    // Split a trailing zone designator (`Z` or `±HH[:]MM`).
-    let (core, offset_seconds): (&str, Option<i32>) = if text.ends_with(['Z', 'z']) {
-        (&text[..text.len() - 1], Some(0))
-    } else {
-        match text.rfind(['+', '-']) {
-            Some(idx) if idx > 7 => {
-                let (head, tail) = text.split_at(idx);
-                let sign = if tail.starts_with('+') { 1 } else { -1 };
-                let digits: String = tail[1..].chars().filter(|c| *c != ':').collect();
-                if digits.len() == 2 || digits.len() == 4 {
-                    let hours: i32 = digits[..2]
-                        .parse()
-                        .map_err(|_| ParseDatetimeError::Invalid)?;
-                    let minutes: i32 = if digits.len() == 4 {
-                        digits[2..]
-                            .parse()
-                            .map_err(|_| ParseDatetimeError::Invalid)?
-                    } else {
-                        0
-                    };
-                    if hours > 23 || minutes > 59 {
-                        return Err(ParseDatetimeError::Invalid);
-                    }
-                    (head, Some(sign * (hours * 3600 + minutes * 60)))
-                } else {
-                    return Err(ParseDatetimeError::Invalid);
-                }
+    let (naive, offset) = parse_iso8601_core(text).ok_or(ParseDatetimeError::Invalid)?;
+    match offset {
+        Some(off) => {
+            let utc = naive.and_utc() - chrono::Duration::microseconds(off.total_micros());
+            // DRF `enforce_timezone` converts into the field zone, and
+            // `astimezone` overflow there is the `overflow` 400.
+            if !(1..=9999).contains(&utc.with_timezone(tz).date_naive().year()) {
+                return Err(ParseDatetimeError::Overflow);
             }
-            _ => (text, None),
-        }
-    };
-    // Date + optional time (`T` or space).
-    let (date_part, time_part) = match core.find(['T', 't', ' ']) {
-        Some(idx) => (&core[..idx], Some(&core[idx + 1..])),
-        None => (core, None),
-    };
-    let date = NaiveDate::parse_from_str(date_part, "%Y-%m-%d")
-        .map_err(|_| ParseDatetimeError::Invalid)?;
-    let time = match time_part {
-        None => NaiveTime::from_hms_opt(0, 0, 0).expect("midnight"),
-        Some(part) => {
-            let part = part.trim();
-            NaiveTime::parse_from_str(part, "%H:%M:%S%.f")
-                .or_else(|_| NaiveTime::parse_from_str(part, "%H:%M:%S"))
-                .or_else(|_| NaiveTime::parse_from_str(part, "%H:%M"))
-                .map_err(|_| ParseDatetimeError::Invalid)?
-        }
-    };
-    let naive = NaiveDateTime::new(date, time);
-    match offset_seconds {
-        Some(offset) => {
-            let utc = trunc_micros(naive.and_utc() - chrono::Duration::seconds(i64::from(offset)));
-            Ok(utc)
+            Ok(trunc_micros(utc))
         }
         None => match tz.from_local_datetime(&naive) {
             chrono::LocalResult::Single(aware) => Ok(trunc_micros(aware.with_timezone(&Utc))),
@@ -3735,8 +4226,10 @@ fn description_stripped_for_create(comment_html: &str) -> Option<String> {
 /// attribute keeps the assigned string and DRF returns strings untouched.
 /// Returns `(db_value, response_text)`. Explicit null violates NOT NULL →
 /// `IntegrityError` 400; unparseable strings → `ValidationError` 400;
-/// non-string scalars reach `parse_datetime` raw, whose `fromisoformat`
-/// raises an UNCAUGHT `TypeError` (only `ValueError` is caught) → 500.
+/// offsets Postgres rejects (fractional seconds, `≥ 16h`) → `DataError`
+/// 500; non-string scalars reach `parse_datetime` raw, whose
+/// `fromisoformat` raises an UNCAUGHT `TypeError` (only `ValueError` is
+/// caught) → 500.
 fn override_created_at(raw: Option<&Value>, tz: &Tz) -> Result<(DateTime<Utc>, String), Denial> {
     match raw {
         None => {
@@ -3745,8 +4238,10 @@ fn override_created_at(raw: Option<&Value>, tz: &Tz) -> Result<(DateTime<Utc>, S
         }
         Some(Value::Null) => Err(Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())),
         Some(Value::String(text)) => {
-            let naive = parse_naive_or_aware(text)
-                .map_err(|_| Denial::FieldErrors(VALID_DETAIL_BODY.to_owned()))?;
+            let naive = parse_naive_or_aware(text).map_err(|error| match error {
+                ParseDatetimeError::Unstorable => Denial::ServerError,
+                _ => Denial::FieldErrors(VALID_DETAIL_BODY.to_owned()),
+            })?;
             let db = match naive {
                 NaiveOrAware::Aware(instant) => instant,
                 NaiveOrAware::Naive(local) => trunc_micros(local.and_utc()),
@@ -3758,70 +4253,32 @@ fn override_created_at(raw: Option<&Value>, tz: &Tz) -> Result<(DateTime<Utc>, S
 }
 
 /// A parsed override datetime before zone handling.
+#[derive(Debug, PartialEq)]
 enum NaiveOrAware {
     Naive(chrono::NaiveDateTime),
     Aware(DateTime<Utc>),
 }
 
-/// Split an override datetime string into naive wall time vs instant
-/// (same grammar as [`parse_django_datetime`).
+/// Split an override datetime string into naive wall time vs instant: the
+/// `parse_datetime` grammar plus the model-field `parse_date` fallback.
+/// Postgres-bound offsets (`|offset| ≥ 16h`, fractional seconds) fail as
+/// `Unstorable`: the ORM passes the offset through and Postgres answers
+/// `DataError` 500.
 fn parse_naive_or_aware(text: &str) -> Result<NaiveOrAware, ParseDatetimeError> {
-    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-    let text = text.trim();
-    if text.is_empty() || text.len() > 100 {
-        return Err(ParseDatetimeError::Invalid);
-    }
-    let (core, offset_seconds): (&str, Option<i32>) = if text.ends_with(['Z', 'z']) {
-        (&text[..text.len() - 1], Some(0))
-    } else {
-        match text.rfind(['+', '-']) {
-            Some(idx) if idx > 7 => {
-                let (head, tail) = text.split_at(idx);
-                let sign = if tail.starts_with('+') { 1 } else { -1 };
-                let digits: String = tail[1..].chars().filter(|c| *c != ':').collect();
-                if digits.len() == 2 || digits.len() == 4 {
-                    let hours: i32 = digits[..2]
-                        .parse()
-                        .map_err(|_| ParseDatetimeError::Invalid)?;
-                    let minutes: i32 = if digits.len() == 4 {
-                        digits[2..]
-                            .parse()
-                            .map_err(|_| ParseDatetimeError::Invalid)?
-                    } else {
-                        0
-                    };
-                    if hours > 23 || minutes > 59 {
-                        return Err(ParseDatetimeError::Invalid);
-                    }
-                    (head, Some(sign * (hours * 3600 + minutes * 60)))
-                } else {
-                    return Err(ParseDatetimeError::Invalid);
-                }
-            }
-            _ => (text, None),
+    let (naive, offset) = parse_iso8601_core(text)
+        .or_else(|| parse_datere_arm(text).map(|midnight| (midnight, None)))
+        .ok_or(ParseDatetimeError::Invalid)?;
+    match offset {
+        Some(off) if off.seconds == 0 && off.micros == 0 => {
+            Ok(NaiveOrAware::Aware(trunc_micros(naive.and_utc())))
         }
-    };
-    let (date_part, time_part) = match core.find(['T', 't', ' ']) {
-        Some(idx) => (&core[..idx], Some(&core[idx + 1..])),
-        None => (core, None),
-    };
-    let date = NaiveDate::parse_from_str(date_part, "%Y-%m-%d")
-        .map_err(|_| ParseDatetimeError::Invalid)?;
-    let time = match time_part {
-        None => NaiveTime::from_hms_opt(0, 0, 0).expect("midnight"),
-        Some(part) => {
-            let part = part.trim();
-            NaiveTime::parse_from_str(part, "%H:%M:%S%.f")
-                .or_else(|_| NaiveTime::parse_from_str(part, "%H:%M:%S"))
-                .or_else(|_| NaiveTime::parse_from_str(part, "%H:%M"))
-                .map_err(|_| ParseDatetimeError::Invalid)?
+        Some(off) if off.micros != 0 || off.seconds.abs() >= 57_600 => {
+            Err(ParseDatetimeError::Unstorable)
         }
-    };
-    let naive = NaiveDateTime::new(date, time);
-    match offset_seconds {
-        Some(offset) => Ok(NaiveOrAware::Aware(trunc_micros(
-            naive.and_utc() - chrono::Duration::seconds(i64::from(offset)),
-        ))),
+        Some(off) => {
+            let utc = naive.and_utc() - chrono::Duration::seconds(off.seconds);
+            Ok(NaiveOrAware::Aware(trunc_micros(utc)))
+        }
         None => Ok(NaiveOrAware::Naive(naive)),
     }
 }
@@ -4884,6 +5341,360 @@ mod tests {
                 .to_rfc3339(),
             "2026-10-01T14:00:00+00:00"
         );
+    }
+
+    #[test]
+    fn django_datetime_grammar_gaps() {
+        // PIDASHCONV-756: every arm probed live against Django 4.2.30 /
+        // CPython 3.12 (`parse_datetime` + DRF `DateTimeField`), then pinned
+        // here. Serializer path (`parse_django_datetime`, UTC request zone).
+        let utc = utc_tz();
+        let instant = |text: &str| {
+            parse_django_datetime(text, &utc)
+                .expect("parses")
+                .to_rfc3339()
+        };
+        // Accept with exact instants (hour-only, week/basic dates, comma
+        // fractions, seconds-bearing offsets, any-char separators, basic
+        // times, `+` as separator rather than zone, truncation, kept and
+        // dropped tz fractions, regex-arm ws/`$`-quirk/non-padded forms).
+        assert_eq!(instant("2024-01-01T12"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-W01-1"), "2024-01-01T00:00:00+00:00");
+        assert_eq!(instant("20240101"), "2024-01-01T00:00:00+00:00");
+        assert_eq!(
+            instant("2024-01-01 12:00:00,123"),
+            "2024-01-01T12:00:00.123+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00+00:00:00"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00+00:00:01"),
+            "2024-01-01T11:59:59+00:00"
+        );
+        assert_eq!(instant("2024-01-01T12:00 "), "2024-01-01T12:00:00+00:00");
+        assert_eq!(
+            instant("2024-01-01T12:00:00+00:00\n"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        assert_eq!(instant("2024-01-01X12:00"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-01-01T120000"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-01-01T1200"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-01-01+00:00"), "2024-01-01T00:00:00+00:00");
+        assert_eq!(instant("2024-01-01+05:00"), "2024-01-01T05:00:00+00:00");
+        assert_eq!(
+            instant("2024-01-01T12:00:00.123456789012345"),
+            "2024-01-01T12:00:00.123456+00:00"
+        );
+        assert_eq!(instant("2024-01-01T12.5"), "2024-01-01T12:00:00.500+00:00");
+        assert_eq!(
+            instant("2024-01-01T12:00:00+23:59"),
+            "2023-12-31T12:01:00+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00+05.5"),
+            "2024-01-01T06:59:59.500+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00+01:02:03:04"),
+            "2024-01-01T10:57:56.960+00:00"
+        );
+        assert_eq!(instant("2024-01-01T12:00Z"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-01-01T12:00 Z"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-01-01T1:2"), "2024-01-01T01:02:00+00:00");
+        assert_eq!(
+            instant("2024-01-01T12:00:00.+00:00"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00X+00:00"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00+00:00:00.5"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        assert_eq!(instant("2024W011"), "2024-01-01T00:00:00+00:00");
+        assert_eq!(instant("2024-W01"), "2024-01-01T00:00:00+00:00");
+        assert_eq!(instant("2020-W53-7"), "2021-01-03T00:00:00+00:00");
+        assert_eq!(
+            instant("0001-01-01T00:00:01+00:00:01"),
+            "0001-01-01T00:00:00+00:00"
+        );
+        // No length cap: Django takes fractions of any length.
+        let long = format!("2024-01-01T12:00:00.{}7", "1".repeat(90));
+        assert_eq!(instant(&long), "2024-01-01T12:00:00.111111+00:00");
+        // Reject: lowercase z, surrounding whitespace (except the regex-arm
+        // trailing run with no zone), year zero, bad components, bad zones,
+        // bad weeks, ordinals, mixed basic/extended forms, week digit traps,
+        // over-long regex-arm fractions. No `parse_date` fallback here.
+        for text in [
+            "2024-01-01T12:00:00z",
+            " 2024-01-01T12:00:00",
+            "2024-01-01T12:00Z ",
+            "2024-01-01 ",
+            "2024-01-01T12 ",
+            "0000-01-01T00:00",
+            "2024-01-01T24:00",
+            "2024-01-01T12:60",
+            "2024-13-01T00:00",
+            "2024-01-01T12:00:00+24:00",
+            "2024-01-01T12:00:00+23:59:60",
+            "2024-01-01T12:00:00+99:99",
+            "2024-W53-1",
+            "9999-W52-7",
+            "2024-001",
+            "2024-01-01T1",
+            "2024-01-01T123",
+            "2024-01-01T123:45",
+            "2024-01-01T12:3456",
+            "2024-01-01T12:00:00+00:0000",
+            "2024-01-01T12:00:00+05X5",
+            "2024-01-01T12:00:00.5X+00:00",
+            "2024W0112:00",
+            "2024-W0112:00",
+            "2024010112:00",
+            "2024-01-01T1:2+00:00:00",
+            "2024-01-01T1:2:3.1234567890123",
+            "2024-1-1",
+            "2024-01-01\n",
+            "garbage",
+            "",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text, &utc),
+                Err(ParseDatetimeError::Invalid),
+                "{text:?}"
+            );
+        }
+        // Aware values converting outside years `0001..9999` take the
+        // `overflow` arm, measured in the request zone like DRF.
+        for text in [
+            "9999-12-31T23:00:00-14:00",
+            "0001-01-01T00:30:00+14:00",
+            "0001-01-01T00:00:00+00:01",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text, &utc),
+                Err(ParseDatetimeError::Overflow),
+                "{text:?}"
+            );
+        }
+        let auckland: Tz = "Pacific/Auckland".parse().expect("tz");
+        assert_eq!(
+            parse_django_datetime("9999-12-31T12:00:00+00:00", &auckland),
+            Err(ParseDatetimeError::Overflow)
+        );
+        assert!(parse_django_datetime("9999-12-31T12:00:00+00:00", &utc).is_ok());
+        let eastern: Tz = "America/New_York".parse().expect("tz");
+        assert_eq!(
+            parse_django_datetime("0001-01-01T00:00:00+00:00", &eastern),
+            Err(ParseDatetimeError::Overflow)
+        );
+    }
+
+    #[test]
+    fn naive_or_aware_grammar_gaps() {
+        // PIDASHCONV-756, model path: the shared grammar plus the
+        // `parse_date` fallback, no overflow (Postgres stores out-of-range
+        // instants fine), and `Unstorable` for offsets Postgres rejects.
+        let naive = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Naive(dt) => dt.to_string(),
+            NaiveOrAware::Aware(_) => panic!("naive expected for {text:?}"),
+        };
+        let aware = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Aware(dt) => dt.to_rfc3339(),
+            NaiveOrAware::Naive(_) => panic!("aware expected for {text:?}"),
+        };
+        assert_eq!(naive("2024-01-01T12"), "2024-01-01 12:00:00");
+        assert_eq!(naive("2024-W01-1"), "2024-01-01 00:00:00");
+        assert_eq!(naive("2024-01-01+05:00"), "2024-01-01 05:00:00");
+        assert_eq!(naive("2024-1-1"), "2024-01-01 00:00:00");
+        assert_eq!(naive("2024-01-01\n"), "2024-01-01 00:00:00");
+        assert_eq!(
+            aware("2024-01-01T12:00:00+00:00:01"),
+            "2024-01-01T11:59:59+00:00"
+        );
+        assert_eq!(
+            aware("2024-01-01T12:00:00+15:59:59"),
+            "2023-12-31T20:00:01+00:00"
+        );
+        assert_eq!(
+            aware("2024-01-01T12:00:00+00:00:00.5"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        // Year-10000 instants are fine here (no conversion happens).
+        assert_eq!(
+            aware("9999-12-31T23:00:00-14:00"),
+            "+10000-01-01T13:00:00+00:00"
+        );
+        // Fractional and ≥16h offsets: Postgres `DataError` 500s live.
+        for text in [
+            "2024-01-01T12:00:00+05.5",
+            "2024-01-01T12:00:00+23:59",
+            "2024-01-01T12:00:00+16:00",
+            "2024-01-01T12:00:00-16:00",
+            "2024-01-01T12:00:00-00:01.5",
+            "2024-01-01T12:00:00+01:02:03:04",
+        ] {
+            assert_eq!(
+                parse_naive_or_aware(text),
+                Err(ParseDatetimeError::Unstorable),
+                "{text:?}"
+            );
+        }
+        for text in [
+            "2024-01-01T12:00:00z",
+            " 2024-01-01T12:00:00",
+            "0000-01-01T00:00",
+            "2024-01-01T12:00:00+24:00",
+            "garbage",
+        ] {
+            assert_eq!(
+                parse_naive_or_aware(text),
+                Err(ParseDatetimeError::Invalid),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn link_patch_deleted_at_overflow_message() {
+        // The DRF `overflow` 400 renders its own message (verified live).
+        let map = patch_map(&[(
+            "deleted_at",
+            Value::String("9999-12-31T23:00:00-14:00".to_owned()),
+        )]);
+        assert_eq!(
+            validate_link_patch(&map, false, &utc_tz()).expect_err("errors"),
+            "{\"deleted_at\":[\"Datetime value out of range.\"]}",
+        );
+    }
+
+    #[test]
+    fn override_created_at_unstorable_arms() {
+        // Offsets Postgres rejects 500, exactly like Django live.
+        for text in ["2024-01-01T12:00:00+05.5", "2024-01-01T12:00:00+23:59"] {
+            let raw = Value::String(text.to_owned());
+            assert!(
+                matches!(
+                    override_created_at(Some(&raw), &utc_tz()),
+                    Err(Denial::ServerError)
+                ),
+                "{text:?}"
+            );
+        }
+        // Newly accepted shapes still echo verbatim on success.
+        let raw = Value::String("2024-01-01T12".to_owned());
+        let (db, echo) = override_created_at(Some(&raw), &utc_tz()).expect("ok");
+        assert_eq!(echo, "2024-01-01T12");
+        assert_eq!(db.to_rfc3339(), "2024-01-01T12:00:00+00:00");
+    }
+
+    #[test]
+    fn time_fraction_separator_rules() {
+        // PIDASHCONV-756 review (F1/F2/F3): CPython `fromisoformat`
+        // fraction rule, pinned against the 187-case differential oracle
+        // (pinned Django 4.2.30 / py3.12). Digits after the time need
+        // `[.,]` — or `:` only after extended seconds; any other ASCII
+        // separator must be empty with a tz after it; a `:` not followed
+        // by two digits is that separator; non-ASCII separators never
+        // count. Both parsers share the time scan, so both pin every arm.
+        let utc = utc_tz();
+        let instant = |text: &str| {
+            parse_django_datetime(text, &utc)
+                .expect("parses")
+                .to_rfc3339()
+        };
+        let naive = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Naive(dt) => dt.to_string(),
+            NaiveOrAware::Aware(_) => panic!("naive expected for {text:?}"),
+        };
+        let aware = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Aware(dt) => dt.to_rfc3339(),
+            NaiveOrAware::Naive(_) => panic!("aware expected for {text:?}"),
+        };
+        // F2 accepts: a lone `:` is the fraction separator at every time
+        // position, empty with a tz after it.
+        for text in [
+            "2024-01-01T12:+00:00",
+            "2024-01-01T12:00:+00:00",
+            "2024-01-01T1200:+00:00",
+            "2024-01-01T120000:+00:00",
+            "2024-01-01T12:00:00:+00:00",
+        ] {
+            assert_eq!(instant(text), "2024-01-01T12:00:00+00:00", "{text:?}");
+            assert_eq!(aware(text), "2024-01-01T12:00:00+00:00", "{text:?}");
+        }
+        // F1 counter-cases: `[.,]` fractions and `:` after extended
+        // seconds keep working, with exact instants.
+        assert_eq!(instant("2024-01-01T12,5"), "2024-01-01T12:00:00.500+00:00");
+        assert_eq!(naive("2024-01-01T12,5"), "2024-01-01 12:00:00.500");
+        assert_eq!(
+            instant("2024-01-01T12:00,5"),
+            "2024-01-01T12:00:00.500+00:00"
+        );
+        assert_eq!(naive("2024-01-01T12:00,5"), "2024-01-01 12:00:00.500");
+        assert_eq!(
+            instant("2024-01-01T1200,25+00:00"),
+            "2024-01-01T12:00:00.250+00:00"
+        );
+        assert_eq!(
+            aware("2024-01-01T1200,25+00:00"),
+            "2024-01-01T12:00:00.250+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00:12"),
+            "2024-01-01T12:00:00.120+00:00"
+        );
+        assert_eq!(naive("2024-01-01T12:00:00:12"), "2024-01-01 12:00:00.120");
+        // F3 counter-case: `é` as the date/time separator stays accepted
+        // (only the fraction separator rejects non-ASCII).
+        assert_eq!(instant("2024-01-01é12:00"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(naive("2024-01-01é12:00"), "2024-01-01 12:00:00");
+        // Regex-arm interplay: the fromisoformat arm rejects these, but
+        // the `\d{1,2}` regex arm accepts — overall accept must survive.
+        assert_eq!(instant("2024-01-01T12:3"), "2024-01-01T12:03:00+00:00");
+        assert_eq!(naive("2024-01-01T12:3"), "2024-01-01 12:03:00");
+        assert_eq!(instant("2024-01-01T12:00:1"), "2024-01-01T12:00:01+00:00");
+        assert_eq!(naive("2024-01-01T12:00:1"), "2024-01-01 12:00:01");
+        assert_eq!(instant("2024-01-01T12:34:5"), "2024-01-01T12:34:05+00:00");
+        assert_eq!(naive("2024-01-01T12:34:5"), "2024-01-01 12:34:05");
+        assert_eq!(
+            instant("2024-01-01T12:3+00:00"),
+            "2024-01-01T12:03:00+00:00"
+        );
+        assert_eq!(aware("2024-01-01T12:3+00:00"), "2024-01-01T12:03:00+00:00");
+        // F1 rejects: separator + digits needs `[.,]`.
+        // F2 nearby rejects: colon-with-digits where no seconds exist,
+        // extended-MM + basic-SS, empty fraction with no tz after it.
+        // F3 reject: multibyte fraction separator, even empty with a tz.
+        for text in [
+            "2024-01-01T12X30",
+            "2024-01-01T12:00X30",
+            "2024-01-01T120000X30",
+            "2024-01-01T12_30",
+            "2024-01-01T12:00:00é12",
+            "2024-01-01T1200:12",
+            "2024-01-01T1200:12+00:00",
+            "2024-01-01T120000:5+00:00",
+            "2024-01-01T12:3456",
+            "2024-01-01T12:",
+            "2024-01-01T12:00:00:",
+            "2024-01-01T12:00:00é+00:00",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text, &utc),
+                Err(ParseDatetimeError::Invalid),
+                "drf {text:?}"
+            );
+            assert_eq!(
+                parse_naive_or_aware(text),
+                Err(ParseDatetimeError::Invalid),
+                "model {text:?}"
+            );
+        }
     }
 
     #[test]
