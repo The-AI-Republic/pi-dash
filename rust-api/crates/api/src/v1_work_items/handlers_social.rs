@@ -2417,63 +2417,66 @@ fn parse_rest_after_date(
 }
 
 /// `HH[MM[SS]]` / `HH:MM[:SS]` (all two-digit, ranges checked) plus the
-/// optional fraction: one separator char of any kind except `:` on the
-/// basic track (and never a tz starter), then any number of ASCII digits.
-/// An empty fraction needs a tz after it. A digit separator carries no
-/// digits of its own; basic seconds instead take a 2+ digit run itself as
-/// the fraction, separator-less. Returns the time and how far the time scan
-/// ran (end of input or a tz starter).
+/// optional fraction: one ASCII separator char (never a tz starter), then
+/// any number of ASCII digits. Digits need `[.,]` — or `:` after extended
+/// seconds; any other separator must be empty with a tz after it
+/// (`HH:`/`HH:MM:`/`HHMM:`/`HHMMSS:` all take `+tz`). A `:` not followed by
+/// two digits is that separator, not a component colon. Basic seconds
+/// instead take a 2+ digit run itself as the fraction, separator-less.
+/// Returns the time and how far the time scan ran (end of input or a tz
+/// starter).
 fn parse_iso_time(b: &[u8], text: &str, i: usize) -> Option<(NaiveTime, usize)> {
     let hh = two_digits(b, i)?;
     if hh > 23 {
         return None;
     }
     let mut j = i + 2;
-    let (mm, ss, basic, has_ss, allow_colon_frac) = if b.get(j) == Some(&b':') {
-        let mm = two_digits(b, j + 1)?;
-        if mm > 59 {
-            return None;
-        }
-        j += 3;
-        if b.get(j) == Some(&b':') {
-            let ss = two_digits(b, j + 1)?;
-            if ss > 59 {
+    let (mm, ss, basic, has_ss, allow_colon_frac) =
+        if b.get(j) == Some(&b':') && is_two_digits(b, j + 1) {
+            let mm = two_digits(b, j + 1)?;
+            if mm > 59 {
                 return None;
             }
             j += 3;
-            (mm, ss, false, true, true)
+            if b.get(j) == Some(&b':') && is_two_digits(b, j + 1) {
+                let ss = two_digits(b, j + 1)?;
+                if ss > 59 {
+                    return None;
+                }
+                j += 3;
+                (mm, ss, false, true, true)
+            } else {
+                // Extended minutes with basic seconds is not a form; a lone
+                // `:` is the fraction separator below.
+                if is_two_digits(b, j) {
+                    return None;
+                }
+                (mm, 0, false, false, false)
+            }
+        } else if b.get(j) == Some(&b':') {
+            // Hour-only `HH:` — the colon is the fraction separator below.
+            (0, 0, false, false, false)
         } else {
-            // Extended minutes with basic seconds is not a form.
-            if is_two_digits(b, j) {
-                return None;
-            }
-            (mm, 0, false, false, false)
-        }
-    } else {
-        let mut mm = 0;
-        let mut ss = 0;
-        let mut has_ss = false;
-        if let Some(v) = two_digits(b, j) {
-            if v > 59 {
-                return None;
-            }
-            mm = v;
-            j += 2;
+            let mut mm = 0;
+            let mut ss = 0;
+            let mut has_ss = false;
             if let Some(v) = two_digits(b, j) {
                 if v > 59 {
                     return None;
                 }
-                ss = v;
+                mm = v;
                 j += 2;
-                has_ss = true;
+                if let Some(v) = two_digits(b, j) {
+                    if v > 59 {
+                        return None;
+                    }
+                    ss = v;
+                    j += 2;
+                    has_ss = true;
+                }
             }
-        }
-        // Basic times take no colons at all.
-        if b.get(j) == Some(&b':') {
-            return None;
-        }
-        (mm, ss, true, has_ss, false)
-    };
+            (mm, ss, true, has_ss, false)
+        };
     // A 2+ digit run is only a fraction after basic seconds (the run
     // itself, no separator); anywhere else digits cannot start one.
     let run = digit_run_len(b, j);
@@ -2519,13 +2522,16 @@ fn parse_time_frac(text: &str, b: &[u8], j: usize, allow_colon: bool) -> Option<
     if ch == 'Z' || ch == '+' || ch == '-' {
         return Some((0, j));
     }
-    if ch == ':' && !allow_colon {
+    if !ch.is_ascii() {
         return None;
     }
     let mut k = j + ch.len_utf8();
     let start = k;
     while k < b.len() && b[k].is_ascii_digit() {
         k += 1;
+    }
+    if k != start && ch != '.' && ch != ',' && !(ch == ':' && allow_colon) {
+        return None;
     }
     if k == b.len() {
         if k == start {
@@ -5584,6 +5590,111 @@ mod tests {
         let (db, echo) = override_created_at(Some(&raw), &utc_tz()).expect("ok");
         assert_eq!(echo, "2024-01-01T12");
         assert_eq!(db.to_rfc3339(), "2024-01-01T12:00:00+00:00");
+    }
+
+    #[test]
+    fn time_fraction_separator_rules() {
+        // PIDASHCONV-756 review (F1/F2/F3): CPython `fromisoformat`
+        // fraction rule, pinned against the 187-case differential oracle
+        // (pinned Django 4.2.30 / py3.12). Digits after the time need
+        // `[.,]` — or `:` only after extended seconds; any other ASCII
+        // separator must be empty with a tz after it; a `:` not followed
+        // by two digits is that separator; non-ASCII separators never
+        // count. Both parsers share the time scan, so both pin every arm.
+        let utc = utc_tz();
+        let instant = |text: &str| {
+            parse_django_datetime(text, &utc)
+                .expect("parses")
+                .to_rfc3339()
+        };
+        let naive = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Naive(dt) => dt.to_string(),
+            NaiveOrAware::Aware(_) => panic!("naive expected for {text:?}"),
+        };
+        let aware = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Aware(dt) => dt.to_rfc3339(),
+            NaiveOrAware::Naive(_) => panic!("aware expected for {text:?}"),
+        };
+        // F2 accepts: a lone `:` is the fraction separator at every time
+        // position, empty with a tz after it.
+        for text in [
+            "2024-01-01T12:+00:00",
+            "2024-01-01T12:00:+00:00",
+            "2024-01-01T1200:+00:00",
+            "2024-01-01T120000:+00:00",
+            "2024-01-01T12:00:00:+00:00",
+        ] {
+            assert_eq!(instant(text), "2024-01-01T12:00:00+00:00", "{text:?}");
+            assert_eq!(aware(text), "2024-01-01T12:00:00+00:00", "{text:?}");
+        }
+        // F1 counter-cases: `[.,]` fractions and `:` after extended
+        // seconds keep working, with exact instants.
+        assert_eq!(instant("2024-01-01T12,5"), "2024-01-01T12:00:00.500+00:00");
+        assert_eq!(naive("2024-01-01T12,5"), "2024-01-01 12:00:00.500");
+        assert_eq!(
+            instant("2024-01-01T12:00,5"),
+            "2024-01-01T12:00:00.500+00:00"
+        );
+        assert_eq!(naive("2024-01-01T12:00,5"), "2024-01-01 12:00:00.500");
+        assert_eq!(
+            instant("2024-01-01T1200,25+00:00"),
+            "2024-01-01T12:00:00.250+00:00"
+        );
+        assert_eq!(
+            aware("2024-01-01T1200,25+00:00"),
+            "2024-01-01T12:00:00.250+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00:12"),
+            "2024-01-01T12:00:00.120+00:00"
+        );
+        assert_eq!(naive("2024-01-01T12:00:00:12"), "2024-01-01 12:00:00.120");
+        // F3 counter-case: `é` as the date/time separator stays accepted
+        // (only the fraction separator rejects non-ASCII).
+        assert_eq!(instant("2024-01-01é12:00"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(naive("2024-01-01é12:00"), "2024-01-01 12:00:00");
+        // Regex-arm interplay: the fromisoformat arm rejects these, but
+        // the `\d{1,2}` regex arm accepts — overall accept must survive.
+        assert_eq!(instant("2024-01-01T12:3"), "2024-01-01T12:03:00+00:00");
+        assert_eq!(naive("2024-01-01T12:3"), "2024-01-01 12:03:00");
+        assert_eq!(instant("2024-01-01T12:00:1"), "2024-01-01T12:00:01+00:00");
+        assert_eq!(naive("2024-01-01T12:00:1"), "2024-01-01 12:00:01");
+        assert_eq!(instant("2024-01-01T12:34:5"), "2024-01-01T12:34:05+00:00");
+        assert_eq!(naive("2024-01-01T12:34:5"), "2024-01-01 12:34:05");
+        assert_eq!(
+            instant("2024-01-01T12:3+00:00"),
+            "2024-01-01T12:03:00+00:00"
+        );
+        assert_eq!(aware("2024-01-01T12:3+00:00"), "2024-01-01T12:03:00+00:00");
+        // F1 rejects: separator + digits needs `[.,]`.
+        // F2 nearby rejects: colon-with-digits where no seconds exist,
+        // extended-MM + basic-SS, empty fraction with no tz after it.
+        // F3 reject: multibyte fraction separator, even empty with a tz.
+        for text in [
+            "2024-01-01T12X30",
+            "2024-01-01T12:00X30",
+            "2024-01-01T120000X30",
+            "2024-01-01T12_30",
+            "2024-01-01T12:00:00é12",
+            "2024-01-01T1200:12",
+            "2024-01-01T1200:12+00:00",
+            "2024-01-01T120000:5+00:00",
+            "2024-01-01T12:3456",
+            "2024-01-01T12:",
+            "2024-01-01T12:00:00:",
+            "2024-01-01T12:00:00é+00:00",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text, &utc),
+                Err(ParseDatetimeError::Invalid),
+                "drf {text:?}"
+            );
+            assert_eq!(
+                parse_naive_or_aware(text),
+                Err(ParseDatetimeError::Invalid),
+                "model {text:?}"
+            );
+        }
     }
 
     #[test]
