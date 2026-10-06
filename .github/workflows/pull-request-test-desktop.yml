@@ -35,13 +35,25 @@ permissions:
 
 jobs:
   native:
-    name: cargo test + packaging tests
-    runs-on: ubuntu-22.04
+    name: cargo test + packaging tests (${{ matrix.os }})
+    # Every OS the app ships on: the crate's #[cfg(windows)] / #[cfg(unix)] /
+    # #[cfg(target_os = "macos")] arms are only part of the compilation unit
+    # on their own target, so a Linux-only job never builds, lints or tests
+    # them. The release build compiles them but runs no tests.
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Tauri Linux dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -64,11 +76,17 @@ jobs:
 
       # Debug profile: build.rs only enforces a real dist/ bundle in release,
       # so the committed placeholder is enough here.
+      - name: Clippy
+        working-directory: desktop/src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
       - name: Test
         working-directory: desktop/src-tauri
-        run: cargo test --locked
+        run: cargo test --all-targets --locked
 
+      # The packaging helpers are OS-independent Python; one leg is enough.
       - name: Test release packaging helpers
+        if: runner.os == 'Linux'
         run: python -m unittest discover -s desktop/tests -p 'test_*.py' -v
 
       # The engine ships renamed to pidash-agent-engine; Codex re-execs helper
@@ -80,6 +98,7 @@ jobs:
       # sandbox. Needs no model, session, or credential; only the download of
       # the pinned release uses the network. See PDASHOSS01-162, design §24.8.
       - name: Sandbox survives the engine rename (Linux)
+        if: runner.os == 'Linux'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python desktop/tests/sandbox_rename_smoke.py --stage

@@ -435,10 +435,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Deferred: navigating from inside the policy callback
                     // would re-enter the webview mid-decision.
                     tauri::async_runtime::spawn(async move {
-                        if let Some(w) = app.get_webview_window("main") {
-                            if let Err(e) = w.navigate(target) {
-                                eprintln!("nav: bounce failed: {e}");
-                            }
+                        if let Some(w) = app.get_webview_window("main")
+                            && let Err(e) = w.navigate(target)
+                        {
+                            eprintln!("nav: bounce failed: {e}");
                         }
                     });
                     false
