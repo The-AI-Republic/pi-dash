@@ -617,6 +617,16 @@ mod tests {
         assert_eq!(bundle_redirect_for(&url, &server(), &root()), None);
     }
 
+    // The session sign-out view lives outside `/api/`, so a form POST to it
+    // is bounced like any other server-host page and never reaches the
+    // server. The web layer signs out over the native API transport instead.
+    #[test]
+    fn sign_out_form_navigation_bounces_to_bundle() {
+        let url = Url::parse("https://pidash.example.com/auth/sign-out/").unwrap();
+        let target = bundle_redirect_for(&url, &server(), &root()).unwrap();
+        assert_eq!(target.as_str(), "tauri://localhost/auth/sign-out/");
+    }
+
     #[test]
     fn bundle_and_foreign_origins_pass_through() {
         for u in ["tauri://localhost/", "https://login.example.com/x", "http://pidash.example.com/"] {
