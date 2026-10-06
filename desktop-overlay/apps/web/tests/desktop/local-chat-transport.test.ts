@@ -715,8 +715,12 @@ describe("LocalChatTransport.subscribeChatEvents", () => {
 
     expect(onError).toHaveBeenCalledTimes(1);
     expect((onError.mock.calls[0][0] as Error).message).toContain("database is locked");
-    // The turn still ends for the view.
-    expect(onEvent.mock.calls.some((c) => c[0].kind === "turn_completed")).toBe(true);
+    // The turn still ends for the view — and before the error arrives: the
+    // page clears its error on every event, so an error reported ahead of
+    // `turn_completed` would be wiped before the user could see it.
+    const completedAt = onEvent.mock.calls.findIndex((c) => c[0].kind === "turn_completed");
+    expect(completedAt).toBeGreaterThanOrEqual(0);
+    expect(onEvent.mock.invocationCallOrder[completedAt]).toBeLessThan(onError.mock.invocationCallOrder[0]);
     unsubscribe();
   });
 });

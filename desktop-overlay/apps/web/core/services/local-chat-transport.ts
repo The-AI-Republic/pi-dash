@@ -596,18 +596,28 @@ export class LocalChatTransport implements ChatTransport {
 
     // A failed write is reported, not swallowed: history is the only copy of
     // the reply, so losing it silently leaves a turn with no answer.
-    const persisted = this.persistFromFrame(sessionId, frame, accum).catch((error: unknown) => {
+    const report = (error: unknown) => {
       const detail = error instanceof Error ? error.message : String(error);
       this.reportError(sessionId, new Error(`Could not save this chat to local history: ${detail}`));
-    });
+    };
+    const persisted = this.persistFromFrame(sessionId, frame, accum);
     if (frame.result === "chat_message_completed") {
       // Persist the assistant reply (falling back to the accumulated deltas)
       // *before* dispatching `turn_completed`, because the page refetches
       // history on that event and replaces the streamed reply with it — if the
-      // reply isn't in history yet it vanishes.
-      void persisted.then(() => this.dispatch(sessionId, frame));
+      // reply isn't in history yet it vanishes. A failure is reported *after*
+      // the dispatch: the page clears its error on every event, so reporting
+      // first would have `turn_completed` wipe the message straight away.
+      void persisted.then(
+        () => this.dispatch(sessionId, frame),
+        (error: unknown) => {
+          this.dispatch(sessionId, frame);
+          report(error);
+        }
+      );
       return;
     }
+    void persisted.catch(report);
     this.dispatch(sessionId, frame);
   }
 
