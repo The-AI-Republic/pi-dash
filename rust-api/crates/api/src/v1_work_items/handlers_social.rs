@@ -5533,4 +5533,52 @@ mod tests {
             serde_json::json!({"labels": ["a", "b"], "url": "u"})
         );
     }
+
+    #[test]
+    fn upload_integer_float_grammar_matches_python() {
+        // `int()` sees the VALUE's layout, not the JSON literal's
+        // (PIDASHCONV-766): `1e3` is 1000.0 (`str` is `1000.0`) so it
+        // validates, while `10000000000000000.0` is 1e16 (`str` is
+        // `1e+16`) so it fails. `arbitrary_precision` is always on in
+        // this crate, so the literals keep their spelling here (the
+        // services crate parses them to `f64`-backed numbers and cannot
+        // tell the difference) — live-probed against DRF `IntegerField`.
+        use pidash_services::v1_work_items::shape_social::{
+            validate_upload_write, UploadWriteInput,
+        };
+        fn upload_size(body: &Value) -> Result<i64, String> {
+            validate_upload_write(&UploadWriteInput { body })
+                .map(|ok| ok.size)
+                .map_err(|err| err.body().to_owned())
+        }
+        for (raw, want) in [
+            (r#"{"name": "a.png", "size": 1e3}"#, 1000),
+            (r#"{"name": "a.png", "size": 1000.0}"#, 1000),
+            (r#"{"name": "a.png", "size": 123.0}"#, 123),
+            (r#"{"name": "a.png", "size": 1E3}"#, 1000),
+            (r#"{"name": "a.png", "size": -1e3}"#, -1000),
+            (r#"{"name": "a.png", "size": 1e15}"#, 1_000_000_000_000_000),
+            (r#"{"name": "a.png", "size": -12.0}"#, -12),
+            (r#"{"name": "a.png", "size": 2.5e3}"#, 2500),
+        ] {
+            let body: Value = serde_json::from_str(raw).expect("parses");
+            assert_eq!(upload_size(&body), Ok(want), "input {raw}");
+        }
+        for raw in [
+            r#"{"name": "a.png", "size": 10000000000000000.0}"#,
+            r#"{"name": "a.png", "size": -10000000000000000.0}"#,
+            r#"{"name": "a.png", "size": 1.50}"#,
+            r#"{"name": "a.png", "size": 1.5}"#,
+            r#"{"name": "a.png", "size": 1e-3}"#,
+            r#"{"name": "a.png", "size": 0.1}"#,
+            r#"{"name": "a.png", "size": 1e999}"#,
+        ] {
+            let body: Value = serde_json::from_str(raw).expect("parses");
+            assert_eq!(
+                upload_size(&body),
+                Err(r#"{"size":["A valid integer is required."]}"#.to_owned()),
+                "input {raw}"
+            );
+        }
+    }
 }
