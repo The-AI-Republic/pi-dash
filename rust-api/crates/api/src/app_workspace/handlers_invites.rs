@@ -2026,12 +2026,8 @@ fn parse_regex_datetime(text: &str) -> Option<ParsedDt> {
         minute.parse().ok()?,
         second.parse().ok()?,
     );
-    let naive = chrono::NaiveDate::from_ymd_opt(
-        year_num,
-        month.parse().ok()?,
-        day.parse().ok()?,
-    )?
-    .and_hms_micro_opt(hour, minute, second, micros)?;
+    let naive = chrono::NaiveDate::from_ymd_opt(year_num, month.parse().ok()?, day.parse().ok()?)?
+        .and_hms_micro_opt(hour, minute, second, micros)?;
     if aware {
         // `Z` and zero offsets (`+00`, `-00:00`) are aware UTC, not
         // naive: under a non-UTC request tz the instants differ.
