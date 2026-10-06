@@ -228,6 +228,8 @@ describe("desktop agent lifecycle", () => {
     runtime.resumeAgentRuntime("user-a");
     await runtime.connectAgentProject("workspace-a", "project-1");
     accessExpired = true;
+    // For an edition whose page refreshes the session: that is refused too.
+    refreshFailure = 401;
     await expect(runtime.connectAgentProject("workspace-a", "project-2")).rejects.toThrow();
     const signOuts = (invoke.mock.calls as unknown as [string, unknown][]).filter(
       ([command]) => command === "managed_sign_out"
