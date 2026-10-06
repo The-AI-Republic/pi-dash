@@ -4058,14 +4058,14 @@ mod tests {
         let entry = daemon_fixture("DELETE_runners_rid");
         let errors = entry["errors"].as_array().unwrap();
         assert_eq!(errors.len(), 2);
-        // The 403 is view-owned (this module); the 401 `Detail` is
+        // The 403 is view-owned (this module); the 401 `detail` is
         // auth-class-owned (589, pinned there) — presence only here.
         assert_errors_match(
             &serde_json::json!({"errors": [errors[0].clone()]}),
             &[(RUNNER_ID_MISMATCH_BODY, 403)],
         );
         assert_eq!(errors[1]["status"], 401);
-        assert!(errors[1]["body"].get("Detail").is_some());
+        assert!(errors[1]["body"].get("detail").is_some());
     }
 
     #[test]

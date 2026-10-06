@@ -127,7 +127,7 @@ pub const AUTHENTICATE_HEADER_BEARER: &str = "Bearer";
 
 /// Render an `AuthenticationFailed(code)` denial exactly like DRF's
 /// `APIView.handle_exception` + `exception_handler`
-/// (`views.py:458-466,71-101`): `{"Detail": code}` (capital `D`, compact
+/// (`views.py:458-466,71-101`): `{"detail": code}` (lowercase `d`, compact
 /// JSON), 401 plus `WWW-Authenticate` when the view's first authenticator
 /// supplies a challenge, else coerced to 403 with no challenge header.
 /// (`NotAuthenticated` differs — see [`not_authenticated_response`].)
@@ -138,7 +138,7 @@ pub const AUTHENTICATE_HEADER_BEARER: &str = "Bearer";
 /// result, projects, and the D-14 bearer-first views), `None` for the create
 /// endpoint (`[APIKeyAuthentication]`).
 pub fn auth_failure_response(code: &str, first_authenticate_header: Option<&str>) -> Response {
-    let body = serde_json::json!({ "Detail": code }).to_string();
+    let body = serde_json::json!({ "detail": code }).to_string();
     match first_authenticate_header {
         Some(challenge) => Response::builder()
             .status(StatusCode::UNAUTHORIZED)
@@ -169,7 +169,7 @@ pub fn bearer_failure_response(code: &str) -> Response {
 /// (present iff the first authenticator supplies one). F4 pins this
 /// (`drf_failure_shapes.NotAuthenticated`: "custom handler forces 401").
 pub fn not_authenticated_response(first_authenticate_header: Option<&str>) -> Response {
-    let body = serde_json::json!({ "Detail": CODE_CREDENTIALS_NOT_PROVIDED }).to_string();
+    let body = serde_json::json!({ "detail": CODE_CREDENTIALS_NOT_PROVIDED }).to_string();
     let mut builder = Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .header(header::CONTENT_TYPE, "application/json");
@@ -1273,8 +1273,8 @@ mod tests {
         )
     }
 
-    /// Denial bytes (`views.py:71-101`, F4 `drf_failure_shapes`): capital-`D`
-    /// `{"Detail": code}`, compact JSON, `application/json`; 401 plus the
+    /// Denial bytes (`views.py:71-101`, F4 `drf_failure_shapes`): lowercase-`d`
+    /// `{"detail": code}`, compact JSON, `application/json`; 401 plus the
     /// challenge when the view's first authenticator supplies one, else the
     /// 403 coercion with no challenge.
     #[tokio::test]
@@ -1287,13 +1287,13 @@ mod tests {
             headers.get(header::CONTENT_TYPE).unwrap(),
             "application/json"
         );
-        assert_eq!(body, r#"{"Detail":"machine_token_invalid"}"#);
+        assert_eq!(body, r#"{"detail":"machine_token_invalid"}"#);
 
         let (status, headers, body) =
             response_parts(auth_failure_response(CODE_GIVEN_API_TOKEN_NOT_VALID, None)).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert!(headers.get(header::WWW_AUTHENTICATE).is_none());
-        assert_eq!(body, r#"{"Detail":"Given API token is not valid"}"#);
+        assert_eq!(body, r#"{"detail":"Given API token is not valid"}"#);
 
         // Same API-key failure on a bearer-first view (projects): 401.
         let (status, headers, body) = response_parts(auth_failure_response(
@@ -1303,7 +1303,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(headers.get(header::WWW_AUTHENTICATE).unwrap(), "Bearer");
-        assert_eq!(body, r#"{"Detail":"Given API token is not valid"}"#);
+        assert_eq!(body, r#"{"detail":"Given API token is not valid"}"#);
     }
 
     /// Missing-credential denial is always 401: the project's
@@ -1320,7 +1320,7 @@ mod tests {
         assert_eq!(headers.get(header::WWW_AUTHENTICATE).unwrap(), "Bearer");
         assert_eq!(
             body,
-            r#"{"Detail":"Authentication credentials were not provided."}"#
+            r#"{"detail":"Authentication credentials were not provided."}"#
         );
 
         // The create endpoint's `[APIKeyAuthentication]`: still 401 (the
@@ -1330,7 +1330,7 @@ mod tests {
         assert!(headers.get(header::WWW_AUTHENTICATE).is_none());
         assert_eq!(
             body,
-            r#"{"Detail":"Authentication credentials were not provided."}"#
+            r#"{"detail":"Authentication credentials were not provided."}"#
         );
     }
 
