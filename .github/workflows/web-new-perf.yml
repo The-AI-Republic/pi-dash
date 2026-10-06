@@ -1,0 +1,54 @@
+# Copyright (c) Pi Dash contributors. All rights reserved.
+# License for this tree is pending the H-license decision (NEWFRONT-2,
+# owner: human). This placeholder grants no license and must be replaced
+# with the final header text by F-11 (NEWFRONT-22).
+# Performance budget CI (NEWFRONT-21). Runs the two runtime checks from the
+# Quality gates page against the production bundles: desktop warm start
+# (<= 500 ms) and 2,000-row scroll (no frame > 50 ms). Self-contained: the
+# specs mock every API call, so this needs browsers but no backend.
+name: web-new-perf
+
+on:
+  pull_request:
+    branches: [web-new-dev]
+    paths:
+      - "apps/web_new/**"
+      - "packages/kit/**"
+      - "packages/api-client/**"
+      - ".ai_design/new_frontend_implementation/parity/**"
+      - ".github/workflows/web-new*.yml"
+      - "pnpm-lock.yaml"
+  push:
+    branches: [web-new-dev]
+    paths:
+      - "apps/web_new/**"
+      - "packages/kit/**"
+      - "packages/api-client/**"
+      - ".ai_design/new_frontend_implementation/parity/**"
+      - ".github/workflows/web-new*.yml"
+      - "pnpm-lock.yaml"
+
+concurrency:
+  group: web-new-perf-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  perf:
+    name: performance budgets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter web_new exec playwright install --with-deps chromium
+      - run: pnpm --filter @pidash/kit build
+      - run: pnpm --filter @pidash/api-client build
+      - run: pnpm --filter web_new build
+      - run: pnpm --filter web_new test:perf

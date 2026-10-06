@@ -19,6 +19,7 @@
     "check": "pnpm lint && pnpm check:boundaries && pnpm check:headers && pnpm check:deps && pnpm check:similarity",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "test:perf": "playwright test --config e2e/perf/playwright.perf.config.ts",
     "size": "size-limit",
     "coexistence:generate": "node checks/coexistence-routes.mjs",
     "check:coexistence": "node checks/coexistence-routes.mjs --check",
