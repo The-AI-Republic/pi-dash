@@ -196,8 +196,9 @@ rather than going out through the webview without the session:
 
 Images that the server only serves to a signed-in user (work-item and page
 images under `/api/assets/v2/workspaces/…`) are requested by the webview
-itself, without the session cookies, and are not routed through the native
-transport yet. Public ones (avatars, covers, workspace logos) are unaffected.
+itself and are not routed through the native transport yet, so whether they
+carry the session depends on the platform's cross-site cookie policy. Public
+ones (avatars, covers, workspace logos) need no session.
 
 Edition code that makes standalone Axios requests must also pass
 `adapter: getDesktopApiAdapter()`. Browser builds keep the default adapter.
