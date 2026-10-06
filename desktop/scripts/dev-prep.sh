@@ -222,8 +222,8 @@ mkdir -p "$STAGING"
 cp -a "$CLIENT/." "$STAGING/"
 
 # Record what this dist/ was built against so subsequent SKIP-mode runs
-# can surface the bake info in their logs. main.rs doesn't read this; it's
-# operator-facing.
+# can surface the bake info in their logs. build.rs hands api_base to
+# main.rs for its startup mismatch warning; the rest is operator-facing.
 {
     echo "api_base=$API_BASE"
     echo "web_base=${WEB_BASE:-<unset>}"
