@@ -519,7 +519,7 @@ fn resolve_chat_working_dir(
 /// same prefix (e.g. `a@b` vs `a.b`) and guarantees uniqueness. The output
 /// charset is limited to `[A-Za-z0-9_-]`, so no account value can escape the
 /// chat tree with `..` or an absolute path.
-fn account_key(account: &str) -> Result<String, String> {
+pub(crate) fn account_key(account: &str) -> Result<String, String> {
     if account.trim().is_empty() {
         return Err("chat history requires a signed-in account".into());
     }
@@ -596,13 +596,13 @@ fn sql_err(e: rusqlite::Error) -> String {
 }
 
 #[cfg(unix)]
-fn restrict_dir(path: &Path) {
+pub(crate) fn restrict_dir(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
 }
 
 #[cfg(not(unix))]
-fn restrict_dir(_path: &Path) {}
+pub(crate) fn restrict_dir(_path: &Path) {}
 
 #[cfg(unix)]
 fn restrict_file(path: &Path) {
