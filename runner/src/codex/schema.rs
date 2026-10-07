@@ -88,6 +88,13 @@ pub struct TurnStartParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TurnInterruptParams {
+    pub thread_id: String,
+    pub turn_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnInputItem {
     #[serde(rename = "type")]
     pub item_type: String,
