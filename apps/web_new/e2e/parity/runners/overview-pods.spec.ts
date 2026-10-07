@@ -1232,35 +1232,41 @@ test(
   async ({ driver, seed }) => {
     const session = await signInSession(seed.email, seed.password);
     const pod = await createPod(seed.projectId, session, `k178${stamp()}`);
+    try {
+      await test.step("sign in as the owner", async () => {
+        await driver.openEntry();
+        await driver.signInWithPassword(seed.email, seed.password);
+      });
 
-    await test.step("sign in as the owner", async () => {
-      await driver.openEntry();
-      await driver.signInWithPassword(seed.email, seed.password);
-    });
+      await test.step("open the workspace runners area", async () => {
+        await driver.runnersOpenOverview(seed.workspaceSlug);
+        await expect
+          .poll(() => driver.runnersPodTiles().then((tiles) => tiles.map((tile) => tile.name)), { timeout: 60_000 })
+          .toContain(pod.name);
+      });
 
-    await test.step("open the workspace runners area", async () => {
-      await driver.runnersOpenOverview(seed.workspaceSlug);
-      await expect
-        .poll(() => driver.runnersPodTiles().then((tiles) => tiles.map((tile) => tile.name)), { timeout: 60_000 })
-        .toContain(pod.name);
-    });
-
-    await test.step("the confirm warns, ignores cancel mid-flight, then drops the tile", async () => {
-      await driver.runnersStallMutations(8_000);
-      const done = driver.runnersDeletePod(pod.name);
-      const copy = await expect
-        .poll(() => driver.runnersModalCopy(), { timeout: 30_000 })
-        .not.toBeNull()
-        .then(() => driver.runnersModalCopy());
-      expect(copy!.title).toBe("Delete pod?");
-      expect(copy!.body).toContain("unassigned");
-      expect(copy!.body).toContain("preserved");
-      await driver.runnersCancelModal();
-      expect(await driver.runnersModalCopy()).not.toBeNull();
-      await done;
-      await driver.runnersReleaseMutationShaping();
-      expect((await serverPods(seed.projectId, session)).map((entry) => entry.name)).not.toContain(pod.name);
-    });
+      await test.step("the confirm warns, ignores cancel mid-flight, then drops the tile", async () => {
+        await driver.runnersStallMutations(8_000);
+        const done = driver.runnersDeletePod(pod.name);
+        // The confirm opens before the Delete click lands, so copy alone
+        // cannot prove mid-flight: gate the Cancel on the working state.
+        await driver.runnersWaitPodDeleteWorking();
+        const copy = await expect
+          .poll(() => driver.runnersModalCopy(), { timeout: 30_000 })
+          .not.toBeNull()
+          .then(() => driver.runnersModalCopy());
+        expect(copy!.title).toBe("Delete pod?");
+        expect(copy!.body).toContain("unassigned");
+        expect(copy!.body).toContain("preserved");
+        await driver.runnersCancelModal();
+        expect(await driver.runnersModalCopy()).not.toBeNull();
+        await done;
+        await driver.runnersReleaseMutationShaping();
+        expect((await serverPods(seed.projectId, session)).map((entry) => entry.name)).not.toContain(pod.name);
+      });
+    } finally {
+      await deletePod(pod.id, session);
+    }
   }
 );
 

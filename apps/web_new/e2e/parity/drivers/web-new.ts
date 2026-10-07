@@ -7145,4 +7145,8 @@ export class WebNewDriver implements ParityDriver {
   async archivesDetailReactionControlEnabled(): Promise<boolean> {
     return todo("archivesDetailReactionControlEnabled");
   }
+
+  async runnersWaitPodDeleteWorking(): Promise<void> {
+    return todo("runnersWaitPodDeleteWorking");
+  }
 }

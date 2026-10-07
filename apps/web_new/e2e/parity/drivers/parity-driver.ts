@@ -4669,6 +4669,8 @@ export interface ParityDriver {
   runnersFailPodsLoad(): Promise<void>;
   /** Release the pod-list failure above. */
   runnersReleasePodsFailure(): Promise<void>;
+  /** Wait until the delete-pod confirm shows its in-flight state. */
+  runnersWaitPodDeleteWorking(): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */

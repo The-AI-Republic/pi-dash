@@ -13906,8 +13906,11 @@ export class WebDriver implements ParityDriver {
   }
 
   private runnersTabLinks(): Locator {
-    // Scoped to main: the side rail carries its own Overview link.
-    return this.page.getByRole("main").getByRole("link", { name: /^(Overview|Runs|Approvals)$/ });
+    // The runners page nests mains three deep (app shell > area layout >
+    // content), and the area layout main also holds the side rail with its
+    // own Overview link. Scope to the innermost main — the content main
+    // carrying the tab strip — so the rail link never matches.
+    return this.page.locator("main:not(:has(main))").getByRole("link", { name: /^(Overview|Runs|Approvals)$/ });
   }
 
   async runnersOpenOverview(workspaceSlug: string, projectId?: string, subpath?: "runs" | "approvals"): Promise<void> {
@@ -24433,7 +24436,9 @@ export class WebDriver implements ParityDriver {
     const suffix =
       label === "Overview" ? "/runners" : label === "Runs" ? "/runs" : label === "Approvals" ? "/approvals" : null;
     if (suffix === null) throw new Error(`[parity] unknown runners tab ${JSON.stringify(label)}.`);
-    await this.page.getByRole("main").getByRole("link", { name: label, exact: true }).click();
+    await this.runnersTabLinks()
+      .filter({ hasText: new RegExp(`^${label}$`) })
+      .click();
     // Both scopes share the same trailing segments; only the base differs.
     await this.page.waitForURL((url) => new RegExp(`${suffix}/?$`).test(url.pathname), {
       timeout: WebDriver.WAIT_MS,
@@ -24523,7 +24528,9 @@ export class WebDriver implements ParityDriver {
     const dialog = this.runnersDialog().filter({
       has: this.page.getByRole("heading", { name: title, exact: true }),
     });
-    await dialog.waitFor({ timeout: WebDriver.OPEN_MS });
+    // The headless-ui dialog root is a zero-size relative container, so
+    // Playwright reports it hidden even when open; wait on its heading.
+    await dialog.getByRole("heading", { name: title, exact: true }).waitFor({ timeout: WebDriver.OPEN_MS });
     return dialog;
   }
 
@@ -24558,9 +24565,11 @@ export class WebDriver implements ParityDriver {
     const dialogs = this.runnersDialog();
     if ((await dialogs.count()) === 0) return null;
     const dialog = dialogs.first();
-    if (!(await dialog.isVisible())) return null;
+    // Openness is read off the heading: the dialog root itself is a
+    // zero-size container that Playwright always reports hidden.
     const heading = dialog.getByRole("heading").first();
     if ((await heading.count()) === 0) return null;
+    if (!(await heading.isVisible())) return null;
     const title = (await heading.innerText()).trim();
     // Confirmation content sits in the block right after the title.
     const body = await dialog
@@ -24676,8 +24685,14 @@ export class WebDriver implements ParityDriver {
   /** The open pod modal carrying the given heading text. */
   private async runnersPodModal(title: string): Promise<Locator> {
     const dialog = this.runnersDialog().filter({ hasText: title });
-    await dialog.waitFor({ timeout: WebDriver.OPEN_MS });
+    // The dialog root is zero-size (always "hidden"); wait on the title.
+    await dialog.getByText(title).first().waitFor({ timeout: WebDriver.OPEN_MS });
     return dialog;
+  }
+
+  /** Wait for a pod modal to close by watching its action buttons go. */
+  private async runnersWaitPodModalClosed(dialog: Locator, timeoutMs: number): Promise<void> {
+    await dialog.locator("button").first().waitFor({ state: "hidden", timeout: timeoutMs });
   }
 
   async runnersOpenCreatePod(): Promise<void> {
@@ -24713,7 +24728,7 @@ export class WebDriver implements ParityDriver {
       await expect.poll(() => this.runnersLastToast(), { timeout: WebDriver.WAIT_MS }).not.toBeNull();
       return;
     }
-    await dialog.waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+    await this.runnersWaitPodModalClosed(dialog, WebDriver.WAIT_MS);
   }
 
   async runnersPodFilterIsClientSide(podName: string): Promise<boolean> {
@@ -24772,7 +24787,10 @@ export class WebDriver implements ParityDriver {
   async runnersPodModalOpen(): Promise<boolean> {
     const dialogs = this.runnersDialog();
     if ((await dialogs.count()) === 0) return false;
-    return await dialogs.first().isVisible();
+    // Read openness off the action buttons: the dialog root is zero-size.
+    const action = dialogs.first().locator("button").first();
+    if ((await action.count()) === 0) return false;
+    return await action.isVisible();
   }
 
   async runnersPodsError(): Promise<string | null> {
@@ -24784,11 +24802,28 @@ export class WebDriver implements ParityDriver {
 
   /** Open one tile's overflow menu through its labelled trigger. */
   private async runnersOpenPodMenu(podName: string): Promise<void> {
-    await this.page
+    // The trigger's i18n template never interpolates at runtime (the
+    // accessible name is literally "Pod actions for {name}"), so the tile
+    // is located first and the trigger scoped to its container.
+    const tile = this.page
       .getByRole("main")
-      .getByRole("button", { name: `Pod actions for ${podName}`, exact: true })
-      .click();
-    await this.page.getByRole("menu").waitFor({ timeout: WebDriver.OPEN_MS });
+      .getByRole("button", { name: `Filter runners by pod ${podName}`, exact: true });
+    // The trigger nests two same-named buttons (headless-ui menu button
+    // wrapping the icon button); the outer one owns the menu.
+    const trigger = tile
+      .locator("xpath=..")
+      .getByRole("button", { name: /^Pod actions for / })
+      .first();
+    const triggerId = await trigger.getAttribute("id");
+    await trigger.click();
+    // The menu shell is zero-size (its popper-positioned panel is absolute),
+    // so readiness is read off this tile's first item, which is what the
+    // user sees. The panel labels itself with the trigger id.
+    const items =
+      triggerId === null
+        ? this.page.getByRole("menuitem")
+        : this.page.locator(`[aria-labelledby='${triggerId}']`).getByRole("menuitem");
+    await items.first().waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
   }
 
   async runnersOpenEditPod(podName: string): Promise<void> {
@@ -24811,20 +24846,21 @@ export class WebDriver implements ParityDriver {
   async runnersSavePodEdit(input: { name?: string; description?: string; makeDefault?: boolean }): Promise<void> {
     const dialog = await this.runnersFillPodEdit(input);
     await dialog.locator('button[type="submit"]').click();
-    await dialog.waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+    await this.runnersWaitPodModalClosed(dialog, WebDriver.WAIT_MS);
   }
 
   async runnersUnchangedEditSkipsSave(): Promise<boolean> {
     const dialog = await this.runnersPodModal("Edit pod");
     let patches = 0;
-    const pattern = "**/api/runners/pods/*";
+    // `**` past pods/: `*` never crosses the id's trailing slash.
+    const pattern = "**/api/runners/pods/**";
     await this.page.route(pattern, async (route) => {
       if (route.request().method() === "PATCH") patches += 1;
       await route.continue();
     });
     try {
       await dialog.locator('button[type="submit"]').click();
-      await dialog.waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
+      await this.runnersWaitPodModalClosed(dialog, WebDriver.OPEN_MS);
     } finally {
       await this.page.unroute(pattern);
     }
@@ -24857,7 +24893,8 @@ export class WebDriver implements ParityDriver {
     makeDefault?: boolean;
   }): Promise<Record<string, unknown>[]> {
     const bodies: Record<string, unknown>[] = [];
-    const pattern = "**/api/runners/pods/*";
+    // `**` past pods/: `*` never crosses the id's trailing slash.
+    const pattern = "**/api/runners/pods/**";
     await this.page.route(pattern, async (route) => {
       if (route.request().method() === "PATCH") {
         try {
@@ -24871,7 +24908,7 @@ export class WebDriver implements ParityDriver {
     try {
       const dialog = await this.runnersFillPodEdit(input);
       await dialog.locator('button[type="submit"]').click();
-      await dialog.waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+      await this.runnersWaitPodModalClosed(dialog, WebDriver.WAIT_MS);
     } finally {
       await this.page.unroute(pattern);
     }
@@ -24887,6 +24924,10 @@ export class WebDriver implements ParityDriver {
       await expect.poll(() => this.runnersLastToast(), { timeout: WebDriver.WAIT_MS }).not.toBeNull();
       return;
     }
+    // Completion is the confirm closing (it stays open while the DELETE is
+    // in flight): the tile wait alone is vacuous because the open modal
+    // hides the background tiles from the accessibility tree.
+    await this.runnersWaitPodModalClosed(dialog, WebDriver.WAIT_MS);
     const tile = this.page
       .getByRole("main")
       .getByRole("button", { name: `Filter runners by pod ${podName}`, exact: true });
@@ -24953,13 +24994,23 @@ export class WebDriver implements ParityDriver {
   }
 
   async runnersFailPodsLoad(): Promise<void> {
-    await this.page.route("**/api/runners/pods*", async (route) => {
+    // Trailing `**` covers every list-URL shape (`pods`, `pods?...`, `pods/?...`).
+    await this.page.route("**/api/runners/pods**", async (route) => {
       if (route.request().method() === "GET") await route.abort("failed");
       else await route.continue();
     });
   }
 
   async runnersReleasePodsFailure(): Promise<void> {
-    await this.page.unroute("**/api/runners/pods*");
+    await this.page.unroute("**/api/runners/pods**");
+  }
+
+  async runnersWaitPodDeleteWorking(): Promise<void> {
+    // The confirm disables its Delete button while the DELETE is in
+    // flight; waiting on that (not on the modal merely being open, which
+    // predates the Delete click) proves mid-flight for dismissal tests.
+    const dialog = await this.runnersWaitForConfirm("Delete pod?");
+    const remove = dialog.getByRole("button", { name: "Delete", exact: true });
+    await expect.poll(() => remove.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
   }
 }
