@@ -163,11 +163,7 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
     """
     from django.db import transaction
 
-    from pi_dash.runner.services.matcher import (
-        BUSY_STATUSES,
-        drain_for_runner_by_id,
-        drain_pod_by_id,
-    )
+    from pi_dash.runner.services.matcher import BUSY_STATUSES
 
     now = timezone.now()
     ts_raw = body.get("ts")
@@ -240,36 +236,55 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
 
             transaction.on_commit(_retry_cancel)
 
+    _finish_unclaimed_runs(
+        runner,
+        stale,
+        detail=(
+            "reaped by heartbeat: runner reported in_flight_run="
+            f"{in_flight_id or '(none)'} but cloud had this run marked busy"
+        ),
+        error_code="heartbeat_reaped",
+    )
+
+
+def _finish_unclaimed_runs(runner: Runner, stale, *, detail: str, error_code: str) -> int:
+    """Terminate ``stale`` BUSY runs that ``runner`` is no longer serving.
+
+    Shared by the heartbeat reaper (the daemon stopped reporting the run) and
+    the offline-runner sweep (the daemon stopped reporting at all). Returns
+    the number of runs moved to a terminal status.
+    """
+    from django.db import transaction
+
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+    from pi_dash.runner.services.matcher import drain_for_runner_by_id, drain_pod_by_id
+
     # A cancellation request disappears from the daemon's in-flight report
-    # only after its worker has stopped. Treat that heartbeat as the same
-    # barrier as an explicit RunCancelled lifecycle frame.
+    # only after its worker has stopped. Treat that as the same barrier as an
+    # explicit RunCancelled lifecycle frame.
     stopped_cancel_ids = list(stale.filter(status=AgentRunStatus.CANCEL_REQUESTED).values_list("id", flat=True))
     stopped_cancel_pod_ids = set(stale.filter(status=AgentRunStatus.CANCEL_REQUESTED).values_list("pod_id", flat=True))
     if stopped_cancel_ids:
         AgentRun.objects.filter(id__in=stopped_cancel_ids).update(
             status=AgentRunStatus.CANCELLED,
-            ended_at=now,
+            ended_at=timezone.now(),
             queue_position=None,
         )
         stale = stale.exclude(id__in=stopped_cancel_ids)
 
     reaped = list(stale.values_list("id", "pod_id"))
     if not reaped and not stopped_cancel_ids:
-        return
+        return 0
 
-    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
-
-    detail = (
-        "reaped by heartbeat: runner reported in_flight_run="
-        f"{in_flight_id or '(none)'} but cloud had this run marked busy"
-    )
+    failed = 0
     for run_id, _ in reaped:
-        finalize_agent_run(
+        if finalize_agent_run(
             run_id,
             AgentRunStatus.FAILED,
-            updates={"error": detail, "error_code": "heartbeat_reaped"},
+            updates={"error": detail, "error_code": error_code},
             expected_runner_id=runner.id,
-        )
+        ):
+            failed += 1
     pod_ids = {pid for _, pid in reaped if pid is not None}
     pod_ids.update(pid for pid in stopped_cancel_pod_ids if pid is not None)
     runner_id = runner.id
@@ -288,6 +303,7 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
             drain_pod_by_id(pid)
 
     transaction.on_commit(_drain_after_commit)
+    return failed + len(stopped_cancel_ids)
 
 
 # ---------------------------------------------------------------------------

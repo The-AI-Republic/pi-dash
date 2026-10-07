@@ -479,6 +479,11 @@ if _raw_long_poll_secs < _LONG_POLL_MIN_SECS or _raw_long_poll_secs > _LONG_POLL
 LONG_POLL_INTERVAL_SECS = max(_LONG_POLL_MIN_SECS, min(_raw_long_poll_secs, _LONG_POLL_MAX_SECS))
 ACCESS_TOKEN_TTL_SECS = int(get_config("ACCESS_TOKEN_TTL_SECS", 3600))
 RUNNER_OFFLINE_THRESHOLD_SECS = int(get_config("RUNNER_OFFLINE_THRESHOLD_SECS", 50))
+# How long a runner must be silent before runs stranded on it are recovered:
+# QUEUED runs pinned to it go back to the pod queue, and runs it was serving
+# are failed. 0 disables either sweep.
+RUNNER_OFFLINE_PIN_RELEASE_SECS = int(get_config("RUNNER_OFFLINE_PIN_RELEASE_SECS", 300))
+RUNNER_OFFLINE_RUN_FAIL_SECS = int(get_config("RUNNER_OFFLINE_RUN_FAIL_SECS", 1800))
 OFFLINE_STREAM_TTL_SECS = int(get_config("OFFLINE_STREAM_TTL_SECS", 86400))
 OFFLINE_STREAM_MAXLEN = int(get_config("OFFLINE_STREAM_MAXLEN", 1000))
 RUNNER_STREAM_MIN_RETENTION_SECS = int(get_config("RUNNER_STREAM_MIN_RETENTION_SECS", 3600))
