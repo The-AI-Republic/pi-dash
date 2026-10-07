@@ -32,9 +32,9 @@
 //! # Auth rendering
 //!
 //! Both 401 flavors re-render the D-13 denial locally (the
-//! PIDASHCONV-590 precedent): `auth.rs` still emits a capital
-//! `Detail` key until PIDASHCONV-718 lands, while DRF and the
-//! hand-built poll bodies use lowercase `detail`. The open/delete
+//! PIDASHCONV-590 precedent): `auth.rs` renders the lowercase
+//! `detail` DRF 401 (PIDASHCONV-718); the re-render pins the exact
+//! compact/spaced flavor per endpoint. The open/delete
 //! 401 renders lowercase-compact with the `Bearer` challenge (DRF's
 //! `exception_handler`); the poll 401 renders lowercase-spaced with
 //! no challenge (the hand-built `JsonResponse`); 500s pass through
@@ -269,9 +269,9 @@ fn poll_body(bytes: &[u8]) -> Result<Map<String, Value>, Response> {
 }
 
 /// Read a machine-generated D-13 denial body back into its code,
-/// returning the code plus the rebuilt response. Accepts the correct
-/// lowercase `detail` and the pre-718 capital `Detail` (`auth.rs`
-/// still emits it until PIDASHCONV-718 lands); anything else yields
+/// returning the code plus the rebuilt response. Accepts lowercase
+/// `detail` (what `auth.rs` renders since PIDASHCONV-718) plus the
+/// legacy pre-718 capital `Detail` for tolerance; anything else yields
 /// `None` and the caller passes the rebuilt response through
 /// untouched. The auth lookups are private to `runner_enroll::auth`
 /// (read-only for this issue), so the code comes back out of the
@@ -300,8 +300,8 @@ async fn denial_code(response: Response) -> (Option<String>, Response) {
 /// Re-render a D-13 machine-token denial for the DRF open/delete
 /// endpoints: the 401 keeps its code and `Bearer` challenge but
 /// renders lowercase-compact (DRF's `exception_handler`), like the
-/// PIDASHCONV-590 handlers do locally until PIDASHCONV-718 fixes
-/// `auth.rs`. 500s and unrecognized shapes pass through untouched.
+/// PIDASHCONV-590 handlers do locally. 500s and unrecognized shapes
+/// pass through untouched.
 async fn open_denial(response: Response) -> Response {
     if response.status() != StatusCode::UNAUTHORIZED {
         return response;
