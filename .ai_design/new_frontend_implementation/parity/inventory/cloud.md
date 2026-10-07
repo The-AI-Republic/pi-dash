@@ -100,7 +100,7 @@ onboarding flow) is covered by the Profile (NEWFRONT-65) and Auth (auth.md) inve
 | `core/hooks/oauth/extended.tsx` (provider button, incl. desktop branch) | CLOUD-017, CLOUD-018 |
 | `core/constants/extended-navigation.tsx` (Apps sidebar item) | CLOUD-021 |
 | `core/constants/openhub-flags.ts` (build-time release gate) | CLOUD-021 |
-| `ce/components/workspace/edition-badge.tsx` | CLOUD-038 |
+| `ce/components/workspace/edition-badge.tsx` [target removed by main#572; CLOUD-038's pinned plan/account-center behavior is untouched by that PR] | CLOUD-038 |
 | `ce/components/desktop/sign-in-card.tsx` (re-exports cloud card) | CLOUD-019 |
 | `ce/components/desktop/agent-runtime-edition.ts` (CSRF path, reason messages) | CLOUD-040 |
 | `ee/components/.gitkeep` | dead placeholder: no behavior, no row |
