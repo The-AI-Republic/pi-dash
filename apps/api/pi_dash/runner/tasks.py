@@ -190,7 +190,7 @@ def fail_runs_on_offline_runners() -> int:
     a desktop app that is closed for a while is their normal case.
     ``RUNNER_OFFLINE_RUN_FAIL_SECS <= 0`` disables the sweep.
     """
-    grace = int(getattr(settings, "RUNNER_OFFLINE_RUN_FAIL_SECS", 1800))
+    grace = int(getattr(settings, "RUNNER_OFFLINE_RUN_FAIL_SECS", 3600))
     if grace <= 0:
         return 0
     cutoff = timezone.now() - timedelta(seconds=grace)

@@ -351,8 +351,9 @@ def test_pending_cancellation_on_silent_runner_becomes_cancelled(db, create_user
 
 @pytest.mark.unit
 def test_fail_run_waits_out_the_grace(db, create_user, workspace, pod):
-    # Ten minutes of silence: a sleeping laptop keeps its run.
-    asleep = _make_runner(create_user, workspace, pod, "asleep", status=RunnerStatus.OFFLINE, silent_for_s=600)
+    # 45 minutes of silence, under the one-hour default: a sleeping laptop
+    # keeps its run.
+    asleep = _make_runner(create_user, workspace, pod, "asleep", status=RunnerStatus.OFFLINE, silent_for_s=2700)
     run = _make_run(create_user, workspace, pod, status=AgentRunStatus.RUNNING, runner=asleep, age_s=7200)
 
     assert tasks.fail_runs_on_offline_runners() == 0
