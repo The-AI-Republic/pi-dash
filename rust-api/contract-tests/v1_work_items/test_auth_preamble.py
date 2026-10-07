@@ -13,7 +13,9 @@ so these tests seed the zone straight into ``users`` with SQL, like the
 737/747 pins in ``v1_projects/test_auth_preamble.py`` do. One route per
 carrier is pinned (links list for social, pull-request list for
 pr_links); every other route in each file shares the same
-``activate_timezone`` call.
+``activate_timezone`` call except the two ``*_destroy_inner`` handlers
+in ``handlers_pr_links.rs``, which return 204 without rendering times
+and never call it (PIDASHCONV-787).
 """
 
 import httpx
