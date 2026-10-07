@@ -6,12 +6,13 @@
 
 import React, { useState } from "react";
 import { observer } from "mobx-react";
-import { copyUrlToClipboard, generateWorkItemLink } from "@pi-dash/utils";
+import { generateWorkItemLink } from "@pi-dash/utils";
 // pi dash imports
 // helpers
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useProject } from "@/hooks/store/use-project";
+import { copyShareUrl } from "@/utils/share-url";
 
 type TCreateIssueToastActionItems = {
   workspaceSlug: string;
@@ -49,7 +50,7 @@ export const CreateIssueToastActionItems = observer(function CreateIssueToastAct
 
   const copyToClipboard = async (e: React.MouseEvent<HTMLButtonElement, MouseEvent>) => {
     try {
-      await copyUrlToClipboard(workItemLink);
+      await copyShareUrl(workItemLink);
       setCopied(true);
       setTimeout(() => setCopied(false), 3000);
     } catch (_error) {

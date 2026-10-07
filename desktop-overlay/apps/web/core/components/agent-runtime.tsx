@@ -9,6 +9,7 @@ import { observer } from "mobx-react";
 import { useMatches } from "react-router";
 import { useUser } from "@/hooks/store/user";
 import { useProject } from "@/hooks/store/use-project";
+import { DesktopSignOutDialog } from "@/components/desktop-sign-out-dialog";
 import { connectAgentProject, isDesktop, refreshAgentRuntime, resumeAgentRuntime } from "@/services/agent-runtime";
 import { registerLocalChatTransport } from "@/services/local-chat-transport";
 
@@ -120,13 +121,19 @@ export const AgentRuntime = observer(function AgentRuntime() {
     };
   }, [user?.id, workspaceSlug, projectId, fetchProjectDetails]);
 
-  if (!isDesktop() || !user?.id || !projectId || !message) return null;
+  if (!isDesktop()) return null;
   return (
-    <div
-      role="status"
-      className="shadow-sm fixed bottom-2 left-1/2 z-20 max-w-xl -translate-x-1/2 rounded-md border border-subtle bg-surface-1 px-3 py-2 text-body-xs-regular"
-    >
-      {message}
-    </div>
+    <>
+      {/* Mounted on every page: sign-out can be started from any of them. */}
+      <DesktopSignOutDialog />
+      {user?.id && projectId && message && (
+        <div
+          role="status"
+          className="shadow-sm fixed bottom-2 left-1/2 z-20 max-w-xl -translate-x-1/2 rounded-md border border-subtle bg-surface-1 px-3 py-2 text-body-xs-regular"
+        >
+          {message}
+        </div>
+      )}
+    </>
   );
 });
