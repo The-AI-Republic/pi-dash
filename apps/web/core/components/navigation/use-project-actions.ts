@@ -6,8 +6,8 @@
 
 import { useCallback, useState } from "react";
 import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
-import { copyUrlToClipboard } from "@pi-dash/utils";
 import type { TNavigationItem } from "@/components/navigation/tab-navigation-root";
+import { copyShareUrl } from "@/utils/share-url";
 
 type UseProjectActionsProps = {
   workspaceSlug: string;
@@ -27,7 +27,7 @@ export const useProjectActions = ({ workspaceSlug, projectId, activeItem }: UseP
     const pathToCopy = activeItem?.href ?? `/${workspaceSlug}/projects/${projectId}/issues`;
 
     try {
-      await copyUrlToClipboard(pathToCopy);
+      await copyShareUrl(pathToCopy);
       setToast({
         type: TOAST_TYPE.INFO,
         title: "Link copied!",

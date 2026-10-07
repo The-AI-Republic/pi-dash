@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use serde_json::json;
 use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
@@ -16,8 +15,11 @@ use crate::util::shell::AgentEnv;
 use crate::codex::jsonrpc::{self, Incoming};
 use crate::codex::schema::{
     ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadStartParams,
-    TurnInputItem, TurnStartParams,
+    TurnInputItem, TurnInterruptParams, TurnStartParams,
 };
+
+/// How long a new turn waits for an interrupted one to report its end.
+const INTERRUPT_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct Bridge {
     pub server: AppServer,
@@ -32,6 +34,15 @@ pub struct Bridge {
     pub engine_settings: EngineThreadSettings,
     initialized: bool,
     thread_id: Option<String>,
+    /// Request id of a `turn/start` whose response (carrying the turn id) has
+    /// not been read yet.
+    turn_start_request: Option<u64>,
+    /// Id of the turn in flight. `turn/interrupt` is rejected without it.
+    turn_id: Option<String>,
+    /// An interrupt was asked for; the turn has not reported its end yet. The
+    /// next turn settles this first, so the interrupted turn's remaining
+    /// frames are not read as its own.
+    interrupting: bool,
     /// Notifications that arrived while we were waiting for an RPC response
     /// (e.g. an early `account/reauthRequired` during `initialize`). Drained
     /// by [`Bridge::next_frame`] before reading from the live stream so the
@@ -75,6 +86,9 @@ impl Bridge {
             engine_settings,
             initialized: false,
             thread_id: None,
+            turn_start_request: None,
+            turn_id: None,
+            interrupting: false,
             pending: std::collections::VecDeque::new(),
         })
     }
@@ -89,6 +103,9 @@ impl Bridge {
             engine_settings: EngineThreadSettings::default(),
             initialized: false,
             thread_id: None,
+            turn_start_request: None,
+            turn_id: None,
+            interrupting: false,
             pending: std::collections::VecDeque::new(),
         }
     }
@@ -96,10 +113,49 @@ impl Bridge {
     /// Returns the next frame from Codex, consulting the pending buffer first
     /// so notifications stashed during `await_response` are not lost.
     pub async fn next_frame(&mut self) -> Option<Incoming> {
-        if let Some(f) = self.pending.pop_front() {
-            return Some(f);
+        let frame = match self.pending.pop_front() {
+            Some(f) => f,
+            None => self.server.inbound.recv().await?,
+        };
+        self.track_turn(&frame);
+        Some(frame)
+    }
+
+    /// Follow the turn in flight from the frames going past.
+    fn track_turn(&mut self, frame: &Incoming) {
+        match frame {
+            Incoming::Response { id, result, .. } if self.turn_start_request == Some(*id) => {
+                self.turn_start_request = None;
+                self.turn_id = result.as_ref().and_then(turn_id_of);
+                // The turn never started, so there is nothing to wait out.
+                if self.turn_id.is_none() {
+                    self.interrupting = false;
+                }
+            }
+            Incoming::Notification { method, .. } if method == "turn/completed" => {
+                self.turn_start_request = None;
+                self.turn_id = None;
+                self.interrupting = false;
+            }
+            _ => {}
         }
-        self.server.inbound.recv().await
+    }
+
+    /// Wait for an interrupted turn to end, discarding what is left of it.
+    /// Without this the next turn would read the old turn's frames as its own.
+    async fn settle_interrupted_turn(&mut self) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + INTERRUPT_SETTLE_TIMEOUT;
+        while self.interrupting {
+            // The interrupt could not be sent before the turn id was known.
+            if self.turn_id.is_some() {
+                self.send_interrupt().await?;
+            }
+            tokio::time::timeout_at(deadline, self.next_frame())
+                .await
+                .context("interrupted codex turn did not end")?
+                .context("codex stdout closed while interrupting a turn")?;
+        }
+        Ok(())
     }
 
     /// Prepare the app-server for a chat turn without sending user input.
@@ -119,6 +175,7 @@ impl Bridge {
 
     pub async fn run(&mut self, payload: &RunPayload, cwd: &Path) -> Result<BridgeCursor> {
         let thread_id = self.warm(cwd).await?;
+        self.settle_interrupted_turn().await?;
         self.start_turn(&thread_id, payload).await?;
         Ok(BridgeCursor {
             run_id: payload.run_id,
@@ -197,7 +254,9 @@ impl Bridge {
                 effort: self.effort_default.clone(),
             },
         )?;
-        self.server.send_raw(&line).await
+        self.server.send_raw(&line).await?;
+        self.turn_start_request = Some(id);
+        Ok(())
     }
 
     pub async fn send_approval(
@@ -220,8 +279,25 @@ impl Bridge {
     }
 
     pub async fn interrupt(&mut self) -> Result<()> {
+        if self.turn_start_request.is_none() && self.turn_id.is_none() {
+            return Ok(());
+        }
+        self.interrupting = true;
+        self.send_interrupt().await
+    }
+
+    /// Send `turn/interrupt` for the turn in flight. A no-op until its id is
+    /// known; [`Bridge::settle_interrupted_turn`] retries once it is.
+    async fn send_interrupt(&mut self) -> Result<()> {
+        let (Some(thread_id), Some(turn_id)) = (self.thread_id.clone(), self.turn_id.take()) else {
+            return Ok(());
+        };
         let id = self.server.alloc_id();
-        let line = jsonrpc::request(id, "turn/interrupt", &json!({}))?;
+        let line = jsonrpc::request(
+            id,
+            "turn/interrupt",
+            &TurnInterruptParams { thread_id, turn_id },
+        )?;
         self.server.send_raw(&line).await
     }
 
@@ -254,6 +330,14 @@ impl Bridge {
             }
         }
     }
+}
+
+fn turn_id_of(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("turn")
+        .and_then(|turn| turn.get("id"))
+        .and_then(|id| id.as_str())
+        .map(|id| id.to_string())
 }
 
 pub struct BridgeCursor {

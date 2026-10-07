@@ -54,8 +54,12 @@ pub struct Args {
     /// Everything after the exchange — the machine token, the workspace
     /// binding, the config file — stays here rather than being reimplemented
     /// in the app.
-    #[arg(long, hide = true, value_name = "CODE")]
-    pub device_code: Option<String>,
+    ///
+    /// The code is read from **stdin**, never taken as an argument: once
+    /// approved it is a bearer credential (the token endpoint asks for nothing
+    /// else), and argv is visible to other local processes.
+    #[arg(long, hide = true)]
+    pub device_code_stdin: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,13 +127,18 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         .build()
         .context("building HTTP client")?;
 
-    let start = match args.device_code.as_deref() {
+    let device_code = if args.device_code_stdin {
+        Some(read_device_code(std::io::stdin().lock())?)
+    } else {
+        None
+    };
+    let start = match device_code {
         // Pre-approved by the desktop app: nothing to show and nobody to ask,
         // just the exchange. `expires_in` bounds the polling; the server is
         // authoritative and ends the poll with a terminal error if the grant
         // is already gone.
         Some(code) => StartResponse {
-            device_code: code.to_string(),
+            device_code: code,
             user_code: String::new(),
             verification_uri: format!("{cloud_url}/auth/device/"),
             expires_in: 300,
@@ -230,6 +239,20 @@ fn resolve_cloud_url(args: &Args, paths: &Paths) -> Result<(String, CloudUrlSour
         crate::DEFAULT_CLOUD_URL.trim_end_matches('/').to_string(),
         CloudUrlSource::Default,
     ))
+}
+
+/// Read the pre-approved device code the desktop app pipes in for
+/// `--device-code-stdin`.
+fn read_device_code(mut input: impl std::io::Read) -> Result<String> {
+    let mut buf = String::new();
+    input
+        .read_to_string(&mut buf)
+        .context("reading device code from stdin")?;
+    let code = buf.trim();
+    if code.is_empty() {
+        anyhow::bail!("--device-code-stdin was given but no device code arrived on stdin");
+    }
+    Ok(code.to_string())
 }
 
 async fn start_device_code(client: &reqwest::Client, cloud_url: &str) -> Result<StartResponse> {
@@ -490,7 +513,7 @@ mod tests {
             url: url.map(str::to_string),
             no_browser: true,
             workspace: None,
-            device_code: None,
+            device_code_stdin: false,
         }
     }
 
@@ -531,6 +554,18 @@ mod tests {
         let (url, source) = resolve_cloud_url(&args_with_url(None), &paths).unwrap();
         assert_eq!(url, "https://self.example.com");
         assert_eq!(source, CloudUrlSource::Config);
+    }
+
+    #[test]
+    fn device_code_is_read_from_stdin_and_trimmed() {
+        assert_eq!(read_device_code(&b"DEV-123\n"[..]).unwrap(), "DEV-123");
+        assert_eq!(read_device_code(&b"DEV-123"[..]).unwrap(), "DEV-123");
+    }
+
+    #[test]
+    fn empty_stdin_is_an_error_rather_than_an_empty_code() {
+        assert!(read_device_code(&b""[..]).is_err());
+        assert!(read_device_code(&b" \n"[..]).is_err());
     }
 
     #[test]

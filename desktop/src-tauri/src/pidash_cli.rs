@@ -378,7 +378,7 @@ fn install_from_bundle<R: Runtime>(app: &AppHandle<R>) -> Result<Option<PathBuf>
 /// makes. What it must not do is write the CLI's credential file: the machine
 /// token, the workspace binding and the config format all belong to the
 /// runner. So it hands the approved device code to the installed CLI
-/// (`pidash auth login --device-code`), which finishes exactly as an
+/// (`pidash auth login --device-code-stdin`), which finishes exactly as an
 /// interactive login would.
 ///
 /// Output is streamed to the webview as `pidash-install-log`, the same channel
@@ -394,25 +394,41 @@ pub async fn pidash_cli_login<R: Runtime>(
     let Some(cli) = status.path else {
         return Err("The pidash CLI is not installed yet.".to_string());
     };
+    let (args, stdin) = login_invocation(device_code, cloud_url, workspace);
+    let app_clone = app.clone();
+    match tauri::async_runtime::spawn_blocking(move || {
+        run_installer(&app_clone, &cli, &args, stdin.as_deref())
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => Err(format!("login task panicked: {e}")),
+    }
+}
+
+/// The argv and stdin for the `pidash auth login` child of [`pidash_cli_login`].
+///
+/// The approved device code goes on **stdin** rather than argv, so it never
+/// appears in the process table: the token endpoint asks for nothing but the
+/// code, so anyone who can read it can redeem it.
+fn login_invocation(
+    device_code: String,
+    cloud_url: String,
+    workspace: Option<String>,
+) -> (Vec<String>, Option<String>) {
     let mut args = vec![
         "auth".to_string(),
         "login".to_string(),
         "--no-browser".to_string(),
         "--url".to_string(),
         cloud_url,
-        "--device-code".to_string(),
-        device_code,
+        "--device-code-stdin".to_string(),
     ];
     if let Some(slug) = workspace.filter(|s| !s.is_empty()) {
         args.push("--workspace".to_string());
         args.push(slug);
     }
-    let app_clone = app.clone();
-    match tauri::async_runtime::spawn_blocking(move || run_installer(&app_clone, &cli, &args)).await
-    {
-        Ok(result) => result,
-        Err(e) => Err(format!("login task panicked: {e}")),
-    }
+    (args, Some(device_code))
 }
 
 /// Find `pidash` by name on PATH. Returns the absolute path resolved by
@@ -609,7 +625,9 @@ pub async fn install_pidash_cli<R: Runtime>(app: AppHandle<R>) -> Result<(), Str
     // the tauri async runtime.
     let app_clone = app.clone();
     let join =
-        tauri::async_runtime::spawn_blocking(move || run_installer(&app_clone, &program, &args));
+        tauri::async_runtime::spawn_blocking(move || {
+            run_installer(&app_clone, &program, &args, None)
+        });
     match join.await {
         Ok(result) => result,
         Err(e) => Err(format!("install task panicked: {e}")),
@@ -719,20 +737,44 @@ fn windows_installer_script() -> String {
     )
 }
 
-fn run_installer<R: Runtime>(
-    app: &AppHandle<R>,
-    program: &PathBuf,
-    args: &[String],
-) -> Result<(), String> {
-    use std::io::{BufRead, BufReader};
+/// Spawn `program` with stdout/stderr piped. `stdin`, when given, is written
+/// to the child followed by EOF; otherwise the child gets a null stdin.
+fn spawn_piped(program: &PathBuf, args: &[String], stdin: Option<&str>) -> Result<Child, String> {
+    use std::io::Write;
 
     let mut child = Command::new(program)
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to spawn {}: {e}", program.display()))?;
+
+    if let Some(input) = stdin {
+        // A child that exits without reading (e.g. an older CLI rejecting the
+        // flag) breaks the pipe; ignore that so its own error output is still
+        // streamed and its exit status reported.
+        if let Some(mut pipe) = child.stdin.take() {
+            let _ = pipe.write_all(input.as_bytes());
+        }
+        // `pipe` dropped here: the child sees EOF instead of blocking forever.
+    }
+    Ok(child)
+}
+
+fn run_installer<R: Runtime>(
+    app: &AppHandle<R>,
+    program: &PathBuf,
+    args: &[String],
+    stdin: Option<&str>,
+) -> Result<(), String> {
+    use std::io::{BufRead, BufReader};
+
+    let mut child = spawn_piped(program, args, stdin)?;
 
     // Take stdout/stderr before wait() so we can stream them in parallel.
     let stdout = child.stdout.take().ok_or("missing stdout pipe")?;
@@ -798,6 +840,82 @@ fn run_installer<R: Runtime>(
     Ok(())
 }
 
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+
+    const CODE: &str = "dev-code-SECRET-123";
+
+    fn invocation() -> (Vec<String>, Option<String>) {
+        login_invocation(
+            CODE.to_string(),
+            "https://pidash.example.com".to_string(),
+            Some("acme".to_string()),
+        )
+    }
+
+    #[test]
+    fn device_code_is_not_on_argv() {
+        // argv is readable by other local processes (`ps`, /proc/<pid>/cmdline)
+        // and the approved code is a bearer credential.
+        let (args, stdin) = invocation();
+        assert!(
+            !args.iter().any(|a| a.contains(CODE)),
+            "device code leaked into argv: {args:?}"
+        );
+        assert_eq!(stdin.as_deref(), Some(CODE));
+        assert_eq!(
+            args,
+            [
+                "auth",
+                "login",
+                "--no-browser",
+                "--url",
+                "https://pidash.example.com",
+                "--device-code-stdin",
+                "--workspace",
+                "acme"
+            ]
+        );
+    }
+
+    /// End to end against a stand-in `pidash` that records what it was given.
+    #[cfg(unix)]
+    #[test]
+    fn login_child_receives_the_code_on_stdin_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("pidash");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\ndir=$(dirname \"$0\")\n\
+             tr '\\0' ' ' < /proc/$$/cmdline > \"$dir/cmdline\" 2>/dev/null || echo \"$*\" > \"$dir/cmdline\"\n\
+             cat > \"$dir/stdin\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (args, stdin) = invocation();
+        let mut child = spawn_piped(&fake, &args, stdin.as_deref()).unwrap();
+        assert!(child.wait().unwrap().success());
+
+        let cmdline = std::fs::read_to_string(tmp.path().join("cmdline")).unwrap();
+        assert!(
+            cmdline.contains("--url"),
+            "cmdline not captured: {cmdline:?}"
+        );
+        assert!(
+            !cmdline.contains(CODE),
+            "device code visible in the process table: {cmdline:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("stdin")).unwrap(),
+            CODE
+        );
+    }
+}
 
 #[cfg(test)]
 mod bundle_install_tests {

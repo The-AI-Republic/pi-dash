@@ -153,6 +153,11 @@ function frameSessionId(frame: ChatFrame): string {
   return frame.data.chat_session_id;
 }
 
+/** Whether a frame ends its turn — the daemon sends exactly one per `chat_send`. */
+function isTerminalFrame(frame: ChatFrame): boolean {
+  return frame.result === "chat_message_completed" || frame.result === "chat_failed" || frame.result === "chat_closed";
+}
+
 /**
  * Pull the assistant text out of an `assistant_delta` frame payload. The daemon
  * wraps engine frames as `{ method, params }`; the text lives on `params.delta`
@@ -283,7 +288,11 @@ function mapRole(role: string): TAgentChatMessageRole {
   return "system";
 }
 
-function storedSessionToChatSession(s: StoredSession, account: string): IAgentChatSession {
+function storedSessionToChatSession(
+  s: StoredSession,
+  account: string,
+  activeMessageId: string | null = null
+): IAgentChatSession {
   // `updated_at` is bumped whenever an event is appended, so a session that has
   // been written to since creation has had at least one message.
   const lastMessageAt = s.updated_at > s.created_at ? toIso(s.updated_at) : null;
@@ -301,7 +310,10 @@ function storedSessionToChatSession(s: StoredSession, account: string): IAgentCh
     cwd: s.working_dir,
     model: "",
     active_turn_id: "",
-    active_message_id: null,
+    // The daemon message id of the turn in flight, if any. The shared page
+    // reads this as "Response in progress" and holds the composer until the
+    // turn ends, exactly as it does for a cloud session.
+    active_message_id: activeMessageId,
     close_requested: false,
     last_message_at: lastMessageAt,
     closed_at: null,
@@ -362,6 +374,7 @@ export class LocalChatTransport implements ChatTransport {
     this.listening = true;
     void this.bridge.listen<ChatFrame>(CHAT_FRAME_EVENT, (frame) => this.handleFrame(frame));
     void this.bridge.listen<{ chat_session_id: string; message: string }>(CHAT_ERROR_EVENT, (payload) => {
+      this.activeTurns.delete(payload.chat_session_id);
       this.reportError(payload.chat_session_id, new Error(payload.message));
     });
   }
@@ -402,6 +415,20 @@ export class LocalChatTransport implements ChatTransport {
     return this.approvalModes.get(sessionId) ?? DEFAULT_APPROVAL_MODE;
   }
 
+  /**
+   * Turns in flight, as session id → the daemon message id of the turn. The
+   * local store has no notion of an active turn, and `chat_send` resolves as
+   * soon as the turn is submitted, so without this the composer re-enabled
+   * mid-turn and a second send cut the first one off. Set on send, cleared by
+   * the turn's terminal frame or a transport error. In-memory: after a webview
+   * reload the host's own refusal of an overlapping `chat_send` is the backstop.
+   */
+  private readonly activeTurns = new Map<string, string>();
+
+  private toChatSession(s: StoredSession, account: string): IAgentChatSession {
+    return storedSessionToChatSession(s, account, this.activeTurns.get(s.id) ?? null);
+  }
+
   // No `runner` selector is sent with any chat request. The daemon's selector
   // is a *runner name* from its own config (`resolve_runner`, runner/src/ipc/
   // server.rs); the id this transport knows is the synthetic route id
@@ -433,7 +460,7 @@ export class LocalChatTransport implements ChatTransport {
     return rows
       .filter((s) => (workspaceId ? s.workspace === workspaceId : true))
       .filter((s) => (runnerId ? s.project === runnerId : true))
-      .map((s) => storedSessionToChatSession(s, account));
+      .map((s) => this.toChatSession(s, account));
   }
 
   async createChatSession(input: {
@@ -453,7 +480,7 @@ export class LocalChatTransport implements ChatTransport {
         engine_version: "",
       },
     });
-    return storedSessionToChatSession(row, account);
+    return this.toChatSession(row, account);
   }
 
   async listChatMessages(sessionId: string): Promise<IAgentChatMessage[]> {
@@ -467,6 +494,28 @@ export class LocalChatTransport implements ChatTransport {
 
   async sendChatMessage(sessionId: string, content: string): Promise<IAgentChatMessage> {
     const account = this.attach(sessionId);
+    // One turn at a time per session: the daemon refuses an overlapping send,
+    // so don't persist a message that can never get a reply.
+    if (this.activeTurns.has(sessionId)) {
+      throw new Error("A response is still in progress. Wait for it to finish, or stop it first.");
+    }
+    const messageId = crypto.randomUUID();
+    this.activeTurns.set(sessionId, messageId);
+    try {
+      return await this.submitTurn(account, sessionId, messageId, content);
+    } catch (error) {
+      // Nothing was submitted, so no terminal frame will ever release it.
+      if (this.activeTurns.get(sessionId) === messageId) this.activeTurns.delete(sessionId);
+      throw error;
+    }
+  }
+
+  private async submitTurn(
+    account: string,
+    sessionId: string,
+    messageId: string,
+    content: string
+  ): Promise<IAgentChatMessage> {
     // Persist the user's turn first so a refresh/restart shows it even if the
     // stream never completes.
     const stored = await this.bridge.invoke<StoredEvent>("chat_append_event", {
@@ -486,7 +535,7 @@ export class LocalChatTransport implements ChatTransport {
     await this.bridge.invoke<void>("chat_send", {
       workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
-      messageId: crypto.randomUUID(),
+      messageId,
       content,
       cwd: session?.working_dir,
       mode: this.getApprovalMode(sessionId),
@@ -533,12 +582,15 @@ export class LocalChatTransport implements ChatTransport {
       workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
     });
+    // Closing aborts the host's reader, so a turn it cut short sends no
+    // terminal frame to release the session.
+    this.activeTurns.delete(sessionId);
     // Slice-3 has no closed state; return the session as-is so the UI keeps the
     // transcript readable.
     const refreshed =
       session ?? (await this.bridge.invoke<StoredSession | null>("chat_get_session", { account, sessionId }));
     if (!refreshed) throw new Error(`no local chat session ${sessionId}`);
-    return storedSessionToChatSession(refreshed, account);
+    return this.toChatSession(refreshed, account);
   }
 
   /**
@@ -581,6 +633,9 @@ export class LocalChatTransport implements ChatTransport {
    */
   private handleFrame(frame: ChatFrame): void {
     const sessionId = frameSessionId(frame);
+    // Release the session before the page hears about the turn's end: it
+    // refetches sessions on that event and must not read a stale turn.
+    if (isTerminalFrame(frame)) this.activeTurns.delete(sessionId);
     if (frame.result === "chat_message_started") {
       this.assistantAccum.set(sessionId, "");
     } else if (frame.result === "chat_event" && frame.data.kind === "assistant_delta") {
@@ -590,7 +645,7 @@ export class LocalChatTransport implements ChatTransport {
       );
     }
     const accum = this.assistantAccum.get(sessionId) ?? "";
-    if (frame.result === "chat_message_completed" || frame.result === "chat_failed" || frame.result === "chat_closed") {
+    if (isTerminalFrame(frame)) {
       this.assistantAccum.delete(sessionId);
     }
 
