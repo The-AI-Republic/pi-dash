@@ -75,6 +75,13 @@ import type {
   SchedulerProjectInstallOption,
   SchedulerProjectRow,
   SchedulerScheduleValues,
+  RunnersEditPodForm,
+  RunnersPodTile,
+  RunnersRail,
+  RunnersRailContact,
+  RunnersRowActions,
+  RunnersTab,
+  RunnersTableRow,
   ServedShellMarkers,
   WorkspaceOnboardingView,
 } from "./parity-driver";
@@ -13881,6 +13888,68 @@ export class WebDriver implements ParityDriver {
     return out;
   }
 
+  // --- Runners overview + pods (NEWFRONT-178, RUN-001/005, RUN-010/015).
+  // --- Appended after the NEWFRONT-19..118 methods, which are untouched
+  // --- per the shared driver contract.
+  //
+  // Observed on the running old app: one page serves the workspace route
+  // (/{ws}/runners) and the project twin
+  // (/{ws}/projects/{id}/runners) — the project id in the route scopes
+  // the lists and rewrites every link base. A tab strip
+  // (Overview/Runs/Approvals) sits above pod tiles and a seven-column
+  // runner table; a left rail repeats the overview link plus one chat
+  // contact per runner. Guests see a not-authorized heading inside the
+  // normal shell instead of the area.
+
+  private runnersDeniedHeading(): Locator {
+    return this.page.getByRole("heading", { name: "Oops! You are not authorized to view this page" });
+  }
+
+  private runnersTabLinks(): Locator {
+    // Scoped to main: the side rail carries its own Overview link.
+    return this.page.getByRole("main").getByRole("link", { name: /^(Overview|Runs|Approvals)$/ });
+  }
+
+  async runnersOpenOverview(workspaceSlug: string, projectId?: string, subpath?: "runs" | "approvals"): Promise<void> {
+    const base =
+      projectId === undefined ? `/${workspaceSlug}/runners` : `/${workspaceSlug}/projects/${projectId}/runners`;
+    const url = subpath === undefined ? base : `${base}/${subpath}`;
+    // Arm the list-response waiter before navigating: the lists fire on
+    // mount, and a waiter armed after the response would hang to its
+    // timeout. Guests never fetch (the gate renders instead), so the
+    // denied heading is the alternate settle signal.
+    const listSettled = this.page
+      .waitForResponse(
+        (response) => response.url().includes("/api/runners/") && response.request().method() === "GET",
+        { timeout: 90_000 }
+      )
+      .then(() => true)
+      .catch(() => false);
+    await this.page.goto(url, { timeout: 90_000 });
+    await this.runnersTabLinks().first().or(this.runnersDeniedHeading()).waitFor({ timeout: 90_000 });
+    if (await this.runnersDeniedVisible()) return;
+    if (!(await listSettled)) throw new Error("[parity] runners list fetch never settled.");
+  }
+
+  async runnersCurrentUrl(): Promise<string> {
+    return this.page.url();
+  }
+
+  async runnersTabs(): Promise<RunnersTab[]> {
+    const links = this.runnersTabLinks();
+    await links.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const out: RunnersTab[] = [];
+    for (const link of await links.all()) {
+      const label = (await link.innerText()).trim();
+      out.push({
+        label,
+        href: await link.getAttribute("href"),
+        active: (await link.getAttribute("aria-current")) !== null,
+      });
+    }
+    return out;
+  }
+
   async notFoundFacts(): Promise<NotFoundFacts | null> {
     const title = await this.page.title();
     if (!title.includes("404")) return null;
@@ -24359,5 +24428,538 @@ export class WebDriver implements ParityDriver {
       const button = found as HTMLButtonElement;
       return !button.disabled && found.getAttribute("aria-disabled") !== "true";
     });
+  }
+  async runnersOpenTab(label: string): Promise<void> {
+    const suffix =
+      label === "Overview" ? "/runners" : label === "Runs" ? "/runs" : label === "Approvals" ? "/approvals" : null;
+    if (suffix === null) throw new Error(`[parity] unknown runners tab ${JSON.stringify(label)}.`);
+    await this.page.getByRole("main").getByRole("link", { name: label, exact: true }).click();
+    // Both scopes share the same trailing segments; only the base differs.
+    await this.page.waitForURL((url) => new RegExp(`${suffix}/?$`).test(url.pathname), {
+      timeout: WebDriver.WAIT_MS,
+    });
+  }
+
+  private runnersTable(): Locator {
+    return this.page.getByRole("main").locator("table");
+  }
+
+  async runnersTableRows(): Promise<RunnersTableRow[]> {
+    const table = this.runnersTable();
+    await table.waitFor({ timeout: WebDriver.WAIT_MS });
+    const out: RunnersTableRow[] = [];
+    for (const row of await table.locator("tbody tr").all()) {
+      const cells = row.locator("td");
+      if ((await cells.count()) < 7) continue; // the empty-state row
+      const text = await cells.allTextContents();
+      out.push({
+        name: (text[0] ?? "").trim(),
+        pod: (text[1] ?? "").trim(),
+        status: (text[2] ?? "").trim(),
+        osArch: (text[3] ?? "").trim(),
+        version: (text[4] ?? "").trim(),
+        heartbeat: (text[5] ?? "").trim(),
+      });
+    }
+    return out;
+  }
+
+  async runnersEmptyVisible(): Promise<boolean> {
+    const table = this.runnersTable();
+    await table.waitFor({ timeout: WebDriver.WAIT_MS });
+    return (await table.getByText("No runners yet.").count()) > 0;
+  }
+
+  /** One table row by exact runner name (names share long prefixes). */
+  private async runnersRow(runnerName: string): Promise<Locator> {
+    const table = this.runnersTable();
+    await table.waitFor({ timeout: WebDriver.WAIT_MS });
+    const rows = table.locator("tbody tr");
+    const count = await rows.count();
+    for (let i = 0; i < count; i += 1) {
+      const row = rows.nth(i);
+      const first = row.locator("td").first();
+      if ((await first.count()) === 0) continue;
+      if ((await first.innerText()).trim() === runnerName) return row;
+    }
+    throw new Error(`[parity] runner row ${JSON.stringify(runnerName)} not found.`);
+  }
+
+  private async runnersHasRow(runnerName: string): Promise<boolean> {
+    try {
+      await this.runnersRow(runnerName);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async runnersRowStatus(runnerName: string): Promise<string> {
+    const rows = await this.runnersTableRows();
+    return rows.find((row) => row.name === runnerName)?.status ?? "";
+  }
+
+  async runnersRowActions(runnerName: string): Promise<RunnersRowActions> {
+    const row = await this.runnersRow(runnerName);
+    return {
+      hasDetails: (await row.getByRole("button", { name: "Details", exact: true }).count()) > 0,
+      hasRevoke: (await row.getByRole("button", { name: "Revoke", exact: true }).count()) > 0,
+      hasDelete: (await row.getByRole("button", { name: "Delete", exact: true }).count()) > 0,
+    };
+  }
+
+  async runnersOpenDetails(runnerName: string): Promise<void> {
+    const row = await this.runnersRow(runnerName);
+    await row.getByRole("button", { name: "Details", exact: true }).click();
+    await this.page.waitForURL(/\/detail\//, { timeout: WebDriver.WAIT_MS });
+  }
+
+  private runnersDialog(): Locator {
+    return this.page.getByRole("dialog");
+  }
+
+  /** The open confirmation modal with the given heading. */
+  private async runnersWaitForConfirm(title: string): Promise<Locator> {
+    const dialog = this.runnersDialog().filter({
+      has: this.page.getByRole("heading", { name: title, exact: true }),
+    });
+    await dialog.waitFor({ timeout: WebDriver.OPEN_MS });
+    return dialog;
+  }
+
+  async runnersDeleteRunner(runnerName: string, options?: { expectFailure?: boolean }): Promise<void> {
+    const row = await this.runnersRow(runnerName);
+    await row.getByRole("button", { name: "Delete", exact: true }).click();
+    const dialog = await this.runnersWaitForConfirm("Delete runner?");
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+    if (options?.expectFailure === true) {
+      // On failure the modal stays open and a toast carries the reason.
+      await expect.poll(() => this.runnersLastToast(), { timeout: WebDriver.WAIT_MS }).not.toBeNull();
+      return;
+    }
+    // The row drops off once the delete lands and the list re-fetches.
+    await expect.poll(() => this.runnersHasRow(runnerName), { timeout: WebDriver.WAIT_MS }).toBe(false);
+  }
+
+  async runnersRevokeRunner(runnerName: string, options?: { expectFailure?: boolean }): Promise<void> {
+    const row = await this.runnersRow(runnerName);
+    await row.getByRole("button", { name: "Revoke", exact: true }).click();
+    const dialog = await this.runnersWaitForConfirm("Revoke runner?");
+    await dialog.getByRole("button", { name: "Revoke", exact: true }).click();
+    if (options?.expectFailure === true) {
+      await expect.poll(() => this.runnersLastToast(), { timeout: WebDriver.WAIT_MS }).not.toBeNull();
+      return;
+    }
+    // The row stays; its badge flips once the revoke lands and re-fetches.
+    await expect.poll(() => this.runnersRowStatus(runnerName), { timeout: WebDriver.WAIT_MS }).toBe("revoked");
+  }
+
+  async runnersModalCopy(): Promise<{ title: string; body: string } | null> {
+    const dialogs = this.runnersDialog();
+    if ((await dialogs.count()) === 0) return null;
+    const dialog = dialogs.first();
+    if (!(await dialog.isVisible())) return null;
+    const heading = dialog.getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    const title = (await heading.innerText()).trim();
+    // Confirmation content sits in the block right after the title.
+    const body = await dialog
+      .locator("h3 + div")
+      .first()
+      .innerText()
+      .then((text) => text.trim())
+      .catch(() => "");
+    return { title, body };
+  }
+
+  async runnersCancelModal(): Promise<void> {
+    const dialog = this.runnersDialog().first();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    // No settle wait: callers asserting the in-flight dismissal block
+    // expect the modal to stay open.
+  }
+
+  async runnersStallMutations(delayMs: number): Promise<void> {
+    await this.page.route("**/api/runners/**", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.continue();
+        return;
+      }
+      // Holds the mutation so in-flight states (working labels, blocked
+      // dismissal) stay observable; re-poll reads pass through.
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await route.continue().catch(() => undefined);
+    });
+  }
+
+  async runnersFailNextMutation(): Promise<void> {
+    let failed = false;
+    await this.page.route("**/api/runners/**", async (route) => {
+      if (route.request().method() !== "GET" && !failed) {
+        failed = true;
+        await route.abort("failed");
+        return;
+      }
+      await route.continue().catch(() => undefined);
+    });
+  }
+
+  async runnersReleaseMutationShaping(): Promise<void> {
+    await this.page.unroute("**/api/runners/**");
+  }
+
+  /** The rail is the aside beside main (the app shell owns other asides). */
+  private runnersRailRoot(): Locator {
+    return this.page.getByRole("main").locator("xpath=../aside");
+  }
+
+  async runnersRail(): Promise<RunnersRail> {
+    const rail = this.runnersRailRoot();
+    await rail.waitFor({ timeout: WebDriver.WAIT_MS });
+    const header = (await rail.locator("div").first().innerText()).trim();
+    const overview = rail.getByRole("link", { name: "Overview", exact: true });
+    const contacts: RunnersRailContact[] = [];
+    for (const link of await rail.getByRole("link").all()) {
+      const href = await link.getAttribute("href");
+      if (href === null || !href.includes("/chat/")) continue;
+      contacts.push({
+        name: (await link.innerText()).trim(),
+        href,
+        // Each contact renders its glyph plus a status dot.
+        hasDot: (await link.locator("svg").count()) >= 2,
+      });
+    }
+    return {
+      header,
+      overviewHref: (await overview.count()) > 0 ? await overview.first().getAttribute("href") : null,
+      contacts,
+      emptyVisible: (await rail.getByText("No runners connected").count()) > 0,
+    };
+  }
+
+  async runnersPodTiles(): Promise<RunnersPodTile[]> {
+    const buttons = this.page.getByRole("main").locator('button[aria-label^="Filter runners by pod "]');
+    const out: RunnersPodTile[] = [];
+    for (const button of await buttons.all()) {
+      const label = (await button.getAttribute("aria-label")) ?? "";
+      const name = label.replace(/^Filter runners by pod /, "");
+      const tile = button.locator("xpath=..");
+      const count = tile.getByText(/\d+ runner\(s\)/);
+      out.push({
+        name,
+        isDefault: (await tile.getByText("default", { exact: true }).count()) > 0,
+        runnerCount: (await count.count()) > 0 ? (await count.first().innerText()).trim() : "",
+      });
+    }
+    return out;
+  }
+
+  async runnersSelectPod(podName: string): Promise<void> {
+    await this.page
+      .getByRole("main")
+      .getByRole("button", { name: `Filter runners by pod ${podName}`, exact: true })
+      .click();
+  }
+
+  async runnersFilterText(): Promise<string | null> {
+    const clear = this.page.getByRole("main").getByRole("button", { name: "Clear filter", exact: true });
+    if ((await clear.count()) === 0) return null;
+    return (await clear.locator("xpath=../span").first().innerText()).trim();
+  }
+
+  async runnersClearPodFilter(): Promise<void> {
+    const clear = this.page.getByRole("main").getByRole("button", { name: "Clear filter", exact: true });
+    await clear.click();
+    await clear.waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
+  }
+
+  /** The open pod modal carrying the given heading text. */
+  private async runnersPodModal(title: string): Promise<Locator> {
+    const dialog = this.runnersDialog().filter({ hasText: title });
+    await dialog.waitFor({ timeout: WebDriver.OPEN_MS });
+    return dialog;
+  }
+
+  async runnersOpenCreatePod(): Promise<void> {
+    await this.page.getByRole("main").getByRole("button", { name: "Create new pod", exact: true }).click();
+    await this.runnersPodModal("Create new pod");
+  }
+
+  async runnersPodFormErrors(): Promise<string[]> {
+    const dialog = this.runnersDialog().first();
+    if ((await dialog.count()) === 0) return [];
+    // Help copy lives in paragraphs; errors are the bare spans (the
+    // toggle's screen-reader label is excluded).
+    const texts = await dialog.locator("span:not(.sr-only)").allTextContents();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
+  }
+
+  async runnersCreatePod(
+    input: { projectName: string; name: string; description?: string },
+    options?: { expectFailure?: boolean }
+  ): Promise<void> {
+    const dialog = await this.runnersPodModal("Create new pod");
+    // Project picker: the trigger shows the current selection, options
+    // render in a portal off the dialog root.
+    await dialog.getByRole("button", { name: "Select a project", exact: true }).click();
+    await this.page.getByRole("option", { name: input.projectName, exact: true }).click();
+    await dialog.getByLabel("Name", { exact: true }).fill(input.name);
+    if (input.description !== undefined) {
+      await dialog.getByLabel("Description (optional)", { exact: true }).fill(input.description);
+    }
+    await dialog.locator('button[type="submit"]').click();
+    if (options?.expectFailure === true) {
+      // On failure the modal stays open and a toast carries the reason.
+      await expect.poll(() => this.runnersLastToast(), { timeout: WebDriver.WAIT_MS }).not.toBeNull();
+      return;
+    }
+    await dialog.waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+  }
+
+  async runnersPodFilterIsClientSide(podName: string): Promise<boolean> {
+    let fetches = 0;
+    const pattern = "**/api/runners/?*";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() === "GET") fetches += 1;
+      await route.continue();
+    });
+    try {
+      // Toggle on and back off; re-poll windows are seconds wide, so a
+      // brief double toggle that fetches is the filter's own doing.
+      await this.runnersSelectPod(podName);
+      await this.page.waitForTimeout(1_500);
+      await this.runnersSelectPod(podName);
+      await this.page.waitForTimeout(1_500);
+    } finally {
+      await this.page.unroute(pattern);
+    }
+    return fetches === 0;
+  }
+
+  async runnersSubmitPodForm(): Promise<void> {
+    const dialog = this.runnersDialog().first();
+    await dialog.locator('button[type="submit"]').click();
+  }
+
+  async runnersCreatePodSubmitting(): Promise<boolean> {
+    const dialog = this.runnersDialog().first();
+    if ((await dialog.count()) === 0) return false;
+    const submit = dialog.locator('button[type="submit"]');
+    if ((await submit.count()) === 0) return false;
+    return await submit.first().isDisabled();
+  }
+
+  async runnersPodCancelEnabled(): Promise<boolean> {
+    const dialog = this.runnersDialog().first();
+    if ((await dialog.count()) === 0) return false;
+    const cancel = dialog.getByRole("button", { name: "Cancel", exact: true });
+    if ((await cancel.count()) === 0) return false;
+    return await cancel.first().isEnabled();
+  }
+
+  async runnersCreatePodForm(): Promise<{ project: string; name: string; description: string }> {
+    const dialog = await this.runnersPodModal("Create new pod");
+    // The project trigger is the form's first button; its text is the
+    // current selection ("Select a project" when untouched).
+    const project = ((await dialog.locator("form button").first().innerText()).trim().split("\n")[0] ?? "").trim();
+    return {
+      project,
+      name: await dialog.getByLabel("Name", { exact: true }).inputValue(),
+      description: await dialog.getByLabel("Description (optional)", { exact: true }).inputValue(),
+    };
+  }
+
+  async runnersPodModalOpen(): Promise<boolean> {
+    const dialogs = this.runnersDialog();
+    if ((await dialogs.count()) === 0) return false;
+    return await dialogs.first().isVisible();
+  }
+
+  async runnersPodsError(): Promise<string | null> {
+    const main = this.page.getByRole("main");
+    const message = main.getByText("Failed to load pods");
+    if ((await message.count()) === 0) return null;
+    return (await message.first().innerText()).trim();
+  }
+
+  /** Open one tile's overflow menu through its labelled trigger. */
+  private async runnersOpenPodMenu(podName: string): Promise<void> {
+    await this.page
+      .getByRole("main")
+      .getByRole("button", { name: `Pod actions for ${podName}`, exact: true })
+      .click();
+    await this.page.getByRole("menu").waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async runnersOpenEditPod(podName: string): Promise<void> {
+    await this.runnersOpenPodMenu(podName);
+    await this.page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+    await this.runnersPodModal("Edit pod");
+  }
+
+  async runnersEditPodForm(): Promise<RunnersEditPodForm> {
+    const dialog = await this.runnersPodModal("Edit pod");
+    const toggle = dialog.getByRole("switch", { name: "Project default" });
+    return {
+      name: await dialog.getByLabel("Name", { exact: true }).inputValue(),
+      description: await dialog.getByLabel("Description (optional)", { exact: true }).inputValue(),
+      isDefault: await toggle.isChecked(),
+      defaultDisabled: (await toggle.isDisabled()) || (await toggle.getAttribute("aria-disabled")) === "true",
+    };
+  }
+
+  async runnersSavePodEdit(input: { name?: string; description?: string; makeDefault?: boolean }): Promise<void> {
+    const dialog = await this.runnersFillPodEdit(input);
+    await dialog.locator('button[type="submit"]').click();
+    await dialog.waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+  }
+
+  async runnersUnchangedEditSkipsSave(): Promise<boolean> {
+    const dialog = await this.runnersPodModal("Edit pod");
+    let patches = 0;
+    const pattern = "**/api/runners/pods/*";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() === "PATCH") patches += 1;
+      await route.continue();
+    });
+    try {
+      await dialog.locator('button[type="submit"]').click();
+      await dialog.waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
+    } finally {
+      await this.page.unroute(pattern);
+    }
+    return patches === 0;
+  }
+
+  /** Fill the open edit form the way runnersSavePodEdit does. */
+  private async runnersFillPodEdit(input: {
+    name?: string;
+    description?: string;
+    makeDefault?: boolean;
+  }): Promise<Locator> {
+    const dialog = await this.runnersPodModal("Edit pod");
+    if (input.name !== undefined) {
+      await dialog.getByLabel("Name", { exact: true }).fill(input.name);
+    }
+    if (input.description !== undefined) {
+      await dialog.getByLabel("Description (optional)", { exact: true }).fill(input.description);
+    }
+    if (input.makeDefault === true) {
+      const toggle = dialog.getByRole("switch", { name: "Project default" });
+      if (!(await toggle.isChecked())) await toggle.click();
+    }
+    return dialog;
+  }
+
+  async runnersSavePodEditCapturing(input: {
+    name?: string;
+    description?: string;
+    makeDefault?: boolean;
+  }): Promise<Record<string, unknown>[]> {
+    const bodies: Record<string, unknown>[] = [];
+    const pattern = "**/api/runners/pods/*";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() === "PATCH") {
+        try {
+          bodies.push(JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>);
+        } catch {
+          bodies.push({});
+        }
+      }
+      await route.continue();
+    });
+    try {
+      const dialog = await this.runnersFillPodEdit(input);
+      await dialog.locator('button[type="submit"]').click();
+      await dialog.waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+    } finally {
+      await this.page.unroute(pattern);
+    }
+    return bodies;
+  }
+
+  async runnersDeletePod(podName: string, options?: { expectFailure?: boolean }): Promise<void> {
+    await this.runnersOpenPodMenu(podName);
+    await this.page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+    const dialog = await this.runnersWaitForConfirm("Delete pod?");
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+    if (options?.expectFailure === true) {
+      await expect.poll(() => this.runnersLastToast(), { timeout: WebDriver.WAIT_MS }).not.toBeNull();
+      return;
+    }
+    const tile = this.page
+      .getByRole("main")
+      .getByRole("button", { name: `Filter runners by pod ${podName}`, exact: true });
+    await tile.waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+  }
+
+  async runnersLastToast(): Promise<string | null> {
+    const titles = this.page.getByText("Error!", { exact: true });
+    if ((await titles.count()) === 0) return null;
+    // Climb from the title to the toast root: the first ancestor whose
+    // text also carries the message.
+    const text = await titles.last().evaluate((element) => {
+      let node: HTMLElement | null = element instanceof HTMLElement ? element : element.parentElement;
+      while (node !== null && node !== document.body) {
+        const text = (node.innerText ?? "").trim();
+        if (text.length > "Error!".length + 8) return text;
+        node = node.parentElement;
+      }
+      return (element.textContent ?? "").trim();
+    });
+    return text.length > 0 ? text : null;
+  }
+
+  async runnersPageTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async runnersSectionHeadings(): Promise<string[]> {
+    const main = this.page.getByRole("main");
+    const out: string[] = [];
+    for (const title of ["Add runner", "Pods", "Runners"]) {
+      if ((await main.getByText(title, { exact: true }).count()) > 0) out.push(title);
+    }
+    return out;
+  }
+
+  async runnersBreadcrumbLeaf(): Promise<string | null> {
+    // The project header renders its breadcrumb into a plain container
+    // (no header landmark) and the area link carries a trailing slash,
+    // which also separates it from the overview tab and rail links that
+    // point at the same route without one.
+    const crumb = this.page.locator('a[href$="/runners/"]');
+    // The project header mounts after the project fetch, which can lag
+    // the denied view (role state resolves first); wait for the crumb
+    // rather than sampling it the instant the gate appears.
+    await crumb
+      .first()
+      .waitFor({ state: "visible", timeout: 30_000 })
+      .catch(() => undefined);
+    if ((await crumb.count()) === 0) return null;
+    const text = ((await crumb.first().innerText()).trim().split("\n")[0] ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  async runnersDeniedVisible(): Promise<boolean> {
+    return (await this.runnersDeniedHeading().count()) > 0;
+  }
+
+  async runnersChromePresent(): Promise<boolean> {
+    // The area layouts render the denied view inside the normal shell:
+    // the sidebar work-item trigger proves the shared hosts mounted.
+    if ((await this.page.getByRole("button", { name: "New work item" }).count()) > 0) return true;
+    return (await this.page.getByRole("complementary").count()) > 0;
+  }
+
+  async runnersFailPodsLoad(): Promise<void> {
+    await this.page.route("**/api/runners/pods*", async (route) => {
+      if (route.request().method() === "GET") await route.abort("failed");
+      else await route.continue();
+    });
+  }
+
+  async runnersReleasePodsFailure(): Promise<void> {
+    await this.page.unroute("**/api/runners/pods*");
   }
 }

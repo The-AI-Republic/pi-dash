@@ -4568,6 +4568,107 @@ export interface ParityDriver {
   archivesDetailComposerVisible(): Promise<boolean>;
   /** Whether the archived detail's issue-level reaction control is enabled (false when absent or disabled). */
   archivesDetailReactionControlEnabled(): Promise<boolean>;
+
+  // --- NEWFRONT-178 (runners overview + pods, RUN-001/005, RUN-010/015).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. One page serves the workspace and project
+  // --- scopes; projectId selects the scoped route tree.
+
+  /** Open the runners overview; projectId selects the project-scoped twin. */
+  runnersOpenOverview(workspaceSlug: string, projectId?: string, subpath?: "runs" | "approvals"): Promise<void>;
+  /** Current page URL (deep-link and navigation assertions). */
+  runnersCurrentUrl(): Promise<string>;
+  /** Tab strip entries: label, link target, and which tab reads active. */
+  runnersTabs(): Promise<RunnersTab[]>;
+  /** Click a tab; resolves once the URL carries the tab route. */
+  runnersOpenTab(label: string): Promise<void>;
+  /** Runner table rows in display order (excludes the empty state). */
+  runnersTableRows(): Promise<RunnersTableRow[]>;
+  /** Whether the table shows its empty state. */
+  runnersEmptyVisible(): Promise<boolean>;
+  /** Actions cell of one runner row: which actions are offered. */
+  runnersRowActions(runnerName: string): Promise<RunnersRowActions>;
+  /** Follow one row's Details action; resolves on the detail route. */
+  runnersOpenDetails(runnerName: string): Promise<void>;
+  /** Delete one runner through its row action plus confirmation. */
+  runnersDeleteRunner(runnerName: string, options?: { expectFailure?: boolean }): Promise<void>;
+  /** Revoke one runner through its row action plus confirmation. */
+  runnersRevokeRunner(runnerName: string, options?: { expectFailure?: boolean }): Promise<void>;
+  /** Title and body of the open confirmation modal, or null when none. */
+  runnersModalCopy(): Promise<{ title: string; body: string } | null>;
+  /** Dismiss the open confirmation modal via its cancel control. */
+  runnersCancelModal(): Promise<void>;
+  /** Hold runner/pod mutation responses by ms (in-flight assertions). */
+  runnersStallMutations(delayMs: number): Promise<void>;
+  /** Fail the next runner/pod mutation (error-toast assertions). */
+  runnersFailNextMutation(): Promise<void>;
+  /** Release any stalls/failures installed by the two methods above. */
+  runnersReleaseMutationShaping(): Promise<void>;
+  /** Side-nav rail: header, overview link, contacts, empty state. */
+  runnersRail(): Promise<RunnersRail>;
+  /** Pod tiles in display order with default marker and runner count. */
+  runnersPodTiles(): Promise<RunnersPodTile[]>;
+  /** Toggle one pod tile's table filter. */
+  runnersSelectPod(podName: string): Promise<void>;
+  /** Active pod-filter label, or null when no filter applies. */
+  runnersFilterText(): Promise<string | null>;
+  /** Clear the active pod filter through its affordance. */
+  runnersClearPodFilter(): Promise<void>;
+  /** Open the create-pod modal through the create tile. */
+  runnersOpenCreatePod(): Promise<void>;
+  /** Validation strings currently shown in the open pod modal. */
+  runnersPodFormErrors(): Promise<string[]>;
+  /** Fill and submit the create-pod form; resolves once the tile lands. */
+  runnersCreatePod(
+    input: { projectName: string; name: string; description?: string },
+    options?: { expectFailure?: boolean }
+  ): Promise<void>;
+  /** Toggle one pod filter twice; true when no list fetch fired. */
+  runnersPodFilterIsClientSide(podName: string): Promise<boolean>;
+  /** Submit the open pod form without filling (validation assertions). */
+  runnersSubmitPodForm(): Promise<void>;
+  /** Whether the open pod form's cancel control is enabled. */
+  runnersPodCancelEnabled(): Promise<boolean>;
+  /** Create-form values (project trigger label, name, description). */
+  runnersCreatePodForm(): Promise<{ project: string; name: string; description: string }>;
+  /** Whether any pod modal (create/edit/confirm) is currently open. */
+  runnersPodModalOpen(): Promise<boolean>;
+  /** Pods section load-failure text, or null when pods render. */
+  runnersPodsError(): Promise<string | null>;
+  /** Whether the create submit currently shows its working state. */
+  runnersCreatePodSubmitting(): Promise<boolean>;
+  /** Open the edit modal for one pod through its tile menu. */
+  runnersOpenEditPod(podName: string): Promise<void>;
+  /** Edit-form values plus whether the default toggle is disabled. */
+  runnersEditPodForm(): Promise<RunnersEditPodForm>;
+  /** Apply an edit (rename/describe/promote); resolves once it lands. */
+  runnersSavePodEdit(input: { name?: string; description?: string; makeDefault?: boolean }): Promise<void>;
+  /** Save the edit form unchanged; true when no update call fired. */
+  runnersUnchangedEditSkipsSave(): Promise<boolean>;
+  /** Apply an edit and return the update payloads the app sent. */
+  runnersSavePodEditCapturing(input: {
+    name?: string;
+    description?: string;
+    makeDefault?: boolean;
+  }): Promise<Record<string, unknown>[]>;
+  /** Delete one pod through its tile menu plus confirmation. */
+  runnersDeletePod(podName: string, options?: { expectFailure?: boolean }): Promise<void>;
+  /** Most recent toast text, or null when no toast is showing. */
+  runnersLastToast(): Promise<string | null>;
+  /** Document title of the current page. */
+  runnersPageTitle(): Promise<string>;
+  /** In-page section headings of the overview (pods/runners/add). */
+  runnersSectionHeadings(): Promise<string[]>;
+  /** Current leaf of the project breadcrumb trail. */
+  runnersBreadcrumbLeaf(): Promise<string | null>;
+  /** Whether the not-authorized view is rendered. */
+  runnersDeniedVisible(): Promise<boolean>;
+  /** Whether the surrounding workspace/project chrome is rendered. */
+  runnersChromePresent(): Promise<boolean>;
+  /** Fail pod-list responses (load-failure assertions). */
+  runnersFailPodsLoad(): Promise<void>;
+  /** Release the pod-list failure above. */
+  runnersReleasePodsFailure(): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -4687,6 +4788,60 @@ export interface SchedulerCalendarBlock {
   title: string;
   /** Computed block background color (past grey vs scheduler tint). */
   background: string;
+}
+
+/** One runners tab: label, link target, active marker. */
+export interface RunnersTab {
+  label: string;
+  href: string | null;
+  active: boolean;
+}
+
+/** One runner table row: the columns the overview renders. */
+export interface RunnersTableRow {
+  name: string;
+  pod: string;
+  status: string;
+  osArch: string;
+  version: string;
+  heartbeat: string;
+}
+
+/** Actions cell of one runner row. */
+export interface RunnersRowActions {
+  hasDetails: boolean;
+  hasRevoke: boolean;
+  hasDelete: boolean;
+}
+
+/** Side-nav rail snapshot. */
+export interface RunnersRail {
+  header: string;
+  overviewHref: string | null;
+  contacts: RunnersRailContact[];
+  emptyVisible: boolean;
+}
+
+/** One rail chat contact. */
+export interface RunnersRailContact {
+  name: string;
+  href: string | null;
+  hasDot: boolean;
+}
+
+/** One pod tile. */
+export interface RunnersPodTile {
+  name: string;
+  isDefault: boolean;
+  runnerCount: string;
+}
+
+/** Edit-pod form values. */
+export interface RunnersEditPodForm {
+  name: string;
+  description: string;
+  isDefault: boolean;
+  defaultDisabled: boolean;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

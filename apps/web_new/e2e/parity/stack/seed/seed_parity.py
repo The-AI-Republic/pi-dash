@@ -45,6 +45,7 @@ from pi_dash.db.models import (
     WorkspaceMember,
 )
 from pi_dash.license.models import Instance, InstanceAdmin, InstanceConfiguration
+from pi_dash.runner.models import Pod, Runner, RunnerStatus
 
 EMAIL = os.environ.get("PARITY_SEED_EMAIL", "parity-oracle@example.com")
 PASSWORD = os.environ.get("PARITY_SEED_PASSWORD", "Parity-Seed-1")
@@ -481,6 +482,7 @@ def build() -> dict:
     refresh_project_issues(project, workspace, state, user)
     inbox_issue_id = seed_rules_fixtures(project, workspace, state, user)
     seed_notification_pagination(project, workspace, state, user, mention_user)
+    seed_runner_fixtures(project, workspace, user)
 
     facts = {
         "email": EMAIL,
@@ -701,6 +703,76 @@ def seed_notification_pagination(project, workspace, state, user, mention_user) 
         Notification.objects.filter(id=row_id).update(
             created_at=stamped, updated_at=stamped, read_at=stamped + timedelta(hours=1)
         )
+
+
+# NEWFRONT-178: read-only runner rows for the runners oracle
+# (RUN-002/004/010/011/012). Runner status is set only by the daemon
+# session flow (online), run assignment (busy) and revoke (revoked) —
+# none reachable from the session/v1 APIs the specs use — so these rows
+# are seeded. Owned by the seed owner (runners are private to their
+# owner), homed in the seeded project's auto-created default pod,
+# dev_machine unset so the dev-machines area sees nothing. Scenarios
+# that mutate runners mint their own via the v1 create endpoint and
+# clean up, so these five rows stay stable across runs.
+RUNNER_FIXTURES = (
+    # (name, status, enrolled, os, arch, version)
+    ("parity-runner-online", RunnerStatus.ONLINE, True, "linux", "arm64", "0.1.0"),
+    ("parity-runner-busy", RunnerStatus.BUSY, True, "", "", ""),
+    ("parity-runner-offline", RunnerStatus.OFFLINE, True, "", "", ""),
+    ("parity-runner-revoked", RunnerStatus.REVOKED, True, "", "", ""),
+    # Added but never enrolled: still reads as offline, and revoke stays
+    # hidden for it (RUN-010/011).
+    ("parity-runner-pending", RunnerStatus.OFFLINE, False, "", "", ""),
+)
+
+
+def seed_runner_fixtures(project, workspace, user) -> None:
+    from django.utils import timezone
+
+    # Anchor on the auto-created default pod's stable name, not on the
+    # is_default flag: pod scenarios legitimately transfer the flag, and
+    # anchoring on the flag would duplicate the fixtures into the new
+    # default on the next reseed.
+    pod, _ = Pod.all_objects.get_or_create(
+        project=project,
+        name=f"{project.identifier}_pod_1",
+        defaults={
+            "workspace_id": workspace.id,
+            "created_by_id": user.id,
+            "is_default": True,
+        },
+    )
+    if pod.deleted_at is not None:
+        pod.deleted_at = None
+        pod.save(update_fields=["deleted_at"])
+    now = timezone.now()
+    for name, status, enrolled, os_name, arch, version in RUNNER_FIXTURES:
+        runner, _ = Runner.objects.get_or_create(
+            pod=pod,
+            name=name,
+            defaults={
+                "owner": user,
+                "workspace_id": workspace.id,
+            },
+        )
+        # Converge every field the scenarios read, so a reseed heals any
+        # drift (a status flipped by dispatch, a stale heartbeat) instead
+        # of duplicating rows.
+        runner.owner = user
+        runner.workspace_id = workspace.id
+        runner.status = status
+        if enrolled:
+            if runner.enrolled_at is None:
+                runner.enrolled_at = now
+        else:
+            runner.enrolled_at = None
+        runner.revoked_at = now if status == RunnerStatus.REVOKED else None
+        runner.revoked_reason = "seeded" if status == RunnerStatus.REVOKED else ""
+        runner.os = os_name
+        runner.arch = arch
+        runner.runner_version = version
+        runner.last_heartbeat_at = now if status == RunnerStatus.ONLINE else None
+        runner.save()
 
 
 facts = build()

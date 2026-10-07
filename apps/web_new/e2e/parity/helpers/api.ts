@@ -11863,3 +11863,393 @@ export async function serverArchivedIssuesStatus(
   });
   return { status: res.status, rows };
 }
+
+// --- Runners overview / pods helpers (NEWFRONT-178, RUN-001/005, RUN-010/015).
+// --- Appended; existing helpers above are untouched per the shared harness
+// --- contract. Session-authenticated like the old runners screens; the v1
+// --- create helper speaks the CLI-enrolment endpoint with a minted API key.
+
+/** Non-privileged seeded identity for the access-control scenarios. */
+export interface ParityGuestSeed {
+  email: string;
+  password: string;
+}
+
+/** The seeded guest, or a thrown error naming the missing seed step. */
+export function requireGuestSeed(seed: ParitySeedFacts): ParityGuestSeed {
+  if (seed.guestEmail === undefined || seed.guestPassword === undefined) {
+    throw new Error("[parity] seed facts carry no guestEmail; re-run the stack seed step (see stack/README.md).");
+  }
+  return { email: seed.guestEmail, password: seed.guestPassword };
+}
+
+/** Workspace UUID the runner/pod endpoints scope on (from the project read). */
+export async function serverWorkspaceId(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const { record } = await projectFacts(workspaceSlug, projectId, sessionCookie, apiBase);
+  const workspace = record["workspace"];
+  if (typeof workspace !== "string" || workspace === "") {
+    throw new Error("[parity] project row carried no string workspace id.");
+  }
+  return workspace;
+}
+
+/** One runner row as the list/detail endpoints report it. */
+export interface ParityRunnerRow {
+  id: string;
+  name: string;
+  status: string;
+  pod: string;
+  podName: string;
+  enrolled: boolean;
+  os: string;
+  arch: string;
+  version: string;
+  heartbeat: string | null;
+}
+
+function runnerRowOf(row: Record<string, unknown>): ParityRunnerRow {
+  if (typeof row["id"] !== "string" || typeof row["name"] !== "string" || typeof row["status"] !== "string") {
+    throw new Error("[parity] runner row carried no string id/name/status.");
+  }
+  const pod = row["pod"];
+  const detail = row["pod_detail"] as { name?: unknown } | null;
+  return {
+    id: row["id"],
+    name: row["name"],
+    status: row["status"],
+    pod: typeof pod === "string" ? pod : "",
+    podName: typeof detail?.name === "string" ? detail.name : "",
+    enrolled: row["enrolled_at"] !== null,
+    os: typeof row["os"] === "string" ? row["os"] : "",
+    arch: typeof row["arch"] === "string" ? row["arch"] : "",
+    version: typeof row["runner_version"] === "string" ? row["runner_version"] : "",
+    heartbeat: typeof row["last_heartbeat_at"] === "string" ? row["last_heartbeat_at"] : null,
+  };
+}
+
+/** Runners visible to the session, optionally narrowed to one project. */
+export async function serverRunners(
+  workspaceId: string,
+  sessionCookie: string,
+  projectId?: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityRunnerRow[]> {
+  const query = projectId === undefined ? `workspace=${workspaceId}` : `workspace=${workspaceId}&project=${projectId}`;
+  const res = await authedApi(`/runners/?${query}`, sessionCookie, undefined, apiBase);
+  requireOk(res, "runner list");
+  const rows = (await res.json()) as Array<Record<string, unknown>>;
+  return rows.map(runnerRowOf);
+}
+
+/** One runner, or null when the server reports it gone. */
+export async function serverRunnerOrNull(
+  runnerId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityRunnerRow | null> {
+  const res = await authedApi(`/runners/${runnerId}/`, sessionCookie, undefined, apiBase);
+  if (res.status === 404) return null;
+  requireOk(res, "runner read");
+  return runnerRowOf((await res.json()) as Record<string, unknown>);
+}
+
+/** A minted user API key (raw token is only visible at creation). */
+export interface ParityApiToken {
+  id: string;
+  token: string;
+}
+
+/** Mint a user API key through the session-authenticated endpoint. */
+export async function serverMintApiToken(
+  sessionCookie: string,
+  label: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityApiToken> {
+  const res = await authedApi(
+    `/users/api-tokens/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label }) },
+    apiBase
+  );
+  requireOk(res, "api-token mint");
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string" || typeof rec["token"] !== "string") {
+    throw new Error("[parity] api-token create response carried no id/token.");
+  }
+  return { id: rec["id"], token: rec["token"] };
+}
+
+/** Delete a minted API key (best effort: 404 means it is already gone). */
+export async function serverDeleteApiToken(
+  tokenId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authedApi(`/users/api-tokens/${tokenId}/`, sessionCookie, { method: "DELETE" }, apiBase);
+  if (!res.ok && res.status !== 204 && res.status !== 404) {
+    throw new Error(`[parity] api-token delete failed with HTTP ${res.status}.`);
+  }
+}
+
+/** Runner minted through the CLI-enrolment (v1) endpoint. */
+export interface ParityCreatedRunner {
+  runnerId: string;
+  runnerName: string;
+  podSlug: string;
+}
+
+/**
+ * Create a runner the way `pidash runner add` does: X-Api-Key against the
+ * v1 endpoint. Lands enrolled in the named pod (full server-side name) or
+ * the project's default pod when omitted.
+ */
+export async function serverCreateRunnerV1(
+  apiToken: string,
+  input: { project: string; workspaceSlug?: string; pod?: string; name?: string; hostLabel?: string },
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityCreatedRunner> {
+  const body: Record<string, string> = { project: input.project };
+  if (input.workspaceSlug !== undefined) body["workspace_slug"] = input.workspaceSlug;
+  if (input.pod !== undefined) body["pod"] = input.pod;
+  if (input.name !== undefined) body["name"] = input.name;
+  if (input.hostLabel !== undefined) body["host_label"] = input.hostLabel;
+  const res = await fetch(`${apiBase}/api/v1/runner/runners/`, {
+    method: "POST",
+    headers: { "X-Api-Key": apiToken, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`[parity] v1 runner create failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["runner_id"] !== "string" || typeof rec["runner_name"] !== "string") {
+    throw new Error("[parity] v1 runner create response carried no runner id/name.");
+  }
+  return {
+    runnerId: rec["runner_id"],
+    runnerName: rec["runner_name"],
+    podSlug: typeof rec["pod_slug"] === "string" ? rec["pod_slug"] : "",
+  };
+}
+
+/** Hard-delete a runner; resolves with the HTTP status (204 on success). */
+export async function serverDeleteRunner(
+  runnerId: string,
+  sessionCookie: string,
+  purgeLocal = false,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await authedApi(
+    `/runners/${runnerId}/?purge_local=${purgeLocal ? "true" : "false"}`,
+    sessionCookie,
+    { method: "DELETE" },
+    apiBase
+  );
+  return res.status;
+}
+
+/** Revoke a runner; resolves with its post-revoke status string. */
+export async function serverRevokeRunner(
+  runnerId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await authedApi(
+    `/runners/${runnerId}/revoke/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+    apiBase
+  );
+  requireOk(res, "runner revoke");
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["status"] !== "string") throw new Error("[parity] runner revoke response carried no status.");
+  return rec["status"];
+}
+
+/** Rename and/or move a runner; resolves with the updated row. */
+export async function serverPatchRunner(
+  runnerId: string,
+  sessionCookie: string,
+  patch: { name?: string; pod?: string },
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityRunnerRow> {
+  const res = await authedApi(
+    `/runners/${runnerId}/`,
+    sessionCookie,
+    { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) },
+    apiBase
+  );
+  requireOk(res, "runner patch");
+  return runnerRowOf((await res.json()) as Record<string, unknown>);
+}
+
+/** One pod as the pod endpoints report it. */
+export interface ParityPodRow {
+  id: string;
+  name: string;
+  description: string;
+  isDefault: boolean;
+  project: string;
+  projectIdentifier: string;
+  runnerCount: number;
+}
+
+function podRowOf(row: Record<string, unknown>): ParityPodRow {
+  if (typeof row["id"] !== "string" || typeof row["name"] !== "string") {
+    throw new Error("[parity] pod row carried no string id/name.");
+  }
+  return {
+    id: row["id"],
+    name: row["name"],
+    description: typeof row["description"] === "string" ? row["description"] : "",
+    isDefault: row["is_default"] === true,
+    project: typeof row["project"] === "string" ? row["project"] : "",
+    projectIdentifier: typeof row["project_identifier"] === "string" ? row["project_identifier"] : "",
+    runnerCount: typeof row["runner_count"] === "number" ? row["runner_count"] : 0,
+  };
+}
+
+/** Every pod of one project, in API order. */
+export async function serverPods(
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityPodRow[]> {
+  const res = await authedApi(`/runners/pods/?project=${projectId}`, sessionCookie, undefined, apiBase);
+  requireOk(res, "pod list");
+  const rows = (await res.json()) as Array<Record<string, unknown>>;
+  return rows.map(podRowOf);
+}
+
+/** Rename / re-describe / promote a pod; resolves with the updated row. */
+export async function serverPatchPod(
+  podId: string,
+  sessionCookie: string,
+  patch: { name?: string; description?: string; is_default?: boolean },
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityPodRow> {
+  const res = await authedApi(
+    `/runners/pods/${podId}/`,
+    sessionCookie,
+    { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) },
+    apiBase
+  );
+  requireOk(res, "pod patch");
+  return podRowOf((await res.json()) as Record<string, unknown>);
+}
+
+/** Pod-delete outcome including the machine-readable guard code. */
+export interface ParityPodDeleteResult {
+  status: number;
+  code: string | null;
+  error: string;
+}
+
+/** Delete a pod without throwing, so scenarios can assert the guard codes. */
+export async function serverDeletePodResult(
+  podId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityPodDeleteResult> {
+  const res = await authedApi(`/runners/pods/${podId}/`, sessionCookie, { method: "DELETE" }, apiBase);
+  if (res.status === 204) return { status: 204, code: null, error: "" };
+  let code: string | null = null;
+  let error = "";
+  try {
+    const rec = (await res.json()) as Record<string, unknown>;
+    code = typeof rec["code"] === "string" ? rec["code"] : null;
+    error = typeof rec["error"] === "string" ? rec["error"] : "";
+  } catch {
+    code = null;
+  }
+  return { status: res.status, code, error };
+}
+
+/** A created agent run: id, status, and the pod the delegation landed in. */
+export interface ParityCreatedRun {
+  id: string;
+  status: string;
+  pod: string;
+}
+
+/** Create a run; the server resolves the pod (explicit > pin > default). */
+export async function serverCreateRun(
+  sessionCookie: string,
+  input: { workspaceId: string; prompt: string; workItemId?: string; podId?: string },
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityCreatedRun> {
+  const body: Record<string, string> = { workspace: input.workspaceId, prompt: input.prompt };
+  if (input.workItemId !== undefined) body["work_item"] = input.workItemId;
+  if (input.podId !== undefined) body["pod"] = input.podId;
+  const res = await authedApi(
+    `/runners/runs/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    apiBase
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`[parity] run create failed with HTTP ${res.status}: ${text.slice(0, 200)}`);
+  }
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string" || typeof rec["status"] !== "string" || typeof rec["pod"] !== "string") {
+    throw new Error("[parity] run create response carried no id/status/pod.");
+  }
+  return { id: rec["id"], status: rec["status"], pod: rec["pod"] };
+}
+
+/** Cancel a run; resolves with the post-cancel status string. */
+export async function serverCancelRun(
+  runId: string,
+  sessionCookie: string,
+  reason: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await authedApi(
+    `/runners/runs/${runId}/cancel/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ reason }) },
+    apiBase
+  );
+  requireOk(res, "run cancel");
+  const rec = (await res.json()) as Record<string, unknown>;
+  return typeof rec["status"] === "string" ? rec["status"] : "";
+}
+
+/**
+ * The pod pin on one issue (null when unpinned). New issues auto-pin to
+ * the project default on save, so delegation scenarios clear first.
+ */
+export async function serverIssuePodPin(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string | null> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  requireOk(res, "issue read");
+  const rec = (await res.json()) as Record<string, unknown>;
+  const pin = rec["assigned_pod_id"];
+  return typeof pin === "string" ? pin : null;
+}
+
+/** Clear one issue's pod pin so its runs follow the project default. */
+export async function serverUnpinIssuePod(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await patchIssue(workspaceSlug, projectId, issueId, sessionCookie, { assigned_pod: null }, apiBase);
+}
