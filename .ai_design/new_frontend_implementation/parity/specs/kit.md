@@ -98,6 +98,10 @@ focus, and labeling behavior is part of done for each one.
   body-contrast label (the dot repeats the adjacent text, so the status
   hues — which sit below AA for small text in the light theme — are never
   used as small text themselves). Counts render without a dot.
+- Status hues in Badge and Button resolve through semantic theme tokens
+  only (success/warning/danger subtle/primary plus hover steps); raw
+  palette utilities are undefined in the themed build and silently emit
+  nothing (targets per main#543, main#581).
 - Kbd: keyboard shortcut chip rendering key names joined with plus signs.
 - VirtualList: windowed rendering of long lists so only visible rows are
   mounted; rows keep stable keys and the list exposes the scroll element
@@ -113,4 +117,6 @@ Select, Combobox, ContextMenu, Sheet, Tabs, Checkbox, Switch, Table,
 EmptyState, and AvatarGroup are named on the wiki page but are not part
 of the F-05 issue scope; they land with the feature issues that need
 them. The rich-text editor, charts, and collaboration chunks are their
-own lazy-loaded areas, not kit components.
+own lazy-loaded areas, not kit components. When Select/Combobox land,
+their Escape-close path must keep trigger and panel state in sync so a
+click reopens the dropdown after an Escape close (target per main#578).
