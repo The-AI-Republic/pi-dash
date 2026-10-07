@@ -4158,6 +4158,7 @@ export class WebNewDriver implements ParityDriver {
   }
   async servedShellMarkers(_path: string): Promise<ServedShellMarkers> {
     return todo("servedShellMarkers");
+  }
   // --- NEWFRONT-178 (runners overview + pods). Throwing stubs per the
   // --- shared driver contract; the runners area fills these in when it
   // --- lands in apps/web_new.
