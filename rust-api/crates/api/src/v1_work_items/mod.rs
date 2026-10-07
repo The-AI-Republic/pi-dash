@@ -48,6 +48,7 @@
 
 pub mod handlers_actions;
 pub mod handlers_activity;
+pub mod handlers_core;
 pub mod handlers_labels_pages;
 pub mod handlers_pr_links;
 pub mod handlers_relations;
