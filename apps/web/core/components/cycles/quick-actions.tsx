@@ -14,12 +14,13 @@ import { IconButton } from "@pi-dash/propel/icon-button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { TContextMenuItem } from "@pi-dash/ui";
 import { ContextMenu, CustomMenu } from "@pi-dash/ui";
-import { copyUrlToClipboard, cn } from "@pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 // hooks
 import { useCycleMenuItems } from "@/components/common/quick-actions-helper";
 import { useCycle } from "@/hooks/store/use-cycle";
 import { useUserPermissions } from "@/hooks/store/user";
 import { useAppRouter } from "@/hooks/use-app-router";
+import { copyShareUrl } from "@/utils/share-url";
 // local imports
 import { ArchiveCycleModal } from "./archived-cycles/modal";
 import { CycleDeleteModal } from "./delete-modal";
@@ -57,7 +58,7 @@ export const CycleQuickActions = observer(function CycleQuickActions(props: Prop
 
   const cycleLink = `${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`;
   const handleCopyText = () =>
-    copyUrlToClipboard(cycleLink).then(() => {
+    copyShareUrl(cycleLink).then(() => {
       setToast({
         type: TOAST_TYPE.SUCCESS,
         title: t("Link copied!"),

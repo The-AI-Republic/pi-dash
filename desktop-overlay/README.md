@@ -83,6 +83,12 @@ desktop/src-tauri/dist/
   Bundled pages run on a Tauri-owned origin, so anything that builds a
   shareable link from `window.location.origin` would hand the user a
   `tauri://localhost` URL.
+- `apps/web/core/utils/share-url.ts` — `copyShareUrl()`, the desktop version
+  of the helper every other "Copy link" in `apps/web` calls (cycles, modules,
+  views, pages, projects, comments, …): it copies `desktopWebUrl(path)`. New
+  copy-link code in `apps/web` must call `copyShareUrl()` from
+  `@/utils/share-url`, never `copyUrlToClipboard()` from `@pi-dash/utils`;
+  `tests/desktop/desktop-share-url.test.ts` fails the build otherwise.
 - `apps/web/core/components/issues/issue-detail/issue-detail-quick-actions.tsx`,
   `issue-layouts/quick-action-dropdowns/helper.tsx` and
   `peek-overview/header.tsx` — the three copy-link paths, routed through
