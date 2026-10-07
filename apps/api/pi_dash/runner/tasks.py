@@ -184,37 +184,53 @@ def fail_runs_on_offline_runners() -> int:
     Same outcome as the heartbeat reaper (FAILED, or CANCELLED for a pending
     cancellation), for the case where no heartbeat ever arrives to trigger
     it. The grace is deliberately long: a laptop runner that sleeps and wakes
-    inside it keeps its run. ``RUNNER_OFFLINE_RUN_FAIL_SECS <= 0`` disables
-    the sweep.
+    inside it keeps its run. If the daemon does come back still working on a
+    run failed here, its next poll tells it to stop (see
+    ``reap_stale_busy_runs``). Managed runs are skipped, as in the pin sweep:
+    a desktop app that is closed for a while is their normal case.
+    ``RUNNER_OFFLINE_RUN_FAIL_SECS <= 0`` disables the sweep.
     """
     grace = int(getattr(settings, "RUNNER_OFFLINE_RUN_FAIL_SECS", 1800))
     if grace <= 0:
         return 0
     cutoff = timezone.now() - timedelta(seconds=grace)
-    runners = (
-        Runner.objects.filter(agent_runs__status__in=matcher.BUSY_STATUSES, agent_runs__assigned_at__lt=cutoff)
-        .filter(Q(last_heartbeat_at__lt=cutoff) | Q(last_heartbeat_at__isnull=True))
+    silent = Q(last_heartbeat_at__lt=cutoff) | Q(last_heartbeat_at__isnull=True)
+    runner_ids = list(
+        Runner.objects.filter(
+            agent_runs__status__in=matcher.BUSY_STATUSES,
+            agent_runs__assigned_at__lt=cutoff,
+            agent_runs__executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+        )
+        .filter(silent)
+        .values_list("id", flat=True)
         .distinct()[:500]
     )
     finished = 0
-    for runner in runners:
+    for runner_id in runner_ids:
         # Per-runner guard, as in ``reconcile_stalled_runs``: one bad row
         # must not stop the sweep from recovering the rest.
         try:
             with transaction.atomic():
+                # The poll takes the same row lock before it writes the
+                # heartbeat, so re-checking under it means a runner that came
+                # back since the list was read keeps its runs.
+                runner = Runner.objects.select_for_update().filter(pk=runner_id).filter(silent).first()
+                if runner is None:
+                    continue
                 stale = AgentRun.objects.filter(
                     runner=runner,
                     status__in=matcher.BUSY_STATUSES,
                     assigned_at__lt=cutoff,
+                    executor_kind=AgentExecutorKind.LOCAL_RUNNER,
                 )
                 finished += session_service._finish_unclaimed_runs(
                     runner,
                     stale,
                     detail=f"runner offline: no heartbeat for >{grace}s while this run was assigned to it",
-                    error_code="runner_offline",
+                    error_code=session_service.RUNNER_OFFLINE_ERROR_CODE,
                 )
         except Exception:
-            logger.exception("fail_runs_on_offline_runners: failed for runner %s", runner.id)
+            logger.exception("fail_runs_on_offline_runners: failed for runner %s", runner_id)
     if finished:
         logger.info("fail_runs_on_offline_runners finished %s run(s) (grace=%ss)", finished, grace)
     return finished

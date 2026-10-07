@@ -54,6 +54,9 @@ OFFLINE_GRACE_SECS = 60
 # crash detection comes from missing heartbeats anyway.
 ASSIGN_DELIVERY_GRACE_SECS = 60
 
+# ``error_code`` on runs failed by ``runner.fail_runs_on_offline_runners``.
+RUNNER_OFFLINE_ERROR_CODE = "runner_offline"
+
 
 def _merge_dev_metadata(current: Any, body: Dict[str, Any]) -> Dict[str, Any]:
     """Merge whitelisted session-open metadata into a JSON object.
@@ -206,17 +209,28 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
     )
     if in_flight_id:
         stale = stale.exclude(id=in_flight_id)
-        if not exclude_redeliverable and AgentRun.objects.filter(
-            id=in_flight_id,
-            runner=runner,
-            status=AgentRunStatus.CANCEL_REQUESTED,
-        ).exists():
+        cancel_reason = None
+        if not exclude_redeliverable:
+            claimed = AgentRun.objects.filter(id=in_flight_id, runner=runner).values("status", "error_code").first()
+            if claimed is not None and claimed["status"] == AgentRunStatus.CANCEL_REQUESTED:
+                cancel_reason = "cancellation_pending"
+            elif (
+                claimed is not None
+                and claimed["status"] == AgentRunStatus.FAILED
+                and claimed["error_code"] == RUNNER_OFFLINE_ERROR_CODE
+            ):
+                # The offline sweep failed this run while the daemon was
+                # silent (asleep, partitioned) and the daemon is still working
+                # on it. Nothing else tells it to stop on the poll path, and
+                # the issue may already have a replacement run elsewhere.
+                cancel_reason = "run_already_failed"
+        if cancel_reason is not None:
             # Re-enqueue on every poll until the daemon acknowledges. This
             # recovers when the initial best-effort enqueue happened during a
             # transient Redis outage without waiting for a session reconnect.
             from pi_dash.runner.services.pubsub import send_to_runner
 
-            def _retry_cancel(rid=runner.id, run_id=in_flight_id):
+            def _retry_cancel(rid=runner.id, run_id=in_flight_id, reason=cancel_reason):
                 try:
                     send_to_runner(
                         rid,
@@ -224,7 +238,7 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
                             "v": 1,
                             "type": "cancel",
                             "run_id": str(run_id),
-                            "reason": "cancellation_pending",
+                            "reason": reason,
                         },
                     )
                 except Exception:

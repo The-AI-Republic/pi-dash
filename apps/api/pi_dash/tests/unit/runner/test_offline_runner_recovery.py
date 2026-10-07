@@ -19,7 +19,8 @@ from django.test import override_settings
 from django.utils import timezone
 
 from pi_dash.core.agent_execution import AgentExecutorKind
-from pi_dash.orchestration.service import _pinned_runner_for
+from pi_dash.db.models import Issue, State
+from pi_dash.orchestration.service import _active_run_for, _pinned_runner_for
 from pi_dash.runner import tasks
 from pi_dash.runner.models import (
     AgentRun,
@@ -28,6 +29,7 @@ from pi_dash.runner.models import (
     Runner,
     RunnerStatus,
 )
+from pi_dash.runner.services import session_service
 
 
 @pytest.fixture
@@ -52,6 +54,14 @@ def _stub_terminal_effects():
 def _run_on_commit_immediately():
     with patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()):
         yield
+
+
+@pytest.fixture
+def issue(workspace, project, create_user):
+    state = State.objects.create(name="In Progress", project=project, group="started")
+    return Issue.objects.create(
+        name="Stranded", workspace=workspace, project=project, state=state, created_by=create_user
+    )
 
 
 def _make_runner(user, workspace, pod, name, *, silent_for_s=1, status=RunnerStatus.ONLINE):
@@ -96,13 +106,27 @@ def test_pin_kept_for_online_runner_with_fresh_heartbeat(db, create_user, worksp
 
 
 @pytest.mark.unit
+def test_pin_kept_for_busy_runner(db, create_user, workspace, pod):
+    # A daemon reporting busy (another run, or a chat turn) is alive: the
+    # follow-up waits for it rather than losing repo locality.
+    runner = _make_runner(create_user, workspace, pod, "busy", status=RunnerStatus.BUSY)
+    parent = _make_run(create_user, workspace, pod, status=AgentRunStatus.COMPLETED, runner=runner)
+
+    assert _pinned_runner_for(parent, pod) == runner
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "status,silent_for_s",
     [
         (RunnerStatus.OFFLINE, 3600),
+        (RunnerStatus.REVOKED, 1),
         # Still flagged ONLINE (the offline sweep has not run yet) but silent.
         (RunnerStatus.ONLINE, 3600),
         (RunnerStatus.ONLINE, None),
+        # ``mark_offline_runners`` never flips BUSY, so a dead runner can
+        # keep this status forever; the heartbeat is what rules it out.
+        (RunnerStatus.BUSY, 3600),
     ],
 )
 def test_no_pin_to_unavailable_runner(db, create_user, workspace, pod, status, silent_for_s):
@@ -127,6 +151,28 @@ def test_release_pin_hands_run_to_another_runner(db, create_user, workspace, pod
     assert run.pinned_runner_id is None
     assert run.status == AgentRunStatus.ASSIGNED
     assert run.runner_id == alive.id
+
+
+@pytest.mark.unit
+def test_release_pin_for_runner_that_never_heartbeated(db, create_user, workspace, pod):
+    never = _make_runner(create_user, workspace, pod, "never", status=RunnerStatus.OFFLINE, silent_for_s=None)
+    run = _make_run(create_user, workspace, pod, pinned_runner=never, age_s=3600)
+
+    assert tasks.release_pins_on_offline_runners() == 1
+
+    run.refresh_from_db()
+    assert run.pinned_runner_id is None
+
+
+@pytest.mark.unit
+def test_release_pin_spares_run_younger_than_the_grace(db, create_user, workspace, pod):
+    gone = _make_runner(create_user, workspace, pod, "gone", status=RunnerStatus.OFFLINE, silent_for_s=3600)
+    run = _make_run(create_user, workspace, pod, pinned_runner=gone, age_s=60)
+
+    assert tasks.release_pins_on_offline_runners() == 0
+
+    run.refresh_from_db()
+    assert run.pinned_runner_id == gone.id
 
 
 @pytest.mark.unit
@@ -225,6 +271,74 @@ def test_fail_run_on_long_silent_runner(db, create_user, workspace, pod, status)
 
 
 @pytest.mark.unit
+def test_fail_run_unblocks_the_issue(db, create_user, workspace, pod, issue):
+    gone = _make_runner(create_user, workspace, pod, "gone", status=RunnerStatus.BUSY, silent_for_s=7200)
+    run = _make_run(
+        create_user, workspace, pod, status=AgentRunStatus.RUNNING, runner=gone, work_item=issue, age_s=7200
+    )
+    assert _active_run_for(issue) == run
+
+    assert tasks.fail_runs_on_offline_runners() == 1
+
+    assert _active_run_for(issue) is None
+
+
+@pytest.mark.unit
+def test_fail_run_for_runner_that_never_heartbeated(db, create_user, workspace, pod):
+    never = _make_runner(create_user, workspace, pod, "never", status=RunnerStatus.OFFLINE, silent_for_s=None)
+    run = _make_run(create_user, workspace, pod, status=AgentRunStatus.ASSIGNED, runner=never, age_s=7200)
+
+    assert tasks.fail_runs_on_offline_runners() == 1
+
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.FAILED
+
+
+@pytest.mark.unit
+def test_fail_run_skips_managed_runs(db, create_user, workspace, pod):
+    gone = _make_runner(create_user, workspace, pod, "gone", status=RunnerStatus.OFFLINE, silent_for_s=7200)
+    run = _make_run(
+        create_user,
+        workspace,
+        pod,
+        status=AgentRunStatus.RUNNING,
+        runner=gone,
+        executor_kind=AgentExecutorKind.MANAGED_RUNNER,
+        age_s=7200,
+    )
+
+    assert tasks.fail_runs_on_offline_runners() == 0
+
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.RUNNING
+
+
+@pytest.mark.unit
+def test_fail_run_rechecks_heartbeat_under_the_runner_lock(db, create_user, workspace, pod):
+    gone = _make_runner(create_user, workspace, pod, "gone", status=RunnerStatus.OFFLINE, silent_for_s=7200)
+    run = _make_run(create_user, workspace, pod, status=AgentRunStatus.RUNNING, runner=gone, age_s=7200)
+    real = session_service._finish_unclaimed_runs
+
+    # The runner polls after the sweep has listed it but before its turn.
+    def _runner_returns_then_lock(qs_method):
+        def wrapped(self, *args, **kwargs):
+            Runner.objects.filter(pk=gone.pk).update(last_heartbeat_at=timezone.now())
+            return qs_method(self, *args, **kwargs)
+
+        return wrapped
+
+    from django.db.models.query import QuerySet
+
+    with patch.object(QuerySet, "select_for_update", _runner_returns_then_lock(QuerySet.select_for_update)):
+        with patch.object(session_service, "_finish_unclaimed_runs", wraps=real) as finish:
+            assert tasks.fail_runs_on_offline_runners() == 0
+
+    finish.assert_not_called()
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.RUNNING
+
+
+@pytest.mark.unit
 def test_pending_cancellation_on_silent_runner_becomes_cancelled(db, create_user, workspace, pod):
     gone = _make_runner(create_user, workspace, pod, "gone", status=RunnerStatus.OFFLINE, silent_for_s=7200)
     run = _make_run(create_user, workspace, pod, status=AgentRunStatus.CANCEL_REQUESTED, runner=gone, age_s=7200)
@@ -286,3 +400,34 @@ def test_fail_run_disabled_by_setting(db, create_user, workspace, pod):
 
     run.refresh_from_db()
     assert run.status == AgentRunStatus.RUNNING
+
+
+# ---------------- returning daemon is told to stop ----------------
+
+
+@pytest.mark.unit
+def test_poll_cancels_run_the_offline_sweep_already_failed(db, create_user, workspace, pod, _stub_send_to_runner):
+    asleep = _make_runner(create_user, workspace, pod, "asleep", status=RunnerStatus.OFFLINE, silent_for_s=7200)
+    run = _make_run(create_user, workspace, pod, status=AgentRunStatus.RUNNING, runner=asleep, age_s=7200)
+    assert tasks.fail_runs_on_offline_runners() == 1
+    _stub_send_to_runner.reset_mock()
+
+    # The laptop wakes and its daemon still reports the run as in flight.
+    session_service.reap_stale_busy_runs(asleep, {"in_flight_run": str(run.id)})
+
+    _stub_send_to_runner.assert_called_once_with(
+        asleep.id,
+        {"v": 1, "type": "cancel", "run_id": str(run.id), "reason": "run_already_failed"},
+    )
+
+
+@pytest.mark.unit
+def test_poll_does_not_cancel_run_that_failed_for_another_reason(db, create_user, workspace, pod, _stub_send_to_runner):
+    runner = _make_runner(create_user, workspace, pod, "alive")
+    run = _make_run(
+        create_user, workspace, pod, status=AgentRunStatus.FAILED, runner=runner, error_code="heartbeat_reaped"
+    )
+
+    session_service.reap_stale_busy_runs(runner, {"in_flight_run": str(run.id)})
+
+    _stub_send_to_runner.assert_not_called()
