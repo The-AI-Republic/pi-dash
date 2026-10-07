@@ -1675,6 +1675,15 @@ async fn fire_open_effects(
     Ok(())
 }
 
+/// `if expected and str(project_slug) != expected` (`:150-154`)
+/// as data: the expected identifier when the sent slug mismatches,
+/// `None` when no identifier resolves (`None`) or it is empty
+/// (`""`) — Django tests truthiness, not nullness, so both pass.
+fn project_slug_mismatch(slug: &Value, expected: Option<String>) -> Option<String> {
+    let expected = expected.filter(|identifier| !identifier.is_empty())?;
+    (py_str(slug) != expected).then_some(expected)
+}
+
 /// `resolve_runner_project_slug` (`session_service.py:462-470`) as
 /// data: `None` when the join finds no row, the runner has no pod,
 /// or the project partner is missing.
@@ -1877,10 +1886,8 @@ pub async fn runner_session_open(
                 Ok(expected) => expected,
                 Err(response) => return response,
             };
-            if let Some(expected) = expected {
-                if py_str(slug) != expected {
-                    return render(project_mismatch_drf(&expected));
-                }
+            if let Some(expected) = project_slug_mismatch(slug, expected) {
+                return render(project_mismatch_drf(&expected));
             }
         }
     }
@@ -2197,6 +2204,25 @@ mod tests {
             let actual: Value = serde_json::from_str(&body).expect("parses");
             assert_eq!(actual, expected, "{key}");
         }
+    }
+
+    /// The project-slug guard matches Django truthiness: a missing
+    /// identifier (`None`) or an empty one (`""`) both pass; only a
+    /// resolved non-empty identifier compares (via `str()`).
+    #[test]
+    fn project_slug_guard_matches_django_truthiness() {
+        let slug = serde_json::json!("X");
+        assert_eq!(project_slug_mismatch(&slug, None), None);
+        assert_eq!(project_slug_mismatch(&slug, Some(String::new())), None);
+        assert_eq!(
+            project_slug_mismatch(&slug, Some("Y".to_owned())),
+            Some("Y".to_owned())
+        );
+        assert_eq!(project_slug_mismatch(&slug, Some("X".to_owned())), None);
+        assert_eq!(
+            project_slug_mismatch(&serde_json::json!(7), Some("7".to_owned())),
+            None
+        );
     }
 
     /// `py_str` vectors: scalar spellings, float exponents, and
