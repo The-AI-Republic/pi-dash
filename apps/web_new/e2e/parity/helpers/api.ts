@@ -7728,3 +7728,327 @@ export async function serverProfileStartOfWeek(
   }
   return record.start_of_the_week;
 }
+
+// --- Desktop-only chat + agent runtime fixtures and server reads
+// --- (NEWFRONT-182, RUN-033–036, RUN-044–045, RUN-047). Appended;
+// --- existing helpers above are untouched per the shared harness
+// --- contract. The desktop rows are proven by their web-observable side:
+// --- absent UI plus the server gates a web session hits (the managed
+// --- endpoints refuse non-desktop sessions), so this block plants the
+// --- cloud fixtures the oracle needs (runners, chat sessions, chat
+// --- approvals) and probes the desktop-gated endpoints raw.
+
+/** Runner statuses the desktop-contact scenarios plant (RUN-011 set, reused here). */
+export type DesktopRuntimeRunnerStatus = "online" | "busy" | "offline" | "revoked";
+
+/** Minimal runner shape the desktop-runtime scenarios assert on. */
+export interface DesktopRuntimeRunner {
+  id: string;
+  name: string;
+  status: string;
+  podId: string;
+}
+
+/** Minimal chat-session shape the desktop-runtime scenarios assert on. */
+export interface DesktopRuntimeChatSession {
+  id: string;
+  status: string;
+  runner: string;
+}
+
+/** Minimal chat-message shape the desktop-runtime scenarios assert on. */
+export interface DesktopRuntimeChatMessage {
+  id: string;
+  role: string;
+  content: string;
+  seq: number;
+}
+
+/** Minimal chat-approval shape the desktop-runtime scenarios assert on. */
+export interface DesktopRuntimeChatApproval {
+  id: string;
+  session: string;
+  kind: string;
+  status: string;
+}
+
+/** Raw refusal of a desktop-gated endpoint: status plus its machine-readable error, if any. */
+export interface DesktopRuntimeEndpointRefusal {
+  status: number;
+  error: string;
+}
+
+/** API container for shell snippets; the base helper pins parity19-api. */
+function desktopRuntimeApiContainer(): string {
+  const override = process.env["PARITY_API_CONTAINER"];
+  return override !== undefined && override.trim() !== "" ? override.trim() : "parity19-api";
+}
+
+/** Run a Django shell snippet inside this run's stack api container. */
+export async function desktopRuntimeShell(python: string): Promise<string> {
+  const { stdout } = await execFileAsync(
+    "docker",
+    ["exec", "-i", desktopRuntimeApiContainer(), "python", "manage.py", "shell", "-c", python],
+    {
+      timeout: 120_000,
+    }
+  );
+  return stdout;
+}
+
+function desktopRuntimeRunnerOf(raw: unknown): DesktopRuntimeRunner {
+  const record = raw as { id?: unknown; name?: unknown; status?: unknown; pod?: unknown; pod_detail?: unknown };
+  const podDetail = record.pod_detail as { id?: unknown } | undefined;
+  const podId = typeof record.pod === "string" ? record.pod : typeof podDetail?.id === "string" ? podDetail.id : "";
+  if (typeof record.id !== "string" || typeof record.name !== "string" || typeof record.status !== "string") {
+    throw new Error("[parity] runner payload carried no id/name/status.");
+  }
+  return { id: record.id, name: record.name, status: record.status, podId };
+}
+
+function desktopRuntimeChatSessionOf(raw: unknown): DesktopRuntimeChatSession {
+  const record = raw as { id?: unknown; status?: unknown; runner?: unknown };
+  if (typeof record.id !== "string" || typeof record.status !== "string" || typeof record.runner !== "string") {
+    throw new Error("[parity] chat-session payload carried no id/status/runner.");
+  }
+  return { id: record.id, status: record.status, runner: record.runner };
+}
+
+function desktopRuntimeChatMessageOf(raw: unknown): DesktopRuntimeChatMessage {
+  const record = raw as { id?: unknown; role?: unknown; content?: unknown; seq?: unknown };
+  if (
+    typeof record.id !== "string" ||
+    typeof record.role !== "string" ||
+    typeof record.content !== "string" ||
+    typeof record.seq !== "number"
+  ) {
+    throw new Error("[parity] chat-message payload missed id/role/content/seq.");
+  }
+  return { id: record.id, role: record.role, content: record.content, seq: record.seq };
+}
+
+function desktopRuntimeChatApprovalOf(raw: unknown): DesktopRuntimeChatApproval {
+  const record = raw as { id?: unknown; session?: unknown; kind?: unknown; status?: unknown };
+  if (
+    typeof record.id !== "string" ||
+    typeof record.session !== "string" ||
+    typeof record.kind !== "string" ||
+    typeof record.status !== "string"
+  ) {
+    throw new Error("[parity] chat-approval payload missed id/session/kind/status.");
+  }
+  return { id: record.id, session: record.session, kind: record.kind, status: record.status };
+}
+
+/** Workspace UUID for a slug (runner rows key off the id, not the slug). */
+export async function serverDesktopRuntimeWorkspaceId(workspaceSlug: string): Promise<string> {
+  const out = await desktopRuntimeShell(
+    `from pi_dash.db.models import Workspace\n` +
+      `ws = Workspace.objects.filter(slug=${JSON.stringify(workspaceSlug)}).first()\n` +
+      `print("PARITY_WS:" + (str(ws.id) if ws else ""))\n`
+  );
+  const id = /^PARITY_WS:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (id === "") throw new Error(`[parity] no workspace for slug ${workspaceSlug}.`);
+  return id;
+}
+
+/**
+ * Plant a runner row owned by `ownerEmail` in the seeded project, at the
+ * given status. Names must be unique per run (callers add a timestamp);
+ * there is no web create endpoint, so this goes through the shell.
+ * Online/busy runners also get a live RunnerSession row: the outbox
+ * treats a runner with no active session as offline, so a planted
+ * "online" runner needs the session row to behave like a connected
+ * daemon. Offline/revoked runners get none.
+ */
+export async function serverDesktopRuntimePlantRunner(input: {
+  ownerEmail: string;
+  workspaceSlug: string;
+  projectId: string;
+  name: string;
+  status: DesktopRuntimeRunnerStatus;
+}): Promise<DesktopRuntimeRunner> {
+  const out = await desktopRuntimeShell(
+    `import json\n` +
+      `from django.utils import timezone\n` +
+      `from pi_dash.db.models import User, Workspace\n` +
+      `from pi_dash.runner.models import Pod, Runner, RunnerSession\n` +
+      `user = User.objects.get(email=${JSON.stringify(input.ownerEmail)})\n` +
+      `ws = Workspace.objects.get(slug=${JSON.stringify(input.workspaceSlug)})\n` +
+      `pod = Pod.default_for_project_id(${JSON.stringify(input.projectId)})\n` +
+      `runner = Runner.objects.create(owner=user, workspace=ws, pod=pod, name=${JSON.stringify(input.name)}, status=${JSON.stringify(input.status)})\n` +
+      `live = ${JSON.stringify(input.status)} in ("online", "busy")\n` +
+      `if live:\n` +
+      `    RunnerSession.objects.create(runner=runner, last_seen_at=timezone.now())\n` +
+      `print("PARITY_RUNNER:" + json.dumps({"id": str(runner.id), "name": runner.name, "status": runner.status, "pod": str(runner.pod_id)}))\n`
+  );
+  const line = /^PARITY_RUNNER:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (line === "") throw new Error(`[parity] runner plant produced no row for ${input.name}.`);
+  return desktopRuntimeRunnerOf(JSON.parse(line) as unknown);
+}
+
+/** Best-effort runner cleanup; cascades to sessions, messages and approvals. */
+export async function serverDesktopRuntimeCleanupRunner(runnerId: string): Promise<void> {
+  try {
+    await desktopRuntimeShell(
+      `from pi_dash.runner.models import Runner\n` +
+        `Runner.objects.filter(pk=${JSON.stringify(runnerId)}).delete()\n` +
+        `print("PARITY_RUNNER_CLEANUP_OK")\n`
+    );
+  } catch (error) {
+    console.log(`[parity] runner cleanup failed for ${runnerId}; leaving it for reseed. ${String(error)}`);
+  }
+}
+
+/**
+ * Create a chat session through the app's own endpoint. The endpoint
+ * reuses an open message-less session with HTTP 200 instead of creating
+ * a duplicate, so both 200 (reused) and 201 (created) resolve.
+ */
+export async function serverDesktopRuntimeCreateChatSession(
+  input: { workspaceId: string; runnerId: string },
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DesktopRuntimeChatSession> {
+  const res = await mutateJSON("POST", `${apiBase}/api/runners/chat/sessions/`, sessionCookie, {
+    workspace: input.workspaceId,
+    runner: input.runnerId,
+  });
+  if (res.status !== 200 && res.status !== 201) {
+    throw new Error(`[parity] chat-session create failed with HTTP ${res.status}.`);
+  }
+  return desktopRuntimeChatSessionOf((await res.json()) as unknown);
+}
+
+/** Chat sessions through the same endpoint the history panel reads. */
+export async function serverDesktopRuntimeListChatSessions(
+  workspaceId: string,
+  runnerId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DesktopRuntimeChatSession[]> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/runners/chat/sessions/?workspace=${encodeURIComponent(workspaceId)}&runner=${encodeURIComponent(runnerId)}`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] chat-session list failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : [];
+  return rows.map(desktopRuntimeChatSessionOf);
+}
+
+/** Messages of a session through the app's own endpoint. */
+export async function serverDesktopRuntimeChatMessages(
+  sessionId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DesktopRuntimeChatMessage[]> {
+  const res = await fetchTolerant(`${apiBase}/api/runners/chat/sessions/${sessionId}/messages/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] chat-message list failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : [];
+  return rows.map(desktopRuntimeChatMessageOf);
+}
+
+/**
+ * Send a chat message through the app's own endpoint. Resolves with the
+ * stored user message; the session is left mid-turn, exactly as after a
+ * UI send with no daemon to answer it.
+ */
+export async function serverDesktopRuntimeSendChatMessage(
+  sessionId: string,
+  content: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DesktopRuntimeChatMessage> {
+  const res = await mutateJSON("POST", `${apiBase}/api/runners/chat/sessions/${sessionId}/messages/`, sessionCookie, {
+    content,
+    content_parts: [],
+  });
+  if (res.status !== 201) throw new Error(`[parity] chat send failed with HTTP ${res.status}.`);
+  return desktopRuntimeChatMessageOf((await res.json()) as unknown);
+}
+
+/**
+ * Plant a pending chat-approval request on a session through the shell,
+ * standing in for the daemon write-back. Returns the approval id.
+ */
+export async function serverDesktopRuntimePlantChatApproval(input: {
+  sessionId: string;
+  localApprovalId: string;
+  kind: string;
+  reason: string;
+  payload: Record<string, unknown>;
+}): Promise<string> {
+  const out = await desktopRuntimeShell(
+    `import json\n` +
+      `from pi_dash.runner.models import AgentChatSession, AgentChatApprovalRequest\n` +
+      `session = AgentChatSession.objects.get(pk=${JSON.stringify(input.sessionId)})\n` +
+      `approval = AgentChatApprovalRequest.objects.create(session=session, local_approval_id=${JSON.stringify(input.localApprovalId)}, kind=${JSON.stringify(input.kind)}, reason=${JSON.stringify(input.reason)}, payload=json.loads(${JSON.stringify(JSON.stringify(input.payload))}))\n` +
+      `print("PARITY_CHAT_APPROVAL:" + str(approval.id))\n`
+  );
+  const id = /^PARITY_CHAT_APPROVAL:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (id === "") throw new Error("[parity] chat-approval plant produced no row.");
+  return id;
+}
+
+/** Pending chat approvals through the user-facing queue endpoint. */
+export async function serverDesktopRuntimeListChatApprovals(
+  workspaceId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DesktopRuntimeChatApproval[]> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/runners/chat/approvals/?workspace=${encodeURIComponent(workspaceId)}`,
+    {
+      headers: { cookie: sessionCookie },
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] chat-approval list failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : [];
+  return rows.map(desktopRuntimeChatApprovalOf);
+}
+
+async function desktopRuntimeRefusalOf(res: Response): Promise<DesktopRuntimeEndpointRefusal> {
+  let error = "";
+  try {
+    const payload = (await res.json()) as { error?: unknown };
+    if (typeof payload.error === "string") error = payload.error;
+  } catch {
+    error = "";
+  }
+  return { status: res.status, error };
+}
+
+/** Raw response of the agent-profile read for a web session (the desktop gate). */
+export async function serverDesktopRuntimeAgentProfileRefusal(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DesktopRuntimeEndpointRefusal> {
+  const res = await fetchTolerant(`${apiBase}/api/users/me/ai-assistant/agent-profile/`, {
+    headers: { cookie: sessionCookie },
+  });
+  return desktopRuntimeRefusalOf(res);
+}
+
+/** Raw response of the agent-token issue for a web session (the desktop gate). */
+export async function serverDesktopRuntimeAgentTokenRefusal(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DesktopRuntimeEndpointRefusal> {
+  const res = await mutateJSON("POST", `${apiBase}/api/users/me/ai-assistant/agent-token/`, sessionCookie, {});
+  return desktopRuntimeRefusalOf(res);
+}
+
+/** Raw response of the desktop-enroll endpoint for a web session (the desktop gate). */
+export async function serverDesktopRuntimeDesktopEnrollRefusal(
+  method: "POST" | "DELETE",
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DesktopRuntimeEndpointRefusal> {
+  const res = await mutateJSON(method, `${apiBase}/api/v1/runner/dev-machines/desktop-enroll/`, sessionCookie, {});
+  return desktopRuntimeRefusalOf(res);
+}
