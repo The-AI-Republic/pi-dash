@@ -2551,6 +2551,141 @@ export interface ParityDriver {
   desktopRuntimeSpyUrls(): Promise<string[]>;
   /** Stop the request spy and forget the logged URLs. */
   desktopRuntimeStopRequestSpy(): Promise<void>;
+
+  // --- Scheduler catalog + definitions (NEWFRONT-184, AGT-001..006, AGT-022).
+  // --- Verbs stay generic (scheduler*) so sibling agents-area children reuse
+  // --- them; later children extend, never rename.
+  /** Open the workspace scheduler catalog; waits for the table or the empty guidance row. */
+  schedulerOpenCatalog(workspaceSlug: string): Promise<void>;
+  /** Catalog table rows in display order (data rows only, never the empty guidance row). */
+  schedulerCatalogRows(): Promise<SchedulerCatalogRow[]>;
+  /** Whether the catalog shows its empty-guidance row. */
+  schedulerCatalogEmptyVisible(): Promise<boolean>;
+  /** The rendered tab title while the catalog shows. */
+  schedulerPageTitle(): Promise<string>;
+  /** Whether the catalog header offers the create control. */
+  schedulerCreateVisible(): Promise<boolean>;
+  /** Per-row action labels offered on one definition's row, in display order. */
+  schedulerRowActions(handle: string): Promise<string[]>;
+  /** Open the create dialog from the catalog header; waits for the form. */
+  schedulerOpenCreate(): Promise<void>;
+  /** Fill definition dialog fields; omitted fields are left untouched. */
+  schedulerFillDefinition(input: {
+    name?: string;
+    handle?: string;
+    description?: string;
+    prompt?: string;
+    color?: string;
+  }): Promise<void>;
+  /** Set the definition dialog's enabled switch to the desired state. */
+  schedulerSetDefinitionEnabled(enabled: boolean): Promise<void>;
+  /** Current values of every definition dialog field (for pre-fill assertions). */
+  schedulerDefinitionValues(): Promise<SchedulerDefinitionValues>;
+  /** Whether the definition dialog's handle field is locked. */
+  schedulerDefinitionHandleLocked(): Promise<boolean>;
+  /** Submit the definition dialog; resolves on click (a rejected submit keeps the dialog open). */
+  schedulerSubmitDefinition(): Promise<void>;
+  /** Whether the definition dialog is currently open. */
+  schedulerDefinitionOpen(): Promise<boolean>;
+  /** Inline validation texts currently shown in the definition dialog. */
+  schedulerDefinitionErrors(): Promise<string[]>;
+  /** Close the definition dialog via its cancel control. */
+  schedulerCloseDefinition(): Promise<void>;
+  /** Open the edit dialog for one definition; waits for the pre-filled form. */
+  schedulerOpenEdit(handle: string): Promise<void>;
+  /** Open the delete confirmation for one definition; waits for the dialog. */
+  schedulerOpenDelete(handle: string): Promise<void>;
+  /** Full text of the open delete confirmation (consequence copy plus definition name). */
+  schedulerDeleteDialogText(): Promise<string>;
+  /**
+   * Confirm the open delete; resolves once the dialog closes, or once a
+   * failure notice shows when the delete is rejected (the dialog stays
+   * open for the scenario to assert).
+   */
+  schedulerConfirmDelete(): Promise<void>;
+  /** Whether the delete confirmation is currently open. */
+  schedulerDeleteOpen(): Promise<boolean>;
+  /** Dismiss the open delete via its cancel control. */
+  schedulerCancelDelete(): Promise<void>;
+  /** Open one project's scheduler list; waits for the panel. */
+  schedulerOpenProjectSchedulers(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Open the project-side create form on its "create new" tab; waits for the fields. */
+  schedulerOpenProjectCreate(): Promise<void>;
+  /** Submit the project-side create form; resolves on click (a rejected submit keeps it open). */
+  schedulerProjectCreateSubmit(): Promise<void>;
+  /** Fill the project-side create form's name field. */
+  schedulerProjectCreateFillName(name: string): Promise<void>;
+  /** Current value of the project-side create form's handle field. */
+  schedulerProjectCreateHandleValue(): Promise<string>;
+  /** Fill the project-side create form's handle field by hand. */
+  schedulerProjectCreateFillHandle(handle: string): Promise<void>;
+  /** Inline validation texts currently shown in the project-side create form. */
+  schedulerProjectCreateErrors(): Promise<string[]>;
+  /** Close the project-side create form via its cancel control. */
+  schedulerCloseProjectCreate(): Promise<void>;
+  /** Open the bulk-install dialog for one definition; waits for the picker. */
+  schedulerOpenInstall(handle: string): Promise<void>;
+  /** Bulk-install picker options in display order (opens the dropdown when needed). */
+  schedulerInstallPickerOptions(): Promise<SchedulerInstallOption[]>;
+  /** Filter the bulk-install picker by a search query. */
+  schedulerInstallSearch(query: string): Promise<void>;
+  /** Toggle the bulk-install picker's select-all control. */
+  schedulerInstallToggleSelectAll(): Promise<void>;
+  /** Toggle one project in the bulk-install picker by name. */
+  schedulerInstallToggleProject(name: string): Promise<void>;
+  /** The bulk-install picker's current selection summary text. */
+  schedulerInstallSelectedSummary(): Promise<string>;
+  /** Submit the bulk-install dialog; resolves on click (failures keep it open). */
+  schedulerInstallSubmit(): Promise<void>;
+  /** Whether the bulk-install dialog is currently open. */
+  schedulerInstallOpen(): Promise<boolean>;
+  /** Close the bulk-install dialog via its cancel control. */
+  schedulerCloseInstall(): Promise<void>;
+  /** Every toast currently visible, oldest first (for partitioned outcomes). */
+  schedulerVisibleToasts(): Promise<{ title: string; message: string }[]>;
+  /** Open the workspace prompts route; settles on the page or the gate panel. */
+  schedulerOpenPrompts(workspaceSlug: string): Promise<void>;
+  /** Whether the not-authorized panel is currently shown. */
+  schedulerNotAuthorizedVisible(): Promise<boolean>;
+  /** How many workspace sidebars are mounted (a second shell would double it). */
+  schedulerShellCount(): Promise<number>;
+}
+
+/** One catalog table row: the user-visible definition facts. */
+export interface SchedulerCatalogRow {
+  /** Display name. */
+  name: string;
+  /** URL handle (the slug). */
+  handle: string;
+  /** Origin mark text (e.g. Built-in). */
+  origin: string;
+  /** Install-count cell text (e.g. "2 installs"). */
+  installs: string;
+  /** Status mark text (e.g. Enabled). */
+  status: string;
+  /** Last-update cell text (locale-rendered; scenarios assert presence, not format). */
+  updated: string;
+}
+
+/** Current values of the definition dialog's fields. */
+export interface SchedulerDefinitionValues {
+  name: string;
+  handle: string;
+  description: string;
+  prompt: string;
+  /** Selected swatch hex (e.g. #3b82f6). */
+  color: string;
+  enabled: boolean;
+}
+
+/** One bulk-install picker option. */
+export interface SchedulerInstallOption {
+  name: string;
+  identifier: string | null;
+  /** Checked in the picker (selected, or locked as already installed). */
+  checked: boolean;
+  /** Already installed: checked and cannot be toggled. */
+  locked: boolean;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */
