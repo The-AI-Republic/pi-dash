@@ -287,7 +287,11 @@ fn owned(
             };
         }
     }
-    router
+    // DRF runs `initial()` (auth → permissions) before its method check, so
+    // exotic methods (TRACE et al.) answer 401/403/405 JSON. The fallback
+    // proxies them with the original request (the `handlers_social`
+    // `owned()` position).
+    router.fallback(crate::edge::proxy)
 }
 
 /// The activity paths own GET only
@@ -2663,6 +2667,13 @@ async fn activity_list_inner(
         None,
     )
     .map_err(page_denial)?;
+    // `results[:limit]` runs on the lazy queryset, whose negative indexing
+    // raises `ValueError` into the 500 — after the offset checks above
+    // (a negative offset still 400s first). `per_page=-1` passes
+    // `offset_window` (stop 0), so it must be refused here.
+    if per_page < 0 {
+        return Err(page_denial(crate::paginator::PageError::NegativeSlice));
+    }
     let total_count = rows.len() as i64;
     // `queryset[offset:stop]` over the evaluated rows.
     let start = (window.offset as usize).min(rows.len());
@@ -2674,8 +2685,8 @@ async fn activity_list_inner(
         return Err(Denial::ServerError);
     }
     let has_more = window_rows.len() as i64 > per_page;
-    // `results[:limit]` over the evaluated window (negative limits already
-    // errored in `offset_window`).
+    // `results[:limit]` over the evaluated window (negative limits were
+    // refused above).
     let trim = usize::try_from(per_page)
         .unwrap_or(usize::MAX)
         .min(window_rows.len());
@@ -2910,6 +2921,11 @@ async fn attachment_post_inner(
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    // `TimezoneMixin.initial` (`views/base.py:43-46`) runs before the view
+    // body, so a bad zone wins over the inline 404/403 below (these views
+    // carry `IsAuthenticated` only; the issue/permission checks are body
+    // code).
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     // No gate (`IsAuthenticated` only); the permission check is inline.
     let Some((_, created_by_id)) = fetch_issue_head(&pre.pool, slug, &project_id, issue_id).await?
     else {
@@ -2927,9 +2943,6 @@ async fn attachment_post_inner(
     {
         return Err(Denial::ForbiddenUpload);
     }
-    // `TimezoneMixin.initial` runs after the gate but before the body: a
-    // bad zone wins over body errors below.
-    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     // The body parses here (`request.data` is first touched at `:2332`):
     // a 400/415/500 from the bytes never precedes the 404/403 above.
     let data = parse_post_data(headers, body)?;
@@ -3204,14 +3217,16 @@ async fn attachment_get_inner(
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    // `TimezoneMixin.initial` (`views/base.py:43-46`) runs before the view
+    // body, so a bad zone wins over the inline 404/403 below (these views
+    // carry `IsAuthenticated` only; the issue/permission checks are body
+    // code).
+    let _tz = activate_timezone(pre.actor.timezone.as_deref())?;
     // The download check passes `issue=None` (creator arm off) and no
     // roles (any active project membership): `has_issue_download_access`.
     if !issue_permission(&pre.pool, &pre.actor.id, None, &project_id, None, false).await? {
         return Err(Denial::ForbiddenDownload);
     }
-    // `TimezoneMixin.initial` runs after the gate (`_tz` unused: the 302
-    // carries no datetimes, but a bad zone still 400/500s like Django).
-    let _tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let Some(row) = fetch_attachment(&pre.pool, slug, &project_id, pk).await? else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
@@ -3289,6 +3304,11 @@ async fn attachment_patch_inner(
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    // `TimezoneMixin.initial` (`views/base.py:43-46`) runs before the view
+    // body, so a bad zone wins over the inline 404/403 below (these views
+    // carry `IsAuthenticated` only; the issue/permission checks are body
+    // code).
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let Some((_, created_by_id)) = fetch_issue_head(&pre.pool, slug, &project_id, issue_id).await?
     else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
@@ -3305,9 +3325,6 @@ async fn attachment_patch_inner(
     {
         return Err(Denial::ForbiddenUpload);
     }
-    // `TimezoneMixin.initial` runs after the gate but before the body: a
-    // bad zone wins over the row 404 below.
-    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let Some(row) = fetch_attachment(&pre.pool, slug, &project_id, pk).await? else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
@@ -3398,6 +3415,11 @@ async fn attachment_delete_inner(
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    // `TimezoneMixin.initial` (`views/base.py:43-46`) runs before the view
+    // body, so a bad zone wins over the inline 404/403 below (these views
+    // carry `IsAuthenticated` only; the issue/permission checks are body
+    // code).
+    let _tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let Some((_, created_by_id)) = fetch_issue_head(&pre.pool, slug, &project_id, issue_id).await?
     else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
@@ -3414,9 +3436,6 @@ async fn attachment_delete_inner(
     {
         return Err(Denial::ForbiddenDelete);
     }
-    // `TimezoneMixin.initial` runs after the gate (`_tz` unused: the 204
-    // carries no datetimes, but a bad zone still 400/500s like Django).
-    let _tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let Some(row) = fetch_attachment(&pre.pool, slug, &project_id, pk).await? else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
