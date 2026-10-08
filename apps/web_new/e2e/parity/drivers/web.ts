@@ -14091,7 +14091,9 @@ export class WebDriver implements ParityDriver {
   }
 
   async schedulerRowActions(handle: string): Promise<string[]> {
-    const buttons = this.schedulerCatalogRow(handle).getByRole("button");
+    // Scope to the trailing actions cell: the origin/status marks are
+    // buttons too, so a row-wide read would report them as actions.
+    const buttons = this.schedulerCatalogRow(handle).locator("td").last().getByRole("button");
     const total = await buttons.count();
     const names: string[] = [];
     for (let i = 0; i < total; i++) {
