@@ -19,6 +19,9 @@ import type {
   ParityDriver,
   ParityTarget,
   RulesCommentMenuOption,
+  SchedulerCatalogRow,
+  SchedulerDefinitionValues,
+  SchedulerInstallOption,
   ServedShellMarkers,
   WorkspaceOnboardingView,
 } from "./parity-driver";
@@ -4148,5 +4151,144 @@ export class WebNewDriver implements ParityDriver {
   }
   async desktopRuntimeStopRequestSpy(): Promise<void> {
     return todo("desktopRuntimeStopRequestSpy");
+  }
+
+  // --- Scheduler catalog + definitions (NEWFRONT-184). Throwing stubs
+  // --- per the shared driver contract; the agents area fills these in.
+
+  async schedulerOpenCatalog(_workspaceSlug: string): Promise<void> {
+    return todo("schedulerOpenCatalog");
+  }
+  async schedulerCatalogRows(): Promise<SchedulerCatalogRow[]> {
+    return todo("schedulerCatalogRows");
+  }
+  async schedulerCatalogEmptyVisible(): Promise<boolean> {
+    return todo("schedulerCatalogEmptyVisible");
+  }
+  async schedulerPageTitle(): Promise<string> {
+    return todo("schedulerPageTitle");
+  }
+  async schedulerCreateVisible(): Promise<boolean> {
+    return todo("schedulerCreateVisible");
+  }
+  async schedulerRowActions(_handle: string): Promise<string[]> {
+    return todo("schedulerRowActions");
+  }
+  async schedulerOpenCreate(): Promise<void> {
+    return todo("schedulerOpenCreate");
+  }
+  async schedulerFillDefinition(_input: {
+    name?: string;
+    handle?: string;
+    description?: string;
+    prompt?: string;
+    color?: string;
+  }): Promise<void> {
+    return todo("schedulerFillDefinition");
+  }
+  async schedulerSetDefinitionEnabled(_enabled: boolean): Promise<void> {
+    return todo("schedulerSetDefinitionEnabled");
+  }
+  async schedulerDefinitionValues(): Promise<SchedulerDefinitionValues> {
+    return todo("schedulerDefinitionValues");
+  }
+  async schedulerDefinitionHandleLocked(): Promise<boolean> {
+    return todo("schedulerDefinitionHandleLocked");
+  }
+  async schedulerSubmitDefinition(): Promise<void> {
+    return todo("schedulerSubmitDefinition");
+  }
+  async schedulerDefinitionOpen(): Promise<boolean> {
+    return todo("schedulerDefinitionOpen");
+  }
+  async schedulerDefinitionErrors(): Promise<string[]> {
+    return todo("schedulerDefinitionErrors");
+  }
+  async schedulerCloseDefinition(): Promise<void> {
+    return todo("schedulerCloseDefinition");
+  }
+  async schedulerOpenEdit(_handle: string): Promise<void> {
+    return todo("schedulerOpenEdit");
+  }
+  async schedulerOpenDelete(_handle: string): Promise<void> {
+    return todo("schedulerOpenDelete");
+  }
+  async schedulerDeleteDialogText(): Promise<string> {
+    return todo("schedulerDeleteDialogText");
+  }
+  async schedulerConfirmDelete(): Promise<void> {
+    return todo("schedulerConfirmDelete");
+  }
+  async schedulerDeleteOpen(): Promise<boolean> {
+    return todo("schedulerDeleteOpen");
+  }
+  async schedulerCancelDelete(): Promise<void> {
+    return todo("schedulerCancelDelete");
+  }
+  async schedulerOpenProjectSchedulers(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("schedulerOpenProjectSchedulers");
+  }
+  async schedulerOpenProjectCreate(): Promise<void> {
+    return todo("schedulerOpenProjectCreate");
+  }
+  async schedulerProjectCreateSubmit(): Promise<void> {
+    return todo("schedulerProjectCreateSubmit");
+  }
+  async schedulerProjectCreateFillName(_name: string): Promise<void> {
+    return todo("schedulerProjectCreateFillName");
+  }
+  async schedulerProjectCreateHandleValue(): Promise<string> {
+    return todo("schedulerProjectCreateHandleValue");
+  }
+  async schedulerProjectCreateFillHandle(_handle: string): Promise<void> {
+    return todo("schedulerProjectCreateFillHandle");
+  }
+  async schedulerProjectCreateErrors(): Promise<string[]> {
+    return todo("schedulerProjectCreateErrors");
+  }
+  async schedulerCloseProjectCreate(): Promise<void> {
+    return todo("schedulerCloseProjectCreate");
+  }
+  async schedulerOpenInstall(_handle: string): Promise<void> {
+    return todo("schedulerOpenInstall");
+  }
+  async schedulerInstallPickerOptions(): Promise<SchedulerInstallOption[]> {
+    return todo("schedulerInstallPickerOptions");
+  }
+  async schedulerInstallSearch(_query: string): Promise<void> {
+    return todo("schedulerInstallSearch");
+  }
+  async schedulerInstallToggleSelectAll(): Promise<void> {
+    return todo("schedulerInstallToggleSelectAll");
+  }
+  async schedulerInstallToggleProject(_name: string): Promise<void> {
+    return todo("schedulerInstallToggleProject");
+  }
+  async schedulerInstallSelectedSummary(): Promise<string> {
+    return todo("schedulerInstallSelectedSummary");
+  }
+  async schedulerInstallSubmit(): Promise<void> {
+    return todo("schedulerInstallSubmit");
+  }
+  async schedulerInstallOpen(): Promise<boolean> {
+    return todo("schedulerInstallOpen");
+  }
+  async schedulerCloseInstall(): Promise<void> {
+    return todo("schedulerCloseInstall");
+  }
+  async schedulerVisibleToasts(): Promise<{ title: string; message: string }[]> {
+    return todo("schedulerVisibleToasts");
+  }
+  async schedulerOpenPrompts(_workspaceSlug: string): Promise<void> {
+    return todo("schedulerOpenPrompts");
+  }
+  async schedulerNotAuthorizedVisible(): Promise<boolean> {
+    return todo("schedulerNotAuthorizedVisible");
+  }
+  async schedulerWorkspaceNotFoundVisible(): Promise<boolean> {
+    return todo("schedulerWorkspaceNotFoundVisible");
+  }
+  async schedulerShellCount(): Promise<number> {
+    return todo("schedulerShellCount");
   }
 }

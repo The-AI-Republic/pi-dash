@@ -8075,3 +8075,334 @@ export async function serverDesktopRuntimeDesktopEnrollRefusal(
   );
   return desktopRuntimeRefusalOf(res);
 }
+
+// --- Scheduler catalog + definitions (NEWFRONT-184, AGT-001..006, AGT-022).
+// --- Appended; existing helpers above are untouched per the shared harness
+// --- contract. Session-cookie style: every helper takes the workspace slug,
+// --- a signed-in session cookie, and the ids it needs. Throwing verbs assert
+// --- the happy-path status; *Status siblings resolve with the outcome so
+// --- refusal halves (403/404/400) can assert instead of throwing.
+
+/** A workspace scheduler definition as the list/detail endpoints return it. */
+export interface ParityScheduler {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  prompt: string;
+  color: string;
+  source: "builtin" | "manifest";
+  is_enabled: boolean;
+  active_binding_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Definition create payload; mirrors the dialog fields. */
+export interface ParitySchedulerInput {
+  slug: string;
+  name: string;
+  description?: string;
+  prompt: string;
+  color?: string;
+  is_enabled?: boolean;
+}
+
+function schedulerRows(payload: unknown): ParityScheduler[] {
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows as ParityScheduler[];
+}
+
+/** List every definition in a workspace (any workspace role may read). */
+export async function serverSchedulers(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityScheduler[]> {
+  const res = await apiJson("GET", `/api/workspaces/${workspaceSlug}/schedulers/`, sessionCookie, undefined, apiBase);
+  if (res.status !== 200) {
+    throw new Error(`[parity] scheduler list failed with HTTP ${res.status}.`);
+  }
+  return schedulerRows(res.payload);
+}
+
+/** Retrieve one definition (workspace admin only). */
+export async function serverScheduler(
+  workspaceSlug: string,
+  schedulerId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityScheduler> {
+  const res = await serverSchedulerStatus(workspaceSlug, schedulerId, sessionCookie, apiBase);
+  if (res.status !== 200) {
+    throw new Error(`[parity] scheduler retrieve failed with HTTP ${res.status}.`);
+  }
+  return res.payload as ParityScheduler;
+}
+
+/** Retrieve one definition; resolves with the outcome instead of throwing on 4xx. */
+export async function serverSchedulerStatus(
+  workspaceSlug: string,
+  schedulerId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  return apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/schedulers/${schedulerId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+}
+
+/** Create a definition (workspace admin only); resolves with the stored row. */
+export async function serverCreateScheduler(
+  workspaceSlug: string,
+  sessionCookie: string,
+  input: ParitySchedulerInput,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityScheduler> {
+  const res = await serverCreateSchedulerStatus(workspaceSlug, sessionCookie, input, apiBase);
+  if (res.status !== 201) {
+    throw new Error(`[parity] scheduler create failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+  return res.payload as ParityScheduler;
+}
+
+/** Create a definition; resolves with the outcome instead of throwing on 4xx. */
+export async function serverCreateSchedulerStatus(
+  workspaceSlug: string,
+  sessionCookie: string,
+  input: ParitySchedulerInput,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  return apiJson("POST", `/api/workspaces/${workspaceSlug}/schedulers/`, sessionCookie, input, apiBase);
+}
+
+/** Patch a definition (workspace admin only); the handle stays out of the patch. */
+export async function serverPatchScheduler(
+  workspaceSlug: string,
+  schedulerId: string,
+  sessionCookie: string,
+  patch: Partial<Pick<ParityScheduler, "name" | "description" | "prompt" | "color" | "is_enabled">>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityScheduler> {
+  const res = await apiJson(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/schedulers/${schedulerId}/`,
+    sessionCookie,
+    patch,
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] scheduler patch failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+  return res.payload as ParityScheduler;
+}
+
+/** Soft-delete a definition (workspace admin only); its bindings stop firing. */
+export async function serverDeleteScheduler(
+  workspaceSlug: string,
+  schedulerId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await apiJson(
+    "DELETE",
+    `/api/workspaces/${workspaceSlug}/schedulers/${schedulerId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200 && res.status !== 204) {
+    throw new Error(`[parity] scheduler delete failed with HTTP ${res.status}.`);
+  }
+}
+
+/**
+ * Convergent definition builder: returns the live row when `input.slug`
+ * already exists (a retry reuses it), otherwise creates it. A create that
+ * loses a slug race re-lists instead of throwing.
+ */
+export async function ensureScheduler(
+  workspaceSlug: string,
+  sessionCookie: string,
+  input: ParitySchedulerInput,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityScheduler> {
+  const existing = (await serverSchedulers(workspaceSlug, sessionCookie, apiBase)).find(
+    (row) => row.slug === input.slug
+  );
+  if (existing !== undefined) return existing;
+  const created = await serverCreateSchedulerStatus(workspaceSlug, sessionCookie, input, apiBase);
+  if (created.status === 201) return created.payload as ParityScheduler;
+  const raced = (await serverSchedulers(workspaceSlug, sessionCookie, apiBase)).find((row) => row.slug === input.slug);
+  if (raced !== undefined) return raced;
+  throw new Error(`[parity] scheduler create failed with HTTP ${created.status}: ${JSON.stringify(created.payload)}`);
+}
+
+/** Best-effort definition delete for teardown; never throws. */
+export async function serverCleanupScheduler(
+  workspaceSlug: string,
+  schedulerId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  try {
+    await serverDeleteScheduler(workspaceSlug, schedulerId, sessionCookie, apiBase);
+  } catch {
+    // Teardown only: the row is already gone or the stack is draining.
+  }
+}
+
+/** One scheduler install on a project, as the bindings list returns it. */
+export interface ParitySchedulerBinding {
+  id: string;
+  scheduler: string;
+  scheduler_slug: string;
+  scheduler_name: string;
+  scheduler_color: string;
+  project: string;
+  dtstart: string;
+  tzid: string;
+  rrule: string;
+  extra_context: string;
+  enabled: boolean;
+  outcome_mode: string;
+  pod: string | null;
+  next_run_at: string | null;
+}
+
+/** Binding detail adds the composed run prompt plus the parent's live flags. */
+export interface ParitySchedulerBindingDetail extends ParitySchedulerBinding {
+  resolved_prompt: string;
+  run_count: number;
+  scheduler_source: "builtin" | "manifest";
+  scheduler_is_enabled: boolean;
+}
+
+/** Binding install payload; `project` repeats the URL id (the API requires it). */
+export interface ParitySchedulerBindingInput {
+  scheduler: string;
+  project: string;
+  dtstart: string;
+  tzid?: string;
+  rrule: string;
+  extra_context?: string;
+  enabled?: boolean;
+  outcome_mode?: string;
+}
+
+function bindingRows(payload: unknown): ParitySchedulerBinding[] {
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows as ParitySchedulerBinding[];
+}
+
+/** List a project's installs (any project role may read). */
+export async function serverBindings(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParitySchedulerBinding[]> {
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/scheduler-bindings/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] binding list failed with HTTP ${res.status}.`);
+  }
+  return bindingRows(res.payload);
+}
+
+/** Read one install's detail payload (any project role may read). */
+export async function serverBindingDetail(
+  workspaceSlug: string,
+  projectId: string,
+  bindingId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParitySchedulerBindingDetail> {
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/scheduler-bindings/${bindingId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] binding detail failed with HTTP ${res.status}.`);
+  }
+  return res.payload as ParitySchedulerBindingDetail;
+}
+
+/** Install a definition on a project (project admin only). */
+export async function serverCreateBinding(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  input: ParitySchedulerBindingInput,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParitySchedulerBinding> {
+  const res = await serverCreateBindingStatus(workspaceSlug, projectId, sessionCookie, input, apiBase);
+  if (res.status !== 201) {
+    throw new Error(`[parity] binding create failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+  return res.payload as ParitySchedulerBinding;
+}
+
+/** Install a definition; resolves with the outcome instead of throwing on 4xx. */
+export async function serverCreateBindingStatus(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  input: ParitySchedulerBindingInput,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  return apiJson(
+    "POST",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/scheduler-bindings/`,
+    sessionCookie,
+    input,
+    apiBase
+  );
+}
+
+/** Uninstall one binding (project admin only). */
+export async function serverDeleteBinding(
+  workspaceSlug: string,
+  projectId: string,
+  bindingId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await apiJson(
+    "DELETE",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/scheduler-bindings/${bindingId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200 && res.status !== 204) {
+    throw new Error(`[parity] binding delete failed with HTTP ${res.status}.`);
+  }
+}
+
+/** Best-effort binding delete for teardown; never throws. */
+export async function serverCleanupBinding(
+  workspaceSlug: string,
+  projectId: string,
+  bindingId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  try {
+    await serverDeleteBinding(workspaceSlug, projectId, bindingId, sessionCookie, apiBase);
+  } catch {
+    // Teardown only: the row is already gone or the stack is draining.
+  }
+}
