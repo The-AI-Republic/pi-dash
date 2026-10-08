@@ -44,6 +44,7 @@ pub mod middleware;
 pub mod overlay;
 pub mod paginator;
 pub mod permissions;
+pub mod project_move_handoff;
 pub mod prompting;
 pub mod routes;
 pub mod runner_enroll;
