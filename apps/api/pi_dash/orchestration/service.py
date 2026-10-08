@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from django.db import transaction
+from django.utils import timezone
 
 from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.db.models.issue import Issue, IssueComment
@@ -534,13 +535,22 @@ def _pinned_runner_for(parent: AgentRun, target_pod: Optional[Pod] = None) -> Op
     or re-fetching. Resume is no longer in play
     (see ``.ai_design/ticking_optimization/design.md``); pinning is best-
     effort and the run is correct on any runner in the pod.
+
+    A runner that is offline or has no fresh heartbeat is not eligible: only
+    the pinned runner may take a pinned run, so pinning to a runner that is
+    gone would park the run in QUEUED and block every later run on the issue.
+    A BUSY runner is alive and stays eligible; the pinned run waits for it.
     """
+    from pi_dash.runner.services.matcher import HEARTBEAT_GRACE
+
     if parent.runner_id is None:
         return None
     runner = parent.runner
     if runner is None:
         return None
-    if runner.status == RunnerStatus.REVOKED:
+    if runner.status in (RunnerStatus.REVOKED, RunnerStatus.OFFLINE):
+        return None
+    if runner.last_heartbeat_at is None or runner.last_heartbeat_at < timezone.now() - HEARTBEAT_GRACE:
         return None
     if target_pod is not None and runner.pod_id != target_pod.id:
         return None
