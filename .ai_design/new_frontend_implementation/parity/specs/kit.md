@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Area spec for NEWFRONT-16 (F-05: @pidash/kit v0). Behavior is written in
 // prose from the H-visual decision (NEWFRONT-5, settled as D12; full token
 // spec on the "UI kit and editor" wiki page). No old-frontend code was read

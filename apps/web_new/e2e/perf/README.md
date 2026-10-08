@@ -1,4 +1,4 @@
-<!-- Copyright (c) Pi Dash contributors. License pending H-license decision (NEWFRONT-2). -->
+<!-- Copyright (c) Pi Dash contributors | SPDX-License-Identifier: AGPL-3.0-only | See the LICENSE file for details. -->
 
 # Perf harness (NEWFRONT-21)
 

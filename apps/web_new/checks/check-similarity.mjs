@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Similarity check against the old frontend (F-02 / NEWFRONT-13).
 // Self-contained token-based duplicate detector: it tokenizes the new trees
 // and the old frontend, then fails on any exact block of >= MIN_TOKENS

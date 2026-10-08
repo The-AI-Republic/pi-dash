@@ -1,11 +1,11 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
-// License-header check for the new trees (F-01; final text in F-11/NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// License-header check for the new trees (F-01; interim AGPL text in F-11/NEWFRONT-22).
 // The single definition lives in apps/web_new/LICENSE_HEADER.txt. A source
-// file passes when it mentions the tree (Pi Dash contributors) and the
-// placeholder owner (NEWFRONT-2), and never carries the old AGPL identifier.
+// file passes when it carries the three header lines (copyright, SPDX
+// identifier, LICENSE pointer) and never the old tree's copyright line,
+// which trips the copied-file wire.
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,13 +35,19 @@ function check(full) {
   const text = readFileSync(full, "utf8");
   const rel = relative(root, full);
   // Built at runtime so this script does not literally contain the string it bans.
-  const oldIdentifier = ["SPDX-License-Identifier:", "AGPL-3.0-only"].join(" ");
-  if (text.includes(oldIdentifier)) {
-    failures.push(`${rel}: carries the old AGPL identifier`);
+  const oldCopyright = ["Copyright (c) 2023-present", "Pi Dash Software, Inc. and contributors"].join(" ");
+  if (text.includes(oldCopyright)) {
+    failures.push(`${rel}: carries the old tree's copyright line (copied file?)`);
     return;
   }
-  if (!text.includes("Pi Dash contributors") || !text.includes("NEWFRONT-2")) {
-    failures.push(`${rel}: missing the license header from LICENSE_HEADER.txt`);
+  const required = [
+    "Copyright (c) Pi Dash contributors",
+    "SPDX-License-Identifier: AGPL-3.0-only",
+    "See the LICENSE file for details.",
+  ];
+  const missing = required.filter((line) => !text.includes(line));
+  if (missing.length > 0) {
+    failures.push(`${rel}: missing the license header from LICENSE_HEADER.txt (${missing.join("; ")})`);
   }
 }
 

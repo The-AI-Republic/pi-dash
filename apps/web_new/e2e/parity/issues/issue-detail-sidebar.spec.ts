@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Oracle scenarios: issue detail sidebar (NEWFRONT-121, Part A). Property
 // rows on the full page: state, assignees, runs-on, priority, created-by,
 // dates, conditional rows, parent, and labels — against scenario-owned

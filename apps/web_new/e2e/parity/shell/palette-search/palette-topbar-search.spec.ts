@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Top-bar search box (NEWFRONT-127). Row: SHELL-081. The top navigation
 // always mounts a plain-text search field; focusing it opens an inline
 // (non-dialog) cmdk results panel with the same commands plus server hits as

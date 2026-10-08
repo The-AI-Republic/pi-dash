@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Oracle scenario (NEWFRONT-114): feed filter menu. The menu offers the
 // updates/comments/state/assignee categories, shows a marker on the control
 // while the selection is narrowed, hides unchecked categories from the
@@ -25,12 +24,7 @@ test(
     const stamp = Date.now();
     const commentBody = `filter probe comment ${stamp}`;
     const session = await signInSessionWithRetry(seed.email, seed.password);
-    const issueId = await serverCreateIssue(
-      seed.workspaceSlug,
-      seed.projectId,
-      session,
-      `Filter probe ${stamp}`
-    );
+    const issueId = await serverCreateIssue(seed.workspaceSlug, seed.projectId, session, `Filter probe ${stamp}`);
     try {
       await test.step("sign in and open the fresh work item", async () => {
         await driver.activitySignIn(seed.email, seed.password, seed.workspaceSlug);

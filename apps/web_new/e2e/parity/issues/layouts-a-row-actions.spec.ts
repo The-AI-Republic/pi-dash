@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Oracle scenarios (NEWFRONT-117): per-row quick actions — project menu
 // (ISS-060), archive gating (ISS-061), cycle/module contexts (ISS-062/063),
 // archived rows (ISS-064), all-issues rows (ISS-065), detail/peek headers
