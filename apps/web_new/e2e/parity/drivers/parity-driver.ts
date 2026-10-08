@@ -3077,6 +3077,126 @@ export interface ParityDriver {
   runnerChatHoldMessageList(ms: number): Promise<void>;
   /** Release the message-list hold. */
   runnerChatReleaseMessageList(): Promise<void>;
+
+  // --- Prompts + project automations (NEWFRONT-186, AGT-023–037) ---
+  /** Open the workspace prompts page; settles on the sections tab, the loader, or a banner. */
+  promptsOpen(workspaceSlug: string): Promise<void>;
+  /** Which prompts tab is active. */
+  promptsActiveTab(): Promise<"Sections" | "Receipt">;
+  /** Follow one prompts tab; waits for its content to settle. */
+  promptsOpenTab(tab: "Sections" | "Receipt"): Promise<void>;
+  /** Section cards in display order: identity, provenance, kinds, edit affordances, effective body. */
+  promptsSectionCards(): Promise<PromptSectionCard[]>;
+  /** One section card by key, or null when no card shows it. */
+  promptsSectionCard(key: string): Promise<PromptSectionCard | null>;
+  /** Side-nav entries in display order. */
+  promptsSectionNav(): Promise<{ title: string; key: string }[]>;
+  /** Follow the side-nav entry for `key`; resolves with the location hash afterwards. */
+  promptsSectionNavJump(key: string): Promise<string>;
+  /** Whether the prompt-sections loading line is currently shown. */
+  promptsLoadingVisible(): Promise<boolean>;
+  /** Whether the member-list failure banner is currently shown. */
+  promptsSectionsErrorVisible(): Promise<boolean>;
+  /** Whether the admin-only baseline warning is currently shown. */
+  promptsWorkspaceWarningVisible(): Promise<boolean>;
+  /** Fail every prompt-sections list read at `scope` with 500 until stopped (failure-state shaping). */
+  promptsFailSectionsStart(scope: "user" | "workspace"): Promise<void>;
+  /** Stop failing prompt-sections reads. */
+  promptsFailSectionsStop(): Promise<void>;
+  /** Delay the next prompt-sections list burst by `ms` (loading-state shaping). */
+  promptsDelaySectionsOnce(ms: number): Promise<void>;
+  /** Fail the next section-upsert PUT once with 500 (save-failure shaping). */
+  promptsFailUpsertOnce(): Promise<void>;
+  /** Open the section editor for `key` at `scope`; waits for the editor. */
+  promptsOpenSectionEditor(key: string, scope: "workspace" | "user"): Promise<void>;
+  /** Current editor state, or null when no editor is open. */
+  promptsEditorState(): Promise<PromptEditorState | null>;
+  /** Replace the editor draft. */
+  promptsEditorFill(text: string): Promise<void>;
+  /** Submit the editor; resolves on click (specs poll for the outcome). */
+  promptsEditorSave(): Promise<void>;
+  /** Cancel the editor; resolves once it closes. */
+  promptsEditorCancel(): Promise<void>;
+  /** Toggle the compare-with-default pane. */
+  promptsEditorToggleCompare(): Promise<void>;
+  /** Open the revert confirmation; waits for the dialog. */
+  promptsEditorRevertOpen(): Promise<void>;
+  /** The open revert dialog, or null when none shows. */
+  promptsRevertDialog(): Promise<PromptRevertDialog | null>;
+  /** Confirm the open revert dialog (specs poll for the outcome). */
+  promptsRevertConfirm(): Promise<void>;
+  /** Dismiss the open revert dialog. */
+  promptsRevertCancel(): Promise<void>;
+  /** Receipt cards in display order with their composed-section lists. */
+  promptsReceiptCards(): Promise<PromptReceiptCard[]>;
+  /** Side receipt-nav entries in display order. */
+  promptsReceiptNav(): Promise<{ kind: string; count: string }[]>;
+  /** Follow the receipt-nav entry for `kind`; resolves with the location hash afterwards. */
+  promptsReceiptNavJump(kind: string): Promise<string>;
+  /** Toggle one receipt card's expanded body. */
+  promptsReceiptToggle(kind: string): Promise<void>;
+  /** Whether the receipt card for `kind` is expanded. */
+  promptsReceiptExpanded(kind: string): Promise<boolean>;
+  /** The expanded assembled template for `kind`, or null when collapsed. */
+  promptsReceiptTemplate(kind: string): Promise<string | null>;
+  /** The automatic-run variant block for `kind`, or null when absent. */
+  promptsReceiptAutomatic(kind: string): Promise<string | null>;
+  /** Whether the saved-preview form shows under the expanded `kind` receipt (admin-only). */
+  promptsSavedPreviewVisible(kind: string): Promise<boolean>;
+  /** Whether the saved-preview submit for `kind` is enabled. */
+  promptsSavedPreviewSubmitEnabled(kind: string): Promise<boolean>;
+  /** Fill the saved-preview target for `kind` and submit. */
+  promptsSavedPreviewSubmit(kind: string, target: string): Promise<void>;
+  /** Saved-preview outcome for `kind`: rendered prompt, inline error, or neither yet. */
+  promptsSavedPreviewResult(kind: string): Promise<{ prompt: string | null; error: string | null }>;
+  /** Draft-preview kind switcher labels (empty when the switcher hides for a single kind). */
+  promptsDraftPreviewKinds(): Promise<string[]>;
+  /** Select one draft-preview kind. */
+  promptsDraftPreviewSelectKind(kind: string): Promise<void>;
+  /** Whether the draft-preview submit is enabled. */
+  promptsDraftPreviewSubmitEnabled(): Promise<boolean>;
+  /** Fill the draft-preview target and submit. */
+  promptsDraftPreviewSubmit(target: string): Promise<void>;
+  /** Draft-preview outcome: rendered prompt, inline error, or neither yet. */
+  promptsDraftPreviewResult(): Promise<{ prompt: string | null; error: string | null }>;
+  /** Open the project-settings automations page; settles on the rows, the refusal, or the loader. */
+  automationsOpen(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Whether the not-authorized view is currently shown. */
+  automationsNotAuthorizedVisible(): Promise<boolean>;
+  /** Auto-archive row state. */
+  automationsArchiveRow(): Promise<AutomationRow>;
+  /** Flip the auto-archive toggle (specs poll for the outcome). */
+  automationsArchiveToggle(): Promise<void>;
+  /** Choose a preset month delay on the auto-archive picker. */
+  automationsArchiveSetPreset(months: number): Promise<void>;
+  /** Open the custom-month dialog from the auto-archive picker. */
+  automationsArchiveOpenCustom(): Promise<void>;
+  /** Auto-close row state. */
+  automationsCloseRow(): Promise<AutomationCloseRow>;
+  /** Flip the auto-close toggle (specs poll for the outcome). */
+  automationsCloseToggle(): Promise<void>;
+  /** Choose a preset month delay on the auto-close picker. */
+  automationsCloseSetPreset(months: number): Promise<void>;
+  /** Choose a close-state target by name (enabled only with several cancelled states). */
+  automationsCloseSetState(name: string): Promise<void>;
+  /** Close-state option names in display order; ends with the picker closed. */
+  automationsCloseStateOptions(): Promise<string[]>;
+  /** Open the custom-month dialog from the auto-close picker. */
+  automationsCloseOpenCustom(): Promise<void>;
+  /** The open custom-month dialog, or null when none shows. */
+  automationsMonthModal(): Promise<AutomationMonthModal | null>;
+  /** Fill the custom-month input. */
+  automationsMonthFill(value: string): Promise<void>;
+  /** Submit the custom-month dialog (specs poll for the outcome). */
+  automationsMonthSubmit(): Promise<void>;
+  /** Cancel the custom-month dialog; resolves once it closes. */
+  automationsMonthCancel(): Promise<void>;
+  /** Fail the next project PATCH once (failure-notice shaping). */
+  automationsFailUpdateOnce(): Promise<void>;
+  /** Built-in automation row titles in display order. */
+  automationsBuiltInRows(): Promise<string[]>;
+  /** Whether any extension contributed rows below the built-ins. */
+  automationsHasExtensionRows(): Promise<boolean>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -3375,4 +3495,94 @@ export interface RunnerChatStreamFrame {
   payload: Record<string, unknown>;
   /** Assistant-delta target bubble; null for session-level frames. */
   message?: string | null;
+}
+
+/** One prompt-section card with its provenance and edit affordances (NEWFRONT-186, AGT-023). */
+export interface PromptSectionCard {
+  /** Registry key. */
+  key: string;
+  /** Display title. */
+  title: string;
+  /** Provenance badge text (default / workspace override / personal override). */
+  sourceBadge: string;
+  /** Governance and kind badge texts in display order. */
+  badges: string[];
+  /** Prompt-kind labels the card belongs to. */
+  kinds: string[];
+  /** Whether the stale-override warning line shows. */
+  staleWarning: boolean;
+  /** Effective body text shown on the card (empty while the editor is open). */
+  body: string;
+  /** Workspace-edit button label, or null when the control hides. */
+  workspaceEditLabel: string | null;
+  /** Personal-edit button label, or null when the control hides. */
+  personalEditLabel: string | null;
+}
+
+/** Open section-editor state (NEWFRONT-186, AGT-024–026). */
+export interface PromptEditorState {
+  /** Scope caption above the draft. */
+  scopeLabel: string;
+  /** Current draft text. */
+  draft: string;
+  /** Whether Save is enabled (dirty and idle). */
+  saveEnabled: boolean;
+  /** Whether the pristine-default pane shows. */
+  defaultVisible: boolean;
+  /** Pristine-default text, or null when the pane hides. */
+  defaultBody: string | null;
+  /** Whether the revert affordance shows (an override exists at this scope). */
+  revertVisible: boolean;
+  /** Inline error text, or null when none shows. */
+  error: string | null;
+}
+
+/** Open revert-confirmation dialog (NEWFRONT-186, AGT-027). */
+export interface PromptRevertDialog {
+  /** Dialog title. */
+  title: string;
+  /** Explanatory body with the irreversibility warning. */
+  body: string;
+  /** Confirm button label. */
+  confirmLabel: string;
+}
+
+/** One receipt card with its composed-section list (NEWFRONT-186, AGT-028). */
+export interface PromptReceiptCard {
+  /** Kind label. */
+  kind: string;
+  /** Rendered section-count badge text. */
+  countBadge: string;
+  /** Composed sections in order with their provenance. */
+  sections: { num: string; title: string; key: string; sourceBadge: string }[];
+}
+
+/** One idle-automation row (NEWFRONT-186, AGT-034–035). */
+export interface AutomationRow {
+  /** Whether the row toggle reads on. */
+  toggleOn: boolean;
+  /** Whether the toggle is disabled for this viewer. */
+  toggleDisabled: boolean;
+  /** Whether the delay picker panel shows. */
+  pickerVisible: boolean;
+  /** Current delay label (empty when the picker hides). */
+  pickerLabel: string;
+}
+
+/** Auto-close row: delay plus cancelled-state target (NEWFRONT-186, AGT-035). */
+export interface AutomationCloseRow extends AutomationRow {
+  /** Current close-state label. */
+  stateLabel: string;
+  /** Whether the state picker is disabled (fewer than two cancelled states). */
+  statePickerDisabled: boolean;
+}
+
+/** Open custom-month dialog (NEWFRONT-186, AGT-036). */
+export interface AutomationMonthModal {
+  /** Dialog title. */
+  title: string;
+  /** Current input value. */
+  inputValue: string;
+  /** Inline range error, or null when none shows. */
+  error: string | null;
 }

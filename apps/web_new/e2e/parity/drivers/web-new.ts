@@ -7,6 +7,9 @@
 // fill these in method by method; the oracle driver stays untouched.
 import type { Page } from "@playwright/test";
 import type {
+  AutomationCloseRow,
+  AutomationMonthModal,
+  AutomationRow,
   LayoutsLayoutKey,
   BoardLayoutKey,
   DevMachineInstallCard,
@@ -21,6 +24,10 @@ import type {
   ParityBrowserCookie,
   ParityDriver,
   ParityTarget,
+  PromptEditorState,
+  PromptReceiptCard,
+  PromptRevertDialog,
+  PromptSectionCard,
   RulesCommentMenuOption,
   SchedulerBindingHeader,
   SchedulerBindingRunRow,
@@ -4951,5 +4958,184 @@ export class WebNewDriver implements ParityDriver {
 
   async runnerChatReleaseMessageList(): Promise<void> {
     return todo("runnerChatReleaseMessageList");
+  }
+
+  // --- Prompts + project automations (NEWFRONT-186, AGT-023–037) ---
+  async promptsOpen(_workspaceSlug: string): Promise<void> {
+    return todo("promptsOpen");
+  }
+  async promptsActiveTab(): Promise<"Sections" | "Receipt"> {
+    return todo("promptsActiveTab");
+  }
+  async promptsOpenTab(_tab: "Sections" | "Receipt"): Promise<void> {
+    return todo("promptsOpenTab");
+  }
+  async promptsSectionCards(): Promise<PromptSectionCard[]> {
+    return todo("promptsSectionCards");
+  }
+  async promptsSectionCard(_key: string): Promise<PromptSectionCard | null> {
+    return todo("promptsSectionCard");
+  }
+  async promptsSectionNav(): Promise<{ title: string; key: string }[]> {
+    return todo("promptsSectionNav");
+  }
+  async promptsSectionNavJump(_key: string): Promise<string> {
+    return todo("promptsSectionNavJump");
+  }
+  async promptsLoadingVisible(): Promise<boolean> {
+    return todo("promptsLoadingVisible");
+  }
+  async promptsSectionsErrorVisible(): Promise<boolean> {
+    return todo("promptsSectionsErrorVisible");
+  }
+  async promptsWorkspaceWarningVisible(): Promise<boolean> {
+    return todo("promptsWorkspaceWarningVisible");
+  }
+  async promptsFailSectionsStart(_scope: "user" | "workspace"): Promise<void> {
+    return todo("promptsFailSectionsStart");
+  }
+  async promptsFailSectionsStop(): Promise<void> {
+    return todo("promptsFailSectionsStop");
+  }
+  async promptsDelaySectionsOnce(_ms: number): Promise<void> {
+    return todo("promptsDelaySectionsOnce");
+  }
+  async promptsFailUpsertOnce(): Promise<void> {
+    return todo("promptsFailUpsertOnce");
+  }
+  async promptsOpenSectionEditor(_key: string, _scope: "workspace" | "user"): Promise<void> {
+    return todo("promptsOpenSectionEditor");
+  }
+  async promptsEditorState(): Promise<PromptEditorState | null> {
+    return todo("promptsEditorState");
+  }
+  async promptsEditorFill(_text: string): Promise<void> {
+    return todo("promptsEditorFill");
+  }
+  async promptsEditorSave(): Promise<void> {
+    return todo("promptsEditorSave");
+  }
+  async promptsEditorCancel(): Promise<void> {
+    return todo("promptsEditorCancel");
+  }
+  async promptsEditorToggleCompare(): Promise<void> {
+    return todo("promptsEditorToggleCompare");
+  }
+  async promptsEditorRevertOpen(): Promise<void> {
+    return todo("promptsEditorRevertOpen");
+  }
+  async promptsRevertDialog(): Promise<PromptRevertDialog | null> {
+    return todo("promptsRevertDialog");
+  }
+  async promptsRevertConfirm(): Promise<void> {
+    return todo("promptsRevertConfirm");
+  }
+  async promptsRevertCancel(): Promise<void> {
+    return todo("promptsRevertCancel");
+  }
+  async promptsReceiptCards(): Promise<PromptReceiptCard[]> {
+    return todo("promptsReceiptCards");
+  }
+  async promptsReceiptNav(): Promise<{ kind: string; count: string }[]> {
+    return todo("promptsReceiptNav");
+  }
+  async promptsReceiptNavJump(_kind: string): Promise<string> {
+    return todo("promptsReceiptNavJump");
+  }
+  async promptsReceiptToggle(_kind: string): Promise<void> {
+    return todo("promptsReceiptToggle");
+  }
+  async promptsReceiptExpanded(_kind: string): Promise<boolean> {
+    return todo("promptsReceiptExpanded");
+  }
+  async promptsReceiptTemplate(_kind: string): Promise<string | null> {
+    return todo("promptsReceiptTemplate");
+  }
+  async promptsReceiptAutomatic(_kind: string): Promise<string | null> {
+    return todo("promptsReceiptAutomatic");
+  }
+  async promptsSavedPreviewVisible(_kind: string): Promise<boolean> {
+    return todo("promptsSavedPreviewVisible");
+  }
+  async promptsSavedPreviewSubmitEnabled(_kind: string): Promise<boolean> {
+    return todo("promptsSavedPreviewSubmitEnabled");
+  }
+  async promptsSavedPreviewSubmit(_kind: string, _target: string): Promise<void> {
+    return todo("promptsSavedPreviewSubmit");
+  }
+  async promptsSavedPreviewResult(_kind: string): Promise<{ prompt: string | null; error: string | null }> {
+    return todo("promptsSavedPreviewResult");
+  }
+  async promptsDraftPreviewKinds(): Promise<string[]> {
+    return todo("promptsDraftPreviewKinds");
+  }
+  async promptsDraftPreviewSelectKind(_kind: string): Promise<void> {
+    return todo("promptsDraftPreviewSelectKind");
+  }
+  async promptsDraftPreviewSubmitEnabled(): Promise<boolean> {
+    return todo("promptsDraftPreviewSubmitEnabled");
+  }
+  async promptsDraftPreviewSubmit(_target: string): Promise<void> {
+    return todo("promptsDraftPreviewSubmit");
+  }
+  async promptsDraftPreviewResult(): Promise<{ prompt: string | null; error: string | null }> {
+    return todo("promptsDraftPreviewResult");
+  }
+  async automationsOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("automationsOpen");
+  }
+  async automationsNotAuthorizedVisible(): Promise<boolean> {
+    return todo("automationsNotAuthorizedVisible");
+  }
+  async automationsArchiveRow(): Promise<AutomationRow> {
+    return todo("automationsArchiveRow");
+  }
+  async automationsArchiveToggle(): Promise<void> {
+    return todo("automationsArchiveToggle");
+  }
+  async automationsArchiveSetPreset(_months: number): Promise<void> {
+    return todo("automationsArchiveSetPreset");
+  }
+  async automationsArchiveOpenCustom(): Promise<void> {
+    return todo("automationsArchiveOpenCustom");
+  }
+  async automationsCloseRow(): Promise<AutomationCloseRow> {
+    return todo("automationsCloseRow");
+  }
+  async automationsCloseToggle(): Promise<void> {
+    return todo("automationsCloseToggle");
+  }
+  async automationsCloseSetPreset(_months: number): Promise<void> {
+    return todo("automationsCloseSetPreset");
+  }
+  async automationsCloseSetState(_name: string): Promise<void> {
+    return todo("automationsCloseSetState");
+  }
+  async automationsCloseStateOptions(): Promise<string[]> {
+    return todo("automationsCloseStateOptions");
+  }
+  async automationsCloseOpenCustom(): Promise<void> {
+    return todo("automationsCloseOpenCustom");
+  }
+  async automationsMonthModal(): Promise<AutomationMonthModal | null> {
+    return todo("automationsMonthModal");
+  }
+  async automationsMonthFill(_value: string): Promise<void> {
+    return todo("automationsMonthFill");
+  }
+  async automationsMonthSubmit(): Promise<void> {
+    return todo("automationsMonthSubmit");
+  }
+  async automationsMonthCancel(): Promise<void> {
+    return todo("automationsMonthCancel");
+  }
+  async automationsFailUpdateOnce(): Promise<void> {
+    return todo("automationsFailUpdateOnce");
+  }
+  async automationsBuiltInRows(): Promise<string[]> {
+    return todo("automationsBuiltInRows");
+  }
+  async automationsHasExtensionRows(): Promise<boolean> {
+    return todo("automationsHasExtensionRows");
   }
 }

@@ -16,6 +16,9 @@
 // workspace main so sidebar rows and issue rows never leak in.
 import { expect, type ElementHandle, type Locator, type Page } from "@playwright/test";
 import type {
+  AutomationCloseRow,
+  AutomationMonthModal,
+  AutomationRow,
   BoardLayoutKey,
   DevMachineInstallCard,
   DevMachineModal,
@@ -30,6 +33,10 @@ import type {
   ParityBrowserCookie,
   ParityDriver,
   ParityTarget,
+  PromptEditorState,
+  PromptReceiptCard,
+  PromptRevertDialog,
+  PromptSectionCard,
   RulesCommentMenuOption,
   SchedulerBindingHeader,
   SchedulerBindingRunRow,
@@ -16178,7 +16185,8 @@ export class WebDriver implements ParityDriver {
 
   async schedulerCalendarClickBlock(name: string): Promise<void> {
     const exact = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const block = this.schedulerCalendarScope().locator("button[title]")
+    const block = this.schedulerCalendarScope()
+      .locator("button[title]")
       .filter({ hasText: new RegExp(exact) })
       .first();
     await block.click();
@@ -16335,9 +16343,7 @@ export class WebDriver implements ParityDriver {
   }
 
   async schedulerDrawerEditVisible(): Promise<boolean> {
-    return this.isShown(
-      this.schedulerDrawer().getByRole("button", { name: "Edit binding", exact: true })
-    );
+    return this.isShown(this.schedulerDrawer().getByRole("button", { name: "Edit binding", exact: true }));
   }
 
   async schedulerDrawerEdit(): Promise<void> {
@@ -16877,5 +16883,805 @@ export class WebDriver implements ParityDriver {
   async runnerChatReleaseMessageList(): Promise<void> {
     this.runnerChatMessageListHoldArmed = false;
     await this.page.unroute("**/api/runners/chat/sessions/*/messages**");
+  }
+
+  // --- Prompts + project automations (NEWFRONT-186, AGT-023–037) ---
+  // --- Every selector below was observed on the running old app: section
+  // --- cards carry prompt-section-<key> ids with provenance badges, editors
+  // --- are textareas scoped to their card, receipts are collapsible
+  // --- prompt-receipt-<kind> sections, and automation rows are h4-titled
+  // --- blocks with headless switches and combobox pickers.
+
+  /** Route pattern for the prompt-sections list reads (no trailing slash). */
+  private static readonly PROMPT_SECTIONS_PATTERN = "**/prompt-sections?*";
+
+  private promptsTabButton(tab: "Sections" | "Receipt"): Locator {
+    return this.page.getByRole("button", { name: tab, exact: true });
+  }
+
+  private promptsSectionsAside(): Locator {
+    return this.page.locator("aside", { has: this.page.getByText("Sections", { exact: true }) });
+  }
+
+  private promptsReceiptAside(): Locator {
+    return this.page.locator("aside", { has: this.page.getByText("Receipts", { exact: true }) });
+  }
+
+  private promptsCard(key: string): Locator {
+    return this.page.locator(`div#prompt-section-${key}`);
+  }
+
+  private promptsCards(): Locator {
+    return this.page.locator('div[id^="prompt-section-"]');
+  }
+
+  private promptsOpenEditorRoot(): Locator {
+    return this.page.locator('div[id^="prompt-section-"]', { has: this.page.locator("textarea") });
+  }
+
+  private promptsKindLabel(kind: string): string {
+    if (kind === "coding-task") return "Coding task";
+    if (kind === "review") return "Review";
+    return "Scheduler";
+  }
+
+  private promptsKindSlug(label: string): string {
+    if (label === "Coding task") return "coding-task";
+    if (label === "Review") return "review";
+    return "scheduler";
+  }
+
+  private promptsReceiptSection(kind: string): Locator {
+    return this.page.locator(`section#prompt-receipt-${kind}`);
+  }
+
+  private automationsRow(title: string): Locator {
+    // Both the settings control item and the outer row block match
+    // div.gap-4 with the heading; the outer row comes first in paint order.
+    return this.page
+      .locator("div.gap-4", { has: this.page.getByRole("heading", { name: title, exact: true }) })
+      .first();
+  }
+
+  private automationsSection(): Locator {
+    return this.page.locator("section", { has: this.page.getByRole("heading", { name: "Automations", exact: true }) });
+  }
+
+  async promptsOpen(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/prompts`);
+    await this.page.getByRole("heading", { name: "Prompts", exact: true }).waitFor({ timeout: WebDriver.OPEN_MS });
+    await this.promptsSectionsAside()
+      .or(this.page.getByText("Loading…", { exact: true }))
+      .or(this.page.getByText("Could not load prompt sections for this workspace.", { exact: true }))
+      .first()
+      .waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async promptsActiveTab(): Promise<"Sections" | "Receipt"> {
+    if (await this.isShown(this.promptsReceiptAside())) return "Receipt";
+    return "Sections";
+  }
+
+  async promptsOpenTab(tab: "Sections" | "Receipt"): Promise<void> {
+    await this.promptsTabButton(tab).click();
+    const aside = tab === "Sections" ? this.promptsSectionsAside() : this.promptsReceiptAside();
+    await aside.waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async promptsSectionCards(): Promise<PromptSectionCard[]> {
+    const roots = this.promptsCards();
+    const total = await roots.count();
+    const out: PromptSectionCard[] = [];
+    for (let i = 0; i < total; i++) {
+      const card = await this.promptsReadCard(roots.nth(i));
+      if (card !== null) out.push(card);
+    }
+    return out;
+  }
+
+  async promptsSectionCard(key: string): Promise<PromptSectionCard | null> {
+    const root = this.promptsCard(key);
+    if ((await root.count()) === 0) return null;
+    return this.promptsReadCard(root.first());
+  }
+
+  private async promptsReadCard(root: Locator): Promise<PromptSectionCard | null> {
+    const id = await root.getAttribute("id").catch(() => null);
+    if (id === null || !id.startsWith("prompt-section-")) return null;
+    const key = id.slice("prompt-section-".length);
+    const header = root.locator("div.flex.items-start").first();
+    const title = (
+      (await header
+        .locator("span.text-13")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    // Badges render as disabled buttons; edit controls as enabled ones.
+    const buttons = root.getByRole("button");
+    const total = await buttons.count();
+    let sourceBadge = "";
+    const badges: string[] = [];
+    const kinds: string[] = [];
+    let workspaceEditLabel: string | null = null;
+    let personalEditLabel: string | null = null;
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await buttons
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text === "") continue;
+      if (text === "Pi Dash default" || text === "Workspace override" || text === "Your override") {
+        sourceBadge = text;
+      } else if (text === "Coding task" || text === "Review" || text === "Scheduler") {
+        kinds.push(text);
+        badges.push(text);
+      } else if (text === "Locked" || text === "Admin-managed") {
+        badges.push(text);
+      } else if (text === "Edit workspace default" || text === "Customize for workspace") {
+        workspaceEditLabel = text;
+      } else if (text === "Edit my override" || text === "Customize for me") {
+        personalEditLabel = text;
+      }
+    }
+    const staleWarning = await this.isShown(root.getByText("This override may no longer render", { exact: false }));
+    const bodyPre = root.locator(":scope > pre");
+    const body = ((await bodyPre.innerText().catch(() => "")) ?? "").trimEnd();
+    return { key, title, sourceBadge, badges, kinds, staleWarning, body, workspaceEditLabel, personalEditLabel };
+  }
+
+  async promptsSectionNav(): Promise<{ title: string; key: string }[]> {
+    const links = this.promptsSectionsAside().getByRole("link");
+    const total = await links.count();
+    const out: { title: string; key: string }[] = [];
+    for (let i = 0; i < total; i++) {
+      const href =
+        (await links
+          .nth(i)
+          .getAttribute("href")
+          .catch(() => null)) ?? "";
+      const lines = (
+        (await links
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      out.push({ title: lines[0] ?? "", key: href.replace(/^#prompt-section-/, "") });
+    }
+    return out;
+  }
+
+  async promptsSectionNavJump(key: string): Promise<string> {
+    await this.promptsSectionsAside()
+      .getByRole("link", { name: new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) })
+      .click();
+    await this.promptsCard(key).waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return this.page.evaluate(() => window.location.hash);
+  }
+
+  async promptsLoadingVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByText("Loading…", { exact: true }));
+  }
+
+  async promptsSectionsErrorVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByText("Could not load prompt sections for this workspace.", { exact: true }));
+  }
+
+  async promptsWorkspaceWarningVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByText("workspace editing is unavailable", { exact: false }));
+  }
+
+  async promptsFailSectionsStart(scope: "user" | "workspace"): Promise<void> {
+    // Persistent (not once): SWR retries failed reads, so a single-shot
+    // failure would flap the banner instead of holding it.
+    await this.page.route(WebDriver.PROMPT_SECTIONS_PATTERN, async (route) => {
+      const url = route.request().url();
+      if (route.request().method() === "GET" && url.includes(`scope=${scope}`)) {
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity sections failure" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+  }
+
+  async promptsFailSectionsStop(): Promise<void> {
+    await this.page.unroute(WebDriver.PROMPT_SECTIONS_PATTERN).catch(() => undefined);
+  }
+
+  async promptsDelaySectionsOnce(ms: number): Promise<void> {
+    let armed = true;
+    await this.page.route(WebDriver.PROMPT_SECTIONS_PATTERN, async (route) => {
+      if (armed && route.request().method() === "GET") {
+        armed = false;
+        await this.page.waitForTimeout(ms);
+      }
+      await route.continue();
+    });
+  }
+
+  async promptsFailUpsertOnce(): Promise<void> {
+    let armed = true;
+    await this.page.route("**/prompt-sections/*", async (route) => {
+      if (armed && route.request().method() === "PUT") {
+        armed = false;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity upsert failure" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+  }
+
+  async promptsOpenSectionEditor(key: string, scope: "workspace" | "user"): Promise<void> {
+    const card = this.promptsCard(key);
+    const name =
+      scope === "workspace" ? /Edit workspace default|Customize for workspace/ : /Edit my override|Customize for me/;
+    await card.getByRole("button", { name }).click();
+    await card.locator("textarea").waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async promptsEditorState(): Promise<PromptEditorState | null> {
+    const root = this.promptsOpenEditorRoot().first();
+    if ((await root.count()) === 0) return null;
+    // The scope caption is the first medium-weight small caption in the
+    // editor (the card key above it is placeholder-weight; the draft
+    // panel's own caption comes later).
+    const scopeLabel = (
+      (await root
+        .locator("span.text-11.font-medium")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const draft =
+      (await root
+        .locator("textarea")
+        .inputValue()
+        .catch(() => "")) ?? "";
+    const save = root.getByRole("button", { name: "Save", exact: true });
+    const saveEnabled = await save.isEnabled().catch(() => false);
+    const defaultPane = root.locator("pre").first();
+    const defaultVisible = await this.isShown(defaultPane);
+    const defaultBody = defaultVisible ? ((await defaultPane.innerText().catch(() => "")) ?? "").trimEnd() : null;
+    const revertVisible = await this.isShown(root.getByRole("button", { name: "Revert to default", exact: true }));
+    // Inline save errors render as danger text; preview errors live in the
+    // nested draft panel and must not leak into this read.
+    const errorBox = root.locator("div.text-danger-primary").first();
+    const errorShown = await this.isShown(errorBox);
+    let error: string | null = null;
+    if (errorShown) {
+      const panel = root.locator("div.rounded-md.border-subtle").last();
+      const panelError = await panel
+        .locator("div.text-danger-primary")
+        .count()
+        .catch(() => 0);
+      const text = ((await errorBox.innerText().catch(() => "")) ?? "").trim();
+      error = panelError > 0 && text === "" ? null : text === "" ? null : text;
+      if (panelError > 0) {
+        // The first danger box may be the preview's; prefer a box outside it.
+        const boxes = root.locator(":scope > div.text-danger-primary, :scope div.flex-col > div.text-danger-primary");
+        const boxTotal = await boxes.count().catch(() => 0);
+        error = null;
+        for (let i = 0; i < boxTotal; i++) {
+          const candidate = (
+            (await boxes
+              .nth(i)
+              .innerText()
+              .catch(() => "")) ?? ""
+          ).trim();
+          if (candidate !== "") {
+            error = candidate;
+            break;
+          }
+        }
+      }
+    }
+    return { scopeLabel, draft, saveEnabled, defaultVisible, defaultBody, revertVisible, error };
+  }
+
+  async promptsEditorFill(text: string): Promise<void> {
+    await this.promptsOpenEditorRoot().first().locator("textarea").fill(text);
+  }
+
+  async promptsEditorSave(): Promise<void> {
+    await this.promptsOpenEditorRoot().first().getByRole("button", { name: "Save", exact: true }).click();
+  }
+
+  async promptsEditorCancel(): Promise<void> {
+    const root = this.promptsOpenEditorRoot().first();
+    await root.getByRole("button", { name: "Cancel", exact: true }).click();
+    await root.locator("textarea").waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async promptsEditorToggleCompare(): Promise<void> {
+    const root = this.promptsOpenEditorRoot().first();
+    await root.getByRole("button", { name: /Compare with default|Hide default/ }).click();
+  }
+
+  async promptsEditorRevertOpen(): Promise<void> {
+    await this.promptsOpenEditorRoot().first().getByRole("button", { name: "Revert to default", exact: true }).click();
+    await this.page.getByRole("heading", { name: "Revert to default?", exact: true }).waitFor({
+      timeout: WebDriver.OPEN_MS,
+    });
+  }
+
+  async promptsRevertDialog(): Promise<PromptRevertDialog | null> {
+    const heading = this.page.getByRole("heading", { name: "Revert to default?", exact: true });
+    if (!(await this.isShown(heading))) return null;
+    const dialog = this.page.getByRole("dialog").filter({ has: heading });
+    const body = (
+      (await dialog
+        .locator("div.text-secondary")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const confirm = dialog.getByRole("button", { name: /^(Revert|Reverting)$/ });
+    const confirmLabel = (
+      (await confirm
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return { title: "Revert to default?", body, confirmLabel };
+  }
+
+  async promptsRevertConfirm(): Promise<void> {
+    const heading = this.page.getByRole("heading", { name: "Revert to default?", exact: true });
+    await this.page
+      .getByRole("dialog")
+      .filter({ has: heading })
+      .getByRole("button", { name: /^Revert$/ })
+      .click();
+  }
+
+  async promptsRevertCancel(): Promise<void> {
+    const heading = this.page.getByRole("heading", { name: "Revert to default?", exact: true });
+    const dialog = this.page.getByRole("dialog").filter({ has: heading });
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await heading.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async promptsReceiptCards(): Promise<PromptReceiptCard[]> {
+    const roots = this.page.locator('section[id^="prompt-receipt-"]');
+    const total = await roots.count();
+    const out: PromptReceiptCard[] = [];
+    for (let i = 0; i < total; i++) {
+      const root = roots.nth(i);
+      const id = (await root.getAttribute("id").catch(() => null)) ?? "";
+      const kind = id.replace(/^prompt-receipt-/, "");
+      const header = root.locator("button").first();
+      const headerText = ((await header.innerText().catch(() => "")) ?? "").trim();
+      const countBadge =
+        headerText
+          .split("\n")
+          .map((line) => line.trim())
+          .find((line) => /section/.test(line)) ?? "";
+      const items = root.locator("ol > li");
+      const itemTotal = await items.count();
+      const sections: { num: string; title: string; key: string; sourceBadge: string }[] = [];
+      for (let j = 0; j < itemTotal; j++) {
+        const item = items.nth(j);
+        const num = (
+          (await item
+            .locator("span.font-mono")
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+        const title = (
+          (await item
+            .locator("span.text-12")
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+        // The number span also carries text-10; the key span is the
+        // truncated one.
+        const key = (
+          (await item
+            .locator("span.text-10.truncate")
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+        const sourceBadge = (
+          (await item
+            .getByRole("button")
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+        sections.push({ num, title, key, sourceBadge });
+      }
+      out.push({ kind, countBadge, sections });
+    }
+    return out;
+  }
+
+  async promptsReceiptNav(): Promise<{ kind: string; count: string }[]> {
+    const links = this.promptsReceiptAside().getByRole("link");
+    const total = await links.count();
+    const out: { kind: string; count: string }[] = [];
+    for (let i = 0; i < total; i++) {
+      const href =
+        (await links
+          .nth(i)
+          .getAttribute("href")
+          .catch(() => null)) ?? "";
+      const lines = (
+        (await links
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      out.push({ kind: href.replace(/^#prompt-receipt-/, ""), count: lines[1] ?? "" });
+    }
+    return out;
+  }
+
+  async promptsReceiptNavJump(kind: string): Promise<string> {
+    await this.promptsReceiptAside()
+      .getByRole("link", { name: new RegExp(this.promptsKindLabel(kind)) })
+      .click();
+    await this.promptsReceiptSection(kind).waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return this.page.evaluate(() => window.location.hash);
+  }
+
+  async promptsReceiptToggle(kind: string): Promise<void> {
+    await this.promptsReceiptSection(kind).locator(":scope > button").first().click();
+  }
+
+  async promptsReceiptExpanded(kind: string): Promise<boolean> {
+    const header = this.promptsReceiptSection(kind).locator(":scope > button").first();
+    const text = ((await header.innerText().catch(() => "")) ?? "").trim();
+    return text.includes("Hide");
+  }
+
+  async promptsReceiptTemplate(kind: string): Promise<string | null> {
+    const section = this.promptsReceiptSection(kind);
+    if (!(await this.promptsReceiptExpanded(kind))) return null;
+    const first = section.locator("pre").first();
+    if (!(await this.isShown(first))) return null;
+    return ((await first.innerText().catch(() => "")) ?? "").trimEnd();
+  }
+
+  async promptsReceiptAutomatic(kind: string): Promise<string | null> {
+    const section = this.promptsReceiptSection(kind);
+    const marker = section.getByText("Automatic runs", { exact: false });
+    if (!(await this.isShown(marker))) return null;
+    const blocks = section.locator("pre");
+    const total = await blocks.count();
+    if (total < 2) return null;
+    return (
+      (await blocks
+        .nth(1)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trimEnd();
+  }
+
+  async promptsSavedPreviewVisible(kind: string): Promise<boolean> {
+    const section = this.promptsReceiptSection(kind);
+    return this.isShown(section.getByRole("heading", { name: "Preview", exact: true }));
+  }
+
+  async promptsSavedPreviewSubmitEnabled(kind: string): Promise<boolean> {
+    const section = this.promptsReceiptSection(kind);
+    return section
+      .getByRole("button", { name: "Preview", exact: true })
+      .isEnabled()
+      .catch(() => false);
+  }
+
+  async promptsSavedPreviewSubmit(kind: string, target: string): Promise<void> {
+    const section = this.promptsReceiptSection(kind);
+    await section.getByRole("textbox").fill(target);
+    await section.getByRole("button", { name: "Preview", exact: true }).click();
+  }
+
+  async promptsSavedPreviewResult(kind: string): Promise<{ prompt: string | null; error: string | null }> {
+    const section = this.promptsReceiptSection(kind);
+    const errorBox = section.locator("div.text-danger-primary").first();
+    const errorShown = await this.isShown(errorBox);
+    const error = errorShown ? ((await errorBox.innerText().catch(() => "")) ?? "").trim() || null : null;
+    // The receipt template pre always renders while expanded; the preview
+    // result is the last pre (after the template and the automatic block).
+    const blocks = section.locator("pre");
+    const total = await blocks.count();
+    const baseline = (await this.promptsReceiptAutomatic(kind)) === null ? 1 : 2;
+    if (total <= baseline) return { prompt: null, error };
+    const prompt =
+      (
+        (await blocks
+          .nth(total - 1)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trimEnd() || null;
+    return { prompt, error };
+  }
+
+  private promptsDraftPanel(): Locator {
+    // The draft panel sits inside the open editor; scoping to it keeps the
+    // card header's kind badges (same labels) and the draft textarea out
+    // of the panel reads below.
+    return this.promptsOpenEditorRoot().first().locator("div.rounded-md.border-subtle").last();
+  }
+
+  async promptsDraftPreviewKinds(): Promise<string[]> {
+    const switcher = this.promptsDraftPanel().getByRole("button", { name: /^(Coding task|Review|Scheduler)$/ });
+    const total = await switcher.count();
+    const out: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const label = (
+        (await switcher
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (label !== "") out.push(this.promptsKindSlug(label));
+    }
+    return out;
+  }
+
+  async promptsDraftPreviewSelectKind(kind: string): Promise<void> {
+    await this.promptsDraftPanel()
+      .getByRole("button", { name: this.promptsKindLabel(kind), exact: true })
+      .click();
+  }
+
+  async promptsDraftPreviewSubmitEnabled(): Promise<boolean> {
+    const root = this.promptsOpenEditorRoot().first();
+    return root
+      .getByRole("button", { name: "Preview draft", exact: true })
+      .isEnabled()
+      .catch(() => false);
+  }
+
+  async promptsDraftPreviewSubmit(target: string): Promise<void> {
+    const panel = this.promptsDraftPanel();
+    await panel.getByRole("textbox").fill(target);
+    await panel.getByRole("button", { name: "Preview draft", exact: true }).click();
+  }
+
+  async promptsDraftPreviewResult(): Promise<{ prompt: string | null; error: string | null }> {
+    const root = this.promptsOpenEditorRoot().first();
+    const errorBox = root.locator("div.rounded-md div.text-danger-primary").first();
+    const errorShown = await this.isShown(errorBox);
+    const error = errorShown ? ((await errorBox.innerText().catch(() => "")) ?? "").trim() || null : null;
+    // The draft panel result is the last pre in the editor (after the
+    // compare pane, when it shows).
+    const blocks = root.locator("div.rounded-md pre");
+    const total = await blocks.count();
+    if (total === 0) return { prompt: null, error };
+    const prompt =
+      (
+        (await blocks
+          .nth(total - 1)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trimEnd() || null;
+    return { prompt, error };
+  }
+
+  async automationsOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/automations`);
+    await this.page
+      .getByRole("heading", { name: "Auto-archive closed work items", exact: true })
+      .or(this.page.getByRole("heading", { name: "Oops! You are not authorized to view this page", exact: true }))
+      .first()
+      .waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async automationsNotAuthorizedVisible(): Promise<boolean> {
+    return this.isShown(
+      this.page.getByRole("heading", { name: "Oops! You are not authorized to view this page", exact: true })
+    );
+  }
+
+  private async automationsReadRow(title: string): Promise<AutomationRow> {
+    const row = this.automationsRow(title);
+    const toggle = row.getByRole("switch");
+    const checked = (await toggle.getAttribute("aria-checked").catch(() => null)) ?? "";
+    const toggleDisabled = await toggle.isDisabled().catch(() => true);
+    const picker = row.getByRole("button", { name: /\d+ months?/ });
+    const pickerVisible = await this.isShown(picker);
+    const pickerLabel = pickerVisible
+      ? (
+          (await picker
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim()
+      : "";
+    return { toggleOn: checked === "true", toggleDisabled, pickerVisible, pickerLabel };
+  }
+
+  async automationsArchiveRow(): Promise<AutomationRow> {
+    return this.automationsReadRow("Auto-archive closed work items");
+  }
+
+  async automationsArchiveToggle(): Promise<void> {
+    await this.automationsRow("Auto-archive closed work items").getByRole("switch").click();
+  }
+
+  private async automationsSetPreset(title: string, months: number): Promise<void> {
+    const label = months === 1 ? "1 month" : `${months} months`;
+    await this.automationsRow(title)
+      .getByRole("button", { name: /\d+ months?/ })
+      .click();
+    await this.page.getByRole("option", { name: label, exact: true }).click();
+  }
+
+  async automationsArchiveSetPreset(months: number): Promise<void> {
+    await this.automationsSetPreset("Auto-archive closed work items", months);
+  }
+
+  private async automationsOpenCustom(title: string): Promise<void> {
+    await this.automationsRow(title)
+      .getByRole("button", { name: /\d+ months?/ })
+      .click();
+    await this.page.getByRole("button", { name: "Customize time range", exact: true }).click();
+    await this.page.getByRole("heading", { name: "Customize time range", exact: true }).waitFor({
+      timeout: WebDriver.OPEN_MS,
+    });
+  }
+
+  async automationsArchiveOpenCustom(): Promise<void> {
+    await this.automationsOpenCustom("Auto-archive closed work items");
+  }
+
+  async automationsCloseRow(): Promise<AutomationCloseRow> {
+    const base = await this.automationsReadRow("Auto-close work items");
+    const row = this.automationsRow("Auto-close work items");
+    // The state picker is the combobox button that is not the month picker.
+    const buttons = row.getByRole("button");
+    const total = await buttons.count();
+    let stateLabel = "";
+    let statePickerDisabled = true;
+    for (let i = 0; i < total; i++) {
+      const candidate = buttons.nth(i);
+      const text = ((await candidate.innerText().catch(() => "")) ?? "").trim();
+      if (text === "" || /\d+ months?/.test(text)) continue;
+      stateLabel = text;
+      statePickerDisabled = await candidate.isDisabled().catch(() => true);
+    }
+    return { ...base, stateLabel, statePickerDisabled };
+  }
+
+  async automationsCloseToggle(): Promise<void> {
+    await this.automationsRow("Auto-close work items").getByRole("switch").click();
+  }
+
+  async automationsCloseSetPreset(months: number): Promise<void> {
+    await this.automationsSetPreset("Auto-close work items", months);
+  }
+
+  async automationsCloseSetState(name: string): Promise<void> {
+    await (await this.automationsCloseStateButton()).click();
+    await this.page.getByRole("option", { name, exact: true }).click();
+  }
+
+  private async automationsCloseStateButton(): Promise<Locator> {
+    const row = this.automationsRow("Auto-close work items");
+    const buttons = row.getByRole("button");
+    const total = await buttons.count();
+    for (let i = 0; i < total; i++) {
+      const candidate = buttons.nth(i);
+      const text = ((await candidate.innerText().catch(() => "")) ?? "").trim();
+      if (text !== "" && !/\d+ months?/.test(text)) return candidate;
+    }
+    throw new Error("[parity] auto-close state picker not found.");
+  }
+
+  async automationsCloseStateOptions(): Promise<string[]> {
+    const button = await this.automationsCloseStateButton();
+    await button.click();
+    const options = this.page.getByRole("option");
+    await options.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    const total = await options.count();
+    const out: string[] = [];
+    for (let i = 0; i < total; i++) {
+      out.push(
+        (
+          (await options
+            .nth(i)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim()
+      );
+    }
+    await button.click();
+    return out;
+  }
+
+  async automationsCloseOpenCustom(): Promise<void> {
+    await this.automationsOpenCustom("Auto-close work items");
+  }
+
+  async automationsMonthModal(): Promise<AutomationMonthModal | null> {
+    const heading = this.page.getByRole("heading", { name: "Customize time range", exact: true });
+    if (!(await this.isShown(heading))) return null;
+    const dialog = this.page.getByRole("dialog").filter({ has: heading });
+    const input = dialog.getByPlaceholder("Enter Months");
+    const inputValue = (await input.inputValue().catch(() => "")) ?? "";
+    const errorBox = dialog.getByText("Select a month between 1 and 12.", { exact: true });
+    const error = (await this.isShown(errorBox)) ? "Select a month between 1 and 12." : null;
+    return { title: "Customize time range", inputValue, error };
+  }
+
+  async automationsMonthFill(value: string): Promise<void> {
+    const heading = this.page.getByRole("heading", { name: "Customize time range", exact: true });
+    await this.page.getByRole("dialog").filter({ has: heading }).getByPlaceholder("Enter Months").fill(value);
+  }
+
+  async automationsMonthSubmit(): Promise<void> {
+    const heading = this.page.getByRole("heading", { name: "Customize time range", exact: true });
+    await this.page
+      .getByRole("dialog")
+      .filter({ has: heading })
+      .getByRole("button", { name: "Submit", exact: true })
+      .click();
+  }
+
+  async automationsMonthCancel(): Promise<void> {
+    const heading = this.page.getByRole("heading", { name: "Customize time range", exact: true });
+    const dialog = this.page.getByRole("dialog").filter({ has: heading });
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await heading.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async automationsFailUpdateOnce(): Promise<void> {
+    let armed = true;
+    await this.page.route("**/projects/*/", async (route) => {
+      if (armed && route.request().method() === "PATCH") {
+        armed = false;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity update failure" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+  }
+
+  async automationsBuiltInRows(): Promise<string[]> {
+    const headings = this.automationsSection().getByRole("heading", { level: 4 });
+    const total = await headings.count();
+    const out: string[] = [];
+    for (let i = 0; i < total; i++) {
+      out.push(
+        (
+          (await headings
+            .nth(i)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim()
+      );
+    }
+    return out;
+  }
+
+  async automationsHasExtensionRows(): Promise<boolean> {
+    const known = new Set(["Auto-archive closed work items", "Auto-close work items"]);
+    const rows = await this.automationsBuiltInRows();
+    return rows.some((row) => row !== "" && !known.has(row));
   }
 }
