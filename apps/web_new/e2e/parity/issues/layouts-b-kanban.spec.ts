@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Oracle scenarios (NEWFRONT-118): Issues board / kanban layout — grouped
 // columns, swimlanes, collapse, cards, quick-add, header create, every
 // drag-drop move including the delete zone and feedback overlays, plus
@@ -417,7 +416,13 @@ test(
       const keptId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, keptName, home.id);
       const plainName = `KB ghost c ${suffix}`;
       await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, plainName, home.id);
-      const doomed = await serverCreateLabel(seed.workspaceSlug, projectId, `KB doomed ${suffix}`, "#666666", owner.cookie);
+      const doomed = await serverCreateLabel(
+        seed.workspaceSlug,
+        projectId,
+        `KB doomed ${suffix}`,
+        "#666666",
+        owner.cookie
+      );
       await serverPatchIssue(seed.workspaceSlug, projectId, ghostId, { label_ids: [doomed.id] }, owner.cookie);
       await serverDeleteLabel(seed.workspaceSlug, projectId, doomed.id, owner.cookie);
       const live = await serverCreateLabel(seed.workspaceSlug, projectId, `KB live ${suffix}`, "#777777", owner.cookie);
@@ -838,11 +843,9 @@ test(
       // state PATCH lands asynchronously (the fix2h sweep read Todo here
       // although the PATCH landed moments later): poll until it persists.
       await expect
-        .poll(
-          async () =>
-            (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).stateId,
-          { timeout: 60_000 }
-        )
+        .poll(async () => (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).stateId, {
+          timeout: 60_000,
+        })
         .toBe(doneId);
       // Restore both fields: later seed scenarios assume the pristine order.
       await serverPatchIssue(

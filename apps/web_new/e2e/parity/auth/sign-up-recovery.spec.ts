@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Oracle scenarios for sign-up, passwords, recovery, guards, and landing
 // (NEWFRONT-108): rows AUTH-009 through AUTH-016. Green on apps/web first
 // (the oracle); the same file must go green on apps/web_new once the auth

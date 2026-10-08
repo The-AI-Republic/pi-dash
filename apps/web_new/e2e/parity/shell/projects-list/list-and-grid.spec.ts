@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Parity scenarios (NEWFRONT-124): the projects list fetches the workspace
 // collection and renders a responsive card grid, with skeletons while it
 // loads. Green on apps/web through drivers/web first. Rows: SHELL-024

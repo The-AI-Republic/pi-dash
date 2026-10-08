@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Server-state assertions for parity scenarios (NEWFRONT-19). The driver
 // proves what the user sees; this helper proves what the server stored, so
 // a redesigned screen cannot pass while saving the wrong thing. It signs
@@ -6668,7 +6667,6 @@ export async function serverUserProfile(
   if (!res.ok) throw new Error(`[parity] profile read failed with HTTP ${res.status}.`);
   return (await res.json()) as Record<string, unknown>;
 }
-
 
 // --- NEWFRONT-118 (layouts B): sign in an existing user into the shared
 // --- authenticated-user handle, so kanban/gantt scenarios enter the app

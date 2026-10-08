@@ -1,8 +1,7 @@
 #!/usr/bin/env node
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 /**
  * Coverage audit: every route, component, service method and shortcut of the
  * old frontends must appear in some feature inventory.
@@ -44,12 +43,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = resolve(HERE, "..", "..", "..", "..");
-const DEFAULT_OUT = join(
-  ".ai_design",
-  "new_frontend_implementation",
-  "parity",
-  "coverage-audit.md"
-);
+const DEFAULT_OUT = join(".ai_design", "new_frontend_implementation", "parity", "coverage-audit.md");
 
 /* ------------------------------------------------------------------ */
 /* small fs helpers                                                    */
@@ -92,7 +86,18 @@ function stripGroups(p) {
 
 /** Structural dir names that are never area-distinctive on their own. */
 const GENERIC_DIRS = new Set([
-  "app", "src", "lib", "core", "ce", "ee", "components", "routes", "store", "hooks", "types", "utils",
+  "app",
+  "src",
+  "lib",
+  "core",
+  "ce",
+  "ee",
+  "components",
+  "routes",
+  "store",
+  "hooks",
+  "types",
+  "utils",
 ]);
 
 /* ------------------------------------------------------------------ */
@@ -134,7 +139,8 @@ function enumerateServicesFromFiles(root, files) {
       // NEWFRONT-103: `AssistantService.cancel` was evidenced by its
       // neighbor `eventsUrl`'s URL). Private/protected members, the
       // constructor, and data properties are not public methods.
-      const methodRe = /(?:^|\n) {2}(?:async\s+)?(?!private |protected |readonly |constructor\b)([A-Za-z_]\w*)\s*(?:=\s*(?:async\s*)?)?\(/g;
+      const methodRe =
+        /(?:^|\n) {2}(?:async\s+)?(?!private |protected |readonly |constructor\b)([A-Za-z_]\w*)\s*(?:=\s*(?:async\s*)?)?\(/g;
       const found = [...body.matchAll(methodRe)];
       const seen = new Set();
       for (let mi = 0; mi < found.length; mi++) {
@@ -183,7 +189,9 @@ function enumerateShortcuts(root, cloudRoot) {
       const r = baseForRel ? rel(baseForRel, f) : f;
       if (!r || !/\.(ts|tsx)$/.test(r)) continue;
       const low = r.toLowerCase();
-      const isPalette = /power-k\/(config|core|menus)|command-palette|global-shortcuts|keybinding|hotkey|shortcut/.test(low);
+      const isPalette = /power-k\/(config|core|menus)|command-palette|global-shortcuts|keybinding|hotkey|shortcut/.test(
+        low
+      );
       if (!isPalette) continue;
       const text = read(f) || "";
       const keys = [r.split("/").pop()];
@@ -193,8 +201,11 @@ function enumerateShortcuts(root, cloudRoot) {
         .filter((s) => /[a-zA-Z]/.test(s));
       for (const lit of new Set(lits)) keys.push(lit);
       // Key combos: endeavor to catch "cmd+k", "ctrl+p", "?" style bindings.
-      const combos = [...text.matchAll(/["'`](?:(?:cmd|ctrl|shift|alt|meta|mod)\s*\+\s*){1,3}[a-z0-9?/[\]\\-](?:\s*\+\s*[a-z0-9?/[\]\\-])*["'`]/gi)]
-        .map((m) => m[0].slice(1, -1));
+      const combos = [
+        ...text.matchAll(
+          /["'`](?:(?:cmd|ctrl|shift|alt|meta|mod)\s*\+\s*){1,3}[a-z0-9?/[\]\\-](?:\s*\+\s*[a-z0-9?/[\]\\-])*["'`]/gi
+        ),
+      ].map((m) => m[0].slice(1, -1));
       for (const c of new Set(combos)) keys.push(c);
       items.push({ category: "shortcuts", kind: "shortcut-site", id: r, keys });
     }
@@ -388,7 +399,13 @@ function normEndpoint(s) {
     .replace(/\?.*$/, "")
     .replace(/[[\]]/g, "")
     .split("/")
-    .map((g) => g.trim().replace(/^[.\s|]+/, "").replace(/^(get|post|put|patch|delete|head|options)\s+/i, "").trim())
+    .map((g) =>
+      g
+        .trim()
+        .replace(/^[.\s|]+/, "")
+        .replace(/^(get|post|put|patch|delete|head|options)\s+/i, "")
+        .trim()
+    )
     .filter((g) => g && g !== "..." && !/^(get|post|put|patch|delete|head|options)$/.test(g));
   // Drop leading inventory shorthands (BASE/, WS/, .../).
   while (segs.length && /^(base|ws|\.\.\.)$/i.test(segs[0])) segs.shift();
@@ -526,7 +543,7 @@ function parseInventory(path) {
       const base = dirBaseOf(line);
       if (level <= 2) sectionBase = base;
       else if (base) sectionBase = base;
-    } else if (inChecklist && (/^\|/.test(line) && !/^\|\s*-/.test(line) || /^\s*-\s+/.test(line))) {
+    } else if (inChecklist && ((/^\|/.test(line) && !/^\|\s*-/.test(line)) || /^\s*-\s+/.test(line))) {
       flushPara();
       checklistCells.push(line);
       // A line that names rows claims its paths; a line that disowns them
@@ -559,7 +576,10 @@ function parseInventory(path) {
     }
   }
   flushPara();
-  const fold = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
+  const fold = (s) =>
+    String(s)
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
   return {
     file: path,
     rows,
@@ -608,11 +628,11 @@ function matchItem(item, inventories) {
         if (!isDir) return false;
         const clean = (c.segs || []).filter((g) => g !== "**");
         if (!clean.length || GENERIC_DIRS.has(clean[clean.length - 1])) return false;
-        const startsWith = (hay, needle) =>
-          needle.length < hay.length && needle.every((g, i) => segsEqual(g, hay[i]));
+        const startsWith = (hay, needle) => needle.length < hay.length && needle.every((g, i) => segsEqual(g, hay[i]));
         return startsWith(clean, areaSegs) || startsWith(clean, rawSegs);
       });
-      if (hit) covered.push({ file: inv.file, evidence: `${hit.via || "checklist"} \`${hit.raw}\` covers`, checklist: true });
+      if (hit)
+        covered.push({ file: inv.file, evidence: `${hit.via || "checklist"} \`${hit.raw}\` covers`, checklist: true });
     }
     if (covered.length) return { status: "covered", matches: covered };
   }
@@ -620,7 +640,10 @@ function matchItem(item, inventories) {
   // endpoint tables harvested as checklist paths. Backend endpoints are shared
   // across apps, so scope is deliberately ignored here.
   if (item.category === "service-methods") {
-    const eps = (item.keys || []).filter((k) => String(k).includes("/")).map(normEndpoint).filter(Boolean);
+    const eps = (item.keys || [])
+      .filter((k) => String(k).includes("/"))
+      .map(normEndpoint)
+      .filter(Boolean);
     const segEq = (a, b) => a === "{}" || b === "{}" || a === b;
     const epMatch = (paths, minOverlap) =>
       paths.find((c) => {
@@ -650,7 +673,9 @@ function matchItem(item, inventories) {
     // elsewhere (review NEWFRONT-103: `WorkspaceService.workspaceMemberMe`
     // shares its endpoint with the dead packages call it replaced).
     const rowNamed = (item.keys || []).some((k) => {
-      const f = String(k).toLowerCase().replace(/[^a-z0-9]/g, "");
+      const f = String(k)
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "");
       return f.length >= 8 && inventories.some((inv) => inv.foldedRows.includes(f));
     });
     if (!rowNamed) {
@@ -694,7 +719,9 @@ function matchItem(item, inventories) {
   if (item.category === "service-methods") {
     for (const inv of inventories) {
       const hit = (item.keys || []).find((k) => {
-        const f = String(k).toLowerCase().replace(/[^a-z0-9]/g, "");
+        const f = String(k)
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, "");
         if (f.length < 8 || f.includes("/")) return false;
         if (f === String(k).toLowerCase() && !/[A-Z]/.test(String(k).slice(1))) return false;
         return inv.folded.includes(f);
@@ -751,7 +778,9 @@ function renderReport(root, out, categories, missing, cloudDir, cloudPresent, co
   s += `\`ce/components\` (+ admin/space/desktop equivalents), service classes under\n`;
   s += `\`apps/web/core/services\`, \`packages/services/src\` (+ admin/space/cloud services),\n`;
   s += `palette/shortcut registrations, redirects and error routes. Cloud overlay:\n`;
-  s += cloudPresent ? `\`${cloudDir}\` (present).\n` : `unavailable (${cloudDir} not present — cloud section skipped, not failed).\n`;
+  s += cloudPresent
+    ? `\`${cloudDir}\` (present).\n`
+    : `unavailable (${cloudDir} not present — cloud section skipped, not failed).\n`;
   if (missing.length) {
     s += `\nSource directories absent from this checkout (not audited, not failures):\n`;
     for (const m of missing) s += `- \`${m}\`\n`;
@@ -847,7 +876,9 @@ function main(argv) {
 
   const invDir = join(root, ".ai_design", "new_frontend_implementation", "parity", "inventory");
   const invFiles = existsSync(invDir)
-    ? readdirSync(invDir).filter((f) => f.endsWith(".md")).map((f) => join(invDir, f))
+    ? readdirSync(invDir)
+        .filter((f) => f.endsWith(".md"))
+        .map((f) => join(invDir, f))
     : [];
   if (!invFiles.length) throw new Error(`no inventory files in ${invDir}`);
   const inventories = invFiles.map(parseInventory);
@@ -867,9 +898,7 @@ function main(argv) {
     { name: "shortcuts", items: shortcuts.filter((i) => !i.missing) },
     {
       name: "redirects-errors",
-      items: byId(
-        [...routes, ...redir].filter((i) => !i.missing && i.category === "redirects-errors")
-      ),
+      items: byId([...routes, ...redir].filter((i) => !i.missing && i.category === "redirects-errors")),
     },
   ];
   const missing = [
@@ -892,7 +921,9 @@ function main(argv) {
   }
 
   renderReport(root, args.out, categories, [...new Set(missing)], args.cloud, cloudPresent, counts);
-  console.log(`items=${counts.items} covered=${counts.covered} explained=${counts.explained} unclaimed=${counts.unclaimed}`);
+  console.log(
+    `items=${counts.items} covered=${counts.covered} explained=${counts.explained} unclaimed=${counts.unclaimed}`
+  );
   console.log(`report: ${relative(root, args.out).split("\\").join("/")}`);
   if (counts.unclaimed) {
     console.log("unclaimed items:");
@@ -917,9 +948,10 @@ function enumerateRoutesRaw(root, absDirs) {
       if (!r) continue;
       const base = f.split("/").pop();
       if (ROUTE_FILES.has(base)) {
-        const kind = base === "not-found.tsx" || base === "global-error.tsx" || base === "error.tsx"
-          ? "error-route"
-          : "route-file";
+        const kind =
+          base === "not-found.tsx" || base === "global-error.tsx" || base === "error.tsx"
+            ? "error-route"
+            : "route-file";
         out.push({
           category: kind === "error-route" ? "redirects-errors" : "routes",
           kind,

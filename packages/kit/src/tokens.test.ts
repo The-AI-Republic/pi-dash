@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Token contract tests: every token from the H-visual decision exists with
 // the approved value, text pairs meet WCAG AA in both themes, and density
 // stops match the spec. Values are parsed from tokens.css so the test pins

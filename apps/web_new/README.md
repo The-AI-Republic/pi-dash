@@ -1,4 +1,4 @@
-<!-- Copyright (c) Pi Dash contributors. License pending H-license decision (NEWFRONT-2). -->
+<!-- Copyright (c) Pi Dash contributors | SPDX-License-Identifier: AGPL-3.0-only | See the LICENSE file for details. -->
 
 # web_new — Pi Dash new frontend
 
@@ -93,8 +93,8 @@ src/
   styles/app.css      Tailwind 4 entry
 e2e/parity/           parity scenarios and drivers (NEWFRONT-19)
 checks/               check-boundaries.mjs check-headers.mjs check-deps.mjs
-LICENSE_HEADER.txt    the ONE file defining the license header (placeholder
-                      until NEWFRONT-2 decides; replaced in full by NEWFRONT-22).
+LICENSE_HEADER.txt    the ONE file defining the license header (interim
+                      AGPL-3.0-only text per F-11/NEWFRONT-22).
                       JSON manifests (package.json, tsconfig, oxlintrc, size-limit,
                       allowlist) cannot carry it — JSON has no comment syntax —
                       so the header check covers code extensions (ts/tsx/mjs/cjs/css)

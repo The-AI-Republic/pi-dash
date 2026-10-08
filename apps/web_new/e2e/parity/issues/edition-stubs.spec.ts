@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Oracle scenarios (NEWFRONT-122): edition-only features stay absent in
 // OSS — every cloud/EE surface below is an empty ce/ stub (verified by
 // reading the stub components: each renders an empty fragment), so the

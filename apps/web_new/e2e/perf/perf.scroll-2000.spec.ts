@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Scroll budget (NEWFRONT-21, Quality gates): an issue list with 2,000 rows
 // scrolls with no frame over 50 ms. Self-contained: the web production
 // bundle (serve.mjs webServer below) with the issues API mocked to 2,000

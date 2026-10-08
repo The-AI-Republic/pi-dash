@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Oracle scenarios (NEWFRONT-114): feed loading and empty states. While
 // the history reads are in flight the section shows a skeleton loader and
 // no entries; once they resolve the entries appear. An item whose history
@@ -24,12 +23,7 @@ test(
     // below are all poll-based and correct at any speed.
     test.slow();
     const session = await signInSessionWithRetry(seed.email, seed.password);
-    const issueId = await serverCreateIssue(
-      seed.workspaceSlug,
-      seed.projectId,
-      session,
-      `Loading probe ${Date.now()}`
-    );
+    const issueId = await serverCreateIssue(seed.workspaceSlug, seed.projectId, session, `Loading probe ${Date.now()}`);
     try {
       await driver.activitySignIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.page.route("**/history/**", async (route) => {
@@ -64,12 +58,7 @@ test(
     // below are all poll-based and correct at any speed.
     test.slow();
     const session = await signInSessionWithRetry(seed.email, seed.password);
-    const issueId = await serverCreateIssue(
-      seed.workspaceSlug,
-      seed.projectId,
-      session,
-      `Empty probe ${Date.now()}`
-    );
+    const issueId = await serverCreateIssue(seed.workspaceSlug, seed.projectId, session, `Empty probe ${Date.now()}`);
     try {
       await driver.activitySignIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.page.route("**/history/**", async (route) => {

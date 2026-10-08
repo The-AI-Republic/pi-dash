@@ -1,7 +1,6 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Parity scenarios: auth workspace onboarding finish + tour (NEWFRONT-111,
 // rows AUTH-034..043). Each scenario drives the old app (the oracle) through
 // the parity driver and proves both what the user sees and what the server
