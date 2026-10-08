@@ -8406,3 +8406,494 @@ export async function serverCleanupBinding(
     // Teardown only: the row is already gone or the stack is draining.
   }
 }
+
+// --- Dev machines, runner detail, activity fixtures and server reads
+// --- (NEWFRONT-183, RUN-037–043). Appended; existing helpers above are
+// --- untouched per the shared harness contract. The web API offers no
+// --- create-machine endpoint, so machines, tokens, runners and live
+// --- states are planted through the Django shell; the reads below go
+// --- through the app's own REST endpoints (the same ones the UI polls)
+// --- plus shell probes for token/session revocation the API never
+// --- exposes. The scratch stack runs no live runner daemon.
+
+/** Runner statuses the dev-machines scenarios plant. */
+export type DevMachinesRunnerStatus = "online" | "busy" | "offline" | "revoked";
+
+/** Minimal planted-machine shape the dev-machines scenarios assert on. */
+export interface DevMachinesMachine {
+  id: string;
+  label: string;
+  hostLabel: string;
+  revokedAt: string | null;
+}
+
+/** One dev-machines list row as the list endpoint returns it. */
+export interface DevMachinesMachineRow {
+  id: string;
+  label: string;
+  hostLabel: string;
+  revokedAt: string | null;
+  runnerCount: number;
+  onlineRunnerCount: number;
+  lastSeenAt: string | null;
+  lastHeartbeatAt: string | null;
+}
+
+/** Minimal runner shape the dev-machines scenarios assert on. */
+export interface DevMachinesRunner {
+  id: string;
+  name: string;
+  status: string;
+  podId: string;
+}
+
+/** Observability snapshot as the runner-detail endpoint returns it. */
+export interface DevMachinesLiveState {
+  lastEventAt: string | null;
+  lastEventKind: string | null;
+  lastEventSummary: string | null;
+  agentPid: number | null;
+  subprocessAlive: boolean | null;
+  approvalsPending: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  llmModel: string | null;
+  turnCount: number | null;
+}
+
+/** Runner detail as the detail endpoint returns it (fields the scenarios need). */
+export interface DevMachinesRunnerDetail {
+  id: string;
+  name: string;
+  status: string;
+  os: string;
+  arch: string;
+  runnerVersion: string;
+  workingDir: string | null;
+  protocolVersion: number;
+  capabilities: string[];
+  lastHeartbeatAt: string | null;
+  owner: string | null;
+  podName: string | null;
+  podProject: string | null;
+  machineLabel: string | null;
+  connection: string | null;
+  enrolledAt: string | null;
+  revokedAt: string | null;
+  revokedReason: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+  liveState: DevMachinesLiveState | null;
+}
+
+/** Raw outcome of a dev-machine rotate/revoke/delete probe. */
+export interface DevMachinesActionResult {
+  status: number;
+  error: string | null;
+}
+
+/** API container for shell snippets; the base helper pins parity19-api. */
+function devMachinesApiContainer(): string {
+  const override = process.env["PARITY_API_CONTAINER"];
+  return override !== undefined && override.trim() !== "" ? override.trim() : "parity19-api";
+}
+
+/** Run a Django shell snippet inside this run's stack api container. */
+export async function devMachinesShell(python: string): Promise<string> {
+  const { stdout } = await execFileAsync(
+    "docker",
+    ["exec", "-i", devMachinesApiContainer(), "python", "manage.py", "shell", "-c", python],
+    {
+      timeout: 120_000,
+    }
+  );
+  return stdout;
+}
+
+function devMachinesText(raw: unknown): string | null {
+  return typeof raw === "string" ? raw : null;
+}
+
+function devMachinesCount(raw: unknown): number {
+  return typeof raw === "number" ? raw : 0;
+}
+
+/** Render a value as a Python literal for shell snippets (JSON booleans/null are not). */
+function devMachinesPy(value: unknown): string {
+  if (value === null || value === undefined) return "None";
+  if (value === true) return "True";
+  if (value === false) return "False";
+  return JSON.stringify(value) ?? "None";
+}
+
+/** Workspace UUID for a slug (dev-machine reads key off the id, not the slug). */
+export async function serverDevMachinesWorkspaceId(workspaceSlug: string): Promise<string> {
+  const out = await devMachinesShell(
+    `from pi_dash.db.models import Workspace\n` +
+      `ws = Workspace.objects.filter(slug=${JSON.stringify(workspaceSlug)}).first()\n` +
+      `print("PARITY_DM_WS:" + (str(ws.id) if ws else ""))\n`
+  );
+  const id = /^PARITY_DM_WS:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (id === "") throw new Error(`[parity] no workspace for slug ${workspaceSlug}.`);
+  return id;
+}
+
+/**
+ * Plant a dev machine owned by `ownerEmail` and attach it to the workspace
+ * with a machine token, so the workspace-scoped list shows it even before
+ * any runner exists. Labels must be unique per run (callers add a
+ * timestamp); the page finds rows by label.
+ */
+export async function serverDevMachinesPlantMachine(input: {
+  ownerEmail: string;
+  workspaceSlug: string;
+  label: string;
+  hostLabel?: string;
+  revoked?: boolean;
+}): Promise<DevMachinesMachine> {
+  const hostLabel = input.hostLabel ?? "";
+  const out = await devMachinesShell(
+    `import json, secrets\n` +
+      `from django.utils import timezone\n` +
+      `from pi_dash.db.models import User, Workspace\n` +
+      `from pi_dash.runner.models import DevMachine, MachineToken\n` +
+      `user = User.objects.get(email=${JSON.stringify(input.ownerEmail)})\n` +
+      `ws = Workspace.objects.get(slug=${JSON.stringify(input.workspaceSlug)})\n` +
+      `machine = DevMachine.objects.create(owner=user, host_label=${JSON.stringify(hostLabel)}, label=${JSON.stringify(input.label)})\n` +
+      `MachineToken.objects.create(user=user, workspace=ws, dev_machine=machine, host_label=${JSON.stringify(hostLabel || input.label)}, token_hash=secrets.token_hex(32), label=${JSON.stringify(input.label)})\n` +
+      `if ${input.revoked === true ? "True" : "False"}:\n` +
+      `    machine.revoked_at = timezone.now()\n` +
+      `    machine.save(update_fields=["revoked_at", "updated_at"])\n` +
+      `print("PARITY_DM_MACHINE:" + json.dumps({"id": str(machine.id), "label": machine.label, "host_label": machine.host_label, "revoked_at": machine.revoked_at.isoformat() if machine.revoked_at else None}))\n`
+  );
+  const line = /^PARITY_DM_MACHINE:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (line === "") throw new Error(`[parity] machine plant produced no row for ${input.label}.`);
+  const record = JSON.parse(line) as { id: string; label: string; host_label: string; revoked_at: string | null };
+  return { id: record.id, label: record.label, hostLabel: record.host_label, revokedAt: record.revoked_at };
+}
+
+/**
+ * Best-effort machine cleanup: drop the machine's runners first (the FK is
+ * SET_NULL, so the machine delete alone would orphan them), then the
+ * machine row itself.
+ */
+export async function serverDevMachinesCleanupMachine(machineId: string): Promise<void> {
+  try {
+    await devMachinesShell(
+      `from pi_dash.runner.models import DevMachine, Runner\n` +
+        `Runner.objects.filter(dev_machine_id=${JSON.stringify(machineId)}).delete()\n` +
+        `DevMachine.objects.filter(pk=${JSON.stringify(machineId)}).delete()\n` +
+        `print("PARITY_DM_CLEANUP_OK")\n`
+    );
+  } catch (error) {
+    console.log(`[parity] machine cleanup failed for ${machineId}; leaving it for reseed. ${String(error)}`);
+  }
+}
+
+/**
+ * Plant a runner row owned by `ownerEmail` in the seeded project, bound to
+ * a dev machine when `machineId` is set. Online/busy runners also get a
+ * live RunnerSession row: the stack treats a runner with no active session
+ * as disconnected, so a planted "online" runner needs the session row to
+ * behave like a connected daemon. Heartbeat age is relative to the plant
+ * moment; enrolled defaults to set (pass "none" for pending-enrolment).
+ */
+export async function serverDevMachinesPlantRunner(input: {
+  ownerEmail: string;
+  workspaceSlug: string;
+  projectId: string;
+  machineId: string | null;
+  name: string;
+  status: DevMachinesRunnerStatus;
+  os?: string;
+  arch?: string;
+  runnerVersion?: string;
+  workingDir?: string;
+  capabilities?: string[];
+  lastHeartbeatAgeSecs?: number | null;
+  enrolled?: "now" | "none";
+  revokedReason?: string;
+}): Promise<DevMachinesRunner> {
+  const out = await devMachinesShell(
+    `import json\n` +
+      `from datetime import timedelta\n` +
+      `from django.utils import timezone\n` +
+      `from pi_dash.db.models import User, Workspace\n` +
+      `from pi_dash.runner.models import DevMachine, Pod, Runner, RunnerSession\n` +
+      `user = User.objects.get(email=${JSON.stringify(input.ownerEmail)})\n` +
+      `ws = Workspace.objects.get(slug=${JSON.stringify(input.workspaceSlug)})\n` +
+      `pod = Pod.default_for_project_id(${JSON.stringify(input.projectId)})\n` +
+      `machine = DevMachine.objects.filter(pk=${JSON.stringify(input.machineId ?? "")}).first() if ${input.machineId === null ? "False" : "True"} else None\n` +
+      `heartbeat = (timezone.now() - timedelta(seconds=${input.lastHeartbeatAgeSecs ?? "null"})) if ${input.lastHeartbeatAgeSecs === null || input.lastHeartbeatAgeSecs === undefined ? "False" : "True"} else None\n` +
+      `runner = Runner.objects.create(owner=user, workspace=ws, pod=pod, dev_machine=machine, name=${JSON.stringify(input.name)}, status=${JSON.stringify(input.status)}, os=${JSON.stringify(input.os ?? "")}, arch=${JSON.stringify(input.arch ?? "")}, runner_version=${JSON.stringify(input.runnerVersion ?? "")}, dev_metadata=${JSON.stringify(input.workingDir === undefined ? {} : { working_dir: input.workingDir })}, capabilities=${JSON.stringify(input.capabilities ?? [])}, last_heartbeat_at=heartbeat, enrolled_at=(timezone.now() if ${input.enrolled === "none" ? "False" : "True"} else None))\n` +
+      `if ${input.revokedReason === undefined ? "False" : "True"}:\n` +
+      `    runner.revoked_at = timezone.now()\n` +
+      `    runner.revoked_reason = ${JSON.stringify(input.revokedReason ?? "")}\n` +
+      `    runner.save(update_fields=["revoked_at", "revoked_reason", "updated_at"])\n` +
+      `if ${JSON.stringify(input.status)} in ("online", "busy"):\n` +
+      `    RunnerSession.objects.create(runner=runner, last_seen_at=timezone.now())\n` +
+      `print("PARITY_DM_RUNNER:" + json.dumps({"id": str(runner.id), "name": runner.name, "status": runner.status, "pod": str(runner.pod_id)}))\n`
+  );
+  const line = /^PARITY_DM_RUNNER:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (line === "") throw new Error(`[parity] runner plant produced no row for ${input.name}.`);
+  const record = JSON.parse(line) as { id: string; name: string; status: string; pod: string };
+  return { id: record.id, name: record.name, status: record.status, podId: record.pod };
+}
+
+/** Best-effort runner cleanup; cascades to sessions and the live state. */
+export async function serverDevMachinesCleanupRunner(runnerId: string): Promise<void> {
+  try {
+    await devMachinesShell(
+      `from pi_dash.runner.models import Runner\n` +
+        `Runner.objects.filter(pk=${JSON.stringify(runnerId)}).delete()\n` +
+        `print("PARITY_DM_RUNNER_CLEANUP_OK")\n`
+    );
+  } catch (error) {
+    console.log(`[parity] runner cleanup failed for ${runnerId}; leaving it for reseed. ${String(error)}`);
+  }
+}
+
+/**
+ * Plant (or replace) a runner's observability snapshot. Event age is
+ * relative to the plant moment so badge-threshold scenarios stay exact;
+ * pass null for an unknown event time. Token counts ride the canonical
+ * usage shape.
+ */
+export async function serverDevMachinesPlantLiveState(
+  runnerId: string,
+  input: {
+    lastEventAgeSecs: number | null;
+    lastEventKind?: string | null;
+    lastEventSummary?: string | null;
+    agentPid?: number | null;
+    subprocessAlive?: boolean | null;
+    approvalsPending?: number | null;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    totalTokens?: number | null;
+    llmModel?: string | null;
+    turnCount?: number | null;
+  }
+): Promise<void> {
+  const usage: Record<string, number> = {};
+  if (input.inputTokens !== undefined && input.inputTokens !== null) usage["input"] = input.inputTokens;
+  if (input.outputTokens !== undefined && input.outputTokens !== null) usage["output"] = input.outputTokens;
+  if (input.totalTokens !== undefined && input.totalTokens !== null) usage["total"] = input.totalTokens;
+  await devMachinesShell(
+    `from datetime import timedelta\n` +
+      `from django.utils import timezone\n` +
+      `from pi_dash.runner.models import Runner, RunnerLiveState\n` +
+      `runner = Runner.objects.get(pk=${JSON.stringify(runnerId)})\n` +
+      `event_at = (timezone.now() - timedelta(seconds=${input.lastEventAgeSecs ?? "null"})) if ${input.lastEventAgeSecs === null ? "False" : "True"} else None\n` +
+      `RunnerLiveState.objects.update_or_create(runner=runner, defaults={"last_event_at": event_at, "last_event_kind": ${devMachinesPy(input.lastEventKind)}, "last_event_summary": ${devMachinesPy(input.lastEventSummary)}, "agent_pid": ${devMachinesPy(input.agentPid)}, "agent_subprocess_alive": ${devMachinesPy(input.subprocessAlive)}, "approvals_pending": ${devMachinesPy(input.approvalsPending)}, "usage": ${devMachinesPy(usage)}, "llm_model": ${devMachinesPy(input.llmModel)}, "turn_count": ${devMachinesPy(input.turnCount)}})\n` +
+      `print("PARITY_DM_LIVE_OK")\n`
+  );
+}
+
+/** Drop a runner's observability snapshot (the unknown-badge fixture). */
+export async function serverDevMachinesClearLiveState(runnerId: string): Promise<void> {
+  await devMachinesShell(
+    `from pi_dash.runner.models import RunnerLiveState\n` +
+      `RunnerLiveState.objects.filter(runner_id=${JSON.stringify(runnerId)}).delete()\n` +
+      `print("PARITY_DM_LIVE_CLEAR_OK")\n`
+  );
+}
+
+/** Whether a machine row still exists (delete scenarios assert the drop). */
+export async function serverDevMachinesMachineExists(machineId: string): Promise<boolean> {
+  const out = await devMachinesShell(
+    `from pi_dash.runner.models import DevMachine\n` +
+      `print("PARITY_DM_EXISTS:" + ("yes" if DevMachine.objects.filter(pk=${JSON.stringify(machineId)}).exists() else "no"))\n`
+  );
+  return /^PARITY_DM_EXISTS:(.+)$/m.exec(out)?.[1]?.trim() === "yes";
+}
+
+/** Revocation flags of a machine's tokens (rotate invalidates, never deletes). */
+export async function serverDevMachinesTokenRevocations(machineId: string): Promise<boolean[]> {
+  const out = await devMachinesShell(
+    `import json\n` +
+      `from pi_dash.runner.models import MachineToken\n` +
+      `flags = [t.revoked_at is not None for t in MachineToken.objects.filter(dev_machine_id=${JSON.stringify(machineId)})]\n` +
+      `print("PARITY_DM_TOKENS:" + json.dumps(flags))\n`
+  );
+  const line = /^PARITY_DM_TOKENS:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (line === "") throw new Error(`[parity] token probe produced no row for ${machineId}.`);
+  return JSON.parse(line) as boolean[];
+}
+
+/** Revocation flags of a runner's sessions (rotate/revoke close them). */
+export async function serverDevMachinesSessionRevocations(runnerId: string): Promise<boolean[]> {
+  const out = await devMachinesShell(
+    `import json\n` +
+      `from pi_dash.runner.models import RunnerSession\n` +
+      `flags = [s.revoked_at is not None for s in RunnerSession.objects.filter(runner_id=${JSON.stringify(runnerId)})]\n` +
+      `print("PARITY_DM_SESSIONS:" + json.dumps(flags))\n`
+  );
+  const line = /^PARITY_DM_SESSIONS:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (line === "") throw new Error(`[parity] session probe produced no row for ${runnerId}.`);
+  return JSON.parse(line) as boolean[];
+}
+
+function devMachinesRowOf(raw: unknown): DevMachinesMachineRow {
+  const record = raw as Record<string, unknown>;
+  const id = devMachinesText(record["id"]);
+  if (id === null) throw new Error("[parity] machine row carried no id.");
+  return {
+    id,
+    label: devMachinesText(record["label"]) ?? "",
+    hostLabel: devMachinesText(record["host_label"]) ?? "",
+    revokedAt: devMachinesText(record["revoked_at"]),
+    runnerCount: devMachinesCount(record["runner_count"]),
+    onlineRunnerCount: devMachinesCount(record["online_runner_count"]),
+    lastSeenAt: devMachinesText(record["last_seen_at"]),
+    lastHeartbeatAt: devMachinesText(record["last_heartbeat_at"]),
+  };
+}
+
+/** Dev-machines list through the same endpoint the page polls. */
+export async function serverDevMachinesListMachines(
+  workspaceId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DevMachinesMachineRow[]> {
+  const res = await fetchTolerant(`${apiBase}/api/runners/dev-machines/?workspace=${encodeURIComponent(workspaceId)}`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] dev-machines list failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : [];
+  return rows.map(devMachinesRowOf);
+}
+
+function devMachinesLiveStateOf(raw: unknown): DevMachinesLiveState | null {
+  if (raw === null || raw === undefined) return null;
+  const record = raw as Record<string, unknown>;
+  const num = (value: unknown): number | null => (typeof value === "number" ? value : null);
+  const flag = (value: unknown): boolean | null => (typeof value === "boolean" ? value : null);
+  return {
+    lastEventAt: devMachinesText(record["last_event_at"]),
+    lastEventKind: devMachinesText(record["last_event_kind"]),
+    lastEventSummary: devMachinesText(record["last_event_summary"]),
+    agentPid: num(record["agent_pid"]),
+    subprocessAlive: flag(record["agent_subprocess_alive"]),
+    approvalsPending: num(record["approvals_pending"]),
+    inputTokens: num(record["input_tokens"]),
+    outputTokens: num(record["output_tokens"]),
+    totalTokens: num(record["total_tokens"]),
+    llmModel: devMachinesText(record["llm_model"]),
+    turnCount: num(record["turn_count"]),
+  };
+}
+
+function devMachinesDetailOf(raw: unknown): DevMachinesRunnerDetail {
+  const record = raw as Record<string, unknown>;
+  const id = devMachinesText(record["id"]);
+  const name = devMachinesText(record["name"]);
+  const status = devMachinesText(record["status"]);
+  if (id === null || name === null || status === null) {
+    throw new Error("[parity] runner detail carried no id/name/status.");
+  }
+  const meta = record["dev_metadata"] as Record<string, unknown> | undefined;
+  const pod = record["pod_detail"] as Record<string, unknown> | null | undefined;
+  const machine = record["dev_machine_detail"] as Record<string, unknown> | null | undefined;
+  const caps: unknown = record["capabilities"];
+  return {
+    id,
+    name,
+    status,
+    os: devMachinesText(record["os"]) ?? "",
+    arch: devMachinesText(record["arch"]) ?? "",
+    runnerVersion: devMachinesText(record["runner_version"]) ?? "",
+    workingDir: meta === undefined || meta === null ? null : (devMachinesText(meta["working_dir"]) ?? null),
+    protocolVersion: typeof record["protocol_version"] === "number" ? record["protocol_version"] : 0,
+    capabilities: Array.isArray(caps) ? caps.filter((entry): entry is string => typeof entry === "string") : [],
+    lastHeartbeatAt: devMachinesText(record["last_heartbeat_at"]),
+    owner: devMachinesText(record["owner"]),
+    podName: pod === null || pod === undefined ? null : (devMachinesText(pod["name"]) ?? null),
+    podProject: pod === null || pod === undefined ? null : (devMachinesText(pod["project_identifier"]) ?? null),
+    machineLabel:
+      machine === null || machine === undefined
+        ? null
+        : (devMachinesText(machine["label"]) ?? devMachinesText(machine["host_label"])),
+    connection: devMachinesText(record["connection"]),
+    enrolledAt: devMachinesText(record["enrolled_at"]),
+    revokedAt: devMachinesText(record["revoked_at"]),
+    revokedReason: devMachinesText(record["revoked_reason"]) ?? "",
+    createdAt: devMachinesText(record["created_at"]),
+    updatedAt: devMachinesText(record["updated_at"]),
+    liveState: devMachinesLiveStateOf(record["live_state"]),
+  };
+}
+
+/**
+ * Runner detail through the same endpoint the detail page polls.
+ * Resolves the status so delete scenarios can assert the 404.
+ */
+export async function serverDevMachinesRunnerDetail(
+  runnerId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; detail: DevMachinesRunnerDetail | null }> {
+  const res = await fetchTolerant(`${apiBase}/api/runners/${encodeURIComponent(runnerId)}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status === 404) return { status: 404, detail: null };
+  if (!res.ok) throw new Error(`[parity] runner detail failed with HTTP ${res.status}.`);
+  return { status: res.status, detail: devMachinesDetailOf((await res.json()) as unknown) };
+}
+
+async function devMachinesActionOf(res: Response): Promise<DevMachinesActionResult> {
+  let error: string | null = null;
+  if (!res.ok) {
+    try {
+      const payload = (await res.json()) as Record<string, unknown>;
+      error = devMachinesText(payload["error"]);
+    } catch {
+      error = null;
+    }
+  }
+  return { status: res.status, error };
+}
+
+/** Rotate probe through the app's own endpoint (409 on revoked machines). */
+export async function serverDevMachinesRotate(
+  machineId: string,
+  workspaceId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DevMachinesActionResult> {
+  const res = await mutateJSON("POST", `${apiBase}/api/runners/dev-machines/${machineId}/rotate/`, sessionCookie, {
+    workspace: workspaceId,
+  });
+  return devMachinesActionOf(res);
+}
+
+/** Revoke probe through the app's own endpoint. */
+export async function serverDevMachinesRevoke(
+  machineId: string,
+  workspaceId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DevMachinesActionResult> {
+  const res = await mutateJSON("POST", `${apiBase}/api/runners/dev-machines/${machineId}/revoke/`, sessionCookie, {
+    workspace: workspaceId,
+  });
+  return devMachinesActionOf(res);
+}
+
+/** Delete probe through the app's own endpoint (204 on success). */
+export async function serverDevMachinesDelete(
+  machineId: string,
+  workspaceId: string,
+  purgeLocal: boolean,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DevMachinesActionResult> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/runners/dev-machines/${machineId}/?workspace=${encodeURIComponent(workspaceId)}&purge_local=${purgeLocal ? "true" : "false"}`,
+    sessionCookie
+  );
+  return devMachinesActionOf(res);
+}

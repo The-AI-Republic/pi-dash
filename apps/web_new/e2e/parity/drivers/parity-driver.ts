@@ -2651,6 +2651,90 @@ export interface ParityDriver {
   schedulerWorkspaceNotFoundVisible(): Promise<boolean>;
   /** How many workspace sidebars are mounted (a second shell would double it). */
   schedulerShellCount(): Promise<number>;
+
+  // --- Dev machines, runner detail, agent activity (NEWFRONT-183, RUN-037–043) ---
+  /** Open the workspace AI-dev-machines page; resolves once the machine table settles. */
+  devMachinesOpen(workspaceSlug: string): Promise<void>;
+  /** Machine rows in display order: name, subline, status badge, counts, times, row actions. */
+  devMachinesRows(): Promise<DevMachineRow[]>;
+  /** One machine row by display name, or null when no row shows it. */
+  devMachinesRowByName(name: string): Promise<DevMachineRow | null>;
+  /** Whether the table shows its empty state. */
+  devMachinesEmptyVisible(): Promise<boolean>;
+  /** Whether the table shows its loading state. */
+  devMachinesLoadingVisible(): Promise<boolean>;
+  /** Whether the table shows its error state. */
+  devMachinesErrorVisible(): Promise<boolean>;
+  /** Serve the next machines-list GET with `rows` (empty-state shaping). */
+  devMachinesStubListOnce(rows: unknown[]): Promise<void>;
+  /** Fail the next machines-list GET once (error-state shaping). */
+  devMachinesFailListOnce(): Promise<void>;
+  /** Delay the next machines-list GET by `ms` (loading-state shaping). */
+  devMachinesDelayListOnce(ms: number): Promise<void>;
+  /** Count machines-list GETs across `windowMs` (refresh-cadence proof). */
+  devMachinesListPollCount(windowMs: number): Promise<number>;
+  /** Open the rotate confirm for the named machine's row. */
+  devMachinesOpenRotate(name: string): Promise<void>;
+  /** Open the revoke confirm for the named machine's row. */
+  devMachinesOpenRevoke(name: string): Promise<void>;
+  /** Open the delete confirm for the named machine's row. */
+  devMachinesOpenDelete(name: string): Promise<void>;
+  /** The open machine confirm modal, or null when none shows. */
+  devMachinesModal(): Promise<DevMachineModal | null>;
+  /** Whether a machine confirm modal is open. */
+  devMachinesModalVisible(): Promise<boolean>;
+  /** Activate the modal's confirm control (specs poll for the outcome). */
+  devMachinesModalConfirm(): Promise<void>;
+  /** Activate the modal's cancel/close control. */
+  devMachinesModalCancel(): Promise<void>;
+  /** Press Escape while the modal is open. */
+  devMachinesModalPressEscape(): Promise<void>;
+  /** Delay the next rotate/revoke/delete request by `ms` (in-flight shaping). */
+  devMachinesDelayActionOnce(ms: number): Promise<void>;
+  /** Fail the next rotate/revoke/delete request once (failure-toast shaping). */
+  devMachinesFailActionOnce(): Promise<void>;
+  /** Newest toast text, or null when no toast shows. */
+  devMachinesLastToast(): Promise<string | null>;
+  /** Record machine-delete request URLs until stopped (purge-flag proof). */
+  devMachinesDeleteSpyStart(): Promise<void>;
+  devMachinesDeleteSpyUrls(): Promise<string[]>;
+  devMachinesDeleteSpyStop(): Promise<void>;
+  /** Install cards in display order: platform label, command text, download link. */
+  devMachinesInstallCards(): Promise<DevMachineInstallCard[]>;
+  /** Activate the copy control of the named install card (grants clipboard first). */
+  devMachinesInstallCopy(label: string): Promise<void>;
+  /** The copy control's current label for the named card (transient confirm). */
+  devMachinesInstallCopyState(label: string): Promise<string | null>;
+  /** The install section's prerequisite note, or null when absent. */
+  devMachinesInstallPrereq(): Promise<string | null>;
+  /** Make the next clipboard write reject (copy-failure shaping). */
+  devMachinesInstallBreakClipboard(): Promise<void>;
+  /** Current clipboard text (grants clipboard permission first). */
+  devMachinesReadClipboard(): Promise<string>;
+  /** Open a runner's detail page (project scope when `projectId` is set); resolves once header, loader or error settles. */
+  runnerDetailOpen(workspaceSlug: string, runnerId: string, projectId?: string): Promise<void>;
+  /** Which detail surface shows: content, loader, or error. */
+  runnerDetailState(): Promise<"loaded" | "loading" | "error">;
+  /** Loaded detail header: runner name plus status badge, or null unless loaded. */
+  runnerDetailHeader(): Promise<{ name: string; status: string } | null>;
+  /** Metadata grid label/value pairs in display order. */
+  runnerDetailMeta(): Promise<{ label: string; value: string }[]>;
+  /** The back-to-list link target, or null when absent. */
+  runnerDetailBackHref(): Promise<string | null>;
+  /** Activate the into-chat control; resolves once navigation lands. */
+  runnerDetailOpenChat(): Promise<void>;
+  /** Count detail GETs for `runnerId` across `windowMs` (refresh-cadence proof). */
+  runnerDetailPollCount(runnerId: string, windowMs: number): Promise<number>;
+  /** Delay the next detail GET by `ms` (loading-state shaping). */
+  runnerDetailDelayOnce(ms: number): Promise<void>;
+  /** Fail the next detail GET once (error-state shaping). */
+  runnerDetailFailOnce(): Promise<void>;
+  /** The activity badge text, or null when the panel shows none. */
+  runnerActivityBadge(): Promise<string | null>;
+  /** Telemetry grid label/value pairs in display order. */
+  runnerActivityTelemetry(): Promise<{ label: string; value: string }[]>;
+  /** Whether the last-activity label visibly advances with server refetches blocked (local-tick proof). */
+  runnerActivityAgingObserved(): Promise<boolean>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -2816,4 +2900,42 @@ export interface ServedShellMarkers {
   hasPortals: boolean;
   /** Whether the served markup loads a session-recorder snippet. */
   hasRecorder: boolean;
+}
+
+/** One dev-machines table row (NEWFRONT-183, RUN-037). */
+export interface DevMachineRow {
+  /** Display name: label, else host label, else id prefix. */
+  name: string;
+  /** Secondary line under the name (host label or short id). */
+  subline: string;
+  /** Client-derived status badge text. */
+  status: string;
+  /** Active/total runner counts line. */
+  runners: string;
+  /** Rendered last-seen time. */
+  lastSeen: string;
+  /** Rendered last-heartbeat time. */
+  lastHeartbeat: string;
+  /** Row action labels in display order. */
+  actions: string[];
+}
+
+/** An open dev-machine confirm modal (NEWFRONT-183, RUN-038–040). */
+export interface DevMachineModal {
+  /** Modal title. */
+  title: string;
+  /** Warning body. */
+  body: string;
+  /** Confirm button label. */
+  confirmLabel: string;
+}
+
+/** One pidash-CLI install card (NEWFRONT-183, RUN-041). */
+export interface DevMachineInstallCard {
+  /** Platform label. */
+  label: string;
+  /** Displayed install command. */
+  command: string;
+  /** Direct download link target, or null when the card has none. */
+  downloadHref: string | null;
 }
