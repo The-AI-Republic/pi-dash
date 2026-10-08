@@ -423,6 +423,57 @@ def test_poll_cancels_run_the_offline_sweep_already_failed(db, create_user, work
 
 
 @pytest.mark.unit
+def test_poll_keeps_cancelling_run_the_offline_sweep_moved_to_cancelled(
+    db, create_user, workspace, pod, _stub_send_to_runner
+):
+    # A user cancelled the run while the laptop slept. Before the sweep the
+    # poll would redeliver ``cancellation_pending``; it must not go quiet once
+    # the sweep has finalized the run.
+    asleep = _make_runner(create_user, workspace, pod, "asleep", status=RunnerStatus.BUSY, silent_for_s=7200)
+    run = _make_run(create_user, workspace, pod, status=AgentRunStatus.CANCEL_REQUESTED, runner=asleep, age_s=7200)
+    assert tasks.fail_runs_on_offline_runners() == 1
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.CANCELLED
+    _stub_send_to_runner.reset_mock()
+
+    session_service.reap_stale_busy_runs(asleep, {"in_flight_run": str(run.id)})
+
+    _stub_send_to_runner.assert_called_once_with(
+        asleep.id,
+        {"v": 1, "type": "cancel", "run_id": str(run.id), "reason": "run_already_cancelled"},
+    )
+
+
+@pytest.mark.unit
+def test_poll_does_not_cancel_run_the_heartbeat_reaper_cancelled(db, create_user, workspace, pod, _stub_send_to_runner):
+    runner = _make_runner(create_user, workspace, pod, "alive")
+    run = _make_run(create_user, workspace, pod, status=AgentRunStatus.CANCELLED, runner=runner)
+
+    session_service.reap_stale_busy_runs(runner, {"in_flight_run": str(run.id)})
+
+    _stub_send_to_runner.assert_not_called()
+
+
+@pytest.mark.unit
+def test_release_pin_drains_remaining_pods_when_one_drain_fails(db, create_user, workspace, pod):
+    from pi_dash.db.models import Project
+
+    other_project = Project.objects.create(name="Other", identifier="OTH", workspace=workspace, created_by=create_user)
+    other_pod = Pod.default_for_project(other_project)
+    gone = _make_runner(create_user, workspace, pod, "gone", status=RunnerStatus.OFFLINE, silent_for_s=3600)
+    gone_too = _make_runner(
+        create_user, workspace, other_pod, "gone-too", status=RunnerStatus.OFFLINE, silent_for_s=3600
+    )
+    _make_run(create_user, workspace, pod, pinned_runner=gone, age_s=3600)
+    _make_run(create_user, workspace, other_pod, pinned_runner=gone_too, age_s=3600)
+
+    with patch("pi_dash.runner.services.matcher.drain_pod_by_id", side_effect=RuntimeError("boom")) as drain:
+        assert tasks.release_pins_on_offline_runners() == 2
+
+    assert {call.args[0] for call in drain.call_args_list} == {pod.id, other_pod.id}
+
+
+@pytest.mark.unit
 def test_poll_does_not_cancel_run_that_failed_for_another_reason(db, create_user, workspace, pod, _stub_send_to_runner):
     runner = _make_runner(create_user, workspace, pod, "alive")
     run = _make_run(

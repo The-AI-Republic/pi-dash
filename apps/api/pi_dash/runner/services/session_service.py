@@ -54,7 +54,8 @@ OFFLINE_GRACE_SECS = 60
 # crash detection comes from missing heartbeats anyway.
 ASSIGN_DELIVERY_GRACE_SECS = 60
 
-# ``error_code`` on runs failed by ``runner.fail_runs_on_offline_runners``.
+# ``error_code`` on runs that ``runner.fail_runs_on_offline_runners`` moved to
+# a terminal status (FAILED, or CANCELLED for a pending cancellation).
 RUNNER_OFFLINE_ERROR_CODE = "runner_offline"
 
 
@@ -216,14 +217,16 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
                 cancel_reason = "cancellation_pending"
             elif (
                 claimed is not None
-                and claimed["status"] == AgentRunStatus.FAILED
+                and claimed["status"] in (AgentRunStatus.FAILED, AgentRunStatus.CANCELLED)
                 and claimed["error_code"] == RUNNER_OFFLINE_ERROR_CODE
             ):
-                # The offline sweep failed this run while the daemon was
+                # The offline sweep finalized this run while the daemon was
                 # silent (asleep, partitioned) and the daemon is still working
                 # on it. Nothing else tells it to stop on the poll path, and
-                # the issue may already have a replacement run elsewhere.
-                cancel_reason = "run_already_failed"
+                # the issue may already have a replacement run elsewhere. For
+                # a run that was CANCEL_REQUESTED this keeps the redelivery
+                # above going after the sweep moved it to CANCELLED.
+                cancel_reason = f"run_already_{claimed['status']}"
         if cancel_reason is not None:
             # Re-enqueue on every poll until the daemon acknowledges. This
             # recovers when the initial best-effort enqueue happened during a
@@ -261,12 +264,19 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
     )
 
 
-def _finish_unclaimed_runs(runner: Runner, stale, *, detail: str, error_code: str) -> int:
+def _finish_unclaimed_runs(
+    runner: Runner, stale, *, detail: str, error_code: str, stamp_cancelled: bool = False
+) -> int:
     """Terminate ``stale`` BUSY runs that ``runner`` is no longer serving.
 
     Shared by the heartbeat reaper (the daemon stopped reporting the run) and
     the offline-runner sweep (the daemon stopped reporting at all). Returns
     the number of runs moved to a terminal status.
+
+    ``stamp_cancelled`` also records ``error_code`` on the runs that end
+    CANCELLED. The heartbeat reaper leaves it off: there the daemon has
+    confirmed it stopped. The offline sweep has no such confirmation, and the
+    stamp is how the poll path recognises the run if the daemon returns.
     """
     from django.db import transaction
 
@@ -279,10 +289,12 @@ def _finish_unclaimed_runs(runner: Runner, stale, *, detail: str, error_code: st
     stopped_cancel_ids = list(stale.filter(status=AgentRunStatus.CANCEL_REQUESTED).values_list("id", flat=True))
     stopped_cancel_pod_ids = set(stale.filter(status=AgentRunStatus.CANCEL_REQUESTED).values_list("pod_id", flat=True))
     if stopped_cancel_ids:
+        cancelled_updates = {"error_code": error_code} if stamp_cancelled else {}
         AgentRun.objects.filter(id__in=stopped_cancel_ids).update(
             status=AgentRunStatus.CANCELLED,
             ended_at=timezone.now(),
             queue_position=None,
+            **cancelled_updates,
         )
         stale = stale.exclude(id__in=stopped_cancel_ids)
 

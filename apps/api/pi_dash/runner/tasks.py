@@ -171,7 +171,12 @@ def release_pins_on_offline_runners() -> int:
         if run.pod_id is not None:
             pod_ids.add(run.pod_id)
     for pod_id in pod_ids:
-        matcher.drain_pod_by_id(pod_id)
+        # The runs are already unpinned, so this sweep will not come back to
+        # them: one pod's failed drain must not skip the others.
+        try:
+            matcher.drain_pod_by_id(pod_id)
+        except Exception:
+            logger.exception("release_pins_on_offline_runners: drain failed for pod %s", pod_id)
     if released:
         logger.info("release_pins_on_offline_runners unpinned %s queued run(s)", released)
     return released
@@ -228,6 +233,7 @@ def fail_runs_on_offline_runners() -> int:
                     stale,
                     detail=f"runner offline: no heartbeat for >{grace}s while this run was assigned to it",
                     error_code=session_service.RUNNER_OFFLINE_ERROR_CODE,
+                    stamp_cancelled=True,
                 )
         except Exception:
             logger.exception("fail_runs_on_offline_runners: failed for runner %s", runner_id)
