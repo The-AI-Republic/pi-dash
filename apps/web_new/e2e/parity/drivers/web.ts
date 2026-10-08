@@ -13859,4 +13859,158 @@ export class WebDriver implements ParityDriver {
       hasRecorder: present("clarity-tracking") || present("clarity.ms"),
     };
   }
+
+  // --- Desktop-only chat + agent runtime (NEWFRONT-182, RUN-033–036,
+  // --- RUN-044–045, RUN-047). Selectors follow the runners area
+  // --- behavior observed on the running old app: the side nav hosts an
+  // --- overview link plus one chat link per connected runner, the chat
+  // --- page pairs a history panel with a composer, and the desktop-only
+  // --- seams (built-in section, inline prompts, mode control, runtime
+  // --- banner, native bridge) are absent throughout.
+
+  /** URLs logged by the desktop-runtime request spy while it runs. */
+  private desktopRuntimeSpyUrlsLogged: string[] = [];
+
+  /** Route patterns the desktop-runtime spy watches (all fall through). */
+  private static readonly DESKTOP_RUNTIME_SPY_PATTERNS = [
+    "**/api/users/me/ai-assistant/**",
+    "**/api/v1/runner/dev-machines/desktop-enroll/**",
+    "**/api/runners/chat/**",
+  ];
+
+  private desktopRuntimeSideNav(): Locator {
+    return this.page.locator("aside", { hasText: "AI Agents" });
+  }
+
+  private desktopRuntimeHistoryPanel(): Locator {
+    return this.page.locator("aside", { has: this.page.getByText("Chats", { exact: true }) });
+  }
+
+  private desktopRuntimeComposerBox(): Locator {
+    return this.page.locator('textarea[placeholder*="Message this runner"]');
+  }
+
+  private desktopRuntimeThreadColumn(): Locator {
+    return this.page.locator("div.flex.min-w-0.flex-1.flex-col.overflow-hidden.px-4");
+  }
+
+  private desktopRuntimeListColumn(): Locator {
+    return this.desktopRuntimeThreadColumn().locator("div.flex.flex-col.gap-3");
+  }
+
+  async desktopRuntimeOpenRunners(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/runners`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.waitForContent("runners side nav", () =>
+      this.desktopRuntimeSideNav().first().waitFor({ timeout: 60_000 })
+    );
+  }
+
+  async desktopRuntimeRailSectionHeaders(): Promise<string[]> {
+    const headers = this.desktopRuntimeSideNav().locator("nav > div.uppercase");
+    const total = await headers.count();
+    const texts: string[] = [];
+    for (let i = 0; i < total; i++) {
+      texts.push((await headers.nth(i).innerText()).trim());
+    }
+    return texts;
+  }
+
+  async desktopRuntimeRailChatLinks(): Promise<{ name: string; href: string }[]> {
+    const links = this.desktopRuntimeSideNav().locator('a[href*="/chat/"]');
+    const total = await links.count();
+    const contacts: { name: string; href: string }[] = [];
+    for (let i = 0; i < total; i++) {
+      const link = links.nth(i);
+      contacts.push({
+        name: (await link.innerText()).trim(),
+        href: (await link.getAttribute("href")) ?? "",
+      });
+    }
+    return contacts;
+  }
+
+  async desktopRuntimeOpenChat(workspaceSlug: string, runnerId: string, sessionId?: string): Promise<void> {
+    const suffix = sessionId === undefined ? "" : `?sessionId=${encodeURIComponent(sessionId)}`;
+    await this.page.goto(`/${workspaceSlug}/runners/chat/${runnerId}${suffix}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on the history heading plus the composer: both render for
+    // known and unknown runners. Generous bounds: the first hit compiles
+    // the route on the dev server, slow under parallel oracle runs.
+    await this.waitForContent("desktop-runtime chat history", () =>
+      this.desktopRuntimeHistoryPanel().getByText("Chats", { exact: true }).first().waitFor({ timeout: 60_000 })
+    );
+    await this.waitForContent("desktop-runtime chat composer", () =>
+      this.desktopRuntimeComposerBox().first().waitFor({ timeout: 60_000 })
+    );
+  }
+
+  async desktopRuntimeApprovalPromptVisible(): Promise<boolean> {
+    return (await this.page.getByRole("alertdialog", { name: "Approval requested" }).count()) > 0;
+  }
+
+  async desktopRuntimeApprovalModeVisible(): Promise<boolean> {
+    return (await this.page.getByRole("group", { name: "Approval mode" }).count()) > 0;
+  }
+
+  async desktopRuntimeRuntimeBannerVisible(): Promise<boolean> {
+    // The runtime banner pins itself to the viewport bottom-center; toast
+    // stacks anchor to a corner instead, so fixed positioning tells them
+    // apart without repeating either one's copy.
+    return (await this.page.locator('div[role="status"].fixed').count()) > 0;
+  }
+
+  async desktopRuntimeIsTauriPresent(): Promise<boolean> {
+    return this.page.evaluate(() => "__TAURI__" in window);
+  }
+
+  async desktopRuntimeChatBubbles(): Promise<{ role: string; text: string }[]> {
+    const column = this.desktopRuntimeListColumn();
+    if ((await column.count()) === 0) return [];
+    return column.evaluate((element) => {
+      const rows: { role: string; text: string }[] = [];
+      for (const child of Array.from(element.children)) {
+        const node = child as HTMLElement;
+        // Activity-strip items are direct rounded children, not bubbles.
+        if (node.classList.contains("rounded")) continue;
+        const text = (node.innerText ?? "").trim();
+        // The bottom scroll anchor carries no text.
+        if (text === "") continue;
+        if (node.querySelector(".justify-end") !== null) rows.push({ role: "user", text });
+        else if (node.querySelector(".justify-start") !== null) rows.push({ role: "assistant", text });
+        else rows.push({ role: "status", text });
+      }
+      return rows;
+    });
+  }
+
+  async desktopRuntimeStorageKeys(): Promise<{ local: string[]; session: string[] }> {
+    return this.page.evaluate(() => ({
+      local: Object.keys(window.localStorage),
+      session: Object.keys(window.sessionStorage),
+    }));
+  }
+
+  async desktopRuntimeStartRequestSpy(): Promise<void> {
+    this.desktopRuntimeSpyUrlsLogged = [];
+    for (const pattern of WebDriver.DESKTOP_RUNTIME_SPY_PATTERNS) {
+      // One logging route per watched pattern: records the URL, then falls
+      // through so the request still reaches the server.
+      await this.page.route(pattern, async (route) => {
+        this.desktopRuntimeSpyUrlsLogged.push(route.request().url());
+        await route.fallback();
+      });
+    }
+  }
+
+  async desktopRuntimeSpyUrls(): Promise<string[]> {
+    return [...this.desktopRuntimeSpyUrlsLogged];
+  }
+
+  async desktopRuntimeStopRequestSpy(): Promise<void> {
+    for (const pattern of WebDriver.DESKTOP_RUNTIME_SPY_PATTERNS) {
+      await this.page.unroute(pattern);
+    }
+    this.desktopRuntimeSpyUrlsLogged = [];
+  }
 }

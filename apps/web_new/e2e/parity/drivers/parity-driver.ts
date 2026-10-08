@@ -2518,6 +2518,39 @@ export interface ParityDriver {
   notFoundGoHome(): Promise<void>;
   /** Presence markers in the served (pre-hydration) document for a path. */
   servedShellMarkers(path: string): Promise<ServedShellMarkers>;
+
+  // --- Desktop-only chat + agent runtime (NEWFRONT-182, RUN-033–036,
+  // --- RUN-044–045, RUN-047). Appended; existing methods above are
+  // --- untouched per the shared driver contract. The oracle proves the
+  // --- web-observable side of desktop-only rows: absent contacts,
+  // --- prompts, controls and banners, plus the absence of local-IPC
+  // --- markers and desktop-endpoint traffic.
+  /** Open the workspace runners area; requires an authenticated session. */
+  desktopRuntimeOpenRunners(workspaceSlug: string): Promise<void>;
+  /** Section headers rendered in the runners side nav, in display order. */
+  desktopRuntimeRailSectionHeaders(): Promise<string[]>;
+  /** Chat contacts rendered in the runners side nav (name plus link target). */
+  desktopRuntimeRailChatLinks(): Promise<{ name: string; href: string }[]>;
+  /** Open one runner's chat page; requires an authenticated session. */
+  desktopRuntimeOpenChat(workspaceSlug: string, runnerId: string, sessionId?: string): Promise<void>;
+  /** Whether an inline approval prompt shows above the chat composer. */
+  desktopRuntimeApprovalPromptVisible(): Promise<boolean>;
+  /** Whether the approval-mode control shows in the chat header. */
+  desktopRuntimeApprovalModeVisible(): Promise<boolean>;
+  /** Whether the background runtime's status banner is rendered. */
+  desktopRuntimeRuntimeBannerVisible(): Promise<boolean>;
+  /** Whether the page exposes the desktop native bridge. */
+  desktopRuntimeIsTauriPresent(): Promise<boolean>;
+  /** Chat transcript bubbles (role plus text), in display order. */
+  desktopRuntimeChatBubbles(): Promise<{ role: string; text: string }[]>;
+  /** Web-storage keys the app currently holds (residue checks). */
+  desktopRuntimeStorageKeys(): Promise<{ local: string[]; session: string[] }>;
+  /** Start logging every request URL the page issues. */
+  desktopRuntimeStartRequestSpy(): Promise<void>;
+  /** Request URLs logged since the spy started. */
+  desktopRuntimeSpyUrls(): Promise<string[]>;
+  /** Stop the request spy and forget the logged URLs. */
+  desktopRuntimeStopRequestSpy(): Promise<void>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

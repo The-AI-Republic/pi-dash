@@ -4106,4 +4106,47 @@ export class WebNewDriver implements ParityDriver {
   async servedShellMarkers(_path: string): Promise<ServedShellMarkers> {
     return todo("servedShellMarkers");
   }
+
+  // --- Desktop-only chat + agent runtime (NEWFRONT-182). Throwing stubs
+  // --- per the shared driver contract; the runners area fills these in.
+
+  async desktopRuntimeOpenRunners(_workspaceSlug: string): Promise<void> {
+    return todo("desktopRuntimeOpenRunners");
+  }
+  async desktopRuntimeRailSectionHeaders(): Promise<string[]> {
+    return todo("desktopRuntimeRailSectionHeaders");
+  }
+  async desktopRuntimeRailChatLinks(): Promise<{ name: string; href: string }[]> {
+    return todo("desktopRuntimeRailChatLinks");
+  }
+  async desktopRuntimeOpenChat(_workspaceSlug: string, _runnerId: string, _sessionId?: string): Promise<void> {
+    return todo("desktopRuntimeOpenChat");
+  }
+  async desktopRuntimeApprovalPromptVisible(): Promise<boolean> {
+    return todo("desktopRuntimeApprovalPromptVisible");
+  }
+  async desktopRuntimeApprovalModeVisible(): Promise<boolean> {
+    return todo("desktopRuntimeApprovalModeVisible");
+  }
+  async desktopRuntimeRuntimeBannerVisible(): Promise<boolean> {
+    return todo("desktopRuntimeRuntimeBannerVisible");
+  }
+  async desktopRuntimeIsTauriPresent(): Promise<boolean> {
+    return todo("desktopRuntimeIsTauriPresent");
+  }
+  async desktopRuntimeChatBubbles(): Promise<{ role: string; text: string }[]> {
+    return todo("desktopRuntimeChatBubbles");
+  }
+  async desktopRuntimeStorageKeys(): Promise<{ local: string[]; session: string[] }> {
+    return todo("desktopRuntimeStorageKeys");
+  }
+  async desktopRuntimeStartRequestSpy(): Promise<void> {
+    return todo("desktopRuntimeStartRequestSpy");
+  }
+  async desktopRuntimeSpyUrls(): Promise<string[]> {
+    return todo("desktopRuntimeSpyUrls");
+  }
+  async desktopRuntimeStopRequestSpy(): Promise<void> {
+    return todo("desktopRuntimeStopRequestSpy");
+  }
 }
