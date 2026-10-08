@@ -2735,6 +2735,243 @@ export interface ParityDriver {
   runnerActivityTelemetry(): Promise<{ label: string; value: string }[]>;
   /** Whether the last-activity label visibly advances with server refetches blocked (local-tick proof). */
   runnerActivityAgingObserved(): Promise<boolean>;
+
+  // --- Project scheduler installs + detail + calendar (NEWFRONT-185, AGT-007..021, AGT-062).
+  /** Open one project's install list; settles on the table for any project role. */
+  schedulerOpenProjectList(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Install list rows in display order (data rows only, never the empty row). */
+  schedulerProjectRows(): Promise<SchedulerProjectRow[]>;
+  /** Whether the install list shows its empty-state row. */
+  schedulerProjectEmptyVisible(): Promise<boolean>;
+  /** Whether the list header offers the New Scheduler control. */
+  schedulerProjectNewVisible(): Promise<boolean>;
+  /** Open an install's detail by clicking its list row; waits for the detail. */
+  schedulerProjectRowOpen(handle: string): Promise<void>;
+  /** Current enable-switch state of one list row. */
+  schedulerProjectToggleState(handle: string): Promise<{ checked: boolean; disabled: boolean }>;
+  /** Flip one list row's enable switch; resolves on click (the scenario polls for the outcome). */
+  schedulerProjectToggle(handle: string): Promise<void>;
+  /**
+   * Stall the next toggle PATCH and report whether the switch gates input
+   * mid-flight (the double-submit block). The stall releases before return;
+   * the scenario polls the server row for the flip itself.
+   */
+  schedulerProjectToggleFlightGated(handle: string): Promise<boolean>;
+  /** Open the edit dialog for one install from its list row; waits for the form. */
+  schedulerProjectOpenEdit(handle: string): Promise<void>;
+  /** Open the uninstall confirmation for one install from its list row; waits for the dialog. */
+  schedulerProjectOpenUninstall(handle: string): Promise<void>;
+  /** Full text of the open uninstall confirmation. */
+  schedulerUninstallDialogText(): Promise<string>;
+  /** Confirm the open uninstall; resolves once the dialog closes or a failure notice shows. */
+  schedulerConfirmUninstall(): Promise<void>;
+  /** Whether the uninstall confirmation is currently open. */
+  schedulerUninstallOpen(): Promise<boolean>;
+  /** Dismiss the open uninstall via its cancel control. */
+  schedulerCancelUninstall(): Promise<void>;
+  /** Open the New Scheduler modal; settles once its title shows. */
+  schedulerOpenProjectInstall(): Promise<void>;
+  /** Which path the open New Scheduler modal is on (or the dead-end variant). */
+  schedulerProjectInstallMode(): Promise<"install" | "create" | "dead-end">;
+  /** Full text of the dead-end variant (nothing installable, cannot author). */
+  schedulerProjectInstallDeadEndText(): Promise<string>;
+  /** Mode tabs offered by the open modal (empty when the viewer cannot author). */
+  schedulerProjectInstallTabs(): Promise<string[]>;
+  /** Switch the open modal to one mode path; waits for its fields. */
+  schedulerProjectInstallSelectTab(tab: "Install existing" | "Create new"): Promise<void>;
+  /** Definitions offered by the open modal's install-path picker, in display order. */
+  schedulerProjectInstallOptions(): Promise<SchedulerProjectInstallOption[]>;
+  /** Pick one definition in the install-path picker by handle. */
+  schedulerProjectInstallSelect(handle: string): Promise<void>;
+  /** Fill install-path schedule fields; omitted fields are left untouched. */
+  schedulerProjectInstallFillSchedule(input: {
+    dtstart?: string;
+    tzid?: string;
+    rrule?: string;
+    extraContext?: string;
+  }): Promise<void>;
+  /** Current values of the install-path schedule fields. */
+  schedulerProjectInstallScheduleValues(): Promise<SchedulerScheduleValues>;
+  /** The live recurrence sentence under the install-path RRULE field. */
+  schedulerProjectInstallHumanizer(): Promise<string>;
+  /** Set the install-path enabled switch to the desired state. */
+  schedulerProjectInstallSetEnabled(enabled: boolean): Promise<void>;
+  /** Inline validation texts currently shown in the open modal. */
+  schedulerProjectInstallErrors(): Promise<string[]>;
+  /** Submit the open modal; resolves on click (a rejected submit keeps it open). */
+  schedulerProjectInstallSubmit(): Promise<void>;
+  /** Whether the open modal's submit control is currently disabled. */
+  schedulerProjectInstallSubmitDisabled(): Promise<boolean>;
+  /** Whether the New Scheduler modal is currently open. */
+  schedulerProjectInstallOpen(): Promise<boolean>;
+  /** Close the open modal via its cancel control. */
+  schedulerCloseProjectInstall(): Promise<void>;
+  /** Fill the project-side create form's description field. */
+  schedulerProjectCreateFillDescription(description: string): Promise<void>;
+  /** Fill the project-side create form's prompt field. */
+  schedulerProjectCreateFillPrompt(prompt: string): Promise<void>;
+  /** Current values of every edit-dialog field (for pre-fill assertions). */
+  schedulerProjectEditValues(): Promise<SchedulerBindingValues>;
+  /** Fill edit-dialog schedule fields; omitted fields are left untouched. */
+  schedulerProjectEditFill(input: {
+    dtstart?: string;
+    tzid?: string;
+    rrule?: string;
+    extraContext?: string;
+  }): Promise<void>;
+  /** Set the edit dialog's enabled switch to the desired state. */
+  schedulerProjectEditSetEnabled(enabled: boolean): Promise<void>;
+  /** The live recurrence sentence under the edit dialog's RRULE field. */
+  schedulerProjectEditHumanizer(): Promise<string>;
+  /** Inline validation texts currently shown in the edit dialog. */
+  schedulerProjectEditErrors(): Promise<string[]>;
+  /** Submit the edit dialog; resolves on click (a rejected submit keeps it open). */
+  schedulerProjectEditSubmit(): Promise<void>;
+  /** Whether the edit dialog is currently open. */
+  schedulerProjectEditOpen(): Promise<boolean>;
+  /** Close the edit dialog via its cancel control. */
+  schedulerCloseProjectEdit(): Promise<void>;
+  /** Outcome-mode options in the open modal, with the help line for the current choice. */
+  schedulerOutcomeState(): Promise<{ options: { label: string; checked: boolean }[]; help: string }>;
+  /** Pick one outcome-mode option in the open modal by label. */
+  schedulerOutcomeSelect(label: string): Promise<void>;
+  /** Pod options in the open modal (the empty value is the project default). */
+  schedulerPodOptions(): Promise<{ value: string; label: string; selected: boolean }[]>;
+  /** Pick one pod in the open modal by option value ("" for the project default). */
+  schedulerPodSelect(value: string): Promise<void>;
+  /** Whether the open modal's pod selector is currently disabled (pods loading). */
+  schedulerPodDisabled(): Promise<boolean>;
+  /**
+   * Stall the pod listing, open the New Scheduler modal, and report whether
+   * the pod selector disables while pods load (then closes the modal).
+   * Assumes the install list with a visible New control.
+   */
+  schedulerPodLoadingObserved(): Promise<boolean>;
+  /** Open one install's detail page; settles on the config, or the removed-install panel. */
+  schedulerOpenProjectBinding(workspaceSlug: string, projectId: string, bindingId: string): Promise<void>;
+  /** Detail header facts (name, handle, badges, which management controls show). */
+  schedulerBindingHeader(): Promise<SchedulerBindingHeader>;
+  /** Detail configuration grid as label/value pairs in display order. */
+  schedulerBindingConfig(): Promise<{ label: string; value: string }[]>;
+  /** The stored-rule tooltip behind the detail's Schedule row. */
+  schedulerBindingScheduleTitle(): Promise<string>;
+  /** The last-error panel text, or null when no error is recorded. */
+  schedulerBindingLastError(): Promise<string | null>;
+  /** Project-context block text, or null when the install carries none. */
+  schedulerBindingExtraContext(): Promise<string | null>;
+  /** Whether the resolved-prompt toggle shows, and whether the prompt is revealed. */
+  schedulerBindingPromptState(): Promise<{ toggleVisible: boolean; revealed: boolean }>;
+  /** Toggle the resolved-prompt reveal. */
+  schedulerBindingPromptToggle(): Promise<void>;
+  /** The revealed resolved-prompt text (toggle it open first). */
+  schedulerBindingPromptText(): Promise<string>;
+  /** Run-history rows in display order. */
+  schedulerBindingRuns(): Promise<SchedulerBindingRunRow[]>;
+  /** The run-history empty-state text, or null when rows show. */
+  schedulerBindingRunsEmpty(): Promise<string | null>;
+  /** The run-history header count text ("N runs"). */
+  schedulerBindingRunsCount(): Promise<string>;
+  /** Run-history pager state, or null when no pager renders. */
+  schedulerBindingRunsPager(): Promise<{ text: string; prevDisabled: boolean; nextDisabled: boolean } | null>;
+  /** Step the run-history pager; waits for the page to settle. */
+  schedulerBindingRunsPage(direction: "next" | "prev"): Promise<void>;
+  /** Wait for the next run-history refetch; resolves on the response. */
+  schedulerBindingWaitRunsRefetch(): Promise<void>;
+  /** Whether the removed-install panel shows (with its way back). */
+  schedulerBindingRemovedVisible(): Promise<boolean>;
+  /** Follow the removed-install panel's way back; waits for the list. */
+  schedulerBindingBackToList(): Promise<void>;
+  /** Current enable-switch state in the detail configuration. */
+  schedulerBindingToggleState(): Promise<{ checked: boolean; disabled: boolean }>;
+  /** Flip the detail enable switch; resolves on click. */
+  schedulerBindingToggle(): Promise<void>;
+  /** Open the edit dialog from the detail page; waits for the form. */
+  schedulerBindingOpenEdit(): Promise<void>;
+  /** Open the uninstall confirmation from the detail page; waits for the dialog. */
+  schedulerBindingOpenUninstall(): Promise<void>;
+  /** Open one project's firing calendar; settles on the grid or the empty state. */
+  schedulerOpenProjectCalendar(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Which calendar view is active. */
+  schedulerCalendarView(): Promise<"week" | "month">;
+  /** Switch the calendar to one view; waits for the grid to settle. */
+  schedulerCalendarSetView(view: "week" | "month"): Promise<void>;
+  /** The calendar header's month-year label. */
+  schedulerCalendarTitle(): Promise<string>;
+  /** Step the calendar one period; waits for the grid to settle. */
+  schedulerCalendarStep(direction: "prev" | "next"): Promise<void>;
+  /** Jump the calendar back to today; waits for the grid to settle. */
+  schedulerCalendarToday(): Promise<void>;
+  /** Whether the calendar shows its no-installs empty state. */
+  schedulerCalendarEmptyVisible(): Promise<boolean>;
+  /** Whether the calendar shows its too-many-occurrences hint. */
+  schedulerCalendarTruncatedVisible(): Promise<boolean>;
+  /** Month-grid occurrence blocks in display order. */
+  schedulerCalendarMonthBlocks(): Promise<SchedulerCalendarBlock[]>;
+  /** Month-grid overflow controls ("+ N more" / density rollups) in display order. */
+  schedulerCalendarMonthOverflow(): Promise<string[]>;
+  /** Whether the month grid marks today. */
+  schedulerCalendarMonthTodayMarked(): Promise<boolean>;
+  /** Week-grid occurrence blocks in display order. */
+  schedulerCalendarWeekBlocks(): Promise<SchedulerCalendarBlock[]>;
+  /** Whether the week grid's day headers mark today. */
+  schedulerCalendarWeekTodayMarked(): Promise<boolean>;
+  /** The week grid's current-time line offset in px, or null when absent. */
+  schedulerCalendarTimeLineTop(): Promise<number | null>;
+  /** Click one calendar block by scheduler name; waits for the occurrence panel. */
+  schedulerCalendarClickBlock(name: string): Promise<void>;
+  /** Whether any calendar block is draggable (the row says none are). */
+  schedulerCalendarAnyDraggable(): Promise<boolean>;
+  /** Export/download/print/share controls on the calendar, if any (the row says none). */
+  schedulerCalendarExportControls(): Promise<string[]>;
+  /** Whether the visibility rail is currently rendered. */
+  schedulerRailVisible(): Promise<boolean>;
+  /** Visibility-rail rows in display order. */
+  schedulerRailRows(): Promise<{ name: string; checked: boolean }[]>;
+  /** Toggle one rail row by scheduler name. */
+  schedulerRailToggle(name: string): Promise<void>;
+  /** Show every scheduler on the rail. */
+  schedulerRailShowAll(): Promise<void>;
+  /** Hide every scheduler on the rail. */
+  schedulerRailHideAll(): Promise<void>;
+  /**
+   * Toggle `name` off in this tab, open the same calendar in a second tab,
+   * and report whether the second tab loads with the choice applied (then
+   * closes it). Assumes the calendar is already open in this tab.
+   */
+  schedulerRailCrossTabPersists(workspaceSlug: string, projectId: string, name: string): Promise<boolean>;
+  /**
+   * Narrow the viewport below the desktop breakpoint and report whether the
+   * rail hides (restores the default viewport before returning).
+   */
+  schedulerRailNarrowHidden(): Promise<boolean>;
+  /** Whether the occurrence panel is currently open. */
+  schedulerDrawerOpen(): Promise<boolean>;
+  /** Occurrence panel rows as label/value pairs in display order. */
+  schedulerDrawerRows(): Promise<{ label: string; value: string }[]>;
+  /** Occurrence panel heading: the state line plus the scheduler name. */
+  schedulerDrawerHeading(): Promise<{ state: string; name: string }>;
+  /** Links offered by the occurrence panel, in display order. */
+  schedulerDrawerLinks(): Promise<string[]>;
+  /** Close the occurrence panel via its dismiss control. */
+  schedulerDrawerClose(): Promise<void>;
+  /** Whether the occurrence panel offers edit-binding (future firing + project admin). */
+  schedulerDrawerEditVisible(): Promise<boolean>;
+  /** Open the edit dialog from the occurrence panel; waits for the form. */
+  schedulerDrawerEdit(): Promise<void>;
+  /** Follow the occurrence panel's parent-install link; waits for the detail. */
+  schedulerDrawerViewScheduler(): Promise<void>;
+  /** Open the bare project schedulers section; the app lands on the calendar. */
+  schedulerOpenProjectSection(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Section tabs with their highlight state, in display order. */
+  schedulerSectionTabs(): Promise<{ label: string; active: boolean }[]>;
+  /** Follow one section tab; waits for its content to settle. */
+  schedulerSectionOpenTab(tab: "List" | "Calendar"): Promise<void>;
+  /** Open the project-settings schedulers variant. */
+  schedulerOpenSettingsSchedulers(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Whether the settings variant shows the installs panel (admins) or the refusal (others). */
+  schedulerSettingsPanelVisible(): Promise<boolean>;
+  /** Export/download/print/share controls on the run-history table, if any (the row says none). */
+  schedulerRunsExportControls(): Promise<string[]>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -2772,6 +3009,88 @@ export interface SchedulerInstallOption {
   checked: boolean;
   /** Already installed: checked and cannot be toggled. */
   locked: boolean;
+}
+
+/** One project install-list row: the user-visible install facts. */
+export interface SchedulerProjectRow {
+  /** Display name. */
+  name: string;
+  /** URL handle (the slug). */
+  handle: string;
+  /** Plain-language schedule sentence. */
+  schedule: string;
+  /** Stored-rule tooltip behind the schedule cell. */
+  scheduleTitle: string;
+  /** Next-run cell text (locale-rendered; scenarios assert presence, not format). */
+  nextRun: string;
+  /** Last-run cell text (locale-rendered, or the never-fired mark). */
+  lastRun: string;
+  /** Status mark text (e.g. Enabled). */
+  status: string;
+  /** Last-update cell text (locale-rendered; scenarios assert presence, not format). */
+  updated: string;
+  /** Whether the row offers Edit/Uninstall management controls. */
+  manageVisible: boolean;
+}
+
+/** One definition offered by the project install-path picker. */
+export interface SchedulerProjectInstallOption {
+  name: string;
+  handle: string;
+  selected: boolean;
+}
+
+/** Current values of the shared install/edit schedule fields. */
+export interface SchedulerScheduleValues {
+  /** `datetime-local` input value ("YYYY-MM-DDTHH:mm", browser-local). */
+  dtstart: string;
+  tzid: string;
+  rrule: string;
+  extraContext: string;
+  enabled: boolean;
+}
+
+/** Current values of every edit-dialog field. */
+export interface SchedulerBindingValues extends SchedulerScheduleValues {
+  /** Visible label of the checked outcome-mode option. */
+  outcomeLabel: string;
+  /** Selected pod option value ("" is the project default). */
+  pod: string;
+}
+
+/** Install-detail header facts. */
+export interface SchedulerBindingHeader {
+  name: string;
+  handle: string;
+  /** Badge texts (origin mark, workspace-disabled mark). */
+  badges: string[];
+  workspaceLinkVisible: boolean;
+  editVisible: boolean;
+  uninstallVisible: boolean;
+}
+
+/** One install-detail run-history row. */
+export interface SchedulerBindingRunRow {
+  started: string;
+  ended: string;
+  status: string;
+  duration: string;
+  pod: string;
+  result: string;
+}
+
+/** One calendar occurrence block. */
+export interface SchedulerCalendarBlock {
+  /** Containing day: the month-cell numeral ("9") or the week day-header text. */
+  day: string;
+  /** Block time text (locale-rendered). */
+  time: string;
+  /** Scheduler display name. */
+  name: string;
+  /** Block tooltip (name, time, status). */
+  title: string;
+  /** Computed block background color (past grey vs scheduler tint). */
+  background: string;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

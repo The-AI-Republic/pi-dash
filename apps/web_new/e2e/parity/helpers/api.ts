@@ -8267,11 +8267,21 @@ export interface ParitySchedulerBinding {
   dtstart: string;
   tzid: string;
   rrule: string;
+  rdates: string[];
+  exdates: string[];
   extra_context: string;
   enabled: boolean;
   outcome_mode: string;
   pod: string | null;
+  pod_name: string | null;
   next_run_at: string | null;
+  last_run: string | null;
+  last_run_status: string | null;
+  last_run_ended_at: string | null;
+  last_error: string;
+  actor: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 /** Binding detail adds the composed run prompt plus the parent's live flags. */
@@ -8289,9 +8299,13 @@ export interface ParitySchedulerBindingInput {
   dtstart: string;
   tzid?: string;
   rrule: string;
+  rdates?: string[];
+  exdates?: string[];
   extra_context?: string;
   enabled?: boolean;
   outcome_mode?: string;
+  /** Pod override id, or null/omitted for the project default. */
+  pod?: string | null;
 }
 
 function bindingRows(payload: unknown): ParitySchedulerBinding[] {
@@ -8896,4 +8910,172 @@ export async function serverDevMachinesDelete(
     sessionCookie
   );
   return devMachinesActionOf(res);
+}
+
+/** Binding patch payload; scheduler/project stay out (uninstall + reinstall to swap). */
+export type ParitySchedulerBindingPatch = Partial<
+  Pick<
+    ParitySchedulerBinding,
+    "dtstart" | "tzid" | "rrule" | "rdates" | "exdates" | "extra_context" | "enabled" | "outcome_mode" | "pod"
+  >
+>;
+
+/** Patch an install (project admin only); resolves with the detail-shaped row. */
+export async function serverPatchBinding(
+  workspaceSlug: string,
+  projectId: string,
+  bindingId: string,
+  sessionCookie: string,
+  patch: ParitySchedulerBindingPatch,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParitySchedulerBindingDetail> {
+  const res = await serverPatchBindingStatus(workspaceSlug, projectId, bindingId, sessionCookie, patch, apiBase);
+  if (res.status !== 200) {
+    throw new Error(`[parity] binding patch failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+  return res.payload as ParitySchedulerBindingDetail;
+}
+
+/** Patch an install; resolves with the outcome instead of throwing on 4xx. */
+export async function serverPatchBindingStatus(
+  workspaceSlug: string,
+  projectId: string,
+  bindingId: string,
+  sessionCookie: string,
+  patch: ParitySchedulerBindingPatch,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  return apiJson(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/scheduler-bindings/${bindingId}/`,
+    sessionCookie,
+    patch,
+    apiBase
+  );
+}
+
+/**
+ * Convergent install builder: returns the live row when `input.scheduler` is
+ * already bound to the project (a retry reuses it), otherwise installs it. A
+ * create that loses an install race re-lists instead of throwing.
+ */
+export async function ensureBinding(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  input: ParitySchedulerBindingInput,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParitySchedulerBinding> {
+  const existing = (await serverBindings(workspaceSlug, projectId, sessionCookie, apiBase)).find(
+    (row) => row.scheduler === input.scheduler
+  );
+  if (existing !== undefined) return existing;
+  const created = await serverCreateBindingStatus(workspaceSlug, projectId, sessionCookie, input, apiBase);
+  if (created.status === 201) return created.payload as ParitySchedulerBinding;
+  const raced = (await serverBindings(workspaceSlug, projectId, sessionCookie, apiBase)).find(
+    (row) => row.scheduler === input.scheduler
+  );
+  if (raced !== undefined) return raced;
+  throw new Error(`[parity] binding create failed with HTTP ${created.status}: ${JSON.stringify(created.payload)}`);
+}
+
+/** One AgentRun row as the binding run-history read returns it. */
+export interface ParityAgentRun {
+  id: string;
+  created_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  status: string;
+  error: string;
+  done_payload: Record<string, unknown> | null;
+  pod_detail: { name: string } | null;
+}
+
+/** Paged run-history envelope (same shape as the runners run listing). */
+export interface ParityAgentRunPage {
+  results: ParityAgentRun[];
+  total_count: number;
+  total_pages: number;
+  page: number;
+  per_page: number;
+  count: number;
+}
+
+/** Read one install's run history page (any project role may read). */
+export async function serverBindingRuns(
+  workspaceSlug: string,
+  projectId: string,
+  bindingId: string,
+  sessionCookie: string,
+  page = 1,
+  perPage?: number,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityAgentRunPage> {
+  const params = new URLSearchParams({ page: String(page) });
+  if (perPage !== undefined) params.set("per_page", String(perPage));
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/scheduler-bindings/${bindingId}/runs/?${params.toString()}`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] binding runs read failed with HTTP ${res.status}.`);
+  }
+  return res.payload as ParityAgentRunPage;
+}
+
+/** One calendar occurrence: a past run or an RRULE-expanded future firing. */
+export interface ParitySchedulerOccurrence {
+  binding_id: string;
+  scheduler_id: string;
+  scheduler_name: string;
+  scheduler_color: string;
+  dtstart: string;
+  tzid: string;
+  kind: "scheduled" | "past";
+  agent_run_id: string | null;
+  status: string | null;
+}
+
+/** Occurrences window read with its truncation hint. */
+export interface ParitySchedulerOccurrenceResponse {
+  occurrences: ParitySchedulerOccurrence[];
+  has_more: boolean;
+  next_window_start: string | null;
+}
+
+/** Read a project's firing occurrences in a window (any project role may read). */
+export async function serverOccurrences(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  from: string,
+  to: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParitySchedulerOccurrenceResponse> {
+  const params = new URLSearchParams({ from, to });
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/scheduler-bindings/occurrences/?${params.toString()}`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] occurrences read failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+  return res.payload as ParitySchedulerOccurrenceResponse;
+}
+
+/** This session's user id (for seating a provisioned member onto a project). */
+export async function serverSessionUserId(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<string> {
+  const res = await apiJson("GET", "/api/users/me/", sessionCookie, undefined, apiBase);
+  if (res.status !== 200) {
+    throw new Error(`[parity] users/me read failed with HTTP ${res.status}.`);
+  }
+  const id = (res.payload as { id?: unknown }).id;
+  if (typeof id !== "string" || id === "") throw new Error("[parity] users/me carried no id.");
+  return id;
 }

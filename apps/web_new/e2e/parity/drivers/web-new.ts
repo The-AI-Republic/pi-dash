@@ -22,9 +22,16 @@ import type {
   ParityDriver,
   ParityTarget,
   RulesCommentMenuOption,
+  SchedulerBindingHeader,
+  SchedulerBindingRunRow,
+  SchedulerBindingValues,
+  SchedulerCalendarBlock,
   SchedulerCatalogRow,
   SchedulerDefinitionValues,
   SchedulerInstallOption,
+  SchedulerProjectInstallOption,
+  SchedulerProjectRow,
+  SchedulerScheduleValues,
   ServedShellMarkers,
   WorkspaceOnboardingView,
 } from "./parity-driver";
@@ -4421,5 +4428,335 @@ export class WebNewDriver implements ParityDriver {
   }
   async runnerActivityAgingObserved(): Promise<boolean> {
     return todo("runnerActivityAgingObserved");
+  }
+
+  async schedulerOpenProjectList(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("schedulerOpenProjectList");
+  }
+  async schedulerProjectRows(): Promise<SchedulerProjectRow[]> {
+    return todo("schedulerProjectRows");
+  }
+  async schedulerProjectEmptyVisible(): Promise<boolean> {
+    return todo("schedulerProjectEmptyVisible");
+  }
+  async schedulerProjectNewVisible(): Promise<boolean> {
+    return todo("schedulerProjectNewVisible");
+  }
+  async schedulerProjectRowOpen(_handle: string): Promise<void> {
+    return todo("schedulerProjectRowOpen");
+  }
+  async schedulerProjectToggleState(_handle: string): Promise<{ checked: boolean; disabled: boolean }> {
+    return todo("schedulerProjectToggleState");
+  }
+  async schedulerProjectToggle(_handle: string): Promise<void> {
+    return todo("schedulerProjectToggle");
+  }
+  async schedulerProjectToggleFlightGated(_handle: string): Promise<boolean> {
+    return todo("schedulerProjectToggleFlightGated");
+  }
+  async schedulerProjectOpenEdit(_handle: string): Promise<void> {
+    return todo("schedulerProjectOpenEdit");
+  }
+  async schedulerProjectOpenUninstall(_handle: string): Promise<void> {
+    return todo("schedulerProjectOpenUninstall");
+  }
+  async schedulerUninstallDialogText(): Promise<string> {
+    return todo("schedulerUninstallDialogText");
+  }
+  async schedulerConfirmUninstall(): Promise<void> {
+    return todo("schedulerConfirmUninstall");
+  }
+  async schedulerUninstallOpen(): Promise<boolean> {
+    return todo("schedulerUninstallOpen");
+  }
+  async schedulerCancelUninstall(): Promise<void> {
+    return todo("schedulerCancelUninstall");
+  }
+  async schedulerOpenProjectInstall(): Promise<void> {
+    return todo("schedulerOpenProjectInstall");
+  }
+  async schedulerProjectInstallMode(): Promise<"install" | "create" | "dead-end"> {
+    return todo("schedulerProjectInstallMode");
+  }
+  async schedulerProjectInstallDeadEndText(): Promise<string> {
+    return todo("schedulerProjectInstallDeadEndText");
+  }
+  async schedulerProjectInstallTabs(): Promise<string[]> {
+    return todo("schedulerProjectInstallTabs");
+  }
+  async schedulerProjectInstallSelectTab(_tab: "Install existing" | "Create new"): Promise<void> {
+    return todo("schedulerProjectInstallSelectTab");
+  }
+  async schedulerProjectInstallOptions(): Promise<SchedulerProjectInstallOption[]> {
+    return todo("schedulerProjectInstallOptions");
+  }
+  async schedulerProjectInstallSelect(_handle: string): Promise<void> {
+    return todo("schedulerProjectInstallSelect");
+  }
+  async schedulerProjectInstallFillSchedule(_input: {
+    dtstart?: string;
+    tzid?: string;
+    rrule?: string;
+    extraContext?: string;
+  }): Promise<void> {
+    return todo("schedulerProjectInstallFillSchedule");
+  }
+  async schedulerProjectInstallScheduleValues(): Promise<SchedulerScheduleValues> {
+    return todo("schedulerProjectInstallScheduleValues");
+  }
+  async schedulerProjectInstallHumanizer(): Promise<string> {
+    return todo("schedulerProjectInstallHumanizer");
+  }
+  async schedulerProjectInstallSetEnabled(_enabled: boolean): Promise<void> {
+    return todo("schedulerProjectInstallSetEnabled");
+  }
+  async schedulerProjectInstallErrors(): Promise<string[]> {
+    return todo("schedulerProjectInstallErrors");
+  }
+  async schedulerProjectInstallSubmit(): Promise<void> {
+    return todo("schedulerProjectInstallSubmit");
+  }
+  async schedulerProjectInstallSubmitDisabled(): Promise<boolean> {
+    return todo("schedulerProjectInstallSubmitDisabled");
+  }
+  async schedulerProjectInstallOpen(): Promise<boolean> {
+    return todo("schedulerProjectInstallOpen");
+  }
+  async schedulerCloseProjectInstall(): Promise<void> {
+    return todo("schedulerCloseProjectInstall");
+  }
+  async schedulerProjectCreateFillDescription(_description: string): Promise<void> {
+    return todo("schedulerProjectCreateFillDescription");
+  }
+  async schedulerProjectCreateFillPrompt(_prompt: string): Promise<void> {
+    return todo("schedulerProjectCreateFillPrompt");
+  }
+  async schedulerProjectEditValues(): Promise<SchedulerBindingValues> {
+    return todo("schedulerProjectEditValues");
+  }
+  async schedulerProjectEditFill(_input: {
+    dtstart?: string;
+    tzid?: string;
+    rrule?: string;
+    extraContext?: string;
+  }): Promise<void> {
+    return todo("schedulerProjectEditFill");
+  }
+  async schedulerProjectEditSetEnabled(_enabled: boolean): Promise<void> {
+    return todo("schedulerProjectEditSetEnabled");
+  }
+  async schedulerProjectEditHumanizer(): Promise<string> {
+    return todo("schedulerProjectEditHumanizer");
+  }
+  async schedulerProjectEditErrors(): Promise<string[]> {
+    return todo("schedulerProjectEditErrors");
+  }
+  async schedulerProjectEditSubmit(): Promise<void> {
+    return todo("schedulerProjectEditSubmit");
+  }
+  async schedulerProjectEditOpen(): Promise<boolean> {
+    return todo("schedulerProjectEditOpen");
+  }
+  async schedulerCloseProjectEdit(): Promise<void> {
+    return todo("schedulerCloseProjectEdit");
+  }
+  async schedulerOutcomeState(): Promise<{ options: { label: string; checked: boolean }[]; help: string }> {
+    return todo("schedulerOutcomeState");
+  }
+  async schedulerOutcomeSelect(_label: string): Promise<void> {
+    return todo("schedulerOutcomeSelect");
+  }
+  async schedulerPodOptions(): Promise<{ value: string; label: string; selected: boolean }[]> {
+    return todo("schedulerPodOptions");
+  }
+  async schedulerPodSelect(_value: string): Promise<void> {
+    return todo("schedulerPodSelect");
+  }
+  async schedulerPodDisabled(): Promise<boolean> {
+    return todo("schedulerPodDisabled");
+  }
+  async schedulerPodLoadingObserved(): Promise<boolean> {
+    return todo("schedulerPodLoadingObserved");
+  }
+  async schedulerOpenProjectBinding(_workspaceSlug: string, _projectId: string, _bindingId: string): Promise<void> {
+    return todo("schedulerOpenProjectBinding");
+  }
+  async schedulerBindingHeader(): Promise<SchedulerBindingHeader> {
+    return todo("schedulerBindingHeader");
+  }
+  async schedulerBindingConfig(): Promise<{ label: string; value: string }[]> {
+    return todo("schedulerBindingConfig");
+  }
+  async schedulerBindingScheduleTitle(): Promise<string> {
+    return todo("schedulerBindingScheduleTitle");
+  }
+  async schedulerBindingLastError(): Promise<string | null> {
+    return todo("schedulerBindingLastError");
+  }
+  async schedulerBindingExtraContext(): Promise<string | null> {
+    return todo("schedulerBindingExtraContext");
+  }
+  async schedulerBindingPromptState(): Promise<{ toggleVisible: boolean; revealed: boolean }> {
+    return todo("schedulerBindingPromptState");
+  }
+  async schedulerBindingPromptToggle(): Promise<void> {
+    return todo("schedulerBindingPromptToggle");
+  }
+  async schedulerBindingPromptText(): Promise<string> {
+    return todo("schedulerBindingPromptText");
+  }
+  async schedulerBindingRuns(): Promise<SchedulerBindingRunRow[]> {
+    return todo("schedulerBindingRuns");
+  }
+  async schedulerBindingRunsEmpty(): Promise<string | null> {
+    return todo("schedulerBindingRunsEmpty");
+  }
+  async schedulerBindingRunsCount(): Promise<string> {
+    return todo("schedulerBindingRunsCount");
+  }
+  async schedulerBindingRunsPager(): Promise<{
+    text: string;
+    prevDisabled: boolean;
+    nextDisabled: boolean;
+  } | null> {
+    return todo("schedulerBindingRunsPager");
+  }
+  async schedulerBindingRunsPage(_direction: "next" | "prev"): Promise<void> {
+    return todo("schedulerBindingRunsPage");
+  }
+  async schedulerBindingWaitRunsRefetch(): Promise<void> {
+    return todo("schedulerBindingWaitRunsRefetch");
+  }
+  async schedulerBindingRemovedVisible(): Promise<boolean> {
+    return todo("schedulerBindingRemovedVisible");
+  }
+  async schedulerBindingBackToList(): Promise<void> {
+    return todo("schedulerBindingBackToList");
+  }
+  async schedulerBindingToggleState(): Promise<{ checked: boolean; disabled: boolean }> {
+    return todo("schedulerBindingToggleState");
+  }
+  async schedulerBindingToggle(): Promise<void> {
+    return todo("schedulerBindingToggle");
+  }
+  async schedulerBindingOpenEdit(): Promise<void> {
+    return todo("schedulerBindingOpenEdit");
+  }
+  async schedulerBindingOpenUninstall(): Promise<void> {
+    return todo("schedulerBindingOpenUninstall");
+  }
+  async schedulerOpenProjectCalendar(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("schedulerOpenProjectCalendar");
+  }
+  async schedulerCalendarView(): Promise<"week" | "month"> {
+    return todo("schedulerCalendarView");
+  }
+  async schedulerCalendarSetView(_view: "week" | "month"): Promise<void> {
+    return todo("schedulerCalendarSetView");
+  }
+  async schedulerCalendarTitle(): Promise<string> {
+    return todo("schedulerCalendarTitle");
+  }
+  async schedulerCalendarStep(_direction: "prev" | "next"): Promise<void> {
+    return todo("schedulerCalendarStep");
+  }
+  async schedulerCalendarToday(): Promise<void> {
+    return todo("schedulerCalendarToday");
+  }
+  async schedulerCalendarEmptyVisible(): Promise<boolean> {
+    return todo("schedulerCalendarEmptyVisible");
+  }
+  async schedulerCalendarTruncatedVisible(): Promise<boolean> {
+    return todo("schedulerCalendarTruncatedVisible");
+  }
+  async schedulerCalendarMonthBlocks(): Promise<SchedulerCalendarBlock[]> {
+    return todo("schedulerCalendarMonthBlocks");
+  }
+  async schedulerCalendarMonthOverflow(): Promise<string[]> {
+    return todo("schedulerCalendarMonthOverflow");
+  }
+  async schedulerCalendarMonthTodayMarked(): Promise<boolean> {
+    return todo("schedulerCalendarMonthTodayMarked");
+  }
+  async schedulerCalendarWeekBlocks(): Promise<SchedulerCalendarBlock[]> {
+    return todo("schedulerCalendarWeekBlocks");
+  }
+  async schedulerCalendarWeekTodayMarked(): Promise<boolean> {
+    return todo("schedulerCalendarWeekTodayMarked");
+  }
+  async schedulerCalendarTimeLineTop(): Promise<number | null> {
+    return todo("schedulerCalendarTimeLineTop");
+  }
+  async schedulerCalendarClickBlock(_name: string): Promise<void> {
+    return todo("schedulerCalendarClickBlock");
+  }
+  async schedulerCalendarAnyDraggable(): Promise<boolean> {
+    return todo("schedulerCalendarAnyDraggable");
+  }
+  async schedulerCalendarExportControls(): Promise<string[]> {
+    return todo("schedulerCalendarExportControls");
+  }
+  async schedulerRailVisible(): Promise<boolean> {
+    return todo("schedulerRailVisible");
+  }
+  async schedulerRailRows(): Promise<{ name: string; checked: boolean }[]> {
+    return todo("schedulerRailRows");
+  }
+  async schedulerRailToggle(_name: string): Promise<void> {
+    return todo("schedulerRailToggle");
+  }
+  async schedulerRailShowAll(): Promise<void> {
+    return todo("schedulerRailShowAll");
+  }
+  async schedulerRailHideAll(): Promise<void> {
+    return todo("schedulerRailHideAll");
+  }
+  async schedulerRailCrossTabPersists(_workspaceSlug: string, _projectId: string, _name: string): Promise<boolean> {
+    return todo("schedulerRailCrossTabPersists");
+  }
+  async schedulerRailNarrowHidden(): Promise<boolean> {
+    return todo("schedulerRailNarrowHidden");
+  }
+  async schedulerDrawerOpen(): Promise<boolean> {
+    return todo("schedulerDrawerOpen");
+  }
+  async schedulerDrawerRows(): Promise<{ label: string; value: string }[]> {
+    return todo("schedulerDrawerRows");
+  }
+  async schedulerDrawerHeading(): Promise<{ state: string; name: string }> {
+    return todo("schedulerDrawerHeading");
+  }
+  async schedulerDrawerLinks(): Promise<string[]> {
+    return todo("schedulerDrawerLinks");
+  }
+  async schedulerDrawerClose(): Promise<void> {
+    return todo("schedulerDrawerClose");
+  }
+  async schedulerDrawerEditVisible(): Promise<boolean> {
+    return todo("schedulerDrawerEditVisible");
+  }
+  async schedulerDrawerEdit(): Promise<void> {
+    return todo("schedulerDrawerEdit");
+  }
+  async schedulerDrawerViewScheduler(): Promise<void> {
+    return todo("schedulerDrawerViewScheduler");
+  }
+  async schedulerOpenProjectSection(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("schedulerOpenProjectSection");
+  }
+  async schedulerSectionTabs(): Promise<{ label: string; active: boolean }[]> {
+    return todo("schedulerSectionTabs");
+  }
+  async schedulerSectionOpenTab(_tab: "List" | "Calendar"): Promise<void> {
+    return todo("schedulerSectionOpenTab");
+  }
+  async schedulerOpenSettingsSchedulers(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("schedulerOpenSettingsSchedulers");
+  }
+  async schedulerSettingsPanelVisible(): Promise<boolean> {
+    return todo("schedulerSettingsPanelVisible");
+  }
+  async schedulerRunsExportControls(): Promise<string[]> {
+    return todo("schedulerRunsExportControls");
   }
 }
