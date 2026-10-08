@@ -14835,7 +14835,9 @@ export class WebDriver implements ParityDriver {
     await this.page.goto(`${base}/detail/${runnerId}`);
     const header = this.page.locator("h1").first();
     const error = this.page.getByText("Failed to load runner").first();
-    await expect(header.or(error)).toBeVisible({ timeout: WebDriver.WAIT_MS });
+    await this.waitForContent("runner detail", () =>
+      expect(header.or(error)).toBeVisible({ timeout: WebDriver.WAIT_MS })
+    );
   }
 
   async runnerDetailState(): Promise<"loaded" | "loading" | "error"> {

@@ -892,23 +892,42 @@ test(
       status: "offline",
     });
     try {
-      await serverDevMachinesPlantLiveState(runner.id, {
-        lastEventAgeSecs: 5,
-        lastEventKind: "parity-probe-kind",
-        lastEventSummary: "parity probe summary",
-        agentPid: 4242,
-        subprocessAlive: true,
-        approvalsPending: 3,
-        inputTokens: 1500,
-        outputTokens: 2500000,
-        totalTokens: 2501500,
-        llmModel: "parity-model-9",
-        turnCount: 7,
-      });
+      // Open first: sign-in plus navigation can take a minute under load,
+      // so age-sensitive snapshots are planted only once the page polls.
       await openSignedInDetail(driver, seed, runner.id);
-      await expect.poll(() => driver.runnerActivityBadge(), { timeout: 15_000 }).not.toBeNull();
+      await expect.poll(() => driver.runnerActivityBadge(), { timeout: 15_000 }).toBe("Unknown");
+
+      await test.step("a missing snapshot renders dash fallbacks", async () => {
+        const grid = await driver.runnerActivityTelemetry();
+        expect(metaValue(grid, "Last activity")).toBe("—");
+        expect(metaValue(grid, "Last event")).toBe("—");
+        expect(metaValue(grid, "Agent PID")).toBe("—");
+        expect(metaValue(grid, "Subprocess alive")).toBe("—");
+        expect(metaValue(grid, "Approvals")).toBe("0");
+        expect(metaValue(grid, "Tokens")).toBe("—");
+        expect(metaValue(grid, "Model")).toBe("—");
+        expect(metaValue(grid, "Turn")).toBe("—");
+      });
 
       await test.step("the grid shows every telemetry scalar compactly", async () => {
+        await serverDevMachinesPlantLiveState(runner.id, {
+          lastEventAgeSecs: 5,
+          lastEventKind: "parity-probe-kind",
+          lastEventSummary: "parity probe summary",
+          agentPid: 4242,
+          subprocessAlive: true,
+          approvalsPending: 3,
+          inputTokens: 1500,
+          outputTokens: 2500000,
+          totalTokens: 2501500,
+          llmModel: "parity-model-9",
+          turnCount: 7,
+        });
+        await expect
+          .poll(() => driver.runnerActivityTelemetry().then((grid) => metaValue(grid, "Last activity")), {
+            timeout: 15_000,
+          })
+          .toMatch(/^\d+s ago$/);
         const grid = await driver.runnerActivityTelemetry();
         expect(metaValue(grid, "Last activity")).toMatch(/^\d+s ago$/);
         expect(metaValue(grid, "Last event")).toBe("parity-probe-kind");
@@ -931,21 +950,6 @@ test(
         await expect
           .poll(() => driver.runnerActivityTelemetry().then((grid) => metaValue(grid, "Tokens")), { timeout: 15_000 })
           .toBe("1.5k");
-      });
-
-      await test.step("a missing snapshot renders dash fallbacks", async () => {
-        await serverDevMachinesClearLiveState(runner.id);
-        await driver.runnerDetailOpen(seed.workspaceSlug, runner.id);
-        await expect.poll(() => driver.runnerActivityBadge(), { timeout: 15_000 }).toBe("Unknown");
-        const grid = await driver.runnerActivityTelemetry();
-        expect(metaValue(grid, "Last activity")).toBe("—");
-        expect(metaValue(grid, "Last event")).toBe("—");
-        expect(metaValue(grid, "Agent PID")).toBe("—");
-        expect(metaValue(grid, "Subprocess alive")).toBe("—");
-        expect(metaValue(grid, "Approvals")).toBe("0");
-        expect(metaValue(grid, "Tokens")).toBe("—");
-        expect(metaValue(grid, "Model")).toBe("—");
-        expect(metaValue(grid, "Turn")).toBe("—");
       });
 
       await test.step("the panel ages visibly without server refetches", async () => {
