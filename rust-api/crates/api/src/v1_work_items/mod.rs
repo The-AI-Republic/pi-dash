@@ -27,10 +27,15 @@
 //!   (`LabelListCreateAPIEndpoint`, `LabelDetailAPIEndpoint`,
 //!   `PageListAPIEndpoint`, `PageDetailAPIEndpoint`,
 //!   `PageArchiveAPIEndpoint`, PIDASHCONV-679).
+//! * [`handlers_relations`] — the relation + workpad endpoints
+//!   (`IssueRelationListCreateAPIEndpoint`, `_IssueRelationAgentBase`,
+//!   `IssueRelationGroupedAPIEndpoint`, `IssueRelationRelateAPIEndpoint`,
+//!   `IssueRelationUnrelateAPIEndpoint`, `IssueWorkpadAPIEndpoint`,
+//!   PIDASHCONV-676).
 //! * [`routes`] — the `urls/work_item.py` route registration with
 //!   owned-method cutover (created by PIDASHCONV-680; extended by
-//!   PIDASHCONV-674, PIDASHCONV-675, PIDASHCONV-678 and PIDASHCONV-679;
-//!   sibling handler issues extend it,
+//!   PIDASHCONV-674, PIDASHCONV-675, PIDASHCONV-676, PIDASHCONV-678 and
+//!   PIDASHCONV-679; sibling handler issues extend it,
 //!   never fork it).
 //!
 //! Wiring note: the crate root declares `pub mod v1_work_items;` (seam for
@@ -45,6 +50,7 @@ pub mod handlers_actions;
 pub mod handlers_activity;
 pub mod handlers_labels_pages;
 pub mod handlers_pr_links;
+pub mod handlers_relations;
 pub mod handlers_social;
 pub mod perms;
 pub mod routes;
@@ -55,8 +61,9 @@ use crate::state::AppState;
 
 /// Domain router: action routes (PIDASHCONV-678), link/comment routes
 /// (PIDASHCONV-674), activity/attachment routes (PIDASHCONV-675),
-/// PR/review-link routes (PIDASHCONV-680), and label/page routes
-/// (PIDASHCONV-679) in [`routes::routes`]. Owned D-18 api-v1 routes serve from Rust (cutover
+/// PR/review-link routes (PIDASHCONV-680), relation/workpad routes
+/// (PIDASHCONV-676), and label/page routes (PIDASHCONV-679) in
+/// [`routes::routes`]. Owned D-18 api-v1 routes serve from Rust (cutover
 /// granularity); everything else keeps proxying to Django through the
 /// edge fallback. Sibling D-18 handler issues (PIDASHCONV-673…679) merge
 /// their routers here; merges keep both sides, never fork this file.

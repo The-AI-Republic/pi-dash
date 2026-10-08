@@ -1,8 +1,9 @@
 //! D-18 work-item route registration: action routes (handlers F,
 //! PIDASHCONV-678), link + comment routes (handlers B, PIDASHCONV-674),
 //! PR / code-review link routes (handlers H, PIDASHCONV-680), plus
-//! activity + attachment routes (handlers C, PIDASHCONV-675) and label
-//! + page routes (handlers G, PIDASHCONV-679).
+//! activity + attachment routes (handlers C, PIDASHCONV-675), relation
+//! + workpad routes (handlers D, PIDASHCONV-676) and label + page
+//! routes (handlers G, PIDASHCONV-679).
 //!
 //! Ports `apps/api/pi_dash/api/urls/work_item.py:133-151` (the four action
 //! paths), `urls/work_item.py:60-77,154-171` (the eight link/comment paths:
@@ -10,10 +11,12 @@
 //! share the view classes and therefore the handlers),
 //! `urls/work_item.py:218-236` (the four PR/review-link paths),
 //! `urls/work_item.py:79-98,173-192` (the eight activity/attachment paths
-//! plus their deprecated twins), `urls/label.py` (the two label paths)
-//! and `urls/page.py` (the three page paths) onto the merged D-18
-//! foundation. Cutover granularity is the route + method (the pilot
-//! `owned()` pattern): the owned methods serve from Rust, every other
+//! plus their deprecated twins), `urls/work_item.py:194-216` (the five
+//! relation/workpad paths, which have no deprecated twins),
+//! `urls/label.py` (the two label paths) and `urls/page.py` (the three
+//! page paths) onto the merged D-18 foundation. Cutover granularity is
+//! the route + method (the pilot `owned()` pattern): the owned methods
+//! serve from Rust, every other
 //! method on these paths proxies to Django so its 405-after-auth and
 //! metadata responses are preserved byte for byte.
 //!
@@ -43,6 +46,12 @@ use super::handlers_pr_links::{
     pr_create, pr_destroy, pr_list, review_create, review_destroy, review_list,
 };
 
+use super::handlers_relations::{
+    get_relation_grouped, get_relation_list, get_workpad, owned_relation_grouped,
+    owned_relation_list, owned_relation_relate, owned_relation_unrelate, owned_workpad,
+    patch_workpad, post_relate, post_relation, post_unrelate,
+};
+
 use super::handlers_social::{
     delete_comment, delete_link, get_comment_detail, get_comment_list, get_link_detail,
     get_link_list, owned_comment_detail, owned_comment_list, owned_link_detail, owned_link_list,
@@ -54,13 +63,39 @@ use super::handlers_social::{
 /// (`urls/work_item.py:60-77,154-171`, PIDASHCONV-674), the
 /// PR/review-link paths (`urls/work_item.py:218-236`, PIDASHCONV-680),
 /// the activity/attachment paths (`urls/work_item.py:79-98,173-192`,
-/// PIDASHCONV-675) and the label/page paths (`urls/label.py`,
-/// `urls/page.py`, PIDASHCONV-679).
+/// PIDASHCONV-675), the relation/workpad paths
+/// (`urls/work_item.py:194-216`, PIDASHCONV-676), and the label/page
+/// paths (`urls/label.py`, `urls/page.py`, PIDASHCONV-679).
 ///
 /// Sibling `v1_work_items` paths have no Rust route yet and keep proxying
 /// to Django through the fallback; on rebase keep both sides.
 pub fn routes() -> Router<AppState> {
     Router::new()
+        // `work_item.py:194-196` — relation list (get + post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/",
+            owned_relation_list(axum::routing::get(get_relation_list).post(post_relation)),
+        )
+        // `work_item.py:199-201` — grouped relations (get).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/grouped/",
+            owned_relation_grouped(axum::routing::get(get_relation_grouped)),
+        )
+        // `work_item.py:204-206` — relate (post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/relate/",
+            owned_relation_relate(axum::routing::post(post_relate)),
+        )
+        // `work_item.py:209-211` — unrelate (post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/unrelate/",
+            owned_relation_unrelate(axum::routing::post(post_unrelate)),
+        )
+        // `work_item.py:214-216` — workpad (get + patch).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/workpad/",
+            owned_workpad(axum::routing::get(get_workpad).patch(patch_workpad)),
+        )
         .route(
             "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/github/pull-requests/",
             super::handlers_pr_links::owned_list(
@@ -280,6 +315,36 @@ mod tests {
         for (method, uri) in [
             (
                 "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/grouped/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/relate/"),
+            ),
+            (
+                "POST",
+                format!(
+                    "/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/unrelate/"
+                ),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/workpad/"),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/workpad/"),
+            ),
+            (
+                "GET",
                 format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/github/pull-requests/"),
             ),
             (
@@ -465,6 +530,32 @@ mod tests {
         let pk = "22222222-2222-2222-2222-222222222222";
         let pid = "11111111-1111-1111-1111-111111111111";
         let iid = "22222222-2222-2222-2222-222222222222";
+        for (method, uri) in [
+            (
+                "PUT",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/"),
+            ),
+            (
+                "POST",
+                format!(
+                    "/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/grouped/"
+                ),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/relate/"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/workpad/"),
+            ),
+        ] {
+            assert_eq!(
+                status(method, &uri).await,
+                StatusCode::BAD_GATEWAY,
+                "{method} {uri}"
+            );
+        }
         assert_eq!(
             status(
                 "PUT",
