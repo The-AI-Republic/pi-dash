@@ -8012,6 +8012,24 @@ export async function serverDesktopRuntimeListChatApprovals(
   return rows.map(desktopRuntimeChatApprovalOf);
 }
 
+/**
+ * Collapse a sign-in cookie header to one value per cookie the way a
+ * browser jar holds it (last wins). Sign-in rotates the CSRF token, so
+ * the minted header carries the pre-login token ahead of the live one;
+ * the strict v1 endpoints reject that stale pair before the desktop gate
+ * runs, which would pin a harness artifact instead of the row behavior.
+ */
+function desktopRuntimeFreshCookieJar(sessionCookie: string): string {
+  const jar = new Map<string, string>();
+  for (const pair of sessionCookie.split(";")) {
+    const trimmed = pair.trim();
+    if (trimmed === "") continue;
+    const cut = trimmed.indexOf("=");
+    jar.set(cut === -1 ? trimmed : trimmed.slice(0, cut), trimmed);
+  }
+  return [...jar.values()].join("; ");
+}
+
 async function desktopRuntimeRefusalOf(res: Response): Promise<DesktopRuntimeEndpointRefusal> {
   let error = "";
   try {
@@ -8049,6 +8067,11 @@ export async function serverDesktopRuntimeDesktopEnrollRefusal(
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<DesktopRuntimeEndpointRefusal> {
-  const res = await mutateJSON(method, `${apiBase}/api/v1/runner/dev-machines/desktop-enroll/`, sessionCookie, {});
+  const res = await mutateJSON(
+    method,
+    `${apiBase}/api/v1/runner/dev-machines/desktop-enroll/`,
+    desktopRuntimeFreshCookieJar(sessionCookie),
+    {}
+  );
   return desktopRuntimeRefusalOf(res);
 }
