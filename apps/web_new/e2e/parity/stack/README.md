@@ -56,6 +56,27 @@ Drops the scratch volume and rebuilds through `parity-up.sh`. The script
 prints its target first; if the names ever stop matching this stack, stop
 and ask a human instead of proceeding.
 
+## Teardown
+
+```sh
+apps/web_new/e2e/parity/stack/parity-down.sh
+```
+
+Removes the stack's containers, network and scratch volumes (images stay,
+so the next bring-up is fast). Run it when you are done.
+
+Inside a Pi Dash agent run you do not have to remember: `parity-up.sh` arms
+`parity-reaper.sh`, a detached watcher that runs the teardown when the
+run's agent process exits, however it exits. The stack therefore lives for
+one run; the next run brings it up again. Set `PARITY_KEEP_STACK=1` before
+`parity-up.sh` to keep a stack across runs. Outside an agent run (your own
+shell, CI) nothing is armed.
+
+Every service has a `mem_limit` in the compose file, about 6 GB for the
+whole stack at the limits and well under 1.5 GB in normal use. If a
+container is killed at its limit, raise that one limit rather than removing
+it.
+
 ## Realtime
 
 Most scenarios need only the API. When a scenario covers realtime rows,
