@@ -205,7 +205,7 @@ class TestProjectSchedulerList:
         assert b["rrule"] == "FREQ=HOURLY"
         assert b["enabled"] is True
         assert b["next_run_at"] is not None
-        assert b["outcome_mode"] == "create_issue"
+        assert "outcome_mode" not in b
 
     @pytest.mark.django_db
     def test_uninstalled_scheduler_not_listed(

@@ -1072,6 +1072,8 @@ export default {
   "None selected": "None selected",
   "Not right now": "Not right now",
   "Notes specific to this project…": "Notes specific to this project…",
+  "Nothing is added to this prompt. It must say what the run should do with what it finds (for example file issues or open a pull request), and how; otherwise the run only reports in its final message.":
+    "Nothing is added to this prompt. It must say what the run should do with what it finds (for example file issues or open a pull request), and how; otherwise the run only reports in its final message.",
   "Notification marked as archived": "Notification marked as archived",
   "Notification marked as read": "Notification marked as read",
   "Notification marked as un archived": "Notification marked as un archived",
@@ -1750,7 +1752,6 @@ export default {
   Webhooks: "Webhooks",
   Week: "Week",
   "What is the pidash CLI, daemon, and runner?": "What is the pidash CLI, daemon, and runner?",
-  "What to do with findings": "What to do with findings",
   "What you'd like to see this link as": "What you'd like to see this link as",
   "What's new?": "What's new?",
   When: "When",
@@ -1925,7 +1926,6 @@ export default {
   "Installed by": "Installed by",
   "Last error": "Last error",
   "No runs yet — next run at {ts}": "No runs yet — next run at {ts}",
-  "Outcome mode": "Outcome mode",
   "Queued {ts}": "Queued {ts}",
   "Run history": "Run history",
   "Scheduler is disabled — it will not fire until re-enabled.":

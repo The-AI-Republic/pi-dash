@@ -27,83 +27,6 @@ class SchedulerSource(models.TextChoices):
     MANIFEST = "manifest", "Manifest"
 
 
-class OutcomeMode(models.TextChoices):
-    """What a scheduler run should *do* with whatever it finds.
-
-    Stored per-install on :attr:`SchedulerBinding.outcome_mode` (not on the
-    workspace ``Scheduler``), so the same scheduler can behave differently
-    across projects. The scheduler layer never creates issues or edits code
-    itself — it only dispatches an agent run. ``outcome_mode`` steers that run
-    by appending a work-mode directive to the dispatched prompt (see
-    ``OUTCOME_MODE_DIRECTIVES`` and ``pi_dash.prompting.context.
-    build_scheduler_task_body``). The agent still does the work via the same
-    ``pidash`` CLI / git tools a user-driven run uses.
-    """
-
-    CREATE_ISSUE = "create_issue", "Create issues"
-    APPLY_FIX = "apply_fix", "Apply fix (open PR)"
-    FIX_AND_REVIEW = "fix_and_review", "Fix & open for review"
-
-
-#: Work-mode directive appended to a scheduler run's prompt, keyed by
-#: ``OutcomeMode``. Single source of truth so the dispatcher, tests, and any
-#: future composer share the same wording. Kept terse — the scheduler's own
-#: prompt carries the task; this only fixes *what to do with findings*.
-OUTCOME_MODE_DIRECTIVES: dict[str, str] = {
-    OutcomeMode.CREATE_ISSUE: (
-        "## Work mode: create issues\n\n"
-        "For each distinct finding, file a Pi Dash issue with the `pidash` CLI:\n"
-        "    pidash issue create --project <PROJ> --title \"<short summary>\" \\\n"
-        "        --description \"<file path, line range, evidence, severity, "
-        'suggested fix>"\n'
-        "Before creating an issue, list existing open issues and skip any "
-        "finding that already has a corresponding open issue (de-dupe by file "
-        "+ root cause, not by exact title). Do NOT modify code."
-    ),
-    OutcomeMode.APPLY_FIX: (
-        "## Work mode: apply fix\n\n"
-        "For each finding you are confident about, implement the fix and open a "
-        "pull request for human review — do NOT merge it. Keep one PR per "
-        "logical fix where practical. If a fix is risky, ambiguous, or larger "
-        "than a focused change, do NOT force it: create a Pi Dash issue "
-        "describing the finding instead (same form as create-issue mode)."
-    ),
-    OutcomeMode.FIX_AND_REVIEW: (
-        "## Work mode: file issue and delegate fix\n\n"
-        "Do NOT modify code or open a pull request in this run — the fix is "
-        "delegated to the issue agent. For each distinct finding, do ALL of "
-        "the following:\n"
-        "1. File a Pi Dash issue with the `pidash` CLI (de-dupe against existing "
-        "open issues by file + root cause, as in create-issue mode), and note "
-        "the issue identifier it returns. Write the description so an AI agent "
-        "can implement the fix without re-investigating: file path(s) and line "
-        "range, the evidence you observed, root cause, severity, a concrete "
-        "suggested fix, and how to validate it:\n"
-        "    pidash issue create --project <PROJ> --title \"<short summary>\" \\\n"
-        "        --description \"<agent-ready technical details>\"\n"
-        "2. Move the issue to In Progress — this automatically delegates it to "
-        "the coding agent, which implements the fix and opens a pull request "
-        "for human review:\n"
-        "    pidash issue patch <IDENT> --state \"In Progress\"\n"
-        "If a finding is risky, ambiguous, or larger than a focused change, "
-        "still file the issue but leave it in its default state (do NOT move "
-        "it to In Progress) and describe the open questions in the issue "
-        "description instead."
-    ),
-}
-
-
-def outcome_mode_directive(mode: str) -> str:
-    """Return the prompt directive for ``mode``.
-
-    Falls back to the ``CREATE_ISSUE`` directive for an unknown value so a
-    stale row can never dispatch a run with no work-mode guidance at all.
-    """
-    return OUTCOME_MODE_DIRECTIVES.get(
-        mode, OUTCOME_MODE_DIRECTIVES[OutcomeMode.CREATE_ISSUE]
-    )
-
-
 class Scheduler(BaseModel):
     """A reusable scheduler definition: a slug + prompt + workspace-level
     enable flag. Definitions are workspace-scoped (mirrors
@@ -180,17 +103,6 @@ class SchedulerBinding(WorkspaceBaseModel):
 
     extra_context = models.TextField(blank=True, default="")
     enabled = models.BooleanField(default=True)
-
-    # What a run of THIS install does with its findings (file issues / open
-    # fix PRs / fix + move to review). Lives on the binding, not the Scheduler,
-    # so the same workspace scheduler can behave differently per project. Steers
-    # the dispatched prompt (see OutcomeMode); defaults to CREATE_ISSUE to match
-    # the pre-existing builtin behavior.
-    outcome_mode = models.CharField(
-        max_length=16,
-        choices=OutcomeMode.choices,
-        default=OutcomeMode.CREATE_ISSUE,
-    )
 
     next_run_at = models.DateTimeField(null=True, blank=True)
     # Single source of truth for "last run state": the AgentRun itself.

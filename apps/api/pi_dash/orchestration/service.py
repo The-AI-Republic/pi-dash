@@ -945,12 +945,6 @@ def dispatch_scheduler_run(
         return None, str(exc)
     admission_error = execution.pop("_cloud_admission_error", None)
 
-    if execution["executor_kind"] == AgentExecutorKind.CLOUD_AGENT and binding.outcome_mode != "create_issue":
-        # Permanent misconfiguration — refuse BEFORE creating a run so a
-        # broken binding writes last_error once instead of minting a FAILED
-        # AgentRun on every scheduler firing.
-        return None, "Cloud Agent scheduler runs support only the create_issue outcome mode"
-
     with transaction.atomic():
         admission_error = (
             lock_cloud_creation_capacity(

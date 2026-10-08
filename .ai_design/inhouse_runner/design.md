@@ -757,13 +757,12 @@ the approved public tool names in §10.1 and stores the intersection as
 Repository coordinates in `run_config` are context for a scoped source-host
 tool only; they do not imply that the Cloud process has cloned the repository.
 
-Cloud scheduler admission supports only
-`SchedulerBinding.outcome_mode=create_issue`. `apply_fix` and `fix_and_review`
-require repository mutation/local execution and create a terminal
-`FAILED/cloud_capability_unavailable` run that advances the scheduler through
-the normal termination hook with an actionable error. They do not fall back to
-a local Runner. The setting UI labels those modes “Local Runner required” when
-the project default is Cloud.
+Cloud scheduler admission does not inspect what the scheduler task asks for
+(PDASHOSS01-281 removed the per-binding outcome mode). A task that asks for
+repository mutation is bounded by the tool plan instead: a Cloud scheduler run
+has no `filesystem`, `shell`, or `worktree` capability and its only write tool
+is `pidash_create_project_issue`, under the locked write policy. It does not
+fall back to a local Runner.
 
 Follow-up rules:
 
@@ -818,13 +817,12 @@ The operator-authored scheduler task, direct user prompt, issue body, comments,
 and tool output are rendered as quoted task data, never parsed as Jinja or
 inserted into the system-instruction tier.
 
-`build_scheduler_task_body(binding, run)` also branches on executor. The local
-branch preserves the current `outcome_mode_directive`. The Cloud branch accepts
-only `create_issue` and adds a locked directive to inspect available evidence,
-de-duplicate against open project issues, create at most one backlog issue for
-the highest-value finding, and otherwise return `noop`. It contains no CLI,
-code-edit, PR, or transition instruction. Unsupported outcome modes are denied
-by admission before composition.
+`build_scheduler_task_body(binding)` is the same for both executors: the
+scheduler prompt plus the binding's extra context, with nothing appended. The
+Cloud rule — de-duplicate against open project issues, create at most one
+backlog issue, otherwise return `noop` — lives in the locked
+`cloud-scheduler-intro` / `cloud-scheduler-loop` sections, not in the task
+body.
 
 The locked recipes encode these outcome rules:
 

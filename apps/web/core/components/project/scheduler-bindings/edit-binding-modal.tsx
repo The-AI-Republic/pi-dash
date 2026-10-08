@@ -11,10 +11,9 @@ import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
-import type { ISchedulerBinding, SchedulerOutcomeMode } from "@pi-dash/services";
+import type { ISchedulerBinding } from "@pi-dash/services";
 import { SchedulerService } from "@pi-dash/services";
 import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
-import { BindingOutcomeModeField, DEFAULT_OUTCOME_MODE } from "./binding-outcome-mode-field";
 import { BindingPodField } from "./binding-pod-field";
 import { BindingScheduleFields } from "./binding-schedule-fields";
 import { DEFAULT_TZID } from "./constants";
@@ -26,7 +25,6 @@ interface EditFormValues {
   rrule: string;
   extra_context: string;
   enabled: boolean;
-  outcome_mode: SchedulerOutcomeMode;
   /** Pod id, or "" for the project default. */
   pod: string;
 }
@@ -58,7 +56,6 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
       rrule: "",
       extra_context: "",
       enabled: true,
-      outcome_mode: DEFAULT_OUTCOME_MODE,
       pod: "",
     },
   });
@@ -71,7 +68,6 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
       rrule: binding.rrule || "",
       extra_context: binding.extra_context ?? "",
       enabled: binding.enabled,
-      outcome_mode: binding.outcome_mode ?? DEFAULT_OUTCOME_MODE,
       pod: binding.pod ?? "",
     });
   }, [isOpen, binding, reset]);
@@ -88,7 +84,6 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
         rrule: values.rrule.trim(),
         extra_context: values.extra_context.trim(),
         enabled: values.enabled,
-        outcome_mode: values.outcome_mode,
         pod: values.pod || null,
       });
       setToast({
@@ -140,8 +135,6 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
           watchDtstart={watchedDtstart}
           watchRrule={watchedRrule}
         />
-
-        <BindingOutcomeModeField control={control} name="outcome_mode" />
 
         <BindingPodField control={control} name="pod" projectId={projectId} />
 

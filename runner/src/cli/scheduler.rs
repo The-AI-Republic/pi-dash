@@ -34,7 +34,7 @@ pub enum SchedulerCommand {
         project: Option<String>,
     },
     /// Read one scheduler's full definition — prompt, enabled flags, and its
-    /// install on the project (cadence, outcome mode, pod, last error).
+    /// install on the project (cadence, pod, extra context, last error).
     Get {
         /// Scheduler UUID (from `pidash scheduler list`).
         scheduler_id: String,

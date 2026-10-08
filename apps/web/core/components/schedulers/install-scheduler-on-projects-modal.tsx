@@ -11,13 +11,9 @@ import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
-import type { IScheduler, SchedulerOutcomeMode } from "@pi-dash/services";
+import type { IScheduler } from "@pi-dash/services";
 import { SchedulerService } from "@pi-dash/services";
 import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
-import {
-  BindingOutcomeModeField,
-  DEFAULT_OUTCOME_MODE,
-} from "@/components/project/scheduler-bindings/binding-outcome-mode-field";
 import { BindingScheduleFields } from "@/components/project/scheduler-bindings/binding-schedule-fields";
 import { DEFAULT_TZID } from "@/components/project/scheduler-bindings/constants";
 import { defaultDtstartLocal, localToIsoUTC } from "@/components/project/scheduler-bindings/datetime-input";
@@ -31,7 +27,6 @@ interface InstallFormValues {
   rrule: string;
   extra_context: string;
   enabled: boolean;
-  outcome_mode: SchedulerOutcomeMode;
 }
 
 type Props = {
@@ -50,7 +45,6 @@ const DEFAULT_VALUES = (): InstallFormValues => ({
   rrule: "FREQ=DAILY",
   extra_context: "",
   enabled: true,
-  outcome_mode: DEFAULT_OUTCOME_MODE,
 });
 
 const schedulerService = new SchedulerService();
@@ -59,7 +53,7 @@ const schedulerService = new SchedulerService();
  * Install a workspace scheduler template onto one or more projects in a single
  * pass. The inverse of the project-side install modal: there the project is
  * fixed and you pick a scheduler; here the scheduler is fixed and you pick the
- * projects. Schedule + outcome metadata is shared across every selected
+ * projects. Schedule + extra context is shared across every selected
  * project (the per-project edit modal can tweak an install afterwards). Pod is
  * intentionally omitted — it is project-scoped, so each binding defaults to its
  * project's default pod.
@@ -154,7 +148,6 @@ export const InstallSchedulerOnProjectsModal = observer(function InstallSchedule
           rrule: values.rrule.trim(),
           extra_context: values.extra_context.trim(),
           enabled: values.enabled,
-          outcome_mode: values.outcome_mode,
         })
       )
     );
@@ -248,8 +241,6 @@ export const InstallSchedulerOnProjectsModal = observer(function InstallSchedule
           watchDtstart={watchedDtstart}
           watchRrule={watchedRrule}
         />
-
-        <BindingOutcomeModeField control={control} name="outcome_mode" />
 
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={isSubmitting}>

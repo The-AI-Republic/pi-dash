@@ -33,8 +33,8 @@ Scan this project's source code for potential security vulnerabilities
 (injection, auth bypass, secret leakage, unsafe deserialization, SSRF,
 insecure defaults).
 
-For each finding, create a Pi Dash issue using the `pi-dash` CLI:
-    pi-dash issue create \\
+For each finding, create a Pi Dash issue using the `pidash` CLI:
+    pidash issue create \\
       --title "[security] <short summary>" \\
       --description "<file path, line range, vulnerable snippet,
                      severity (high|medium|low), and suggested fix>"
@@ -79,11 +79,11 @@ path and line range, category (security|correctness) and a specific subtype,
 severity (high|medium|low), confidence (high|medium|low), a 1-3 sentence
 explanation of the exploit path or failure mode, and a concrete fix.
 
-For each NEW finding, create a Pi Dash issue with the `pi-dash` CLI. Use the
+For each NEW finding, create a Pi Dash issue with the `pidash` CLI. Use the
 title prefix "[fable-security]" for security findings and "[fable-bug]" for
 correctness findings (a dedicated namespace so this audit does not collide with
 the basic "[security]" Security Audit scheduler):
-    pi-dash issue create \\
+    pidash issue create \\
       --title "[fable-security] <short summary>" \\
       --description "<file path + line range, category/subtype, severity,
                      confidence, explanation, and suggested fix>"
