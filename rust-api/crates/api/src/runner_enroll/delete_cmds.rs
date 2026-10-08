@@ -20,8 +20,8 @@
 //!   authenticates via D-13 [`crate::runner_enroll::auth`] and binds the
 //!   token to the URL machine exactly like the D-14 machine handlers
 //!   (the `machine.rs` `authed_machine_id` precedent); denials pass
-//!   through untouched — capital-`Detail` is byte-correct per live
-//!   Django (the PIDASHCONV-589 correction; PIDASHCONV-718 is backwards).
+//!   through untouched — `auth.rs` renders the byte-correct
+//!   lowercase-`detail` DRF 401 (PIDASHCONV-718).
 //! * SQL text comes from the merged builders
 //!   ([`manage_reads`](pidash_services::runner_enroll::queries::manage_reads)
 //!   M4/R2 plus the `_scoped_machine` read); the two create-endpoint
@@ -2099,7 +2099,7 @@ pub async fn machine_command_result(
     let auth = match authenticate_machine_token(&pool, secret.as_bytes(), &headers).await {
         Ok(auth) => auth,
         // The D-13 denial already renders the byte-correct DRF 401
-        // (capital `Detail` + `Bearer` challenge); pass it through.
+        // (lowercase `detail` + `Bearer` challenge); pass it through.
         Err(response) => return response,
     };
     if authed_machine_id(auth.as_ref(), dev_machine_id).is_none() {
