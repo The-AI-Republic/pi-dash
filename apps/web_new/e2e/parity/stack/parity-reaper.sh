@@ -22,7 +22,7 @@ PARITY_PROJECT="${PARITY_PROJECT:-parity19}"
 agent_pid() {
   local pid=$$ ppid comm
   while [ "$pid" -gt 1 ]; do
-    ppid="$(awk '{print $4}' "/proc/$pid/stat" 2>/dev/null)" || return 1
+    ppid="$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null)" || return 1
     [ -n "$ppid" ] || return 1
     comm="$(cat "/proc/$ppid/comm" 2>/dev/null)" || return 1
     if [ "$comm" = "pidash" ]; then

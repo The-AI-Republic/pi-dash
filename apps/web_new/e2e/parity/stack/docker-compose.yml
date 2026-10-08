@@ -50,7 +50,8 @@ services:
   mq:
     image: rabbitmq:3-management-alpine
     container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-mq
-    mem_limit: 512m
+    # RabbitMQ throttles publishers at 40% of this, so keep it roomy.
+    mem_limit: 1g
     environment:
       RABBITMQ_DEFAULT_USER: parity19
       RABBITMQ_DEFAULT_PASS: parity19
