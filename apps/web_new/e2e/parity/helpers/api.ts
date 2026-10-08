@@ -8461,6 +8461,24 @@ export interface DevMachinesRunner {
   podId: string;
 }
 
+// --- Runner chat fixtures + server reads (NEWFRONT-181, RUN-025–032). ---
+// Appended; existing helpers above are untouched per the shared harness
+// contract. The web API offers no create-runner endpoint (runners arrive
+// through device enrollment), so Runner/Pod rows are planted through the
+// Django shell while chat sessions and messages go through the same REST
+// endpoints the old app calls.
+
+/** Runner statuses the chat page branches on (RUN-011 set, reused here). */
+export type RunnerChatStatus = "online" | "busy" | "offline" | "revoked";
+
+/** Minimal runner shape the chat scenarios assert on. */
+export interface RunnerChatRunner {
+  id: string;
+  name: string;
+  status: string;
+  podId: string;
+}
+
 /** Observability snapshot as the runner-detail endpoint returns it. */
 export interface DevMachinesLiveState {
   lastEventAt: string | null;
@@ -8549,6 +8567,86 @@ export async function serverDevMachinesWorkspaceId(workspaceSlug: string): Promi
       `print("PARITY_DM_WS:" + (str(ws.id) if ws else ""))\n`
   );
   const id = /^PARITY_DM_WS:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (id === "") throw new Error(`[parity] no workspace for slug ${workspaceSlug}.`);
+  return id;
+}
+
+/** Minimal chat-session shape the chat scenarios assert on. */
+export interface RunnerChatSession {
+  id: string;
+  status: string;
+  runner: string;
+  last_message_at: string | null;
+  active_message_id: string | null;
+  active_turn_id: string;
+  cwd: string;
+}
+
+/** Minimal chat-message shape the chat scenarios assert on. */
+export interface RunnerChatMessage {
+  id: string;
+  role: string;
+  content: string;
+  status: string;
+  seq: number;
+}
+
+function runnerChatRunnerOf(raw: unknown): RunnerChatRunner {
+  const record = raw as { id?: unknown; name?: unknown; status?: unknown; pod?: unknown; pod_detail?: unknown };
+  const podDetail = record.pod_detail as { id?: unknown } | undefined;
+  const podId = typeof record.pod === "string" ? record.pod : typeof podDetail?.id === "string" ? podDetail.id : "";
+  if (typeof record.id !== "string" || typeof record.name !== "string" || typeof record.status !== "string") {
+    throw new Error("[parity] runner payload carried no id/name/status.");
+  }
+  return { id: record.id, name: record.name, status: record.status, podId };
+}
+
+function runnerChatSessionOf(raw: unknown): RunnerChatSession {
+  const record = raw as {
+    id?: unknown;
+    status?: unknown;
+    runner?: unknown;
+    last_message_at?: unknown;
+    active_message_id?: unknown;
+    active_turn_id?: unknown;
+    cwd?: unknown;
+  };
+  if (typeof record.id !== "string" || typeof record.status !== "string" || typeof record.runner !== "string") {
+    throw new Error("[parity] chat-session payload carried no id/status/runner.");
+  }
+  return {
+    id: record.id,
+    status: record.status,
+    runner: record.runner,
+    last_message_at: typeof record.last_message_at === "string" ? record.last_message_at : null,
+    active_message_id: typeof record.active_message_id === "string" ? record.active_message_id : null,
+    active_turn_id: typeof record.active_turn_id === "string" ? record.active_turn_id : "",
+    cwd: typeof record.cwd === "string" ? record.cwd : "",
+  };
+}
+
+function runnerChatMessageOf(raw: unknown): RunnerChatMessage {
+  const record = raw as { id?: unknown; role?: unknown; content?: unknown; status?: unknown; seq?: unknown };
+  if (
+    typeof record.id !== "string" ||
+    typeof record.role !== "string" ||
+    typeof record.content !== "string" ||
+    typeof record.status !== "string" ||
+    typeof record.seq !== "number"
+  ) {
+    throw new Error("[parity] chat-message payload missed id/role/content/status/seq.");
+  }
+  return { id: record.id, role: record.role, content: record.content, status: record.status, seq: record.seq };
+}
+
+/** Workspace UUID for a slug (runner rows key off the id, not the slug). */
+export async function serverWorkspaceIdBySlug(workspaceSlug: string): Promise<string> {
+  const out = await apiShell(
+    `from pi_dash.db.models import Workspace\n` +
+      `ws = Workspace.objects.filter(slug=${JSON.stringify(workspaceSlug)}).first()\n` +
+      `print("PARITY_WS:" + (str(ws.id) if ws else ""))\n`
+  );
+  const id = /^PARITY_WS:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
   if (id === "") throw new Error(`[parity] no workspace for slug ${workspaceSlug}.`);
   return id;
 }
@@ -8662,6 +8760,90 @@ export async function serverDevMachinesCleanupRunner(runnerId: string): Promise<
       `from pi_dash.runner.models import Runner\n` +
         `Runner.objects.filter(pk=${JSON.stringify(runnerId)}).delete()\n` +
         `print("PARITY_DM_RUNNER_CLEANUP_OK")\n`
+    );
+  } catch (error) {
+    console.log(`[parity] runner cleanup failed for ${runnerId}; leaving it for reseed. ${String(error)}`);
+  }
+}
+
+/** The seeded project's default pod id (every runner belongs to one pod). */
+export async function serverDefaultPodId(projectId: string): Promise<string> {
+  const out = await apiShell(
+    `from pi_dash.runner.models import Pod\n` +
+      `pod = Pod.default_for_project_id(${JSON.stringify(projectId)})\n` +
+      `print("PARITY_POD:" + (str(pod.id) if pod else ""))\n`
+  );
+  const id = /^PARITY_POD:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (id === "") throw new Error(`[parity] no default pod for project ${projectId}.`);
+  return id;
+}
+
+/**
+ * Plant a runner row owned by `ownerEmail` in the seeded project, at the
+ * given status. Names must be unique per run (callers add a timestamp);
+ * there is no web create endpoint, so this goes through the shell.
+ * Online/busy runners also get a live RunnerSession row: the outbox
+ * treats a runner with no active session as offline and rejects
+ * chat_warm/chat_cancel/chat_close (the close endpoint then 500s after
+ * persisting), so a planted "online" runner needs the session row to
+ * behave like a connected daemon. Offline/revoked runners get none.
+ */
+export async function serverCreateRunner(input: {
+  ownerEmail: string;
+  workspaceSlug: string;
+  projectId: string;
+  name: string;
+  status: RunnerChatStatus;
+}): Promise<RunnerChatRunner> {
+  const out = await apiShell(
+    `import json\n` +
+      `from django.utils import timezone\n` +
+      `from pi_dash.db.models import User, Workspace\n` +
+      `from pi_dash.runner.models import Pod, Runner, RunnerSession\n` +
+      `user = User.objects.get(email=${JSON.stringify(input.ownerEmail)})\n` +
+      `ws = Workspace.objects.get(slug=${JSON.stringify(input.workspaceSlug)})\n` +
+      `pod = Pod.default_for_project_id(${JSON.stringify(input.projectId)})\n` +
+      `runner = Runner.objects.create(owner=user, workspace=ws, pod=pod, name=${JSON.stringify(input.name)}, status=${JSON.stringify(input.status)})\n` +
+      `live = ${JSON.stringify(input.status)} in ("online", "busy")\n` +
+      `if live:\n` +
+      `    RunnerSession.objects.create(runner=runner, last_seen_at=timezone.now())\n` +
+      `print("PARITY_RUNNER:" + json.dumps({"id": str(runner.id), "name": runner.name, "status": runner.status, "pod": str(runner.pod_id)}))\n`
+  );
+  const line = /^PARITY_RUNNER:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (line === "") throw new Error(`[parity] runner plant produced no row for ${input.name}.`);
+  return runnerChatRunnerOf(JSON.parse(line) as unknown);
+}
+
+/**
+ * Flip a planted runner's status (online/busy/offline/revoked),
+ * keeping the live-session row in step: reconnecting revives (or
+ * creates) the active session, going offline/revoked revokes it.
+ */
+export async function serverSetRunnerStatus(runnerId: string, status: RunnerChatStatus): Promise<void> {
+  await apiShell(
+    `from django.utils import timezone\n` +
+      `from pi_dash.runner.models import Runner, RunnerSession\n` +
+      `Runner.objects.filter(pk=${JSON.stringify(runnerId)}).update(status=${JSON.stringify(status)})\n` +
+      `live = ${JSON.stringify(status)} in ("online", "busy")\n` +
+      `now = timezone.now()\n` +
+      `active = RunnerSession.objects.filter(runner_id=${JSON.stringify(runnerId)}, revoked_at__isnull=True).first()\n` +
+      `if live and active is None:\n` +
+      `    RunnerSession.objects.create(runner_id=${JSON.stringify(runnerId)}, last_seen_at=now)\n` +
+      `elif not live and active is not None:\n` +
+      `    active.revoked_at = now\n` +
+      `    active.revoked_reason = "parity_offline"\n` +
+      `    active.save(update_fields=["revoked_at", "revoked_reason"])\n` +
+      `print("PARITY_RUNNER_STATUS_OK")\n`
+  );
+}
+
+/** Best-effort runner cleanup; cascades to sessions, messages and events. */
+export async function serverCleanupRunner(runnerId: string): Promise<void> {
+  try {
+    await apiShell(
+      `from pi_dash.runner.models import Runner\n` +
+        `Runner.objects.filter(pk=${JSON.stringify(runnerId)}).delete()\n` +
+        `print("PARITY_RUNNER_CLEANUP_OK")\n`
     );
   } catch (error) {
     console.log(`[parity] runner cleanup failed for ${runnerId}; leaving it for reseed. ${String(error)}`);
@@ -9078,4 +9260,205 @@ export async function serverSessionUserId(sessionCookie: string, apiBase: string
   const id = (res.payload as { id?: unknown }).id;
   if (typeof id !== "string" || id === "") throw new Error("[parity] users/me carried no id.");
   return id;
+}
+
+/** Runner detail through the same endpoint the chat header reads. */
+export async function serverRunner(
+  runnerId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<RunnerChatRunner> {
+  const res = await fetchTolerant(`${apiBase}/api/runners/${runnerId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] runner read failed with HTTP ${res.status}.`);
+  return runnerChatRunnerOf((await res.json()) as unknown);
+}
+
+/**
+ * Create a chat session through the app's own endpoint. The endpoint
+ * reuses an open message-less session with HTTP 200 instead of creating
+ * a duplicate, so both 200 (reused) and 201 (created) resolve.
+ */
+export async function serverCreateChatSession(
+  input: { workspaceId: string; runnerId: string },
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<RunnerChatSession> {
+  const res = await mutateJSON("POST", `${apiBase}/api/runners/chat/sessions/`, sessionCookie, {
+    workspace: input.workspaceId,
+    runner: input.runnerId,
+  });
+  if (res.status !== 200 && res.status !== 201) {
+    throw new Error(`[parity] chat-session create failed with HTTP ${res.status}.`);
+  }
+  return runnerChatSessionOf((await res.json()) as unknown);
+}
+
+/** Chat sessions through the same endpoint the history panel reads. */
+export async function serverListChatSessions(
+  workspaceId: string,
+  runnerId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<RunnerChatSession[]> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/runners/chat/sessions/?workspace=${encodeURIComponent(workspaceId)}&runner=${encodeURIComponent(runnerId)}`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] chat-session list failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : [];
+  return rows.map(runnerChatSessionOf);
+}
+
+/** One chat session through the app's own endpoint. */
+export async function serverGetChatSession(
+  sessionId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<RunnerChatSession> {
+  const res = await fetchTolerant(`${apiBase}/api/runners/chat/sessions/${sessionId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] chat-session read failed with HTTP ${res.status}.`);
+  return runnerChatSessionOf((await res.json()) as unknown);
+}
+
+/** Messages of a session through the app's own endpoint. */
+export async function serverChatMessages(
+  sessionId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<RunnerChatMessage[]> {
+  const res = await fetchTolerant(`${apiBase}/api/runners/chat/sessions/${sessionId}/messages/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] chat-message list failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : [];
+  return rows.map(runnerChatMessageOf);
+}
+
+/**
+ * Send a chat message through the app's own endpoint. Resolves with the
+ * stored user message; the session is left mid-turn (active message set),
+ * exactly as after a UI send with no daemon to answer it.
+ */
+export async function serverSendChatMessage(
+  sessionId: string,
+  content: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<RunnerChatMessage> {
+  const res = await mutateJSON("POST", `${apiBase}/api/runners/chat/sessions/${sessionId}/messages/`, sessionCookie, {
+    content,
+    content_parts: [],
+  });
+  if (res.status !== 201) throw new Error(`[parity] chat send failed with HTTP ${res.status}.`);
+  return runnerChatMessageOf((await res.json()) as unknown);
+}
+
+/** Close a chat session through the app's own endpoint. */
+export async function serverCloseChatSession(
+  sessionId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<RunnerChatSession> {
+  const res = await mutateJSON("POST", `${apiBase}/api/runners/chat/sessions/${sessionId}/close/`, sessionCookie, {});
+  if (!res.ok) throw new Error(`[parity] chat close failed with HTTP ${res.status}.`);
+  return runnerChatSessionOf((await res.json()) as unknown);
+}
+
+/**
+ * Craft session states the REST surface cannot produce (ordering stamps,
+ * parked or cleared turns). Only the named fields are touched.
+ */
+export async function serverSetChatSession(
+  sessionId: string,
+  fields: {
+    lastMessageAtIso?: string | null;
+    activeTurnId?: string;
+    activeMessageId?: string | null;
+    status?: "open" | "closed";
+  }
+): Promise<void> {
+  const sets: string[] = [];
+  if (fields.lastMessageAtIso !== undefined) {
+    sets.push(
+      fields.lastMessageAtIso === null
+        ? `session.last_message_at = None`
+        : `session.last_message_at = parse_datetime(${JSON.stringify(fields.lastMessageAtIso)})`
+    );
+  }
+  if (fields.activeTurnId !== undefined) sets.push(`session.active_turn_id = ${JSON.stringify(fields.activeTurnId)}`);
+  if (fields.activeMessageId !== undefined) {
+    sets.push(
+      fields.activeMessageId === null
+        ? `session.active_message_id = None`
+        : `session.active_message_id = ${JSON.stringify(fields.activeMessageId)}`
+    );
+  }
+  if (fields.status !== undefined) sets.push(`session.status = ${JSON.stringify(fields.status)}`);
+  await apiShell(
+    `from django.utils.dateparse import parse_datetime\n` +
+      `from pi_dash.runner.models import AgentChatSession\n` +
+      `session = AgentChatSession.objects.get(pk=${JSON.stringify(sessionId)})\n` +
+      sets.map((line) => `${line}\n`).join("") +
+      `session.save()\n` +
+      `print("PARITY_CHAT_SESSION_OK")\n`
+  );
+}
+
+/** Persisted event kinds of a session in sequence order (server-side stream log). */
+export async function serverChatEventKinds(sessionId: string): Promise<{ seq: number; kind: string }[]> {
+  const out = await apiShell(
+    `import json\n` +
+      `from pi_dash.runner.models import AgentChatEvent\n` +
+      `rows = [{"seq": e.seq, "kind": e.kind} for e in AgentChatEvent.objects.filter(session_id=${JSON.stringify(sessionId)}).order_by("seq")]\n` +
+      `print("PARITY_CHAT_EVENTS:" + json.dumps(rows))\n`
+  );
+  const line = /^PARITY_CHAT_EVENTS:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (line === "") throw new Error(`[parity] chat-event read produced no row for ${sessionId}.`);
+  return JSON.parse(line) as { seq: number; kind: string }[];
+}
+
+/**
+ * Read the live SSE endpoint until `maxChars` arrive or `waitMs` elapse,
+ * then cancel the (never-ending) stream. Proves the resumable replay:
+ * `after=0` replays persisted frames, `after=<tip>` stays quiet.
+ */
+export async function serverReadChatStream(
+  sessionId: string,
+  sessionCookie: string,
+  after: number,
+  options?: { maxChars?: number; waitMs?: number }
+): Promise<string> {
+  const apiBase = apiBaseFromEnv();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options?.waitMs ?? 8000);
+  try {
+    const res = await fetch(`${apiBase}/api/runners/chat/sessions/${sessionId}/events/?after=${after}`, {
+      headers: { cookie: sessionCookie },
+      signal: controller.signal,
+    });
+    if (!res.ok || !res.body) throw new Error(`[parity] chat SSE read failed with HTTP ${res.status}.`);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    const limit = options?.maxChars ?? 4000;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+      if (text.length >= limit) break;
+    }
+    await reader.cancel();
+    return text;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") return "";
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
