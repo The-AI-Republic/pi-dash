@@ -35,26 +35,26 @@ test(
   async ({ driver }) => {
     test.setTimeout(600_000);
     const harness = await test.step("fresh owner plus workspace", async () => schedulerHarness("parity-agt6"));
-    const { owner, ownerSession, workspaceSlug } = harness;
+    const { owner, ownerSession, workspaceSlug, tag } = harness;
     const slug = `agt6-bulk-${workspaceSlug}`;
 
     const { projectA, projectB } = await test.step("owner prepares projects and definitions", async () => {
       const projectA = await ensureProject(
         workspaceSlug,
         ownerSession,
-        `Bulk Alpha ${workspaceSlug}`,
+        `Bulk Alpha ${tag}`,
         parityProjectIdentifier("AG6A")
       );
       const projectB = await ensureProject(
         workspaceSlug,
         ownerSession,
-        `Bulk Beta ${workspaceSlug}`,
+        `Bulk Beta ${tag}`,
         parityProjectIdentifier("AG6B")
       );
       const projectC = await ensureProject(
         workspaceSlug,
         ownerSession,
-        `Bulk Gamma ${workspaceSlug}`,
+        `Bulk Gamma ${tag}`,
         parityProjectIdentifier("AG6C")
       );
       for (const project of [projectA, projectB, projectC]) {
@@ -99,13 +99,13 @@ test(
     await test.step("the picker lists joined projects with search and select-all", async () => {
       const options = await driver.schedulerInstallPickerOptions();
       const byName = new Map(options.map((option) => [option.name, option]));
-      expect(byName.get(`Bulk Alpha ${workspaceSlug}`)).toMatchObject({ checked: false, locked: false });
-      expect(byName.get(`Bulk Beta ${workspaceSlug}`)).toMatchObject({ checked: false, locked: false });
-      expect(byName.get(`Bulk Gamma ${workspaceSlug}`)).toMatchObject({ checked: true, locked: true });
+      expect(byName.get(`Bulk Alpha ${tag}`)).toMatchObject({ checked: false, locked: false });
+      expect(byName.get(`Bulk Beta ${tag}`)).toMatchObject({ checked: false, locked: false });
+      expect(byName.get(`Bulk Gamma ${tag}`)).toMatchObject({ checked: true, locked: true });
       await driver.schedulerInstallSearch("Beta");
       await expect
         .poll(() => driver.schedulerInstallPickerOptions(), { timeout: 30_000 })
-        .toEqual([expect.objectContaining({ name: `Bulk Beta ${workspaceSlug}` })]);
+        .toEqual([expect.objectContaining({ name: `Bulk Beta ${tag}` })]);
       await driver.schedulerInstallSearch("");
       await driver.schedulerInstallToggleSelectAll();
       await expect
@@ -117,7 +117,7 @@ test(
           .filter((option) => option.checked && !option.locked)
           .map((option) => option.name)
           .sort()
-      ).toEqual([`Bulk Alpha ${workspaceSlug}`, `Bulk Beta ${workspaceSlug}`].sort());
+      ).toEqual([`Bulk Alpha ${tag}`, `Bulk Beta ${tag}`].sort());
     });
 
     await test.step("an empty selection is refused", async () => {
@@ -132,8 +132,8 @@ test(
     });
 
     await test.step("per-target results partition into success and failure", async () => {
-      await driver.schedulerInstallToggleProject(`Bulk Alpha ${workspaceSlug}`);
-      await driver.schedulerInstallToggleProject(`Bulk Beta ${workspaceSlug}`);
+      await driver.schedulerInstallToggleProject(`Bulk Alpha ${tag}`);
+      await driver.schedulerInstallToggleProject(`Bulk Beta ${tag}`);
       await expect
         .poll(() => driver.schedulerInstallSelectedSummary(), { timeout: 30_000 })
         .toBe("2 projects selected");
@@ -155,7 +155,7 @@ test(
             { title: "Installed on 1 project", message: expect.stringContaining("configured schedule") },
             {
               title: "1 project failed",
-              message: expect.stringContaining(`Bulk Beta ${workspaceSlug}`),
+              message: expect.stringContaining(`Bulk Beta ${tag}`),
             },
           ])
         );
@@ -164,8 +164,8 @@ test(
       await expect.poll(() => driver.schedulerInstallSelectedSummary(), { timeout: 30_000 }).toBe("1 project selected");
       const options = await driver.schedulerInstallPickerOptions();
       const byName = new Map(options.map((option) => [option.name, option]));
-      expect(byName.get(`Bulk Alpha ${workspaceSlug}`)).toMatchObject({ checked: true, locked: true });
-      expect(byName.get(`Bulk Beta ${workspaceSlug}`)).toMatchObject({ checked: true, locked: false });
+      expect(byName.get(`Bulk Alpha ${tag}`)).toMatchObject({ checked: true, locked: true });
+      expect(byName.get(`Bulk Beta ${tag}`)).toMatchObject({ checked: true, locked: false });
       expect(await serverBindings(workspaceSlug, projectA.id, ownerSession)).toHaveLength(1);
     });
 

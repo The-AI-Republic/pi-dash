@@ -26,14 +26,14 @@ test(
   { tag: specTags(ROWS) },
   async ({ driver }) => {
     const harness = await test.step("fresh owner plus workspace", async () => schedulerHarness("parity-agt4"));
-    const { owner, ownerSession, workspaceSlug } = harness;
+    const { owner, ownerSession, workspaceSlug, tag } = harness;
     const slug = `agt4-delete-${workspaceSlug}`;
 
     const projectId = await test.step("owner prepares a definition with an install", async () => {
       const project = await ensureProject(
         workspaceSlug,
         ownerSession,
-        `AGT4 Project ${workspaceSlug}`,
+        `AGT4 Project ${tag}`,
         parityProjectIdentifier("AG4")
       );
       const definition = await ensureScheduler(workspaceSlug, ownerSession, {

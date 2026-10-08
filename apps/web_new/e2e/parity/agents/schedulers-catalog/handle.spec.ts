@@ -20,13 +20,13 @@ test(
   { tag: specTags(ROWS) },
   async ({ driver }) => {
     const harness = await test.step("fresh owner plus workspace", async () => schedulerHarness("parity-agt5"));
-    const { owner, ownerSession, workspaceSlug } = harness;
+    const { owner, ownerSession, workspaceSlug, tag } = harness;
 
     const projectId = await test.step("owner prepares a project", async () => {
       const project = await ensureProject(
         workspaceSlug,
         ownerSession,
-        `AGT5 Project ${workspaceSlug}`,
+        `AGT5 Project ${tag}`,
         parityProjectIdentifier("AG5")
       );
       return project.id;

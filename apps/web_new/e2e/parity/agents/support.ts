@@ -25,6 +25,8 @@ export interface SchedulerHarness {
   workspaceSlug: string;
   workspaceName: string;
   workspaceId: string;
+  /** The slug with hyphens stripped, for hyphen-hostile fields (project names). */
+  tag: string;
 }
 
 /** Fresh owner plus fresh workspace; the owner is onboarded and lands there. */
@@ -35,7 +37,14 @@ export async function schedulerHarness(prefix = "parity-agt"): Promise<Scheduler
   const workspace = await createWorkspaceViaApi(owner, { name: workspaceName, slug: workspaceSlug });
   await markOnboarded(owner);
   await setLastWorkspace(owner, workspace.id);
-  return { owner, ownerSession: owner.cookie, workspaceSlug, workspaceName, workspaceId: workspace.id };
+  return {
+    owner,
+    ownerSession: owner.cookie,
+    workspaceSlug,
+    workspaceName,
+    workspaceId: workspace.id,
+    tag: workspaceSlug.replace(/-/g, ""),
+  };
 }
 
 /** Password for harness-seated members and guests (meets the signup rules). */

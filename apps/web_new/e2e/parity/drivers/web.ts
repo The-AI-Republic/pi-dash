@@ -14265,14 +14265,13 @@ export class WebDriver implements ParityDriver {
   async schedulerOpenProjectCreate(): Promise<void> {
     await this.page.getByRole("button", { name: "New Scheduler", exact: true }).click();
     const dialog = this.schedulerDialog();
+    // The modal opens on the install tab (no derivation fields mounted), so
+    // settle on the title first, flip to the create tab, then wait for the
+    // handle field. Tabs render for workspace admins; the derivation halves
+    // always run as the owner.
+    await dialog.getByText("New Scheduler", { exact: true }).waitFor({ timeout: WebDriver.OPEN_MS });
+    await dialog.getByRole("tab", { name: "Create new", exact: true }).click({ timeout: WebDriver.OPEN_MS });
     await dialog.getByLabel("Slug").waitFor({ timeout: WebDriver.OPEN_MS });
-    // Workspace admins get install/create tabs; settle on the create tab so
-    // the derivation fields are the live ones.
-    const createTab = dialog.getByRole("tab", { name: "Create new", exact: true });
-    if ((await createTab.count()) > 0) {
-      await createTab.click();
-      await dialog.getByLabel("Slug").waitFor({ timeout: WebDriver.OPEN_MS });
-    }
   }
 
   async schedulerProjectCreateSubmit(): Promise<void> {
