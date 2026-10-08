@@ -3,8 +3,12 @@
 // See the LICENSE file for details.
 // Oracle scenario (NEWFRONT-184): the schedulers and prompts routes admit
 // workspace admins, members and guests inside the normal workspace chrome,
-// refuse outsiders with a not-authorized panel, and never mount a second
-// shell. Row: AGT-022. Both route halves are proven in this one scenario.
+// refuse outsiders, and never mount a second shell. Row: AGT-022. Both
+// route halves are proven in this one scenario.
+// Note: outsiders meet the workspace "not found" surface (which mounts no
+// sidebar) before the route layouts mount, so the layout-level refusal
+// panel is unreachable while that wrapper guard stands; the scenario pins
+// the effective refusal on both routes instead.
 import { test, expect } from "../../fixtures";
 import { specTags, specTitle } from "../../helpers/tags";
 import { outsiderUser, schedulerHarness, seatGuest, seatMember } from "../support";
@@ -32,23 +36,25 @@ test(
         await driver.rulesEnsureSignedIn(role.email, role.password, workspaceSlug);
         await driver.schedulerOpenCatalog(workspaceSlug);
         expect(await driver.schedulerNotAuthorizedVisible()).toBe(false);
+        expect(await driver.schedulerWorkspaceNotFoundVisible()).toBe(false);
         expect(await driver.schedulerShellCount()).toBe(1);
         await driver.schedulerOpenPrompts(workspaceSlug);
         expect(await driver.schedulerNotAuthorizedVisible()).toBe(false);
+        expect(await driver.schedulerWorkspaceNotFoundVisible()).toBe(false);
         expect(await driver.schedulerShellCount()).toBe(1);
       });
     }
 
-    await test.step("outsider meets the gate panel on both routes, still one shell", async () => {
+    await test.step("outsider is refused on both routes with no shell at all", async () => {
       await driver.resetSession();
       await driver.openEntry();
       await driver.signInWithPassword(outsider.email, outsider.password);
       await driver.schedulerOpenCatalog(workspaceSlug);
-      expect(await driver.schedulerNotAuthorizedVisible()).toBe(true);
-      expect(await driver.schedulerShellCount()).toBe(1);
+      expect(await driver.schedulerWorkspaceNotFoundVisible()).toBe(true);
+      expect(await driver.schedulerShellCount()).toBe(0);
       await driver.schedulerOpenPrompts(workspaceSlug);
-      expect(await driver.schedulerNotAuthorizedVisible()).toBe(true);
-      expect(await driver.schedulerShellCount()).toBe(1);
+      expect(await driver.schedulerWorkspaceNotFoundVisible()).toBe(true);
+      expect(await driver.schedulerShellCount()).toBe(0);
     });
   }
 );

@@ -14033,6 +14033,11 @@ export class WebDriver implements ParityDriver {
     return this.page.getByRole("heading", { name: "Oops! You are not authorized to view this page" });
   }
 
+  /** The workspace wrapper's refusal heading, shown above the route layouts. */
+  private schedulerNotFoundHeading(): Locator {
+    return this.page.getByRole("heading", { name: "Workspace not found" });
+  }
+
   /** One catalog table row, matched on its exact handle cell. */
   private schedulerCatalogRow(handle: string): Locator {
     const exact = new RegExp(`^${handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
@@ -14040,8 +14045,14 @@ export class WebDriver implements ParityDriver {
   }
 
   private async settleOnCatalogOrGate(): Promise<void> {
-    await this.page.locator("#main-sidebar").waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
-    await this.page.locator("tbody").or(this.schedulerGateHeading()).first().waitFor({ timeout: WebDriver.OPEN_MS });
+    // Three outcomes, no sidebar wait: the not-found surface mounts no
+    // sidebar at all, so waiting for chrome would hang the refusal halves.
+    await this.page
+      .locator("tbody")
+      .or(this.schedulerGateHeading())
+      .or(this.schedulerNotFoundHeading())
+      .first()
+      .waitFor({ timeout: WebDriver.OPEN_MS });
   }
 
   async schedulerOpenCatalog(workspaceSlug: string): Promise<void> {
@@ -14453,16 +14464,20 @@ export class WebDriver implements ParityDriver {
 
   async schedulerOpenPrompts(workspaceSlug: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/prompts`);
-    await this.page.locator("#main-sidebar").waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
     await this.page
       .getByRole("heading", { name: "Prompts", exact: true })
       .or(this.schedulerGateHeading())
+      .or(this.schedulerNotFoundHeading())
       .first()
       .waitFor({ timeout: WebDriver.OPEN_MS });
   }
 
   async schedulerNotAuthorizedVisible(): Promise<boolean> {
     return this.isShown(this.schedulerGateHeading());
+  }
+
+  async schedulerWorkspaceNotFoundVisible(): Promise<boolean> {
+    return this.isShown(this.schedulerNotFoundHeading());
   }
 
   async schedulerShellCount(): Promise<number> {

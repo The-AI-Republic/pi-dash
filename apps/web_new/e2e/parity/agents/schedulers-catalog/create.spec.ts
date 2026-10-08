@@ -39,7 +39,9 @@ test(
       await expect
         .poll(() => driver.rulesLastToast(), { timeout: 60_000 })
         .toEqual({ title: "Scheduler created", message: expect.stringContaining("install") });
-      expect(await driver.schedulerDefinitionOpen()).toBe(false);
+      // The success notice lands a beat before the close animation unmounts
+      // the dialog; poll for the close instead of asserting it outright.
+      await expect.poll(() => driver.schedulerDefinitionOpen(), { timeout: 30_000 }).toBe(false);
       await expect
         .poll(async () => (await driver.schedulerCatalogRows()).map((row) => row.handle), { timeout: 60_000 })
         .toContain(slug);

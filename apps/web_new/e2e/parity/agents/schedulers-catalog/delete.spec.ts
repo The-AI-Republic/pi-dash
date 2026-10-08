@@ -101,6 +101,8 @@ test(
         name: "AGT4 Raced Away",
         prompt: "Deleted out from under the dialog.",
       });
+      // The row was created behind the table's back; reload so it is listed.
+      await driver.schedulerOpenCatalog(workspaceSlug);
       await driver.schedulerOpenDelete(doomed.slug);
       await serverDeleteScheduler(workspaceSlug, doomed.id, ownerSession);
       await driver.schedulerConfirmDelete();

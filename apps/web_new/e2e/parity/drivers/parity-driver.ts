@@ -2555,7 +2555,7 @@ export interface ParityDriver {
   // --- Scheduler catalog + definitions (NEWFRONT-184, AGT-001..006, AGT-022).
   // --- Verbs stay generic (scheduler*) so sibling agents-area children reuse
   // --- them; later children extend, never rename.
-  /** Open the workspace scheduler catalog; waits for the table or the empty guidance row. */
+  /** Open the workspace scheduler catalog; settles on the table, the gate panel, or the workspace not-found surface. */
   schedulerOpenCatalog(workspaceSlug: string): Promise<void>;
   /** Catalog table rows in display order (data rows only, never the empty guidance row). */
   schedulerCatalogRows(): Promise<SchedulerCatalogRow[]>;
@@ -2643,10 +2643,12 @@ export interface ParityDriver {
   schedulerCloseInstall(): Promise<void>;
   /** Every toast currently visible, oldest first (for partitioned outcomes). */
   schedulerVisibleToasts(): Promise<{ title: string; message: string }[]>;
-  /** Open the workspace prompts route; settles on the page or the gate panel. */
+  /** Open the workspace prompts route; settles on the page, the gate panel, or the workspace not-found surface. */
   schedulerOpenPrompts(workspaceSlug: string): Promise<void>;
   /** Whether the not-authorized panel is currently shown. */
   schedulerNotAuthorizedVisible(): Promise<boolean>;
+  /** Whether the workspace not-found surface is currently shown. */
+  schedulerWorkspaceNotFoundVisible(): Promise<boolean>;
   /** How many workspace sidebars are mounted (a second shell would double it). */
   schedulerShellCount(): Promise<number>;
 }

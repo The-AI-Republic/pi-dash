@@ -97,32 +97,50 @@ test(
     });
 
     await test.step("the picker lists joined projects with search and select-all", async () => {
+      const projectAName = `Bulk Alpha ${tag}`;
+      const projectBName = `Bulk Beta ${tag}`;
+      const projectCName = `Bulk Gamma ${tag}`;
       const options = await driver.schedulerInstallPickerOptions();
       const byName = new Map(options.map((option) => [option.name, option]));
-      expect(byName.get(`Bulk Alpha ${tag}`)).toMatchObject({ checked: false, locked: false });
-      expect(byName.get(`Bulk Beta ${tag}`)).toMatchObject({ checked: false, locked: false });
-      expect(byName.get(`Bulk Gamma ${tag}`)).toMatchObject({ checked: true, locked: true });
+      expect(byName.get(projectAName)).toMatchObject({ checked: false, locked: false });
+      expect(byName.get(projectBName)).toMatchObject({ checked: false, locked: false });
+      expect(byName.get(projectCName)).toMatchObject({ checked: true, locked: true });
+      // Workspace creation also provisions sample projects outside this
+      // scenario; they are eligible like any joined project, so select-all
+      // assertions discover them instead of hardcoding a count.
+      const extraEligible = options.filter(
+        (option) => option.name !== projectAName && option.name !== projectBName && option.name !== projectCName
+      );
+      expect(extraEligible.length).toBeGreaterThan(0);
+      expect(extraEligible.every((option) => !option.locked)).toBe(true);
       await driver.schedulerInstallSearch("Beta");
       await expect
         .poll(() => driver.schedulerInstallPickerOptions(), { timeout: 30_000 })
-        .toEqual([expect.objectContaining({ name: `Bulk Beta ${tag}` })]);
+        .toEqual([expect.objectContaining({ name: projectBName })]);
       await driver.schedulerInstallSearch("");
-      await driver.schedulerInstallToggleSelectAll();
+      await driver.schedulerInstallToggleProject(projectAName);
+      await driver.schedulerInstallToggleProject(projectBName);
       await expect
         .poll(() => driver.schedulerInstallSelectedSummary(), { timeout: 30_000 })
         .toBe("2 projects selected");
-      const selected = await driver.schedulerInstallPickerOptions();
-      expect(
-        selected
-          .filter((option) => option.checked && !option.locked)
-          .map((option) => option.name)
-          .sort()
-      ).toEqual([`Bulk Alpha ${tag}`, `Bulk Beta ${tag}`].sort());
+      // Select-all adds every remaining eligible project, then clears all.
+      await driver.schedulerInstallToggleSelectAll();
+      await expect
+        .poll(
+          async () =>
+            (await driver.schedulerInstallPickerOptions())
+              .filter((option) => option.checked && !option.locked)
+              .map((option) => option.name)
+              .sort(),
+          { timeout: 30_000 }
+        )
+        .toEqual([projectAName, projectBName, ...extraEligible.map((option) => option.name)].sort());
+      await driver.schedulerInstallToggleSelectAll();
+      await expect.poll(() => driver.schedulerInstallSelectedSummary(), { timeout: 30_000 }).toBe("Select projects");
     });
 
     await test.step("an empty selection is refused", async () => {
-      await driver.schedulerInstallToggleSelectAll();
-      await expect.poll(() => driver.schedulerInstallSelectedSummary(), { timeout: 30_000 }).toBe("Select projects");
+      expect(await driver.schedulerInstallSelectedSummary()).toBe("Select projects");
       await driver.schedulerInstallSubmit();
       await expect
         .poll(() => driver.schedulerVisibleToasts(), { timeout: 60_000 })

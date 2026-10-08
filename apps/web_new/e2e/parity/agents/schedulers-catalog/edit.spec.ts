@@ -84,7 +84,9 @@ test(
       await expect
         .poll(() => driver.rulesLastToast(), { timeout: 60_000 })
         .toEqual({ title: "Scheduler updated", message: expect.stringContaining("updated definition") });
-      expect(await driver.schedulerDefinitionOpen()).toBe(false);
+      // The success notice lands a beat before the close animation unmounts
+      // the dialog; poll for the close instead of asserting it outright.
+      await expect.poll(() => driver.schedulerDefinitionOpen(), { timeout: 30_000 }).toBe(false);
       await expect
         .poll(async () => (await driver.schedulerCatalogRows()).map((row) => row.name), { timeout: 60_000 })
         .toContain("AGT3 After Edit");

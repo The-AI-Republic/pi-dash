@@ -4285,6 +4285,9 @@ export class WebNewDriver implements ParityDriver {
   async schedulerNotAuthorizedVisible(): Promise<boolean> {
     return todo("schedulerNotAuthorizedVisible");
   }
+  async schedulerWorkspaceNotFoundVisible(): Promise<boolean> {
+    return todo("schedulerWorkspaceNotFoundVisible");
+  }
   async schedulerShellCount(): Promise<number> {
     return todo("schedulerShellCount");
   }
