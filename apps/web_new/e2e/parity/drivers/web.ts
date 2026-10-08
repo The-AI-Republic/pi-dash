@@ -14569,50 +14569,44 @@ export class WebDriver implements ParityDriver {
   }
 
   async devMachinesStubListOnce(rows: unknown[]): Promise<void> {
-    await this.page.route(
-      WebDriver.DEV_MACHINES_PATTERN,
-      async (route) => {
-        if (route.request().method() !== "GET") {
-          await route.continue();
-          return;
-        }
+    // Armed-flag shaping, not times:1: a continued request still consumes
+    // a times slot, so an unrelated poll could disarm the stub.
+    let armed = true;
+    await this.page.route(WebDriver.DEV_MACHINES_PATTERN, async (route) => {
+      if (armed && route.request().method() === "GET") {
+        armed = false;
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(rows) });
-      },
-      { times: 1 }
-    );
+        return;
+      }
+      await route.continue();
+    });
   }
 
   async devMachinesFailListOnce(): Promise<void> {
-    await this.page.route(
-      WebDriver.DEV_MACHINES_PATTERN,
-      async (route) => {
-        if (route.request().method() !== "GET") {
-          await route.continue();
-          return;
-        }
+    let armed = true;
+    await this.page.route(WebDriver.DEV_MACHINES_PATTERN, async (route) => {
+      if (armed && route.request().method() === "GET") {
+        armed = false;
         await route.fulfill({
           status: 500,
           contentType: "application/json",
           body: JSON.stringify({ error: "parity list failure" }),
         });
-      },
-      { times: 1 }
-    );
+        return;
+      }
+      await route.continue();
+    });
   }
 
   async devMachinesDelayListOnce(ms: number): Promise<void> {
-    await this.page.route(
-      WebDriver.DEV_MACHINES_PATTERN,
-      async (route) => {
-        if (route.request().method() !== "GET") {
-          await route.continue();
-          return;
-        }
+    let armed = true;
+    await this.page.route(WebDriver.DEV_MACHINES_PATTERN, async (route) => {
+      if (armed && route.request().method() === "GET") {
+        armed = false;
         await this.page.waitForTimeout(ms);
-        await route.continue();
-      },
-      { times: 1 }
-    );
+      }
+      await route.continue();
+    });
   }
 
   async devMachinesListPollCount(windowMs: number): Promise<number> {
@@ -14704,38 +14698,32 @@ export class WebDriver implements ParityDriver {
   }
 
   async devMachinesDelayActionOnce(ms: number): Promise<void> {
-    await this.page.route(
-      WebDriver.DEV_MACHINES_PATTERN,
-      async (route) => {
-        const request = route.request();
-        if (!WebDriver.devMachinesIsActionRequest(request.url(), request.method())) {
-          await route.continue();
-          return;
-        }
+    let armed = true;
+    await this.page.route(WebDriver.DEV_MACHINES_PATTERN, async (route) => {
+      const request = route.request();
+      if (armed && WebDriver.devMachinesIsActionRequest(request.url(), request.method())) {
+        armed = false;
         await this.page.waitForTimeout(ms);
-        await route.continue();
-      },
-      { times: 1 }
-    );
+      }
+      await route.continue();
+    });
   }
 
   async devMachinesFailActionOnce(): Promise<void> {
-    await this.page.route(
-      WebDriver.DEV_MACHINES_PATTERN,
-      async (route) => {
-        const request = route.request();
-        if (!WebDriver.devMachinesIsActionRequest(request.url(), request.method())) {
-          await route.continue();
-          return;
-        }
+    let armed = true;
+    await this.page.route(WebDriver.DEV_MACHINES_PATTERN, async (route) => {
+      const request = route.request();
+      if (armed && WebDriver.devMachinesIsActionRequest(request.url(), request.method())) {
+        armed = false;
         await route.fulfill({
           status: 500,
           contentType: "application/json",
           body: JSON.stringify({ error: "parity action failure" }),
         });
-      },
-      { times: 1 }
-    );
+        return;
+      }
+      await route.continue();
+    });
   }
 
   async devMachinesLastToast(): Promise<string | null> {
@@ -14794,11 +14782,12 @@ export class WebDriver implements ParityDriver {
     const count = await pres.count();
     for (let index = 0; index < count; index += 1) {
       const root = pres.nth(index).locator("xpath=..");
+      // textContent, not innerText: the label renders uppercased by style.
       const text = (
         (await root
           .locator("span")
           .first()
-          .innerText()
+          .textContent()
           .catch(() => "")) ?? ""
       ).trim();
       if (text === label) return root;
@@ -14914,44 +14903,46 @@ export class WebDriver implements ParityDriver {
   }
 
   private static runnerDetailIsShapedRequest(url: string, method: string): boolean {
+    // Detail shape only (/api/runners/<id>/): the side nav's list GET and
+    // the chat endpoints share the prefix and must never consume the stub.
     if (method !== "GET") return false;
-    if (url.includes("dev-machines") || url.includes("/chat/")) return false;
-    return url.includes("/api/runners/");
+    let path: string;
+    try {
+      path = new URL(url).pathname;
+    } catch {
+      return false;
+    }
+    const segment = /^\/api\/runners\/([^/]+)\/?$/.exec(path)?.[1];
+    return segment !== undefined && segment !== "dev-machines" && segment !== "chat";
   }
 
   async runnerDetailDelayOnce(ms: number): Promise<void> {
-    await this.page.route(
-      "**/api/runners/**",
-      async (route) => {
-        const request = route.request();
-        if (!WebDriver.runnerDetailIsShapedRequest(request.url(), request.method())) {
-          await route.continue();
-          return;
-        }
+    let armed = true;
+    await this.page.route("**/api/runners/**", async (route) => {
+      const request = route.request();
+      if (armed && WebDriver.runnerDetailIsShapedRequest(request.url(), request.method())) {
+        armed = false;
         await this.page.waitForTimeout(ms);
-        await route.continue();
-      },
-      { times: 1 }
-    );
+      }
+      await route.continue();
+    });
   }
 
   async runnerDetailFailOnce(): Promise<void> {
-    await this.page.route(
-      "**/api/runners/**",
-      async (route) => {
-        const request = route.request();
-        if (!WebDriver.runnerDetailIsShapedRequest(request.url(), request.method())) {
-          await route.continue();
-          return;
-        }
+    let armed = true;
+    await this.page.route("**/api/runners/**", async (route) => {
+      const request = route.request();
+      if (armed && WebDriver.runnerDetailIsShapedRequest(request.url(), request.method())) {
+        armed = false;
         await route.fulfill({
           status: 500,
           contentType: "application/json",
           body: JSON.stringify({ error: "parity detail failure" }),
         });
-      },
-      { times: 1 }
-    );
+        return;
+      }
+      await route.continue();
+    });
   }
 
   private runnerActivityHeading(): Locator {

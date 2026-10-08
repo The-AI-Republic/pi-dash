@@ -8519,6 +8519,14 @@ function devMachinesCount(raw: unknown): number {
   return typeof raw === "number" ? raw : 0;
 }
 
+/** Render a value as a Python literal for shell snippets (JSON booleans/null are not). */
+function devMachinesPy(value: unknown): string {
+  if (value === null || value === undefined) return "None";
+  if (value === true) return "True";
+  if (value === false) return "False";
+  return JSON.stringify(value) ?? "None";
+}
+
 /** Workspace UUID for a slug (dev-machine reads key off the id, not the slug). */
 export async function serverDevMachinesWorkspaceId(workspaceSlug: string): Promise<string> {
   const out = await devMachinesShell(
@@ -8678,7 +8686,7 @@ export async function serverDevMachinesPlantLiveState(
       `from pi_dash.runner.models import Runner, RunnerLiveState\n` +
       `runner = Runner.objects.get(pk=${JSON.stringify(runnerId)})\n` +
       `event_at = (timezone.now() - timedelta(seconds=${input.lastEventAgeSecs ?? "null"})) if ${input.lastEventAgeSecs === null ? "False" : "True"} else None\n` +
-      `RunnerLiveState.objects.update_or_create(runner=runner, defaults={"last_event_at": event_at, "last_event_kind": ${JSON.stringify(input.lastEventKind ?? null)}, "last_event_summary": ${JSON.stringify(input.lastEventSummary ?? null)}, "agent_pid": ${JSON.stringify(input.agentPid ?? null)}, "agent_subprocess_alive": ${JSON.stringify(input.subprocessAlive ?? null)}, "approvals_pending": ${JSON.stringify(input.approvalsPending ?? null)}, "usage": ${JSON.stringify(usage)}, "llm_model": ${JSON.stringify(input.llmModel ?? null)}, "turn_count": ${JSON.stringify(input.turnCount ?? null)}})\n` +
+      `RunnerLiveState.objects.update_or_create(runner=runner, defaults={"last_event_at": event_at, "last_event_kind": ${devMachinesPy(input.lastEventKind)}, "last_event_summary": ${devMachinesPy(input.lastEventSummary)}, "agent_pid": ${devMachinesPy(input.agentPid)}, "agent_subprocess_alive": ${devMachinesPy(input.subprocessAlive)}, "approvals_pending": ${devMachinesPy(input.approvalsPending)}, "usage": ${devMachinesPy(usage)}, "llm_model": ${devMachinesPy(input.llmModel)}, "turn_count": ${devMachinesPy(input.turnCount)}})\n` +
       `print("PARITY_DM_LIVE_OK")\n`
   );
 }
