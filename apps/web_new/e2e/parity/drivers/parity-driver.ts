@@ -2772,6 +2772,7 @@ export interface SchedulerInstallOption {
   checked: boolean;
   /** Already installed: checked and cannot be toggled. */
   locked: boolean;
+}
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */
 export type RulesCommentMenuOption = "edit" | "copy_link" | "access_switch" | "fold" | "unfold" | "delete";
