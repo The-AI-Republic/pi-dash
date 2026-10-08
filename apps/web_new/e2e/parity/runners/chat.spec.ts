@@ -531,31 +531,55 @@ test(
       const bubbleId = randomUUID();
       await driver.openEntry();
       await driver.signInWithPassword(seed.email, seed.password);
+      // Installed before the page subscribes so the stub (not the live
+      // server) owns the stream; the asserted frames are re-stubbed fresh
+      // below, since each serve is wiped by the reconnect-error refetch.
       await driver.runnerChatStubStream(chat.id, [
-        { seq: 1, kind: "assistant_delta", payload: { params: { delta: "Hello " } }, message: bubbleId },
-        // Same sequence twice: deltas are de-duplicated, applied once.
-        { seq: 1, kind: "assistant_delta", payload: { params: { delta: "Hello " } }, message: bubbleId },
-        { seq: 2, kind: "assistant_delta", payload: { params: { delta: "**world**" } }, message: bubbleId },
+        { seq: 1, kind: "assistant_delta", payload: { params: { delta: "priming" } }, message: bubbleId },
       ]);
       await driver.runnerChatOpen(seed.workspaceSlug, runner.id, chat.id);
 
       await test.step("tokens accumulate into one markdown bubble, never blank", async () => {
+        // Settle on the user turn first (initial load done), then hold the
+        // reconnect refetch and serve fresh frames: the streamed bubble
+        // stays on screen instead of collapsing back to the server state.
         await expect
           .poll(() => driver.runnerChatMessageBubbles(), { timeout: 20_000 })
-          .toEqual([
-            { role: "user", text: "stubbed turn" },
-            { role: "assistant", text: "Hello world" },
+          .toEqual([{ role: "user", text: "stubbed turn" }]);
+        await driver.runnerChatHoldMessageList(30_000);
+        try {
+          await driver.runnerChatStubStream(chat.id, [
+            { seq: 101, kind: "assistant_delta", payload: { params: { delta: "Hello " } }, message: bubbleId },
+            // Same sequence twice: deltas are de-duplicated, applied once.
+            { seq: 101, kind: "assistant_delta", payload: { params: { delta: "Hello " } }, message: bubbleId },
+            { seq: 102, kind: "assistant_delta", payload: { params: { delta: "**world**" } }, message: bubbleId },
           ]);
-        for (const bubble of await driver.runnerChatMessageBubbles()) {
-          if (bubble.role === "assistant") expect(bubble.text).not.toBe("");
+          await expect
+            .poll(() => driver.runnerChatMessageBubbles(), { timeout: 20_000 })
+            .toEqual([
+              { role: "user", text: "stubbed turn" },
+              { role: "assistant", text: "Hello world" },
+            ]);
+          for (const bubble of await driver.runnerChatMessageBubbles()) {
+            if (bubble.role === "assistant") expect(bubble.text).not.toBe("");
+          }
+          expect(await driver.runnerChatAssistantBubbleHtml(0)).toContain("<strong>");
+          // The bubble came from the stream: the server holds no assistant
+          // message for this session.
+          expect(await serverChatMessages(chat.id, session)).toHaveLength(1);
+        } finally {
+          await driver.runnerChatReleaseMessageList();
         }
-        expect(await driver.runnerChatAssistantBubbleHtml(0)).toContain("<strong>");
       });
 
-      await test.step("the stream subscribes resumably from the start", async () => {
+      await test.step("the stream subscribes from the start on the bare events URL", async () => {
         await expect.poll(() => driver.runnerChatStreamRequestUrls(chat.id), { timeout: 15_000 }).not.toHaveLength(0);
         const urls = await driver.runnerChatStreamRequestUrls(chat.id);
-        expect(urls[0]).toContain("after=0");
+        // A fresh subscribe carries no `after` cursor (the transport only
+        // sends one when resuming past persisted frames); the server-side
+        // step below proves the resumable replay itself.
+        expect(urls[0]).toContain(`/chat/sessions/${chat.id}/events/`);
+        expect(urls[0]).not.toContain("after=");
       });
 
       await test.step("the server replays persisted frames by sequence", async () => {
@@ -581,6 +605,9 @@ test(
     const runner = await plantRunner(seed, "strip", "online");
     try {
       const chat = await serverCreateChatSession({ workspaceId: wsId, runnerId: runner.id }, session);
+      // One user turn mounts the message list (and with it the strip);
+      // with zero messages the page renders the empty state instead.
+      await serverSendChatMessage(chat.id, "strip turn", session);
       const commands = Array.from({ length: 8 }, (_, i) => ({
         seq: i + 1,
         kind: "raw",
@@ -618,7 +645,7 @@ test(
           .toBeGreaterThan(before);
         // Terminal frames reconcile; they never join the strip.
         expect(await driver.runnerChatActivityStrip()).toHaveLength(6);
-        expect(await serverChatMessages(chat.id, session)).toHaveLength(0);
+        expect(await serverChatMessages(chat.id, session)).toHaveLength(1);
         await driver.runnerChatClearStreamStub(chat.id);
         await driver.runnerChatStopApiSpy().catch(() => undefined);
       });
@@ -644,13 +671,20 @@ test(
 
       await test.step("a bad frame raises the banner; the next frame clears it", async () => {
         await expect.poll(() => driver.runnerChatAlertText(), { timeout: 20_000 }).not.toBeNull();
-        await driver.runnerChatStubStream(chat.id, [
-          { seq: 2, kind: "assistant_delta", payload: { params: { delta: "recovered" } }, message: randomUUID() },
-        ]);
-        await expect.poll(() => driver.runnerChatAlertText(), { timeout: 30_000 }).toBeNull();
-        await expect
-          .poll(() => driver.runnerChatMessageBubbles(), { timeout: 15_000 })
-          .toEqual([{ role: "assistant", text: "recovered" }]);
+        // Hold the reconnect refetch so the recovered bubble stays put
+        // instead of collapsing back to the (empty) server state.
+        await driver.runnerChatHoldMessageList(30_000);
+        try {
+          await driver.runnerChatStubStream(chat.id, [
+            { seq: 2, kind: "assistant_delta", payload: { params: { delta: "recovered" } }, message: randomUUID() },
+          ]);
+          await expect.poll(() => driver.runnerChatAlertText(), { timeout: 30_000 }).toBeNull();
+          await expect
+            .poll(() => driver.runnerChatMessageBubbles(), { timeout: 15_000 })
+            .toEqual([{ role: "assistant", text: "recovered" }]);
+        } finally {
+          await driver.runnerChatReleaseMessageList();
+        }
       });
 
       await test.step("the banner also dismisses by hand", async () => {
@@ -721,11 +755,14 @@ test(
     const wsId = await serverWorkspaceIdBySlug(seed.workspaceSlug);
     const runner = await plantRunner(seed, "closer", "online");
     try {
-      await serverCreateChatSession({ workspaceId: wsId, runnerId: runner.id }, session);
+      const chat = await serverCreateChatSession({ workspaceId: wsId, runnerId: runner.id }, session);
       await driver.openEntry();
       await driver.signInWithPassword(seed.email, seed.password);
       await driver.runnerChatStartApiSpy();
-      await driver.runnerChatOpen(seed.workspaceSlug, runner.id);
+      // Explicit deep link: closing the auto-selected session makes the
+      // warm effect backfill a fresh session, while an explicitly viewed
+      // session stays put once closed.
+      await driver.runnerChatOpen(seed.workspaceSlug, runner.id, chat.id);
       await expect.poll(() => driver.runnerChatHistoryItems(), { timeout: 15_000 }).toHaveLength(1);
 
       const before = (await driver.runnerChatApiCounts()).sessionList;
@@ -733,16 +770,11 @@ test(
 
       await test.step("the session closes server-side and history refetches", async () => {
         await expect
-          .poll(
-            async () =>
-              serverGetChatSession((await serverListChatSessions(wsId, runner.id, session))[0]!.id, session).then(
-                (s) => s.status
-              ),
-            {
-              timeout: 15_000,
-            }
-          )
+          .poll(async () => serverGetChatSession(chat.id, session).then((s) => s.status), {
+            timeout: 15_000,
+          })
           .toBe("closed");
+        expect(await serverListChatSessions(wsId, runner.id, session)).toHaveLength(1);
         await expect
           .poll(() => driver.runnerChatApiCounts().then((counts) => counts.sessionList), { timeout: 15_000 })
           .toBeGreaterThan(before);

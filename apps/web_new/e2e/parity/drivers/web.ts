@@ -80,6 +80,8 @@ export class WebDriver implements ParityDriver {
   private runnerChatRunnerDetailDelayPattern: string | null = null;
   private runnerChatStreamFrames = new Map<string, RunnerChatStreamFrame[]>();
   private runnerChatStreamUrls = new Map<string, string[]>();
+  private runnerChatMessageListHoldMs = 0;
+  private runnerChatMessageListHoldArmed = false;
 
   /** Every wait below is explicitly bounded: the suite config leaves action and navigation timeouts at Playwright's unbounded defaults, so a bare waitFor would hang to the test timeout instead of failing honestly. */
   private static readonly WAIT_MS = 30_000;
@@ -15328,7 +15330,9 @@ export class WebDriver implements ParityDriver {
   // --- follow the chat page behavior observed on the running old app:
   // --- side-nav contacts link to the chat route, the history panel
   // --- lists date-labelled sessions, and the composer is an icon-button
-  // --- row (send/stop/mic distinguished by their Lucide glyphs).
+  // --- row (send/stop/mic distinguished by their Lucide glyphs). Route
+  // --- patterns end in `**`: a trailing `*` never crosses `/`, so it
+  // --- misses the API's trailing slashes.
 
   private runnerChatSideNav(): Locator {
     return this.page.locator("aside", { hasText: "AI Agents" });
@@ -16525,7 +16529,7 @@ export class WebDriver implements ParityDriver {
 
   async runnerChatFailSessionCreate(): Promise<void> {
     this.runnerChatSessionCreateFailRemaining = 1;
-    await this.page.route("**/api/runners/chat/sessions*", async (route) => {
+    await this.page.route("**/api/runners/chat/sessions**", async (route) => {
       const request = route.request();
       const pathname = new URL(request.url()).pathname;
       if (request.method() === "POST" && pathname.endsWith("/chat/sessions/")) {
@@ -16546,7 +16550,7 @@ export class WebDriver implements ParityDriver {
   async runnerChatDelaySessionCreate(ms: number): Promise<void> {
     this.runnerChatSessionCreateDelayMs = ms;
     this.runnerChatSessionCreateDelayRemaining = 1;
-    await this.page.route("**/api/runners/chat/sessions*", async (route) => {
+    await this.page.route("**/api/runners/chat/sessions**", async (route) => {
       const request = route.request();
       const pathname = new URL(request.url()).pathname;
       if (
@@ -16564,7 +16568,7 @@ export class WebDriver implements ParityDriver {
   async runnerChatClearSessionCreateStubs(): Promise<void> {
     this.runnerChatSessionCreateFailRemaining = 0;
     this.runnerChatSessionCreateDelayRemaining = 0;
-    await this.page.unroute("**/api/runners/chat/sessions*");
+    await this.page.unroute("**/api/runners/chat/sessions**");
   }
 
   async runnerChatFillDraft(text: string): Promise<void> {
@@ -16639,7 +16643,7 @@ export class WebDriver implements ParityDriver {
 
   async runnerChatFailNextSend(): Promise<void> {
     this.runnerChatSendFailRemaining = 1;
-    await this.page.route("**/api/runners/chat/sessions/*/messages*", async (route) => {
+    await this.page.route("**/api/runners/chat/sessions/*/messages**", async (route) => {
       const request = route.request();
       if (request.method() === "POST" && this.runnerChatSendFailRemaining > 0) {
         this.runnerChatSendFailRemaining -= 1;
@@ -16656,7 +16660,7 @@ export class WebDriver implements ParityDriver {
 
   async runnerChatClearSendFailure(): Promise<void> {
     this.runnerChatSendFailRemaining = 0;
-    await this.page.unroute("**/api/runners/chat/sessions/*/messages*");
+    await this.page.unroute("**/api/runners/chat/sessions/*/messages**");
   }
 
   async runnerChatVoiceButtonLabel(): Promise<string | null> {
@@ -16716,7 +16720,7 @@ export class WebDriver implements ParityDriver {
   async runnerChatDelayRunnerDetail(runnerId: string, ms: number): Promise<void> {
     this.runnerChatRunnerDetailDelayMs = ms;
     this.runnerChatRunnerDetailDelayRemaining = 1;
-    this.runnerChatRunnerDetailDelayPattern = `**/api/runners/${runnerId}*`;
+    this.runnerChatRunnerDetailDelayPattern = `**/api/runners/${runnerId}**`;
     await this.page.route(this.runnerChatRunnerDetailDelayPattern, async (route) => {
       const request = route.request();
       const pathname = new URL(request.url()).pathname;
@@ -16746,7 +16750,7 @@ export class WebDriver implements ParityDriver {
       this.runnerChatStreamUrls.set(sessionId, []);
       // Installed once per session; re-stubbing swaps the frames the
       // handler serves, so the stream's natural reconnect picks them up.
-      await this.page.route(`**/chat/sessions/${sessionId}/events*`, async (route) => {
+      await this.page.route(`**/chat/sessions/${sessionId}/events**`, async (route) => {
         this.runnerChatStreamUrls.get(sessionId)?.push(route.request().url());
         const stamp = new Date().toISOString();
         const body = (this.runnerChatStreamFrames.get(sessionId) ?? [])
@@ -16777,7 +16781,7 @@ export class WebDriver implements ParityDriver {
 
   async runnerChatClearStreamStub(sessionId: string): Promise<void> {
     this.runnerChatStreamFrames.delete(sessionId);
-    await this.page.unroute(`**/chat/sessions/${sessionId}/events*`);
+    await this.page.unroute(`**/chat/sessions/${sessionId}/events**`);
   }
 
   async runnerChatStreamRequestUrls(sessionId: string): Promise<string[]> {
@@ -16847,5 +16851,31 @@ export class WebDriver implements ParityDriver {
         (visible) => visible,
         () => false
       );
+  }
+
+  async runnerChatHoldMessageList(ms: number): Promise<void> {
+    // A stubbed stream ends as soon as its frames are served, and the
+    // reconnect error refetches messages — resetting the live list to the
+    // server state before the streamed bubble can be asserted. Holding the
+    // refetch keeps the streamed bubble on screen while the scenario reads
+    // it. Never combined with the send-failure stub on one page (both sit
+    // on the messages route).
+    this.runnerChatMessageListHoldMs = ms;
+    if (!this.runnerChatMessageListHoldArmed) {
+      this.runnerChatMessageListHoldArmed = true;
+      await this.page.route("**/api/runners/chat/sessions/*/messages**", async (route) => {
+        const request = route.request();
+        const pathname = new URL(request.url()).pathname;
+        if (request.method() === "GET" && pathname.endsWith("/messages/") && this.runnerChatMessageListHoldArmed) {
+          await new Promise((resolve) => setTimeout(resolve, this.runnerChatMessageListHoldMs));
+        }
+        await route.fallback();
+      });
+    }
+  }
+
+  async runnerChatReleaseMessageList(): Promise<void> {
+    this.runnerChatMessageListHoldArmed = false;
+    await this.page.unroute("**/api/runners/chat/sessions/*/messages**");
   }
 }

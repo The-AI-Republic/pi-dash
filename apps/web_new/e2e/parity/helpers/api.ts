@@ -8468,6 +8468,24 @@ export interface DevMachinesRunner {
 // Django shell while chat sessions and messages go through the same REST
 // endpoints the old app calls.
 
+/** API container for shell snippets; parallel stacks override the stock name. */
+function runnerChatApiContainer(): string {
+  const override = process.env["PARITY_API_CONTAINER"];
+  return override !== undefined && override.trim() !== "" ? override.trim() : "parity19-api";
+}
+
+/** Run a Django shell snippet inside this run's stack api container. */
+export async function runnerChatShell(python: string): Promise<string> {
+  const { stdout } = await execFileAsync(
+    "docker",
+    ["exec", "-i", runnerChatApiContainer(), "python", "manage.py", "shell", "-c", python],
+    {
+      timeout: 120_000,
+    }
+  );
+  return stdout;
+}
+
 /** Runner statuses the chat page branches on (RUN-011 set, reused here). */
 export type RunnerChatStatus = "online" | "busy" | "offline" | "revoked";
 
@@ -8641,7 +8659,7 @@ function runnerChatMessageOf(raw: unknown): RunnerChatMessage {
 
 /** Workspace UUID for a slug (runner rows key off the id, not the slug). */
 export async function serverWorkspaceIdBySlug(workspaceSlug: string): Promise<string> {
-  const out = await apiShell(
+  const out = await runnerChatShell(
     `from pi_dash.db.models import Workspace\n` +
       `ws = Workspace.objects.filter(slug=${JSON.stringify(workspaceSlug)}).first()\n` +
       `print("PARITY_WS:" + (str(ws.id) if ws else ""))\n`
@@ -8768,7 +8786,7 @@ export async function serverDevMachinesCleanupRunner(runnerId: string): Promise<
 
 /** The seeded project's default pod id (every runner belongs to one pod). */
 export async function serverDefaultPodId(projectId: string): Promise<string> {
-  const out = await apiShell(
+  const out = await runnerChatShell(
     `from pi_dash.runner.models import Pod\n` +
       `pod = Pod.default_for_project_id(${JSON.stringify(projectId)})\n` +
       `print("PARITY_POD:" + (str(pod.id) if pod else ""))\n`
@@ -8795,7 +8813,7 @@ export async function serverCreateRunner(input: {
   name: string;
   status: RunnerChatStatus;
 }): Promise<RunnerChatRunner> {
-  const out = await apiShell(
+  const out = await runnerChatShell(
     `import json\n` +
       `from django.utils import timezone\n` +
       `from pi_dash.db.models import User, Workspace\n` +
@@ -8820,7 +8838,7 @@ export async function serverCreateRunner(input: {
  * creates) the active session, going offline/revoked revokes it.
  */
 export async function serverSetRunnerStatus(runnerId: string, status: RunnerChatStatus): Promise<void> {
-  await apiShell(
+  await runnerChatShell(
     `from django.utils import timezone\n` +
       `from pi_dash.runner.models import Runner, RunnerSession\n` +
       `Runner.objects.filter(pk=${JSON.stringify(runnerId)}).update(status=${JSON.stringify(status)})\n` +
@@ -8840,7 +8858,7 @@ export async function serverSetRunnerStatus(runnerId: string, status: RunnerChat
 /** Best-effort runner cleanup; cascades to sessions, messages and events. */
 export async function serverCleanupRunner(runnerId: string): Promise<void> {
   try {
-    await apiShell(
+    await runnerChatShell(
       `from pi_dash.runner.models import Runner\n` +
         `Runner.objects.filter(pk=${JSON.stringify(runnerId)}).delete()\n` +
         `print("PARITY_RUNNER_CLEANUP_OK")\n`
@@ -9400,7 +9418,7 @@ export async function serverSetChatSession(
     );
   }
   if (fields.status !== undefined) sets.push(`session.status = ${JSON.stringify(fields.status)}`);
-  await apiShell(
+  await runnerChatShell(
     `from django.utils.dateparse import parse_datetime\n` +
       `from pi_dash.runner.models import AgentChatSession\n` +
       `session = AgentChatSession.objects.get(pk=${JSON.stringify(sessionId)})\n` +
@@ -9412,7 +9430,7 @@ export async function serverSetChatSession(
 
 /** Persisted event kinds of a session in sequence order (server-side stream log). */
 export async function serverChatEventKinds(sessionId: string): Promise<{ seq: number; kind: string }[]> {
-  const out = await apiShell(
+  const out = await runnerChatShell(
     `import json\n` +
       `from pi_dash.runner.models import AgentChatEvent\n` +
       `rows = [{"seq": e.seq, "kind": e.kind} for e in AgentChatEvent.objects.filter(session_id=${JSON.stringify(sessionId)}).order_by("seq")]\n` +

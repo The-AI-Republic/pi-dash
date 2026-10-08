@@ -3073,6 +3073,10 @@ export interface ParityDriver {
   runnerChatClickClose(): Promise<void>;
   /** Whether an inline approval prompt shows above the composer. */
   runnerChatApprovalPromptVisible(): Promise<boolean>;
+  /** Hold chat message-list GETs by `ms` so stream bubbles stay assertable. */
+  runnerChatHoldMessageList(ms: number): Promise<void>;
+  /** Release the message-list hold. */
+  runnerChatReleaseMessageList(): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */

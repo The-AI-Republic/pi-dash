@@ -4944,4 +4944,12 @@ export class WebNewDriver implements ParityDriver {
   async runnerChatApprovalPromptVisible(): Promise<boolean> {
     return todo("runnerChatApprovalPromptVisible");
   }
+
+  async runnerChatHoldMessageList(_ms: number): Promise<void> {
+    return todo("runnerChatHoldMessageList");
+  }
+
+  async runnerChatReleaseMessageList(): Promise<void> {
+    return todo("runnerChatReleaseMessageList");
+  }
 }
