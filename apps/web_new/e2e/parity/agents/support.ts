@@ -8,9 +8,11 @@
 import type { FreshUser } from "../helpers/api";
 import {
   ROLE,
+  addProjectMembers,
   createWorkspaceViaApi,
   ensureWorkspaceMember,
   markOnboarded,
+  serverSessionUserId,
   setLastWorkspace,
   signUpFreshUser,
   uniqueEmail,
@@ -87,6 +89,27 @@ export async function seatGuest(harness: SchedulerHarness): Promise<{
   session: string;
 }> {
   return seatWorkspaceRole(harness, ROLE.GUEST, "parity-agtg");
+}
+
+/**
+ * Seat a fresh user on the harness workspace with `workspaceRole`, then add
+ * them to `projectId` with `projectRole` (project standing is separate from
+ * workspace standing), and return UI credentials plus an API session and the
+ * user id. Convergent: every call mints a fresh identity.
+ */
+export async function seatProjectRole(
+  harness: SchedulerHarness,
+  projectId: string,
+  workspaceRole: number,
+  projectRole: number,
+  prefix = "parity-agtp"
+): Promise<{ email: string; password: string; session: string; userId: string }> {
+  const seat = await seatWorkspaceRole(harness, workspaceRole, prefix);
+  const userId = await serverSessionUserId(seat.session);
+  await addProjectMembers(harness.workspaceSlug, projectId, harness.ownerSession, [
+    { member_id: userId, role: projectRole },
+  ]);
+  return { ...seat, userId };
 }
 
 /**
