@@ -9,6 +9,9 @@ import type { Page } from "@playwright/test";
 import type {
   LayoutsLayoutKey,
   BoardLayoutKey,
+  DevMachineInstallCard,
+  DevMachineModal,
+  DevMachineRow,
   GanttSidebarRow,
   GanttZoom,
   KanbanCard,
@@ -4290,5 +4293,133 @@ export class WebNewDriver implements ParityDriver {
   }
   async schedulerShellCount(): Promise<number> {
     return todo("schedulerShellCount");
+  }
+
+  // --- Dev machines, runner detail, agent activity (NEWFRONT-183, RUN-037–043) ---
+  async devMachinesOpen(_workspaceSlug: string): Promise<void> {
+    return todo("devMachinesOpen");
+  }
+  async devMachinesRows(): Promise<DevMachineRow[]> {
+    return todo("devMachinesRows");
+  }
+  async devMachinesRowByName(_name: string): Promise<DevMachineRow | null> {
+    return todo("devMachinesRowByName");
+  }
+  async devMachinesEmptyVisible(): Promise<boolean> {
+    return todo("devMachinesEmptyVisible");
+  }
+  async devMachinesLoadingVisible(): Promise<boolean> {
+    return todo("devMachinesLoadingVisible");
+  }
+  async devMachinesErrorVisible(): Promise<boolean> {
+    return todo("devMachinesErrorVisible");
+  }
+  async devMachinesStubListOnce(_rows: unknown[]): Promise<void> {
+    return todo("devMachinesStubListOnce");
+  }
+  async devMachinesFailListOnce(): Promise<void> {
+    return todo("devMachinesFailListOnce");
+  }
+  async devMachinesDelayListOnce(_ms: number): Promise<void> {
+    return todo("devMachinesDelayListOnce");
+  }
+  async devMachinesListPollCount(_windowMs: number): Promise<number> {
+    return todo("devMachinesListPollCount");
+  }
+  async devMachinesOpenRotate(_name: string): Promise<void> {
+    return todo("devMachinesOpenRotate");
+  }
+  async devMachinesOpenRevoke(_name: string): Promise<void> {
+    return todo("devMachinesOpenRevoke");
+  }
+  async devMachinesOpenDelete(_name: string): Promise<void> {
+    return todo("devMachinesOpenDelete");
+  }
+  async devMachinesModal(): Promise<DevMachineModal | null> {
+    return todo("devMachinesModal");
+  }
+  async devMachinesModalVisible(): Promise<boolean> {
+    return todo("devMachinesModalVisible");
+  }
+  async devMachinesModalConfirm(): Promise<void> {
+    return todo("devMachinesModalConfirm");
+  }
+  async devMachinesModalCancel(): Promise<void> {
+    return todo("devMachinesModalCancel");
+  }
+  async devMachinesModalPressEscape(): Promise<void> {
+    return todo("devMachinesModalPressEscape");
+  }
+  async devMachinesDelayActionOnce(_ms: number): Promise<void> {
+    return todo("devMachinesDelayActionOnce");
+  }
+  async devMachinesFailActionOnce(): Promise<void> {
+    return todo("devMachinesFailActionOnce");
+  }
+  async devMachinesLastToast(): Promise<string | null> {
+    return todo("devMachinesLastToast");
+  }
+  async devMachinesDeleteSpyStart(): Promise<void> {
+    return todo("devMachinesDeleteSpyStart");
+  }
+  async devMachinesDeleteSpyUrls(): Promise<string[]> {
+    return todo("devMachinesDeleteSpyUrls");
+  }
+  async devMachinesDeleteSpyStop(): Promise<void> {
+    return todo("devMachinesDeleteSpyStop");
+  }
+  async devMachinesInstallCards(): Promise<DevMachineInstallCard[]> {
+    return todo("devMachinesInstallCards");
+  }
+  async devMachinesInstallCopy(_label: string): Promise<void> {
+    return todo("devMachinesInstallCopy");
+  }
+  async devMachinesInstallCopyState(_label: string): Promise<string | null> {
+    return todo("devMachinesInstallCopyState");
+  }
+  async devMachinesInstallPrereq(): Promise<string | null> {
+    return todo("devMachinesInstallPrereq");
+  }
+  async devMachinesInstallBreakClipboard(): Promise<void> {
+    return todo("devMachinesInstallBreakClipboard");
+  }
+  async devMachinesReadClipboard(): Promise<string> {
+    return todo("devMachinesReadClipboard");
+  }
+  async runnerDetailOpen(_workspaceSlug: string, _runnerId: string, _projectId?: string): Promise<void> {
+    return todo("runnerDetailOpen");
+  }
+  async runnerDetailState(): Promise<"loaded" | "loading" | "error"> {
+    return todo("runnerDetailState");
+  }
+  async runnerDetailHeader(): Promise<{ name: string; status: string } | null> {
+    return todo("runnerDetailHeader");
+  }
+  async runnerDetailMeta(): Promise<{ label: string; value: string }[]> {
+    return todo("runnerDetailMeta");
+  }
+  async runnerDetailBackHref(): Promise<string | null> {
+    return todo("runnerDetailBackHref");
+  }
+  async runnerDetailOpenChat(): Promise<void> {
+    return todo("runnerDetailOpenChat");
+  }
+  async runnerDetailPollCount(_runnerId: string, _windowMs: number): Promise<number> {
+    return todo("runnerDetailPollCount");
+  }
+  async runnerDetailDelayOnce(_ms: number): Promise<void> {
+    return todo("runnerDetailDelayOnce");
+  }
+  async runnerDetailFailOnce(): Promise<void> {
+    return todo("runnerDetailFailOnce");
+  }
+  async runnerActivityBadge(): Promise<string | null> {
+    return todo("runnerActivityBadge");
+  }
+  async runnerActivityTelemetry(): Promise<{ label: string; value: string }[]> {
+    return todo("runnerActivityTelemetry");
+  }
+  async runnerActivityAgingObserved(): Promise<boolean> {
+    return todo("runnerActivityAgingObserved");
   }
 }

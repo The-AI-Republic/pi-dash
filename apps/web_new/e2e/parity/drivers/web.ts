@@ -17,6 +17,9 @@
 import { expect, type ElementHandle, type Locator, type Page } from "@playwright/test";
 import type {
   BoardLayoutKey,
+  DevMachineInstallCard,
+  DevMachineModal,
+  DevMachineRow,
   GanttSidebarRow,
   GanttZoom,
   KanbanCard,
@@ -14482,5 +14485,538 @@ export class WebDriver implements ParityDriver {
 
   async schedulerShellCount(): Promise<number> {
     return this.page.locator("#main-sidebar").count();
+  }
+
+  // --- Dev machines, runner detail, agent activity (NEWFRONT-183, RUN-037–043) ---
+  // --- Every selector below was observed on the running old app: the
+  // --- machines table carries six cells per data row (states span one),
+  // --- badges render as buttons, and the confirm modals are headless
+  // --- dialogs with a heading, a warning body and cancel/confirm.
+
+  /** Matches any dev-machines REST call the page makes (list, rotate, revoke, delete). */
+  private static readonly DEV_MACHINES_PATTERN = "**/api/runners/dev-machines/**";
+
+  private devMachinesDeleteSpyState: {
+    urls: string[];
+    handler: (route: Parameters<Parameters<Page["route"]>[1]>[0]) => Promise<void>;
+  } | null = null;
+
+  private devMachinesTable(): Locator {
+    return this.page.locator("table", { has: this.page.getByRole("columnheader", { name: "Last heartbeat" }) }).first();
+  }
+
+  async devMachinesOpen(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/ai-dev-machines`);
+    await this.waitForContent("dev-machines table", () =>
+      this.devMachinesTable().waitFor({ timeout: WebDriver.WAIT_MS })
+    );
+  }
+
+  async devMachinesRows(): Promise<DevMachineRow[]> {
+    const table = this.devMachinesTable();
+    if ((await table.count()) === 0) return [];
+    const rows = await table.evaluate((root) => {
+      const out: {
+        name: string;
+        subline: string;
+        status: string;
+        runners: string;
+        lastSeen: string;
+        lastHeartbeat: string;
+        actions: string[];
+      }[] = [];
+      for (const tr of root.querySelectorAll("tbody tr")) {
+        const cells = tr.querySelectorAll(":scope > td");
+        if (cells.length < 6) continue;
+        const divs = cells[0]?.querySelectorAll(":scope > div") ?? [];
+        const buttons = cells[5]?.querySelectorAll("button") ?? [];
+        out.push({
+          name: divs[0]?.textContent?.trim() ?? "",
+          subline: divs[1]?.textContent?.trim() ?? "",
+          status: cells[1]?.querySelector("button")?.textContent?.trim() ?? "",
+          runners: cells[2]?.textContent?.trim().replace(/\s+/g, " ") ?? "",
+          lastSeen: cells[3]?.textContent?.trim() ?? "",
+          lastHeartbeat: cells[4]?.textContent?.trim() ?? "",
+          actions: [...buttons].map((button) => (button.textContent ?? "").trim()).filter((label) => label !== ""),
+        });
+      }
+      return out;
+    });
+    return rows;
+  }
+
+  async devMachinesRowByName(name: string): Promise<DevMachineRow | null> {
+    const rows = await this.devMachinesRows();
+    return rows.find((row) => row.name === name) ?? null;
+  }
+
+  private async devMachinesStateText(): Promise<string> {
+    const table = this.devMachinesTable();
+    if ((await table.count()) === 0) return "";
+    return ((await table.locator("tbody").first().innerText()) ?? "").trim();
+  }
+
+  async devMachinesEmptyVisible(): Promise<boolean> {
+    return (await this.devMachinesStateText()).includes("No dev machines");
+  }
+
+  async devMachinesLoadingVisible(): Promise<boolean> {
+    return (await this.devMachinesStateText()).includes("Loading dev machines");
+  }
+
+  async devMachinesErrorVisible(): Promise<boolean> {
+    return (await this.devMachinesStateText()).includes("Could not load dev machines");
+  }
+
+  async devMachinesStubListOnce(rows: unknown[]): Promise<void> {
+    await this.page.route(
+      WebDriver.DEV_MACHINES_PATTERN,
+      async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(rows) });
+      },
+      { times: 1 }
+    );
+  }
+
+  async devMachinesFailListOnce(): Promise<void> {
+    await this.page.route(
+      WebDriver.DEV_MACHINES_PATTERN,
+      async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity list failure" }),
+        });
+      },
+      { times: 1 }
+    );
+  }
+
+  async devMachinesDelayListOnce(ms: number): Promise<void> {
+    await this.page.route(
+      WebDriver.DEV_MACHINES_PATTERN,
+      async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
+        await this.page.waitForTimeout(ms);
+        await route.continue();
+      },
+      { times: 1 }
+    );
+  }
+
+  async devMachinesListPollCount(windowMs: number): Promise<number> {
+    let calls = 0;
+    const pattern = WebDriver.DEV_MACHINES_PATTERN;
+    const counter = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() === "GET") calls += 1;
+      await route.continue();
+    };
+    await this.page.route(pattern, counter);
+    try {
+      await this.page.waitForTimeout(windowMs);
+      return calls;
+    } finally {
+      await this.page.unroute(pattern, counter).catch(() => undefined);
+    }
+  }
+
+  private devMachinesDataRow(name: string): Locator {
+    return this.devMachinesTable()
+      .locator("tbody tr")
+      .filter({ has: this.page.locator("td:nth-child(6)") })
+      .filter({ hasText: name })
+      .first();
+  }
+
+  private async devMachinesOpenAction(name: string, action: string): Promise<void> {
+    const row = this.devMachinesDataRow(name);
+    await row.getByRole("button", { name: action, exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await expect.poll(() => this.devMachinesModalVisible(), { timeout: WebDriver.WAIT_MS }).toBe(true);
+  }
+
+  async devMachinesOpenRotate(name: string): Promise<void> {
+    await this.devMachinesOpenAction(name, "Rotate");
+  }
+
+  async devMachinesOpenRevoke(name: string): Promise<void> {
+    await this.devMachinesOpenAction(name, "Revoke");
+  }
+
+  async devMachinesOpenDelete(name: string): Promise<void> {
+    await this.devMachinesOpenAction(name, "Delete");
+  }
+
+  private devMachinesDialog(): Locator {
+    return this.appDialogs()
+      .filter({ has: this.page.locator("h3") })
+      .first();
+  }
+
+  async devMachinesModal(): Promise<DevMachineModal | null> {
+    const dialog = this.devMachinesDialog();
+    if ((await dialog.count()) === 0) return null;
+    const title = ((await dialog.locator("h3").first().innerText()) ?? "").trim();
+    const body = (
+      (await dialog.locator("h3").first().locator("xpath=following-sibling::div[1]").innerText()) ?? ""
+    ).trim();
+    const buttons = dialog.getByRole("button");
+    if ((await buttons.count()) === 0) return null;
+    const confirmLabel = ((await buttons.last().innerText()) ?? "").trim();
+    return { title, body, confirmLabel };
+  }
+
+  async devMachinesModalVisible(): Promise<boolean> {
+    return (await this.devMachinesDialog().count()) > 0;
+  }
+
+  async devMachinesModalConfirm(): Promise<void> {
+    const dialog = this.devMachinesDialog();
+    await dialog.getByRole("button").last().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async devMachinesModalCancel(): Promise<void> {
+    const dialog = this.devMachinesDialog();
+    const cancel = dialog.getByRole("button", { name: "Cancel", exact: true });
+    if ((await cancel.count()) > 0) {
+      await cancel.first().click({ timeout: WebDriver.WAIT_MS });
+    }
+  }
+
+  async devMachinesModalPressEscape(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForTimeout(300);
+  }
+
+  private static devMachinesIsActionRequest(url: string, method: string): boolean {
+    if (method === "DELETE") return true;
+    return method === "POST" && (url.includes("/rotate/") || url.includes("/revoke/"));
+  }
+
+  async devMachinesDelayActionOnce(ms: number): Promise<void> {
+    await this.page.route(
+      WebDriver.DEV_MACHINES_PATTERN,
+      async (route) => {
+        const request = route.request();
+        if (!WebDriver.devMachinesIsActionRequest(request.url(), request.method())) {
+          await route.continue();
+          return;
+        }
+        await this.page.waitForTimeout(ms);
+        await route.continue();
+      },
+      { times: 1 }
+    );
+  }
+
+  async devMachinesFailActionOnce(): Promise<void> {
+    await this.page.route(
+      WebDriver.DEV_MACHINES_PATTERN,
+      async (route) => {
+        const request = route.request();
+        if (!WebDriver.devMachinesIsActionRequest(request.url(), request.method())) {
+          await route.continue();
+          return;
+        }
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity action failure" }),
+        });
+      },
+      { times: 1 }
+    );
+  }
+
+  async devMachinesLastToast(): Promise<string | null> {
+    return this.lastToast();
+  }
+
+  async devMachinesDeleteSpyStart(): Promise<void> {
+    const urls: string[] = [];
+    const handler = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() === "DELETE") urls.push(route.request().url());
+      await route.continue();
+    };
+    this.devMachinesDeleteSpyState = { urls, handler };
+    await this.page.route(WebDriver.DEV_MACHINES_PATTERN, handler);
+  }
+
+  async devMachinesDeleteSpyUrls(): Promise<string[]> {
+    return [...(this.devMachinesDeleteSpyState?.urls ?? [])];
+  }
+
+  async devMachinesDeleteSpyStop(): Promise<void> {
+    const state = this.devMachinesDeleteSpyState;
+    this.devMachinesDeleteSpyState = null;
+    if (state !== null) {
+      await this.page.unroute(WebDriver.DEV_MACHINES_PATTERN, state.handler).catch(() => undefined);
+    }
+  }
+
+  private devMachinesInstallSection(): Locator {
+    return this.page
+      .locator("section", { has: this.page.getByRole("heading", { name: "Install the pidash CLI" }) })
+      .first();
+  }
+
+  async devMachinesInstallCards(): Promise<DevMachineInstallCard[]> {
+    const section = this.devMachinesInstallSection();
+    if ((await section.count()) === 0) return [];
+    return section.evaluate((root) => {
+      const cards: { label: string; command: string; downloadHref: string | null }[] = [];
+      for (const pre of root.querySelectorAll("pre")) {
+        const card = pre.parentElement;
+        if (card === null) continue;
+        cards.push({
+          label: card.querySelector("span")?.textContent?.trim() ?? "",
+          command: pre.textContent ?? "",
+          downloadHref: card.querySelector("a[href]")?.getAttribute("href") ?? null,
+        });
+      }
+      return cards;
+    });
+  }
+
+  private async devMachinesInstallCardRoot(label: string): Promise<Locator | null> {
+    const section = this.devMachinesInstallSection();
+    const pres = section.locator("pre");
+    const count = await pres.count();
+    for (let index = 0; index < count; index += 1) {
+      const root = pres.nth(index).locator("xpath=..");
+      const text = (
+        (await root
+          .locator("span")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text === label) return root;
+    }
+    return null;
+  }
+
+  async devMachinesInstallCopy(label: string): Promise<void> {
+    // The page writes through the async clipboard API, which headless
+    // Chromium denies without an explicit grant.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const root = await this.devMachinesInstallCardRoot(label);
+    if (root === null) throw new Error(`[parity] no install card labelled ${label}.`);
+    await root.getByRole("button").first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async devMachinesInstallCopyState(label: string): Promise<string | null> {
+    const root = await this.devMachinesInstallCardRoot(label);
+    if (root === null) return null;
+    const button = root.getByRole("button").first();
+    if ((await button.count()) === 0) return null;
+    return (((await button.innerText()) ?? "").trim() || null) as string | null;
+  }
+
+  async devMachinesInstallPrereq(): Promise<string | null> {
+    const section = this.devMachinesInstallSection();
+    const note = section.locator("p", { hasText: "doctor" }).first();
+    if ((await note.count()) === 0) return null;
+    return (((await note.innerText()) ?? "").trim() || null) as string | null;
+  }
+
+  async devMachinesInstallBreakClipboard(): Promise<void> {
+    await this.page.evaluate(() => {
+      window.Clipboard.prototype.writeText = () => Promise.reject(new Error("parity: clipboard blocked"));
+    });
+  }
+
+  async devMachinesReadClipboard(): Promise<string> {
+    return this.readClipboard();
+  }
+
+  async runnerDetailOpen(workspaceSlug: string, runnerId: string, projectId?: string): Promise<void> {
+    const base =
+      projectId !== undefined ? `/${workspaceSlug}/projects/${projectId}/runners` : `/${workspaceSlug}/runners`;
+    await this.page.goto(`${base}/detail/${runnerId}`);
+    const header = this.page.locator("h1").first();
+    const error = this.page.getByText("Failed to load runner").first();
+    await expect(header.or(error)).toBeVisible({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async runnerDetailState(): Promise<"loaded" | "loading" | "error"> {
+    const header = this.page.locator("h1").first();
+    if ((await header.count()) > 0 && (await header.isVisible().catch(() => false))) return "loaded";
+    if ((await this.page.getByText("Failed to load runner").count()) > 0) return "error";
+    return "loading";
+  }
+
+  async runnerDetailHeader(): Promise<{ name: string; status: string } | null> {
+    const header = this.page.locator("h1").first();
+    if ((await header.count()) === 0) return null;
+    const badge = header.locator("xpath=ancestor::section[1]").getByRole("button").first();
+    if ((await badge.count()) === 0) return null;
+    return {
+      name: ((await header.innerText()) ?? "").trim(),
+      status: ((await badge.innerText()) ?? "").trim(),
+    };
+  }
+
+  async runnerDetailMeta(): Promise<{ label: string; value: string }[]> {
+    const section = this.page.locator("section", { hasText: "Metadata" }).first();
+    if ((await section.count()) === 0) return [];
+    const list = section.locator("dl").first();
+    if ((await list.count()) === 0) return [];
+    return list.evaluate((root) => {
+      const out: { label: string; value: string }[] = [];
+      for (const term of root.querySelectorAll(":scope > dt")) {
+        const next = term.nextElementSibling;
+        if (next === null || next.tagName !== "DD") continue;
+        out.push({
+          label: (term.textContent ?? "").trim(),
+          value: (next.textContent ?? "").trim().replace(/\s+/g, " "),
+        });
+      }
+      return out;
+    });
+  }
+
+  async runnerDetailBackHref(): Promise<string | null> {
+    const link = this.page.getByRole("link", { name: "Back to runners" }).first();
+    if ((await link.count()) === 0) return null;
+    return link.getAttribute("href");
+  }
+
+  async runnerDetailOpenChat(): Promise<void> {
+    await this.page.getByRole("button", { name: "Open chat" }).first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForURL("**/chat/**", { timeout: WebDriver.WAIT_MS });
+  }
+
+  async runnerDetailPollCount(runnerId: string, windowMs: number): Promise<number> {
+    let calls = 0;
+    const pattern = `**/api/runners/${runnerId}/*`;
+    const counter = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() === "GET") calls += 1;
+      await route.continue();
+    };
+    await this.page.route(pattern, counter);
+    try {
+      await this.page.waitForTimeout(windowMs);
+      return calls;
+    } finally {
+      await this.page.unroute(pattern, counter).catch(() => undefined);
+    }
+  }
+
+  private static runnerDetailIsShapedRequest(url: string, method: string): boolean {
+    if (method !== "GET") return false;
+    if (url.includes("dev-machines") || url.includes("/chat/")) return false;
+    return url.includes("/api/runners/");
+  }
+
+  async runnerDetailDelayOnce(ms: number): Promise<void> {
+    await this.page.route(
+      "**/api/runners/**",
+      async (route) => {
+        const request = route.request();
+        if (!WebDriver.runnerDetailIsShapedRequest(request.url(), request.method())) {
+          await route.continue();
+          return;
+        }
+        await this.page.waitForTimeout(ms);
+        await route.continue();
+      },
+      { times: 1 }
+    );
+  }
+
+  async runnerDetailFailOnce(): Promise<void> {
+    await this.page.route(
+      "**/api/runners/**",
+      async (route) => {
+        const request = route.request();
+        if (!WebDriver.runnerDetailIsShapedRequest(request.url(), request.method())) {
+          await route.continue();
+          return;
+        }
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity detail failure" }),
+        });
+      },
+      { times: 1 }
+    );
+  }
+
+  private runnerActivityHeading(): Locator {
+    return this.page.getByRole("heading", { name: "Agent", exact: true }).first();
+  }
+
+  async runnerActivityBadge(): Promise<string | null> {
+    const heading = this.runnerActivityHeading();
+    if ((await heading.count()) === 0) return null;
+    const badge = heading.locator("xpath=..").getByRole("button").first();
+    if ((await badge.count()) === 0) return null;
+    return (((await badge.innerText()) ?? "").trim() || null) as string | null;
+  }
+
+  private runnerActivityGrid(): Locator {
+    return this.runnerActivityHeading().locator("xpath=ancestor::div[2]/following-sibling::dl[1]");
+  }
+
+  async runnerActivityTelemetry(): Promise<{ label: string; value: string }[]> {
+    const grid = this.runnerActivityGrid();
+    if ((await grid.count()) === 0) return [];
+    return grid.evaluate((root) => {
+      const out: { label: string; value: string }[] = [];
+      for (const term of root.querySelectorAll(":scope > dt")) {
+        const next = term.nextElementSibling;
+        if (next === null || next.tagName !== "DD") continue;
+        out.push({
+          label: (term.textContent ?? "").trim(),
+          value: (next.textContent ?? "").trim().replace(/\s+/g, " "),
+        });
+      }
+      return out;
+    });
+  }
+
+  private async runnerActivityLastActivity(): Promise<string | null> {
+    const grid = this.runnerActivityGrid();
+    if ((await grid.count()) === 0) return null;
+    const value = grid.locator("dt", { hasText: "Last activity" }).locator("xpath=following-sibling::dd[1]");
+    if ((await value.count()) === 0) return null;
+    return (((await value.first().innerText()) ?? "").trim() || null) as string | null;
+  }
+
+  async runnerActivityAgingObserved(): Promise<boolean> {
+    // Refetches aborted: any label advance comes from the panel's own
+    // tick, not from a fresh server payload.
+    const pattern = "**/api/runners/**";
+    const blocker = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      const request = route.request();
+      if (request.method() === "GET" && !request.url().includes("dev-machines")) {
+        await route.abort();
+      } else {
+        await route.continue();
+      }
+    };
+    await this.page.route(pattern, blocker);
+    try {
+      const first = await this.runnerActivityLastActivity();
+      if (first === null) return false;
+      await expect.poll(() => this.runnerActivityLastActivity(), { timeout: 25_000 }).not.toBe(first);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      await this.page.unroute(pattern, blocker).catch(() => undefined);
+    }
   }
 }
