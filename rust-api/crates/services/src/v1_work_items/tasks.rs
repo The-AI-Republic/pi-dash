@@ -579,6 +579,24 @@ pub const ATTACHMENT_MIME_TYPES: &[&str] = &[
 pub const PRESIGN_RESPONSE_KEY_ORDER: &[&str] =
     &["upload_data", "asset_id", "attachment", "asset_url"];
 
+/// CPython `float()` over a JSON number that `as_f64` cannot read
+/// (an arbitrary-precision overflow literal or a huge int): float
+/// spellings saturate to ±inf exactly like `float("1e999")` (both
+/// parsers correctly rounded); huge int literals stay exact, so they
+/// read as `None` — no float spelling. (`Number::is_f64` cannot stand
+/// in here: it requires a finite value, so it answers false for the
+/// overflow literals this exists for.)
+fn saturated_float(n: &serde_json::Number) -> Option<f64> {
+    if n.to_string()
+        .bytes()
+        .any(|b| b == b'.' || b == b'e' || b == b'E')
+    {
+        n.to_string().parse::<f64>().ok()
+    } else {
+        None
+    }
+}
+
 /// Python truthiness over a JSON value (`if not x` in the attachment
 /// views): null/false/zero/empty all falsy, everything else truthy.
 fn py_truthy(value: &Value) -> bool {
@@ -590,8 +608,18 @@ fn py_truthy(value: &Value) -> bool {
                 i != 0
             } else if let Some(u) = n.as_u64() {
                 u != 0
+            } else if let Some(f) = n.as_f64() {
+                f != 0.0
+            } else if let Some(f) = saturated_float(n) {
+                // Overflow float literal (`-1e999`): CPython saturates
+                // to ±inf (truthy).
+                f != 0.0
             } else {
-                n.as_f64().is_some_and(|f| f != 0.0)
+                // Huge int literal past u64/i64: exact in Python —
+                // truthy iff any nonzero digit.
+                n.to_string()
+                    .bytes()
+                    .any(|b| b.is_ascii_digit() && b != b'0')
             }
         }
         Value::String(s) => !s.is_empty(),
@@ -603,8 +631,8 @@ fn py_truthy(value: &Value) -> bool {
 /// `min(size, file_size_limit)` (`views/issue.py:2336`): the winner is
 /// returned verbatim (Python `min` returns one of its operands, first on
 /// ties). `None` means `min` raised `TypeError` — anything non-numeric.
-/// (`serde_json` numbers are always finite, so the float comparison is
-/// total; Python's NaN-wins-`min` edge has no JSON spelling.)
+/// (Python's NaN-wins-`min` edge has no JSON spelling: bare `NaN`
+/// literals 400 at the parser.)
 fn size_min_limit(size: &Value, file_size_limit: i64) -> Option<Value> {
     match size {
         Value::Bool(b) => {
@@ -634,8 +662,22 @@ fn size_min_limit(size: &Value, file_size_limit: i64) -> Option<Value> {
                 } else {
                     Some(Value::from(file_size_limit))
                 }
+            } else if let Some(f) = saturated_float(n) {
+                // Overflow float literal: `min(-inf, LIMIT)` keeps the
+                // operand verbatim (the INSERT 500s); `min(+inf, LIMIT)`
+                // clamps to the limit.
+                if f <= file_size_limit as f64 {
+                    Some(size.clone())
+                } else {
+                    Some(Value::from(file_size_limit))
+                }
+            } else if n.to_string().starts_with('-') {
+                // Huge negative int: below any limit, kept verbatim
+                // (the INSERT 500s on `float()`'s `OverflowError`).
+                Some(size.clone())
             } else {
-                None
+                // Huge positive int: above any limit, clamped.
+                Some(Value::from(file_size_limit))
             }
         }
         _ => None,
@@ -1566,6 +1608,61 @@ mod tests {
             invalid_file_type_body(),
             json!({"error": "Invalid file type.", "status": false})
         );
+    }
+
+    /// Overflow-magnitude JSON numbers (PIDASHCONV-782): Python
+    /// `json.loads` saturates `±1e999` to ±inf (truthy) and keeps huge
+    /// ints exact (truthy iff nonzero), so the plan proceeds to `min()`
+    /// instead of answering 400. Literals parse exactly as the request
+    /// path publishes them (test builds enable arbitrary_precision —
+    /// see this crate's dev-dependencies).
+    #[test]
+    fn attachment_post_plan_saturates_overflow_numbers() {
+        let limit = FILE_SIZE_LIMIT_DEFAULT;
+        let mime = json!("application/pdf");
+        let num =
+            |literal: &str| -> Value { serde_json::from_str(literal).expect("number literal") };
+        let huge_pos = format!("1{}", "0".repeat(400));
+        let huge_neg = format!("-{huge_pos}");
+        // ±inf and nonzero huge ints are truthy; underflow (`1e-999`
+        // → `0.0`) stays falsy.
+        for literal in ["-1e999", "1e999", &huge_pos, &huge_neg] {
+            assert!(py_truthy(&num(literal)), "{literal}");
+        }
+        assert!(!py_truthy(&num("1e-999")));
+        // Negative overflow keeps the operand verbatim (Ready — the
+        // INSERT 500s downstream); positive overflow clamps to the
+        // limit.
+        for literal in ["-1e999", &huge_neg] {
+            let size = num(literal);
+            assert_eq!(
+                attachment_post_plan(&json!("f.pdf"), &size, &mime, limit),
+                AttachmentPostPlan::Ready {
+                    size_limit: size.clone()
+                },
+                "size={literal}"
+            );
+        }
+        for literal in ["1e999", &huge_pos] {
+            assert_eq!(
+                attachment_post_plan(&json!("f.pdf"), &num(literal), &mime, limit),
+                AttachmentPostPlan::Ready {
+                    size_limit: json!(limit)
+                },
+                "size={literal}"
+            );
+        }
+        // Overflow in `name` is truthy too (the INSERT 500s on `dumps`
+        // for floats; huge ints store fine).
+        for literal in ["-1e999", "1e999", &huge_pos, &huge_neg] {
+            assert_eq!(
+                attachment_post_plan(&num(literal), &json!(100), &mime, limit),
+                AttachmentPostPlan::Ready {
+                    size_limit: json!(100)
+                },
+                "name={literal}"
+            );
+        }
     }
 
     #[test]

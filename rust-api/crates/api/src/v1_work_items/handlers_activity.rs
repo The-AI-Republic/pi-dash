@@ -3028,6 +3028,22 @@ fn storage_can_sign(storage: &pidash_db::config::StorageSettings) -> bool {
     !storage.access_key_id.is_empty() && !storage.secret_access_key.is_empty()
 }
 
+/// CPython `float()` over a JSON number that `as_f64` cannot read
+/// (an arbitrary-precision overflow literal or a huge int): float
+/// spellings saturate to ±inf exactly like `float("1e999")`; huge int
+/// literals stay exact, so they read as `None`. (Mirrors the `tasks`
+/// kernel, which keeps its copy private.)
+fn saturated_float(n: &serde_json::Number) -> Option<f64> {
+    if n.to_string()
+        .bytes()
+        .any(|b| b == b'.' || b == b'e' || b == b'E')
+    {
+        n.to_string().parse::<f64>().ok()
+    } else {
+        None
+    }
+}
+
 /// Python truthiness over request data (`if not x`): null/false/zero/
 /// empty all falsy (mirrors the `tasks` kernel, which keeps its copy
 /// private).
@@ -3040,14 +3056,52 @@ fn is_truthy(value: &Value) -> bool {
                 i != 0
             } else if let Some(u) = n.as_u64() {
                 u != 0
+            } else if let Some(f) = n.as_f64() {
+                f != 0.0
+            } else if let Some(f) = saturated_float(n) {
+                // Overflow float literal (`-1e999`): CPython saturates
+                // to ±inf (truthy).
+                f != 0.0
             } else {
-                n.as_f64().is_some_and(|f| f != 0.0)
+                // Huge int literal past u64/i64: exact in Python —
+                // truthy iff any nonzero digit.
+                n.to_string()
+                    .bytes()
+                    .any(|b| b.is_ascii_digit() && b != b'0')
             }
         }
         Value::String(s) => !s.is_empty(),
         Value::Array(items) => !items.is_empty(),
         Value::Object(map) => !map.is_empty(),
     }
+}
+
+/// Whether `json.dumps(attributes)` (`views/issue.py:2387` JSONField
+/// prep) renders a non-finite float: Python spells ±inf `Infinity` /
+/// `-Infinity`, which the jsonb cast rejects (`DataError` 500). The
+/// driver would send the raw literal (`-1e999`), which Postgres
+/// numeric accepts — so an overflow float anywhere in the map 500s
+/// first. Huge ints dump and store fine on both sides, so only floats
+/// fail. Iterative: values nest to thousands of levels (see
+/// `to_serde_publish`), past a recursive walk's stack on a 2MB tokio
+/// worker.
+fn attributes_dump_fails(attributes: &Map<String, Value>) -> bool {
+    let mut stack: Vec<&Value> = attributes.values().collect();
+    while let Some(value) = stack.pop() {
+        match value {
+            Value::Number(n) => {
+                if n.as_f64().is_some_and(|f| !f.is_finite())
+                    || saturated_float(n).is_some_and(|f| !f.is_finite())
+                {
+                    return true;
+                }
+            }
+            Value::Array(items) => stack.extend(items.iter()),
+            Value::Object(map) => stack.extend(map.values()),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// A `size_limit` plan value as the `float8` size column stores it:
@@ -3717,6 +3771,12 @@ async fn attachment_post_inner(
     attributes.insert("name".to_owned(), name_value);
     attributes.insert("type".to_owned(), Value::String(mime.to_owned()));
     attributes.insert("size".to_owned(), size_limit.clone());
+    // `json.dumps(attributes)` (`:2387` JSONField prep) renders ±inf as
+    // `Infinity`, which the jsonb cast rejects (`DataError` 500). Runs
+    // after the dup probe (`:2353-2384` precedes `:2386`).
+    if attributes_dump_fails(&attributes) {
+        return Err(Denial::ServerError);
+    }
     let size_f64 = size_limit_f64(&size_limit)?;
     let storage = &state.settings().storage;
     let insert = sqlx::query(
@@ -5148,6 +5208,41 @@ mod tests {
         assert!(is_truthy(&serde_json::json!(-0.5)));
         assert!(is_truthy(&serde_json::json!("0")));
         assert!(is_truthy(&serde_json::json!([false])));
+    }
+
+    #[test]
+    fn overflow_numbers_match_python_truthiness_and_dumps() {
+        // PIDASHCONV-782: overflow literals saturate to ±inf (truthy);
+        // huge ints are truthy iff nonzero. This crate builds with
+        // arbitrary_precision, so literals parse exactly as the request
+        // path publishes them.
+        let num =
+            |literal: &str| -> Value { serde_json::from_str(literal).expect("number literal") };
+        let huge_pos = format!("1{}", "0".repeat(400));
+        let huge_neg = format!("-{huge_pos}");
+        for literal in ["-1e999", "1e999", &huge_pos, &huge_neg] {
+            assert!(is_truthy(&num(literal)), "{literal}");
+        }
+        assert!(!is_truthy(&num("1e-999")));
+        // `json.dumps` renders ±inf `Infinity`, which jsonb rejects —
+        // at any depth; huge ints dump fine.
+        let mut attributes = Map::new();
+        attributes.insert("name".to_owned(), num("-1e999"));
+        attributes.insert("type".to_owned(), serde_json::json!("application/pdf"));
+        attributes.insert("size".to_owned(), serde_json::json!(100));
+        assert!(attributes_dump_fails(&attributes));
+        let nested: Value = serde_json::from_str(r#"{"n": [1e999]}"#).expect("nested parses");
+        let mut deep = Map::new();
+        deep.insert("name".to_owned(), nested);
+        assert!(attributes_dump_fails(&deep));
+        let mut huge = Map::new();
+        huge.insert("name".to_owned(), num(&huge_neg));
+        huge.insert("size".to_owned(), num(&huge_pos));
+        assert!(!attributes_dump_fails(&huge));
+        let mut plain = Map::new();
+        plain.insert("name".to_owned(), serde_json::json!("f.pdf"));
+        plain.insert("size".to_owned(), serde_json::json!(100));
+        assert!(!attributes_dump_fails(&plain));
     }
 
     #[test]
