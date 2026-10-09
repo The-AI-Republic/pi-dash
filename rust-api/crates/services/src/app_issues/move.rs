@@ -214,17 +214,18 @@ pub const AGENT_RUN_COLUMNS: &str = "\"agent_run\".\"id\", \"agent_run\".\"works
 /// Source-issue fetch (`:140`): `Issue.issue_objects.get(workspace__slug,
 /// project_id, pk)`. Full row; `issue_objects` scope (soft-delete +
 /// triage/archived/draft exclusions — the `states` conjunct rides a LEFT
-/// JOIN, so stateless rows are excluded, verbatim) + the `projects` join
+/// JOIN, so it carries Django's NULL-tolerant `.exclude()` spelling and
+/// stateless rows are kept, verbatim: F18-11 stmt 0) + the `projects` join
 /// for `project__archived_at` + the `workspaces` join for the slug. `$1`
 /// slug, `$2` project id, `$3` pk. (Django's `.get()` `LIMIT 21`
 /// collapses to 1: the pk lookup returns at most one row.)
-pub const SOURCE_ISSUE_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage') AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1";
+pub const SOURCE_ISSUE_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1";
 
 /// Locked re-fetch (`:182-184`): [`SOURCE_ISSUE_SQL`] with
 /// `select_for_update(of=("self",))` — the lock scopes to the base row
 /// (a bare `FOR UPDATE` would ask Postgres to lock the nullable side of
 /// the `states` outer join and 500).
-pub const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage') AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
+pub const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
 
 /// `Project.resolve` pk arm (`project.py:197-199`): minimal projection
 /// (`id`, `workspace_id`, `identifier` — the only columns the move
@@ -322,7 +323,7 @@ pub const DESCRIPTION_IDS_SQL: &str = "SELECT \"issue_comments\".\"description_i
 /// Final refetch (`:393`): `issue_objects` scope + `select_related`
 /// joins; minimal projection (full issue row + the url parts the
 /// handler re-renders). `$1` pk.
-pub const MOVED_ISSUE_REFETCH_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\", \"workspaces\".\"slug\", \"projects\".\"identifier\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage') AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"id\" = $1) LIMIT 1";
+pub const MOVED_ISSUE_REFETCH_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\", \"workspaces\".\"slug\", \"projects\".\"identifier\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"id\" = $1) LIMIT 1";
 
 // ---------------------------------------------------------------------------
 // Project/workspace repoints (`:336-351`)
@@ -2740,5 +2741,29 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn source_fetch_sql_keeps_stateless_rows() {
+        // Django's `.exclude(state__group='triage')` negates with
+        // NULL-tolerant semantics (F18-11 stmt 0); the bare
+        // `NOT ("states"."group" = 'triage')` evaluates to NULL on the
+        // LEFT OUTER JOIN states and drops stateless issues.
+        for sql in [
+            SOURCE_ISSUE_SQL,
+            SOURCE_ISSUE_LOCK_SQL,
+            MOVED_ISSUE_REFETCH_SQL,
+        ] {
+            assert!(
+                sql.contains(
+                    "NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL)"
+                ),
+                "{sql}"
+            );
+            assert!(
+                !sql.contains("NOT (\"states\".\"group\" = 'triage')"),
+                "{sql}"
+            );
+        }
     }
 }
