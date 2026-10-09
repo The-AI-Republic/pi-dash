@@ -1760,26 +1760,43 @@ fn presigned_get_url(
         None => Uuid::new_v4().simple().to_string(),
     };
     let content_disposition = format!("{disposition}; filename*=UTF-8''{name}");
-    let mut params = [
-        (
-            "response-content-disposition".to_owned(),
-            content_disposition,
-        ),
+    // Auth params in botocore's insertion order
+    // (`SigV4QueryAuth._modify_request_before_signing`).
+    let auth_params = [
         ("X-Amz-Algorithm".to_owned(), "AWS4-HMAC-SHA256".to_owned()),
         ("X-Amz-Credential".to_owned(), credential),
-        ("X-Amz-Date".to_owned(), amz_date),
+        ("X-Amz-Date".to_owned(), amz_date.clone()),
         (
             "X-Amz-Expires".to_owned(),
             storage.signed_url_expiration_secs.to_string(),
         ),
         ("X-Amz-SignedHeaders".to_owned(), "host".to_owned()),
     ];
-    params.sort_by(|a, b| a.0.cmp(&b.0));
-    let canonical_query = params
+    // The canonical query sorts everything (signing input); the URL
+    // keeps operation params before auth params (botocore: "The spec is
+    // particular about this").
+    let mut canonical: Vec<(String, String)> = Vec::with_capacity(6);
+    canonical.push((
+        "response-content-disposition".to_owned(),
+        content_disposition.clone(),
+    ));
+    canonical.extend(auth_params.iter().cloned());
+    canonical.sort_by(|a, b| a.0.cmp(&b.0));
+    let canonical_query = canonical
         .iter()
         .map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v)))
         .collect::<Vec<_>>()
         .join("&");
+    let mut url_query = format!(
+        "response-content-disposition={}",
+        uri_encode(&content_disposition)
+    );
+    for (key, value) in &auth_params {
+        url_query.push('&');
+        url_query.push_str(&uri_encode(key));
+        url_query.push('=');
+        url_query.push_str(&uri_encode(value));
+    }
     let path_style = storage.use_minio
         || storage
             .endpoint_url
@@ -1794,13 +1811,7 @@ fn presigned_get_url(
         "GET\n{canonical_path}\n{canonical_query}\nhost:{signed_host}\n\nhost\nUNSIGNED-PAYLOAD"
     );
     let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-        params
-            .iter()
-            .find(|(k, _)| k == "X-Amz-Date")
-            .expect("date param")
-            .1,
-        scope,
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
         sha256_hex(canonical.as_bytes())
     );
     let signature = hex(&hmac_sha256(
@@ -1808,7 +1819,7 @@ fn presigned_get_url(
         string_to_sign.as_bytes(),
     ));
     Ok(format!(
-        "{endpoint}{canonical_path}?{canonical_query}&X-Amz-Signature={signature}"
+        "{endpoint}{canonical_path}?{url_query}&X-Amz-Signature={signature}"
     ))
 }
 
@@ -2450,6 +2461,10 @@ mod tests {
         assert!(url.starts_with("http://127.0.0.1:8486/uploads/wid/ab12-logo.png?"));
         assert!(url.contains("response-content-disposition=attachment"));
         assert!(url.contains("logo.png"));
+        // Operation params stay before auth params in the URL (botocore
+        // order); only the canonical signing string is sorted.
+        let query = url.split_once('?').expect("query").1;
+        assert!(query.starts_with("response-content-disposition="), "{url}");
         // Static fetch: inline + fresh hex (no filename passes through).
         let first = presigned_get_url(
             &test_storage(),
@@ -2473,6 +2488,30 @@ mod tests {
         .expect("minio signs");
         assert!(first.contains("response-content-disposition=inline"));
         assert_ne!(first, second, "fresh hex per call");
+    }
+
+    // Golden presigned GET from live botocore 1.34.162 (same client
+    // construction as `storage.py`: s3v4, endpoint
+    // `http://127.0.0.1:8486`, key `access-key` / secret `secret-key`,
+    // region `us-east-1`, bucket `uploads`, object
+    // `wid/ab12-logo.png`, `ResponseContentDisposition` attachment
+    // with filename `logo.png`, `ExpiresIn=3600`), time frozen at the
+    // `test_now()` instant (2026-09-28T12:00:00Z).
+    const PRESIGNED_GET_GOLDEN: &str = "http://127.0.0.1:8486/uploads/wid/ab12-logo.png?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27logo.png&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=access-key%2F20260928%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260928T120000Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=97cdb54fd6422b48d0d0fdb6a03ea8eba93659ae4c2165dc432a4bfa4718d355";
+
+    #[test]
+    fn presigned_get_url_matches_botocore_golden() {
+        let url = presigned_get_url(
+            &test_storage(),
+            "http",
+            "127.0.0.1:8486",
+            "wid/ab12-logo.png",
+            "attachment",
+            Some("logo.png".to_owned()),
+            &test_now(),
+        )
+        .expect("minio signs");
+        assert_eq!(url, PRESIGNED_GET_GOLDEN);
     }
 
     #[test]
