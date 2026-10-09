@@ -122,12 +122,19 @@ export const IssuePeekOverviewHeader = observer(function IssuePeekOverviewHeader
   const handleCopyText = async (e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
     e.preventDefault();
-    await copyTextToClipboard(desktopWebUrl(workItemLink));
-    setToast({
-      type: TOAST_TYPE.SUCCESS,
-      title: t("Link copied!"),
-      message: t("Link copied to clipboard"),
-    });
+    try {
+      await copyTextToClipboard(desktopWebUrl(workItemLink));
+      setToast({
+        type: TOAST_TYPE.SUCCESS,
+        title: t("Link copied!"),
+        message: t("Link copied to clipboard"),
+      });
+    } catch (_error) {
+      setToast({
+        title: t("Error!"),
+        type: TOAST_TYPE.ERROR,
+      });
+    }
   };
 
   const handleDeleteIssue = async () => {

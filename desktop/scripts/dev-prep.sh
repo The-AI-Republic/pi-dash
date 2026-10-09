@@ -119,7 +119,14 @@ API_BASE="${VITE_API_BASE_URL:-http://localhost:8000}"
 # desktop build sets it, so default it to the sign-in origin, the same server
 # the deep-link hand-off targets. Already in turbo.json globalEnv, so the build
 # cache key tracks it.
-WEB_BASE="${VITE_WEB_BASE_URL:-${PI_DASH_URL:-}}"
+#
+# The last fallback is main.rs's own bundled-dev default for PI_DASH_URL. It
+# must never come out empty: desktopWebUrl() throws on an empty origin, and
+# because the value is exported to the build below, an empty one would also
+# mask whatever apps/web/.env provides (dotenv does not override a variable
+# that is already set). Release builds are unaffected — main.rs and build.rs
+# both refuse to compile without PI_DASH_URL.
+WEB_BASE="${VITE_WEB_BASE_URL:-${PI_DASH_URL:-http://localhost:8000}}"
 
 VERIFY_HOOK="${PIDASH_DESKTOP_VERIFY_HOOK:-}"
 if [[ -n "$VERIFY_HOOK" && ! -f "$VERIFY_HOOK" ]]; then
@@ -131,7 +138,7 @@ echo "[dev-prep] OSS source:  $OSS_DIR"
 echo "[dev-prep] Build tree:  $DEV_TREE"
 echo "[dev-prep] Dist target: $DIST"
 echo "[dev-prep] API base:    $API_BASE  (VITE_API_BASE_URL → baked into SPA)"
-echo "[dev-prep] Web base:    ${WEB_BASE:-<unset>}  (VITE_WEB_BASE_URL → sign-in card + shareable links)"
+echo "[dev-prep] Web base:    $WEB_BASE  (VITE_WEB_BASE_URL → sign-in card + shareable links)"
 echo "[dev-prep] Preparing bundled runner and agent engine"
 bash "$SCRIPT_DIR/prepare-agent.sh"
 echo "[dev-prep] Sign-in target: ${PI_DASH_URL:-<unset, main.rs default>}  (PI_DASH_URL → main.rs deep-link)"
@@ -189,6 +196,11 @@ if ! grep -R -F -q --include='*.html' --include='*.js' --include='*.mjs' --inclu
     echo "[dev-prep] The SPA may be using a stale constants build or falling back to the webview origin for API calls." >&2
     exit 1
 fi
+if ! grep -R -F -q --include='*.html' --include='*.js' --include='*.mjs' --include='*.css' --include='*.json' "$WEB_BASE" "$CLIENT"; then
+    echo "[dev-prep] ERROR: built frontend does not contain VITE_WEB_BASE_URL=$WEB_BASE" >&2
+    echo "[dev-prep] Every \"Copy link\" in the app would fail: shareable links are resolved against this origin." >&2
+    exit 1
+fi
 if [[ -n "$VERIFY_HOOK" ]]; then
     echo "[dev-prep] Running verify hook: $VERIFY_HOOK"
     if ! bash "$VERIFY_HOOK" "$CLIENT"; then
@@ -226,7 +238,7 @@ cp -a "$CLIENT/." "$STAGING/"
 # operator-facing.
 {
     echo "api_base=$API_BASE"
-    echo "web_base=${WEB_BASE:-<unset>}"
+    echo "web_base=$WEB_BASE"
     echo "pi_dash_url=${PI_DASH_URL:-<unset>}"
     echo "oss_sha=${PI_DASH_OSS_SHA:-<unset>}"
     echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
