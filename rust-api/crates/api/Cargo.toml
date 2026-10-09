@@ -119,8 +119,10 @@ pulldown-cmark = "0.13.4"
 # 0.10 line it builds on, so the lockfile gains no new downloads).
 ego-tree = "0.10"
 # v1 work-item core (D-18 PIDASHCONV-673): lxml.html fromstring/tostring port
-# over the HTML5 parser + reference DOM.
-html5ever = "0.40.1"
+# over the HTML5 parser + reference DOM. Both pinned to the 0.39 line:
+# rcdom's `RcDom` implements that line's `TreeSink`, so the parser and the
+# DOM must resolve together (0.40's sink trait is a different trait).
+html5ever = "0.39"
 markup5ever_rcdom = "0.39.0"
 
 [dev-dependencies]

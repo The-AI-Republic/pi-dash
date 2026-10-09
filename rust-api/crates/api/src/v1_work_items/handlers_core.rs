@@ -49,6 +49,7 @@ use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, NaiveDate, TimeZone as _, Utc};
 use chrono_tz::Tz;
+use markup5ever_rcdom::{Handle, NodeData};
 use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -5872,4 +5873,1152 @@ async fn issue_detail_inner(
         StatusCode::OK,
         serde_json::to_string(&rendered).map_err(|_| Denial::ServerError)?,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// lxml.html fromstring/tostring round-trip (`serializers/issue.py:222-229`)
+// ---------------------------------------------------------------------------
+//
+// `validate()` runs `html.tostring(html.fromstring(description_html))` unless
+// the HTML came from markdown; any exception becomes `{"non_field_errors":
+// ["Invalid HTML passed"]}`. The parse is libxml2's recovering HTML parser
+// and the element selection is `lxml/html/__init__.py:839-936`
+// (`fromstring`); the emission is libxml2's HTML serializer
+// (`htmlDocContentDump`, `method="html"`, `encoding="unicode"`,
+// `with_tail=True`).
+//
+// The tree comes from html5ever (document parse, scripting disabled); the
+// SELECTION (full-doc regex, head/body inference, single-unwrap, div/span
+// retag, leading-comment hoist, `</body>` truncation, giant-text abort) and
+// the SERIALIZER (void set, boolean minimize, quote style, URI attrs, raw
+// script/style, Content-Type meta strip) below are the libxml2 port, pinned
+// by the `/tmp/lxml_probe{1-6}.py` batteries (outputs in
+// `/tmp/lxml_vectors*.txt`, lxml 6.0.4) and the unit tests at the bottom of
+// this file.
+//
+// Known divergences (all unpinned — no fixture or contract case sends them;
+// recovery corners where libxml2's parser and WHATWG tree construction
+// differ, or where html5ever loses a libxml2-visible distinction):
+//
+// * Foster parenting: libxml2 keeps stray text/elements inside `<table>` /
+//   `<select>` (`<table>text<tr>`); html5ever foster-parents them out.
+// * `<frame>` / `<noframes>` outside a frameset: libxml2 hoists/drops them
+//   (`<frame><p>y</p>` → `<p>y</p>`); html5ever nests normally.
+// * Lowercase `<!doctype`: libxml2 emits a bogus `doctype` element;
+//   html5ever makes a comment.
+// * `<b><p>x</b>`-style misnesting: adoption-agency output differs.
+// * Valueless non-boolean attributes (`<p a>`) vs empty-valued (`<p a="">`):
+//   html5ever reports both as `""`; the port emits `=""` (editor HTML always
+//   quotes values; valueless booleans minimize either way).
+// * Giant-text threshold for non-ASCII runs: libxml2's byte/char accounting
+//   is unreproducible past 10MB (see [`LXML_TEXT_ABORT_CHARS`]); the port
+//   counts Unicode scalar offsets, exact for ASCII.
+// * `xlink:href`-style prefixed attributes and foreign-element case: tag and
+//   attribute names are ASCII-lowercased (libxml2 lowercases everything);
+//   only unprefixed `href`/`src`/`action` percent-encode.
+
+/// Elements serialized without a close tag (libxml2 `htmlTagLookup` void
+/// set, pinned by probe batteries 1-4 — note `embed`, `source`, `track`,
+/// `wbr`, `keygen`, `command` and `bgsound` all take close tags).
+const LXML_VOID_TAGS: &[&str] = &[
+    "area", "base", "basefont", "br", "col", "frame", "hr", "img", "input", "isindex", "link",
+    "meta", "param",
+];
+
+/// Attributes serialized bare (value ignored) on ANY tag (libxml2
+/// `htmlIsBooleanAttr`, pinned by battery 5 — note `required`, `hidden`,
+/// `async` and friends are NOT in the set).
+const LXML_BOOLEAN_ATTRS: &[&str] = &[
+    "checked", "selected", "disabled", "readonly", "multiple", "ismap", "defer", "declare",
+    "noresize", "nowrap", "noshade", "compact", "nohref",
+];
+
+/// Attributes whose values percent-encode (libxml2 `htmlAttrDumpOutput` URI
+/// arm, pinned by batteries 3-4 — exactly `href`/`src`/`action`, any tag,
+/// unprefixed only; `srcset`, `cite`, `poster`, `data` and the rest pass
+/// through).
+const LXML_URI_ATTRS: &[&str] = &["href", "src", "action"];
+
+/// Tags whose element content serializes RAW (libxml2 CDATA elements —
+/// `<script>a&b</script>` round-trips byte-identical; `title`, `textarea`,
+/// `iframe`, `xmp` and friends escape normally).
+const LXML_RAW_TEXT_TAGS: &[&str] = &["script", "style"];
+
+/// `defs.block_tags` (`lxml/html/defs.py:61-97`): the div-vs-span retag vote.
+/// Any such tag anywhere under the inferred body votes `div`.
+const LXML_BLOCK_TAGS: &[&str] = &[
+    "address", "blockquote", "center", "del", "div", "h1", "h2", "h3", "h4", "h5", "h6", "hr",
+    "ins", "isindex", "noscript", "p", "pre", "dir", "dl", "dt", "dd", "li", "menu", "ol", "ul",
+    "table", "caption", "colgroup", "col", "thead", "tfoot", "tbody", "tr", "td", "th", "fieldset",
+    "form", "legend", "optgroup", "option",
+];
+
+/// Giant-text abort (`lxml` 6.0.4, ASCII inputs): a text run whose absolute
+/// end offset (chars from the input start) exceeds this drops the run and
+/// aborts the parse — the rest of the input is ignored, as if truncated at
+/// the run's start (battery: `<p>` + `x`*9_999_998 + `</p>` → `<p></p>`;
+/// two 5M runs keep the first, drop the second; trailing content after a
+/// dropped run never survives). Pure-text input whose only run aborts falls
+/// into the empty-document error. Non-ASCII boundary behavior differs in
+/// libxml2 (see the module notes); unpinned either way.
+const LXML_TEXT_ABORT_CHARS: usize = 10_000_000;
+
+/// `^\s*<(?:html|!doctype)` (`lxml/html/__init__.py:733-736`, `re.I`): note
+/// the PREFIX match — `<htmlfoo>` counts as full HTML.
+fn looks_like_full_html(value: &str) -> bool {
+    let mut chars = value.chars();
+    loop {
+        match chars.next() {
+            None => return false,
+            Some(ch) if ch.is_whitespace() => continue,
+            Some('<') => break,
+            Some(_) => return false,
+        }
+    }
+    let rest: String = chars.collect();
+    rest.len() >= 4
+        && (rest[..4].eq_ignore_ascii_case("html")
+            || (rest.len() >= 8 && rest[..8].eq_ignore_ascii_case("!doctype")))
+}
+
+/// Byte index just past a tag starting at `bytes[start] == b'<'`, honoring
+/// single/double-quoted attribute values; `None` when the tag never closes.
+fn scan_tag_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start + 1;
+    let mut quote = 0u8;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if quote != 0 {
+            if byte == quote {
+                quote = 0;
+            }
+        } else if byte == b'\'' || byte == b'"' {
+            quote = byte;
+        } else if byte == b'>' {
+            return Some(index + 1);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// The tag name at `bytes[start] == b'<'` (lowercased ASCII, without the
+/// `<`, `</` or `<!` prefix): `None` for comments, PIs and non-tags (`<`
+/// followed by space, EOF, or anything but a letter, `/`, `!`, `?`).
+fn scan_tag_name(bytes: &[u8], start: usize) -> Option<String> {
+    let mut index = start + 1;
+    if index < bytes.len() && (bytes[index] == b'/' || bytes[index] == b'!') {
+        // `</x`, `<!doctype`, `<![CDATA[` — but never `<!--` (a comment).
+        if bytes[index] == b'!' && bytes.get(index + 1) == Some(&b'-') {
+            return None;
+        }
+        index += 1;
+    } else if index < bytes.len() && bytes[index] == b'?' {
+        return None;
+    }
+    let name_start = index;
+    while index < bytes.len() && bytes[index].is_ascii_alphanumeric() {
+        index += 1;
+    }
+    if index == name_start {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes[name_start..index]).to_ascii_lowercase())
+}
+
+/// Whether the input carries an explicit `<name ...>` tag (comments, PIs and
+/// quoted attribute values skipped, so `<p title="<head>">` does not count
+/// as a head). Drives the inferred-head/body calls `fromstring` makes.
+fn has_open_tag(input: &str, wanted: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'<' {
+            index += 1;
+            continue;
+        }
+        if bytes.get(index + 1) == Some(&b'!')
+            && bytes.get(index + 2) == Some(&b'-')
+            && bytes.get(index + 3) == Some(&b'-')
+        {
+            // Comment: skip to `-->` (unterminated runs to EOF, like the
+            // parsers do).
+            let mut end = index + 4;
+            while end + 2 < bytes.len()
+                && !(bytes[end] == b'-' && bytes[end + 1] == b'-' && bytes[end + 2] == b'>')
+            {
+                end += 1;
+            }
+            index = (end + 3).min(bytes.len());
+            continue;
+        }
+        let Some(end) = scan_tag_end(bytes, index) else {
+            return false;
+        };
+        if let Some(name) = scan_tag_name(bytes, index) {
+            if name == wanted {
+                // Exclude closes (`</head>`) and decls (`<!head>`): only a
+                // plain `<head ...>` opens one.
+                if bytes[index + 1] != b'/' && bytes[index + 1] != b'!' {
+                    return true;
+                }
+            }
+        }
+        index = end;
+    }
+    false
+}
+
+/// End byte index of the LAST explicit `</body ...>` tag (`None` when the
+/// input has none). Everything after it is dropped (battery 6:
+/// `<body><p>a</p></body>tail<p>b</p>` → `<p>a</p>`), because libxml2 only
+/// reopens on a further `<body>` — which the last-close truncation keeps.
+fn last_body_close_end(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    let mut found = None;
+    while index < bytes.len() {
+        if bytes[index] != b'<' {
+            index += 1;
+            continue;
+        }
+        if bytes.get(index + 1) == Some(&b'!')
+            && bytes.get(index + 2) == Some(&b'-')
+            && bytes.get(index + 3) == Some(&b'-')
+        {
+            let mut end = index + 4;
+            while end + 2 < bytes.len()
+                && !(bytes[end] == b'-' && bytes[end + 1] == b'-' && bytes[end + 2] == b'>')
+            {
+                end += 1;
+            }
+            index = (end + 3).min(bytes.len());
+            continue;
+        }
+        let Some(end) = scan_tag_end(bytes, index) else {
+            break;
+        };
+        if bytes.get(index + 1) == Some(&b'/') {
+            if let Some(name) = scan_tag_name(bytes, index) {
+                if name == "body" {
+                    found = Some(end);
+                }
+            }
+        }
+        index = end;
+    }
+    found
+}
+
+/// Strip a trailing unterminated tag (`a<bogus text` → `a`, battery 1):
+/// libxml2 drops `<letter...` / `</...` / `<!...` (but NOT `<!--`, which
+/// runs to EOF as a comment) with no `>` before EOF. `<` + space/EOF stays
+/// (text, both parsers).
+fn strip_unterminated_tag(input: &str) -> &str {
+    let bytes = input.as_bytes();
+    let Some(start) = bytes.iter().rposition(|byte| *byte == b'<') else {
+        return input;
+    };
+    if bytes[start..].contains(&b'>') {
+        return input;
+    }
+    let next = bytes.get(start + 1).copied().unwrap_or(0);
+    if next == b'!' && bytes.get(start + 2) == Some(&b'-') {
+        // Unterminated `<!--`: a comment to EOF in both parsers.
+        return input;
+    }
+    if next.is_ascii_alphabetic() || next == b'/' || next == b'!' || next == b'?' {
+        return &input[..start];
+    }
+    input
+}
+
+/// Truncate `input` at the start of the first text run whose absolute end
+/// offset exceeds [`LXML_TEXT_ABORT_CHARS`], emulating the giant-text abort
+/// (the scan skips tags with quote awareness, comments, PIs and decls, and
+/// treats `<` + non-tag-start as text, exactly like the parsers do for
+/// offset purposes). Returns the input unchanged when no run aborts.
+/// Only runs when the input is past the threshold (char count), so the
+/// common path pays one counting pass at most.
+fn truncate_giant_text(input: &str) -> &str {
+    if input.chars().count() <= LXML_TEXT_ABORT_CHARS {
+        return input;
+    }
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    // Char offset of the current text run's start, and the run length.
+    let mut run_start_char = 0usize;
+    let mut run_start_byte = 0usize;
+    let mut run_len = 0usize;
+    let mut offset = 0usize;
+    let mut in_run = true;
+    while index < bytes.len() {
+        if bytes[index] == b'<' {
+            // Comment?
+            if bytes.get(index + 1) == Some(&b'!')
+                && bytes.get(index + 2) == Some(&b'-')
+                && bytes.get(index + 3) == Some(&b'-')
+            {
+                let mut end = index + 4;
+                while end + 2 < bytes.len()
+                    && !(bytes[end] == b'-' && bytes[end + 1] == b'-' && bytes[end + 2] == b'>')
+                {
+                    end += 1;
+                }
+                let skipped = input[index..(end + 3).min(bytes.len())].chars().count();
+                offset += skipped;
+                index = (end + 3).min(bytes.len());
+                in_run = false;
+                continue;
+            }
+            if let Some(end) = scan_tag_end(bytes, index) {
+                if scan_tag_name(bytes, index).is_some() {
+                    let skipped = input[index..end].chars().count();
+                    offset += skipped;
+                    index = end;
+                    in_run = false;
+                    continue;
+                }
+            } else {
+                // Unterminated tag: dropped (see [`strip_unterminated_tag`]
+                // — unreachable here, the caller strips first, but stay
+                // total).
+                break;
+            }
+        }
+        // A text char (or a `<` that opens no tag).
+        if !in_run {
+            in_run = true;
+            run_start_char = offset;
+            run_start_byte = index;
+            run_len = 0;
+        }
+        let width = utf8_width(bytes[index]);
+        run_len += 1;
+        offset += 1;
+        index += width;
+        if run_start_char + run_len > LXML_TEXT_ABORT_CHARS {
+            return &input[..run_start_byte];
+        }
+    }
+    input
+}
+
+/// UTF-8 sequence width from a lead byte (input is valid UTF-8; the
+/// fallback arm is unreachable but keeps the scan total).
+fn utf8_width(lead: u8) -> usize {
+    if lead < 0x80 {
+        1
+    } else if lead < 0xE0 {
+        2
+    } else if lead < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
+/// Escape text content: `&<>` only (`"`/`'` pass through raw).
+fn escape_lxml_text(out: &mut String, text: &str) {
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
+/// Percent-encode a URI attribute value (libxml2 `htmlAttrDumpOutput`):
+/// strip leading space/tab/CR/LF (NOT vertical-tab/form-feed), then encode
+/// every byte `<= 0x20`, `== 0x7F` or `>= 0x80` as UPPERCASE `%XX` (UTF-8
+/// byte by byte: `é` → `%C3%A9`). Everything else — including `%`, `&`,
+/// `?`, `#`, `<`, `>`, quotes — passes through for the attr escaper.
+fn encode_lxml_uri(value: &str) -> String {
+    let stripped = value.trim_start_matches([' ', '\t', '\r', '\n']);
+    let mut out = String::with_capacity(stripped.len());
+    for byte in stripped.bytes() {
+        if byte <= 0x20 || byte == 0x7F || byte >= 0x80 {
+            out.push_str(&format!("%{byte:02X}"));
+        } else {
+            out.push(byte as char);
+        }
+    }
+    out
+}
+
+/// Serialize one attribute (libxml2 `htmlAttrDumpOutput`): booleans bare,
+/// URI values encoded, quote style single iff the value holds `"` but not
+/// `'`, `&<>` escaped plus `"` in double-quoted style (`'` always raw).
+fn push_lxml_attr(out: &mut String, name: &str, value: &str) {
+    out.push(' ');
+    out.push_str(name);
+    if LXML_BOOLEAN_ATTRS.contains(&name) {
+        return;
+    }
+    let encoded;
+    let cooked = if LXML_URI_ATTRS.contains(&name) {
+        encoded = encode_lxml_uri(value);
+        encoded.as_str()
+    } else {
+        value
+    };
+    let single = cooked.contains('"') && !cooked.contains('\'');
+    out.push('=');
+    out.push(if single { '\'' } else { '"' });
+    for ch in cooked.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' if !single => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+    out.push(if single { '\'' } else { '"' });
+}
+
+/// Parse one document with html5ever (scripting disabled, so `<noscript>`
+/// content parses as markup exactly like libxml2's script-less parser).
+fn parse_lxml_document(input: &str) -> markup5ever_rcdom::RcDom {
+    let opts = html5ever::ParseOpts {
+        tree_builder: html5ever::TreeBuilderOpts {
+            scripting_enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let parser = html5ever::parse_document(markup5ever_rcdom::RcDom::default(), opts);
+    html5ever::tendril::TendrilSink::one(parser, input)
+}
+
+/// The lowercased local tag name of an element handle (`None` otherwise).
+fn lxml_element_name(handle: &Handle) -> Option<String> {
+    match &handle.data {
+        NodeData::Element { name, .. } => Some(name.local.to_string().to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+/// Direct text of a node (concatenated text children, unescaped).
+fn lxml_direct_text(handle: &Handle) -> String {
+    let mut text = String::new();
+    for child in handle.children.borrow().iter() {
+        if let NodeData::Text { contents } = &child.data {
+            text.push_str(&contents.borrow().to_string());
+        }
+    }
+    text
+}
+
+/// First child element with this lowercased tag name.
+fn lxml_find_child(handle: &Handle, tag: &str) -> Option<Handle> {
+    handle
+        .children
+        .borrow()
+        .iter()
+        .find(|child| lxml_element_name(child).as_deref() == Some(tag))
+        .cloned()
+}
+
+/// Whether any element in the subtree (inclusive) carries a block tag.
+fn lxml_subtree_has_block(handle: &Handle) -> bool {
+    if let Some(name) = lxml_element_name(handle) {
+        if LXML_BLOCK_TAGS.contains(&name.as_str()) {
+            return true;
+        }
+    }
+    handle
+        .children
+        .borrow()
+        .iter()
+        .any(lxml_subtree_has_block)
+}
+
+/// Serialize a comment or PI node: `<!--data-->`; PIs (which HTML parsing
+/// never produces — `<?` tokenizes as a bogus comment — but kept total)
+/// as `<!--?target data?-->`.
+fn push_lxml_comment(out: &mut String, handle: &Handle) {
+    match &handle.data {
+        NodeData::Comment { contents } => {
+            out.push_str("<!--");
+            out.push_str(&contents.to_string());
+            out.push_str("-->");
+        }
+        NodeData::ProcessingInstruction { target, contents } => {
+            out.push_str("<!--?");
+            out.push_str(&target.to_string());
+            let data = contents.to_string();
+            if !data.is_empty() {
+                out.push(' ');
+                out.push_str(&data);
+            }
+            out.push_str("?-->");
+        }
+        _ => {}
+    }
+}
+
+/// Serialize one element's attributes in document order (names
+/// ASCII-lowercased — libxml2 lowercases everything, including foreign
+/// `viewBox`).
+fn push_lxml_attrs(out: &mut String, handle: &Handle) {
+    let NodeData::Element { attrs, .. } = &handle.data else {
+        return;
+    };
+    for attr in attrs.borrow().iter() {
+        let local = attr.name.local.to_string().to_ascii_lowercase();
+        let full = match &attr.name.prefix {
+            Some(prefix) => format!("{}:{local}", prefix.to_string().to_ascii_lowercase()),
+            None => local,
+        };
+        push_lxml_attr(out, &full, &attr.value.to_string());
+    }
+}
+
+/// Serialize one node: elements recurse (raw for `script`/`style`, the
+/// Content-Type meta drops), text escapes, comments/PIs emit, doctypes drop.
+fn push_lxml_node(out: &mut String, handle: &Handle) {
+    match &handle.data {
+        NodeData::Document | NodeData::Doctype { .. } => {}
+        NodeData::Text { contents } => {
+            escape_lxml_text(out, &contents.borrow().to_string());
+        }
+        NodeData::Comment { .. } | NodeData::ProcessingInstruction { .. } => {
+            push_lxml_comment(out, handle);
+        }
+        NodeData::Element { name, .. } => {
+            let tag = name.local.to_string().to_ascii_lowercase();
+            // `tostring` drops any existing `<meta http-equiv="Content-Type">`
+            // wherever it sits (battery 6): the attribute name matches
+            // case-insensitively (already lowercased), the value
+            // case-SENSITIVELY (`content-type` survives).
+            if tag == "meta" && lxml_is_content_type_meta(handle) {
+                return;
+            }
+            push_lxml_element_named(out, handle, &tag);
+        }
+    }
+}
+
+/// Whether this `<meta>` element is the Content-Type declaration
+/// `tostring` strips.
+fn lxml_is_content_type_meta(handle: &Handle) -> bool {
+    let NodeData::Element { attrs, .. } = &handle.data else {
+        return false;
+    };
+    attrs.borrow().iter().any(|attr| {
+        attr.name.local.to_string().eq_ignore_ascii_case("http-equiv")
+            && attr.name.prefix.is_none()
+            && attr.value.to_string() == "Content-Type"
+    })
+}
+
+/// Serialize an element under an override tag name (the div/span retag).
+/// Void tags emit no close tag and no children; `script`/`style` children
+/// emit raw; `<template>` fragment children serialize inline (libxml2 has
+/// no template concept — content parses as normal elements).
+fn push_lxml_element_named(out: &mut String, handle: &Handle, tag: &str) {
+    out.push('<');
+    out.push_str(tag);
+    push_lxml_attrs(out, handle);
+    out.push('>');
+    if LXML_VOID_TAGS.contains(&tag) {
+        return;
+    }
+    if LXML_RAW_TEXT_TAGS.contains(&tag) {
+        for child in handle.children.borrow().iter() {
+            if let NodeData::Text { contents } = &child.data {
+                out.push_str(&contents.borrow().to_string());
+            }
+        }
+    } else {
+        for child in handle.children.borrow().iter() {
+            push_lxml_node(out, child);
+        }
+        if tag == "template" {
+            let NodeData::Element {
+                template_contents, ..
+            } = &handle.data
+            else {
+                return;
+            };
+            if let Some(fragment) = template_contents.borrow().as_ref() {
+                for child in fragment.children.borrow().iter() {
+                    push_lxml_node(out, child);
+                }
+            }
+        }
+    }
+    out.push_str("</");
+    out.push_str(tag);
+    out.push('>');
+}
+
+/// Serialize the `<html>` element for a full document, omitting inferred
+/// empties: the head goes unless explicit, attributed, or holding children;
+/// the body goes unless explicit, attributed, holding elements or non-ws
+/// text — its ws-only text then emits directly under `<html>`
+/// (`<html>   </html>`, battery 6). Everything else (frameset, `head`-kept
+/// heads, stray comments) serializes in place.
+fn push_lxml_document(out: &mut String, html: &Handle, explicit_head: bool, explicit_body: bool) {
+    out.push_str("<html");
+    push_lxml_attrs(out, html);
+    out.push('>');
+    for child in html.children.borrow().iter() {
+        let Some(tag) = lxml_element_name(child) else {
+            push_lxml_node(out, child);
+            continue;
+        };
+        if tag == "head"
+            && !explicit_head
+            && child.children.borrow().is_empty()
+            && lxml_direct_text(child).is_empty()
+        {
+            let empty_attrs = match &child.data {
+                NodeData::Element { attrs, .. } => attrs.borrow().is_empty(),
+                _ => true,
+            };
+            if empty_attrs {
+                continue;
+            }
+        }
+        if tag == "body" && !explicit_body {
+            let has_elements = child
+                .children
+                .borrow()
+                .iter()
+                .any(|grand| lxml_element_name(grand).is_some());
+            let empty_attrs = match &child.data {
+                NodeData::Element { attrs, .. } => attrs.borrow().is_empty(),
+                _ => true,
+            };
+            if !has_elements && empty_attrs {
+                // Ws-only text emits directly under `<html>`; anything else
+                // here (comments in an inferred body) drops with it.
+                for grand in child.children.borrow().iter() {
+                    if let NodeData::Text { contents } = &grand.data {
+                        let text = contents.borrow().to_string();
+                        if !text.trim().is_empty() {
+                            escape_lxml_text(out, &text);
+                        } else {
+                            out.push_str(&text);
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        push_lxml_node(out, child);
+    }
+    out.push_str("</html>");
+}
+
+/// `html.tostring(html.fromstring(value), encoding="unicode")`: `None` is
+/// the `ParserError` arm (empty/whitespace-only input, lone
+/// comments/PIs/CDATA — `etree.fromstring` returns no tree).
+pub fn lxml_roundtrip(value: &str) -> Option<String> {
+    // Normalization, all invisible to the full-doc regex (prefix-preserving):
+    // drop a trailing unterminated tag, drop everything past the last
+    // `</body>`, abort past the giant-text threshold.
+    let mut input = strip_unterminated_tag(value);
+    if let Some(end) = last_body_close_end(input) {
+        input = &input[..end];
+    }
+    input = truncate_giant_text(input);
+    let is_full = looks_like_full_html(input);
+    let explicit_head = has_open_tag(input, "head");
+    let explicit_body = has_open_tag(input, "body");
+
+    let dom = parse_lxml_document(input);
+    let document = dom.document;
+    let html = lxml_find_child(&document, "html")?;
+
+    if is_full {
+        let mut out = String::new();
+        push_lxml_document(&mut out, &html, explicit_head, explicit_body);
+        return Some(out);
+    }
+
+    // Heads (`lxml/html/__init__.py:880-890`): any head element — explicit,
+    // however empty, or inferred-but-holding-elements (`<title>`, lone
+    // `<script>`) — keeps the whole document.
+    let head = lxml_find_child(&html, "head");
+    let has_head = explicit_head
+        || head.as_ref().is_some_and(|head| {
+            head.children
+                .borrow()
+                .iter()
+                .any(|child| lxml_element_name(child).is_some())
+        });
+    if has_head {
+        let mut out = String::new();
+        push_lxml_document(&mut out, &html, explicit_head, explicit_body);
+        return Some(out);
+    }
+    let Some(body) = lxml_find_child(&html, "body") else {
+        // No body (frameset documents): the whole document.
+        let mut out = String::new();
+        push_lxml_document(&mut out, &html, explicit_head, explicit_body);
+        return Some(out);
+    };
+
+    // Leading-comment hoist: with an INFERRED body, comments/PIs before the
+    // first element or non-ws text attach to `<html>` in libxml2 and never
+    // reach the body (`<!-- a --><!-- b --><p>x</p>` → `<p>x</p>`).
+    // Explicit bodies keep them (`<body><!--x--></body>` → `<!--x-->`).
+    let children: Vec<Handle> = body.children.borrow().clone();
+    let mut kept: Vec<Handle> = Vec::with_capacity(children.len());
+    let mut seen_content = explicit_body;
+    for child in &children {
+        match &child.data {
+            NodeData::Comment { .. } | NodeData::ProcessingInstruction { .. } => {
+                if seen_content {
+                    kept.push(child.clone());
+                }
+            }
+            NodeData::Text { contents } => {
+                if !contents.borrow().to_string().trim().is_empty() {
+                    seen_content = true;
+                }
+                kept.push(child.clone());
+            }
+            _ => {
+                seen_content = true;
+                kept.push(child.clone());
+            }
+        }
+    }
+
+    // The empty-document error: no elements, no text, no explicit body
+    // (`""`, `"   "`, lone comments/PIs — comments never count).
+    let has_elements = kept.iter().any(|child| lxml_element_name(child).is_some());
+    let has_text = kept.iter().any(|child| {
+        matches!(&child.data, NodeData::Text { contents } if !contents.borrow().to_string().is_empty())
+    });
+    if !has_elements && !has_text && !explicit_body {
+        return None;
+    }
+
+    // Single-unwrap (`:894-899`): exactly one non-text child (element OR
+    // comment), every direct text run ws-only. The child keeps its tail —
+    // the FOLLOWING ws text; leading ws drops with the body.
+    let non_text: Vec<&Handle> = kept
+        .iter()
+        .filter(|child| !matches!(&child.data, NodeData::Text { .. } | NodeData::Doctype { .. }))
+        .collect();
+    let texts_clean = kept.iter().all(|child| match &child.data {
+        NodeData::Text { contents } => contents.borrow().to_string().trim().is_empty(),
+        _ => true,
+    });
+    if non_text.len() == 1 && texts_clean {
+        let only = non_text[0];
+        let mut out = String::new();
+        push_lxml_node(&mut out, only);
+        // The kept tail: ws text AFTER the child (leading ws dropped).
+        let mut after = false;
+        for child in &kept {
+            if std::rc::Rc::ptr_eq(child, only) {
+                after = true;
+                continue;
+            }
+            if after {
+                if let NodeData::Text { contents } = &child.data {
+                    out.push_str(&contents.borrow().to_string());
+                }
+            }
+        }
+        return Some(out);
+    }
+
+    // Retag (`:900-908`): `div` when any block tag sits under the body
+    // (attrs kept: `<body class=bd>` → `<div class="bd">`), else `span`.
+    let tag = if lxml_subtree_has_block(&body) {
+        "div"
+    } else {
+        "span"
+    };
+    let mut out = String::new();
+    out.push('<');
+    out.push_str(tag);
+    push_lxml_attrs(&mut out, &body);
+    out.push('>');
+    for child in &kept {
+        push_lxml_node(&mut out, child);
+    }
+    out.push_str("</");
+    out.push_str(tag);
+    out.push('>');
+    Some(out)
+}
+
+#[cfg(test)]
+mod lxml_tests {
+    use super::*;
+
+    fn roundtrip_ok(input: &str) -> String {
+        lxml_roundtrip(input).expect("round-trip succeeds")
+    }
+
+    #[test]
+    fn lxml_selection_and_wrapping() {
+        // (input, expected) — probe batteries 1-2, lxml 6.0.4.
+        for (input, expected) in [
+            ("<p>unclosed", "<p>unclosed</p>"),
+            ("<<>>", "<span>&lt;&lt;&gt;&gt;</span>"),
+            ("hello", "<span>hello</span>"),
+            ("<p>a</p><p>b</p>", "<div><p>a</p><p>b</p></div>"),
+            ("<b>x</b> tail", "<span><b>x</b> tail</span>"),
+            ("lead <b>x</b>", "<span>lead <b>x</b></span>"),
+            ("<br>", "<br>"),
+            ("<br/>", "<br>"),
+            ("<p>a</p>   ", "<p>a</p>   "),
+            ("   <p>a</p>", "<p>a</p>"),
+            ("<p>a</p>tail", "<div><p>a</p>tail</div>"),
+            ("<span>a</span><span>b</span>", "<span><span>a</span><span>b</span></span>"),
+            ("<hr><hr/>", "<div><hr><hr></div>"),
+            ("<li>a<li>b", "<div><li>a</li><li>b</li></div>"),
+            (
+                "<table><tr><td>x</td></tr></table>",
+                "<table><tr><td>x</td></tr></table>",
+            ),
+            (
+                "text<table><tr><td>x</td></tr></table>",
+                "<div>text<table><tr><td>x</td></tr></table></div>",
+            ),
+            ("<a><a>nested</a></a>", "<span><a></a><a>nested</a></span>"),
+            ("<P><B>upper</B></P>", "<p><b>upper</b></p>"),
+            (
+                "<unknown-tag foo=bar>text</unknown-tag>",
+                "<unknown-tag foo=\"bar\">text</unknown-tag>",
+            ),
+            ("<p>unclosed <b>bold", "<p>unclosed <b>bold</b></p>"),
+            ("a<3 and b>c", "<span>a&lt;3 and b&gt;c</span>"),
+            ("a<bogus text", "<span>a</span>"),
+            ("< p>spaced</p>", "<span>&lt; p&gt;spaced</span>"),
+            (
+                "</p>stray-close<p>x</p>",
+                "<div>stray-close<p>x</p></div>",
+            ),
+            ("<div><p>a<br>b</p>TAIL</div>", "<div><p>a<br>b</p>TAIL</div>"),
+            (
+                "<div><span>nested</span> mid <b>bold</b> tail</div>",
+                "<div><span>nested</span> mid <b>bold</b> tail</div>",
+            ),
+            ("<", "<span>&lt;</span>"),
+            (">", "<span>&gt;</span>"),
+            ("&", "<span>&amp;</span>"),
+            ("&amp", "<span>&amp;</span>"),
+            ("&amp;", "<span>&amp;</span>"),
+            ("&#xZZ;", "<span>&amp;#xZZ;</span>"),
+            ("&#65;&#x42;", "<span>AB</span>"),
+            ("<p>&#65;&#x42;</p>", "<p>AB</p>"),
+            ("<body class=bd><p>a</p></body>", "<p>a</p>"),
+            (
+                "<body class=bd><p>a</p><p>b</p></body>",
+                "<div class=\"bd\"><p>a</p><p>b</p></div>",
+            ),
+            ("<body>   </body>", "<span>   </span>"),
+            ("<body></body>", "<span></span>"),
+            ("<body class=x>text</body>", "<span class=\"x\">text</span>"),
+            ("<body><p>a</p></body>tail", "<p>a</p>"),
+            ("<form><input name=n></form>", "<form><input name=\"n\"></form>"),
+            ("<button>click</button>", "<button>click</button>"),
+            ("<P>a", "<p>a</p>"),
+            ("a", "<span>a</span>"),
+        ] {
+            assert_eq!(roundtrip_ok(input), expected, "input {input:?}");
+        }
+        // The error arm: empty, whitespace-only, lone comments/PIs/CDATA.
+        for input in ["", "   ", "<!-- just a comment -->", "<?justpi?>", "<![CDATA[cd]]>"] {
+            assert_eq!(lxml_roundtrip(input), None, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn lxml_full_documents_and_heads() {
+        for (input, expected) in [
+            (
+                "<HTML><BODY><P CLASS=x>Hi</P></BODY></HTML>",
+                "<html><body><p class=\"x\">Hi</p></body></html>",
+            ),
+            (
+                "<html><head><title>T</title></head><body><p>x</p></body></html>",
+                "<html><head><title>T</title></head><body><p>x</p></body></html>",
+            ),
+            (
+                "<!DOCTYPE html><html><body><p>x</p></body></html>",
+                "<html><body><p>x</p></body></html>",
+            ),
+            (
+                "  <html><body><p>ws-full</p></body></html>  ",
+                "<html><body><p>ws-full</p></body></html>",
+            ),
+            (
+                "<head><title>T</title></head><p>x</p>",
+                "<html><head><title>T</title></head><body><p>x</p></body></html>",
+            ),
+            (
+                "<html><p>nobody</p></html>",
+                "<html><body><p>nobody</p></body></html>",
+            ),
+            (
+                "<html><head></head><body><p>x</p></body></html>",
+                "<html><head></head><body><p>x</p></body></html>",
+            ),
+            (
+                "<html><head><title>T</title></head></html>",
+                "<html><head><title>T</title></head></html>",
+            ),
+            ("<html></html>", "<html></html>"),
+            ("<html>hello</html>", "<html><body>hello</body></html>"),
+            (
+                "<html lang=\"en\"><body><p>x</p></body></html>",
+                "<html lang=\"en\"><body><p>x</p></body></html>",
+            ),
+            ("<html>   </html>", "<html>   </html>"),
+            ("<html><!--c--></html>", "<html><!--c--></html>"),
+            (
+                "<HTML><P>upper-full</P></HTML>",
+                "<html><body><p>upper-full</p></body></html>",
+            ),
+            (
+                "<script>if (a < b) { c(); }</script>",
+                "<html><head><script>if (a < b) { c(); }</script></head></html>",
+            ),
+            (
+                "<style>p > a { color: red; }</style>",
+                "<html><head><style>p > a { color: red; }</style></head></html>",
+            ),
+            (
+                "<script>a&b</script>",
+                "<html><head><script>a&b</script></head></html>",
+            ),
+            ("<title></title>", "<html><head><title></title></head></html>"),
+            (
+                "<title>a < b &amp; c</title>",
+                "<html><head><title>a &lt; b &amp; c</title></head></html>",
+            ),
+            (
+                "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\"><p>x</p>",
+                "<html><head></head><body><p>x</p></body></html>",
+            ),
+            (
+                "<meta http-equiv=\"content-type\"><p>x</p>",
+                "<html><head><meta http-equiv=\"content-type\"></head><body><p>x</p></body></html>",
+            ),
+            (
+                "<meta HTTP-EQUIV=\"Content-Type\"><p>x</p>",
+                "<html><head></head><body><p>x</p></body></html>",
+            ),
+            (
+                "<p>x</p><meta http-equiv=\"Content-Type\">",
+                "<div><p>x</p></div>",
+            ),
+            (
+                "<head></head><p>x</p>",
+                "<html><head></head><body><p>x</p></body></html>",
+            ),
+            ("<head>x</head>", "<html><head></head><body>x</body></html>"),
+            (
+                "<frameset><frame></frameset>",
+                "<html><frameset><frame></frameset></html>",
+            ),
+            ("<isindex>", "<isindex>"),
+            ("<p>a</p><body><p>b</p></body>", "<div><p>a</p><p>b</p></div>"),
+            (
+                "<p>a</p><script>s</script>",
+                "<div><p>a</p><script>s</script></div>",
+            ),
+            (
+                "<select><option>a</option><option>b</option></select>",
+                "<select><option>a</option><option>b</option></select>",
+            ),
+        ] {
+            assert_eq!(roundtrip_ok(input), expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn lxml_attributes_escapes_entities() {
+        for (input, expected) in [
+            ("<img src=x>", "<img src=\"x\">"),
+            (
+                "<input type=checkbox checked>",
+                "<input type=\"checkbox\" checked>",
+            ),
+            (
+                "<input type=checkbox checked=\"false\">",
+                "<input type=\"checkbox\" checked>",
+            ),
+            (
+                "<input type=checkbox checked=\"\">",
+                "<input type=\"checkbox\" checked>",
+            ),
+            (
+                "<option selected=\"selected\">a</option>",
+                "<option selected>a</option>",
+            ),
+            ("<a href=\"a&amp;b\">t</a>", "<a href=\"a&amp;b\">t</a>"),
+            ("<a title='say \"hi\"'>t</a>", "<a title='say \"hi\"'>t</a>"),
+            ("<a title=\"it's\">t</a>", "<a title=\"it's\">t</a>"),
+            (
+                "<p>a &amp; b &lt; c &gt; d</p>",
+                "<p>a &amp; b &lt; c &gt; d</p>",
+            ),
+            (
+                "<p>&nbsp;nbsp&nbsp;</p>",
+                "<p> nbsp </p>",
+            ),
+            ("<p>&bogus; &copy;</p>", "<p>&amp;bogus; ©</p>"),
+            ("<p>café 中</p>", "<p>café 中</p>"),
+            ("<p> </p>", "<p> </p>"),
+            ("<p class=\"a  b\">x</p>", "<p class=\"a  b\">x</p>"),
+            (
+                "<p data-x=1 data-y='2' data-z=\"3\">x</p>",
+                "<p data-x=\"1\" data-y=\"2\" data-z=\"3\">x</p>",
+            ),
+            (
+                "<p t=\"it&apos;s &quot;q&quot;\">x</p>",
+                "<p t=\"it's &quot;q&quot;\">x</p>",
+            ),
+            ("<p t=\"a>b\">x</p>", "<p t=\"a&gt;b\">x</p>"),
+            ("<p t=\"a<b\">x</p>", "<p t=\"a&lt;b\">x</p>"),
+            ("<p t=\"a&amp;b\">x</p>", "<p t=\"a&amp;b\">x</p>"),
+            (
+                "<p t=\"line1\nline2\ttab\">x</p>",
+                "<p t=\"line1\nline2\ttab\">x</p>",
+            ),
+            ("<p>&quot;&apos;&amp;&lt;&gt;</p>", "<p>\"'&amp;&lt;&gt;</p>"),
+            ("<p a=1 a=2>x</p>", "<p a=\"1\">x</p>"),
+            ("<p A=1 a=2>x</p>", "<p a=\"1\">x</p>"),
+            ("<p CHECKED=x>y</p>", "<p checked>y</p>"),
+            ("<p a=\"\" b=\"\">x</p>", "<p a=\"\" b=\"\">x</p>"),
+            // Deliberate divergence (see the module notes): libxml2 emits
+            // `<p a b>` (valueless); html5ever cannot distinguish valueless
+            // from empty-valued, and the port emits `=""`.
+            ("<p a b>x</p>", "<p a=\"\" b=\"\">x</p>"),
+            ("<p t=\"a&quot;'b\">x</p>", "<p t=\"a&quot;'b\">x</p>"),
+            ("<p t='a\"b&c<d>e'>x</p>", "<p t='a\"b&amp;c&lt;d&gt;e'>x</p>"),
+            ("<p t=\"a'b&c<d>e\">x</p>", "<p t=\"a'b&amp;c&lt;d&gt;e\">x</p>"),
+            (
+                "<a href=\"  spaces  \">x</a>",
+                "<a href=\"spaces%20%20\">x</a>",
+            ),
+            ("<a href=\"a b\">x</a>", "<a href=\"a%20b\">x</a>"),
+            ("<a href=\" a\">x</a>", "<a href=\"a\">x</a>"),
+            ("<a href=\"a%20b\">x</a>", "<a href=\"a%20b\">x</a>"),
+            ("<a href=\"a?b=c&d=e\">x</a>", "<a href=\"a?b=c&amp;d=e\">x</a>"),
+            ("<a href=\"a#b c\">x</a>", "<a href=\"a#b%20c\">x</a>"),
+            ("<a title=\"a b\">x</a>", "<a title=\"a b\">x</a>"),
+            (
+                "<blockquote cite=\"a b\">x</blockquote>",
+                "<blockquote cite=\"a b\">x</blockquote>",
+            ),
+            ("<img src=\"a b\">", "<img src=\"a%20b\">"),
+            (
+                "<form action=\"a b\">x</form>",
+                "<form action=\"a%20b\">x</form>",
+            ),
+            ("<p href=\"u v\">x</p>", "<p href=\"u%20v\">x</p>"),
+            ("<div src=\"u v\">x</div>", "<div src=\"u%20v\">x</div>"),
+            ("<a HREF=\"u v\">x</a>", "<a href=\"u%20v\">x</a>"),
+            ("<a>x</a>", "<a>x</a>"),
+            ("<a href=\"\">x</a>", "<a href=\"\">x</a>"),
+            ("<img srcset=\"a 1x, b 2x\">", "<img srcset=\"a 1x, b 2x\">"),
+            (
+                "<svg viewBox=\"0 0 1 1\"><circle/></svg>",
+                "<svg viewbox=\"0 0 1 1\"><circle></circle></svg>",
+            ),
+        ] {
+            assert_eq!(roundtrip_ok(input), expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn lxml_comments_pis_rawtext() {
+        for (input, expected) in [
+            ("<!-- comment --><p>x</p>", "<p>x</p>"),
+            ("<p>a<!-- inner -->b</p>", "<p>a<!-- inner -->b</p>"),
+            (
+                "<p>a</p><!-- between --><p>b</p>",
+                "<div><p>a</p><!-- between --><p>b</p></div>",
+            ),
+            (
+                "<p>a</p><!-- trailing -->",
+                "<div><p>a</p><!-- trailing --></div>",
+            ),
+            ("<?php echo; ?><p>x</p>", "<p>x</p>"),
+            ("<p>a<?pi?>b</p>", "<p>a<!--?pi?-->b</p>"),
+            ("<p>x</p><?pi data?>", "<div><p>x</p><!--?pi data?--></div>"),
+            ("<p><![CDATA[cd]]></p>", "<p><!--[CDATA[cd]]--></p>"),
+            (
+                "<p>a</p><!-- unclosed comment",
+                "<div><p>a</p><!-- unclosed comment--></div>",
+            ),
+            ("<!-- a --><!-- b --><p>x</p>", "<p>x</p>"),
+            (
+                "text<!-- c --><p>x</p>",
+                "<div>text<!-- c --><p>x</p></div>",
+            ),
+            ("<!-- a -->text<p>x</p>", "<div>text<p>x</p></div>"),
+            (
+                "<!-- a --><p>x</p><p>y</p>",
+                "<div><p>x</p><p>y</p></div>",
+            ),
+            ("<body><!--x--></body>", "<!--x-->"),
+            (
+                "<textarea>a < b & c</textarea>",
+                "<textarea>a &lt; b &amp; c</textarea>",
+            ),
+            ("<pre>  spaced\n\ttext  </pre>", "<pre>  spaced\n\ttext  </pre>"),
+            ("<p>a\r\nb\rc</p>", "<p>a\nb\nc</p>"),
+            ("<xmp>a < b</xmp>", "<xmp>a &lt; b</xmp>"),
+            (
+                "<noembed>raw <b>text</noembed>",
+                "<noembed>raw &lt;b&gt;text</noembed>",
+            ),
+            ("<noscript><p>x</p></noscript>", "<noscript><p>x</p></noscript>"),
+            (
+                "<iframe src=x>fallback</iframe>",
+                "<iframe src=\"x\">fallback</iframe>",
+            ),
+            (
+                "<iframe><p>x</p></iframe>",
+                "<iframe>&lt;p&gt;x&lt;/p&gt;</iframe>",
+            ),
+            ("<marquee>x</marquee>", "<marquee>x</marquee>"),
+            ("<nobr>x</nobr>", "<nobr>x</nobr>"),
+            ("<p>a<br>b</p>", "<p>a<br>b</p>"),
+            ("<ul><li>a</li><li>b</li></ul>", "<ul><li>a</li><li>b</li></ul>"),
+        ] {
+            assert_eq!(roundtrip_ok(input), expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn lxml_boolean_minimize_set() {
+        // All thirteen minimize on any tag, whatever the value.
+        for attr in [
+            "checked", "selected", "disabled", "readonly", "multiple", "ismap", "defer",
+            "declare", "noresize", "nowrap", "noshade", "compact", "nohref",
+        ] {
+            let input = format!("<p {attr}=v>x</p>");
+            assert_eq!(
+                roundtrip_ok(&input),
+                format!("<p {attr}>x</p>"),
+                "input {input:?}"
+            );
+        }
+        // Near-misses keep their values.
+        for attr in ["required", "hidden", "async", "autofocus", "controls", "open"] {
+            let input = format!("<p {attr}=v>x</p>");
+            assert_eq!(
+                roundtrip_ok(&input),
+                format!("<p {attr}=\"v\">x</p>"),
+                "input {input:?}"
+            );
+        }
+    }
 }

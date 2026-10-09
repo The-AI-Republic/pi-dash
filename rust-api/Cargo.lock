@@ -2689,7 +2689,7 @@ dependencies = [
  "ego-tree",
  "flate2",
  "hmac 0.12.1",
- "html5ever 0.40.1",
+ "html5ever 0.39.0",
  "http",
  "http-body",
  "http-body-util",
