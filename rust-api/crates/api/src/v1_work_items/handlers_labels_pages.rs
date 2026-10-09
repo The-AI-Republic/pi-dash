@@ -4684,7 +4684,7 @@ impl SourceWalker<'_> {
             // Rejected: literal `&`, plus the death rule — with no `;`
             // anywhere after, the rest of the input is data.
             self.out.push_str("&amp;");
-            if self.last_semi.map_or(false, |s| s > i) {
+            if self.last_semi.is_some_and(|s| s > i) {
                 self.pos = i + 1;
             } else {
                 self.escape_rest(i + 1);
@@ -4985,9 +4985,7 @@ fn is_heading_name(name: &str) -> bool {
     let Some(rest) = name.strip_prefix('h') else {
         return false;
     };
-    rest.chars()
-        .next()
-        .is_some_and(|c| c.to_digit(10).is_some())
+    rest.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 
 /// `process_text` (`__init__.py:315-346`) with `wrap=False`. `escape()` is
@@ -5225,7 +5223,7 @@ fn heading_level(name: &str) -> Option<u32> {
     if digits.len() > 1 {
         return Some(6);
     }
-    Some(digits.parse::<u32>().unwrap_or(0).max(1).min(6))
+    Some(digits.parse::<u32>().unwrap_or(0).clamp(1, 6))
 }
 
 /// `chomp` (`__init__.py:60-70`): hoist a single leading/trailing ASCII
@@ -5399,7 +5397,7 @@ fn convert_hn(level: u32, text: &str, tags: ParentTags) -> String {
     if tags.inline {
         return text.to_owned();
     }
-    let level = level.max(1).min(6) as usize;
+    let level = level.clamp(1, 6) as usize;
     let mut single = String::with_capacity(text.len());
     let mut in_ws = false;
     for ch in text.trim().chars() {
@@ -5702,7 +5700,7 @@ fn convert_figcaption(text: &str) -> String {
 /// fallback; vulgar fractions and roman numerals are *not* `isdigit`, so a
 /// `colspan` of `½` quietly means 1.)
 fn is_python_digit(ch: char) -> bool {
-    ch.to_digit(10).is_some()
+    ch.is_ascii_digit()
         || matches!(
             ch,
             '⁰'..='⁹' | '₀'..='₉' | '²' | '³' | '¹'
@@ -6935,8 +6933,8 @@ fn strip_splice(events: &mut Vec<MdEvent<'_>>, item_at: usize, md: &str, kind: I
         Event::Text(CowStr::from(replacement)),
         events[inline_at].1.start..gap_end,
     ));
-    for j in (inline_at + 1)..k {
-        patched.push((Event::Text(CowStr::Borrowed("")), events[j].1.clone()));
+    for event in &events[inline_at + 1..k] {
+        patched.push((Event::Text(CowStr::Borrowed("")), event.1.clone()));
     }
     events.splice(inline_at..k, patched);
 }
@@ -7748,11 +7746,7 @@ impl Renderer<'_, '_> {
                 let fence = line.chars().next().unwrap_or('`');
                 let fence = if fence == '~' { '~' } else { '`' };
                 let info = line.trim_start_matches(fence);
-                info.trim()
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_owned()
+                info.split_whitespace().next().unwrap_or("").to_owned()
             }
             _ => String::new(),
         };

@@ -324,11 +324,11 @@ mod tests {
             ),
             (
                 "GET",
-                format!("/api/v1/workspaces/acme/projects/p1/labels/"),
+                "/api/v1/workspaces/acme/projects/p1/labels/".to_string(),
             ),
             (
                 "POST",
-                format!("/api/v1/workspaces/acme/projects/p1/labels/"),
+                "/api/v1/workspaces/acme/projects/p1/labels/".to_string(),
             ),
             (
                 "GET",
@@ -344,11 +344,11 @@ mod tests {
             ),
             (
                 "GET",
-                format!("/api/v1/workspaces/acme/projects/p1/pages/"),
+                "/api/v1/workspaces/acme/projects/p1/pages/".to_string(),
             ),
             (
                 "POST",
-                format!("/api/v1/workspaces/acme/projects/p1/pages/"),
+                "/api/v1/workspaces/acme/projects/p1/pages/".to_string(),
             ),
             (
                 "GET",
@@ -541,11 +541,7 @@ mod tests {
         );
         // PIDASHCONV-679: unowned verbs on the label/page paths.
         assert_eq!(
-            status(
-                "PUT",
-                &format!("/api/v1/workspaces/acme/projects/p1/labels/"),
-            )
-            .await,
+            status("PUT", "/api/v1/workspaces/acme/projects/p1/labels/",).await,
             StatusCode::BAD_GATEWAY
         );
         assert_eq!(
