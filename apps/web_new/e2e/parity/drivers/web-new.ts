@@ -5468,4 +5468,127 @@ export class WebNewDriver implements ParityDriver {
   async assistantLastToast(): Promise<{ title: string; message: string } | null> {
     return todo("assistantLastToast");
   }
+  async assistantCurrentHash(): Promise<string> {
+    return todo("assistantCurrentHash");
+  }
+  async assistantMicDisabled(): Promise<boolean> {
+    return todo("assistantMicDisabled");
+  }
+  async assistantMicHold(_ms: number): Promise<void> {
+    return todo("assistantMicHold");
+  }
+  async assistantMicDown(): Promise<void> {
+    return todo("assistantMicDown");
+  }
+  async assistantMicUp(): Promise<void> {
+    return todo("assistantMicUp");
+  }
+  async assistantMicUpAfter(_ms: number): Promise<void> {
+    return todo("assistantMicUpAfter");
+  }
+  async assistantSetMicrophonePermission(_state: "granted" | "denied"): Promise<void> {
+    return todo("assistantSetMicrophonePermission");
+  }
+  async assistantSimulateUnsupportedCapture(): Promise<void> {
+    return todo("assistantSimulateUnsupportedCapture");
+  }
+  async assistantSimulateMicDenial(): Promise<void> {
+    return todo("assistantSimulateMicDenial");
+  }
+  async assistantStubTranscribeText(_text: string): Promise<void> {
+    return todo("assistantStubTranscribeText");
+  }
+  async assistantFailTranscribe(_status: number, _body: Record<string, string>): Promise<void> {
+    return todo("assistantFailTranscribe");
+  }
+  async assistantClearTranscribeStubs(): Promise<void> {
+    return todo("assistantClearTranscribeStubs");
+  }
+  async assistantTranscribeRequests(): Promise<{ contentType: string; hasFilePart: boolean; byteLength: number }[]> {
+    return todo("assistantTranscribeRequests");
+  }
+  async assistantSidebarButtons(): Promise<string[]> {
+    return todo("assistantSidebarButtons");
+  }
+  async assistantThreadManagementControls(): Promise<string[]> {
+    return todo("assistantThreadManagementControls");
+  }
+  async assistantSidebarHeader(): Promise<string | null> {
+    return todo("assistantSidebarHeader");
+  }
+  async assistantSidebarRowKinds(): Promise<{ newChat: string | null; rows: string[] }> {
+    return todo("assistantSidebarRowKinds");
+  }
+  async assistantSkippedNoticeActions(): Promise<{ kind: string; text: string; href: string | null }[]> {
+    return todo("assistantSkippedNoticeActions");
+  }
+  async assistantChatSettingsLinks(): Promise<string[]> {
+    return todo("assistantChatSettingsLinks");
+  }
+  async assistantStartDesktopCallWatch(): Promise<void> {
+    return todo("assistantStartDesktopCallWatch");
+  }
+  async assistantDesktopCallsObserved(): Promise<{ method: string; url: string }[]> {
+    return todo("assistantDesktopCallsObserved");
+  }
+  async assistantStopDesktopCallWatch(): Promise<void> {
+    return todo("assistantStopDesktopCallWatch");
+  }
+  async assistantStubInstanceLlm(_configured: boolean): Promise<void> {
+    return todo("assistantStubInstanceLlm");
+  }
+  async assistantClearInstanceStub(): Promise<void> {
+    return todo("assistantClearInstanceStub");
+  }
+  async assistantStubGptAnswer(_response: { response: string; response_html: string }): Promise<void> {
+    return todo("assistantStubGptAnswer");
+  }
+  async assistantFailGptAnswer(_status: number, _body: Record<string, string>): Promise<void> {
+    return todo("assistantFailGptAnswer");
+  }
+  async assistantClearGptStubs(): Promise<void> {
+    return todo("assistantClearGptStubs");
+  }
+  async assistantGptRequests(): Promise<{ prompt: string; task: string }[]> {
+    return todo("assistantGptRequests");
+  }
+  async issueModalAiEntryVisible(): Promise<boolean> {
+    return todo("issueModalAiEntryVisible");
+  }
+  async issueModalAiOpen(): Promise<void> {
+    return todo("issueModalAiOpen");
+  }
+  async issueModalAiFillTask(_text: string): Promise<void> {
+    return todo("issueModalAiFillTask");
+  }
+  async issueModalAiGenerate(): Promise<void> {
+    return todo("issueModalAiGenerate");
+  }
+  async issueModalAiResponse(): Promise<string | null> {
+    return todo("issueModalAiResponse");
+  }
+  async issueModalAiInvalidVisible(): Promise<boolean> {
+    return todo("issueModalAiInvalidVisible");
+  }
+  async issueModalAiUseResponse(): Promise<void> {
+    return todo("issueModalAiUseResponse");
+  }
+  async issueModalAiClose(): Promise<void> {
+    return todo("issueModalAiClose");
+  }
+  async issueModalDescriptionText(): Promise<string | null> {
+    return todo("issueModalDescriptionText");
+  }
+  async pageEditorOpen(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
+    return todo("pageEditorOpen");
+  }
+  async pageEditorAiHandleCount(): Promise<number> {
+    return todo("pageEditorAiHandleCount");
+  }
+  async pageEditorAiMenuVisible(): Promise<boolean> {
+    return todo("pageEditorAiMenuVisible");
+  }
+  async pageEditorRephraseRequests(): Promise<string[]> {
+    return todo("pageEditorRephraseRequests");
+  }
 }

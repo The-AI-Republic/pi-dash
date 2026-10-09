@@ -10354,3 +10354,156 @@ export async function serverAssistantPollTerminal(
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 }
+
+// -- Assistant-plus server reads (NEWFRONT-188, AGT-050–052/058–061/063). --
+
+/** Connectivity-check outcome shape both key-test endpoints share. */
+export interface AssistantKeyTest {
+  ok: boolean;
+  error_code: string | null;
+  detail: string | null;
+}
+
+function assistantKeyTestOf(payload: unknown): AssistantKeyTest {
+  const row = payload as Record<string, unknown>;
+  return {
+    ok: row["ok"] === true,
+    error_code: typeof row["error_code"] === "string" ? row["error_code"] : null,
+    detail: typeof row["detail"] === "string" ? row["detail"] : null,
+  };
+}
+
+/** Run the provider-key connectivity check (200 with ok/error_code). */
+export async function serverAssistantConfigTest(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantKeyTest> {
+  const res = await mutateJSON("POST", `${apiBase}/api/users/me/ai-assistant/config/test/`, sessionCookie, {});
+  if (res.status !== 200) throw new Error(`[parity] key check failed with HTTP ${res.status}.`);
+  return assistantKeyTestOf((await res.json()) as unknown);
+}
+
+/** Run the speech-key connectivity check (200 with ok/error_code). */
+export async function serverAssistantSttTest(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantKeyTest> {
+  const res = await mutateJSON("POST", `${apiBase}/api/users/me/ai-assistant/stt-config/test/`, sessionCookie, {});
+  if (res.status !== 200) throw new Error(`[parity] speech-key check failed with HTTP ${res.status}.`);
+  return assistantKeyTestOf((await res.json()) as unknown);
+}
+
+/** Delete a chat thread (reserved-method proofs; the chat surface has no button). */
+export async function serverAssistantThreadDelete(
+  workspaceSlug: string,
+  threadId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/ai-assistant/threads/${threadId}/`,
+    sessionCookie
+  );
+  if (res.status !== 204) throw new Error(`[parity] thread delete failed with HTTP ${res.status}.`);
+}
+
+/** Rename/toggle a tool-server registry row (registry proofs). */
+export async function serverAssistantMcpPatch(
+  serverId: string,
+  sessionCookie: string,
+  patch: { name?: string; url?: string; is_enabled?: boolean },
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantMcpServer> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/users/me/ai-assistant/mcp-servers/${serverId}/`,
+    sessionCookie,
+    patch
+  );
+  if (res.status !== 200) throw new Error(`[parity] tool-server patch failed with HTTP ${res.status}.`);
+  return assistantMcpServerOf((await res.json()) as unknown);
+}
+
+/** Raw transcribe outcome: status plus payload (gate proofs). */
+export interface AssistantTranscribeRaw {
+  status: number;
+  payload: unknown;
+}
+
+/**
+ * POST an audio upload to the transcribe endpoint. Raw shape: callers
+ * assert the gate codes (missing config, missing file, oversize) as well
+ * as the happy path.
+ */
+export async function serverAssistantTranscribeRaw(
+  sessionCookie: string,
+  file: { bytes: Uint8Array; filename: string; contentType: string } | null,
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantTranscribeRaw> {
+  const form = new FormData();
+  if (file !== null) {
+    form.append("file", new Blob([file.bytes], { type: file.contentType }), file.filename);
+  }
+  const res = await fetch(`${apiBase}/api/users/me/ai-assistant/transcribe/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+    body: form,
+  });
+  let payload: unknown = null;
+  try {
+    payload = (await res.json()) as unknown;
+  } catch {
+    payload = null;
+  }
+  return { status: res.status, payload };
+}
+
+/** Raw GPT-editor outcome: status plus payload (gate proofs). */
+export interface WorkspaceGptRaw {
+  status: number;
+  payload: unknown;
+}
+
+/** POST a GPT-editor task; raw shape for the no-LLM-key refusal half. */
+export async function serverWorkspaceGptRaw(
+  workspaceSlug: string,
+  sessionCookie: string,
+  input: { prompt: string; task: string },
+  apiBase: string = apiBaseFromEnv()
+): Promise<WorkspaceGptRaw> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/ai-assistant/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  let payload: unknown = null;
+  try {
+    payload = (await res.json()) as unknown;
+  } catch {
+    payload = null;
+  }
+  return { status: res.status, payload };
+}
+
+/** Raw rephrase outcome: status only (missing-backend proofs). */
+export async function serverRephraseStatus(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/rephrase-grammar/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ task: "ask_anything", text_input: "parity probe" }),
+  });
+  return res.status;
+}
+
+/** Whether the instance reports an LLM key (the editor-AI gate flag). */
+export async function serverInstanceLlmConfigured(apiBase: string = apiBaseFromEnv()): Promise<boolean> {
+  const res = await fetch(`${apiBase}/api/instances/`);
+  if (!res.ok) throw new Error(`[parity] instance read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { config?: { has_llm_configured?: unknown } };
+  return payload["config"]?.["has_llm_configured"] === true;
+}
