@@ -1743,23 +1743,40 @@ fn presigned_get_url(
     let scope = credential_scope(&date, region);
     let credential = format!("{}/{}", storage.access_key_id, scope);
     let disposition = disposition_value(&filename);
-    let mut params = [
-        ("response-content-disposition".to_owned(), disposition),
+    // Auth params in botocore's insertion order
+    // (`SigV4QueryAuth._modify_request_before_signing`).
+    let auth_params = [
         ("X-Amz-Algorithm".to_owned(), "AWS4-HMAC-SHA256".to_owned()),
         ("X-Amz-Credential".to_owned(), credential),
-        ("X-Amz-Date".to_owned(), amz_date),
+        ("X-Amz-Date".to_owned(), amz_date.clone()),
         (
             "X-Amz-Expires".to_owned(),
             storage.signed_url_expiration_secs.to_string(),
         ),
         ("X-Amz-SignedHeaders".to_owned(), "host".to_owned()),
     ];
-    params.sort_by(|a, b| a.0.cmp(&b.0));
-    let canonical_query = params
+    // The canonical query sorts everything (signing input); the URL
+    // keeps operation params before auth params (botocore: "The spec is
+    // particular about this").
+    let mut canonical: Vec<(String, String)> = Vec::with_capacity(6);
+    canonical.push((
+        "response-content-disposition".to_owned(),
+        disposition.clone(),
+    ));
+    canonical.extend(auth_params.iter().cloned());
+    canonical.sort_by(|a, b| a.0.cmp(&b.0));
+    let canonical_query = canonical
         .iter()
         .map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v)))
         .collect::<Vec<_>>()
         .join("&");
+    let mut url_query = format!("response-content-disposition={}", uri_encode(&disposition));
+    for (key, value) in &auth_params {
+        url_query.push('&');
+        url_query.push_str(&uri_encode(key));
+        url_query.push('=');
+        url_query.push_str(&uri_encode(value));
+    }
     let path_style = storage.use_minio
         || storage
             .endpoint_url
@@ -1774,13 +1791,7 @@ fn presigned_get_url(
         "GET\n{canonical_path}\n{canonical_query}\nhost:{signed_host}\n\nhost\nUNSIGNED-PAYLOAD"
     );
     let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-        params
-            .iter()
-            .find(|(k, _)| k == "X-Amz-Date")
-            .expect("date param")
-            .1,
-        scope,
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
         sha256_hex(canonical.as_bytes())
     );
     let signature = hex(&hmac_sha256(
@@ -1788,7 +1799,7 @@ fn presigned_get_url(
         string_to_sign.as_bytes(),
     ));
     Ok(format!(
-        "{endpoint}{canonical_path}?{canonical_query}&X-Amz-Signature={signature}"
+        "{endpoint}{canonical_path}?{url_query}&X-Amz-Signature={signature}"
     ))
 }
 
@@ -4126,16 +4137,25 @@ mod tests {
         assert!(url.contains("response-content-disposition=attachment"));
         assert!(url.contains("shot.png"));
         assert!(url.contains("X-Amz-Expires=3600"));
-        let (query, signature) = url
-            .split_once('?')
-            .expect("query")
-            .1
-            .rsplit_once("X-Amz-Signature=")
-            .expect("signature");
+        // Operation params stay before auth params in the URL (botocore
+        // order); only the canonical signing string is sorted.
+        let query = url.split_once('?').expect("query").1;
+        assert!(query.starts_with("response-content-disposition="), "{url}");
+        // Independent oracle: recompute the query signature by hand.
+        let (query, signature) = query.rsplit_once("X-Amz-Signature=").expect("signature");
         let query = query.strip_suffix('&').expect("trailing amp");
+        fn pair_key(pair: &str) -> &str {
+            match pair.split_once('=') {
+                Some((k, _)) => k,
+                None => pair,
+            }
+        }
+        let mut sorted: Vec<&str> = query.split('&').collect();
+        sorted.sort_by(|a, b| pair_key(a).cmp(pair_key(b)));
+        let canonical_query = sorted.join("&");
         let scope = "20260928/us-east-1/s3/aws4_request";
         let canonical = format!(
-            "GET\n/uploads/ws-id/ab12-shot.png\n{query}\nhost:127.0.0.1:8486\n\nhost\nUNSIGNED-PAYLOAD"
+            "GET\n/uploads/ws-id/ab12-shot.png\n{canonical_query}\nhost:127.0.0.1:8486\n\nhost\nUNSIGNED-PAYLOAD"
         );
         let to_sign = format!(
             "AWS4-HMAC-SHA256\n20260928T120000Z\n{scope}\n{}",
@@ -4146,6 +4166,29 @@ mod tests {
             to_sign.as_bytes(),
         ));
         assert_eq!(signature, expected);
+    }
+
+    // Golden presigned GET from live botocore 1.34.162 (same client
+    // construction as `storage.py`: s3v4, endpoint
+    // `http://127.0.0.1:8486`, key `access-key` / secret `secret-key`,
+    // region `us-east-1`, bucket `uploads`, object
+    // `ws-id/ab12-shot.png`, `ResponseContentDisposition` attachment
+    // with filename `shot.png`, `ExpiresIn=3600`), time frozen at the
+    // `test_now()` instant (2026-09-28T12:00:00Z).
+    const PRESIGNED_GET_GOLDEN: &str = "http://127.0.0.1:8486/uploads/ws-id/ab12-shot.png?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27shot.png&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=access-key%2F20260928%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260928T120000Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=e770f9b6095e005db9967d28ebe2773b981f7a7b79dd4e35f45eca1645ff5b70";
+
+    #[test]
+    fn presigned_get_url_matches_botocore_golden() {
+        let url = presigned_get_url(
+            &test_storage(),
+            "http",
+            "127.0.0.1:8486",
+            "ws-id/ab12-shot.png",
+            Filename::Name("shot.png".to_owned()),
+            &test_now(),
+        )
+        .expect("minio signs");
+        assert_eq!(url, PRESIGNED_GET_GOLDEN);
     }
 
     #[test]
