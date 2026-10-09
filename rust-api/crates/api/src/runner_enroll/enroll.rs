@@ -2078,16 +2078,35 @@ pub async fn create_runner(
 // `POST /api/runners/machine-tokens/<ws>/tickets/`
 // ---------------------------------------------------------------------------
 
-/// `MachineTokenTicketEndpoint.post` (`:810-850`): session auth,
-/// workspace-uuid parse, membership 404, host-label required, Redis
+/// Django's `<uuid:>` converter (`[0-9a-f]{8}-...`, lowercase-only):
+/// the only segment form that reaches the view. `Uuid::parse_str`
+/// alone also accepts uppercase/braced/simple forms, which Django
+/// 404s before auth runs; comparing against the canonical lowercase
+/// form reproduces the converter exactly (neither side checks
+/// version bits).
+fn strict_uuid(segment: &str) -> Option<Uuid> {
+    match segment.parse::<Uuid>() {
+        Ok(id) if id.hyphenated().to_string() == segment => Some(id),
+        _ => None,
+    }
+}
+
+/// `MachineTokenTicketEndpoint.post` (`:810-850`): workspace-uuid
+/// gate, session auth, membership 404, host-label required, Redis
 /// `SET EX 60`, 201 body. The `SET` is skipped when Redis is `None`
-/// but the 201 still goes out (ported bug).
+/// but the 201 still goes out (ported bug). A non-canonical segment
+/// falls through to Django (which renders its own 404): the view's
+/// defensive `invalid_workspace_id` 400 is unreachable in Django
+/// (the converter 404s first), so Rust never emits it either.
 pub async fn machine_token_ticket(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     Path(workspace_raw): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    let Some(ws_uuid) = strict_uuid(&workspace_raw) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
         Err(response) => return response,
@@ -2097,15 +2116,6 @@ pub async fn machine_token_ticket(
         Ok(Some(user_id)) => user_id,
         Ok(None) => return not_authenticated(),
         Err(response) => return response,
-    };
-    // The `<uuid:workspace_id>` converter 404s non-UUID segments before
-    // the Django view runs; axum has no converter, so the view's own
-    // defensive 400 stays reachable here.
-    let ws_uuid = match workspace_raw.parse::<Uuid>() {
-        Ok(ws_uuid) => ws_uuid,
-        Err(_) => {
-            return json_response(StatusCode::BAD_REQUEST, error_body("invalid_workspace_id"));
-        }
     };
     match workspace_member_exists(pool, ws_uuid, user_id).await {
         Ok(true) => {}
@@ -2145,6 +2155,18 @@ pub async fn machine_token_ticket(
 // ---------------------------------------------------------------------------
 // `POST /api/v1/runner/machine-tokens/`
 // ---------------------------------------------------------------------------
+
+/// A valid-JSON non-object ticket blob (`:903-905`): Django indexes
+/// `payload["user_id"]`, so a list/string/number/`null` raises
+/// `TypeError` (500) — `Value::get` would wrongly 410. Runs before
+/// the per-key lookups; object payloads are untouched.
+fn ensure_object_payload(payload: &Value) -> Result<(), Response> {
+    if payload.is_object() {
+        Ok(())
+    } else {
+        Err(server_error())
+    }
+}
 
 /// One ticket-payload UUID (`:903-910`): absent/`null` is the 410
 /// (`KeyError`/`DoesNotExist`); a present non-string or an unparseable
@@ -2222,6 +2244,9 @@ pub async fn machine_token_redeem(
             );
         }
     };
+    if let Err(response) = ensure_object_payload(&payload) {
+        return response;
+    }
     let user_id = match payload_uuid(&payload, "user_id") {
         Ok(user_id) => user_id,
         Err(response) => return response,
@@ -2313,12 +2338,19 @@ pub async fn runner_invite(
 }
 
 /// `RunnerReviveEndpoint.post` (`:491-500`): session-authed, always 410.
-/// The view ignores `runner_id` entirely (never parsed).
+/// The view ignores `runner_id` entirely (never parsed), but the
+/// `<uuid:runner_id>` converter 404s non-canonical segments before
+/// auth runs — so the gate falls through to Django, which renders
+/// its own 404.
 pub async fn runner_revive(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
-    Path(_runner_id): Path<String>,
+    Path(runner_raw): Path<String>,
+    req: Request<axum::body::Body>,
 ) -> Response {
+    if strict_uuid(&runner_raw).is_none() {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    }
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
         Err(response) => return response,
@@ -2769,6 +2801,45 @@ mod tests {
         ] {
             let err = payload_uuid(&bad, "user_id").expect_err("500");
             assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    // -- Web-route UUID gating + non-object ticket blob (PIDASHCONV-791) --
+
+    #[test]
+    fn strict_uuid_pins_django_converter() {
+        let lower = "12345678-1234-abcd-ef01-234567890abc";
+        assert_eq!(
+            strict_uuid(lower)
+                .expect("lowercase")
+                .hyphenated()
+                .to_string(),
+            lower
+        );
+        // Django's `<uuid:>` converter 404s every one of these
+        // (several of which `Uuid::parse_str` would accept), so the
+        // gate rejects them.
+        for rejected in [
+            lower.to_uppercase(),
+            "not-a-uuid".to_owned(),
+            "123".to_owned(),
+            format!("{{{lower}}}"),
+            lower.replace('-', ""),
+            format!("urn:uuid:{lower}"),
+            format!("{lower}/"),
+        ] {
+            assert!(strict_uuid(&rejected).is_none(), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn non_object_ticket_payload_is_500() {
+        let object: Value = serde_json::from_str(r#"{"user_id":"x"}"#).expect("object");
+        assert!(ensure_object_payload(&object).is_ok());
+        for raw in ["[1,2]", "\"just-a-string\"", "42", "true", "null"] {
+            let payload: Value = serde_json::from_str(raw).expect("valid json");
+            let err = ensure_object_payload(&payload).expect_err("500");
+            assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR, "{raw}");
         }
     }
 
