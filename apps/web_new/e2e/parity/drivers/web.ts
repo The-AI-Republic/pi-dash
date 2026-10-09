@@ -45,6 +45,7 @@ import type {
   NotificationsListQuery,
   NotificationsMode,
   NotificationsOrigin,
+  NotificationsDetailVariant,
   NotificationsTab,
   ParityBrowserCookie,
   ParityDriver,
@@ -19956,5 +19957,373 @@ export class WebDriver implements ParityDriver {
       (route) => route.abort(),
       { times: 1 }
     );
+  }
+
+  // --- Notifications detail, pagination, refresh, mark-all-read
+  // --- (NEWFRONT-199, NTF-007..014). Appended; existing methods above are
+  // --- untouched per the shared driver contract.
+
+  async notificationsDetailVariant(): Promise<NotificationsDetailVariant> {
+    const detail = this.page.getByTestId("notifications-detail-pane").first();
+    await detail.waitFor({ timeout: WebDriver.WAIT_MS });
+    const placeholder = detail.getByTestId("notifications-detail-placeholder");
+    if ((await placeholder.count()) > 0 && (await placeholder.isVisible().catch(() => false))) {
+      return "placeholder";
+    }
+    const loading = detail.getByTestId("notifications-detail-loading");
+    if ((await loading.count()) > 0 && (await loading.isVisible().catch(() => false))) {
+      return "loading";
+    }
+    const accept = detail.getByRole("button", { name: "Accept", exact: true });
+    const decline = detail.getByRole("button", { name: "Decline", exact: true });
+    if ((await accept.count()) > 0 && (await decline.count()) > 0) return "triage";
+    return "peek";
+  }
+
+  async notificationsDetailText(): Promise<string> {
+    const detail = this.page.getByTestId("notifications-detail-pane").first();
+    return WebDriver.cleanText(await detail.innerText().catch(() => ""));
+  }
+
+  async notificationsCloseDetail(): Promise<void> {
+    const detail = this.page.getByTestId("notifications-detail-pane").first();
+    await detail.getByTestId("notifications-detail-close").first().click({ timeout: WebDriver.WAIT_MS });
+    await detail.getByTestId("notifications-detail-placeholder").first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async notificationsSelectCardPostedRead(index: number): Promise<boolean> {
+    const detail = this.page.getByTestId("notifications-detail-pane").first();
+    const before = WebDriver.cleanText(await detail.innerText().catch(() => ""));
+    const posted = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          /\/users\/notifications\/[^/]+\/read\/(\?|$)/.test(response.url()) &&
+          response.ok(),
+        { timeout: 8_000 }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    const card = this.page.getByTestId("notification-card").nth(index);
+    await card.scrollIntoViewIfNeeded().catch(() => undefined);
+    await card.click({ timeout: WebDriver.WAIT_MS });
+    // A first open swaps the detail text; reselecting the current card
+    // leaves it unchanged, so either outcome settles the click.
+    await this.page
+      .waitForFunction(
+        (expected: string) => {
+          const pane = document.querySelector('[data-testid="notifications-detail-pane"]');
+          const text = (pane?.textContent ?? "").replace(/\s+/g, " ").trim();
+          return text !== expected;
+        },
+        before,
+        { timeout: 8_000 }
+      )
+      .catch(() => undefined);
+    return posted;
+  }
+
+  async notificationsSelectCardHeldAccess(index: number, holdMs: number): Promise<{ spinnerShown: boolean }> {
+    const pattern = "**/api/workspaces/*/projects/*/project-members/me/";
+    await this.page.route(pattern, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      const card = this.page.getByTestId("notification-card").nth(index);
+      await card.scrollIntoViewIfNeeded().catch(() => undefined);
+      await card.click({ timeout: WebDriver.WAIT_MS });
+      const loading = this.page.getByTestId("notifications-detail-loading").first();
+      let spinnerShown = false;
+      const deadline = Date.now() + holdMs + 10_000;
+      for (;;) {
+        if ((await loading.count()) > 0 && (await loading.isVisible().catch(() => false))) {
+          spinnerShown = true;
+          break;
+        }
+        if (Date.now() > deadline) break;
+        await this.page.waitForTimeout(100);
+      }
+      await this.page
+        .getByTestId("notifications-detail-pane")
+        .first()
+        .getByRole("button", { name: "Accept", exact: true })
+        .waitFor({ timeout: WebDriver.WAIT_MS });
+      return { spinnerShown };
+    } finally {
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
+  }
+
+  async notificationsNextPageLabel(): Promise<string | null> {
+    const control = this.page.getByTestId("notifications-next-page").first();
+    if ((await control.count()) === 0) return null;
+    if (!(await control.isVisible().catch(() => false))) return null;
+    const text = WebDriver.cleanText(await control.innerText().catch(() => ""));
+    return text === "" ? null : text;
+  }
+
+  async notificationsLoadNextPage(): Promise<void> {
+    const cards = this.page.getByTestId("notification-card");
+    const before = await cards.count();
+    await this.page.getByTestId("notifications-next-page").first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForFunction(
+      (expected: number) => document.querySelectorAll('[data-testid="notification-card"]').length > expected,
+      before,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async notificationsLoadNextPageHeld(
+    holdMs: number
+  ): Promise<{ loadingShown: boolean; before: number; after: number }> {
+    const pattern = "**/api/workspaces/*/users/notifications*";
+    await this.page.route(pattern, async (route) => {
+      const request = route.request();
+      if (request.method() !== "GET" || request.url().includes("/unread/")) {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      const cards = this.page.getByTestId("notification-card");
+      const before = await cards.count();
+      await this.page.getByTestId("notifications-next-page").first().click({ timeout: WebDriver.WAIT_MS });
+      const control = this.page.getByTestId("notifications-next-page").first();
+      let loadingShown = false;
+      const deadline = Date.now() + holdMs + 10_000;
+      for (;;) {
+        const label = WebDriver.cleanText(await control.innerText().catch(() => ""));
+        if (/loading/i.test(label)) {
+          loadingShown = true;
+          break;
+        }
+        if (Date.now() > deadline) break;
+        await this.page.waitForTimeout(100);
+      }
+      await this.page.waitForFunction(
+        (expected: number) => document.querySelectorAll('[data-testid="notification-card"]').length > expected,
+        before,
+        { timeout: WebDriver.WAIT_MS }
+      );
+      const after = await cards.count();
+      return { loadingShown, before, after };
+    } finally {
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
+  }
+
+  async notificationsSkeletonOnDelayedEntry(
+    workspaceSlug: string,
+    holdMs: number
+  ): Promise<{ skeletonShown: boolean; settledCards: number }> {
+    const pattern = "**/api/workspaces/*/users/notifications*";
+    await this.page.route(pattern, async (route) => {
+      const request = route.request();
+      if (request.method() !== "GET" || request.url().includes("/unread/")) {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.page.goto(`/${workspaceSlug}/notifications/`, { timeout: 60_000 });
+      await this.page.waitForLoadState("domcontentloaded");
+      const skeleton = this.page.getByTestId("notifications-skeleton").first();
+      let skeletonShown = false;
+      const deadline = Date.now() + holdMs + 10_000;
+      for (;;) {
+        if ((await skeleton.count()) > 0 && (await skeleton.isVisible().catch(() => false))) {
+          skeletonShown = true;
+          break;
+        }
+        if (Date.now() > deadline) break;
+        await this.page.waitForTimeout(100);
+      }
+      await this.page.waitForFunction(
+        () =>
+          document.querySelectorAll('[data-testid="notification-card"]').length > 0 ||
+          document.querySelector('[data-testid="notifications-empty-state"]') !== null,
+        undefined,
+        { timeout: WebDriver.WAIT_MS }
+      );
+      const settledCards = await this.page.getByTestId("notification-card").count();
+      return { skeletonShown, settledCards };
+    } finally {
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
+  }
+
+  async notificationsEmptyText(): Promise<string | null> {
+    const empty = this.page.getByTestId("notifications-empty-state").first();
+    if ((await empty.count()) === 0) return null;
+    if (!(await empty.isVisible().catch(() => false))) return null;
+    const text = WebDriver.cleanText(await empty.innerText().catch(() => ""));
+    return text === "" ? null : text;
+  }
+
+  /**
+   * Wait until the inbox list branch has resolved to cards or the empty
+   * state, so a header action never races the entry fetch: a stale entry
+   * response landing after the action would overwrite its outcome.
+   */
+  private async notificationsWaitForListSettled(): Promise<void> {
+    await this.page.waitForFunction(
+      () =>
+        document.querySelectorAll('[data-testid="notification-card"]').length > 0 ||
+        document.querySelector('[data-testid="notifications-empty-state"]') !== null,
+      undefined,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async notificationsRefresh(): Promise<void> {
+    await this.notificationsWaitForListSettled();
+    const landed = this.page
+      .waitForResponse(
+        (response) => {
+          const url = response.url();
+          return (
+            response.request().method() === "GET" &&
+            url.includes("/users/notifications") &&
+            !url.includes("/unread/") &&
+            response.ok()
+          );
+        },
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.page.getByTestId("notifications-refresh").first().click({ timeout: WebDriver.WAIT_MS });
+    if (!(await landed)) throw new Error("[parity] refresh posted no list fetch.");
+  }
+
+  async notificationsRefreshHeld(holdMs: number): Promise<{ spinning: boolean; requests: string[] }> {
+    const requests: string[] = [];
+    const pattern = "**/api/workspaces/*/users/notifications*";
+    await this.page.route(pattern, async (route) => {
+      const request = route.request();
+      if (request.method() !== "GET" || request.url().includes("/unread/")) {
+        await route.continue();
+        return;
+      }
+      requests.push(request.url());
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.notificationsWaitForListSettled();
+      const refresh = this.page.getByTestId("notifications-refresh").first();
+      await refresh.click({ timeout: WebDriver.WAIT_MS });
+      // Let the in-flight state paint before the repeat press: the guard
+      // reads the rendered loader, so only a press while progress shows
+      // proves the mid-flight ignore. The repeat press is forced — a
+      // spinning control never passes the stability check, and waiting it
+      // out would land the press after the flight instead of during it.
+      let spinning = false;
+      const progressDeadline = Date.now() + 10_000;
+      for (;;) {
+        const classes = (await refresh.getAttribute("class").catch(() => "")) ?? "";
+        if (classes.split(/\s+/).includes("animate-spin")) {
+          spinning = true;
+          break;
+        }
+        if (Date.now() > progressDeadline) break;
+        await this.page.waitForTimeout(100);
+      }
+      await refresh.click({ timeout: WebDriver.WAIT_MS, force: true });
+      await this.page.waitForFunction(
+        () => {
+          const button = document.querySelector('[data-testid="notifications-refresh"]');
+          if (!(button instanceof HTMLElement)) return false;
+          return !button.className.split(/\s+/).includes("animate-spin");
+        },
+        undefined,
+        { timeout: WebDriver.WAIT_MS }
+      );
+      return { spinning, requests };
+    } finally {
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
+  }
+
+  async notificationsMarkAllRead(): Promise<void> {
+    await this.notificationsWaitForListSettled();
+    const done = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          response.url().includes("/users/notifications/mark-all-read/") &&
+          response.ok(),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.page.getByTestId("notifications-mark-all-read").first().click({ timeout: WebDriver.WAIT_MS });
+    if (!(await done)) throw new Error("[parity] mark-all-read posted no request.");
+    await this.page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="notification-unread-dot"]').length === 0,
+      undefined,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async notificationsMarkAllReadHeld(
+    holdMs: number
+  ): Promise<{ progress: boolean; requests: number; scopeBody: string | null }> {
+    let requests = 0;
+    let scopeBody: string | null = null;
+    const pattern = "**/api/workspaces/*/users/notifications/mark-all-read/";
+    await this.page.route(pattern, async (route) => {
+      requests += 1;
+      if (scopeBody === null) scopeBody = route.request().postData() ?? null;
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.notificationsWaitForListSettled();
+      const control = this.page.getByTestId("notifications-mark-all-read").first();
+      await control.click({ timeout: WebDriver.WAIT_MS });
+      // Let the in-flight state paint before the repeat press: the guard
+      // reads the rendered loader, so only a press while progress shows
+      // proves the mid-flight ignore. The repeat press is forced, matching
+      // the refresh control — a human press never waits out the progress
+      // animation's stability check.
+      let progress = false;
+      const progressDeadline = Date.now() + 10_000;
+      for (;;) {
+        const status = control.locator('[role="status"]');
+        if (
+          (await status.count()) > 0 &&
+          (await status
+            .first()
+            .isVisible()
+            .catch(() => false))
+        ) {
+          progress = true;
+          break;
+        }
+        if (Date.now() > progressDeadline) break;
+        await this.page.waitForTimeout(100);
+      }
+      await control.click({ timeout: WebDriver.WAIT_MS, force: true });
+      await this.page.waitForFunction(
+        () => document.querySelectorAll('[data-testid="notification-unread-dot"]').length === 0,
+        undefined,
+        { timeout: WebDriver.WAIT_MS }
+      );
+      return { progress, requests, scopeBody };
+    } finally {
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
   }
 }

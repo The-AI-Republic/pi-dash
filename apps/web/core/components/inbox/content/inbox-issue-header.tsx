@@ -289,7 +289,7 @@ export const InboxIssueActionsHeader = observer(function InboxIssueActionsHeader
       <Row className="relative z-15 hidden h-full w-full items-center justify-between gap-2 border-b border-subtle bg-surface-1 lg:flex">
         <div className="flex items-center gap-4">
           {isNotificationEmbed && (
-            <button onClick={embedRemoveCurrentNotification}>
+            <button onClick={embedRemoveCurrentNotification} data-testid="notifications-detail-close">
               <MoveRight className="h-4 w-4 text-tertiary hover:text-secondary" />
             </button>
           )}

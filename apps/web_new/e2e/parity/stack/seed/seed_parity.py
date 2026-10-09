@@ -15,6 +15,8 @@
 import json
 import os
 import time
+import uuid
+from datetime import datetime, timedelta, timezone
 
 from django.contrib.auth.hashers import make_password
 from django.db import connection, transaction
@@ -32,6 +34,7 @@ from pi_dash.db.models import (
     IssueActivity,
     IssueComment,
     IssueSequence,
+    Notification,
     Profile,
     Project,
     ProjectMember,
@@ -70,6 +73,9 @@ ISSUE_NAMES = ["Parity first issue", "Parity second issue", "Parity third issue"
 # Marker HTML for the git-synced comment (CMT-005). The scenario finds it by
 # this marker instead of position, so sibling specs can post freely.
 SYNC_COMMENT_MARKER = "parity-git-synced seven"
+# Read notification rows seeded for the owner (NEWFRONT-199, NTF-010): just
+# over the client's 300-row page so the next-page control always renders.
+NOTIFICATION_PAGE_SEED_COUNT = 310
 
 
 # Every table with a foreign key into issues, mapped to the columns that
@@ -474,6 +480,7 @@ def build() -> dict:
 
     refresh_project_issues(project, workspace, state, user)
     inbox_issue_id = seed_rules_fixtures(project, workspace, state, user)
+    seed_notification_pagination(project, workspace, state, user, mention_user)
 
     facts = {
         "email": EMAIL,
@@ -636,6 +643,64 @@ def seed_rules_fixtures(project, workspace, state, user) -> None:
         },
     )
     return str(inbox_issue.id)
+
+
+def seed_notification_pagination(project, workspace, state, user, mention_user) -> None:
+    # NEWFRONT-199 (NTF-010): pagination volume the runtime fan-out cannot
+    # cover — the client pages at 300 rows, so the owner's stream needs just
+    # over one page. Every row is READ and backdated, so unread counts,
+    # badges and newest-first heads of other scenarios are unaffected; the
+    # rows converge by fixed UUID and re-point at the current first issue on
+    # every reseed (refresh_project_issues rebuilds the issues above).
+    first_issue = Issue.objects.filter(project=project, name=ISSUE_NAMES[0]).first()
+    if first_issue is None:
+        return
+    base = datetime(2024, 6, 1, tzinfo=timezone.utc)
+    for position in range(NOTIFICATION_PAGE_SEED_COUNT):
+        row_id = uuid.uuid5(uuid.NAMESPACE_URL, f"parity-ntf010-page-{position}")
+        stamped = base + timedelta(minutes=position)
+        Notification.objects.update_or_create(
+            id=row_id,
+            defaults={
+                "workspace": workspace,
+                "project": project,
+                "receiver": user,
+                "triggered_by": mention_user,
+                "sender": "in_app:issue_activities:subscribed",
+                "entity_identifier": first_issue.id,
+                "entity_name": "issue",
+                "title": f"seeded pagination comment {position}",
+                "message": None,
+                "message_html": "<p></p>",
+                "data": {
+                    "issue": {
+                        "id": str(first_issue.id),
+                        "name": first_issue.name,
+                        "identifier": str(project.identifier),
+                        "sequence_id": first_issue.sequence_id,
+                        "state_name": state.name,
+                        "state_group": state.group,
+                    },
+                    "issue_activity": {
+                        "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"parity-ntf010-activity-{position}")),
+                        "verb": "created",
+                        "field": "comment",
+                        "actor": str(mention_user.id),
+                        "new_value": f"<p>seeded pagination comment {position}</p>",
+                        "old_value": "None",
+                        "issue_comment": f"seeded pagination comment {position}",
+                        "old_identifier": None,
+                        "new_identifier": None,
+                    },
+                },
+                "created_by_id": user.id,
+            },
+        )
+        # auto_now_add defeats the ORM write, so backdate past it; read_at
+        # keeps the rows out of every unread count.
+        Notification.objects.filter(id=row_id).update(
+            created_at=stamped, updated_at=stamped, read_at=stamped + timedelta(hours=1)
+        )
 
 
 facts = build()

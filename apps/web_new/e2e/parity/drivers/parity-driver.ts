@@ -3649,6 +3649,76 @@ export interface ParityDriver {
   notificationsToggleCardArchive(index: number): Promise<void>;
   /** Fail the next per-card read/archive write once (failure shaping). */
   notificationsFailNextCardWrite(): Promise<void>;
+
+  // ---------------------------------------------------------------------------
+  // Notifications detail, pagination, refresh, mark-all-read (NEWFRONT-199,
+  // NTF-007..014). Observed on apps/web: selecting a card opens its detail
+  // and marks it read on first open; triage items embed the triage view and
+  // ordinary items the peek overview; the placeholder, the next-page
+  // control, skeletons, per-tab empty states, the refresh control and the
+  // mark-all-read control. Appended; existing entries above are untouched
+  // per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** What the detail pane currently shows (selection state). */
+  notificationsDetailVariant(): Promise<NotificationsDetailVariant>;
+  /** Visible text of the detail pane, whitespace-collapsed. */
+  notificationsDetailText(): Promise<string>;
+  /** Close the detail preview and wait until the selection clears. */
+  notificationsCloseDetail(): Promise<void>;
+  /**
+   * Select a card by index and report whether the selection posted a
+   * mark-read write. Settles on the detail pane like notificationsSelectCard
+   * when the selection changes, and on a short grace window when it does
+   * not (reselecting the current card).
+   */
+  notificationsSelectCardPostedRead(index: number): Promise<boolean>;
+  /**
+   * Select a card whose detail waits on the project-access lookup while
+   * that lookup is held back `holdMs`, reporting whether the loading
+   * indicator showed. Releases the hold and waits for the triage view.
+   */
+  notificationsSelectCardHeldAccess(index: number, holdMs: number): Promise<{ spinnerShown: boolean }>;
+  /** Label of the next-page control, or null when no further page exists. */
+  notificationsNextPageLabel(): Promise<string | null>;
+  /** Activate the next-page control and wait until older cards append. */
+  notificationsLoadNextPage(): Promise<void>;
+  /**
+   * Activate the next-page control while the list fetch is held back
+   * `holdMs`, reporting whether the loading label showed and how the card
+   * count moved. Releases the hold and waits for the appended cards.
+   */
+  notificationsLoadNextPageHeld(holdMs: number): Promise<{ loadingShown: boolean; before: number; after: number }>;
+  /**
+   * Enter the inbox while the initial list fetch is held back `holdMs`,
+   * reporting whether skeleton rows showed mid-flight and how many cards
+   * settled once the fetch landed.
+   */
+  notificationsSkeletonOnDelayedEntry(
+    workspaceSlug: string,
+    holdMs: number
+  ): Promise<{ skeletonShown: boolean; settledCards: number }>;
+  /** Visible text of the empty state, or null when the list is non-empty. */
+  notificationsEmptyText(): Promise<string | null>;
+  /** Refresh the current stream and wait until the list fetch lands. */
+  notificationsRefresh(): Promise<void>;
+  /**
+   * Press refresh twice while the list fetch is held back `holdMs`,
+   * reporting whether the control showed progress and which list-fetch
+   * URLs fired. Releases the hold and waits for the list to settle.
+   */
+  notificationsRefreshHeld(holdMs: number): Promise<{ spinning: boolean; requests: string[] }>;
+  /** Mark the current scope read and wait until the request completes. */
+  notificationsMarkAllRead(): Promise<void>;
+  /**
+   * Press mark-all-read twice while its request is held back `holdMs`,
+   * reporting whether the control showed progress, how many requests
+   * fired, and the first request's raw body. Releases the hold and waits
+   * for the cards to settle read.
+   */
+  notificationsMarkAllReadHeld(
+    holdMs: number
+  ): Promise<{ progress: boolean; requests: number; scopeBody: string | null }>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -4120,6 +4190,13 @@ export interface AssistantApiCounts {
 
 /** Inbox stream-tab key (NEWFRONT-198, NTF-002). */
 export type NotificationsTab = "all" | "mentions";
+
+/**
+ * What the inbox detail pane shows (NEWFRONT-199, NTF-007..009): the
+ * no-selection placeholder, the access-lookup loading indicator, the
+ * triage-queue embed, or the ordinary work-item peek overview.
+ */
+export type NotificationsDetailVariant = "placeholder" | "loading" | "triage" | "peek";
 
 /** One inbox card as the user reads it (NEWFRONT-198, NTF-005..006). */
 export interface NotificationsCard {

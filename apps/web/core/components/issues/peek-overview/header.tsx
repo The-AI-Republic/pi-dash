@@ -191,7 +191,7 @@ export const IssuePeekOverviewHeader = observer(function IssuePeekOverviewHeader
     >
       <div className="flex items-center gap-4">
         <Tooltip tooltipContent={t("Close the peek view")} isMobile={isMobile}>
-          <button onClick={removeRoutePeekId}>
+          <button onClick={removeRoutePeekId} data-testid="notifications-detail-close">
             <MoveRight className="h-4 w-4 text-tertiary hover:text-secondary" />
           </button>
         </Tooltip>
