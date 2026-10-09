@@ -58,6 +58,18 @@ function CustomSelect(props: ICustomSelectProps) {
 
   const closeDropdown = useCallback(() => setIsOpen(false), []);
   const handleKeyDown = useDropdownKeyDown(openDropdown, closeDropdown, isOpen);
+  // Close on Escape in the capture phase: Headless UI's button handler calls
+  // preventDefault() on Escape, and its mergeProps wrapper drops already-
+  // prevented events, so a bubble-phase onKeyDown never sees the key. Do not
+  // stop propagation — the button handler must still run so the Combobox's
+  // internal state closes too (and its preventDefault keeps a surrounding
+  // Dialog from closing on the same keypress).
+  const handleKeyDownCapture = useCallback(
+    (event: React.KeyboardEvent<HTMLElement>) => {
+      if (event.key === "Escape" && isOpen) closeDropdown();
+    },
+    [closeDropdown, isOpen]
+  );
   useOutsideClickDetector(dropdownRef, closeDropdown);
 
   const toggleDropdown = useCallback(() => {
@@ -79,6 +91,7 @@ function CustomSelect(props: ICustomSelectProps) {
         }}
         className={cn("relative flex-shrink-0 text-left", className)}
         onKeyDown={handleKeyDown}
+        onKeyDownCapture={handleKeyDownCapture}
         disabled={disabled}
       >
         <>
@@ -120,7 +133,7 @@ function CustomSelect(props: ICustomSelectProps) {
         </>
         {isOpen &&
           createPortal(
-            <Combobox.Options data-prevent-outside-click>
+            <Combobox.Options data-prevent-outside-click static>
               <div
                 className={cn(
                   "z-30 my-1 min-w-48 overflow-y-scroll rounded-md border-[0.5px] border-subtle-1 bg-surface-1 px-2 py-2.5 text-11 whitespace-nowrap focus:outline-none",
