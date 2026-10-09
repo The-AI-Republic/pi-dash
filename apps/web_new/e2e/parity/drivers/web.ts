@@ -117,6 +117,20 @@ export class WebDriver implements ParityDriver {
   private assistantStreamFrames = new Map<string, AssistantStreamFrame[]>();
   private assistantStreamUrls = new Map<string, string[]>();
 
+  // --- Assistant-plus oracle state (NEWFRONT-188, AGT-050–052/058–061/063).
+  // --- Same slot discipline as the c4 state above: one-shot stubs plus
+  // --- recorded request shapes per stubbed endpoint.
+  private assistantTranscribeTextStub: string | null = null;
+  private assistantTranscribeFailure: { status: number; body: Record<string, string> } | null = null;
+  private assistantTranscribeSeen: { contentType: string; hasFilePart: boolean; byteLength: number }[] = [];
+  private assistantDesktopWatchHandler: ((request: { method(): string; url(): string }) => void) | null = null;
+  private assistantDesktopCalls: { method: string; url: string }[] = [];
+  private assistantInstanceLlmStub: boolean | null = null;
+  private assistantGptAnswerStub: { response: string; response_html: string } | null = null;
+  private assistantGptFailure: { status: number; body: Record<string, string> } | null = null;
+  private assistantGptSeen: { prompt: string; task: string }[] = [];
+  private pageEditorRephraseSeen: string[] = [];
+
   /** Every wait below is explicitly bounded: the suite config leaves action and navigation timeouts at Playwright's unbounded defaults, so a bare waitFor would hang to the test timeout instead of failing honestly. */
   private static readonly WAIT_MS = 30_000;
   /** Tighter bound for menus and dialogs, which render synchronously once open. */
@@ -18730,5 +18744,402 @@ export class WebDriver implements ParityDriver {
       return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
     }
     return null;
+  }
+
+  // -- Assistant voice/keys/tools/negatives/editor (NEWFRONT-188) --------
+
+  async assistantCurrentHash(): Promise<string> {
+    return new URL(this.page.url()).hash;
+  }
+
+  private assistantMicButton(): Locator {
+    return this.assistantComposerRow().locator("button:has(svg.lucide-mic)").first();
+  }
+
+  async assistantMicDisabled(): Promise<boolean> {
+    return this.assistantMicButton().isDisabled();
+  }
+
+  async assistantMicHold(ms: number): Promise<void> {
+    // Push-to-talk rides on pointer down/up (a click's fast up lands under
+    // the tap floor and discards), so hold through the mouse explicitly.
+    const mic = this.assistantMicButton();
+    await mic.hover();
+    await this.page.mouse.down();
+    await this.page.waitForTimeout(ms);
+    await this.page.mouse.up();
+  }
+
+  async assistantMicDown(): Promise<void> {
+    await this.assistantMicButton().hover();
+    await this.page.mouse.down();
+  }
+
+  async assistantMicUp(): Promise<void> {
+    await this.page.mouse.up();
+  }
+
+  async assistantMicUpAfter(ms: number): Promise<void> {
+    // The tap floor counts from recorder start, so a down/poll/up cycle
+    // can release inside it; holding past the observation clears it.
+    await this.page.waitForTimeout(ms);
+    await this.page.mouse.up();
+  }
+
+  async assistantSetMicrophonePermission(state: "granted" | "denied"): Promise<void> {
+    if (state === "granted") await this.page.context().grantPermissions(["microphone"]);
+    else await this.page.context().clearPermissions();
+  }
+
+  async assistantSimulateUnsupportedCapture(): Promise<void> {
+    // A capture-less browser: the composer hides the mic and all hints.
+    await this.page.addInitScript(() => {
+      Object.defineProperty(window, "MediaRecorder", { value: undefined, configurable: true });
+      Object.defineProperty(navigator, "mediaDevices", { value: undefined, configurable: true });
+    });
+  }
+
+  async assistantSimulateMicDenial(): Promise<void> {
+    // Headless prompts never surface a real NotAllowedError, so reject
+    // with the spec's denial name and prove the hook's mapping of it.
+    await this.page.addInitScript(() => {
+      const media = navigator.mediaDevices;
+      if (media === undefined) return;
+      const denial = () => Promise.reject(Object.assign(new Error("Permission denied"), { name: "NotAllowedError" }));
+      try {
+        Object.defineProperty(media, "getUserMedia", { value: denial, configurable: true });
+      } catch {
+        media.getUserMedia = denial;
+      }
+    });
+  }
+
+  async assistantStubTranscribeText(text: string): Promise<void> {
+    this.assistantTranscribeTextStub = text;
+    this.assistantTranscribeFailure = null;
+    await this.routeTranscribeStub();
+  }
+
+  async assistantFailTranscribe(status: number, body: Record<string, string>): Promise<void> {
+    this.assistantTranscribeTextStub = null;
+    this.assistantTranscribeFailure = { status, body };
+    await this.routeTranscribeStub();
+  }
+
+  private async routeTranscribeStub(): Promise<void> {
+    await this.page.unroute("**/api/users/me/ai-assistant/transcribe/");
+    await this.page.route("**/api/users/me/ai-assistant/transcribe/", async (route) => {
+      const request = route.request();
+      if (request.method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      const buffer = request.postDataBuffer();
+      const raw = buffer === null ? "" : buffer.toString("latin1");
+      this.assistantTranscribeSeen.push({
+        contentType: (await request.headerValue("content-type")) ?? "",
+        hasFilePart: raw.includes("filename="),
+        byteLength: buffer === null ? 0 : buffer.length,
+      });
+      const failure = this.assistantTranscribeFailure;
+      if (failure !== null) {
+        await route.fulfill({
+          status: failure.status,
+          contentType: "application/json",
+          body: JSON.stringify(failure.body),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ text: this.assistantTranscribeTextStub ?? "" }),
+      });
+    });
+  }
+
+  async assistantClearTranscribeStubs(): Promise<void> {
+    this.assistantTranscribeTextStub = null;
+    this.assistantTranscribeFailure = null;
+    await this.page.unroute("**/api/users/me/ai-assistant/transcribe/");
+  }
+
+  async assistantTranscribeRequests(): Promise<{ contentType: string; hasFilePart: boolean; byteLength: number }[]> {
+    return [...this.assistantTranscribeSeen];
+  }
+
+  async assistantSidebarButtons(): Promise<string[]> {
+    const sidebar = this.assistantSidebar();
+    if ((await sidebar.count()) === 0) return [];
+    return sidebar.locator("button").allInnerTexts();
+  }
+
+  async assistantThreadManagementControls(): Promise<string[]> {
+    // The assistant layout (sidebar + outlet) must offer no thread
+    // rename/archive/delete affordance; the report names any violator.
+    const layout = this.page.locator("div.flex.h-full.w-full.overflow-hidden").first();
+    if ((await layout.count()) === 0) return [];
+    const candidates = layout.locator("button, a");
+    const total = await candidates.count();
+    const hits: string[] = [];
+    for (let i = 0; i < total; i += 1) {
+      const text = ((await candidates.nth(i).textContent()) ?? "").trim().toLowerCase();
+      if (text.includes("rename") || text.includes("archive") || text.includes("delete")) hits.push(text);
+    }
+    return hits;
+  }
+
+  async assistantSidebarHeader(): Promise<string | null> {
+    const header = this.assistantSidebar().locator("div.h-12").first();
+    if ((await header.count()) === 0) return null;
+    // textContent: innerText would apply CSS text transforms.
+    const text = ((await header.textContent()) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  async assistantSidebarRowKinds(): Promise<{ newChat: string | null; rows: string[] }> {
+    const sidebar = this.assistantSidebar();
+    if ((await sidebar.count()) === 0) return { newChat: null, rows: [] };
+    const links = sidebar.locator(":scope a, :scope button");
+    const total = await links.count();
+    let newChat: string | null = null;
+    const rows: string[] = [];
+    for (let i = 0; i < total; i += 1) {
+      const node = links.nth(i);
+      const tag = await node.evaluate((element) => element.tagName.toLowerCase());
+      const text = ((await node.textContent()) ?? "").trim();
+      if (text === "New chat") newChat = tag;
+      else rows.push(tag);
+    }
+    return { newChat, rows };
+  }
+
+  async assistantSkippedNoticeActions(): Promise<{ kind: string; text: string; href: string | null }[]> {
+    const column = this.assistantThreadColumn();
+    if ((await column.count()) === 0) return [];
+    // One icon per notice; its parent div is the notice root.
+    const icons = column.locator("svg.lucide-plug-zap");
+    const actions: { kind: string; text: string; href: string | null }[] = [];
+    const total = await icons.count();
+    for (let i = 0; i < total; i += 1) {
+      const interactive = icons.nth(i).locator("xpath=..").locator("a, button");
+      const count = await interactive.count();
+      for (let j = 0; j < count; j += 1) {
+        const node = interactive.nth(j);
+        actions.push({
+          kind: await node.evaluate((element) => element.tagName.toLowerCase()),
+          text: ((await node.textContent()) ?? "").trim(),
+          href: await node.getAttribute("href"),
+        });
+      }
+    }
+    return actions;
+  }
+
+  async assistantChatSettingsLinks(): Promise<string[]> {
+    // Registry chrome lives in settings: the chat surface must not link
+    // there for tool servers (the dictation hint may link while unsetup).
+    const layout = this.page.locator("div.flex.h-full.w-full.overflow-hidden").first();
+    if ((await layout.count()) === 0) return [];
+    const links = layout.locator('a[href*="/settings"]');
+    const total = await links.count();
+    const out: string[] = [];
+    for (let i = 0; i < total; i += 1) out.push((await links.nth(i).getAttribute("href")) ?? "");
+    return out;
+  }
+
+  async assistantStartDesktopCallWatch(): Promise<void> {
+    await this.assistantStopDesktopCallWatch();
+    this.assistantDesktopCalls = [];
+    const handler = (request: { method(): string; url(): string }) => {
+      const url = request.url();
+      if (url.includes("/ai-assistant/agent-profile/") || url.includes("/ai-assistant/agent-token/")) {
+        this.assistantDesktopCalls.push({ method: request.method(), url });
+      }
+    };
+    this.assistantDesktopWatchHandler = handler;
+    this.page.on("request", handler as (request: never) => void);
+  }
+
+  async assistantDesktopCallsObserved(): Promise<{ method: string; url: string }[]> {
+    return [...this.assistantDesktopCalls];
+  }
+
+  async assistantStopDesktopCallWatch(): Promise<void> {
+    if (this.assistantDesktopWatchHandler !== null) {
+      this.page.off("request", this.assistantDesktopWatchHandler as (request: never) => void);
+      this.assistantDesktopWatchHandler = null;
+    }
+  }
+
+  async assistantStubInstanceLlm(configured: boolean): Promise<void> {
+    this.assistantInstanceLlmStub = configured;
+    // Eagerly read the real payload once (same origin, same session) and
+    // serve the patched copy: patching inside the handler stalls app boot.
+    const live = await this.page.request.get("/api/instances/");
+    const payload = (await live.json()) as Record<string, unknown>;
+    // The app reads the nested config object, not the top level.
+    const nested = payload["config"] as Record<string, unknown> | undefined;
+    if (nested !== undefined) nested["has_llm_configured"] = configured;
+    else payload["has_llm_configured"] = configured;
+    const status = live.status();
+    await this.page.unroute("**/api/instances/");
+    await this.page.route("**/api/instances/", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.fallback();
+        return;
+      }
+      await route.fulfill({ status, contentType: "application/json", json: payload });
+    });
+  }
+
+  async assistantClearInstanceStub(): Promise<void> {
+    this.assistantInstanceLlmStub = null;
+    await this.page.unroute("**/api/instances/");
+  }
+
+  async assistantStubGptAnswer(response: { response: string; response_html: string }): Promise<void> {
+    this.assistantGptAnswerStub = response;
+    this.assistantGptFailure = null;
+    await this.routeGptStub();
+  }
+
+  async assistantFailGptAnswer(status: number, body: Record<string, string>): Promise<void> {
+    this.assistantGptAnswerStub = null;
+    this.assistantGptFailure = { status, body };
+    await this.routeGptStub();
+  }
+
+  private async routeGptStub(): Promise<void> {
+    // Exact-path glob: thread/Message routes share the workspace prefix
+    // but carry more segments, so only the editor endpoint matches.
+    await this.page.unroute("**/api/workspaces/*/ai-assistant/");
+    await this.page.route("**/api/workspaces/*/ai-assistant/", async (route) => {
+      const request = route.request();
+      if (request.method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      const body = (request.postDataJSON() ?? {}) as { prompt?: unknown; task?: unknown };
+      this.assistantGptSeen.push({
+        prompt: typeof body["prompt"] === "string" ? body["prompt"] : "",
+        task: typeof body["task"] === "string" ? body["task"] : "",
+      });
+      const failure = this.assistantGptFailure;
+      if (failure !== null) {
+        await route.fulfill({
+          status: failure.status,
+          contentType: "application/json",
+          body: JSON.stringify(failure.body),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(this.assistantGptAnswerStub ?? { response: "", response_html: "" }),
+      });
+    });
+  }
+
+  async assistantClearGptStubs(): Promise<void> {
+    this.assistantGptAnswerStub = null;
+    this.assistantGptFailure = null;
+    await this.page.unroute("**/api/workspaces/*/ai-assistant/");
+  }
+
+  async assistantGptRequests(): Promise<{ prompt: string; task: string }[]> {
+    return [...this.assistantGptSeen];
+  }
+
+  private issueModalAiPanel(): Locator {
+    // The helper panel is the wide fixed popover hosting the task box.
+    return this.page.locator("div.min-w-\\[50rem\\]").first();
+  }
+
+  async issueModalAiEntryVisible(): Promise<boolean> {
+    const entry = this.modalScope().getByRole("button", { name: "AI", exact: true });
+    return (await entry.count()) > 0 && (await entry.first().isVisible());
+  }
+
+  async issueModalAiOpen(): Promise<void> {
+    await this.modalScope().getByRole("button", { name: "AI", exact: true }).first().click();
+    await this.waitForContent("AI helper popover", () =>
+      this.page.locator("input#task").first().waitFor({ timeout: WebDriver.OPEN_MS })
+    );
+  }
+
+  async issueModalAiFillTask(text: string): Promise<void> {
+    await this.page.locator("input#task").first().fill(text);
+  }
+
+  async issueModalAiGenerate(): Promise<void> {
+    await this.issueModalAiPanel()
+      .getByRole("button", { name: /Generate (response|again)/ })
+      .first()
+      .click();
+  }
+
+  async issueModalAiResponse(): Promise<string | null> {
+    const review = this.issueModalAiPanel().locator("div.page-block-section").first();
+    if ((await review.count()) === 0) return null;
+    const text = (await review.innerText()).trim().replace(/^Response:\s*/, "");
+    return text === "" ? null : text;
+  }
+
+  async issueModalAiInvalidVisible(): Promise<boolean> {
+    const invalid = this.issueModalAiPanel().getByText("No response could be generated.", { exact: false });
+    return (await invalid.count()) > 0 && (await invalid.first().isVisible());
+  }
+
+  async issueModalAiUseResponse(): Promise<void> {
+    await this.issueModalAiPanel().getByRole("button", { name: "Use this response" }).first().click();
+  }
+
+  async issueModalAiClose(): Promise<void> {
+    await this.issueModalAiPanel().getByRole("button", { name: "Close" }).first().click();
+  }
+
+  async issueModalDescriptionText(): Promise<string | null> {
+    const editor = this.modalScope().locator('[contenteditable="true"]').first();
+    if ((await editor.count()) === 0) return null;
+    return ((await editor.textContent()) ?? "").trim();
+  }
+
+  async pageEditorOpen(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    // Watch the dead endpoint from navigation on: the menu posts here.
+    this.pageEditorRephraseSeen = [];
+    await this.page.unroute("**/api/workspaces/*/rephrase-grammar/");
+    await this.page.route("**/api/workspaces/*/rephrase-grammar/", async (route) => {
+      this.pageEditorRephraseSeen.push(route.request().url());
+      await route.fallback();
+    });
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.waitForContent("page editor", () =>
+      this.page.locator(".frame-renderer [contenteditable='true']").first().waitFor({ timeout: 60_000 })
+    );
+  }
+
+  async pageEditorAiHandleCount(): Promise<number> {
+    // The side menu (with the AI handle, when enabled) reveals on block
+    // hover; sweep the blocks, settle, then count what revealed.
+    const blocks = this.page.locator(".frame-renderer [contenteditable='true'] p");
+    const total = await blocks.count();
+    for (let i = 0; i < Math.min(total, 5); i += 1) {
+      await blocks.nth(i).hover();
+      await this.page.waitForTimeout(500);
+    }
+    await this.page.waitForTimeout(2000);
+    return this.page.locator("#ai-handle").count();
+  }
+
+  async pageEditorAiMenuVisible(): Promise<boolean> {
+    const entry = this.page.getByRole("button", { name: "Ask Pi" });
+    return (await entry.count()) > 0 && (await entry.first().isVisible());
+  }
+
+  async pageEditorRephraseRequests(): Promise<string[]> {
+    return [...this.pageEditorRephraseSeen];
   }
 }

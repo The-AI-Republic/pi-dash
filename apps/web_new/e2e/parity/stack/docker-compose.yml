@@ -158,6 +158,12 @@ services:
     # Empty base keeps API calls same-origin; the proxy routes them to Django.
     environment:
       VITE_API_BASE_URL: ""
+      # Live collaboration endpoint for the document editor (NEWFRONT-188):
+      # derived from the slot's live port when set, empty otherwise — so
+      # slots without `live` keep the window-origin fallback exactly as
+      # before, while a slot that sets PARITY_LIVE_PORT lights the editor
+      # up with no other change.
+      VITE_LIVE_BASE_URL: "${PARITY_LIVE_PORT:+http://localhost:$PARITY_LIVE_PORT}"
     # Listen on all interfaces so the proxy container can reach the server.
     command: ["pnpm", "--filter=web", "dev", "--host", "0.0.0.0", "--port", "3000"]
     depends_on:

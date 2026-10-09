@@ -3408,6 +3408,90 @@ export interface ParityDriver {
   assistantClearSendDelay(): Promise<void>;
   /** Newest visible toast; null when none shows. */
   assistantLastToast(): Promise<{ title: string; message: string } | null>;
+
+  // -- Assistant voice/keys/tools/negatives/editor (NEWFRONT-188, AGT-050-052, AGT-058-061, AGT-063) --
+  /** URL hash on the current page (dictation-settings anchor proofs). */
+  assistantCurrentHash(): Promise<string>;
+  /** Whether the composer mic button is disabled. */
+  assistantMicDisabled(): Promise<boolean>;
+  /** Press-and-hold the mic: pointer down, held for `ms`, pointer up. */
+  assistantMicHold(ms: number): Promise<void>;
+  /** Push-to-talk down without release (mid-hold assertions). */
+  assistantMicDown(): Promise<void>;
+  /** Push-to-talk up after a down. */
+  assistantMicUp(): Promise<void>;
+  /** Hold `ms` more, then push-to-talk up (clears the tap floor). */
+  assistantMicUpAfter(ms: number): Promise<void>;
+  /** Grant or deny microphone capture for the page. */
+  assistantSetMicrophonePermission(state: "granted" | "denied"): Promise<void>;
+  /** Hide capture APIs from the page (unsupported-browser proofs). */
+  assistantSimulateUnsupportedCapture(): Promise<void>;
+  /** Reject mic capture as denied (denied-mapping proofs). */
+  assistantSimulateMicDenial(): Promise<void>;
+  /** Serve a canned transcription for transcribe POSTs (transport proofs). */
+  assistantStubTranscribeText(text: string): Promise<void>;
+  /** Fail transcribe POSTs with `status` + body (error-path proofs). */
+  assistantFailTranscribe(status: number, body: Record<string, string>): Promise<void>;
+  /** Remove transcribe stubs. */
+  assistantClearTranscribeStubs(): Promise<void>;
+  /** Transcribe uploads seen (multipart audio posts). */
+  assistantTranscribeRequests(): Promise<{ contentType: string; hasFilePart: boolean; byteLength: number }[]>;
+  /** Visible texts of buttons inside the assistant sidebar (negative proofs). */
+  assistantSidebarButtons(): Promise<string[]>;
+  /** Rename/archive/delete-ish controls in the assistant layout (negative proofs). */
+  assistantThreadManagementControls(): Promise<string[]>;
+  /** Header text of the assistant sidebar. */
+  assistantSidebarHeader(): Promise<string | null>;
+  /** Row element kinds of the sidebar New-chat entry + thread rows. */
+  assistantSidebarRowKinds(): Promise<{ newChat: string | null; rows: string[] }>;
+  /** Links and buttons inside skipped-server notices (negative proofs). */
+  assistantSkippedNoticeActions(): Promise<{ kind: string; text: string; href: string | null }[]>;
+  /** Settings-bound link targets inside the assistant layout (registry-chrome proofs). */
+  assistantChatSettingsLinks(): Promise<string[]>;
+  /** Count desktop-gated endpoint calls from here on. */
+  assistantStartDesktopCallWatch(): Promise<void>;
+  /** Desktop-gated calls seen since the watch started. */
+  assistantDesktopCallsObserved(): Promise<{ method: string; url: string }[]>;
+  /** Remove the desktop-call watch. */
+  assistantStopDesktopCallWatch(): Promise<void>;
+  /** Report the instance as LLM-configured or not (editor-AI gate proofs). */
+  assistantStubInstanceLlm(configured: boolean): Promise<void>;
+  /** Remove the instance stub. */
+  assistantClearInstanceStub(): Promise<void>;
+  /** Serve a canned GPT-editor answer (transport proofs). */
+  assistantStubGptAnswer(response: { response: string; response_html: string }): Promise<void>;
+  /** Fail GPT-editor POSTs with `status` + body (error-path proofs). */
+  assistantFailGptAnswer(status: number, body: Record<string, string>): Promise<void>;
+  /** Remove GPT-editor stubs. */
+  assistantClearGptStubs(): Promise<void>;
+  /** GPT-editor request bodies seen. */
+  assistantGptRequests(): Promise<{ prompt: string; task: string }[]>;
+  /** Whether the issue-modal description editor offers the AI helper entry. */
+  issueModalAiEntryVisible(): Promise<boolean>;
+  /** Open the AI helper popover from the description editor. */
+  issueModalAiOpen(): Promise<void>;
+  /** Fill the helper's request box. */
+  issueModalAiFillTask(text: string): Promise<void>;
+  /** Submit the helper request. */
+  issueModalAiGenerate(): Promise<void>;
+  /** Review text the helper shows, or null while none shows. */
+  issueModalAiResponse(): Promise<string | null>;
+  /** Whether the helper marks its answer invalid. */
+  issueModalAiInvalidVisible(): Promise<boolean>;
+  /** Insert the reviewed answer into the description. */
+  issueModalAiUseResponse(): Promise<void>;
+  /** Close the helper popover. */
+  issueModalAiClose(): Promise<void>;
+  /** Plain text currently in the modal description editor. */
+  issueModalDescriptionText(): Promise<string | null>;
+  /** Open a project page in the document editor. */
+  pageEditorOpen(workspaceSlug: string, projectId: string, pageId: string): Promise<void>;
+  /** AI handles revealed after hovering the page blocks (absence proofs). */
+  pageEditorAiHandleCount(): Promise<number>;
+  /** Whether the AI popup shows. */
+  pageEditorAiMenuVisible(): Promise<boolean>;
+  /** Rephrase/grammar request URLs seen (missing-backend proofs). */
+  pageEditorRephraseRequests(): Promise<string[]>;
 }
 
 /** One catalog table row: the user-visible definition facts. */

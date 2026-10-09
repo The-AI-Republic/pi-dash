@@ -86,6 +86,20 @@ start the live service too:
 docker compose -f apps/web_new/e2e/parity/stack/docker-compose.yml --profile full up -d live
 ```
 
+The document editor needs the live endpoint to become editable. The
+oracle reads it from `VITE_LIVE_BASE_URL`, which the compose file
+derives from `PARITY_LIVE_PORT` when set (empty otherwise, keeping the
+window-origin fallback): export the slot's live port — e.g.
+`PARITY_LIVE_PORT=13089` — and (re)create the oracle so the dev server
+picks it up. Known wrinkle (NEWFRONT-188): the compose `live` image
+currently fails to build (pre-existing propel DTS error); until that is
+fixed, run live natively — build the workspace packages with
+`tsdown --no-dts`, write an `apps/live/.env` for the slot
+(`PORT`, `API_BASE_URL`, `LIVE_BASE_PATH=""`,
+`LIVE_SERVER_SECRET_KEY`, slot `REDIS_URL`, slot
+`CORS_ALLOWED_ORIGINS`), build `apps/live`, and start
+`node --env-file=.env dist/start.mjs` on the slot's live port.
+
 ## Frontends
 
 The stack serves the oracle behind one origin (port 13000): an edge proxy
