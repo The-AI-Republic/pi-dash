@@ -52,6 +52,14 @@ jobs:
       API_KEY_RATE_LIMIT: 100000/minute
       DJANGO_SETTINGS_MODULE: pi_dash.settings.test
       BASE_URL: http://127.0.0.1:8000
+      # Dummy S3 settings for the attachment-presign tests (PIDASHCONV-789):
+      # presigning is offline (no S3 service needed), but without a
+      # key/secret/region/bucket botocore raises NoCredentialsError and
+      # Django 500s every attachment POST.
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET_NAME: pi-dash-contract
     steps:
       - uses: actions/checkout@v4
 

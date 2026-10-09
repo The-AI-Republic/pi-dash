@@ -1102,55 +1102,715 @@ impl std::fmt::Display for InvalidEndpoint {
 
 impl std::error::Error for InvalidEndpoint {}
 
-/// Endpoint + host/path split for signing, mirroring
-/// `S3Storage.__init__` with a request (`is_server=False`):
-/// MinIO mode signs `{scheme}://{Host}` path-style; an explicit
-/// endpoint URL signs path-style against it; otherwise the
-/// virtual-hosted AWS default. Presigned URLs resolve the global
-/// endpoint for every region (`use_global_endpoint`,
-/// `botocore/signers.py:859`); header auth keeps the regional host.
+/// A resolved S3 endpoint for signing: URL base, signed `host`
+/// header, base path and addressing style (botocore's S3
+/// endpoint-ruleset output for our inputs —
+/// `endpoint-rule-set-1.json`, live-probed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedEndpoint {
+    /// `{scheme}://{authority}`: scheme lowercased, authority verbatim
+    /// (the base path travels separately in `base_path`).
+    url_base: String,
+    /// Signed `host` header (`auth._host_from_url`): lowercased (a
+    /// `%zone` tail verbatim), no userinfo, default/empty port stripped,
+    /// IPv6 re-bracketed.
+    signed_host: String,
+    /// Normalized base path: `""` or `"/base/path"` (no trailing slash).
+    base_path: String,
+    /// The bucket travels in the path (custom/MinIO endpoints always;
+    /// AWS endpoints for non-virtual-hostable names).
+    path_style: bool,
+}
+
+/// `aws.partition` over `partitions.json` (`endpoint_provider.py`):
+/// explicit-region membership, else `regionRegex` in file order, else
+/// the default (`aws`). Every explicit region matches its own regex, so
+/// the regex pass alone is exact. Returns the partition's `dnsSuffix`
+/// and whether it is `aws` (`use_global_endpoint` presigns global only
+/// there). FIPS/`s3-external-1` pseudo-regions match nothing and take
+/// the default — their special endpoints/scopes are a known residual
+/// (see the PR).
+fn partition_for_region(region: &str) -> (&'static str, bool) {
+    const PARTITIONS: &[(&[&str], &str)] = &[
+        (
+            &["us", "eu", "ap", "sa", "ca", "me", "af", "il"],
+            "amazonaws.com",
+        ),
+        (&["cn"], "amazonaws.com.cn"),
+        (&["us-gov"], "amazonaws.com"),
+        (&["us-iso"], "c2s.ic.gov"),
+        (&["us-isob"], "sc2s.sgov.gov"),
+        (&["eu-isoe"], "cloud.adc-e.uk"),
+        (&["us-isof"], "csp.hci.ic.gov"),
+    ];
+    // `^(prefix)-\w+-\d+$` (`\w`/`\d` ASCII: regions pass the host-label
+    // gate first).
+    fn region_matches(prefixes: &[&str], region: &str) -> bool {
+        prefixes.iter().any(|prefix| {
+            region
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|rest| {
+                    let mut parts = rest.rsplitn(2, '-');
+                    let digits = parts.next().unwrap_or_default();
+                    let middle = parts.next().unwrap_or_default();
+                    !middle.is_empty()
+                        && middle
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                        && !digits.is_empty()
+                        && digits.bytes().all(|b| b.is_ascii_digit())
+                })
+        })
+    }
+    for (index, (prefixes, suffix)) in PARTITIONS.iter().enumerate() {
+        if region_matches(prefixes, region) {
+            return (suffix, index == 0);
+        }
+    }
+    ("amazonaws.com", true)
+}
+
+/// `^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$` (`botocore/compat.py`): range-loose
+/// on purpose (also the `ls32` IPv4 tail below).
+fn is_ipv4_literal(value: &str) -> bool {
+    let mut parts = value.split('.');
+    for _ in 0..4 {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.is_empty() || part.len() > 3 || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
+
+/// One `RFC 1123` host label (`^(?!-)[a-zA-Z\d-]{1,63}(?<!-)$`,
+/// ASCII-only — callers gate non-ASCII out first).
+fn is_host_label(label: &str) -> bool {
+    if label.is_empty() || label.len() > 63 {
+        return false;
+    }
+    let bytes = label.as_bytes();
+    if bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+}
+
+/// `isVirtualHostableS3Bucket(bucket, False)`
+/// (`endpoint_provider.py`): 3+ chars, all lowercase, not IPv4-shaped,
+/// no dots, and a valid host label. The length reads the RAW name (so
+/// `ab\n` counts 3) while the label match enjoys `$` (so `ab\n` is
+/// virtual-hosted).
+fn is_virtual_hostable_bucket(bucket: &str) -> bool {
+    if bucket.len() < 3 || bucket.bytes().any(|b| b.is_ascii_uppercase()) {
+        return false;
+    }
+    let bucket = strip_regex_newline(bucket);
+    if is_ipv4_literal(bucket) || bucket.contains('.') {
+        return false;
+    }
+    is_host_label(bucket)
+}
+
+/// Python `$` matches before one trailing newline, so `abc\n`
+/// validates like `abc` in every `$`-anchored bucket/ARN/label match.
+fn strip_regex_newline(value: &str) -> &str {
+    value.strip_suffix('\n').unwrap_or(value)
+}
+
+/// `validate_bucket_name` (`botocore/handlers.py`,
+/// `before-parameter-build.s3`): `^[a-zA-Z0-9.\-_]{1,255}$` or an
+/// access-point/outpost ARN. Anything else is `ParamValidationError` —
+/// the Django 500.
+fn is_valid_bucket_name(bucket: &str) -> bool {
+    let bucket = strip_regex_newline(bucket);
+    if !bucket.is_empty()
+        && bucket.len() <= 255
+        && bucket
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
+    {
+        return true;
+    }
+    is_accesspoint_arn(bucket) || is_outpost_arn(bucket)
+}
+
+/// `^arn:aws:.*:(s3|s3-object-lambda):[a-z\-0-9]*:[0-9]{12}:accesspoint[/:][a-zA-Z0-9\-.]{1,63}$`
+/// with greedy `.*` (the rightmost colon split wins).
+fn is_accesspoint_arn(value: &str) -> bool {
+    let value = strip_regex_newline(value);
+    let Some(tail) = value.strip_prefix("arn:aws") else {
+        return false;
+    };
+    for (index, _) in tail.rmatch_indices(':') {
+        let rest = &tail[index + 1..];
+        let rest = if let Some(rest) = rest.strip_prefix("s3-object-lambda:") {
+            rest
+        } else if let Some(rest) = rest.strip_prefix("s3:") {
+            rest
+        } else {
+            continue;
+        };
+        // `[a-z\-0-9]*:` — the terminator sits outside the class, so the
+        // run ends at the first colon.
+        let run = rest
+            .bytes()
+            .take_while(|b| b.is_ascii_lowercase() || *b == b'-' || b.is_ascii_digit())
+            .count();
+        let Some(after) = rest.get(run..).and_then(|s| s.strip_prefix(':')) else {
+            continue;
+        };
+        if after.len() < 12 || !after.as_bytes()[..12].iter().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Some(after) = after.get(12..).and_then(|s| s.strip_prefix(":accesspoint")) else {
+            continue;
+        };
+        let Some(name) = after.strip_prefix('/').or_else(|| after.strip_prefix(':')) else {
+            continue;
+        };
+        if !name.is_empty()
+            && name.len() <= 63
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// `^arn:aws:.*:s3-outposts:[a-z\-0-9]+:[0-9]{12}:outpost[/:][a-zA-Z0-9\-]{1,63}[/:]accesspoint[/:][a-zA-Z0-9\-]{1,63}$`
+/// with greedy `.*` (the rightmost colon split wins; greedy outpost id
+/// likewise).
+fn is_outpost_arn(value: &str) -> bool {
+    fn is_arn_name(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 63
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    }
+    let value = strip_regex_newline(value);
+    let Some(tail) = value.strip_prefix("arn:aws") else {
+        return false;
+    };
+    for (index, _) in tail.rmatch_indices(':') {
+        let Some(rest) = tail[index + 1..].strip_prefix("s3-outposts:") else {
+            continue;
+        };
+        let run = rest
+            .bytes()
+            .take_while(|b| b.is_ascii_lowercase() || *b == b'-' || b.is_ascii_digit())
+            .count();
+        if run == 0 {
+            continue;
+        }
+        let Some(after) = rest.get(run..).and_then(|s| s.strip_prefix(':')) else {
+            continue;
+        };
+        if after.len() < 12 || !after.as_bytes()[..12].iter().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Some(after) = after.get(12..).and_then(|s| s.strip_prefix(":outpost")) else {
+            continue;
+        };
+        let Some(after) = after.strip_prefix('/').or_else(|| after.strip_prefix(':')) else {
+            continue;
+        };
+        // `{id}[/:]accesspoint[/:]{name}` to the end — names hold no
+        // separators, so the rightmost `accesspoint` slot wins.
+        for (slot, _) in after.rmatch_indices("accesspoint") {
+            let (id, sep) = (&after[..slot], &after[slot..]);
+            let Some(id) = id.strip_suffix('/').or_else(|| id.strip_suffix(':')) else {
+                continue;
+            };
+            let Some(name) = sep
+                .strip_prefix("accesspoint")
+                .and_then(|s| s.strip_prefix('/').or_else(|| s.strip_prefix(':')))
+            else {
+                continue;
+            };
+            if is_arn_name(id) && is_arn_name(name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// `urllib.parse.urlsplit` (`CPython/Lib/urllib/parse.py`) reduced to
+/// endpoint parsing: leading C0/space strip, `\t\r\n` removal, scheme
+/// split (lowercased), `//` netloc split with IPv6-bracket validation,
+/// fragment drop, query split. Returns `(scheme, netloc, path, query)`,
+/// or `None` when urlsplit raises. Non-ASCII netlocs fail (botocore runs
+/// an NFKC check there that needs normalization tables — residual, see
+/// the PR).
+fn urlsplit_parts(url: &str) -> Option<(String, String, String, String)> {
+    let trimmed: String = url
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| *c != '\t' && *c != '\r' && *c != '\n')
+        .collect();
+    let mut scheme = String::new();
+    let mut rest = trimmed.as_str();
+    if let Some(colon) = trimmed.find(':') {
+        let candidate = &trimmed[..colon];
+        if colon > 0
+            && candidate.as_bytes()[0].is_ascii_alphabetic()
+            && candidate
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.')
+        {
+            scheme = candidate.to_ascii_lowercase();
+            rest = &trimmed[colon + 1..];
+        }
+    }
+    let mut netloc = String::new();
+    if let Some(after) = rest.strip_prefix("//") {
+        let end = after.find(['/', '?', '#']).unwrap_or(after.len());
+        netloc = after[..end].to_owned();
+        rest = &after[end..];
+        let has_open = netloc.contains('[');
+        let has_close = netloc.contains(']');
+        if has_open != has_close || (has_open && !check_bracketed_netloc(&netloc)) {
+            return None;
+        }
+    }
+    if !netloc.is_ascii() {
+        return None;
+    }
+    let rest = match rest.find('#') {
+        Some(hash) => &rest[..hash],
+        None => rest,
+    };
+    let (path, query) = match rest.find('?') {
+        Some(mark) => (rest[..mark].to_owned(), rest[mark + 1..].to_owned()),
+        None => (rest.to_owned(), String::new()),
+    };
+    Some((scheme, netloc, path, query))
+}
+
+/// `_check_bracketed_netloc`: userinfo split at the last `@`; nothing
+/// before `[`, nothing-but-`:port` after `]`; the bracketed host itself
+/// goes to [`check_bracketed_host`].
+fn check_bracketed_netloc(netloc: &str) -> bool {
+    let hostinfo = netloc.rsplit('@').next().unwrap_or_default();
+    let Some(open) = hostinfo.find('[') else {
+        // The brackets lived in the userinfo: the bare host part still
+        // validates as a bracketed host.
+        let hostname = hostinfo.split(':').next().unwrap_or_default();
+        return check_bracketed_host(hostname);
+    };
+    if !hostinfo[..open].is_empty() {
+        return false;
+    }
+    let inside = &hostinfo[open + 1..];
+    let Some(close) = inside.find(']') else {
+        return false;
+    };
+    let after = &inside[close + 1..];
+    if !after.is_empty() && !after.starts_with(':') {
+        return false;
+    }
+    check_bracketed_host(&inside[..close])
+}
+
+/// `_check_bracketed_host`: IPvFuture (`v` + hex + `.` + more) or a
+/// strict IPv6 literal (an IPv4 address in brackets fails). A `%zone`
+/// tail strips before the strict parse (validated by the ADDRZ pass
+/// later); embedded-IPv4 octets reject C-style leading zeros like
+/// `ipaddress` does.
+fn check_bracketed_host(hostname: &str) -> bool {
+    if let Some(tail) = hostname.strip_prefix('v') {
+        let hex_len = tail.bytes().take_while(u8::is_ascii_hexdigit).count();
+        let Some(rest) = tail.get(hex_len..).and_then(|s| s.strip_prefix('.')) else {
+            return false;
+        };
+        return !rest.is_empty() && !rest.contains('\n');
+    }
+    let head = hostname.split('%').next().unwrap_or_default();
+    if head.parse::<std::net::Ipv6Addr>().is_err() {
+        return false;
+    }
+    if head.contains('.') {
+        // Dots only occur in the embedded-IPv4 tail: every octet is
+        // decimal without C-style leading zeros.
+        let dotted = &head[head.rfind(':').map_or(0, |i| i + 1)..];
+        for octet in dotted.split('.') {
+            if octet.len() > 1 && octet.starts_with('0') {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// `_hostinfo` (`urllib/parse.py`): userinfo split at the last `@`,
+/// bracket-aware host/port split, empty port reads as missing.
+fn split_hostinfo(netloc: &str) -> (String, Option<String>) {
+    let hostinfo = netloc.rsplit('@').next().unwrap_or_default();
+    let (hostname, port) = match hostinfo.find('[') {
+        Some(open) => {
+            let after_open = &hostinfo[open + 1..];
+            match after_open.find(']') {
+                Some(close) => {
+                    let after_close = &after_open[close + 1..];
+                    let port = after_close.split(':').nth(1).unwrap_or_default();
+                    (&after_open[..close], port)
+                }
+                None => (after_open, ""),
+            }
+        }
+        None => {
+            let mut parts = hostinfo.splitn(2, ':');
+            (
+                parts.next().unwrap_or_default(),
+                parts.next().unwrap_or_default(),
+            )
+        }
+    };
+    let port = if port.is_empty() {
+        None
+    } else {
+        Some(port.to_owned())
+    };
+    (hostname.to_owned(), port)
+}
+
+/// `.port` (`urllib/parse.py`): ASCII digits, `0..=65535` — `None`
+/// (absent) passes through, anything else fails the parse.
+fn parse_port_number(port: Option<&str>) -> Option<Option<u16>> {
+    match port {
+        None => Some(None),
+        Some(text) => {
+            if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            match text.parse::<u32>() {
+                Ok(number) if number <= 65535 => Some(Some(number as u16)),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// `.hostname` (`urllib/parse.py`): missing when empty, lowercased
+/// except a `%zone` tail (kept verbatim).
+fn normalize_hostname(hostname: &str) -> Option<String> {
+    if hostname.is_empty() {
+        return None;
+    }
+    match hostname.find('%') {
+        Some(zone) => Some(format!(
+            "{}{}",
+            hostname[..zone].to_ascii_lowercase(),
+            &hostname[zone..]
+        )),
+        None => Some(hostname.to_ascii_lowercase()),
+    }
+}
+
+/// The urllib3 IPv6 alternatives (`botocore/compat.py`): full form is
+/// exactly 8 groups with a loose-IPv4-or-`h16:h16` tail; `::` (at most
+/// once) compresses at least one group. The embedded IPv4 tail is
+/// range-loose (`999` included).
+fn is_ipv6_loose(head: &str) -> bool {
+    fn is_hex16(group: &str) -> bool {
+        !group.is_empty() && group.len() <= 4 && group.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+    // Explicit colon-groups in a `::` half: all hex, except the last may
+    // be a loose-IPv4 tail worth two groups. Returns the group count.
+    fn half_groups(half: &str) -> Option<usize> {
+        if half.is_empty() {
+            return Some(0);
+        }
+        let groups: Vec<&str> = half.split(':').collect();
+        if groups.iter().any(|g| g.is_empty()) {
+            return None;
+        }
+        let last = groups.len() - 1;
+        if groups[last].contains('.') {
+            if !is_ipv4_literal(groups[last]) || groups[..last].iter().any(|g| !is_hex16(g)) {
+                return None;
+            }
+            Some(groups.len() + 1)
+        } else if groups.iter().all(|g| is_hex16(g)) {
+            Some(groups.len())
+        } else {
+            None
+        }
+    }
+    match head.split_once("::") {
+        None => {
+            if head.contains('.') {
+                let Some(colon) = head.rfind(':') else {
+                    return false;
+                };
+                let (front, tail) = (&head[..colon], &head[colon + 1..]);
+                front.split(':').count() == 6
+                    && front.split(':').all(is_hex16)
+                    && is_ipv4_literal(tail)
+            } else {
+                let groups: Vec<&str> = head.split(':').collect();
+                groups.len() == 8 && groups.iter().all(|g| is_hex16(g))
+            }
+        }
+        Some((left, right)) => {
+            if right.contains("::") {
+                return false;
+            }
+            match (half_groups(left), half_groups(right)) {
+                (Some(left), Some(right)) => left + right <= 7,
+                _ => false,
+            }
+        }
+    }
+}
+
+/// `is_valid_ipv6_endpoint_url`: `'[' + hostname + ']'` against
+/// `IPV6_ADDRZ_RE` — a loose IPv6 literal with an optional `%zone`
+/// (`(?:%25|%)(?:[unreserved]|%HH)+`, unreserved `A-Za-z0-9._!~-`).
+fn is_valid_ipv6_bracketed(hostname: &str) -> bool {
+    let (head, zone) = match hostname.find('%') {
+        Some(at) => (&hostname[..at], Some(&hostname[at..])),
+        None => (hostname, None),
+    };
+    if let Some(zone) = zone {
+        let tail = if let Some(tail) = zone.strip_prefix("%25") {
+            tail
+        } else if let Some(tail) = zone.strip_prefix('%') {
+            tail
+        } else {
+            return false;
+        };
+        if tail.is_empty() {
+            return false;
+        }
+        let mut rest = tail;
+        while !rest.is_empty() {
+            if let Some(hex) = rest.strip_prefix('%') {
+                if hex.len() < 2 || !hex.as_bytes()[..2].iter().all(|b| b.is_ascii_hexdigit()) {
+                    return false;
+                }
+                rest = &rest[3..];
+            } else {
+                let byte = rest.as_bytes()[0];
+                if !(byte.is_ascii_alphanumeric()
+                    || byte == b'.'
+                    || byte == b'_'
+                    || byte == b'!'
+                    || byte == b'~'
+                    || byte == b'-')
+                {
+                    return false;
+                }
+                rest = &rest[1..];
+            }
+        }
+    }
+    is_ipv6_loose(head)
+}
+
+/// `is_valid_endpoint_url or is_valid_ipv6_endpoint_url`
+/// (`botocore/utils.py`, `endpoint.py:400`): a scheme and host, no
+/// `\t\r\n`, hostname ≤ 255 chars, valid labels after one trailing-dot
+/// strip — or a bracketable IPv6 literal. Anything else is
+/// `ValueError: Invalid endpoint` (the Django 500).
+fn is_valid_endpoint_str(url: &str) -> bool {
+    if url.contains(['\t', '\r', '\n']) {
+        return false;
+    }
+    let Some((_, netloc, _, _)) = urlsplit_parts(url) else {
+        return false;
+    };
+    let (hostname, _) = split_hostinfo(&netloc);
+    let Some(hostname) = normalize_hostname(&hostname) else {
+        return false;
+    };
+    if hostname.len() > 255 {
+        return false;
+    }
+    let stripped = hostname.strip_suffix('.').unwrap_or(&hostname);
+    if stripped.split('.').all(is_host_label) {
+        return true;
+    }
+    is_valid_ipv6_bracketed(&hostname)
+}
+
+/// `normalize_url_path` + `remove_dot_segments` (`botocore/utils.py`):
+/// RFC 3986 §5.2.4 plus consecutive-slash collapsing (leading empties
+/// drop, over-pops vanish — the result never starts with `/`).
+fn normalize_url_path(path: &str) -> String {
+    if path.is_empty() {
+        return "/".to_owned();
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            kept.pop();
+        } else {
+            kept.push(segment);
+        }
+    }
+    kept.join("/")
+}
+
+/// `parseURL` (`endpoint_provider.py`) plus the client-creation gate:
+/// strict custom-endpoint validation returning the lowercased scheme,
+/// the verbatim authority and the normalized base path (`""` or
+/// `"/base"`, no trailing slash). Fragments drop; queries,
+/// non-`http(s)` schemes, bad ports and invalid hosts fail — every
+/// failure is the Django 500.
+fn parse_custom_endpoint(url: &str) -> Option<(String, String, String)> {
+    if !is_valid_endpoint_str(url) {
+        return None;
+    }
+    let (scheme, netloc, path, query) = urlsplit_parts(url)?;
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    if !query.is_empty() {
+        return None;
+    }
+    let (_, port) = split_hostinfo(&netloc);
+    parse_port_number(port.as_deref())?;
+    // `normalizedPath`: dot-segments resolved, doubles collapsed,
+    // `quote(path, safe='/')` (exactly [`uri_encode_path`]), trailing
+    // slash ensured — then trimmed back off for joining.
+    let mut normal = uri_encode_path(&normalize_url_path(&path));
+    if !normal.ends_with('/') {
+        normal.push('/');
+    }
+    let base = normal.trim_end_matches('/');
+    let base_path = if base.is_empty() {
+        String::new()
+    } else {
+        format!("/{base}")
+    };
+    Some((scheme, netloc, base_path))
+}
+
+/// `_host_from_url` (`botocore/auth.py`): the signed `host` header —
+/// lowercased (zone tail verbatim), no userinfo, default/empty port
+/// stripped, IPv6 re-bracketed.
+fn signed_host_for(scheme: &str, authority: &str) -> Option<String> {
+    let (hostname, port) = split_hostinfo(authority);
+    let mut host = normalize_hostname(&hostname)?;
+    if is_valid_ipv6_bracketed(&host) {
+        host = format!("[{host}]");
+    }
+    if let Some(port) = port {
+        let number: u16 = port.parse().ok()?;
+        let default = match scheme {
+            "http" => 80,
+            "https" => 443,
+            _ => 0,
+        };
+        if number != default {
+            host = format!("{host}:{number}");
+        }
+    }
+    Some(host)
+}
+
+/// Endpoint + signed host + base path + addressing for signing,
+/// mirroring `S3Storage.__init__` with a request (`is_server=False`)
+/// plus botocore's S3 endpoint ruleset: MinIO mode signs
+/// `{scheme}://{Host}` path-style; an explicit endpoint URL signs
+/// path-style against its normalized base; otherwise the virtual-hosted
+/// AWS default (path-style for non-host-label buckets). Presigned URLs
+/// resolve the global endpoint in `aws` (`use_global_endpoint`) and the
+/// regional host in every other partition; header auth keeps the
+/// regional host everywhere but `us-east-1`.
 fn endpoint_parts(
     storage: &pidash_db::config::StorageSettings,
     scheme: &str,
     host: &str,
     presign: bool,
-) -> Result<(String, String), InvalidEndpoint> {
+) -> Result<ResolvedEndpoint, InvalidEndpoint> {
     if !pidash_db::config::is_valid_region_name(&storage.region) {
+        return Err(InvalidEndpoint);
+    }
+    // Python `$` matches before one trailing newline, so `abc\n`
+    // passes the bucket gate and signs exactly like `abc` — except
+    // path-style URL segments and the POST policy carry the raw spelling
+    // (`%0A` / `\n`). The stripped form drives the gate and the virtual
+    // host; addressing reads the raw name (length counts the newline);
+    // path segments encode the raw bucket below.
+    // (PIDASHCONV-789#7, live-probed.)
+    let bucket = strip_regex_newline(&storage.bucket_name);
+    if !is_valid_bucket_name(bucket) {
         return Err(InvalidEndpoint);
     }
     // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
     let scheme = storage.endpoint_protocol(scheme);
     if storage.use_minio {
-        Ok((format!("{scheme}://{host}"), host.to_owned()))
-    } else if let Some(endpoint) = storage.endpoint_url.as_deref().filter(|e| !e.is_empty()) {
-        let endpoint = endpoint.trim_end_matches('/');
-        let signed_host = endpoint
-            .rsplit("://")
-            .next()
-            .unwrap_or(endpoint)
-            .split('/')
-            .next()
-            .unwrap_or(endpoint);
-        Ok((endpoint.to_owned(), signed_host.to_owned()))
+        let (scheme, authority, base_path) =
+            parse_custom_endpoint(&format!("{scheme}://{host}")).ok_or(InvalidEndpoint)?;
+        return Ok(ResolvedEndpoint {
+            url_base: format!("{scheme}://{authority}"),
+            signed_host: signed_host_for(&scheme, &authority).ok_or(InvalidEndpoint)?,
+            base_path,
+            path_style: true,
+        });
+    }
+    if let Some(endpoint) = storage.endpoint_url.as_deref().filter(|e| !e.is_empty()) {
+        let (scheme, authority, base_path) =
+            parse_custom_endpoint(endpoint).ok_or(InvalidEndpoint)?;
+        return Ok(ResolvedEndpoint {
+            url_base: format!("{scheme}://{authority}"),
+            signed_host: signed_host_for(&scheme, &authority).ok_or(InvalidEndpoint)?,
+            base_path,
+            path_style: true,
+        });
+    }
+    let region = storage.region.as_str();
+    if region.is_empty() {
+        // botocore derives `https://s3..amazonaws.com` and rejects
+        // it (`ValueError: Invalid endpoint`).
+        return Err(InvalidEndpoint);
+    }
+    let (suffix, is_aws) = partition_for_region(&storage.region);
+    // Presigned URLs use the global endpoint in `aws`
+    // (`use_global_endpoint`); header auth stays regional everywhere
+    // but `us-east-1`, whose endpoint is the global one.
+    let base = if (presign && is_aws) || region == "us-east-1" {
+        "s3.amazonaws.com".to_owned()
     } else {
-        let region = storage.region.as_str();
-        if region.is_empty() {
-            // botocore derives `https://s3..amazonaws.com` and rejects
-            // it (`ValueError: Invalid endpoint`).
-            return Err(InvalidEndpoint);
-        }
-        // botocore's s3 endpoint table serves us-east-1 from the global
-        // endpoint (`s3.amazonaws.com`, no region infix); presigned
-        // URLs use it for every region, header auth stays regional.
-        let base = if presign || region == "us-east-1" {
-            "s3.amazonaws.com".to_owned()
-        } else {
-            format!("s3.{region}.amazonaws.com")
-        };
-        Ok((
-            format!("https://{}.{base}", storage.bucket_name),
-            format!("{}.{base}", storage.bucket_name),
-        ))
+        format!("s3.{region}.{suffix}")
+    };
+    // Access-point ARNs pass the bucket gate but route to special
+    // endpoints botocore-side; this port signs them virtual-hosted
+    // (known residual, see the PR). The RAW name drives addressing:
+    // `is_virtual_hostable_bucket` reads the raw length (`ab\n` counts
+    // 3) and strips for the label match itself — the stripped `bucket`
+    // below is only the virtual-host spelling.
+    let virtual_host = is_accesspoint_arn(&storage.bucket_name)
+        || is_outpost_arn(&storage.bucket_name)
+        || is_virtual_hostable_bucket(&storage.bucket_name);
+    if virtual_host {
+        let host = format!("{bucket}.{base}");
+        Ok(ResolvedEndpoint {
+            url_base: format!("https://{host}"),
+            signed_host: host,
+            base_path: String::new(),
+            path_style: false,
+        })
+    } else {
+        Ok(ResolvedEndpoint {
+            url_base: format!("https://{base}"),
+            signed_host: base,
+            base_path: String::new(),
+            path_style: true,
+        })
     }
 }
 
@@ -1165,7 +1825,7 @@ fn presigned_get_url(
     now: &DateTime<Utc>,
 ) -> Result<String, InvalidEndpoint> {
     let region = storage.region.as_str();
-    let (endpoint, signed_host) = endpoint_parts(storage, scheme, host, true)?;
+    let resolved = endpoint_parts(storage, scheme, host, true)?;
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date = now.format("%Y%m%d").to_string();
     let scope = credential_scope(&date, region);
@@ -1189,18 +1849,17 @@ fn presigned_get_url(
         .map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v)))
         .collect::<Vec<_>>()
         .join("&");
-    let path_style = storage.use_minio
-        || storage
-            .endpoint_url
-            .as_deref()
-            .is_some_and(|e| !e.is_empty());
-    let canonical_path = if path_style {
-        format!("/{}/{}", storage.bucket_name, uri_encode_path(object_name))
-    } else {
-        format!("/{}", uri_encode_path(object_name))
-    };
+    let mut canonical_path = resolved.base_path.clone();
+    if resolved.path_style {
+        canonical_path.push('/');
+        // Raw spelling, URI-encoded (`a\n` travels as `/a%0A/`).
+        canonical_path.push_str(&uri_encode(&storage.bucket_name));
+    }
+    canonical_path.push('/');
+    canonical_path.push_str(&uri_encode_path(object_name));
     let canonical = format!(
-        "GET\n{canonical_path}\n{canonical_query}\nhost:{signed_host}\n\nhost\nUNSIGNED-PAYLOAD"
+        "GET\n{canonical_path}\n{canonical_query}\nhost:{}\n\nhost\nUNSIGNED-PAYLOAD",
+        resolved.signed_host
     );
     let string_to_sign = format!(
         "AWS4-HMAC-SHA256\n{}\n{}\n{}",
@@ -1217,7 +1876,8 @@ fn presigned_get_url(
         string_to_sign.as_bytes(),
     ));
     Ok(format!(
-        "{endpoint}{canonical_path}?{canonical_query}&X-Amz-Signature={signature}"
+        "{}{canonical_path}?{canonical_query}&X-Amz-Signature={signature}",
+        resolved.url_base
     ))
 }
 
@@ -1229,6 +1889,18 @@ fn uri_encode_path(path: &str) -> String {
         .map(uri_encode)
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// The `${filename}` template token: `key[: -len(token)]` is the
+/// `starts-with` prefix (a char slice — `[:-11]` on a short key is `""`,
+/// exactly like Python).
+const FILENAME_TOKEN: &str = "${filename}";
+
+fn strip_filename_token(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    chars[..chars.len().saturating_sub(FILENAME_TOKEN.len())]
+        .iter()
+        .collect()
 }
 
 /// `generate_presigned_post(object_name, file_type, file_size)`
@@ -1244,7 +1916,7 @@ fn presigned_post(
     now: &DateTime<Utc>,
 ) -> Result<Value, InvalidEndpoint> {
     let region = storage.region.as_str();
-    let (endpoint, _) = endpoint_parts(storage, scheme, host, true)?;
+    let resolved = endpoint_parts(storage, scheme, host, true)?;
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date = now.format("%Y%m%d").to_string();
     let scope = credential_scope(&date, region);
@@ -1259,15 +1931,37 @@ fn presigned_post(
     let credential = format!("{}/{}", storage.access_key_id, scope);
     // The client-level `generate_presigned_post` appends its own
     // `{"bucket"}` / `{"key"}` conditions after the caller's and before
-    // the signer's (`botocore/signers.py`), so the policy carries nine.
+    // the signer's (`botocore/signers.py`), so the policy carries nine —
+    // except a key ending in `${filename}` appends
+    // `["starts-with", "$key", <prefix>]` instead of its `{"key"}`
+    // (while `fields.key` keeps the full key). `storage.py:83-84` has
+    // its own template branch for keys STARTING with the token (the
+    // prefix comes from the same trailing-11 slice — port the quirk).
+    // (PIDASHCONV-789#1, live-probed.)
+    let caller_key_condition = if object_name.starts_with(FILENAME_TOKEN) {
+        format!(
+            "[\"starts-with\", \"$key\", {}]",
+            py_json_string(&strip_filename_token(object_name))
+        )
+    } else {
+        format!("{{\"key\": {}}}", py_json_string(object_name))
+    };
+    let client_key_condition = if object_name.ends_with(FILENAME_TOKEN) {
+        format!(
+            "[\"starts-with\", \"$key\", {}]",
+            py_json_string(&strip_filename_token(object_name))
+        )
+    } else {
+        format!("{{\"key\": {}}}", py_json_string(object_name))
+    };
     let conditions = format!(
-        "[{{\"bucket\": {}}}, [\"content-length-range\", 1, {}], {{\"Content-Type\": {}}}, {{\"key\": {}}}, {{\"bucket\": {}}}, {{\"key\": {}}}, {{\"x-amz-algorithm\": \"AWS4-HMAC-SHA256\"}}, {{\"x-amz-credential\": {}}}, {{\"x-amz-date\": {}}}]",
+        "[{{\"bucket\": {}}}, [\"content-length-range\", 1, {}], {{\"Content-Type\": {}}}, {}, {{\"bucket\": {}}}, {}, {{\"x-amz-algorithm\": \"AWS4-HMAC-SHA256\"}}, {{\"x-amz-credential\": {}}}, {{\"x-amz-date\": {}}}]",
         py_json_string(&storage.bucket_name),
         file_size,
         py_json_string(file_type),
-        py_json_string(object_name),
+        caller_key_condition,
         py_json_string(&storage.bucket_name),
-        py_json_string(object_name),
+        client_key_condition,
         py_json_string(&credential),
         py_json_string(&amz_date),
     );
@@ -1280,18 +1974,18 @@ fn presigned_post(
         &signing_key(&storage.secret_access_key, &date, region),
         policy_b64.as_bytes(),
     ));
-    // `url`: path-style against a custom/MinIO endpoint, otherwise the
-    // virtual-hosted bucket root with its trailing slash
+    // `url`: path-style appends the bucket to the base, virtual-hosted
+    // is the bucket root with its trailing slash
     // (`https://uploads.s3.amazonaws.com/`).
-    let url = if storage.use_minio
-        || storage
-            .endpoint_url
-            .as_deref()
-            .is_some_and(|e| !e.is_empty())
-    {
-        format!("{endpoint}/{}", storage.bucket_name)
+    let url = if resolved.path_style {
+        format!(
+            "{}{}/{}",
+            resolved.url_base,
+            resolved.base_path,
+            uri_encode(&storage.bucket_name)
+        )
     } else {
-        format!("{endpoint}/")
+        format!("{}/", resolved.url_base)
     };
     let mut fields = Map::with_capacity(7);
     fields.insert(
@@ -1379,6 +2073,20 @@ mod tests {
         }
     }
 
+    fn endpoint(
+        url_base: &str,
+        signed_host: &str,
+        base_path: &str,
+        path_style: bool,
+    ) -> ResolvedEndpoint {
+        ResolvedEndpoint {
+            url_base: url_base.to_owned(),
+            signed_host: signed_host.to_owned(),
+            base_path: base_path.to_owned(),
+            path_style,
+        }
+    }
+
     #[test]
     fn endpoint_parts_minio_ssl_and_global_east() {
         // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
@@ -1386,40 +2094,71 @@ mod tests {
         ssl.minio_endpoint_ssl = true;
         assert_eq!(
             endpoint_parts(&ssl, "http", "h:9", true).expect("minio"),
-            ("https://h:9".to_owned(), "h:9".to_owned())
+            endpoint("https://h:9", "h:9", "", true)
         );
         // us-east-1 resolves to the global endpoint (botocore probe A/L).
         let mut aws = test_storage();
         aws.use_minio = false;
         assert_eq!(
             endpoint_parts(&aws, "http", "h:9", true).expect("aws"),
-            (
-                "https://uploads.s3.amazonaws.com".to_owned(),
-                "uploads.s3.amazonaws.com".to_owned()
+            endpoint(
+                "https://uploads.s3.amazonaws.com",
+                "uploads.s3.amazonaws.com",
+                "",
+                false
             )
+        );
+        // Buckets that are not valid host labels sign path-style and the
+        // signed host drops default ports while the URL keeps the
+        // authority verbatim (PIDASHCONV-789#7/#9, live-probed).
+        let mut dots = test_storage();
+        dots.use_minio = false;
+        dots.bucket_name = "with.dots".to_owned();
+        assert_eq!(
+            endpoint_parts(&dots, "http", "h:9", true).expect("path style"),
+            endpoint("https://s3.amazonaws.com", "s3.amazonaws.com", "", true)
+        );
+        assert_eq!(
+            endpoint_parts(&ssl, "https", "H:443", true).expect("minio"),
+            endpoint("https://H:443", "h", "", true)
         );
     }
 
     #[test]
     fn endpoint_parts_presign_global_and_invalid_region() {
-        // Presigned URLs resolve the global endpoint for every region
-        // (`use_global_endpoint`, botocore probe J); header auth keeps
-        // the regional host (probe J HEAD).
+        // Presigned URLs resolve the global endpoint in `aws`
+        // (`use_global_endpoint`, botocore probe J) and the regional host
+        // in other partitions (PIDASHCONV-789#8); header auth keeps the
+        // regional host everywhere but `us-east-1` (probe J HEAD).
         let mut regional = test_storage();
         regional.use_minio = false;
         regional.region = "eu-west-1".to_owned();
         assert_eq!(
             endpoint_parts(&regional, "http", "h:9", true).expect("presign"),
-            (
-                "https://uploads.s3.amazonaws.com".to_owned(),
-                "uploads.s3.amazonaws.com".to_owned()
+            endpoint(
+                "https://uploads.s3.amazonaws.com",
+                "uploads.s3.amazonaws.com",
+                "",
+                false
             )
         );
         assert_eq!(
             endpoint_parts(&regional, "http", "h:9", false).expect("header auth"),
-            (
-                "https://uploads.s3.eu-west-1.amazonaws.com".to_owned(),
-                "uploads.s3.eu-west-1.amazonaws.com".to_owned()
+            endpoint(
+                "https://uploads.s3.eu-west-1.amazonaws.com",
+                "uploads.s3.eu-west-1.amazonaws.com",
+                "",
+                false
+            )
+        );
+        regional.region = "cn-north-1".to_owned();
+        assert_eq!(
+            endpoint_parts(&regional, "http", "h:9", true).expect("presign"),
+            endpoint(
+                "https://uploads.s3.cn-north-1.amazonaws.com.cn",
+                "uploads.s3.cn-north-1.amazonaws.com.cn",
+                "",
+                false
             )
         );
         // Empty region with a derived endpoint fails (`ValueError`,
@@ -1441,10 +2180,7 @@ mod tests {
         empty.endpoint_url = Some("http://127.0.0.1:9000".to_owned());
         assert_eq!(
             endpoint_parts(&empty, "http", "h:9", true).expect("custom"),
-            (
-                "http://127.0.0.1:9000".to_owned(),
-                "127.0.0.1:9000".to_owned()
-            )
+            endpoint("http://127.0.0.1:9000", "127.0.0.1:9000", "", true)
         );
     }
 

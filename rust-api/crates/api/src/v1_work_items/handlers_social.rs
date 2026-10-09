@@ -1514,8 +1514,12 @@ async fn expand_issue(
     web_base_url: Option<&str>,
 ) -> Result<Value, Denial> {
     use pidash_services::v1_work_items::shape_issue as shape;
+    // Unscoped: `select_related("issue")` joins the issue row without the
+    // soft-deletion scope, so a soft-deleted issue still renders (with its
+    // `deleted_at`) instead of collapsing to null (PIDASHCONV-789#4,
+    // live-probed).
     let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(r#"SELECT * FROM "issues" WHERE "id" = $1 AND "deleted_at" IS NULL"#)
+        sqlx::query(r#"SELECT * FROM "issues" WHERE "id" = $1"#)
             .bind(issue_id)
             .fetch_optional(pool)
             .await

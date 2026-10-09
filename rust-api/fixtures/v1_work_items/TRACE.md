@@ -156,6 +156,12 @@ move-SQL file. Gate: PIDASHCONV-76 (`rust-api/contract-tests/v1_work_items/`,
 - `handlers/F18-11.move.json` — the 46 SQL statements issued by
   `move_work_item_to_project` `utils/issue_move.py:122-393` plus DB
   before/after (consumed by PIDASHCONV-677).
+- `handlers/activity_signing.golden.json` — 31 presigned-GET URLs + 6
+  presigned-POST responses from botocore 1.34.162 under frozen time
+  (2026-10-05T02:56:16Z), covering S3 partitions, bucket addressing,
+  endpoint normalization and `${filename}` policies for the
+  `S3Storage` wrappers `settings/storage.py:66-113` (PIDASHCONV-789;
+  consumed by the `pidash-api` signer tests, not by a layer issue).
 
 ## Converters (PIDASHCONV-679)
 
