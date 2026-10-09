@@ -25,11 +25,15 @@
 //!
 //! Deliberate edges (all unpinned — no fixture or contract case sends them):
 //!
-//! * The orchestration `post_save` signal (`orchestration/signals.py`) is
-//!   response-neutral (it swallows every exception) and owned by the
-//!   orchestration domain; like the `recent_visited_task` precedent this
-//!   port does not invoke it. `resolve_moved_by_run` still runs so its
-//!   400s match.
+//! * The orchestration `post_save` signal (`orchestration/signals.py`)
+//!   fires on the patch path only (PIDASHCONV-804): `capture_prior_state`
+//!   before the save, `fire_state_transition` after, through the
+//!   `CoreSignalSeam` below (the 677 `MoveSignalSeam` twin — live
+//!   `prior_state_id` + `state`, loud gaps past a dispatching
+//!   transition). It stays response-neutral — a failed handler is
+//!   logged and the save stands — so `resolve_moved_by_run`'s 400s
+//!   still match. Create and delete do not fire yet (same gap,
+//!   follow-up).
 //! * `PUT` on detail proxies to Django (see above).
 //! * Non-string `created_at` overrides answer 500, as Django's uncaught
 //!   `TypeError` out of `parse_datetime` does.
@@ -38,7 +42,9 @@
 //! `by_identifier`, `by_identifier_dup_sequence`, `list`, `detail`,
 //! `create`, `patch`, `patch_bad_state`, `detail_404`, `create_invalid`,
 //! `issue_delete`, `issue_delete_again`, `put_405`, twins). Every `replay_*`
-//! test below replays one: status + body byte-identical.
+//! test below replays one: status + body byte-identical. The patch
+//! signal call is pinned by `patch_signals.golden.json` in the same
+//! directory (PIDASHCONV-804).
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
@@ -55,8 +61,23 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use pidash_auth::permissions::membership::ProjectRoleFacts;
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_db::orchestration::workpad::AgentUserCollisionError;
+use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
+use pidash_services::dispatch::policy::UserFlags;
+use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
+use pidash_services::orchestration::creation::{
+    AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest,
+    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
+    RenderedTurn, RunView, RunnerView, StateView, STATE_SELECT_SQL,
+};
+use pidash_services::orchestration::entries::{
+    capture_prior_state, fire_state_transition, BindingView, EntriesSeam, FireOutcome, FireRequest,
+    NewSchedulerRun, PreflightSeam, SchedulerView, WorkspaceView, PRIOR_STATE_SELECT_SQL,
+};
+use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
 use pidash_services::v1_work_items::queries_core as core_queries;
 use pidash_services::v1_work_items::shape_issue as shape;
 use pidash_services::v1_work_items::tasks as work_tasks;
@@ -65,6 +86,7 @@ use pidash_services::v1_work_items::{filter_fields, python_number_str, FieldSpec
 use crate::state::AppState;
 
 use super::perms::{decide, gate_for, resolve_moved_by_run, RunFacts, V1WorkItemsRoute};
+use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 
 // ---------------------------------------------------------------------------
@@ -6756,9 +6778,9 @@ async fn patch_issue_inner(
     fetch_project_for_write(&pre.pool, &project_id).await?;
 
     // The run header (`:794-807`): a blank/missing header infers the
-    // caller's active run, a malformed id 400s. The resolved run id is
-    // stamped for the orchestration signal only (no wire effect — the
-    // `fire_state_transition` mirror is deferred, see the PR).
+    // caller's active run, a malformed id 400s. The resolved run id
+    // stamps `MOVED_BY_RUN_ATTR` for the post-save orchestration
+    // signal (PIDASHCONV-804); it has no wire effect on its own.
     let header = headers
         .get("X-Pi-Dash-Run-Id")
         .map(|value| value.to_str().unwrap_or("\u{fffd}").to_owned());
@@ -6775,7 +6797,7 @@ async fn patch_issue_inner(
     } else {
         fetch_newest_runs_on_issue(&pre.pool, pk).await?
     };
-    let (_moved_by_run, header_error) = resolve_moved_by_run(
+    let (moved_by_run, header_error) = resolve_moved_by_run(
         header_ref,
         Some(pre.actor.id),
         *pk,
@@ -6902,6 +6924,15 @@ async fn patch_issue_inner(
         Some(number) => Some(i32::try_from(number).map_err(|_| Denial::ServerError)?),
         None => None,
     };
+    // The pre-save snapshot (`capture_prior_state`, `signals.py:61-71`):
+    // the stored `state_id` re-read just before the save, past every
+    // guard, as `pre_save` runs inside `serializer.save()`. A storage
+    // failure 500s, as in Python where only the handler call is in
+    // `try`.
+    let mut signal = CoreSignalSeam { pool: &pre.pool };
+    let prev_state_id = capture_prior_state(&mut signal, Some(*pk))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new("");
     qb.push("UPDATE \"issues\" SET ");
     let mut sep = qb.separated(", ");
@@ -6967,6 +6998,28 @@ async fn patch_issue_inner(
         .await
         .map(|_| ())
         .map_err(|error| save_error(&error, "write-update"))?;
+
+    // The post-save fire (`signals.py:74-107`): it runs inside the save
+    // in Python (before the `.delay` fan-out below), so it runs here —
+    // after the `UPDATE`, before the enqueues. `dispatch_immediate` is
+    // always true (this view never stamps the opt-out); `moved_by_run`
+    // is the resolved header run. A failed handler is logged and the
+    // save stands; only a lookup storage failure 500s.
+    let current_state: Option<Uuid> = current.state.as_deref().and_then(|id| id.parse().ok());
+    let current_state_id = match set_state {
+        Some(state) => state,
+        None => current_state,
+    };
+    fire_after_save(
+        &pre.pool,
+        *pk,
+        prev_state_id,
+        current_state_id,
+        moved_by_run,
+        Some(pre.actor.id),
+        Utc::now(),
+    )
+    .await?;
 
     // Task fan-out (`:844-865`): both activities carry the before-image.
     let requested_text = requested_data_text(&data);
@@ -8568,5 +8621,523 @@ mod lxml_tests {
                 "input {input:?}"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration signals (explicit): `capture_prior_state` + `fire_state_transition`
+// ---------------------------------------------------------------------------
+
+/// Build the patch path's post-save fire (`signals.py:74-107`): the
+/// snapshot pair around the save, the resolved header run, and the
+/// receiver defaults this view never overrides. Pure so the fixture
+/// pins the call exactly (`patch_signals.golden.json`).
+fn patch_fire_request(
+    issue_id: Uuid,
+    prev_state_id: Option<Uuid>,
+    current_state_id: Option<Uuid>,
+    moved_by_run: Option<Uuid>,
+    created_by: Option<Uuid>,
+    now: DateTime<Utc>,
+) -> FireRequest {
+    FireRequest {
+        issue_id,
+        prev_state_id,
+        current_state_id,
+        // This view never stamps `_DISPATCH_IMMEDIATE_ATTR`, so the
+        // receiver default (`True`) always applies.
+        dispatch_immediate: true,
+        moved_by_run,
+        now,
+        // Caller-drawn jitter (L5 quirk-5): the request path draws
+        // none, like the D-26 and move fires.
+        jitter_secs: 0.0,
+        created_by,
+    }
+}
+
+/// The post-save fire: a non-transition answers `NoTransition` without
+/// I/O; a failed handler is logged with the verbatim line (the counter
+/// already bumped inside) and the save stands; only a *lookup* storage
+/// failure propagates to the 500 — exactly the `try` placement in
+/// `fire_state_transition` (the D-26 `fire_after_save` shape, plus the
+/// resolved `moved_by_run` only this surface carries).
+async fn fire_after_save(
+    pool: &PgPool,
+    issue_id: Uuid,
+    prev_state_id: Option<Uuid>,
+    current_state_id: Option<Uuid>,
+    moved_by_run: Option<Uuid>,
+    created_by: Option<Uuid>,
+    now: DateTime<Utc>,
+) -> Result<(), Denial> {
+    let mut seam = CoreSignalSeam { pool };
+    let mut preflight = CorePreflight;
+    let request = patch_fire_request(
+        issue_id,
+        prev_state_id,
+        current_state_id,
+        moved_by_run,
+        created_by,
+        now,
+    );
+    let outcome = fire_state_transition(&mut seam, &mut preflight, &request)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if let FireOutcome::Failed { log_line, .. } = outcome {
+        tracing::error!("{log_line}");
+    }
+    Ok(())
+}
+
+/// The 594 [`EntriesSeam`] for the core saves: `state` + `prior_state_id`
+/// are live (they cover the capture and the driver's non-trigger early
+/// return); the ticker/creation surface answers store errors, which the
+/// fire swallows by design (counter + the verbatim log line) while the
+/// save stands. The 677 `MoveSignalSeam` twin for this file.
+struct CoreSignalSeam<'a> {
+    pool: &'a PgPool,
+}
+
+/// A creation-runtime method the core saves' fire reached past a
+/// dispatching transition without the D-12 runtime. The fire maps it to
+/// `Failed` (logged); the save stands.
+fn core_seam_gap<T>(method: &str) -> Result<T, CreationError> {
+    Err(CreationError::Db(format!(
+        "v1 core signal seam: {method} needs the D-12 creation runtime"
+    )))
+}
+
+impl CreationSeam for CoreSignalSeam<'_> {
+    async fn issue(&mut self, _issue_id: Uuid) -> Result<IssueView, CreationError> {
+        core_seam_gap("issue")
+    }
+
+    async fn project(&mut self, _project_id: Uuid) -> Result<ProjectView, CreationError> {
+        core_seam_gap("project")
+    }
+
+    async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
+        let Some(state_id) = state_id else {
+            return Ok(None);
+        };
+        let row: Option<(Uuid, String, String)> = sqlx::query_as(STATE_SELECT_SQL)
+            .bind(state_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        row.map(|(id, name, group)| StateView { id, name, group })
+            .ok_or_else(|| CreationError::MissingRow("state".to_owned()))
+            .map(Some)
+    }
+
+    async fn latest_prior_run(
+        &mut self,
+        _issue_id: Uuid,
+    ) -> Result<Option<RunView>, CreationError> {
+        core_seam_gap("latest_prior_run")
+    }
+
+    async fn active_run_for(&mut self, _issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        core_seam_gap("active_run_for")
+    }
+
+    async fn run(&mut self, _run_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        core_seam_gap("run")
+    }
+
+    async fn runner(&mut self, _runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
+        core_seam_gap("runner")
+    }
+
+    async fn assigned_pod(&mut self, _pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
+        core_seam_gap("assigned_pod")
+    }
+
+    async fn default_pod_for_project(
+        &mut self,
+        _project_id: Uuid,
+    ) -> Result<Option<PodView>, CreationError> {
+        core_seam_gap("default_pod_for_project")
+    }
+
+    async fn resume_parent_run_id(
+        &mut self,
+        _issue_id: Uuid,
+    ) -> Result<Option<Uuid>, CreationError> {
+        core_seam_gap("resume_parent_run_id")
+    }
+
+    async fn work_item_id_for_run(&mut self, _run_id: Uuid) -> Result<Option<Uuid>, CreationError> {
+        core_seam_gap("work_item_id_for_run")
+    }
+
+    async fn lock_issue_for_handoff(
+        &mut self,
+        _issue_id: Uuid,
+    ) -> Result<Option<LockedIssue>, CreationError> {
+        core_seam_gap("lock_issue_for_handoff")
+    }
+
+    async fn lock_run_for_handoff(
+        &mut self,
+        _run_id: Uuid,
+    ) -> Result<Option<RunView>, CreationError> {
+        core_seam_gap("lock_run_for_handoff")
+    }
+
+    async fn user_flags(&mut self, _user_id: Uuid) -> Result<UserFlags, CreationError> {
+        core_seam_gap("user_flags")
+    }
+
+    async fn insert_run(&mut self, _row: &NewAgentRun) -> Result<RunView, CreationError> {
+        core_seam_gap("insert_run")
+    }
+
+    async fn save_prompt(
+        &mut self,
+        _run_id: Uuid,
+        _prompt: &str,
+        _manifest: &Value,
+    ) -> Result<(), CreationError> {
+        core_seam_gap("save_prompt")
+    }
+
+    async fn save_run_config(
+        &mut self,
+        _run_id: Uuid,
+        _config: &Value,
+    ) -> Result<(), CreationError> {
+        core_seam_gap("save_run_config")
+    }
+
+    async fn execution_fields(
+        &mut self,
+        _req: &ExecutionRequest,
+    ) -> Result<ExecutionFields, ExecutionError> {
+        Err(ExecutionError::Store(CreationError::Db(
+            "v1 core signal seam: execution_fields needs the D-12 creation runtime".to_owned(),
+        )))
+    }
+
+    async fn lock_cloud_creation_capacity(
+        &mut self,
+        _workspace_id: Uuid,
+        _executor_kind: AgentExecutorKind,
+        _automatic: bool,
+    ) -> Result<Option<AdmissionError>, CreationError> {
+        core_seam_gap("lock_cloud_creation_capacity")
+    }
+
+    fn dispatch_after_commit(&mut self, _run_id: Uuid) {}
+
+    async fn render_bundle(
+        &mut self,
+        _issue_id: Uuid,
+        _run_id: Uuid,
+        _parent_run_id: Option<Uuid>,
+        _trigger: &str,
+        _created_by_id: Uuid,
+    ) -> Result<RenderBundle, CreationError> {
+        core_seam_gap("render_bundle")
+    }
+
+    fn extra_toolsets_schema_tool(&self) -> String {
+        String::new()
+    }
+}
+
+impl FinalizeAgentRunSeam for CoreSignalSeam<'_> {
+    async fn finalize_failed_run(
+        &mut self,
+        _run_id: Uuid,
+        _error_code: &str,
+        _error: &str,
+        _now: DateTime<Utc>,
+    ) -> Result<RunView, CreationError> {
+        core_seam_gap("finalize_failed_run")
+    }
+}
+
+impl EntriesSeam for CoreSignalSeam<'_> {
+    async fn prior_state_id(&mut self, issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
+        let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(PRIOR_STATE_SELECT_SQL)
+            .bind(issue_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        Ok(row.and_then(|(_, state_id)| state_id))
+    }
+
+    async fn queued_follow_up(
+        &mut self,
+        _issue_id: Uuid,
+    ) -> Result<Option<RunView>, CreationError> {
+        core_seam_gap("queued_follow_up")
+    }
+
+    async fn lock_ticker(
+        &mut self,
+        _issue_id: Uuid,
+    ) -> Result<Option<IssueAgentTicker>, CreationError> {
+        core_seam_gap("lock_ticker")
+    }
+
+    async fn save_ticker(
+        &mut self,
+        _row: &IssueAgentTicker,
+        _write: ClockWrite,
+    ) -> Result<(), CreationError> {
+        core_seam_gap("save_ticker")
+    }
+
+    fn set_rollback(&mut self) {}
+
+    async fn clock_policy(
+        &mut self,
+        _project_id: Uuid,
+    ) -> Result<ProjectClockPolicy, CreationError> {
+        core_seam_gap("clock_policy")
+    }
+
+    async fn binding(&mut self, _binding_id: Uuid) -> Result<BindingView, CreationError> {
+        core_seam_gap("binding")
+    }
+
+    async fn scheduler_override_pod(
+        &mut self,
+        _pod_id: Uuid,
+        _project_id: Option<Uuid>,
+    ) -> Result<Option<PodView>, CreationError> {
+        core_seam_gap("scheduler_override_pod")
+    }
+
+    async fn workspace(&mut self, _workspace_id: Uuid) -> Result<WorkspaceView, CreationError> {
+        core_seam_gap("workspace")
+    }
+
+    async fn scheduler_row(&mut self, _scheduler_id: Uuid) -> Result<SchedulerView, CreationError> {
+        core_seam_gap("scheduler_row")
+    }
+
+    async fn scheduler_override_rows(
+        &mut self,
+        _workspace_id: Uuid,
+    ) -> Result<Vec<OverrideRow>, CreationError> {
+        core_seam_gap("scheduler_override_rows")
+    }
+
+    async fn project_role_facts(
+        &mut self,
+        _user_id: Uuid,
+        _workspace_slug: &str,
+        _project_id: Uuid,
+    ) -> Result<ProjectRoleFacts, CreationError> {
+        core_seam_gap("project_role_facts")
+    }
+
+    async fn has_usable_llm_config(&mut self, _user_id: Uuid) -> Result<bool, CreationError> {
+        core_seam_gap("has_usable_llm_config")
+    }
+
+    async fn agent_system_user(
+        &mut self,
+    ) -> Result<Result<Uuid, AgentUserCollisionError>, CreationError> {
+        core_seam_gap("agent_system_user")
+    }
+
+    async fn insert_scheduler_run(
+        &mut self,
+        _row: &NewSchedulerRun,
+    ) -> Result<RunView, CreationError> {
+        core_seam_gap("insert_scheduler_run")
+    }
+
+    fn compose_scheduler_turn(
+        &mut self,
+        _context: &Value,
+        _index: &OverrideIndex,
+        _workspace_id: Option<&str>,
+        _executor_kind: Option<&str>,
+        _tool_catalog_version: i64,
+    ) -> Result<RenderedTurn, String> {
+        Err(
+            "v1 core signal seam: compose_scheduler_turn needs the D-12 creation runtime"
+                .to_owned(),
+        )
+    }
+}
+
+/// Preflight for the core saves' fire: the L8 eligibility check is unmerged,
+/// so any dispatch decision fails closed (the entry aborts loudly, the
+/// save stands).
+struct CorePreflight;
+
+impl PreflightSeam for CorePreflight {
+    async fn preflight_eligibility_or_bounce(
+        &mut self,
+        _issue_id: Uuid,
+        _creator_id: Uuid,
+        _pod_id: Uuid,
+        _triggered_by: &str,
+    ) -> Result<bool, CreationError> {
+        core_seam_gap("preflight_eligibility_or_bounce")
+    }
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::*;
+
+    static PATCH_SIGNALS_FIXTURE: &str =
+        include_str!("../../../../fixtures/v1_work_items/handlers/patch_signals.golden.json");
+
+    fn fixture_cases() -> Value {
+        let fixture: Value = serde_json::from_str(PATCH_SIGNALS_FIXTURE).expect("fixture parses");
+        fixture["cases"].clone()
+    }
+
+    fn opt_uuid(value: &Value) -> Option<Uuid> {
+        value
+            .as_str()
+            .map(|text| text.parse().expect("uuid parses"))
+    }
+
+    fn uid(n: u128) -> Uuid {
+        Uuid::from_u128(n)
+    }
+
+    /// The fixture pins the call: every case's inputs build exactly the
+    /// pinned `FireRequest` — `dispatch_immediate` always true (this
+    /// view never stamps the opt-out), the resolved header run passed
+    /// through as `moved_by_run`, zero caller jitter.
+    #[test]
+    fn patch_fire_request_pins_fixture() {
+        let cases = fixture_cases();
+        let names = [
+            "human_patch_no_transition",
+            "agent_patch_no_transition",
+            "human_patch_transition",
+            "agent_patch_transition",
+        ];
+        assert_eq!(
+            cases.as_object().expect("cases is a map").len(),
+            names.len(),
+            "fixture covers exactly the pinned cases"
+        );
+        for name in names {
+            let case = &cases[name];
+            let now = DateTime::parse_from_rfc3339(case["now"].as_str().expect("now"))
+                .expect("now parses")
+                .to_utc();
+            let request = patch_fire_request(
+                case["issue_id"]
+                    .as_str()
+                    .expect("issue_id")
+                    .parse()
+                    .expect("uuid"),
+                opt_uuid(&case["prev_state_id"]),
+                opt_uuid(&case["current_state_id"]),
+                opt_uuid(&case["moved_by_run"]),
+                opt_uuid(&case["created_by"]),
+                now,
+            );
+            let expected = &case["expected"];
+            assert_eq!(
+                request.issue_id,
+                expected["issue_id"]
+                    .as_str()
+                    .expect("expected issue_id")
+                    .parse::<Uuid>()
+                    .expect("uuid"),
+                "{name}"
+            );
+            assert_eq!(
+                request.prev_state_id,
+                opt_uuid(&expected["prev_state_id"]),
+                "{name}"
+            );
+            assert_eq!(
+                request.current_state_id,
+                opt_uuid(&expected["current_state_id"]),
+                "{name}"
+            );
+            assert_eq!(
+                request.dispatch_immediate,
+                expected["dispatch_immediate"].as_bool().expect("bool"),
+                "{name}"
+            );
+            assert_eq!(
+                request.moved_by_run,
+                opt_uuid(&expected["moved_by_run"]),
+                "{name}"
+            );
+            assert_eq!(
+                request.now,
+                DateTime::parse_from_rfc3339(expected["now"].as_str().expect("now"))
+                    .expect("now parses")
+                    .to_utc(),
+                "{name}"
+            );
+            assert_eq!(
+                request.jitter_secs,
+                expected["jitter_secs"].as_f64().expect("f64"),
+                "{name}"
+            );
+            assert_eq!(
+                request.created_by,
+                opt_uuid(&expected["created_by"]),
+                "{name}"
+            );
+        }
+    }
+
+    /// The `agent_patch_no_transition` row: the save fires the receiver
+    /// and it no-ops (equal states) with zero seam I/O — the lazy pool
+    /// is never touched, and the short-circuit precedes any run use.
+    #[tokio::test]
+    async fn fire_no_transition_needs_no_io() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://127.0.0.1:1/core_probe")
+            .expect("lazy pool");
+        let mut seam = CoreSignalSeam { pool: &pool };
+        let mut preflight = CorePreflight;
+        let now = chrono::Utc::now();
+        let request = patch_fire_request(
+            uid(9),
+            Some(uid(3)),
+            Some(uid(3)),
+            Some(uid(7)),
+            Some(uid(1)),
+            now,
+        );
+        let outcome = fire_state_transition(&mut seam, &mut preflight, &request)
+            .await
+            .expect("no-transition never fails");
+        assert_eq!(outcome, FireOutcome::NoTransition);
+    }
+
+    /// Lookup rule: a storage failure outside the handler `try`
+    /// propagates (here: the unreachable lazy pool, short acquire
+    /// budget so the test fails fast).
+    #[tokio::test]
+    async fn fire_lookup_failure_propagates() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect_lazy("postgresql://127.0.0.1:1/core_probe")
+            .expect("lazy pool");
+        let mut seam = CoreSignalSeam { pool: &pool };
+        let mut preflight = CorePreflight;
+        let now = chrono::Utc::now();
+        let request = patch_fire_request(
+            uid(9),
+            Some(uid(3)),
+            Some(uid(4)),
+            Some(uid(7)),
+            Some(uid(1)),
+            now,
+        );
+        let outcome = fire_state_transition(&mut seam, &mut preflight, &request).await;
+        assert!(outcome.is_err());
     }
 }
