@@ -2617,6 +2617,7 @@ dependencies = [
  "flate2",
  "hmac 0.12.1",
  "http",
+ "http-body",
  "http-body-util",
  "idna",
  "jsonwebtoken",
