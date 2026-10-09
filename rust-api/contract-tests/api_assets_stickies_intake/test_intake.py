@@ -233,3 +233,132 @@ def test_intake_delete_accepted_item_keeps_issue(org):
         "SELECT id FROM issues WHERE id = %s", (created["issue"],)
     ).fetchone()
     assert row is not None
+
+
+EXPANDED_USER_KEYS = {
+    "id", "first_name", "last_name", "email", "avatar", "avatar_url",
+    "display_name",
+}
+
+
+def test_intake_list_per_page_limits_results(org):
+    # Regression cover (PIDASHCONV-794/797 class): a single-value query
+    # param must not 400 the extractor. ?per_page=1 returns the newest
+    # item only, with the Django cursor "1:1:0" for the next page.
+    org.create_intake_issue(name="first")
+    second = org.create_intake_issue(name="second")
+    r = org.request("GET", _base(org), "admin", params={"per_page": "1"})
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == LIST_KEYS
+    assert body["total_count"] == 2
+    assert body["count"] == 1
+    assert len(body["results"]) == 1
+    assert body["results"][0]["id"] == second["id"]
+    assert set(body["results"][0]) == INTAKE_KEYS
+    assert body["next_page_results"] is True
+    assert body["prev_page_results"] is False
+    assert body["next_cursor"] == "1:1:0"
+
+
+def test_intake_list_cursor_walks_pages(org):
+    # The offset is cursor.offset * per_page, so the cursor is only
+    # meaningful together with the per_page it was issued for.
+    first = org.create_intake_issue(name="first")
+    org.create_intake_issue(name="second")
+    page1 = org.request(
+        "GET", _base(org), "admin", params={"per_page": "1"}
+    ).json()
+    r = org.request(
+        "GET", _base(org), "admin",
+        params={"per_page": "1", "cursor": page1["next_cursor"]},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total_count"] == 2
+    assert [row["id"] for row in body["results"]] == [first["id"]]
+    assert set(body["results"][0]) == INTAKE_KEYS
+    assert body["next_cursor"] == "1:2:0"
+    assert body["prev_cursor"] == "1:0:1"
+    assert body["next_page_results"] is False
+    assert body["prev_page_results"] is True
+
+
+def test_intake_list_fields_narrows_item_keys(org):
+    created = org.create_intake_issue(name="narrowed")
+    r = org.request("GET", _base(org), "admin", params={"fields": "id,status"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total_count"] == 1
+    assert body["results"] == [{"id": created["id"], "status": created["status"]}]
+
+
+def test_intake_list_fields_repeated_param_last_wins(org):
+    # request.GET.get returns the LAST value, so ?fields=id&fields=status
+    # behaves exactly as ?fields=status.
+    org.create_intake_issue(name="last wins")
+    r = org.request(
+        "GET", _base(org), "admin", params=[("fields", "id"), ("fields", "status")]
+    )
+    assert r.status_code == 200
+    assert r.json()["results"] == [{"status": -2}]
+    single = org.request("GET", _base(org), "admin", params={"fields": "status"})
+    assert r.json() == single.json()
+
+
+def test_intake_list_expand_created_by(org):
+    org.create_intake_issue(name="expanded")
+    r = org.request("GET", _base(org), "admin", params={"expand": "created_by"})
+    assert r.status_code == 200
+    row = r.json()["results"][0]
+    assert set(row) == INTAKE_KEYS
+    assert set(row["created_by"]) == EXPANDED_USER_KEYS
+    assert row["created_by"]["id"] == org.admin["id"]
+    assert row["created_by"]["email"] == org.admin["email"]
+
+
+def test_intake_retrieve_fields_narrows_keys(org):
+    created = org.create_intake_issue(name="fetch narrowed")
+    r = org.request(
+        "GET", f"{_base(org)}{created['issue']}/", "admin",
+        params={"fields": "id,status"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"id": created["id"], "status": created["status"]}
+
+
+def test_intake_retrieve_expand_created_by(org):
+    created = org.create_intake_issue(name="fetch expanded")
+    r = org.request(
+        "GET", f"{_base(org)}{created['issue']}/", "admin",
+        params={"expand": "created_by"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == INTAKE_KEYS
+    assert set(body["created_by"]) == EXPANDED_USER_KEYS
+    assert body["created_by"]["id"] == org.admin["id"]
+    assert body["created_by"]["email"] == org.admin["email"]
+    rest = {k: v for k, v in body.items() if k != "created_by"}
+    assert rest == {k: v for k, v in created.items() if k != "created_by"}
+
+
+def test_intake_retrieve_ignores_per_page(org):
+    # Retrieve never reads per_page, but the param must still deserialize.
+    created = org.create_intake_issue(name="paged retrieve")
+    r = org.request(
+        "GET", f"{_base(org)}{created['issue']}/", "admin",
+        params={"per_page": "1"},
+    )
+    assert r.status_code == 200
+    assert r.json() == created
+
+
+def test_intake_retrieve_ignores_cursor(org):
+    created = org.create_intake_issue(name="cursor retrieve")
+    r = org.request(
+        "GET", f"{_base(org)}{created['issue']}/", "admin",
+        params={"cursor": "1:1:0"},
+    )
+    assert r.status_code == 200
+    assert r.json() == created
