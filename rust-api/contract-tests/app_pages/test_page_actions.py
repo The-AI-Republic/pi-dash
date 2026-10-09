@@ -112,6 +112,50 @@ def test_unarchive_detaches_archived_parent(user_client, world, seeder, db):
     )
 
 
+def test_unarchive_finds_soft_deleted_archived_parent(user_client, world, seeder, db):
+    # `page.parent` is an unscoped FK fetch (`_base_manager`): a soft-deleted
+    # parent is FOUND and only its `archived_at` decides the detach
+    # (PIDASHCONV-796). Still archived here, so the child detaches.
+    parent = seeder.create_page(
+        world["workspace"]["id"], world["owner"]["id"], name="Parent", archived=True
+    )
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], parent["id"])
+    child = seeder.create_page(
+        world["workspace"]["id"],
+        world["owner"]["id"],
+        name="Child",
+        parent_id=parent["id"],
+        archived=True,
+    )
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], child["id"])
+    db.execute("UPDATE pages SET deleted_at=now() WHERE id=%s", (parent["id"],))
+    assert user_client.delete(f"{page_url(world, child['id'])}archive/").status_code == 204
+    row = db.fetchone("SELECT parent_id, archived_at FROM pages WHERE id=%s", (child["id"],))
+    assert row["parent_id"] is None
+    assert row["archived_at"] is None
+
+
+def test_unarchive_keeps_soft_deleted_live_parent(user_client, world, seeder, db):
+    # Soft-deleted but NOT archived parent: found, no detach, still 204.
+    parent = seeder.create_page(
+        world["workspace"]["id"], world["owner"]["id"], name="Parent"
+    )
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], parent["id"])
+    child = seeder.create_page(
+        world["workspace"]["id"],
+        world["owner"]["id"],
+        name="Child",
+        parent_id=parent["id"],
+        archived=True,
+    )
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], child["id"])
+    db.execute("UPDATE pages SET deleted_at=now() WHERE id=%s", (parent["id"],))
+    assert user_client.delete(f"{page_url(world, child['id'])}archive/").status_code == 204
+    row = db.fetchone("SELECT parent_id, archived_at FROM pages WHERE id=%s", (child["id"],))
+    assert str(row["parent_id"]) == parent["id"]
+    assert row["archived_at"] is None
+
+
 def test_unarchive_denied_for_member_non_owner(member_client, world, seeder):
     # Members may not DELETE at all: the permission layer denies the method
     # before the view's owner/admin check is ever reached.
