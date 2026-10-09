@@ -80,12 +80,11 @@
 //! * BUG-7 (Q3-7): the comment-text arm ignores `IssueComment.access`,
 //!   so INTERNAL comment text can surface an issue to a member who
 //!   cannot read that comment.
-//! * BUG-8 (move, inherited from the 650 port): the driver's
-//!   `SOURCE_ISSUE_SQL` triage conjunct (`NOT (group = 'triage')`)
-//!   drops stateless rows, where Django's `.exclude()` keeps NULLs
-//!   (fixture stmt 0, Q1, and Q3 all spell the NULL-tolerant form) —
-//!   so moving a stateless issue 404s here but moves in Python. D-26
-//!   owns the driver text; unpinned (no seed moves a stateless issue).
+//!
+//! Retired: BUG-8 (the 650 driver's bare `NOT (group = 'triage')`
+//! conjunct dropping stateless rows) is fixed upstream by
+//! PIDASHCONV-792 — the driver consts this module imports now spell
+//! the NULL-tolerant form, so stateless moves behave as in Django.
 //!
 //! Deliberate edges (all unpinned — no fixture or contract case sends
 //! them):
@@ -106,8 +105,11 @@
 //!   (the D-26 twin documents the same edge).
 //! * The immediate-handoff insert (a move whose handoff runs are all
 //!   QUEUED/PAUSED) answers an explicit 500 naming the D-12 creation
-//!   runtime gap (PIDASHCONV-743 owns the seam); unreachable in every
-//!   automated gate (seeds carry no agent runs) and loud when hit.
+//!   seam gap; unreachable in every automated gate (seeds carry no
+//!   agent runs) and loud when hit. The D-26 twin has since adopted
+//!   the API-side seam (`create_project_move_handoff_run`,
+//!   PIDASHCONV-743) — adopting it here is a follow-up, not this
+//!   port (no gate covers the path).
 //!
 //! Fixture: `F18-11` (`rust-api/fixtures/v1_work_items/handlers/` —
 //! `search`, `search_advanced`, the deprecated `search` twin, and the
@@ -1076,11 +1078,15 @@ async fn move_inner(
                     Value::Array(enqueue.args.clone()),
                     Value::Object(enqueue.kwargs.clone()),
                 );
-                // `.delay` past the commit: a broker failure is a 500
-                // with the move standing, as in Django.
-                pidash_jobs::queue::enqueue(&pre.pool, &job)
-                    .await
-                    .map_err(|_| Denial::ServerError)?;
+                // `.delay` past the commit: best-effort, the response
+                // stands on enqueue failure, as in Django (where the
+                // broker is up so `.delay` never raises here) and as in
+                // the D-26 twin (PIDASHCONV-793: serve-only envs have no
+                // `rust_job_queue` table, so a mapped 500 would fail an
+                // already-committed move).
+                if let Err(error) = pidash_jobs::queue::enqueue(&pre.pool, &job).await {
+                    tracing::warn!(%error, task = enqueue.task, "task enqueue failed; response stands");
+                }
             }
             let body = render_moved_issue_api(
                 &store,
@@ -2226,10 +2232,11 @@ impl MoveStore for PoolMoveStore {
         _now: &chrono::DateTime<chrono::Utc>,
     ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
         // Documented gap (see the module docs): the immediate-handoff
-        // insert needs the D-11/D-12 creation runtime, which has no
-        // API-side factory. Loud 500, never a silent skip.
+        // insert needs the D-12 creation seam, which this mirror has
+        // not adopted yet (the D-26 twin has, via PIDASHCONV-743).
+        // Loud 500, never a silent skip.
         Err(pidash_services::app_issues::issue_move::StoreError(
-            "move store: immediate handoff creation needs the D-12 creation runtime (no API-side factory)".to_owned(),
+            "move store: immediate handoff creation needs the D-12 creation seam (not adopted here yet)".to_owned(),
         ))
     }
 
