@@ -3224,6 +3224,9 @@ pub async fn pr_destroy_inner(
         "DELETE",
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(PR_DETAIL_SQL)
         .bind(slug)
         .bind(project_id)
@@ -3389,6 +3392,9 @@ pub async fn review_destroy_inner(
         "DELETE",
     )
     .await?;
+    // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
+    // runs after permissions; an unknown zone 400s only for survivors).
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(REVIEW_DETAIL_SQL)
         .bind(slug)
         .bind(project_id)
