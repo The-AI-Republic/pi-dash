@@ -3574,10 +3574,30 @@ pub struct ParsedDatetime {
 
 /// `django.utils.dateparse.parse_datetime` on the oracle (Django 4.2,
 /// Python 3.12, `dateparse.py:104-129`, probed): `fromisoformat` first,
-/// the `datetime_re` fallback second. Both `None` and `ValueError` mean
-/// "invalid" to DRF (suppressed at `fields.py:1179`), so one `Option`.
+/// the `datetime_re` fallback second, then DRF's
+/// `strptime(value, 'iso-8601')` fallthrough (`to_internal_value` runs
+/// it when `parse_datetime` returns `None`). Both `None` and
+/// `ValueError` mean "invalid" to DRF (suppressed at `fields.py:1179`),
+/// so one `Option`.
 pub fn parse_iso_datetime(text: &str) -> Option<ParsedDatetime> {
-    parse_fromisoformat(text).or_else(|| parse_django_datetime_re(text))
+    parse_fromisoformat(text)
+        .or_else(|| parse_django_datetime_re(text))
+        .or_else(|| {
+            // `strptime` compiles the literal format with `re.IGNORECASE`,
+            // so the input `iso-8601` in any letter case yields naive
+            // 1900-01-01. Exact match: padding fails on both sides (probed).
+            // Python's fold also accepts İ/ı/ſ letter variants; the port is
+            // ASCII-only (same family as the 765 unicode gap).
+            text.eq_ignore_ascii_case("iso-8601").then(|| {
+                let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+                    .and_then(|date| date.and_hms_opt(0, 0, 0))
+                    .expect("1900-01-01 valid");
+                ParsedDatetime {
+                    naive,
+                    offset_micros: None,
+                }
+            })
+        })
 }
 
 /// Python 3.12 `datetime.fromisoformat` (probed): extended/basic calendar
@@ -8787,6 +8807,45 @@ mod tests {
             Value::String("https://cdn.example/x.png".to_owned())
         );
         assert_eq!(render_avatar_text("   "), Value::String("   ".to_owned()));
+    }
+
+    #[test]
+    fn iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01 in the request zone (probed live both backends).
+        let utc: chrono_tz::Tz = "UTC".parse().expect("utc");
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let parsed = parse_iso_datetime(text).expect(text);
+            assert_eq!(
+                parsed.naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "1900-01-01T00:00:00",
+                "{text:?}"
+            );
+            assert_eq!(parsed.offset_micros, None, "{text:?}");
+            let instant = enforce_user_timezone(&parsed, &utc).expect("enforces");
+            assert_eq!(
+                instant.to_rfc3339(),
+                "1900-01-01T00:00:00+00:00",
+                "{text:?}"
+            );
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert!(parse_iso_datetime(text).is_none(), "{text:?}");
+        }
     }
 
     #[test]

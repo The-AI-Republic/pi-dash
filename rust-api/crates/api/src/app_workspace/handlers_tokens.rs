@@ -1196,12 +1196,14 @@ fn datetime_invalid_message() -> String {
 }
 
 /// DRF `DateTimeField.to_internal_value` (`deleted_at`): ISO-8601 only
-/// (`parse_datetime` — no date fallback); naive input is made aware in
-/// the REQUEST zone (`enforce_timezone`); a DST-gap wall time fails
-/// with the `make_aware` message; ambiguous takes the first fold;
-/// aware input whose request-zone rendering leaves years 1-9999 fails
-/// with the `overflow` message. Empty-string HTML input was nulled by
-/// `get_value` before this runs.
+/// (`parse_datetime` — no date fallback — plus the
+/// `strptime(value, 'iso-8601')` fallthrough, which accepts the literal
+/// `iso-8601` in any letter case as naive 1900-01-01); naive input is
+/// made aware in the REQUEST zone (`enforce_timezone`); a DST-gap wall
+/// time fails with the `make_aware` message; ambiguous takes the first
+/// fold; aware input whose request-zone rendering leaves years 1-9999
+/// fails with the `overflow` message. Empty-string HTML input was
+/// nulled by `get_value` before this runs.
 fn validate_datetime(
     value: &JVal,
     zone: &Tz,
@@ -1221,7 +1223,22 @@ fn validate_datetime(
                 }
                 return Err(invalid());
             }
-            match parse_django_datetime(&clean) {
+            // DRF runs `strptime(value, 'iso-8601')` when `parse_datetime`
+            // returns `None` (PIDASHCONV-773): the literal matches
+            // case-insensitively and yields naive 1900-01-01. Kept at this
+            // DRF caller — the shared parser also serves the model
+            // `expired_at` path, which has no `strptime` step and must
+            // stay invalid there. Exact match: padding fails on both
+            // sides (probed); ASCII-only (765 unicode-gap family).
+            let parsed = parse_django_datetime(&clean).or_else(|| {
+                clean.eq_ignore_ascii_case("iso-8601").then(|| {
+                    let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+                        .and_then(|date| date.and_hms_opt(0, 0, 0))
+                        .expect("1900-01-01 valid");
+                    ParsedInput::Naive(naive)
+                })
+            });
+            match parsed {
                 None => Err(invalid()),
                 Some(ParsedInput::Aware(instant)) => {
                     if !(1..=9999).contains(&instant.with_timezone(zone).year()) {
@@ -3349,5 +3366,46 @@ mod tests {
             false
         )
         .is_ok());
+    }
+
+    #[test]
+    fn deleted_at_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01 in the request zone (probed live both backends).
+        let utc: Tz = "UTC".parse().unwrap();
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let instant = validate_datetime(&jstr(text), &utc, "UTC", false)
+                .expect("valid")
+                .expect("some");
+            assert_eq!(
+                instant.to_rfc3339(),
+                "1900-01-01T00:00:00+00:00",
+                "{text:?}"
+            );
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert!(
+                validate_datetime(&jstr(text), &utc, "UTC", false).is_err(),
+                "{text:?}"
+            );
+        }
+        // The shared parser also serves the model `expired_at` path, which
+        // has no `strptime` step: the literal stays invalid there.
+        assert_eq!(parse_django_datetime("iso-8601"), None);
+        assert!(model_expired_at("iso-8601").is_err());
     }
 }
