@@ -21,7 +21,11 @@
 //!   token to the URL machine exactly like the D-14 machine handlers
 //!   (the `machine.rs` `authed_machine_id` precedent); denials pass
 //!   through untouched — `auth.rs` renders the byte-correct
-//!   lowercase-`detail` DRF 401 (PIDASHCONV-718).
+//!   lowercase-`detail` DRF 401 (PIDASHCONV-718, per DRF 3.15.2
+//!   `exception_handler`, `views.py:96`, and the live wire; the 589
+//!   probe's capital-`D` reading does not survive byte-ordinal
+//!   checks — the `exc.detail` attribute beside the key is the easy
+//!   misread).
 //! * SQL text comes from the merged builders
 //!   ([`manage_reads`](pidash_services::runner_enroll::queries::manage_reads)
 //!   M4/R2 plus the `_scoped_machine` read); the two create-endpoint
@@ -126,7 +130,7 @@ use pidash_types::runner_sessions::responses::dev_machine_mismatch_drf;
 use pidash_types::{UserId, WorkspaceId};
 
 use crate::middleware::SessionHandle;
-use crate::runner_enroll::auth::{authenticate_machine_token, MachineAuth};
+use crate::runner_enroll::auth::{authenticate_machine_token, MachineAuth, ALLOW_POST};
 use crate::runner_runs::run_endpoints::execute_terminal_effects;
 use crate::runner_runs::{json_response, pool_of, server_error, LivePorts, RunnerPorts};
 use crate::state::AppState;
@@ -2096,12 +2100,14 @@ pub async fn machine_command_result(
         Err(_) => return page_not_found(),
     };
     let secret = state.settings().secret_key.clone();
-    let auth = match authenticate_machine_token(&pool, secret.as_bytes(), &headers).await {
-        Ok(auth) => auth,
-        // The D-13 denial already renders the byte-correct DRF 401
-        // (lowercase `detail` + `Bearer` challenge); pass it through.
-        Err(response) => return response,
-    };
+    let auth =
+        match authenticate_machine_token(&pool, secret.as_bytes(), &headers, ALLOW_POST).await {
+            Ok(auth) => auth,
+            // The D-13 denial already renders the byte-correct DRF 401
+            // (lowercase `detail` + `Bearer` challenge + this view's `Allow`);
+            // pass it through.
+            Err(response) => return response,
+        };
     if authed_machine_id(auth.as_ref(), dev_machine_id).is_none() {
         return dev_machine_mismatch();
     }

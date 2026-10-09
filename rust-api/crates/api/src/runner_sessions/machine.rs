@@ -33,8 +33,9 @@
 //!
 //! Both 401 flavors re-render the D-13 denial locally (the
 //! PIDASHCONV-590 precedent): `auth.rs` renders the lowercase
-//! `detail` DRF 401 (PIDASHCONV-718); the re-render pins the exact
-//! compact/spaced flavor per endpoint. The open/delete
+//! `detail` DRF 401 (PIDASHCONV-718; pre-fix it emitted a capital
+//! `Detail` key, lowercased by the auth-shape fix); the re-render
+//! pins the exact compact/spaced flavor per endpoint. The open/delete
 //! 401 renders lowercase-compact with the `Bearer` challenge (DRF's
 //! `exception_handler`); the poll 401 renders lowercase-spaced with
 //! no challenge (the hand-built `JsonResponse`); 500s pass through
@@ -88,7 +89,7 @@ use pidash_types::runner_sessions::{
 };
 
 use crate::runner_enroll::auth::{
-    authenticate_machine_token, MachineAuth, AUTHENTICATE_HEADER_BEARER,
+    authenticate_machine_token, MachineAuth, ALLOW_DELETE, ALLOW_POST, AUTHENTICATE_HEADER_BEARER,
 };
 use crate::runner_runs::{json_response, pool_of, server_error};
 use crate::state::AppState;
@@ -271,7 +272,7 @@ fn poll_body(bytes: &[u8]) -> Result<Map<String, Value>, Response> {
 /// Read a machine-generated D-13 denial body back into its code,
 /// returning the code plus the rebuilt response. Accepts lowercase
 /// `detail` (what `auth.rs` renders since PIDASHCONV-718) plus the
-/// legacy pre-718 capital `Detail` for tolerance; anything else yields
+/// pre-fix capital `Detail` for tolerance; anything else yields
 /// `None` and the caller passes the rebuilt response through
 /// untouched. The auth lookups are private to `runner_enroll::auth`
 /// (read-only for this issue), so the code comes back out of the
@@ -298,8 +299,10 @@ async fn denial_code(response: Response) -> (Option<String>, Response) {
 }
 
 /// Re-render a D-13 machine-token denial for the DRF open/delete
-/// endpoints: the 401 keeps its code and `Bearer` challenge but
-/// renders lowercase-compact (DRF's `exception_handler`), like the
+/// endpoints: the 401 keeps its code, its `Bearer` challenge, and its
+/// `Allow` (DRF's `finalize_response` stamps the view's `Allow` on error
+/// responses too, rendered by `auth.rs` — PIDASHCONV-781) but renders
+/// lowercase-compact (DRF's `exception_handler`), like the
 /// PIDASHCONV-590 handlers do locally. 500s and unrecognized shapes
 /// pass through untouched.
 async fn open_denial(response: Response) -> Response {
@@ -310,10 +313,14 @@ async fn open_denial(response: Response) -> Response {
     match code {
         Some(code) => {
             let rendered = unauthorized_drf(&code);
-            Response::builder()
+            let mut builder = Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .header(header::CONTENT_TYPE, "application/json")
-                .header(header::WWW_AUTHENTICATE, AUTHENTICATE_HEADER_BEARER)
+                .header(header::WWW_AUTHENTICATE, AUTHENTICATE_HEADER_BEARER);
+            if let Some(allow) = response.headers().get(header::ALLOW) {
+                builder = builder.header(header::ALLOW, allow.clone());
+            }
+            builder
                 .body(axum::body::Body::from(rendered.body))
                 .unwrap_or_else(|_| server_error())
         }
@@ -364,10 +371,11 @@ pub async fn machine_session_open(
         Err(response) => return response,
     };
     let secret = state.settings().secret_key.clone();
-    let auth = match authenticate_machine_token(&pool, secret.as_bytes(), &headers).await {
-        Ok(auth) => auth,
-        Err(response) => return open_denial(response).await,
-    };
+    let auth =
+        match authenticate_machine_token(&pool, secret.as_bytes(), &headers, ALLOW_POST).await {
+            Ok(auth) => auth,
+            Err(response) => return open_denial(response).await,
+        };
     if authed_machine_id(auth.as_ref(), dev_machine_id).is_none() {
         return render(dev_machine_mismatch_drf());
     }
@@ -506,10 +514,11 @@ pub async fn machine_session_delete(
         Err(response) => return response,
     };
     let secret = state.settings().secret_key.clone();
-    let auth = match authenticate_machine_token(&pool, secret.as_bytes(), &headers).await {
-        Ok(auth) => auth,
-        Err(response) => return open_denial(response).await,
-    };
+    let auth =
+        match authenticate_machine_token(&pool, secret.as_bytes(), &headers, ALLOW_DELETE).await {
+            Ok(auth) => auth,
+            Err(response) => return open_denial(response).await,
+        };
     if authed_machine_id(auth.as_ref(), dev_machine_id).is_none() {
         return render(dev_machine_mismatch_drf());
     }
@@ -725,10 +734,14 @@ pub async fn machine_session_poll(
         Err(response) => return response,
     };
     let secret = state.settings().secret_key.clone();
-    let auth = match authenticate_machine_token(&pool, secret.as_bytes(), &headers).await {
-        Ok(auth) => auth,
-        Err(response) => return poll_denial(response).await,
-    };
+    // The poll view is plain Django (no DRF `Allow` anywhere), so the
+    // threaded value below never reaches the wire: `poll_denial`'s
+    // rebuild drops it, exactly like the source's hand-built `JsonResponse`.
+    let auth =
+        match authenticate_machine_token(&pool, secret.as_bytes(), &headers, ALLOW_POST).await {
+            Ok(auth) => auth,
+            Err(response) => return poll_denial(response).await,
+        };
     if authed_machine_id(auth.as_ref(), dev_machine_id).is_none() {
         return render(dev_machine_mismatch_poll());
     }
@@ -984,19 +997,20 @@ mod tests {
             .status(StatusCode::UNAUTHORIZED)
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::WWW_AUTHENTICATE, AUTHENTICATE_HEADER_BEARER)
+            .header(header::ALLOW, ALLOW_POST)
             .body(axum::body::Body::from(
                 r#"{"detail":"machine_token_invalid"}"#,
             ))
             .expect("denial builds")
     }
 
-    /// The open/delete 401 re-render: the D-13 denial keeps its code
-    /// and `Bearer` challenge but renders lowercase-compact, exactly
-    /// DRF's `exception_handler`; 500s pass through untouched.
+    /// The open/delete 401 re-render: the D-13 denial keeps its code,
+    /// `Bearer` challenge, and `Allow` but renders lowercase-compact,
+    /// exactly DRF's `exception_handler`; 500s pass through untouched.
     #[tokio::test]
     async fn open_denial_rerenders_401_lowercase_compact_with_challenge() {
         for denial in [
-            bearer_failure_response(CODE_MACHINE_TOKEN_INVALID),
+            bearer_failure_response(CODE_MACHINE_TOKEN_INVALID, ALLOW_POST),
             post_718_denial(),
         ] {
             let denied = open_denial(denial).await;
@@ -1009,6 +1023,10 @@ mod tests {
                 Some("Bearer")
             );
             assert_eq!(
+                denied.headers().get(header::ALLOW).unwrap(),
+                "POST, OPTIONS"
+            );
+            assert_eq!(
                 body_text(denied).await,
                 r#"{"detail":"machine_token_invalid"}"#
             );
@@ -1018,18 +1036,19 @@ mod tests {
     }
 
     /// The poll 401 re-render: the D-13 denial keeps its code but
-    /// renders lowercase-spaced with no challenge, exactly the
-    /// hand-built `JsonResponse` (`:304-307`); 500s pass through
+    /// renders lowercase-spaced with no challenge and no `Allow`, exactly
+    /// the hand-built `JsonResponse` (`:304-307`); 500s pass through
     /// untouched.
     #[tokio::test]
     async fn poll_denial_rerenders_401_spaced_without_challenge() {
         for denial in [
-            bearer_failure_response(CODE_MACHINE_TOKEN_INVALID),
+            bearer_failure_response(CODE_MACHINE_TOKEN_INVALID, ALLOW_POST),
             post_718_denial(),
         ] {
             let denied = poll_denial(denial).await;
             assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
             assert!(denied.headers().get(header::WWW_AUTHENTICATE).is_none());
+            assert!(denied.headers().get(header::ALLOW).is_none());
             assert_eq!(
                 body_text(denied).await,
                 r#"{"detail": "machine_token_invalid"}"#

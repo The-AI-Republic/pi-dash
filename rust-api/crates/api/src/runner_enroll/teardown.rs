@@ -801,6 +801,7 @@ pub async fn runner_self_revoke(
         &ring,
         &headers,
         Some(&raw_id),
+        enroll_auth::ALLOW_DELETE,
     )
     .await
     {
