@@ -34,6 +34,7 @@ export const NotificationFilterOptionItem = observer(function NotificationFilter
   return (
     <div
       key={value}
+      data-testid={`notifications-filter-option-${value}`}
       className="flex cursor-pointer items-center gap-2 rounded-xs p-1 px-2 transition-all hover:bg-layer-1"
       onClick={() => handleFilterTypeChange(value, !isSelected)}
     >

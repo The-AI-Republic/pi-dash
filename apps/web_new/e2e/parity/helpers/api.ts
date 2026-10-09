@@ -10643,6 +10643,66 @@ export async function serverNotificationMarkRead(
   if (!res.ok) throw new Error(`[parity] notification mark-read failed with HTTP ${res.status}.`);
 }
 
+/** Mark one notification unread (fixture setup; the UI control is NTF-018's). */
+export async function serverNotificationMarkUnread(
+  workspaceSlug: string,
+  notificationId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/users/notifications/${notificationId}/read/`, {
+    method: "DELETE",
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] notification mark-unread failed with HTTP ${res.status}.`);
+}
+
+/** Archive one notification (fixture setup; the UI control is NTF-019's). */
+export async function serverNotificationArchive(
+  workspaceSlug: string,
+  notificationId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/users/notifications/${notificationId}/archive/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] notification archive failed with HTTP ${res.status}.`);
+}
+
+/** Unarchive one notification (fixture setup; the UI control is NTF-019's). */
+export async function serverNotificationUnarchive(
+  workspaceSlug: string,
+  notificationId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/users/notifications/${notificationId}/archive/`, {
+    method: "DELETE",
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] notification unarchive failed with HTTP ${res.status}.`);
+}
+
+/**
+ * Unsubscribe the session owner from an issue (fixture setup for origin
+ * isolation: keeps an assigned fixture out of the subscribed origin).
+ */
+export async function serverUnsubscribeIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/subscribe/`,
+    { method: "DELETE", headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] issue unsubscribe failed with HTTP ${res.status}.`);
+}
+
 /** Mark the scope read in bulk (fixture setup; the UI control is NTF-014's). */
 export async function serverNotificationsMarkAllRead(
   workspaceSlug: string,
