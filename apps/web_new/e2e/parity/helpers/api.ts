@@ -11119,3 +11119,178 @@ export async function serverEmailLogCount(receiverEmail: string, entityIdentifie
   if (!/^\d+$/.test(count)) throw new Error("[parity] email-log count produced no numeric row.");
   return Number(count);
 }
+
+// --- Archives: modules/cycles fixtures (NEWFRONT-225, ARCH-020..025). ---
+// Appended; existing helpers above are untouched per the shared harness
+// contract. Fixture writes (patch/archive/restore) plus server-state reads
+// for the archived-modules oracle scenarios. Restore uses the live
+// frontend path DELETE .../modules/{id}/archive/ (probed 204 on the seeded
+// stack; the Notes-flagged .../archived-modules/{id}/unarchive/ 404s on
+// /api and needs token auth on /api/v1, so it is not the app path).
+
+/** One archived module as the archived-modules list reports it. */
+export interface ArchivesModuleRow {
+  id: string;
+  name: string;
+  status: string;
+  archivedAt: string | null;
+}
+
+function archivesModuleRowOf(row: Record<string, unknown>): ArchivesModuleRow {
+  if (typeof row["id"] !== "string" || typeof row["name"] !== "string") {
+    throw new Error("[parity] archived-module row carried no string id/name.");
+  }
+  const archivedAt = row["archived_at"];
+  return {
+    id: row["id"],
+    name: row["name"],
+    status: typeof row["status"] === "string" ? row["status"] : "",
+    archivedAt: typeof archivedAt === "string" ? archivedAt : null,
+  };
+}
+
+/** Patch a module (fixture setup: status, lead, dates). Unknown keys are the server's to reject. */
+export async function archivesPatchModule(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  patch: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/`,
+    sessionCookie,
+    patch
+  );
+  if (!res.ok) throw new Error(`[parity] module patch failed with HTTP ${res.status}.`);
+}
+
+/** Archive one module; resolves with the stored archived_at stamp. */
+export async function archivesArchiveModule(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/archive/`,
+    sessionCookie
+  );
+  if (!res.ok) throw new Error(`[parity] module archive failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["archived_at"] !== "string") throw new Error("[parity] module archive carried no archived_at.");
+  return rec["archived_at"];
+}
+
+/** Restore one archived module through the live frontend path. */
+export async function archivesRestoreModule(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/archive/`,
+    sessionCookie
+  );
+  if (res.status !== 204 && res.status !== 200) {
+    throw new Error(`[parity] module restore failed with HTTP ${res.status}.`);
+  }
+}
+
+/** Archived modules of a project, in API order. */
+export async function archivesArchivedModules(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ArchivesModuleRow[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/archived-modules/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] archived-modules read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => archivesModuleRowOf(row as Record<string, unknown>));
+}
+
+/** One archived module's detail record (what the peek panel fetches). */
+export async function archivesArchivedModuleDetail(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/archived-modules/${moduleId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] archived-module detail read failed with HTTP ${res.status}.`);
+  return (await res.json()) as Record<string, unknown>;
+}
+
+/**
+ * Whether a module currently reads as archived. The live detail read 404s
+ * for archived modules (probed), so a 404 means archived; a 200 resolves
+ * from the record's own stamp. Any other status throws.
+ */
+export async function archivesModuleIsArchived(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status === 404) return true;
+  if (!res.ok) throw new Error(`[parity] module detail read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  return typeof rec["archived_at"] === "string" && rec["archived_at"] !== "";
+}
+
+/** Archive one cycle; the cycle must already be past its end date. */
+export async function archivesArchiveCycle(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/archive/`,
+    sessionCookie
+  );
+  if (!res.ok) throw new Error(`[parity] cycle archive failed with HTTP ${res.status}.`);
+}
+
+/** Archived cycles of a project: id plus name. */
+export async function archivesArchivedCycles(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; name: string }[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/archived-cycles/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] archived-cycles read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    if (typeof rec["id"] !== "string" || typeof rec["name"] !== "string") {
+      throw new Error("[parity] archived-cycle row carried no string id/name.");
+    }
+    return { id: rec["id"], name: rec["name"] };
+  });
+}
