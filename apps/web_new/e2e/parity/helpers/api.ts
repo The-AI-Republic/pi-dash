@@ -40,9 +40,12 @@ async function fetchTolerant(input: string, init?: RequestInit, retries = 5): Pr
 
 /** Run a Django shell snippet inside the stack's api container; resolves with stdout. */
 export async function apiShell(python: string): Promise<string> {
+  // Slots verifying against a prefixed stack point this at their own api
+  // container; the shared parity19 default is unchanged (NEWFRONT-42).
+  const container = process.env["PARITY_API_CONTAINER"] ?? "parity19-api";
   const { stdout } = await execFileAsync(
     "docker",
-    ["exec", "-i", "parity19-api", "python", "manage.py", "shell", "-c", python],
+    ["exec", "-i", container, "python", "manage.py", "shell", "-c", python],
     {
       timeout: 120_000,
     }
@@ -11313,4 +11316,322 @@ export async function serverArchivesProjectFlags(
   if (typeof record["cycle_view"] !== "boolean" || typeof record["module_view"] !== "boolean")
     throw new Error("[parity] project carried no boolean cycle_view/module_view.");
   return { cycleView: record["cycle_view"], moduleView: record["module_view"] };
+}
+
+// --- Views area server helpers (NEWFRONT-42, VIEW-*). Appended; existing
+// --- helpers above are untouched per the shared harness contract. Two
+// --- inventory corrections are baked in: the UI favorites views through
+// --- the generic user-favorites collection (entity_type "view"), never
+// --- through the legacy user-favorite-views service methods (no callers);
+// --- and a view detail's issues resolve through the issues list with the
+// --- view's stored query, never through the uncalled
+// --- views/{id}/issues/ service method (no backend route).
+
+/** Access flag as the server stores it: 0 private, 1 public. */
+export const VIEW_ACCESS = { PRIVATE: 0, PUBLIC: 1 } as const;
+
+/** A saved project view as the retrieve endpoint reports it. */
+export interface ParityProjectViewDetail {
+  id: string;
+  name: string;
+  description: string;
+  access: number;
+  owned_by: string | null;
+  is_favorite: boolean;
+  is_locked: boolean;
+  logo_props: unknown;
+  rich_filters: unknown;
+  display_filters: unknown;
+  display_properties: unknown;
+}
+
+function projectViewDetailOf(row: Record<string, unknown>): ParityProjectViewDetail {
+  if (typeof row["id"] !== "string" || typeof row["name"] !== "string")
+    throw new Error("[parity] view row carried no string id/name.");
+  const owned = row["owned_by"];
+  return {
+    id: row["id"],
+    name: row["name"],
+    description: typeof row["description"] === "string" ? row["description"] : "",
+    access: typeof row["access"] === "number" ? row["access"] : VIEW_ACCESS.PUBLIC,
+    owned_by: typeof owned === "string" ? owned : null,
+    is_favorite: row["is_favorite"] === true,
+    is_locked: row["is_locked"] === true,
+    logo_props: row["logo_props"] ?? null,
+    rich_filters: row["rich_filters"] ?? null,
+    display_filters: row["display_filters"] ?? null,
+    display_properties: row["display_properties"] ?? null,
+  };
+}
+
+/** One saved project view by id, as the server reports it. */
+export async function serverProjectViewDetail(
+  workspaceSlug: string,
+  projectId: string,
+  viewId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityProjectViewDetail> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/${viewId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] view detail read failed with HTTP ${res.status}.`);
+  return projectViewDetailOf((await res.json()) as Record<string, unknown>);
+}
+
+/** Raw view-detail status (missing/forbidden proofs read the code, not the row). */
+export async function serverProjectViewStatus(
+  workspaceSlug: string,
+  projectId: string,
+  viewId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/${viewId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  return res.status;
+}
+
+/** Create a saved project view with a full payload; returns its id. */
+export async function createProjectViewFull(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/`,
+    sessionCookie,
+    body
+  );
+  if (!res.ok) throw new Error(`[parity] view create failed with HTTP ${res.status}.`);
+  const view = (await res.json()) as { id?: unknown };
+  if (typeof view.id !== "string") throw new Error("[parity] view create returned no id.");
+  return view.id;
+}
+
+/** Raw view-create outcome: status plus payload (validation proofs). */
+export async function serverCreateProjectViewRaw(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/`,
+    sessionCookie,
+    body
+  );
+  let payload: unknown = null;
+  try {
+    payload = (await res.json()) as unknown;
+  } catch {
+    payload = null;
+  }
+  return { status: res.status, payload };
+}
+
+/** Patch a saved project view (owner-only server-side). */
+export async function patchProjectView(
+  workspaceSlug: string,
+  projectId: string,
+  viewId: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/${viewId}/`,
+    sessionCookie,
+    body
+  );
+  if (!res.ok) throw new Error(`[parity] view patch failed with HTTP ${res.status}.`);
+}
+
+/**
+ * Plant fixture state the OSS API cannot write: access and is_locked are
+ * serializer read-only (VIEW-019/VIEW-025), so the lock/private render
+ * paths are proven by flipping the row in the container and reading it
+ * back through the public GET. Callers delete the view after.
+ */
+export async function serverPlantViewFlags(
+  viewId: string,
+  flags: { access?: number; is_locked?: boolean }
+): Promise<void> {
+  const sets: string[] = [];
+  if (flags.access !== undefined) sets.push(`access=${JSON.stringify(flags.access)}`);
+  if (flags.is_locked !== undefined) sets.push(`is_locked=${flags.is_locked ? "True" : "False"}`);
+  if (sets.length === 0) return;
+  const out = await apiShell(
+    `from pi_dash.db.models import IssueView\n` +
+      `IssueView.objects.filter(id=${JSON.stringify(viewId)}).update(${sets.join(", ")})\n` +
+      `print("PARITY_VIEW_FLAGS_OK")\n`
+  );
+  if (!out.includes("PARITY_VIEW_FLAGS_OK")) throw new Error("[parity] view flag plant produced no marker.");
+}
+
+/** A custom workspace view as the retrieve endpoint reports it. */
+export interface ParityWorkspaceViewDetail {
+  id: string;
+  name: string;
+  description: string;
+  access: number;
+  owned_by: string | null;
+  is_locked: boolean;
+  rich_filters: unknown;
+  display_filters: unknown;
+  display_properties: unknown;
+}
+
+function workspaceViewDetailOf(row: Record<string, unknown>): ParityWorkspaceViewDetail {
+  if (typeof row["id"] !== "string" || typeof row["name"] !== "string")
+    throw new Error("[parity] workspace view row carried no string id/name.");
+  const owned = row["owned_by"];
+  return {
+    id: row["id"],
+    name: row["name"],
+    description: typeof row["description"] === "string" ? row["description"] : "",
+    access: typeof row["access"] === "number" ? row["access"] : VIEW_ACCESS.PUBLIC,
+    owned_by: typeof owned === "string" ? owned : null,
+    is_locked: row["is_locked"] === true,
+    rich_filters: row["rich_filters"] ?? null,
+    display_filters: row["display_filters"] ?? null,
+    display_properties: row["display_properties"] ?? null,
+  };
+}
+
+/** Custom workspace views as the server reports them (defaults are static). */
+export async function serverWorkspaceViews(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityWorkspaceViewDetail[]> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/views/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] workspace views read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => workspaceViewDetailOf(row as Record<string, unknown>));
+}
+
+/** One custom workspace view by id, as the server reports it. */
+export async function serverWorkspaceViewDetail(
+  workspaceSlug: string,
+  viewId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityWorkspaceViewDetail> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/views/${viewId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] workspace view read failed with HTTP ${res.status}.`);
+  return workspaceViewDetailOf((await res.json()) as Record<string, unknown>);
+}
+
+/** Create a custom workspace view; returns its id (callers delete it after). */
+export async function createWorkspaceViewFull(
+  workspaceSlug: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await mutateJSON("POST", `${apiBase}/api/workspaces/${workspaceSlug}/views/`, sessionCookie, body);
+  if (!res.ok) throw new Error(`[parity] workspace view create failed with HTTP ${res.status}.`);
+  const view = (await res.json()) as { id?: unknown };
+  if (typeof view.id !== "string") throw new Error("[parity] workspace view create returned no id.");
+  return view.id;
+}
+
+/** Patch a custom workspace view (owner-only server-side). */
+export async function patchWorkspaceView(
+  workspaceSlug: string,
+  viewId: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/views/${viewId}/`,
+    sessionCookie,
+    body
+  );
+  if (!res.ok) throw new Error(`[parity] workspace view patch failed with HTTP ${res.status}.`);
+}
+
+/** Delete a custom workspace view (keeps scenarios from leaking views). */
+export async function deleteWorkspaceView(
+  workspaceSlug: string,
+  viewId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON("DELETE", `${apiBase}/api/workspaces/${workspaceSlug}/views/${viewId}/`, sessionCookie);
+  if (!res.ok && res.status !== 204) throw new Error(`[parity] workspace view delete failed with HTTP ${res.status}.`);
+}
+
+/** A user-favorite row as the server reports it. */
+export interface ParityUserFavorite {
+  id: string;
+  entity_type: string;
+  entity_identifier: string;
+  project_id: string | null;
+}
+
+/** The session user's favorites in a workspace (views star through these). */
+export async function serverUserFavorites(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityUserFavorite[]> {
+  // NOTE: `?all=true` like the app itself — the bare list omits view rows.
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/user-favorites/?all=true`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] favorites read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const fav = row as { id?: unknown; entity_type?: unknown; entity_identifier?: unknown; project_id?: unknown };
+    if (typeof fav.id !== "string" || typeof fav.entity_identifier !== "string")
+      throw new Error("[parity] favorite row carried no id/entity.");
+    return {
+      id: fav.id,
+      entity_type: typeof fav.entity_type === "string" ? fav.entity_type : "",
+      entity_identifier: fav.entity_identifier,
+      project_id: typeof fav.project_id === "string" ? fav.project_id : null,
+    };
+  });
+}
+
+/** Delete one user-favorite row (favorite-toggle cleanup). */
+export async function deleteUserFavorite(
+  workspaceSlug: string,
+  favoriteId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/user-favorites/${favoriteId}/`,
+    sessionCookie
+  );
+  if (!res.ok && res.status !== 204) throw new Error(`[parity] favorite delete failed with HTTP ${res.status}.`);
+}
+
+/** Display name of the session user (chips show real names, never "You"). */
+export async function serverDisplayName(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<string> {
+  const res = await fetchShared(`${apiBase}/api/users/me/`, { headers: { cookie: sessionCookie } });
+  if (!res.ok) throw new Error(`[parity] users-me read failed with HTTP ${res.status}.`);
+  const me = (await res.json()) as { display_name?: unknown };
+  if (typeof me.display_name !== "string" || me.display_name === "")
+    throw new Error("[parity] users-me carried no display name.");
+  return me.display_name;
 }

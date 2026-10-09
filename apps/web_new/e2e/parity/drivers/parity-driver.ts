@@ -3919,6 +3919,264 @@ export interface ParityDriver {
     projectId: string,
     expression: ArchivesFilterExpression
   ): Promise<void>;
+
+  // --- Project views list (NEWFRONT-42, VIEW-001-012). Observed on the
+  // --- running old app: the list page titles its tab "<project> - Views"
+  // --- and trails project crumbs with a views crumb; the header carries
+  // --- an expandable search, a sort menu, a filters menu and an Add view
+  // --- action; rows link to the detail page with an access badge, the
+  // --- owner's avatar, a role-gated favorite star and an overflow menu.
+  // --- With the feature off the list is replaced by the gate empty state
+  // --- whose Manage-features shortcut only project admins can use.
+  /** Saved-view names in display order. */
+  viewsListNames(): Promise<string[]>;
+  /** Breadcrumb trail texts above the list. */
+  viewsListBreadcrumb(): Promise<string[]>;
+  /** Browser tab title on the views list. */
+  viewsListTabTitle(): Promise<string>;
+  /** Whether the header Add-view action renders. */
+  viewsHeaderAddVisible(): Promise<boolean>;
+  /** Open the create dialog from the header action; resolves once it opens. */
+  viewsOpenCreateFromHeader(): Promise<void>;
+  /** Whether the list loading skeleton currently shows. */
+  viewsListSkeletonVisible(): Promise<boolean>;
+  /** Delay views-list API answers by `ms` so the skeleton is observable. */
+  viewsDelayListLoad(ms: number): Promise<void>;
+  /** Zero-views empty-state title, or "" when the list renders. */
+  viewsEmptyTitle(): Promise<string>;
+  /** Whether the empty-state create action renders. */
+  viewsEmptyCreateVisible(): Promise<boolean>;
+  /** Whether the empty-state create action is enabled. */
+  viewsEmptyCreateEnabled(): Promise<boolean>;
+  /** Open the create dialog from the empty-state action; resolves once it opens. */
+  viewsEmptyCreateOpen(): Promise<void>;
+  /** No-match empty-state title, or "" when rows or the zero state render. */
+  viewsNoMatchTitle(): Promise<string>;
+  /** Deep-link href of the row `name`, or null when the row is absent. */
+  viewsRowHref(name: string): Promise<string | null>;
+  /** Access badge of the row `name` ("Public"/"Private"), "" when none shows. */
+  viewsRowAccess(name: string): Promise<string>;
+  /** Whether the row `name` shows its owner's avatar. */
+  viewsRowOwnerAvatar(name: string): Promise<boolean>;
+  /** Whether the row `name` carries the published Live marker. */
+  viewsRowLiveVisible(name: string): Promise<boolean>;
+  /** Whether the row `name` renders a favorite star (role-gated). */
+  viewsRowStarVisible(name: string): Promise<boolean>;
+  /** Whether the row `name`'s star shows selected. */
+  viewsRowStarSelected(name: string): Promise<boolean>;
+  /** Toggle the row `name`'s favorite star, after network quiescence. */
+  viewsToggleStar(name: string): Promise<void>;
+  /** Visible text of the row `name` (icon glyphs, name, badges). */
+  viewsRowText(name: string): Promise<string>;
+  // --- Project views list controls (NEWFRONT-42, VIEW-004-007). Observed
+  // --- on the running old app: the search field sits collapsed as an
+  // --- icon until opened; Escape clears the query first and collapses
+  // --- the empty field on a second press; the sort menu offers name and
+  // --- timestamps with a direction half; the filters menu offers
+  // --- favorites, creation date and creator (the access dimension is a
+  // --- cloud-only stub on this build); applied filters render as chips.
+  /** Whether the collapsed search trigger renders. */
+  viewsSearchTriggerVisible(): Promise<boolean>;
+  /** Open the collapsed search field; resolves once it focuses. */
+  viewsSearchOpen(): Promise<void>;
+  /** Whether the search field currently shows expanded. */
+  viewsSearchExpanded(): Promise<boolean>;
+  /** Type into the list search field. */
+  viewsSearchType(text: string): Promise<void>;
+  /** Current list-search query. */
+  viewsSearchValue(): Promise<string>;
+  /** Whether the list-search field currently holds focus. */
+  viewsSearchFocused(): Promise<boolean>;
+  /** Press Escape while the search field focuses. */
+  viewsSearchEscape(): Promise<void>;
+  /** Click the search field's clear control. */
+  viewsSearchClear(): Promise<void>;
+  /** Click outside the search field (breadcrumb area). */
+  viewsSearchClickOutside(): Promise<void>;
+  /** Sort trigger label (the active sort key). */
+  viewsSortTriggerText(): Promise<string>;
+  /** Open the sort menu. */
+  viewsSortOpen(): Promise<void>;
+  /** Sort menu item texts in display order. */
+  viewsSortMenuTexts(): Promise<string[]>;
+  /** Whether the sort menu item `text` carries the selected checkmark. */
+  viewsSortMenuSelected(text: string): Promise<boolean>;
+  /** Pick the sort menu item `text`; resolves once the menu closes. */
+  viewsSortPick(text: string): Promise<void>;
+  /** Open the list filters menu. */
+  viewsFiltersOpen(): Promise<void>;
+  /** Visible text of the open filters panel. */
+  viewsFiltersPanelText(): Promise<string>;
+  /** Toggle the favorites row in the open filters menu. */
+  viewsFiltersToggleFavorites(): Promise<void>;
+  /** Option texts of the created-date section in the open filters menu. */
+  viewsFiltersDateOptions(): Promise<string[]>;
+  /** Pick the created-date option `text` in the open filters menu. */
+  viewsFiltersPickDate(text: string): Promise<void>;
+  /** Member names offered in the created-by section of the open menu. */
+  viewsFiltersCreatorOptions(): Promise<string[]>;
+  /** Pick the creator `name` in the open filters menu. */
+  viewsFiltersPickCreator(name: string): Promise<void>;
+  /** Whether the open filters menu offers an access-type section (cloud-only). */
+  viewsFiltersAccessPresent(): Promise<boolean>;
+  /** Type into the open filters menu's own search box. */
+  viewsFiltersSearchType(text: string): Promise<void>;
+  /** Close the filters menu; resolves once the panel hides. */
+  viewsFiltersClose(): Promise<void>;
+  /** Whether the applied-filters chip strip renders. */
+  viewsChipsVisible(): Promise<boolean>;
+  /** Applied chip texts in display order. */
+  viewsChipTexts(): Promise<string[]>;
+  /** Remove one value from the `dimension` chip. */
+  viewsChipRemoveValue(dimension: string, value: string): Promise<void>;
+  /** Remove the whole `dimension` chip. */
+  viewsChipRemoveDimension(dimension: string): Promise<void>;
+  /** Click the clear-all chip; resolves once the strip hides. */
+  viewsChipsClearAll(): Promise<void>;
+  // --- Project views flag gate (NEWFRONT-42, VIEW-002). Observed on the
+  // --- running old app: with the project's views feature off, the list
+  // --- route renders an explanatory empty state instead of the list, with
+  // --- a Manage-features shortcut into project settings that stays
+  // --- disabled for non-admins.
+  /** Gate empty-state title, or "" when the list renders. */
+  viewsGateTitle(): Promise<string>;
+  /** Whether the gate's Manage-features shortcut renders. */
+  viewsGateManageVisible(): Promise<boolean>;
+  /** Whether the gate's Manage-features shortcut is enabled. */
+  viewsGateManageEnabled(): Promise<boolean>;
+  /** Follow the Manage-features shortcut; resolves on the settings page. */
+  viewsGateManageOpen(): Promise<void>;
+  // --- Project view dialog (NEWFRONT-42, VIEW-003, VIEW-013, VIEW-014,
+  // --- VIEW-015, VIEW-019). Observed on the running old app: the create
+  // --- and update forms share one dialog with an icon picker, a required
+  // --- title, an optional description, a layout picker, a Display
+  // --- dropdown and an expanded work-item filter builder; the access
+  // --- selector is a cloud-only stub on this build. Create success
+  // --- navigates to the new detail page; failure toasts and keeps the
+  // --- dialog open with its input intact.
+  /** Dialog heading ("Create View"/"Update View"), or null when closed. */
+  viewsDialogHeading(): Promise<string | null>;
+  /** Fill the dialog title field. */
+  viewsDialogFillTitle(text: string): Promise<void>;
+  /** Current dialog title value. */
+  viewsDialogTitleValue(): Promise<string>;
+  /** Inline title validation message, or "" when none shows. */
+  viewsDialogTitleError(): Promise<string>;
+  /** Fill the dialog description field. */
+  viewsDialogFillDescription(text: string): Promise<void>;
+  /** Current dialog description value. */
+  viewsDialogDescriptionValue(): Promise<string>;
+  /** Whether the dialog offers an access selector (cloud-only). */
+  viewsDialogAccessPresent(): Promise<boolean>;
+  /** Open the dialog icon picker. */
+  viewsDialogIconOpen(): Promise<void>;
+  /** Icon picker tab names in display order. */
+  viewsDialogIconTabs(): Promise<string[]>;
+  /** Pick the first glyph icon in the open picker. */
+  viewsDialogPickFirstIcon(): Promise<void>;
+  /** Emoji preview currently shown in the dialog, or "" when none shows. */
+  viewsDialogIconPreview(): Promise<string>;
+  /** Open the dialog Display dropdown. */
+  viewsDialogDisplayOpen(): Promise<void>;
+  /** Display option texts in the open dropdown. */
+  viewsDialogDisplayTexts(): Promise<string[]>;
+  /** Whether the work-item filter builder renders expanded in the dialog. */
+  viewsDialogFiltersExpanded(): Promise<boolean>;
+  /** Current dialog layout choice label. */
+  viewsDialogLayoutValue(): Promise<string>;
+  /** Pick a layout in the dialog layout dropdown. */
+  viewsDialogPickLayout(label: string): Promise<void>;
+  /** Dismiss the dialog with Escape; resolves once it hides. */
+  viewsDialogEscape(): Promise<void>;
+  /** Cancel the dialog; resolves once it closes. */
+  viewsDialogCancel(): Promise<void>;
+  /** Submit the dialog's primary action; resolves once it closes. */
+  viewsDialogSubmit(): Promise<void>;
+  /** Click the dialog's submit without waiting (failure-path proofs). */
+  viewsDialogSubmitAttempt(): Promise<void>;
+  /** Whether the view dialog is currently open. */
+  viewsDialogOpen(): Promise<boolean>;
+  /** Fail the next view write with HTTP `status` (failure-path proofs). */
+  viewsFailNextWrite(status: number): Promise<void>;
+  // --- Project view row menu (NEWFRONT-42, VIEW-016, VIEW-017, VIEW-018,
+  // --- VIEW-020). Observed on the running old app: each row's overflow
+  // --- menu offers edit for the owner, open-in-new-tab and copy-link for
+  // --- every role, and delete for the owner or a project admin; the
+  // --- publish entry is a cloud-only stub on this build.
+  /** Open the row `name`'s overflow menu; resolves once items show. */
+  viewsRowMenuOpen(name: string): Promise<void>;
+  /** Visible overflow-menu item texts in display order. */
+  viewsRowMenuItems(): Promise<string[]>;
+  /** Pick the overflow-menu item `item`; resolves once the menu closes. */
+  viewsRowMenuPick(item: string): Promise<void>;
+  /** Copy the row's deep link; resolves with the clipboard text. */
+  viewsRowCopyLink(name: string): Promise<string>;
+  /** Whether the open menu offers a publish entry (cloud-only). */
+  viewsRowMenuPublishPresent(): Promise<boolean>;
+  /** Open the row `name`'s menu and follow its new-tab entry; resolves with the popup URL. */
+  viewsRowOpenNewTabHref(name: string): Promise<string>;
+  // --- Project view delete (NEWFRONT-42, VIEW-016). Observed on the
+  // --- running old app: deletion confirms through a modal that names
+  // --- the loss (sort, filter, display and layout), then toasts and
+  // --- returns to the list.
+  /** Delete-confirmation title, or "" when closed. */
+  viewsDeleteTitle(): Promise<string>;
+  /** Delete-confirmation body text, or "" when closed. */
+  viewsDeleteBody(): Promise<string>;
+  /** Confirm deletion; resolves once the modal closes. */
+  viewsDeleteConfirm(): Promise<void>;
+  /** Click delete confirm without waiting for the modal to close. */
+  viewsDeleteConfirmAttempt(): Promise<void>;
+  /** Cancel deletion; resolves once the modal closes. */
+  viewsDeleteCancel(): Promise<void>;
+  /** Detail breadcrumb trail texts (project, list, current view). */
+  viewsDetailBreadcrumb(): Promise<string[]>;
+  /** Missing-view error title, or "" when the detail renders. */
+  viewsDetailErrorTitle(): Promise<string>;
+  /** Click the error state's back-to-list button. */
+  viewsDetailErrorBack(): Promise<void>;
+  /** Open the detail view switcher from the current view `name`. */
+  viewsDetailSwitcherOpen(name: string): Promise<void>;
+  /** Switcher option names in display order. */
+  viewsDetailSwitcherOptions(): Promise<string[]>;
+  /** Whether the switcher offers a search box. */
+  viewsDetailSwitcherSearchVisible(): Promise<boolean>;
+  /** Type into the switcher search box. */
+  viewsDetailSwitcherSearch(text: string): Promise<void>;
+  /** Pick a switcher option by name; resolves once navigation lands. */
+  viewsDetailSwitcherPick(name: string): Promise<void>;
+  /** Whether the private-view lock shows in the detail header. */
+  viewsDetailLockVisible(): Promise<boolean>;
+  /** Active layout index (0 list, 1 board, 2 calendar, 3 table, 4 timeline). */
+  viewsDetailLayoutActive(): Promise<number>;
+  /** Pick a layout by index; resolves once the choice applies. */
+  viewsDetailLayoutPick(index: number): Promise<void>;
+  /** Whether the layout switcher renders in the detail header. */
+  viewsDetailLayoutVisible(): Promise<boolean>;
+  /** Whether the display dropdown renders in the detail header. */
+  viewsDetailDisplayVisible(): Promise<boolean>;
+  /** Whether the work-item filter toggle renders in the detail header. */
+  viewsDetailFiltersToggleVisible(): Promise<boolean>;
+  /** Whether the add-work-item button renders in the detail header. */
+  viewsDetailAddVisible(): Promise<boolean>;
+  /** Empty-issues title on a fresh/empty detail, or "" when rows render. */
+  viewsDetailEmptyTitle(): Promise<string>;
+  /** Browser tab title on the detail page. */
+  viewsDetailTabTitle(): Promise<string>;
+  /** Display dropdown option texts for the active layout. */
+  viewsDetailDisplayOptions(): Promise<string[]>;
+  /** Add a saved-query condition; resolves once Update view offers. */
+  viewsDetailFilterAdd(property: string, value: string): Promise<void>;
+  /** Click Update view; resolves once the button hides. */
+  viewsDetailUpdateView(): Promise<void>;
+  /** Whether the Save as button offers in the filter row. */
+  viewsDetailSaveAsVisible(): Promise<boolean>;
+  /** Click Save as in the filter row. */
+  viewsDetailSaveAsClick(): Promise<void>;
+  /** Click the Add work item button. */
+  viewsDetailAddClick(): Promise<void>;
+  /** Whether the detail body text currently contains `name`. */
+  viewsDetailShowsIssue(name: string): Promise<boolean>;
 }
 
 /** One catalog table row: the user-visible definition facts. */

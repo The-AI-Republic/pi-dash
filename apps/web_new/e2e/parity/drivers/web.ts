@@ -14,7 +14,7 @@
 // back to structural reads (icon glyph, header position) proven
 // element-identical on the oracle. Tab reads scope to the nested
 // workspace main so sidebar rows and issue rows never leak in.
-import { expect, type ElementHandle, type Locator, type Page } from "@playwright/test";
+import { expect, type ElementHandle, type Locator, type Page, type Route } from "@playwright/test";
 import type {
   ArchivesFilterExpression,
   ArchivesListQuery,
@@ -21433,5 +21433,956 @@ export class WebDriver implements ParityDriver {
     );
     await this.page.reload();
     await this.archivesTabLink("issues").waitFor({ state: "visible", timeout: 120_000 });
+  }
+
+  // --- Project views list (NEWFRONT-42, VIEW-001-012). Rows are ListItem
+  // --- ControlLink anchors to the detail page; the breadcrumb "Views"
+  // --- link (bare /views/ href) and the sidebar favorites (inside the
+  // --- complementary aside) are excluded structurally, never by a hook
+  // --- added to apps/web.
+
+  private viewsRowLinks(): Locator {
+    // Detail hrefs end /views/{id}; the breadcrumb crumb ends /views/.
+    return this.page.locator(
+      'xpath=//a[contains(@href, "/views/") and not(ancestor::aside) and substring(@href, string-length(@href) - 6) != "/views/"]'
+    );
+  }
+
+  private viewsRowTitles(): Locator {
+    return this.viewsRowLinks().locator("span.truncate");
+  }
+
+  private async viewsRowIndex(name: string): Promise<number | null> {
+    const titles = await this.viewsRowTitles().allInnerTexts();
+    const index = titles.map((t) => t.trim()).findIndex((t) => t === name);
+    return index === -1 ? null : index;
+  }
+
+  private viewsRowContainer(link: Locator): Locator {
+    // ListItem nests anchor < title row < Row; the Row carries the actions.
+    return link.locator("xpath=../..");
+  }
+
+  private viewsRowActions(row: Locator): Locator {
+    // The actionable container is the Row's only flex-wrap child.
+    return row.locator("div.flex-wrap").first();
+  }
+
+  private async viewsRowLinkByName(name: string): Promise<Locator> {
+    const index = await this.viewsRowIndex(name);
+    if (index === null) throw new Error(`[parity] no views-list row named ${JSON.stringify(name)}.`);
+    return this.viewsRowLinks().nth(index);
+  }
+
+  async viewsListNames(): Promise<string[]> {
+    const titles = await this.viewsRowTitles().allInnerTexts();
+    return titles.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async viewsListBreadcrumb(): Promise<string[]> {
+    const texts = await this.breadcrumbItems().allTextContents();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async viewsListTabTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async viewsHeaderAddVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Add view", exact: true }));
+  }
+
+  async viewsOpenCreateFromHeader(): Promise<void> {
+    await this.page.getByRole("button", { name: "Add view", exact: true }).click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Create View" }).waitFor({ timeout: 30_000 });
+  }
+
+  async viewsListSkeletonVisible(): Promise<boolean> {
+    // The list loader pulses a flex-col stack of padded rows; the
+    // breadcrumb pulse loader is an h-7 row without flex-col.
+    return this.isShown(this.page.locator("div.animate-pulse.flex-col").filter({ has: this.page.locator("div.p-4") }));
+  }
+
+  async viewsDelayListLoad(ms: number): Promise<void> {
+    // Hold list GETs (bare /views/ only; detail and writes pass through)
+    // so the skeleton stays up long enough to observe.
+    const hold = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue();
+    };
+    await this.page.route("**/projects/*/views/", hold);
+    await this.page.route("**/projects/*/views/?*", hold);
+  }
+
+  async viewsEmptyTitle(): Promise<string> {
+    const heading = this.page.getByRole("heading", { name: "Save custom views for your project" });
+    if (!(await this.isShown(heading))) return "";
+    return (
+      (await heading
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async viewsEmptyCreateVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Create view", exact: true }));
+  }
+
+  async viewsEmptyCreateEnabled(): Promise<boolean> {
+    const action = this.page.getByRole("button", { name: "Create view", exact: true });
+    if ((await action.count()) === 0) return false;
+    return action.first().isEnabled();
+  }
+
+  async viewsEmptyCreateOpen(): Promise<void> {
+    await this.page.getByRole("button", { name: "Create view", exact: true }).click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Create View" }).waitFor({ timeout: 30_000 });
+  }
+
+  async viewsNoMatchTitle(): Promise<string> {
+    const heading = this.page.getByRole("heading", { name: "No matching results." });
+    if (!(await this.isShown(heading))) return "";
+    return (
+      (await heading
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async viewsRowHref(name: string): Promise<string | null> {
+    if ((await this.viewsRowIndex(name)) === null) return null;
+    const link = await this.viewsRowLinkByName(name);
+    return link.getAttribute("href");
+  }
+
+  async viewsRowAccess(name: string): Promise<string> {
+    // The badge is the actions container's first child: a lucide earth for
+    // shared views, the custom lock glyph for owner-only views.
+    const link = await this.viewsRowLinkByName(name);
+    const badge = this.viewsRowActions(this.viewsRowContainer(link)).locator("xpath=./div[1]");
+    if ((await badge.locator("svg.lucide-earth").count()) > 0) return "Public";
+    if ((await badge.locator("svg").count()) > 0) return "Private";
+    return "";
+  }
+
+  async viewsRowOwnerAvatar(name: string): Promise<boolean> {
+    const link = await this.viewsRowLinkByName(name);
+    const actions = this.viewsRowActions(this.viewsRowContainer(link));
+    return this.isShown(actions.locator("div.grid.place-items-center.overflow-hidden"));
+  }
+
+  async viewsRowLiveVisible(name: string): Promise<boolean> {
+    const link = await this.viewsRowLinkByName(name);
+    const row = this.viewsRowContainer(link);
+    return this.isShown(row.getByText("Live", { exact: true }));
+  }
+
+  private async viewsRowStarButton(name: string): Promise<Locator | null> {
+    const link = await this.viewsRowLinkByName(name);
+    const actions = this.viewsRowActions(this.viewsRowContainer(link));
+    const stars = actions.locator("button").filter({ has: this.page.locator("svg.lucide-star") });
+    if ((await stars.count()) === 0) return null;
+    return stars.first();
+  }
+
+  async viewsRowStarVisible(name: string): Promise<boolean> {
+    const star = await this.viewsRowStarButton(name);
+    if (star === null) return false;
+    return this.isShown(star);
+  }
+
+  async viewsRowStarSelected(name: string): Promise<boolean> {
+    const star = await this.viewsRowStarButton(name);
+    if (star === null) return false;
+    const cls = await star.locator("svg.lucide-star").first().getAttribute("class");
+    return (cls ?? "").includes("fill-");
+  }
+
+  async viewsToggleStar(name: string): Promise<void> {
+    // The list fires its views/ GET twice on load; a duplicate response
+    // landing after the toggle would overwrite the optimistic star with
+    // stale data (NEWFRONT-220). Quiesce first so nothing is outstanding.
+    await this.page.waitForLoadState("networkidle", { timeout: 30_000 }).catch(() => undefined);
+    const star = await this.viewsRowStarButton(name);
+    if (star === null) throw new Error(`[parity] no star on the row ${JSON.stringify(name)}.`);
+    await star.click({ timeout: 30_000 });
+  }
+
+  async viewsRowText(name: string): Promise<string> {
+    const link = await this.viewsRowLinkByName(name);
+    const row = this.viewsRowContainer(link);
+    return ((await row.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  // --- Project views list controls (NEWFRONT-42, VIEW-004-007). The
+  // --- collapsed search trigger is an icon-only button carrying a
+  // --- negative-margin utility class; the filters panel is the shared
+  // --- 18.75rem popover; chips hang off the clear-all action.
+
+  private viewsSearchInput(): Locator {
+    // The page mounts more than one "Search" box (the filters menu owns
+    // one when open); the list field is the visible header one.
+    return this.page.getByPlaceholder("Search", { exact: true }).filter({ visible: true }).first();
+  }
+
+  async viewsSearchTriggerVisible(): Promise<boolean> {
+    return this.isShown(this.page.locator("button.-mr-1"));
+  }
+
+  async viewsSearchOpen(): Promise<void> {
+    await this.page.locator("button.-mr-1").click({ timeout: 30_000 });
+    await this.viewsSearchInput().waitFor({ state: "visible", timeout: 15_000 });
+  }
+
+  async viewsSearchExpanded(): Promise<boolean> {
+    return this.isShown(this.viewsSearchInput());
+  }
+
+  async viewsSearchType(text: string): Promise<void> {
+    await this.viewsSearchInput().fill(text, { timeout: 30_000 });
+  }
+
+  async viewsSearchValue(): Promise<string> {
+    return this.viewsSearchInput().inputValue();
+  }
+
+  async viewsSearchFocused(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      const active = document.activeElement;
+      return active instanceof HTMLInputElement && active.getAttribute("placeholder") === "Search";
+    });
+  }
+
+  async viewsSearchEscape(): Promise<void> {
+    await this.viewsSearchInput().press("Escape", { timeout: 30_000 });
+  }
+
+  async viewsSearchClear(): Promise<void> {
+    await this.viewsSearchInput().locator("xpath=../button").click({ timeout: 30_000 });
+  }
+
+  async viewsSearchClickOutside(): Promise<void> {
+    // Only header-zone presses reach the search field's document-level
+    // outside detector: breadcrumb separators swallow mousedown in
+    // their menu trigger, and list/sidebar presses never propagate
+    // that far. Click the neutral header gap left of the open field:
+    // outside the input, navigation-free, propagates normally.
+    const box = await this.viewsSearchInput().boundingBox();
+    if (!box) throw new Error("viewsSearchClickOutside requires the open search field");
+    await this.page.mouse.click(Math.max(8, box.x - 120), box.y + box.height / 2);
+  }
+
+  private async viewsShownFirst(locator: Locator): Promise<Locator> {
+    // Desktop and compact headers both mount sort/filter triggers; drive
+    // the visible one so the same methods work at any width.
+    const count = await locator.count();
+    for (let index = 0; index < count; index += 1) {
+      const candidate = locator.nth(index);
+      if (await candidate.isVisible().catch(() => false)) return candidate;
+    }
+    throw new Error("[parity] no visible views sort/filter trigger.");
+  }
+
+  private viewsSortTriggerQuery(): Locator {
+    return this.page.getByRole("button", { name: /^(Name|Created at|Updated at)$/ });
+  }
+
+  async viewsSortTriggerText(): Promise<string> {
+    const trigger = await this.viewsShownFirst(this.viewsSortTriggerQuery());
+    return ((await trigger.innerText().catch(() => "")) ?? "").trim();
+  }
+
+  async viewsSortOpen(): Promise<void> {
+    const trigger = await this.viewsShownFirst(this.viewsSortTriggerQuery());
+    await trigger.click({ timeout: 30_000 });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+  }
+
+  async viewsSortMenuTexts(): Promise<string[]> {
+    const texts = await this.page.getByRole("menuitem").allInnerTexts();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async viewsSortMenuSelected(text: string): Promise<boolean> {
+    const item = this.page.getByRole("menuitem", { name: text });
+    if ((await item.count()) === 0) return false;
+    return (await item.first().locator("svg").count()) > 0;
+  }
+
+  async viewsSortPick(text: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name: text }).first().click({ timeout: 30_000 });
+    await this.page
+      .getByRole("menuitem")
+      .first()
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
+
+  private viewsFiltersPanel(): Locator {
+    return this.page.locator('div[class*="w-[18.75rem]"]').first();
+  }
+
+  async viewsFiltersOpen(): Promise<void> {
+    const trigger = await this.viewsShownFirst(this.page.getByRole("button", { name: "Filters" }));
+    await trigger.click({ timeout: 30_000 });
+    await this.viewsFiltersPanel().waitFor({ timeout: 15_000 });
+  }
+
+  async viewsFiltersPanelText(): Promise<string> {
+    const panel = this.viewsFiltersPanel();
+    await panel.waitFor({ timeout: 15_000 });
+    return ((await panel.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async viewsFiltersToggleFavorites(): Promise<void> {
+    await this.viewsFiltersPanel().getByRole("button", { name: "Favorites" }).click({ timeout: 30_000 });
+  }
+
+  private viewsFilterSection(title: string): Locator {
+    return this.viewsFiltersPanel().locator("div.py-2", { hasText: title }).first();
+  }
+
+  async viewsFiltersDateOptions(): Promise<string[]> {
+    const section = this.viewsFilterSection("Created date");
+    const texts = await section.getByRole("button").allInnerTexts();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async viewsFiltersPickDate(text: string): Promise<void> {
+    await this.viewsFilterSection("Created date").getByRole("button", { name: text }).click({ timeout: 30_000 });
+  }
+
+  async viewsFiltersCreatorOptions(): Promise<string[]> {
+    const section = this.viewsFilterSection("Created by");
+    const texts = await section.getByRole("button").allInnerTexts();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async viewsFiltersPickCreator(name: string): Promise<void> {
+    await this.viewsFilterSection("Created by").getByRole("button", { name }).click({ timeout: 30_000 });
+  }
+
+  async viewsFiltersAccessPresent(): Promise<boolean> {
+    // The access dimension is a cloud-only stub on this build; its two
+    // options would render as plain option buttons when present.
+    const panel = this.viewsFiltersPanel();
+    const priv = await panel.getByRole("button", { name: "Private", exact: true }).count();
+    const pub = await panel.getByRole("button", { name: "Public", exact: true }).count();
+    return priv > 0 || pub > 0;
+  }
+
+  async viewsFiltersSearchType(text: string): Promise<void> {
+    await this.viewsFiltersPanel().getByPlaceholder("Search", { exact: true }).fill(text, { timeout: 30_000 });
+  }
+
+  async viewsFiltersClose(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.viewsFiltersPanel()
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
+
+  private viewsChipsStrip(): Locator {
+    // The clear-all button is a direct child of the strip, next to the Tag divs.
+    return this.page.getByRole("button", { name: "Clear all" }).locator("xpath=..");
+  }
+
+  async viewsChipsVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Clear all" }));
+  }
+
+  async viewsChipTexts(): Promise<string[]> {
+    const strip = this.viewsChipsStrip();
+    if ((await strip.count()) === 0) return [];
+    const texts = await strip.locator(":scope > div").allInnerTexts();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
+  }
+
+  private viewsChipByDimension(dimension: string): Locator {
+    return this.viewsChipsStrip().locator(":scope > div", { hasText: dimension }).first();
+  }
+
+  async viewsChipRemoveValue(dimension: string, value: string): Promise<void> {
+    const chip = this.viewsChipByDimension(dimension);
+    await chip.locator("span", { hasText: value }).first().locator("xpath=../button").click({ timeout: 30_000 });
+  }
+
+  async viewsChipRemoveDimension(dimension: string): Promise<void> {
+    const chip = this.viewsChipByDimension(dimension);
+    const buttons = chip.locator("button");
+    const count = await buttons.count();
+    if (count === 0) throw new Error(`[parity] no remove control on the ${JSON.stringify(dimension)} chip.`);
+    await buttons.nth(count - 1).click({ timeout: 30_000 });
+  }
+
+  async viewsChipsClearAll(): Promise<void> {
+    await this.page.getByRole("button", { name: "Clear all" }).click({ timeout: 30_000 });
+    await this.page
+      .getByRole("button", { name: "Clear all" })
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
+
+  // --- Project views flag gate (NEWFRONT-42, VIEW-002). The gate renders
+  // --- instead of the list while the project's views feature is off.
+
+  async viewsGateTitle(): Promise<string> {
+    const heading = this.page.getByRole("heading", { name: "Views are not enabled for the project." });
+    if (!(await this.isShown(heading))) return "";
+    return (
+      (await heading
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async viewsGateManageVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Manage features" }));
+  }
+
+  async viewsGateManageEnabled(): Promise<boolean> {
+    const action = this.page.getByRole("button", { name: "Manage features" });
+    if ((await action.count()) === 0) return false;
+    return action.first().isEnabled();
+  }
+
+  async viewsGateManageOpen(): Promise<void> {
+    await this.page.getByRole("button", { name: "Manage features" }).click({ timeout: 30_000 });
+    await this.page.waitForURL(/\/settings\/projects\/[^/]+\/features/, { timeout: 60_000 });
+  }
+
+  // --- Project view dialog (NEWFRONT-42, VIEW-003, VIEW-013, VIEW-014,
+  // --- VIEW-015, VIEW-019). The create/update form is the dialog headed
+  // --- Create/Update View; the delete confirmation is a separate dialog.
+
+  private viewsDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: /^(Create View|Update View)$/ }) });
+  }
+
+  async viewsDialogHeading(): Promise<string | null> {
+    const heading = this.page.getByRole("heading", { name: /^(Create View|Update View)$/ });
+    if ((await heading.count()) === 0) return null;
+    return (
+      (await heading
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async viewsDialogFillTitle(text: string): Promise<void> {
+    await this.viewsDialog().getByPlaceholder("Title", { exact: true }).fill(text, { timeout: 30_000 });
+  }
+
+  async viewsDialogTitleValue(): Promise<string> {
+    return this.viewsDialog().getByPlaceholder("Title", { exact: true }).inputValue();
+  }
+
+  async viewsDialogTitleError(): Promise<string> {
+    const error = this.viewsDialog().locator("span.text-danger-primary");
+    if ((await error.count()) === 0) return "";
+    return (
+      (await error
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async viewsDialogFillDescription(text: string): Promise<void> {
+    await this.viewsDialog().getByPlaceholder("Description", { exact: true }).fill(text, { timeout: 30_000 });
+  }
+
+  async viewsDialogDescriptionValue(): Promise<string> {
+    return this.viewsDialog().getByPlaceholder("Description", { exact: true }).inputValue();
+  }
+
+  async viewsDialogAccessPresent(): Promise<boolean> {
+    // The cloud access selector would offer Private/Public choices; the
+    // OSS stub renders nothing in its slot.
+    const dialog = this.viewsDialog();
+    const priv = await dialog.getByRole("button", { name: "Private", exact: true }).count();
+    const pub = await dialog.getByRole("button", { name: "Public", exact: true }).count();
+    return priv > 0 || pub > 0;
+  }
+
+  private viewsIconPickerTrigger(): Locator {
+    return this.viewsDialog()
+      .locator("button")
+      .filter({ has: this.page.locator("span.grid.h-9.w-9") })
+      .first();
+  }
+
+  async viewsDialogIconOpen(): Promise<void> {
+    await this.viewsIconPickerTrigger().click({ timeout: 30_000 });
+    await this.page.getByRole("tab").first().waitFor({ timeout: 15_000 });
+  }
+
+  async viewsDialogIconTabs(): Promise<string[]> {
+    const texts = await this.page.getByRole("tab").allInnerTexts();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async viewsDialogPickFirstIcon(): Promise<void> {
+    // The picker opens on the Icon tab for a fresh form. Scope to the
+    // icon grid (grid-cols-8): the tabpanel's leading buttons are color
+    // swatches, which select no icon. Picking closes the popover
+    // through the picker's own onChange. (The emoji grid is virtualized
+    // frimousse whose cells never settle for automation; the oracle pins
+    // the Emoji tab's presence via IconTabs instead of picking one.)
+    // Wait on the grid itself, not the tabpanel role: the picker's panel
+    // content can mount a beat after its tabs (code-split chunk), and the
+    // grid is the thing being pressed anyway.
+    const grid = this.page.locator("div.grid.grid-cols-8");
+    await grid.first().waitFor({ timeout: 30_000 });
+    await grid.getByRole("button").first().click({ timeout: 30_000 });
+    await this.page
+      .getByRole("tab")
+      .first()
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
+
+  async viewsDialogIconPreview(): Promise<string> {
+    const preview = this.viewsIconPickerTrigger();
+    if ((await preview.count()) === 0) return "";
+    return ((await preview.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async viewsDialogDisplayOpen(): Promise<void> {
+    // The Display panel expands inline inside the dialog (not a portal):
+    // wait for its section heading rather than a popover shell.
+    await this.viewsDialog().getByRole("button", { name: "Display" }).click({ timeout: 30_000 });
+    await this.viewsDialog().getByText("Display Properties").first().waitFor({ timeout: 15_000 });
+  }
+
+  async viewsDialogDisplayTexts(): Promise<string[]> {
+    // No open-wait here: the caller opens the Display panel first, and a
+    // bare dialog waitFor flakes while the inline panel animates.
+    const panel = this.viewsDialog();
+    const text = ((await panel.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    return text === "" ? [] : [text];
+  }
+
+  async viewsDialogFiltersExpanded(): Promise<boolean> {
+    // The temporary filter builder mounts inside the dialog as soon as
+    // the form renders (showOnMount); with no filters yet it shows only
+    // its trigger, which opens the filter-type menu on click.
+    const dialog = this.viewsDialog();
+    return this.isShown(dialog.getByRole("button", { name: "Filters" }));
+  }
+
+  private viewsDialogLayoutTrigger(): Locator {
+    return this.viewsDialog().getByRole("button", { name: /^(List|Board|Calendar|Table|Timeline)$/ });
+  }
+
+  async viewsDialogLayoutValue(): Promise<string> {
+    return (
+      (await this.viewsDialogLayoutTrigger()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async viewsDialogPickLayout(label: string): Promise<void> {
+    await this.viewsDialogLayoutTrigger().click({ timeout: 30_000 });
+    const options = this.page.getByRole("listbox").getByRole("option", { name: label, exact: true });
+    await options.click({ timeout: 30_000 });
+    await this.page
+      .getByRole("listbox")
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
+
+  async viewsDialogEscape(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("heading", { name: /^(Create View|Update View)$/ })
+      .waitFor({ state: "hidden", timeout: 15_000 });
+  }
+
+  async viewsDialogCancel(): Promise<void> {
+    await this.viewsDialog().getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 30_000 });
+    await this.page
+      .getByRole("heading", { name: /^(Create View|Update View)$/ })
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
+
+  async viewsDialogSubmit(): Promise<void> {
+    await this.viewsDialog().locator('button[type="submit"]').click({ timeout: 30_000 });
+    await this.page
+      .getByRole("heading", { name: /^(Create View|Update View)$/ })
+      .waitFor({ state: "hidden", timeout: 60_000 });
+  }
+
+  async viewsDialogSubmitAttempt(): Promise<void> {
+    await this.viewsDialog().locator('button[type="submit"]').click({ timeout: 30_000 });
+  }
+
+  async viewsDialogOpen(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("heading", { name: /^(Create View|Update View)$/ }));
+  }
+
+  async viewsFailNextWrite(status: number): Promise<void> {
+    // NOTE: a predicate matcher, not a glob — the glob
+    // `**/projects/*/views*` silently never matches these URLs while a
+    // catch-all does. No `times` cap either: a CORS preflight (OPTIONS)
+    // or a background GET would consume a counted route before the write
+    // lands. Continue reads/preflights and unroute right after the first
+    // failed write.
+    const matches = (url: URL) => url.pathname.includes("/projects/") && url.pathname.includes("/views");
+    const handler = async (route: Route) => {
+      const method = route.request().method();
+      if (method === "GET" || method === "OPTIONS" || method === "HEAD") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({ status, contentType: "application/json", body: "{}" });
+      await this.page.unroute(matches, handler).catch(() => undefined);
+    };
+    await this.page.route(matches, handler);
+  }
+
+  // --- Project view row menu (NEWFRONT-42, VIEW-016, VIEW-017, VIEW-018,
+  // --- VIEW-020). The trigger is the actionable button that is not the
+  // --- favorite star; reads scope to the one open (visible) menu.
+
+  private async viewsRowMenuTrigger(name: string): Promise<Locator> {
+    const link = await this.viewsRowLinkByName(name);
+    const actions = this.viewsRowActions(this.viewsRowContainer(link));
+    const buttons = actions.locator("button");
+    const count = await buttons.count();
+    for (let index = 0; index < count; index += 1) {
+      const candidate = buttons.nth(index);
+      if ((await candidate.locator("svg.lucide-star").count()) === 0) return candidate;
+    }
+    throw new Error(`[parity] no menu trigger on the row ${JSON.stringify(name)}.`);
+  }
+
+  private viewsOpenMenu(): Locator {
+    // NOTE: no visibility filter — the menu shell reports a 0x0 box while
+    // its items lay out visibly, so readiness waits target the items.
+    return this.page.getByRole("menu").first();
+  }
+
+  async viewsRowMenuOpen(name: string): Promise<void> {
+    const trigger = await this.viewsRowMenuTrigger(name);
+    await trigger.click({ timeout: 30_000 });
+    await this.viewsOpenMenu().getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+  }
+
+  async viewsRowMenuItems(): Promise<string[]> {
+    const menu = this.viewsOpenMenu();
+    await menu.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+    const texts = await menu.getByRole("menuitem").allInnerTexts();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
+  }
+
+  async viewsRowMenuPick(item: string): Promise<void> {
+    const menu = this.viewsOpenMenu();
+    await menu.getByRole("menuitem", { name: item }).first().click({ timeout: 30_000 });
+    await menu.waitFor({ state: "hidden", timeout: 15_000 }).catch(() => undefined);
+  }
+
+  async viewsRowCopyLink(name: string): Promise<string> {
+    // Clipboard-write is denied by default in automation; grant before
+    // picking so the app's writeText (and its toast) actually runs.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.viewsRowMenuOpen(name);
+    await this.viewsRowMenuPick("Copy link");
+    await expect.poll(() => this.page.evaluate(() => navigator.clipboard.readText()), { timeout: 15_000 }).not.toBe("");
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async viewsRowMenuPublishPresent(): Promise<boolean> {
+    const items = await this.viewsRowMenuItems();
+    return items.some((item) => /publish/i.test(item));
+  }
+
+  async viewsRowOpenNewTabHref(name: string): Promise<string> {
+    await this.viewsRowMenuOpen(name);
+    const menu = this.viewsOpenMenu();
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 30_000 }),
+      menu.getByRole("menuitem", { name: "Open in new tab" }).first().click({ timeout: 30_000 }),
+    ]);
+    const href = popup.url();
+    await popup.close().catch(() => undefined);
+    return href;
+  }
+
+  // --- Project view delete (NEWFRONT-42, VIEW-016).
+
+  private viewsDeleteDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: "Are you sure you want to delete this view?" }) });
+  }
+
+  async viewsDeleteTitle(): Promise<string> {
+    const heading = this.page.getByRole("heading", { name: "Are you sure you want to delete this view?" });
+    if (!(await this.isShown(heading))) return "";
+    return (
+      (await heading
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async viewsDeleteBody(): Promise<string> {
+    const dialog = this.viewsDeleteDialog();
+    if ((await dialog.count()) === 0) return "";
+    return ((await dialog.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async viewsDeleteConfirm(): Promise<void> {
+    await this.viewsDeleteDialog().getByRole("button", { name: "Delete", exact: true }).click({ timeout: 60_000 });
+    await this.page
+      .getByRole("heading", { name: "Are you sure you want to delete this view?" })
+      .waitFor({ state: "hidden", timeout: 60_000 });
+  }
+
+  async viewsDeleteConfirmAttempt(): Promise<void> {
+    await this.viewsDeleteDialog().getByRole("button", { name: "Delete", exact: true }).click({ timeout: 60_000 });
+  }
+
+  async viewsDeleteCancel(): Promise<void> {
+    await this.viewsDeleteDialog().getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 30_000 });
+    await this.page
+      .getByRole("heading", { name: "Are you sure you want to delete this view?" })
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
+
+  // --- Project view detail (NEWFRONT-42, VIEW-021-028). The detail header
+  // is the second main landmark's control row: breadcrumb with a view
+  // switcher, a private lock, five icon-only layout buttons, a filter
+  // toggle, a Display dropdown, an add button and quick actions.
+  private viewsDetailHeader(): Locator {
+    return this.page.getByRole("main").nth(1);
+  }
+
+  async viewsDetailBreadcrumb(): Promise<string[]> {
+    // Breadcrumb order: project crumb button, Views link, switcher button
+    // (each renders nested, so take the outer of each pair).
+    const header = this.viewsDetailHeader();
+    const clean = (raw: string) => raw.replace(/\s+/g, " ").trim();
+    const project = clean(
+      (await header
+        .getByRole("button")
+        .nth(0)
+        .innerText()
+        .catch(() => "")) ?? ""
+    );
+    const views = clean(
+      (await header
+        .getByRole("link", { name: "Views" })
+        .innerText()
+        .catch(() => "")) ?? ""
+    );
+    const current = clean(
+      (await header
+        .getByRole("button")
+        .nth(2)
+        .innerText()
+        .catch(() => "")) ?? ""
+    );
+    return [project, views, current].filter((t) => t !== "");
+  }
+
+  async viewsDetailErrorTitle(): Promise<string> {
+    const heading = this.page.getByRole("heading", { name: /does not exist|not accessible|not found/i });
+    if ((await heading.count()) === 0) return "";
+    return (
+      (await heading
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async viewsDetailErrorBack(): Promise<void> {
+    const main = this.page.getByRole("main").last();
+    await main
+      .getByRole("button", { name: /views|back|list/i })
+      .first()
+      .click({ timeout: 30_000 });
+    await this.page.waitForURL(/\/views\/?$/, { timeout: 30_000 }).catch(() => undefined);
+  }
+
+  async viewsDetailSwitcherOpen(name: string): Promise<void> {
+    // The switcher trigger is the breadcrumb button carrying the current
+    // view name. Its popover is a combobox whose option listbox reports no
+    // box of its own, so readiness waits on the first visible option.
+    await this.viewsDetailHeader().getByRole("button", { name }).first().click({ timeout: 30_000 });
+    await this.viewsDetailSwitcherOptionList().first().waitFor({ timeout: 15_000 });
+  }
+
+  private viewsDetailSwitcherOptionList(): Locator {
+    return this.page.getByRole("option");
+  }
+
+  async viewsDetailSwitcherOptions(): Promise<string[]> {
+    await this.viewsDetailSwitcherOptionList().first().waitFor({ timeout: 15_000 });
+    const texts = await this.viewsDetailSwitcherOptionList().allInnerTexts();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
+  }
+
+  async viewsDetailSwitcherSearchVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("combobox"));
+  }
+
+  async viewsDetailSwitcherSearch(text: string): Promise<void> {
+    await this.page.getByRole("combobox").first().fill(text, { timeout: 30_000 });
+  }
+
+  async viewsDetailSwitcherPick(name: string): Promise<void> {
+    await this.viewsDetailSwitcherOptionList().getByText(name, { exact: false }).first().click({ timeout: 30_000 });
+    await this.viewsDetailSwitcherOptionList()
+      .first()
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
+
+  async viewsDetailLockVisible(): Promise<boolean> {
+    // Owner-only views render a naked lock glyph (no text or label) in a
+    // default-cursor box next to the breadcrumb; shared views render none.
+    return this.isShown(this.viewsDetailHeader().locator("div.cursor-default.text-tertiary svg"));
+  }
+
+  async viewsDetailDisplayOptions(): Promise<string[]> {
+    // The Display dropdown is a headless popover (no menu role); its open
+    // panel carries the headless open marker. Options are plain buttons.
+    await this.viewsDetailHeader().getByRole("button", { name: "Display", exact: true }).click({ timeout: 30_000 });
+    const panel = this.page
+      .locator("div[data-headlessui-state='open']:visible", { hasText: "Display Properties" })
+      .last();
+    await panel.waitFor({ timeout: 15_000 });
+    const text = await panel.innerText({ timeout: 15_000 });
+    await this.page.keyboard.press("Escape");
+    // Closed panels linger hidden in the DOM; wait one out so the next
+    // open never resolves to a stale sibling.
+    await panel.waitFor({ state: "hidden", timeout: 15_000 }).catch(() => undefined);
+    return text
+      .split("\n")
+      .map((t) => t.replace(/\s+/g, " ").trim())
+      .filter((t) => t.length > 0);
+  }
+
+  async viewsDetailFilterAdd(property: string, value: string): Promise<void> {
+    // With no conditions the header toggle is the add-filter trigger; it
+    // opens the property menu, then the value menu for the property.
+    await this.viewsDetailHeader().locator("button:has(svg.lucide-list-filter)").first().click({ timeout: 30_000 });
+    await this.page.getByRole("option", { name: property }).first().click({ timeout: 30_000 });
+    await this.page.getByRole("option", { name: value }).first().click({ timeout: 30_000 });
+    await this.page.getByRole("button", { name: "Update view", exact: true }).waitFor({ timeout: 15_000 });
+  }
+
+  async viewsDetailUpdateView(): Promise<void> {
+    await this.page.getByRole("button", { name: "Update view", exact: true }).click({ timeout: 30_000 });
+    await this.page
+      .getByRole("button", { name: "Update view", exact: true })
+      .waitFor({ state: "hidden", timeout: 30_000 });
+  }
+
+  async viewsDetailSaveAsVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Save as", exact: true }));
+  }
+
+  async viewsDetailSaveAsClick(): Promise<void> {
+    await this.page.getByRole("button", { name: "Save as", exact: true }).click({ timeout: 30_000 });
+  }
+
+  async viewsDetailAddClick(): Promise<void> {
+    await this.viewsDetailHeader()
+      .getByRole("button", { name: "Add work item", exact: true })
+      .click({ timeout: 30_000 });
+  }
+
+  async viewsDetailShowsIssue(name: string): Promise<boolean> {
+    // Layout-agnostic: board cards do not use the list's paragraph rows,
+    // so match against the detail body's text, as the issues-area text
+    // counters do for non-list layouts.
+    const text = await this.page
+      .getByRole("main")
+      .last()
+      .innerText({ timeout: 15_000 })
+      .catch(() => "");
+    return text.includes(name);
+  }
+
+  private viewsDetailLayoutButtons(): Locator {
+    // Five icon-only buttons (list, board, calendar, table, timeline);
+    // the active one carries the primary marker class. Visible-only: the
+    // sidebar hides same-sized icon buttons outside the detail header.
+    return this.viewsDetailHeader().locator("button:visible:has(svg.size-3\\.5)");
+  }
+
+  async viewsDetailLayoutVisible(): Promise<boolean> {
+    return (await this.viewsDetailLayoutButtons().count()) >= 5;
+  }
+
+  async viewsDetailLayoutActive(): Promise<number> {
+    // The active marker lands after the filter store hydrates; unlocked
+    // details always settle exactly one, locked details none (no wait).
+    const buttons = this.viewsDetailLayoutButtons();
+    if ((await buttons.count()) >= 5) {
+      await this.viewsDetailHeader()
+        .locator("button svg.size-3\\.5.text-primary")
+        .first()
+        .waitFor({ timeout: 15_000 })
+        .catch(() => undefined);
+    }
+    const count = await buttons.count();
+    for (let index = 0; index < count; index += 1) {
+      const cls = await buttons
+        .nth(index)
+        .locator("svg")
+        .getAttribute("class")
+        .catch(() => "");
+      if ((cls ?? "").includes("text-primary")) return index;
+    }
+    return -1;
+  }
+
+  async viewsDetailLayoutPick(index: number): Promise<void> {
+    await this.viewsDetailLayoutButtons().nth(index).click({ timeout: 30_000 });
+  }
+
+  async viewsDetailDisplayVisible(): Promise<boolean> {
+    return this.isShown(this.viewsDetailHeader().getByRole("button", { name: "Display", exact: true }));
+  }
+
+  async viewsDetailFiltersToggleVisible(): Promise<boolean> {
+    return this.isShown(this.viewsDetailHeader().locator("button:has(svg.lucide-list-filter)"));
+  }
+
+  async viewsDetailAddVisible(): Promise<boolean> {
+    return this.isShown(this.viewsDetailHeader().getByRole("button", { name: "Add work item", exact: true }));
+  }
+
+  async viewsDetailEmptyTitle(): Promise<string> {
+    const heading = this.page.getByRole("heading", { name: "View work items will appear here" });
+    if ((await heading.count()) === 0) return "";
+    return "View work items will appear here";
+  }
+
+  async viewsDetailTabTitle(): Promise<string> {
+    return this.page.title();
   }
 }
