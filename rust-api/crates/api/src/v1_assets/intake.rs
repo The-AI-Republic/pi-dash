@@ -325,16 +325,16 @@ fn parse_json_body(body: &[u8], headers: &HeaderMap) -> Result<Value, Denial> {
         .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}")))
 }
 
-/// Django `QueryDict.get`: the last value, or `None`.
-fn query_last(params: &HashMap<String, Vec<String>>, key: &str) -> Option<String> {
-    params
-        .get(key)
-        .and_then(|values| values.iter().last().cloned())
+/// Django `QueryDict.get`: the last value, or `None`. Axum's
+/// `Query<HashMap<String, String>>` keeps the last duplicate the same way,
+/// and unlike the `Vec<String>` form it accepts a single `?key=value`.
+fn query_last(params: &HashMap<String, String>, key: &str) -> Option<String> {
+    params.get(key).cloned()
 }
 
 /// `?fields=` / `?expand=` (`api/views/base.py:199-208`): comma-split,
 /// empties dropped, `None` when nothing survives.
-fn fields_param(params: &HashMap<String, Vec<String>>, key: &str) -> Option<Vec<String>> {
+fn fields_param(params: &HashMap<String, String>, key: &str) -> Option<Vec<String>> {
     let raw = query_last(params, key).unwrap_or_default();
     let kept: Vec<String> = raw
         .split(',')
@@ -10466,7 +10466,7 @@ async fn intake_list(
     State(state): State<AppState>,
     Path((slug, raw_project_id)): Path<(String, String)>,
     headers: HeaderMap,
-    Query(params): Query<HashMap<String, Vec<String>>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> HandlerResult {
     let ctx = context(&state, &headers, &slug, &raw_project_id).await?;
     let project = fetch_project(&ctx.pool, &ctx.project_id).await?;
@@ -10686,7 +10686,7 @@ async fn intake_retrieve(
     State(state): State<AppState>,
     Path((slug, raw_project_id, raw_issue_id)): Path<(String, String, String)>,
     headers: HeaderMap,
-    Query(params): Query<HashMap<String, Vec<String>>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> HandlerResult {
     // URL-resolve precedence: a non-UUID `issue_id` 404s before auth.
     let issue_id = parse_uuid_or_invalid(&raw_issue_id)?;
