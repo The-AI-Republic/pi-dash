@@ -372,6 +372,19 @@ fn py_parse_float(text: &str) -> Option<f64> {
     }
 }
 
+/// Python `str.strip()` membership (live-probed, PIDASHCONV-801): Rust
+/// `is_whitespace` plus U+001C-U+001F (which Python strips but the Unicode
+/// `White_Space` property omits). Same kernel as the sibling `py_strip` in
+/// `shape_social` and `py_stripped` in the relations handler.
+fn py_is_space(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\x1c'..='\x1f')
+}
+
+/// Python `str.strip()` (no-arg): strip [`py_is_space`] from both ends.
+fn py_strip(text: &str) -> &str {
+    text.trim_matches(py_is_space)
+}
+
 /// Outcome of [`validate_char`] for one text input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CharOutcome {
@@ -455,13 +468,13 @@ fn validate_char(
     // The blank check runs on the raw value: `data == '' or
     // str(data).strip() == ''` — whitespace-only fails unless blank is
     // allowed, in which case the field validates as `""`.
-    if raw.is_empty() || raw.trim().is_empty() {
+    if raw.is_empty() || py_strip(&raw).is_empty() {
         if allow_blank {
             return Ok(CharOutcome::Text(String::new()));
         }
         return Err(vec![CharError::Blank]);
     }
-    let stripped = raw.trim().to_owned();
+    let stripped = py_strip(&raw).to_owned();
     let mut failures = Vec::new();
     if let Some(max) = max_chars {
         if stripped.chars().count() > max {
@@ -664,10 +677,10 @@ pub fn name_lookup_key(body: &Value) -> Option<String> {
         Value::Number(number) => number.to_string(),
         _ => return None,
     };
-    if raw.is_empty() || raw.trim().is_empty() {
+    if raw.is_empty() || py_strip(&raw).is_empty() {
         return None;
     }
-    Some(raw.trim().to_owned())
+    Some(py_strip(&raw).to_owned())
 }
 
 /// `LabelCreateUpdateSerializer(data, partial=...)` input
@@ -1625,6 +1638,52 @@ mod tests {
             check(&serde_json::json!({"body": "\t\n "})),
             Some(String::new())
         );
+    }
+
+    #[test]
+    fn workpad_strips_fs_chars_like_python() {
+        // PIDASHCONV-801: Python `str.strip()` strips U+001C-U+001F; Rust
+        // `str::trim` keeps them. Ends go, interior stays (live-probed
+        // against CPython: `' \x1dhello\x1e \x1fworld\x1c '.strip() ==
+        // 'hello\x1e \x1fworld'`).
+        let check = |body: &Value| {
+            validate_workpad_write(&WorkpadWriteInput {
+                body,
+                partial: true,
+            })
+            .expect("valid")
+            .workpad
+        };
+        assert_eq!(
+            check(&serde_json::json!({"body": " \u{1d}hello\u{1e} \u{1f}world\u{1c} "})),
+            Some("hello\u{1e} \u{1f}world".to_string())
+        );
+        // Whitespace-only incl. FS chars takes the blank arm (`allow_blank`).
+        assert_eq!(
+            check(&serde_json::json!({"body": " \u{1c}"})),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn label_fs_chars_blank_and_lookup_key_in_sync() {
+        // PIDASHCONV-801: `allow_blank=False`, so an FS-only name fails
+        // `blank` and yields no unique-check lookup key.
+        let body = serde_json::json!({"name": " \u{1c}"});
+        assert_eq!(
+            validate_label_write(&label_input(&body))
+                .expect_err("fs-only name fails blank")
+                .body()
+                .expect("wire body"),
+            "{\"name\":[\"This field may not be blank.\"]}"
+        );
+        assert_eq!(name_lookup_key(&body), None);
+        // FS chars at the ends strip; the lookup key matches the validated
+        // value.
+        let body = serde_json::json!({"name": " \u{1d}bug\u{1c} "});
+        let validated = validate_label_write(&label_input(&body)).expect("valid");
+        assert_eq!(validated.name, Some("bug".to_string()));
+        assert_eq!(name_lookup_key(&body), Some("bug".to_string()));
     }
 
     #[test]
