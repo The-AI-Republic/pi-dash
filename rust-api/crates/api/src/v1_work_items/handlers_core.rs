@@ -3217,19 +3217,37 @@ fn resolve_task_events(events: &[pulldown_cmark::Event]) -> Vec<MdEvent> {
     // Second pass: lower, consuming markers.
     let mut out: Vec<MdEvent> = Vec::with_capacity(events.len());
     let mut index = 0;
-    // Item (task state, checked flag, open-event index) by nesting stack.
-    let mut item_stack: Vec<(bool, bool, usize)> = Vec::new();
+    // Item (task state, checked flag, open-event index, injected paragraph
+    // open) by nesting stack.
+    let mut item_stack: Vec<(bool, bool, usize, bool)> = Vec::new();
     // Whether the next text's leading space lstrips (post-marker).
     let mut lstrip_next_text = false;
     // Image alt-text capture: (dest, title, alt parts).
     let mut image_stack: Vec<(String, String, String)> = Vec::new();
     // Table-cell head flags by nesting stack.
     let mut cell_stack: Vec<bool> = Vec::new();
+    // Real-paragraph and table-cell depth: injection only fires for bare
+    // inline content directly inside a list item.
+    let mut para_depth: u32 = 0;
+    let mut cell_depth: u32 = 0;
     while index < events.len() {
         // Task-list markers are consumed here, never lowered directly.
         if let Event::TaskListMarker(checked) = events[index] {
+            // The marker is the item's first event; its text (literal or
+            // following) sits inside the injected paragraph.
+            if para_depth == 0 && cell_depth == 0 {
+                if let Some(frame) = item_stack.last_mut() {
+                    if !frame.3 {
+                        out.push(MdEvent::StartParagraph);
+                        frame.3 = true;
+                    }
+                }
+            }
             // Find the enclosing item's task state.
-            let is_task = item_stack.last().map(|(task, _, _)| *task).unwrap_or(false);
+            let is_task = item_stack
+                .last()
+                .map(|(task, _, _, _)| *task)
+                .unwrap_or(false);
             if !is_task {
                 out.push(MdEvent::Text(if checked {
                     "[x]".to_owned()
@@ -3243,13 +3261,89 @@ fn resolve_task_events(events: &[pulldown_cmark::Event]) -> Vec<MdEvent> {
             index += 1;
             continue;
         }
+        // Tight-list paragraphs (`markdown_converter.py:456-460` renders
+        // every paragraph token, `hidden` or not): pulldown omits
+        // `Start/End(Paragraph)` inside tight items, so inject them
+        // around bare inline content. Real paragraphs, table cells (the
+        // renderer wraps those), nested-item opens and empty items never
+        // inject.
+        let is_item_end = matches!(&events[index], Event::End(TagEnd::Item));
+        let is_block_start = matches!(
+            &events[index],
+            Event::Start(
+                Tag::Paragraph
+                    | Tag::Heading { .. }
+                    | Tag::BlockQuote(_)
+                    | Tag::CodeBlock(_)
+                    | Tag::HtmlBlock
+                    | Tag::List(_)
+                    | Tag::FootnoteDefinition(_)
+                    | Tag::Table(_)
+            ) | Event::Rule
+                | Event::Html(_)
+        );
+        let is_inline_content = matches!(
+            &events[index],
+            Event::Text(_)
+                | Event::Code(_)
+                | Event::SoftBreak
+                | Event::HardBreak
+                | Event::InlineHtml(_)
+                | Event::FootnoteReference(_)
+                | Event::InlineMath(_)
+                | Event::DisplayMath(_)
+                | Event::Start(
+                    Tag::Emphasis
+                        | Tag::Strong
+                        | Tag::Strikethrough
+                        | Tag::Link { .. }
+                        | Tag::Image { .. }
+                )
+                | Event::End(
+                    TagEnd::Emphasis
+                        | TagEnd::Strong
+                        | TagEnd::Strikethrough
+                        | TagEnd::Link
+                        | TagEnd::Image
+                )
+        );
+        if is_item_end {
+            if let Some(frame) = item_stack.last_mut() {
+                if frame.3 {
+                    out.push(MdEvent::EndParagraph);
+                    frame.3 = false;
+                }
+            }
+        } else if is_block_start {
+            if para_depth == 0 {
+                if let Some(frame) = item_stack.last_mut() {
+                    if frame.3 {
+                        out.push(MdEvent::EndParagraph);
+                        frame.3 = false;
+                    }
+                }
+            }
+        } else if is_inline_content && para_depth == 0 && cell_depth == 0 {
+            if let Some(frame) = item_stack.last_mut() {
+                if !frame.3 {
+                    out.push(MdEvent::StartParagraph);
+                    frame.3 = true;
+                }
+            }
+        }
         match &events[index] {
+            Event::Start(Tag::Paragraph) => {
+                para_depth += 1;
+                out.push(MdEvent::StartParagraph);
+            }
+            Event::End(TagEnd::Paragraph) => {
+                para_depth = para_depth.saturating_sub(1);
+                out.push(MdEvent::EndParagraph);
+            }
             Event::Start(Tag::Heading { level, .. }) => {
                 out.push(MdEvent::StartHeading(*level as u32))
             }
             Event::End(TagEnd::Heading(_)) => out.push(MdEvent::EndHeading),
-            Event::Start(Tag::Paragraph) => out.push(MdEvent::StartParagraph),
-            Event::End(TagEnd::Paragraph) => out.push(MdEvent::EndParagraph),
             Event::Start(Tag::BlockQuote(_)) => out.push(MdEvent::StartQuote),
             Event::End(TagEnd::BlockQuote(_)) => out.push(MdEvent::EndQuote),
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -3301,12 +3395,14 @@ fn resolve_task_events(events: &[pulldown_cmark::Event]) -> Vec<MdEvent> {
             Event::Start(Tag::Item) => {
                 let as_task = item_task[index].unwrap_or(false);
                 let open = out.len();
-                item_stack.push((as_task, false, open));
+                item_stack.push((as_task, false, open, false));
                 out.push(MdEvent::StartItem(as_task, false));
             }
             Event::End(TagEnd::Item) => {
-                let (as_task, checked, open) =
-                    item_stack.pop().unwrap_or((false, false, usize::MAX));
+                let (as_task, checked, open, _) =
+                    item_stack
+                        .pop()
+                        .unwrap_or((false, false, usize::MAX, false));
                 // Patch the checked flag onto this item's open event.
                 if let Some(MdEvent::StartItem(_, slot)) = out.get_mut(open) {
                     *slot = checked;
@@ -3320,6 +3416,7 @@ fn resolve_task_events(events: &[pulldown_cmark::Event]) -> Vec<MdEvent> {
             Event::Start(Tag::TableRow) => out.push(MdEvent::StartRow),
             Event::End(TagEnd::TableRow) => out.push(MdEvent::EndRow),
             Event::Start(Tag::TableCell) => {
+                cell_depth += 1;
                 // Header vs body: inside `TableHead` until its end.
                 let mut in_head = false;
                 let mut depth = 0;
@@ -3343,6 +3440,7 @@ fn resolve_task_events(events: &[pulldown_cmark::Event]) -> Vec<MdEvent> {
             Event::End(TagEnd::TableCell) => {
                 // The renderer pairs opens and closes structurally; carry
                 // the flag from the matching open via the cell stack.
+                cell_depth = cell_depth.saturating_sub(1);
                 let head = cell_stack.pop().unwrap_or(false);
                 out.push(MdEvent::EndCell(head));
             }
@@ -3635,6 +3733,28 @@ fn paragraph_depth(events: &[MdEvent], open: usize) -> usize {
 mod difftest {
     use super::*;
 
+    /// Tight-list paragraphs (`markdown_converter.py:456-460` renders
+    /// every paragraph token): pulldown omits them, the lowering injects
+    /// them — pinned live against `markdown_to_html` (Django 4.2 venv).
+    #[test]
+    fn markdown_tight_list_paragraphs() {
+        for (input, expected) in [
+            ("- a\n- b", "<ul><li><p>a</p></li><li><p>b</p></li></ul>"),
+            ("- a\n\n- b", "<ul><li><p>a</p></li><li><p>b</p></li></ul>"),
+            ("- ", "<ul><li></li></ul>"),
+            (
+                "- a\n  - b",
+                "<ul><li><p>a</p><ul><li><p>b</p></li></ul></li></ul>",
+            ),
+            (
+                "- [x] done\n- [ ] todo",
+                "<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"true\"><label><input type=\"checkbox\" checked=\"checked\"><span></span></label><div><p>done</p></div></li><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p>todo</p></div></li></ul>",
+            ),
+        ] {
+            assert_eq!(markdown_to_html_port(input).as_deref(), Ok(expected), "{input:?}");
+        }
+    }
+
     #[test]
     fn differential_markdown_corpus_scratch() {
         // Scratch corpus (regenerated by the markdown probe scripts, never
@@ -3818,12 +3938,18 @@ fn proxy_request<'a>(
     state: &'a AppState,
     method: &'a str,
     uri: String,
+    headers: &HeaderMap,
+    body: Vec<u8>,
 ) -> impl std::future::Future<Output = Response> + 'a {
-    let req = Request::builder()
+    // The original headers ride along: some proxied targets are authed
+    // Django paths (`work-items/search/` lands here through the
+    // by-identifier capture), and dropping `X-Api-Key` would 401 them.
+    let mut req = Request::builder()
         .method(method)
         .uri(uri)
-        .body(axum::body::Body::empty())
+        .body(axum::body::Body::from(body))
         .expect("proxy request");
+    *req.headers_mut() = headers.clone();
     crate::edge::proxy(State(state.clone()), req)
 }
 
@@ -4843,7 +4969,7 @@ pub async fn get_by_identifier(
     // URL resolving precedes auth: an unmatchable segment proxies before
     // the 401 check runs.
     let Some((project_identifier, issue_identifier)) = split_identifier_segment(&segment) else {
-        return proxy_request(&state, "GET", original.to_string()).await;
+        return proxy_request(&state, "GET", original.to_string(), &headers, Vec::new()).await;
     };
     let project_identifier = project_identifier.to_owned();
     let issue_identifier = issue_identifier.to_owned();
@@ -5194,7 +5320,7 @@ pub async fn get_issue_detail(
     // `<uuid:pk>` in Django (`urls/work_item.py:54-58,123-127`): a
     // non-UUID segment never resolves — proxy before auth runs.
     if !crate::runner_runs::is_uuid_path_segment(&pk) {
-        return proxy_request(&state, "GET", original.to_string()).await;
+        return proxy_request(&state, "GET", original.to_string(), &headers, Vec::new()).await;
     }
     let pk = pk.parse::<Uuid>().expect("checked segment");
     match issue_detail_inner(&state, &headers, &slug, &project_id, &pk, &query).await {
@@ -6008,28 +6134,30 @@ async fn insert_m2m_batch(
     );
     qb.push(id_column);
     qb.push(") VALUES ");
+    // One `push` per row (the `", "` separator); everything inside the
+    // row is unseparated (`push_bind` would emit a separator after `(`).
     let mut separated = qb.separated(", ");
     for id in ids {
         separated.push("(");
-        separated.push_bind(Uuid::new_v4());
-        separated.push(", ");
-        separated.push_bind(now_utc());
-        separated.push(", ");
-        separated.push_bind(now_utc());
-        separated.push(", ");
-        separated.push_bind(created_by_id);
-        separated.push(", ");
-        separated.push_bind(updated_by_id);
-        separated.push(", ");
-        separated.push_bind(None::<DateTime<Utc>>);
-        separated.push(", ");
-        separated.push_bind(project_id);
-        separated.push(", ");
-        separated.push_bind(workspace_id);
-        separated.push(", ");
-        separated.push_bind(issue_id);
-        separated.push(", ");
-        separated.push_bind(id);
+        separated.push_bind_unseparated(Uuid::new_v4());
+        separated.push_unseparated(", ");
+        separated.push_bind_unseparated(now_utc());
+        separated.push_unseparated(", ");
+        separated.push_bind_unseparated(now_utc());
+        separated.push_unseparated(", ");
+        separated.push_bind_unseparated(created_by_id);
+        separated.push_unseparated(", ");
+        separated.push_bind_unseparated(updated_by_id);
+        separated.push_unseparated(", ");
+        separated.push_bind_unseparated(None::<DateTime<Utc>>);
+        separated.push_unseparated(", ");
+        separated.push_bind_unseparated(project_id);
+        separated.push_unseparated(", ");
+        separated.push_bind_unseparated(workspace_id);
+        separated.push_unseparated(", ");
+        separated.push_bind_unseparated(issue_id);
+        separated.push_unseparated(", ");
+        separated.push_bind_unseparated(id);
         separated.push_unseparated(")");
     }
     if ignore_conflicts {
@@ -7022,14 +7150,14 @@ pub async fn patch_issue_detail(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Response {
-    if !crate::runner_runs::is_uuid_path_segment(&pk) {
-        return proxy_request(&state, "PATCH", original.to_string()).await;
-    }
-    let pk = pk.parse::<Uuid>().expect("checked segment");
     let raw = match read_body(body).await {
         Ok(raw) => raw,
         Err(denial) => return denial.into_response(),
     };
+    if !crate::runner_runs::is_uuid_path_segment(&pk) {
+        return proxy_request(&state, "PATCH", original.to_string(), &headers, raw).await;
+    }
+    let pk = pk.parse::<Uuid>().expect("checked segment");
     match patch_issue_inner(&state, &headers, &slug, &project_id, &pk, &raw).await {
         Ok(response) => response,
         Err(denial) => denial.into_response(),
@@ -7045,7 +7173,7 @@ pub async fn delete_issue_detail(
     headers: HeaderMap,
 ) -> Response {
     if !crate::runner_runs::is_uuid_path_segment(&pk) {
-        return proxy_request(&state, "DELETE", original.to_string()).await;
+        return proxy_request(&state, "DELETE", original.to_string(), &headers, Vec::new()).await;
     }
     let pk = pk.parse::<Uuid>().expect("checked segment");
     match delete_issue_inner(&state, &headers, &slug, &project_id, &pk).await {

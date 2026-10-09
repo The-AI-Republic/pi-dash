@@ -115,6 +115,44 @@ def test_issue_detail_unknown_is_404(api, world):
     assert response.status_code == 404
 
 
+def test_issue_create_invalid(api, world):
+    """F18-11 ``create_invalid``: missing name + bad choice, exact body."""
+    response = api.post(issue_url(world), json={"priority": "bogus"})
+    assert response.status_code == 400
+    assert response.json() == {
+        "name": ["This field is required."],
+        "priority": ['"bogus" is not a valid choice.'],
+    }
+
+
+def test_issue_patch_bad_state(api, world):
+    """F18-11 ``patch_bad_state``: unknown state id, exact body."""
+    response = api.patch(
+        issue_url(world, world["issue"]["id"]),
+        json={"state": "00000000-0000-0000-0000-000000000000"},
+    )
+    assert response.status_code == 400
+    assert response.json() == {
+        "state": ['Invalid pk "00000000-0000-0000-0000-000000000000" - object does not exist.'],
+    }
+
+
+def test_issue_delete_again_is_404(api, world):
+    """F18-11 ``issue_delete_again``: second delete 404s, exact body."""
+    created = api.post(issue_url(world), json={"name": "Ephemeral"}).json()
+    assert api.delete(issue_url(world, created["id"])).status_code == 204
+    again = api.delete(issue_url(world, created["id"]))
+    assert again.status_code == 404
+    assert again.json() == {"error": "The requested resource does not exist."}
+
+
+def test_issue_detail_put_is_405(api, world):
+    """F18-11 ``put_405``: PUT stays Django-owned (proxied 405)."""
+    response = api.put(issue_url(world, world["issue"]["id"]), json={"name": "x"})
+    assert response.status_code == 405
+    assert response.json() == {"detail": 'Method "PUT" not allowed.'}
+
+
 def test_deprecated_issues_prefix_parity(api, world):
     """The old ``issues/*`` routes serve the same views: spot-check parity."""
     slug = world["workspace"]["slug"]
