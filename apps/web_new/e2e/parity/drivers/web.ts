@@ -19385,4 +19385,27 @@ export class WebDriver implements ParityDriver {
     seen.unread = await unreadWait;
     return seen;
   }
+
+  // --- Desktop agent-runtime web-observable sides (NEWFRONT-207, DESK-001–010,
+  // --- DESK-026). Appended; existing methods above are untouched per the
+  // --- shared driver contract.
+
+  async deskRuntimePageText(): Promise<string> {
+    return (await this.page.locator("body").innerText()).trim();
+  }
+
+  async deskRuntimeDispatchWindowFocus(): Promise<void> {
+    await this.page.evaluate(() => window.dispatchEvent(new FocusEvent("focus")));
+  }
+
+  async deskRuntimeIndexedDatabaseNames(): Promise<string[]> {
+    return this.page.evaluate(async () => {
+      const factory = window.indexedDB as unknown as
+        | { databases?: () => Promise<{ name?: string | null }[]> }
+        | undefined;
+      if (typeof factory?.databases !== "function") return [];
+      const infos = await factory.databases();
+      return infos.map((info) => info.name ?? "").filter((name) => name !== "");
+    });
+  }
 }
