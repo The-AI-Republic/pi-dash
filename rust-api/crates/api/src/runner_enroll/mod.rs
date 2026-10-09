@@ -8,11 +8,15 @@
 //!   behaviour — fixture id D13-F4.
 //! - [`throttle`]: the inherited DRF `AnonRateThrottle` (30/minute) for the
 //!   enroll, redeem, and health endpoints — fixture ids D13-F4 + D13-F7.
+//!
 //! - [`desktop`]: the desktop-app machine enrollment endpoint
 //!   (`runner/views/desktop.py`, PIDASHCONV-595) — fixture ids D13-F5 +
 //!   D13-F6 + D13-F7.
 //! - [`projects`]: the runner project list (`runner/views/projects.py`,
 //!   PIDASHCONV-595) — fixture ids D13-F2 + D13-F5 + D13-F7.
+//! - [`enroll`]: the daemon enrollment handlers (PIDASHCONV-590) —
+//!   enroll, create, ticket, redeem, health, invite/revive 410s —
+//!   fixture ids D13-F2 + D13-F3 + D13-F4 + D13-F5 + D13-F7.
 //!
 //! Kernel reuse only (`pidash_auth`, `pidash_types`), plus this module's own
 //! SQL: no cross-domain code dependency.
@@ -34,6 +38,7 @@
 pub mod auth;
 pub mod delete_cmds;
 pub mod desktop;
+pub mod enroll;
 pub mod manage;
 pub mod projects;
 pub mod teardown;
