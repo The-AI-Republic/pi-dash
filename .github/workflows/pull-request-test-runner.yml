@@ -13,6 +13,7 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - "dist-workspace.toml"
       - "runner/**"
       - ".github/workflows/pull-request-test-runner.yml"
   # Post-merge validation: GitHub re-runs PR checks on synchronize, not when
@@ -26,6 +27,7 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - "dist-workspace.toml"
       - "runner/**"
       - ".github/workflows/pull-request-test-runner.yml"
 
@@ -60,3 +62,45 @@ jobs:
 
       - name: Test
         run: cargo test --all-targets --locked
+
+  install-ps1:
+    # install.ps1 is documented as `irm .../install.ps1 | iex`, which runs it
+    # inside the user's own session: a bare `exit` there closes their window
+    # and hides the installer's error. Drive it the way users do, against a
+    # fake installer and a fake pidash.exe, under both Windows PowerShell 5.1
+    # and PowerShell 7.
+    name: install.ps1 (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install cargo-dist 0.22.1
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'cargo-dist.zip'
+          $destination = Join-Path $env:RUNNER_TEMP 'cargo-dist'
+          Invoke-WebRequest `
+            -Uri 'https://github.com/axodotdev/cargo-dist/releases/download/v0.22.1/cargo-dist-x86_64-pc-windows-msvc.zip' `
+            -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          $expected = 'f51b918e97a6bf21fc858934191977ded0a15ca93244a19334521a833fa8dfdd'
+          if ($actual -ne $expected) { throw "cargo-dist checksum mismatch: $actual" }
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          $destination | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Generate cargo-dist installer with stub artifacts
+        shell: pwsh
+        run: cargo dist build --artifacts=lies
+
+      - name: Test generated cargo-dist installer (Windows PowerShell 5.1)
+        shell: powershell
+        run: ./runner/tests/generated_install_ps1_test.ps1 -GeneratedInstaller ./target/distrib/pidash-installer.ps1
+
+      - name: Test generated cargo-dist installer (PowerShell 7)
+        shell: pwsh
+        run: ./runner/tests/generated_install_ps1_test.ps1 -GeneratedInstaller ./target/distrib/pidash-installer.ps1
+
+      - name: Test install.ps1 under irm | iex
+        shell: pwsh
+        run: ./runner/tests/install_ps1_test.ps1
