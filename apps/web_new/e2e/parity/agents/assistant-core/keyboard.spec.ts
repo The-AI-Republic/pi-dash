@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 // Oracle scenario (NEWFRONT-187): Enter submits from the multiline thread
 // composer and from the single-line dashboard input, Shift+Enter inserts a
-// newline, and blank drafts never send from either. (No window-level key
+// newline, and blank thread-composer drafts never send. (No window-level key
 // handlers exist on this surface — the only key handlers sit on the
 // composer textarea, the widget input and the mic button itself — so
 // there are no global hotkeys by construction.) bug: NEWFRONT-195 —
