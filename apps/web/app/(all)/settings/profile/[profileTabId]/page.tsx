@@ -16,14 +16,11 @@ import { ProfileSettingsContent } from "@/components/settings/profile/content";
 import { ProfileSettingsSidebarRoot } from "@/components/settings/profile/sidebar";
 // hooks
 import { useUser } from "@/hooks/store/user";
-import { useAppRouter } from "@/hooks/use-app-router";
 // local imports
 import type { Route } from "../+types/layout";
 
 function ProfileSettingsPage(props: Route.ComponentProps) {
   const { profileTabId } = props.params;
-  // router
-  const router = useAppRouter();
   // store hooks
   const { data: currentUser } = useUser();
   // translation
@@ -43,11 +40,7 @@ function ProfileSettingsPage(props: Route.ComponentProps) {
       <PageHead title={`${t("Profile")} - ${t("General settings")}`} />
       <div className="relative size-full">
         <div className="flex size-full">
-          <ProfileSettingsSidebarRoot
-            activeTab={profileTabId as TProfileSettingsTabs}
-            className="w-[250px]"
-            updateActiveTab={(tab) => router.push(`/settings/profile/${tab}`)}
-          />
+          <ProfileSettingsSidebarRoot activeTab={profileTabId as TProfileSettingsTabs} className="w-[250px]" />
           <ProfileSettingsContent
             activeTab={profileTabId as TProfileSettingsTabs}
             className="mx-auto w-fit max-w-225 grow px-page-x py-20"
