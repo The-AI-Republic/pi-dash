@@ -603,7 +603,7 @@ fn negotiate_data(headers: &HeaderMap, body: &[u8]) -> Result<RequestData, Denia
             files: Default::default(),
             is_html: false,
         }),
-        shared_body::NegotiatedBody::JsonText(text) => parse_request_data(text.as_bytes())
+        shared_body::NegotiatedBody::JsonText { text, .. } => parse_request_data(text.as_bytes())
             .map(|value| RequestData {
                 value,
                 files: Default::default(),
@@ -615,7 +615,7 @@ fn negotiate_data(headers: &HeaderMap, body: &[u8]) -> Result<RequestData, Denia
                 }
                 JsonFail::Recursion => Denial::ServerError,
             }),
-        shared_body::NegotiatedBody::Form { map, files } => {
+        shared_body::NegotiatedBody::Form { map, files, .. } => {
             let mut object = JObject::new();
             for (key, item) in map.iter() {
                 object.insert(JStr::from_text(key), json_value_to_jval(item));
@@ -2066,6 +2066,7 @@ fn offset_before_gap(tz: &Tz, naive: &chrono::NaiveDateTime) -> Option<chrono::F
 /// A parsed `deleted_at` input: the stored instant, plus the echo
 /// override for the DST-gap arm only (`None` everywhere else, where the
 /// normalized render is already correct).
+#[derive(Debug)]
 struct ParsedMemberDatetime {
     utc: chrono::DateTime<chrono::Utc>,
     echo: Option<String>,
