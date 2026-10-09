@@ -155,7 +155,9 @@ use pidash_types::runner_sessions::{
     runner_open_201, runner_state_locked_drf, unauthorized_drf, HttpResponse,
 };
 
-use crate::runner_enroll::auth::{authenticate_access_token, AUTHENTICATE_HEADER_BEARER};
+use crate::runner_enroll::auth::{
+    authenticate_access_token, ALLOW_DELETE, ALLOW_POST, AUTHENTICATE_HEADER_BEARER,
+};
 use crate::runner_enroll::read_request_data;
 use crate::runner_runs::chat::drain_chat_effects;
 use crate::runner_runs::run_endpoints::drain_lifecycle_effects;
@@ -488,8 +490,10 @@ async fn denial_code(response: Response) -> (Option<String>, Response) {
 }
 
 /// Re-render a D-13 access-token denial for the DRF open/delete
-/// endpoints: the 401 keeps its code and `Bearer` challenge but
-/// renders lowercase-compact (DRF's `exception_handler`). 500s and
+/// endpoints: the 401 keeps its code, its `Bearer` challenge, and its
+/// `Allow` (DRF's `finalize_response` stamps the view's `Allow` on error
+/// responses too, rendered by `auth.rs` — PIDASHCONV-781) but renders
+/// lowercase-compact (DRF's `exception_handler`). 500s and
 /// unrecognized shapes pass through untouched.
 async fn open_denial(response: Response) -> Response {
     if response.status() != StatusCode::UNAUTHORIZED {
@@ -499,10 +503,14 @@ async fn open_denial(response: Response) -> Response {
     match code {
         Some(code) => {
             let rendered = unauthorized_drf(&code);
-            Response::builder()
+            let mut builder = Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .header(header::CONTENT_TYPE, "application/json")
-                .header(header::WWW_AUTHENTICATE, AUTHENTICATE_HEADER_BEARER)
+                .header(header::WWW_AUTHENTICATE, AUTHENTICATE_HEADER_BEARER);
+            if let Some(allow) = response.headers().get(header::ALLOW) {
+                builder = builder.header(header::ALLOW, allow.clone());
+            }
+            builder
                 .body(axum::body::Body::from(rendered.body))
                 .unwrap_or_else(|_| server_error())
         }
@@ -1855,6 +1863,7 @@ pub async fn runner_session_open(
         &ring,
         &headers,
         Some(rid_str.as_str()),
+        ALLOW_POST,
     )
     .await
     {
@@ -2039,6 +2048,7 @@ pub async fn runner_session_delete(
         &ring,
         &headers,
         Some(rid_str.as_str()),
+        ALLOW_DELETE,
     )
     .await
     {
@@ -2249,7 +2259,8 @@ mod tests {
 
     /// The 401 re-render: the pre-718 capital-`Detail` denial and the
     /// fixed lowercase one both come back lowercase-compact with the
-    /// `Bearer` challenge; 500s and unknown shapes pass through.
+    /// `Bearer` challenge and the `Allow` carried through; 500s and
+    /// unknown shapes pass through.
     #[tokio::test]
     async fn open_denial_rerenders_lowercase() {
         let fx = fixture();
@@ -2273,11 +2284,12 @@ mod tests {
             assert_eq!(status, StatusCode::UNAUTHORIZED);
             assert_eq!(text, wire);
         }
-        // Challenge preserved.
+        // Challenge and `Allow` preserved.
         let denial = Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::WWW_AUTHENTICATE, AUTHENTICATE_HEADER_BEARER)
+            .header(header::ALLOW, ALLOW_POST)
             .body(axum::body::Body::from(r#"{"Detail":"runner_id_mismatch"}"#))
             .expect("denial builds");
         let rendered = open_denial(denial).await;
@@ -2289,6 +2301,10 @@ mod tests {
                 .to_str()
                 .expect("ascii"),
             AUTHENTICATE_HEADER_BEARER
+        );
+        assert_eq!(
+            rendered.headers().get(header::ALLOW).expect("allow"),
+            "POST, OPTIONS"
         );
         // 500s pass through untouched.
         let failure = server_error();
