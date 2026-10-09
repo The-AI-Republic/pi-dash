@@ -10899,3 +10899,118 @@ export async function serverDeskRuntimeDecideChatApproval(
   }
   return { id: record.id, status: record.status, decisionSource: record.decision_source };
 }
+
+// --- Notifications snooze + email preferences (NEWFRONT-201, NTF-020..022,
+// --- NTF-024..025). Snooze fixture writes, email-preference reads/writes,
+// --- and email-log counts for the delivery-gating proof. Appended; existing
+// --- helpers above are untouched per the shared harness contract.
+
+/**
+ * Snooze or unsnooze one notification (fixture setup; the UI control is
+ * NTF-020's). A null resume clears the snooze, matching the app's own
+ * unsnooze write (the view defaults a missing timestamp to null).
+ */
+export async function serverNotificationSnooze(
+  workspaceSlug: string,
+  notificationId: string,
+  sessionCookie: string,
+  snoozedTill: string | null,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const body: Record<string, string | null> =
+    snoozedTill === null ? { snoozed_till: null } : { snoozed_till: snoozedTill };
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/users/notifications/${notificationId}/`, {
+    method: "PATCH",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`[parity] notification snooze failed with HTTP ${res.status}.`);
+}
+
+/** Email-preference toggles as the server reports them. */
+export interface EmailNotificationPreferences {
+  property_change: boolean;
+  state_change: boolean;
+  issue_completed: boolean;
+  comment: boolean;
+  mention: boolean;
+}
+
+function emailPreferencesOf(payload: unknown): EmailNotificationPreferences {
+  const record = payload as Record<string, unknown>;
+  for (const key of ["property_change", "state_change", "issue_completed", "comment", "mention"]) {
+    if (typeof record[key] !== "boolean") {
+      throw new Error("[parity] email-preference payload carried a non-boolean toggle.");
+    }
+  }
+  return {
+    property_change: record["property_change"] as boolean,
+    state_change: record["state_change"] as boolean,
+    issue_completed: record["issue_completed"] as boolean,
+    comment: record["comment"] as boolean,
+    mention: record["mention"] as boolean,
+  };
+}
+
+/** Current email-preference toggles for the session owner. */
+export async function serverEmailPreferences(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<EmailNotificationPreferences> {
+  const res = await fetch(`${apiBase}/api/users/me/notification-preferences/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] email-preference read failed with HTTP ${res.status}.`);
+  return emailPreferencesOf(await res.json());
+}
+
+/** Save email-preference toggles for the session owner (fixture setup). */
+export async function serverUpdateEmailPreferences(
+  sessionCookie: string,
+  patch: Partial<EmailNotificationPreferences>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<EmailNotificationPreferences> {
+  const res = await fetch(`${apiBase}/api/users/me/notification-preferences/`, {
+    method: "PATCH",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(`[parity] email-preference save failed with HTTP ${res.status}.`);
+  return emailPreferencesOf(await res.json());
+}
+
+/**
+ * Run a Django shell snippet inside a chosen api container; resolves with
+ * stdout. Same shape as apiShell, with the container name overridable for
+ * runs on a renamed stack (PARITY_API_CONTAINER); apiShell itself stays
+ * pinned to the default stack per the shared harness contract.
+ */
+export async function apiShellOn(container: string, python: string): Promise<string> {
+  const { stdout } = await execFileAsync(
+    "docker",
+    ["exec", "-i", container, "python", "manage.py", "shell", "-c", python],
+    {
+      timeout: 120_000,
+    }
+  );
+  return stdout;
+}
+
+/**
+ * Email-log rows queued for `receiverEmail` on one work item. The fan-out
+ * writes these only when the receiver's per-topic preference allows, while
+ * the in-app rows always land — so the count is the delivery-gating signal
+ * NTF-025 asserts on.
+ */
+export async function serverEmailLogCount(receiverEmail: string, entityIdentifier: string): Promise<number> {
+  const container = (process.env["PARITY_API_CONTAINER"] ?? "parity19-api").trim() || "parity19-api";
+  const out = await apiShellOn(
+    container,
+    `from pi_dash.db.models import EmailNotificationLog, User\n` +
+      `user = User.objects.get(email=${JSON.stringify(receiverEmail)})\n` +
+      `print("PARITY_EMAIL_LOGS:" + str(EmailNotificationLog.objects.filter(receiver=user, entity_identifier=${JSON.stringify(entityIdentifier)}).count()))\n`
+  );
+  const count = /^PARITY_EMAIL_LOGS:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (!/^\d+$/.test(count)) throw new Error("[parity] email-log count produced no numeric row.");
+  return Number(count);
+}

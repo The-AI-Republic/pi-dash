@@ -39,6 +39,7 @@ import type {
   DocumentShellFacts,
   NotFoundFacts,
   NotificationsCard,
+  NotificationsEmailPref,
   NotificationsTab,
   ParityBrowserCookie,
   ParityDriver,
@@ -19407,5 +19408,330 @@ export class WebDriver implements ParityDriver {
       const infos = await factory.databases();
       return infos.map((info) => info.name ?? "").filter((name) => name !== "");
     });
+  }
+
+  // --- Notifications snooze + email preferences (NEWFRONT-201, NTF-020..022,
+  // --- NTF-024..025). Selectors use the snooze/prefs test hooks this area
+  // --- added to the old app; the portaled calendar and time options follow
+  // --- the same structural reads the date-picker drivers already use.
+
+  private notificationsCardAt(index: number): Locator {
+    return this.page.getByTestId("notification-card").nth(index);
+  }
+
+  private async notificationsOpenSnoozePicker(index: number): Promise<Locator> {
+    const card = this.notificationsCardAt(index);
+    await card.scrollIntoViewIfNeeded().catch(() => undefined);
+    // Card actions reveal on hover (NTF-023); the trigger is inert at rest.
+    await card.hover({ timeout: WebDriver.WAIT_MS });
+    await card.getByTestId("snooze-trigger").first().click({ timeout: WebDriver.WAIT_MS });
+    const panel = card.getByTestId("snooze-panel").first();
+    await panel.waitFor({ timeout: WebDriver.WAIT_MS });
+    return panel;
+  }
+
+  private async notificationsCloseSnoozePicker(panel: Locator): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await panel.waitFor({ state: "detached", timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  private notificationsItemPatchWait(): Promise<unknown> {
+    return this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/users/notifications/"),
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async notificationsSnoozePresets(index: number): Promise<string[]> {
+    const panel = await this.notificationsOpenSnoozePicker(index);
+    const buttons = panel.locator('button[data-testid^="snooze-option-"]');
+    const count = await buttons.count();
+    const presets: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const testid =
+        (await buttons
+          .nth(i)
+          .getAttribute("data-testid")
+          .catch(() => "")) ?? "";
+      if (testid === "snooze-option-unsnooze" || testid === "snooze-option-custom") continue;
+      presets.push(
+        WebDriver.cleanText(
+          await buttons
+            .nth(i)
+            .innerText()
+            .catch(() => "")
+        )
+      );
+    }
+    await this.notificationsCloseSnoozePicker(panel);
+    return presets;
+  }
+
+  async notificationsSnoozeWithPreset(index: number, preset: string): Promise<void> {
+    const panel = await this.notificationsOpenSnoozePicker(index);
+    const patchWait = this.notificationsItemPatchWait();
+    await panel.getByRole("button", { name: preset, exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await patchWait;
+  }
+
+  async notificationsSnoozeRemovalOffered(index: number): Promise<boolean> {
+    const panel = await this.notificationsOpenSnoozePicker(index);
+    const offered = (await panel.getByTestId("snooze-option-unsnooze").count()) > 0;
+    await this.notificationsCloseSnoozePicker(panel);
+    return offered;
+  }
+
+  async notificationsUnsnooze(index: number): Promise<void> {
+    const panel = await this.notificationsOpenSnoozePicker(index);
+    const patchWait = this.notificationsItemPatchWait();
+    await panel.getByTestId("snooze-option-unsnooze").first().click({ timeout: WebDriver.WAIT_MS });
+    await patchWait;
+  }
+
+  async notificationsFailItemWrites(status: number): Promise<void> {
+    await this.page.route("**/api/workspaces/*/users/notifications/*/", async (route) => {
+      if (route.request().method() === "PATCH") {
+        await route.fulfill({ status, body: JSON.stringify({ detail: "parity snooze failure" }) });
+      } else {
+        await route.continue();
+      }
+    });
+  }
+
+  async notificationsClearItemWriteFailure(): Promise<void> {
+    await this.page.unroute("**/api/workspaces/*/users/notifications/*/");
+  }
+
+  async notificationsOpenCustomSnooze(index: number): Promise<void> {
+    const panel = await this.notificationsOpenSnoozePicker(index);
+    await panel.getByTestId("snooze-option-custom").first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByTestId("snooze-custom-dialog").first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async notificationsCustomSnoozeVisible(): Promise<boolean> {
+    const dialog = this.page.getByTestId("snooze-custom-dialog").first();
+    if ((await dialog.count()) === 0) return false;
+    return dialog.isVisible().catch(() => false);
+  }
+
+  private notificationsCustomDialogSection(heading: string): Locator {
+    const dialog = this.page.getByTestId("snooze-custom-dialog").first();
+    // Each section heads its picker with an h6; the heading's parent is the
+    // section that owns the dropdown button.
+    return dialog.getByText(heading, { exact: true }).locator("xpath=..");
+  }
+
+  async notificationsCustomSnoozePickDay(offsetDays: number): Promise<void> {
+    // The date dropdown button carries the section; the calendar itself is
+    // portaled, so the day grid is read page-wide like the other pickers.
+    const section = this.notificationsCustomDialogSection("Pick a date");
+    await section.getByRole("button").first().click({ timeout: WebDriver.WAIT_MS });
+    const calendar = this.page.locator(".rdp-root").last();
+    await calendar.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const target = new Date();
+    target.setDate(target.getDate() + offsetDays);
+    const selects = calendar.locator("select");
+    await selects.nth(0).selectOption({ label: target.toLocaleString("en-US", { month: "long" }) });
+    await selects.nth(1).selectOption({ label: String(target.getFullYear()) });
+    await calendar
+      .locator("td:not(.rdp-outside) button", { hasText: new RegExp(`^${target.getDate()}$`) })
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
+    await calendar.waitFor({ state: "detached", timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  private async notificationsCustomTimePanel(): Promise<Locator> {
+    const section = this.notificationsCustomDialogSection("Pick a time");
+    await section.getByRole("button").first().click({ timeout: WebDriver.WAIT_MS });
+    const panel = this.page.getByRole("listbox").last();
+    // The list element itself is zero-height (its options ride in an
+    // absolutely-positioned popper child), so settle on the placed panel
+    // instead of the list's own visibility; this also covers the empty
+    // "no available time" branch, which renders no options at all.
+    await panel.locator("div[data-popper-placement]").first().waitFor({ timeout: WebDriver.WAIT_MS });
+    return panel;
+  }
+
+  async notificationsCustomSnoozeTimeSlots(period: "AM" | "PM"): Promise<string[]> {
+    const panel = await this.notificationsCustomTimePanel();
+    await panel.getByText(period, { exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    const options = panel.getByRole("option");
+    const count = await options.count();
+    const slots: string[] = [];
+    for (let i = 0; i < count; i++) {
+      slots.push(
+        WebDriver.cleanText(
+          await options
+            .nth(i)
+            .innerText()
+            .catch(() => "")
+        )
+      );
+    }
+    // Dismiss via an in-dialog outside click: Escape would also dismiss the
+    // resume dialog itself, stranding the next read with no dialog at all.
+    const dialog = this.page.getByTestId("snooze-custom-dialog").first();
+    await dialog.getByText("Pick a time", { exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await panel.waitFor({ state: "detached", timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+    return slots;
+  }
+
+  async notificationsCustomSnoozePickTime(period: "AM" | "PM", slot: string): Promise<void> {
+    const panel = await this.notificationsCustomTimePanel();
+    await panel.getByText(period, { exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await panel.getByRole("option", { name: slot, exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await panel.waitFor({ state: "detached", timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async notificationsCustomSnoozeSubmit(): Promise<void> {
+    const dialog = this.page.getByTestId("snooze-custom-dialog").first();
+    await dialog.getByRole("button", { name: "Submit" }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async notificationsSetSnoozedMode(on: boolean): Promise<void> {
+    const menuButton = this.page.getByTestId("notifications-overflow-menu").first();
+    await menuButton.click({ timeout: WebDriver.WAIT_MS });
+    const item = this.page.getByText("Show snoozed", { exact: true });
+    await item.waitFor({ timeout: WebDriver.WAIT_MS });
+    // The active entry carries a trailing check icon (precedent: the tab
+    // underline and other structural markers elsewhere in this driver).
+    const row = item.locator("xpath=ancestor::div[contains(@class, 'cursor-pointer')][1]");
+    const active = (await row.locator("div.ml-auto").count()) > 0;
+    if (active !== on) {
+      const listWait = this.page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "GET" &&
+            response.url().includes("/users/notifications") &&
+            !response.url().includes("/unread/"),
+          { timeout: WebDriver.WAIT_MS }
+        )
+        .catch(() => undefined);
+      await item.click({ timeout: WebDriver.WAIT_MS });
+      await listWait;
+    }
+    await this.page.keyboard.press("Escape");
+  }
+
+  async notificationsOpenEmailPreferences(): Promise<void> {
+    await this.page.goto("/settings/profile/notifications", { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page
+      .getByTestId("email-prefs-form")
+      .first()
+      .getByRole("switch")
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async notificationsEmailPreferencesLoaderShown(): Promise<boolean> {
+    const pattern = "**/api/users/me/notification-preferences/";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() === "GET") {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      await route.continue();
+    });
+    try {
+      await this.page.goto("/settings/profile/notifications", { timeout: 60_000 });
+      const seen = await this.page
+        .getByTestId("email-prefs-loader")
+        .first()
+        .waitFor({ timeout: 10_000 })
+        .then(
+          () => true,
+          () => false
+        );
+      await this.page
+        .getByTestId("email-prefs-form")
+        .first()
+        .getByRole("switch")
+        .first()
+        .waitFor({ timeout: WebDriver.WAIT_MS });
+      return seen;
+    } finally {
+      await this.page.unroute(pattern);
+    }
+  }
+
+  private static readonly notificationsEmailPrefTitles: Record<NotificationsEmailPref, string> = {
+    property_change: "Property changes",
+    state_change: "State change",
+    issue_completed: "Work item completed",
+    comment: "Comments",
+    mention: "Mentions",
+  };
+
+  private notificationsEmailPrefSwitch(pref: NotificationsEmailPref): Locator {
+    const form = this.page.getByTestId("email-prefs-form").first();
+    // Each control pairs a heading with its switch inside one row: the
+    // heading's grandparent is the row that owns the switch.
+    return form
+      .getByRole("heading", { name: WebDriver.notificationsEmailPrefTitles[pref], exact: true })
+      .locator("xpath=../..")
+      .getByRole("switch")
+      .first();
+  }
+
+  async notificationsEmailPreferences(): Promise<Record<NotificationsEmailPref, boolean>> {
+    const prefs: NotificationsEmailPref[] = [
+      "property_change",
+      "state_change",
+      "issue_completed",
+      "comment",
+      "mention",
+    ];
+    const out = {} as Record<NotificationsEmailPref, boolean>;
+    for (const pref of prefs) {
+      const checked = await this.notificationsEmailPrefSwitch(pref)
+        .getAttribute("aria-checked")
+        .catch(() => null);
+      out[pref] = checked === "true";
+    }
+    return out;
+  }
+
+  async notificationsEmailPreferencesToggle(pref: NotificationsEmailPref): Promise<void> {
+    const saveWait = this.page.waitForResponse(
+      (response) =>
+        response.request().method() === "PATCH" && response.url().includes("/users/me/notification-preferences/"),
+      { timeout: WebDriver.WAIT_MS }
+    );
+    await this.notificationsEmailPrefSwitch(pref).click({ timeout: WebDriver.WAIT_MS });
+    await saveWait;
+  }
+
+  async notificationsEmailPreferencesCompletedNested(): Promise<boolean> {
+    const nest = this.page.getByTestId("email-prefs-completed-nest").first();
+    if ((await nest.getByRole("switch").count()) !== 1) return false;
+    // The nested row sits indented to the right of the state row.
+    const stateRow = this.page
+      .getByTestId("email-prefs-form")
+      .first()
+      .getByRole("heading", { name: "State change", exact: true })
+      .locator("xpath=../..");
+    const completedRow = this.page
+      .getByTestId("email-prefs-form")
+      .first()
+      .getByRole("heading", { name: "Work item completed", exact: true })
+      .locator("xpath=../..");
+    const stateBox = await stateRow.boundingBox().catch(() => null);
+    const completedBox = await completedRow.boundingBox().catch(() => null);
+    if (!stateBox || !completedBox) return false;
+    return completedBox.x > stateBox.x;
+  }
+
+  async notificationsFailEmailPreferenceSaves(status: number): Promise<void> {
+    await this.page.route("**/api/users/me/notification-preferences/", async (route) => {
+      if (route.request().method() === "PATCH") {
+        await route.fulfill({ status, body: JSON.stringify({ detail: "parity prefs failure" }) });
+      } else {
+        await route.continue();
+      }
+    });
+  }
+
+  async notificationsClearEmailPreferenceSaveFailure(): Promise<void> {
+    await this.page.unroute("**/api/users/me/notification-preferences/");
   }
 }

@@ -103,6 +103,7 @@ export const NotificationItemSnoozeOption = observer(function NotificationItemSn
                 isMobile={isMobile}
               >
                 <Popover.Button
+                  data-testid="snooze-trigger"
                   className={cn(
                     "relative flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-xs bg-layer-1 outline-none hover:bg-surface-2",
                     open ? "bg-layer-1" : ""
@@ -121,10 +122,14 @@ export const NotificationItemSnoozeOption = observer(function NotificationItemSn
                 leaveFrom="opacity-100 translate-y-0"
                 leaveTo="opacity-0 translate-y-1"
               >
-                <Popover.Panel className="absolute right-0 z-10 mt-2 min-w-44 select-none">
+                <Popover.Panel
+                  data-testid="snooze-panel"
+                  className="absolute right-0 z-10 mt-2 min-w-44 select-none"
+                >
                   <div className="space-y-1 rounded-md border border-subtle bg-surface-1 p-2">
                     {data.snoozed_till && (
                       <button
+                        data-testid="snooze-option-unsnooze"
                         className="w-full cursor-pointer rounded-xs p-1 px-2 text-left text-body-xs-medium text-secondary transition-all hover:bg-layer-1"
                         onClick={(e) => {
                           e.preventDefault();
@@ -139,6 +144,7 @@ export const NotificationItemSnoozeOption = observer(function NotificationItemSn
                     {NOTIFICATION_SNOOZE_OPTIONS.map((option) => (
                       <button
                         key={option.key}
+                        data-testid={`snooze-option-${option.key}`}
                         className="w-full cursor-pointer rounded-xs p-1 px-2 text-left text-body-xs-medium text-secondary transition-all hover:bg-layer-1"
                         onClick={(e) => {
                           e.preventDefault();
