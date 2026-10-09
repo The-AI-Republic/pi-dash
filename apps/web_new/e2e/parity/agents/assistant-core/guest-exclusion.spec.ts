@@ -33,6 +33,11 @@ test(
     await test.step("guest sees no dashboard card", async () => {
       await driver.rulesEnsureSignedIn(guest.email, guest.password, workspaceSlug);
       await driver.assistantOpenHome(workspaceSlug);
+      // The card gate rides on the loaded workspace, so settle on the
+      // greeting (rendered for every signed-in user once home hydrates)
+      // before asserting absence — a bare count would also pass on an
+      // unhydrated page.
+      await expect.poll(() => driver.homeGreetingHeading(), { timeout: 60_000 }).not.toBeNull();
       expect(await driver.assistantCardVisible()).toBe(false);
     });
 
@@ -85,7 +90,7 @@ test(
       await driver.resetSession();
       await driver.rulesEnsureSignedIn(harness.owner.email, harness.owner.password, workspaceSlug);
       await driver.assistantOpenHome(workspaceSlug);
-      expect(await driver.assistantCardVisible()).toBe(true);
+      await expect.poll(() => driver.assistantCardVisible(), { timeout: 60_000 }).toBe(true);
     });
   }
 );
