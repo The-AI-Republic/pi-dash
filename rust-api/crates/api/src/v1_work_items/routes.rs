@@ -31,14 +31,14 @@ use axum::Router;
 use crate::state::AppState;
 
 use super::handlers_actions::{owned_action, post_retick, post_run_ai, post_wait, post_yield};
-use super::handlers_core::{
-    delete_issue_detail, get_by_identifier, get_issue_detail, get_issue_list, owned_by_identifier,
-    owned_issue_detail, owned_issue_list, patch_issue_detail, post_issue_list,
-};
 use super::handlers_activity::{
     delete_attachment, get_activity_detail, get_activity_list, get_attachment, get_attachment_list,
     owned_activity, owned_attachment_detail, owned_attachment_list, patch_attachment,
     post_attachment,
+};
+use super::handlers_core::{
+    delete_issue_detail, get_by_identifier, get_issue_detail, get_issue_list, owned_by_identifier,
+    owned_issue_detail, owned_issue_list, patch_issue_detail, post_issue_list,
 };
 
 use super::handlers_labels_pages::{
