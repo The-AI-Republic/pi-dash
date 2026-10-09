@@ -225,10 +225,7 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_eq!(status_for("POST", &delete).await, StatusCode::BAD_GATEWAY);
-        // The runner poll path stays unclaimed (sibling PIDASHCONV-558).
-        assert_eq!(
-            status_for("POST", &format!("{delete}poll")).await,
-            StatusCode::NOT_FOUND
-        );
+        // The runner poll path is owned by the merged sibling
+        // (PIDASHCONV-558); `routes_register_runner_poll_path` pins it.
     }
 }
