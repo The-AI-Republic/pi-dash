@@ -120,7 +120,7 @@ test(
       await serverNotificationMarkRead(seed.workspaceSlug, readRow.id, ownerSession);
       await serverNotificationArchive(seed.workspaceSlug, archivedRow.id, ownerSession);
       const resume = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
-      await serverNotificationSnooze(seed.workspaceSlug, snoozedRow.id, resume, ownerSession);
+      await serverNotificationSnooze(seed.workspaceSlug, snoozedRow.id, ownerSession, resume);
     });
 
     const entry = await test.step("the default stream skips archived and snoozed", async () => {
