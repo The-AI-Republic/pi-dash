@@ -112,7 +112,10 @@ export const NotificationsSidebarRoot = observer(function NotificationsSidebarRo
                 <NotificationListRoot workspaceSlug={workspaceSlug.toString()} workspaceId={workspace?.id} />
               </ContentWrapper>
             ) : (
-              <div className="relative flex h-full w-full items-center justify-center">
+              <div
+                className="relative flex h-full w-full items-center justify-center"
+                data-testid="notifications-empty-state"
+              >
                 <NotificationEmptyState currentNotificationTab={currentNotificationTab} />
               </div>
             )}

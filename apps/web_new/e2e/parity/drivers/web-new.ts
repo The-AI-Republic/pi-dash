@@ -49,6 +49,7 @@ import type {
   NotificationsListQuery,
   NotificationsMode,
   NotificationsOrigin,
+  NotificationsDetailVariant,
   NotificationsTab,
   SchedulerCatalogRow,
   SchedulerDefinitionValues,
@@ -5770,5 +5771,71 @@ export class WebNewDriver implements ParityDriver {
   }
   async notificationsFailNextCardWrite(): Promise<void> {
     return todo("notificationsFailNextCardWrite");
+  }
+
+  // --- Notifications detail, pagination, refresh, mark-all-read
+  // --- (NEWFRONT-199, NTF-007..014). Stubs; the new app implements them.
+
+  async notificationsDetailVariant(): Promise<NotificationsDetailVariant> {
+    return todo("notificationsDetailVariant");
+  }
+
+  async notificationsDetailText(): Promise<string> {
+    return todo("notificationsDetailText");
+  }
+
+  async notificationsCloseDetail(): Promise<void> {
+    return todo("notificationsCloseDetail");
+  }
+
+  async notificationsSelectCardPostedRead(_index: number): Promise<boolean> {
+    return todo("notificationsSelectCardPostedRead");
+  }
+
+  async notificationsSelectCardHeldAccess(_index: number, _holdMs: number): Promise<{ spinnerShown: boolean }> {
+    return todo("notificationsSelectCardHeldAccess");
+  }
+
+  async notificationsNextPageLabel(): Promise<string | null> {
+    return todo("notificationsNextPageLabel");
+  }
+
+  async notificationsLoadNextPage(): Promise<void> {
+    return todo("notificationsLoadNextPage");
+  }
+
+  async notificationsLoadNextPageHeld(
+    _holdMs: number
+  ): Promise<{ loadingShown: boolean; before: number; after: number }> {
+    return todo("notificationsLoadNextPageHeld");
+  }
+
+  async notificationsSkeletonOnDelayedEntry(
+    _workspaceSlug: string,
+    _holdMs: number
+  ): Promise<{ skeletonShown: boolean; settledCards: number }> {
+    return todo("notificationsSkeletonOnDelayedEntry");
+  }
+
+  async notificationsEmptyText(): Promise<string | null> {
+    return todo("notificationsEmptyText");
+  }
+
+  async notificationsRefresh(): Promise<void> {
+    return todo("notificationsRefresh");
+  }
+
+  async notificationsRefreshHeld(_holdMs: number): Promise<{ spinning: boolean; requests: string[] }> {
+    return todo("notificationsRefreshHeld");
+  }
+
+  async notificationsMarkAllRead(): Promise<void> {
+    return todo("notificationsMarkAllRead");
+  }
+
+  async notificationsMarkAllReadHeld(
+    _holdMs: number
+  ): Promise<{ progress: boolean; requests: number; scopeBody: string | null }> {
+    return todo("notificationsMarkAllReadHeld");
   }
 }

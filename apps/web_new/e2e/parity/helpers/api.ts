@@ -10534,6 +10534,8 @@ export interface NotificationsRow {
   entityIdentifier: string;
   entityName: string;
   isMentioned: boolean;
+  /** Whether the row's work item sits in the triage queue (NEWFRONT-199, NTF-008). */
+  isInboxIssue: boolean;
   readAt: string | null;
   archivedAt: string | null;
   snoozedTill: string | null;
@@ -10567,6 +10569,7 @@ function notificationsRowOf(row: unknown): NotificationsRow {
     entityIdentifier: record["entity_identifier"],
     entityName: record["entity_name"],
     isMentioned: record["is_mentioned_notification"] === true,
+    isInboxIssue: record["is_inbox_issue"] === true,
     readAt: typeof record["read_at"] === "string" ? record["read_at"] : null,
     archivedAt: typeof record["archived_at"] === "string" ? record["archived_at"] : null,
     snoozedTill: typeof record["snoozed_till"] === "string" ? record["snoozed_till"] : null,
@@ -10604,6 +10607,48 @@ export async function serverNotificationsList(
   const payload: unknown = await res.json();
   const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
   return rows.map(notificationsRowOf);
+}
+
+/** One inbox page as the list endpoint reports it (NEWFRONT-199, NTF-010). */
+export interface NotificationsPage {
+  rows: NotificationsRow[];
+  nextPageResults: boolean;
+  nextCursor: string | null;
+  totalResults: number;
+}
+
+/**
+ * Inbox list page with its pagination envelope. Mirrors
+ * serverNotificationsList's query flags; the envelope carries the
+ * next-page cursor the client's explicit control follows.
+ */
+export async function serverNotificationsPage(
+  workspaceSlug: string,
+  sessionCookie: string,
+  params: NotificationsListParams = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<NotificationsPage> {
+  const query = new URLSearchParams();
+  if (params.mentioned !== undefined) query.set("mentioned", String(params.mentioned));
+  if (params.read !== undefined) query.set("read", String(params.read));
+  if (params.archived !== undefined) query.set("archived", String(params.archived));
+  if (params.snoozed !== undefined) query.set("snoozed", String(params.snoozed));
+  if (params.type !== undefined) query.set("type", params.type);
+  if (params.perPage !== undefined) query.set("per_page", String(params.perPage));
+  if (params.cursor !== undefined) query.set("cursor", params.cursor);
+  const suffix = query.size > 0 ? `?${query}` : "";
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/users/notifications/${suffix}`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] notifications page failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as Record<string, unknown>;
+  const rows: unknown[] = Array.isArray(payload["results"]) ? payload["results"] : [];
+  return {
+    rows: rows.map(notificationsRowOf),
+    nextPageResults: payload["next_page_results"] === true,
+    nextCursor: typeof payload["next_cursor"] === "string" ? payload["next_cursor"] : null,
+    totalResults: typeof payload["total_results"] === "number" ? payload["total_results"] : rows.length,
+  };
 }
 
 /** Unread totals for the session owner in this workspace. */
