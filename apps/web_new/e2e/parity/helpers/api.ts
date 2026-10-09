@@ -10507,3 +10507,192 @@ export async function serverInstanceLlmConfigured(apiBase: string = apiBaseFromE
   const payload = (await res.json()) as { config?: { has_llm_configured?: unknown } };
   return payload["config"]?.["has_llm_configured"] === true;
 }
+
+// ---------------------------------------------------------------------------
+// Notifications inbox foundation (NEWFRONT-198, NTF-001..006). Server reads
+// and fixture writes behind the inbox specs: the parameterized list, the
+// unread totals, per-item and bulk mark-read (fixture setup only — the
+// UI controls stay with their owning rows), and the mention-comment wire
+// format the fan-out parses. Appended; existing helpers above are untouched.
+// ---------------------------------------------------------------------------
+
+/** Query flags the inbox list endpoint accepts (mirrors the app's own params). */
+export interface NotificationsListParams {
+  mentioned?: boolean;
+  read?: boolean;
+  archived?: boolean;
+  snoozed?: boolean;
+  type?: string;
+  perPage?: number;
+  cursor?: string;
+}
+
+/** One inbox row as the list endpoint reports it. */
+export interface NotificationsRow {
+  id: string;
+  sender: string;
+  entityIdentifier: string;
+  entityName: string;
+  isMentioned: boolean;
+  readAt: string | null;
+  archivedAt: string | null;
+  snoozedTill: string | null;
+  createdAt: string;
+  issueName: string;
+  issueIdentifier: string;
+  issueSequenceId: number | null;
+}
+
+/** Unread totals as the unread-count endpoint reports them. */
+export interface NotificationsUnread {
+  total: number;
+  mentions: number;
+}
+
+function notificationsRowOf(row: unknown): NotificationsRow {
+  const record = row as Record<string, unknown>;
+  const data = (record["data"] as Record<string, unknown> | undefined) ?? {};
+  const issue = (data["issue"] as Record<string, unknown> | undefined) ?? {};
+  if (
+    typeof record["id"] !== "string" ||
+    typeof record["sender"] !== "string" ||
+    typeof record["entity_identifier"] !== "string" ||
+    typeof record["entity_name"] !== "string"
+  ) {
+    throw new Error("[parity] notification row carried no usable identity fields.");
+  }
+  return {
+    id: record["id"],
+    sender: record["sender"],
+    entityIdentifier: record["entity_identifier"],
+    entityName: record["entity_name"],
+    isMentioned: record["is_mentioned_notification"] === true,
+    readAt: typeof record["read_at"] === "string" ? record["read_at"] : null,
+    archivedAt: typeof record["archived_at"] === "string" ? record["archived_at"] : null,
+    snoozedTill: typeof record["snoozed_till"] === "string" ? record["snoozed_till"] : null,
+    createdAt: typeof record["created_at"] === "string" ? record["created_at"] : "",
+    issueName: typeof issue["name"] === "string" ? issue["name"] : "",
+    issueIdentifier: typeof issue["identifier"] === "string" ? issue["identifier"] : "",
+    issueSequenceId: typeof issue["sequence_id"] === "number" ? issue["sequence_id"] : null,
+  };
+}
+
+/**
+ * Inbox list with the caller's session and query flags. Without flags this
+ * mirrors the full-stream tab (mentions excluded server-side); with
+ * `mentioned: true` it mirrors the mentions tab.
+ */
+export async function serverNotificationsList(
+  workspaceSlug: string,
+  sessionCookie: string,
+  params: NotificationsListParams = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<NotificationsRow[]> {
+  const query = new URLSearchParams();
+  if (params.mentioned !== undefined) query.set("mentioned", String(params.mentioned));
+  if (params.read !== undefined) query.set("read", String(params.read));
+  if (params.archived !== undefined) query.set("archived", String(params.archived));
+  if (params.snoozed !== undefined) query.set("snoozed", String(params.snoozed));
+  if (params.type !== undefined) query.set("type", params.type);
+  if (params.perPage !== undefined) query.set("per_page", String(params.perPage));
+  if (params.cursor !== undefined) query.set("cursor", params.cursor);
+  const suffix = query.size > 0 ? `?${query}` : "";
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/users/notifications/${suffix}`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] notifications list failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map(notificationsRowOf);
+}
+
+/** Unread totals for the session owner in this workspace. */
+export async function serverNotificationsUnread(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<NotificationsUnread> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/users/notifications/unread/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] unread-count read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as Record<string, unknown>;
+  if (
+    typeof payload["total_unread_notifications_count"] !== "number" ||
+    typeof payload["mention_unread_notifications_count"] !== "number"
+  ) {
+    throw new Error("[parity] unread-count response carried no numeric totals.");
+  }
+  return {
+    total: payload["total_unread_notifications_count"],
+    mentions: payload["mention_unread_notifications_count"],
+  };
+}
+
+/** Mark one notification read (fixture setup; the UI control is NTF-018's). */
+export async function serverNotificationMarkRead(
+  workspaceSlug: string,
+  notificationId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/users/notifications/${notificationId}/read/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] notification mark-read failed with HTTP ${res.status}.`);
+}
+
+/** Mark the scope read in bulk (fixture setup; the UI control is NTF-014's). */
+export async function serverNotificationsMarkAllRead(
+  workspaceSlug: string,
+  sessionCookie: string,
+  scope: Record<string, unknown> = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/users/notifications/mark-all-read/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify(scope),
+  });
+  if (!res.ok) throw new Error(`[parity] mark-all-read failed with HTTP ${res.status}.`);
+}
+
+/**
+ * Comment HTML that names `userId`: the mention tag the comment fan-out
+ * parses, plus `bodyText` so the row stays findable. Attribute names follow
+ * the backend parser contract (mention-component with entity_name and
+ * entity_identifier), the same wire format the stored-comment assertions
+ * in the mention specs already pin.
+ */
+export function serverMentionHtml(userId: string, displayName: string, bodyText: string): string {
+  const safeName = displayName.replace(/[<>&]/g, "");
+  const safeBody = bodyText.replace(/[<>&]/g, "");
+  return (
+    `<p><mention-component entity_identifier="${userId}" entity_name="user_mention">` +
+    `@${safeName}</mention-component> ${safeBody}</p>`
+  );
+}
+
+/**
+ * Mark the session owner fully onboarded with the tour completed, so a
+ * freshly provisioned user can enter app pages directly instead of being
+ * funneled into onboarding. Same end state as the onboarding specs'
+ * markOnboarded, driven from a session cookie.
+ */
+export async function serverOnboardSession(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<void> {
+  const profile = await mutateJSON("PATCH", `${apiBase}/api/users/me/profile/`, sessionCookie, {
+    onboarding_step: {
+      profile_complete: true,
+      workspace_create: true,
+      workspace_join: true,
+      workspace_invite: true,
+    },
+  });
+  if (!profile.ok) throw new Error(`[parity] onboard profile update failed with HTTP ${profile.status}.`);
+  const onboard = await mutateJSON("PATCH", `${apiBase}/api/users/me/onboard/`, sessionCookie, {
+    is_onboarded: true,
+  });
+  if (!onboard.ok) throw new Error(`[parity] onboard marker update failed with HTTP ${onboard.status}.`);
+  await serverSetTourCompleted(sessionCookie, true, apiBase);
+}
