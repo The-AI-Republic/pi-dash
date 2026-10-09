@@ -18,6 +18,12 @@ import { expect, type ElementHandle, type Locator, type Page } from "@playwright
 import type {
   AddRunnerFormState,
   AddRunnerRemotePhase,
+  AssistantApiCounts,
+  AssistantBubble,
+  AssistantLandingGreeting,
+  AssistantSidebarThread,
+  AssistantStreamFrame,
+  AssistantToolActivity,
   AutomationCloseRow,
   AutomationMonthModal,
   AutomationRow,
@@ -91,6 +97,25 @@ export class WebDriver implements ParityDriver {
   private runnerChatStreamUrls = new Map<string, string[]>();
   private runnerChatMessageListHoldMs = 0;
   private runnerChatMessageListHoldArmed = false;
+
+  // --- Assistant-chat oracle state (NEWFRONT-187, AGT-038–049/053–057).
+  // --- Same shape as the runner-chat slots above: one classifying spy,
+  // --- one-shot failure/delay stubs, and canned SSE streams per thread.
+  private assistantSpyCounts: AssistantApiCounts = {
+    threadCreate: 0,
+    send: 0,
+    cancel: 0,
+    threadList: 0,
+    messageList: 0,
+  };
+
+  private assistantThreadCreateFailRemaining = 0;
+  private assistantThreadCreateDelayMs = 0;
+  private assistantThreadCreateDelayRemaining = 0;
+  private assistantSendDelayMs = 0;
+  private assistantSendDelayRemaining = 0;
+  private assistantStreamFrames = new Map<string, AssistantStreamFrame[]>();
+  private assistantStreamUrls = new Map<string, string[]>();
 
   /** Every wait below is explicitly bounded: the suite config leaves action and navigation timeouts at Playwright's unbounded defaults, so a bare waitFor would hang to the test timeout instead of failing honestly. */
   private static readonly WAIT_MS = 30_000;
@@ -18150,5 +18175,560 @@ export class WebDriver implements ParityDriver {
 
   async addRunnerLastToast(): Promise<string | null> {
     return this.lastToast();
+  }
+
+  // --- Assistant chat core (NEWFRONT-187, AGT-038–049, AGT-053–057). ----
+
+  /** The assistant layout's own sidebar (not the workspace shell nav). */
+  private assistantSidebar(): Locator {
+    return this.page.locator('aside[class*="w-[280px]"]');
+  }
+
+  /** The centered thread column: transcript, inline error, composer. */
+  private assistantThreadColumn(): Locator {
+    return this.page.locator("div.mx-auto.w-full.max-w-3xl");
+  }
+
+  /** The centered landing column: greeting or setup card, plus composer. */
+  private assistantLandingColumn(): Locator {
+    return this.page.locator("div.m-auto.w-full.max-w-2xl");
+  }
+
+  /** The composer textarea (landing and thread share one placeholder). */
+  private assistantComposerBox(): Locator {
+    return this.page.locator('textarea[placeholder*="Ask Pi Dash to do something"]');
+  }
+
+  /** The composer button row the textarea sits in (send/stop/mic host). */
+  private assistantComposerRow(): Locator {
+    return this.assistantComposerBox().locator("xpath=..");
+  }
+
+  /**
+   * The transcript list once rows render (absent on the empty state). Exact
+   * class match: the setup card shares the flex-col/gap-3 shape but carries
+   * its own card classes.
+   */
+  private assistantListColumn(): Locator {
+    return this.assistantThreadColumn().locator(
+      'div.min-h-0.flex-1.overflow-auto.py-4 > div[class="flex flex-col gap-3"]'
+    );
+  }
+
+  /** The dashboard card input; absent exactly when the card hides. */
+  private assistantHomeCardInput(): Locator {
+    return this.page.locator('input[placeholder*="Ask Pi Dash to do something"]');
+  }
+
+  /** The dashboard card root (the input row's parent). */
+  private assistantHomeCard(): Locator {
+    return this.assistantHomeCardInput().locator("xpath=../..");
+  }
+
+  async assistantOpenLanding(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/assistant`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // The greeting/setup swap rides on the config read, so settle on the
+    // column itself; scenarios poll for the stable branch.
+    await this.waitForContent("assistant landing", () =>
+      this.assistantLandingColumn().first().waitFor({ timeout: 60_000 })
+    );
+  }
+
+  async assistantOpenThread(workspaceSlug: string, threadId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/assistant/${threadId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.waitForContent("assistant thread", () =>
+      this.assistantThreadColumn().first().waitFor({ timeout: 60_000 })
+    );
+  }
+
+  async assistantOpenHome(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.waitForContent("assistant dashboard", () =>
+      this.page.getByRole("main").first().waitFor({ timeout: 60_000 })
+    );
+  }
+
+  async assistantCurrentPath(): Promise<string> {
+    return new URL(this.page.url()).pathname;
+  }
+
+  async assistantGoBack(): Promise<void> {
+    await this.page.goBack();
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async assistantLandingGreeting(): Promise<AssistantLandingGreeting | null> {
+    const headline = this.assistantLandingColumn().locator("h1").first();
+    if ((await headline.count()) === 0) return null;
+    const caption = this.assistantLandingColumn().locator("p").first();
+    return {
+      headline: (await headline.innerText()).trim(),
+      caption: (await caption.count()) === 0 ? "" : (await caption.innerText()).trim(),
+    };
+  }
+
+  async assistantLandingComposerVisible(): Promise<boolean> {
+    return this.assistantLandingColumn()
+      .locator('textarea[placeholder*="Ask Pi Dash to do something"]')
+      .first()
+      .isVisible()
+      .then(
+        (visible) => visible,
+        () => false
+      );
+  }
+
+  async assistantSetupCard(): Promise<{ title: string; body: string; button: string } | null> {
+    const title = this.page.getByText("Set up your AI assistant", { exact: true }).first();
+    if ((await title.count()) === 0) return null;
+    const card = title.locator("xpath=..");
+    return {
+      title: (await title.innerText()).trim(),
+      body: ((await card.locator("p").first().innerText()).trim() ?? "").trim(),
+      button: (await card.getByRole("button").first().innerText()).trim(),
+    };
+  }
+
+  async assistantSetupCardClick(): Promise<void> {
+    const title = this.page.getByText("Set up your AI assistant", { exact: true }).first();
+    await title.locator("xpath=..").getByRole("button").first().click();
+  }
+
+  async assistantFillDraft(text: string): Promise<void> {
+    await this.assistantComposerBox().first().fill(text);
+  }
+
+  async assistantDraftValue(): Promise<string> {
+    return this.assistantComposerBox().first().inputValue();
+  }
+
+  async assistantPressEnter(): Promise<void> {
+    await this.assistantComposerBox().first().press("Enter");
+  }
+
+  async assistantPressShiftEnter(): Promise<void> {
+    await this.assistantComposerBox().first().press("Shift+Enter");
+  }
+
+  async assistantPressControlEnter(): Promise<void> {
+    await this.assistantComposerBox().first().press("Control+Enter");
+  }
+
+  async assistantSendVisible(): Promise<boolean> {
+    return this.assistantComposerRow()
+      .locator("button:has(svg.lucide-send)")
+      .first()
+      .isVisible()
+      .then(
+        (visible) => visible,
+        () => false
+      );
+  }
+
+  async assistantSendEnabled(): Promise<boolean> {
+    return this.assistantComposerRow()
+      .locator("button:has(svg.lucide-send)")
+      .first()
+      .isEnabled()
+      .then(
+        (enabled) => enabled,
+        () => false
+      );
+  }
+
+  async assistantClickSend(): Promise<void> {
+    await this.assistantComposerRow().locator("button:has(svg.lucide-send)").first().click();
+  }
+
+  async assistantStopVisible(): Promise<boolean> {
+    return this.assistantComposerRow()
+      .locator("button:has(svg.lucide-square)")
+      .first()
+      .isVisible()
+      .then(
+        (visible) => visible,
+        () => false
+      );
+  }
+
+  async assistantClickStop(): Promise<void> {
+    await this.assistantComposerRow().locator("button:has(svg.lucide-square)").first().click();
+  }
+
+  async assistantComposerReason(): Promise<string | null> {
+    const reason = this.assistantComposerBox()
+      .locator("xpath=../..")
+      .locator("div.mb-2.text-12.text-secondary")
+      .first();
+    if ((await reason.count()) === 0) return null;
+    const text = (await reason.innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async assistantTextareaDisabled(): Promise<boolean> {
+    return this.assistantComposerBox().first().isDisabled();
+  }
+
+  async assistantErrorLine(): Promise<string | null> {
+    const line = this.assistantThreadColumn().locator("div.text-danger.mb-2.text-12").first();
+    if ((await line.count()) === 0) return null;
+    const text = (await line.innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async assistantMicLabel(): Promise<string | null> {
+    const mic = this.assistantComposerRow().locator("button:has(svg.lucide-mic)").first();
+    if ((await mic.count()) === 0) return null;
+    return mic.getAttribute("aria-label");
+  }
+
+  async assistantClickMic(): Promise<void> {
+    await this.assistantComposerRow().locator("button:has(svg.lucide-mic)").first().click();
+  }
+
+  async assistantDictationHint(): Promise<string | null> {
+    // The lockdown line shares the mb-2/text-12 wrapper shape, so it is
+    // excluded by its own marker class.
+    const hint = this.assistantComposerBox()
+      .locator("xpath=../..")
+      .locator("div.mb-2.text-12:not(.text-secondary)")
+      .first();
+    if ((await hint.count()) === 0) return null;
+    const text = (await hint.innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async assistantBubbles(): Promise<AssistantBubble[]> {
+    const column = this.assistantListColumn();
+    if ((await column.count()) === 0) return [];
+    return column.evaluate((element) => {
+      const rows: { role: string; text: string }[] = [];
+      for (const child of Array.from(element.children)) {
+        const node = child as HTMLElement;
+        const text = (node.innerText ?? "").trim();
+        // The bottom scroll anchor carries no text.
+        if (text === "") continue;
+        if (node.querySelector(".justify-end") !== null) rows.push({ role: "user", text });
+        else if (node.querySelector("svg.lucide-plug-zap") !== null) rows.push({ role: "notice", text });
+        else if (node.querySelector("svg.lucide-wrench") !== null) rows.push({ role: "tool", text });
+        else if (node.querySelector(".justify-start") !== null) rows.push({ role: "assistant", text });
+        else if ((node.firstElementChild as HTMLElement | null)?.className.includes("text-danger") === true) {
+          rows.push({ role: "error", text });
+        } else rows.push({ role: "unknown", text });
+      }
+      return rows;
+    });
+  }
+
+  async assistantBubbleHtml(index: number): Promise<string> {
+    return this.assistantListColumn().locator(":scope > div").nth(index).innerHTML();
+  }
+
+  async assistantToolActivities(): Promise<AssistantToolActivity[]> {
+    const rows = this.assistantListColumn().locator(":scope > div:has(svg.lucide-wrench)");
+    const total = await rows.count();
+    const out: AssistantToolActivity[] = [];
+    for (let i = 0; i < total; i++) {
+      const row = rows.nth(i);
+      const text = (await row.locator(":scope span").first().innerText()).trim();
+      const links = row.locator(":scope a");
+      const linkTotal = await links.count();
+      const items: { label: string; href: string }[] = [];
+      for (let j = 0; j < linkTotal; j++) {
+        const link = links.nth(j);
+        items.push({
+          label: (await link.innerText()).trim(),
+          href: (await link.getAttribute("href")) ?? "",
+        });
+      }
+      out.push({ text, links: items });
+    }
+    return out;
+  }
+
+  async assistantNoticeLines(): Promise<string[]> {
+    const lines = this.assistantListColumn().locator(":scope > div:has(svg.lucide-plug-zap) span");
+    const total = await lines.count();
+    const out: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (await lines.nth(i).innerText()).trim();
+      if (text !== "") out.push(text);
+    }
+    return out;
+  }
+
+  async assistantEmptyState(): Promise<string | null> {
+    if ((await this.assistantListColumn().count()) > 0) return null;
+    const slot = this.assistantThreadColumn().locator("div.min-h-0.flex-1.overflow-auto.py-4").first();
+    if ((await slot.count()) === 0) return null;
+    const text = (await slot.innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async assistantIsScrolledToBottom(): Promise<boolean> {
+    const slot = this.assistantThreadColumn().locator("div.min-h-0.flex-1.overflow-auto.py-4").first();
+    if ((await slot.count()) === 0) return false;
+    return slot.evaluate((element) => {
+      const node = element as HTMLElement;
+      // The auto-scroll anchors the tail marker to the scrollport's end,
+      // which leaves the slot's own bottom padding (~16px) visible below
+      // the newest row; anything within that is "following the tail".
+      return Math.abs(node.scrollHeight - node.scrollTop - node.clientHeight) < 20;
+    });
+  }
+
+  async assistantClickToolLink(activityIndex: number, linkIndex: number): Promise<void> {
+    await this.assistantListColumn()
+      .locator(":scope > div:has(svg.lucide-wrench)")
+      .nth(activityIndex)
+      .locator(":scope a")
+      .nth(linkIndex)
+      .click();
+  }
+
+  async assistantSidebarThreads(): Promise<AssistantSidebarThread[]> {
+    const links = this.assistantSidebar().locator("nav a");
+    const total = await links.count();
+    const out: AssistantSidebarThread[] = [];
+    for (let i = 0; i < total; i++) {
+      const link = links.nth(i);
+      out.push({
+        title: (await link.innerText()).trim(),
+        href: (await link.getAttribute("href")) ?? "",
+        active: (await link.getAttribute("aria-current")) === "page",
+      });
+    }
+    return out;
+  }
+
+  async assistantSidebarEmptyVisible(): Promise<boolean> {
+    return this.assistantSidebar()
+      .getByText("No conversations yet.", { exact: true })
+      .first()
+      .isVisible()
+      .then(
+        (visible) => visible,
+        () => false
+      );
+  }
+
+  async assistantClickNewChat(): Promise<void> {
+    await this.assistantSidebar().getByRole("link", { name: "New chat" }).click();
+  }
+
+  async assistantClickSidebarThread(index: number): Promise<void> {
+    await this.assistantSidebar().locator("nav a").nth(index).click();
+  }
+
+  async assistantCardVisible(): Promise<boolean> {
+    return (await this.assistantHomeCardInput().count()) > 0;
+  }
+
+  async assistantCardFillDraft(text: string): Promise<void> {
+    await this.assistantHomeCardInput().first().fill(text);
+  }
+
+  async assistantCardDraftValue(): Promise<string> {
+    return this.assistantHomeCardInput().first().inputValue();
+  }
+
+  async assistantCardPressEnter(): Promise<void> {
+    await this.assistantHomeCardInput().first().press("Enter");
+  }
+
+  async assistantCardAskDisabled(): Promise<boolean> {
+    return this.assistantHomeCard().getByRole("button", { name: "Ask", exact: true }).first().isDisabled();
+  }
+
+  async assistantCardClickAsk(): Promise<void> {
+    await this.assistantHomeCard().getByRole("button", { name: "Ask", exact: true }).first().click();
+  }
+
+  async assistantCardClickSuggestion(text: string): Promise<void> {
+    await this.assistantHomeCard().getByRole("button", { name: text, exact: true }).first().click();
+  }
+
+  async assistantCardSuggestions(): Promise<string[]> {
+    if (!(await this.assistantCardVisible())) return [];
+    const texts = await this.assistantHomeCard().getByRole("button").allTextContents();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0 && text !== "Ask");
+  }
+
+  async assistantCardRecents(): Promise<{ title: string; href: string }[]> {
+    if (!(await this.assistantCardVisible())) return [];
+    const links = this.assistantHomeCard().locator("a");
+    const total = await links.count();
+    const out: { title: string; href: string }[] = [];
+    for (let i = 0; i < total; i++) {
+      const link = links.nth(i);
+      out.push({
+        title: (await link.innerText()).trim(),
+        href: (await link.getAttribute("href")) ?? "",
+      });
+    }
+    return out;
+  }
+
+  async assistantCardClickRecent(index: number): Promise<void> {
+    await this.assistantHomeCard().locator("a").nth(index).click();
+  }
+
+  async assistantStubStream(threadId: string, frames: AssistantStreamFrame[]): Promise<void> {
+    this.assistantStreamFrames.set(threadId, frames);
+    if (!this.assistantStreamUrls.has(threadId)) {
+      this.assistantStreamUrls.set(threadId, []);
+      // Installed once per thread; re-stubbing swaps the frames the
+      // handler serves, so the stream's natural reconnect picks them up.
+      await this.page.route(`**/ai-assistant/threads/${threadId}/events**`, async (route) => {
+        this.assistantStreamUrls.get(threadId)?.push(route.request().url());
+        const stamp = new Date().toISOString();
+        const body = (this.assistantStreamFrames.get(threadId) ?? [])
+          .map((frame) => {
+            const event = {
+              thread: threadId,
+              message: frame.message ?? null,
+              seq: frame.seq,
+              kind: frame.kind,
+              payload: frame.payload,
+              created_at: stamp,
+            };
+            return `event: chat.event\ndata: ${JSON.stringify(event)}\n\n`;
+          })
+          .join("");
+        await route.fulfill({
+          status: 200,
+          headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
+          body,
+        });
+      });
+    }
+  }
+
+  async assistantClearStreamStub(threadId: string): Promise<void> {
+    this.assistantStreamFrames.delete(threadId);
+    await this.page.unroute(`**/ai-assistant/threads/${threadId}/events**`);
+  }
+
+  async assistantStreamRequestUrls(threadId: string): Promise<string[]> {
+    return [...(this.assistantStreamUrls.get(threadId) ?? [])];
+  }
+
+  async assistantBlockStream(threadId: string): Promise<void> {
+    if (!this.assistantStreamUrls.has(threadId)) {
+      this.assistantStreamUrls.set(threadId, []);
+    }
+    await this.page.route(`**/ai-assistant/threads/${threadId}/events**`, async (route) => {
+      this.assistantStreamUrls.get(threadId)?.push(route.request().url());
+      await route.abort("failed");
+    });
+  }
+
+  async assistantClearStreamBlock(threadId: string): Promise<void> {
+    await this.page.unroute(`**/ai-assistant/threads/${threadId}/events**`);
+  }
+
+  async assistantStartApiSpy(): Promise<void> {
+    this.assistantSpyCounts = { threadCreate: 0, send: 0, cancel: 0, threadList: 0, messageList: 0 };
+    // One classifying route: counts the call, then falls through so the
+    // request still reaches the server (or a later-registered stub).
+    await this.page.route("**/api/workspaces/*/ai-assistant/**", async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      const method = request.method();
+      const counts = this.assistantSpyCounts;
+      if (method === "POST" && pathname.endsWith("/ai-assistant/threads/")) counts.threadCreate += 1;
+      else if (method === "POST" && pathname.endsWith("/messages/")) counts.send += 1;
+      else if (method === "POST" && pathname.endsWith("/cancel/")) counts.cancel += 1;
+      else if (method === "GET" && pathname.endsWith("/ai-assistant/threads/")) counts.threadList += 1;
+      else if (method === "GET" && pathname.endsWith("/messages/")) counts.messageList += 1;
+      await route.fallback();
+    });
+  }
+
+  async assistantApiCounts(): Promise<AssistantApiCounts> {
+    return { ...this.assistantSpyCounts };
+  }
+
+  async assistantStopApiSpy(): Promise<void> {
+    await this.page.unroute("**/api/workspaces/*/ai-assistant/**");
+  }
+
+  async assistantFailThreadCreateOnce(): Promise<void> {
+    this.assistantThreadCreateFailRemaining = 1;
+    await this.page.route("**/api/workspaces/*/ai-assistant/threads/", async (route) => {
+      const request = route.request();
+      if (request.method() === "POST" && this.assistantThreadCreateFailRemaining > 0) {
+        this.assistantThreadCreateFailRemaining -= 1;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity thread-create failure" }),
+        });
+        return;
+      }
+      await route.fallback();
+    });
+  }
+
+  async assistantDelayThreadCreate(ms: number): Promise<void> {
+    this.assistantThreadCreateDelayMs = ms;
+    this.assistantThreadCreateDelayRemaining = 1;
+    await this.page.route("**/api/workspaces/*/ai-assistant/threads/", async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      if (
+        request.method() === "POST" &&
+        pathname.endsWith("/ai-assistant/threads/") &&
+        this.assistantThreadCreateDelayRemaining > 0
+      ) {
+        this.assistantThreadCreateDelayRemaining -= 1;
+        await new Promise((resolve) => setTimeout(resolve, this.assistantThreadCreateDelayMs));
+      }
+      await route.fallback();
+    });
+  }
+
+  async assistantClearThreadCreateStubs(): Promise<void> {
+    this.assistantThreadCreateFailRemaining = 0;
+    this.assistantThreadCreateDelayRemaining = 0;
+    await this.page.unroute("**/api/workspaces/*/ai-assistant/threads/");
+  }
+
+  async assistantDelaySend(ms: number): Promise<void> {
+    this.assistantSendDelayMs = ms;
+    this.assistantSendDelayRemaining = 1;
+    await this.page.route("**/api/workspaces/*/ai-assistant/threads/*/messages/", async (route) => {
+      const request = route.request();
+      if (request.method() === "POST" && this.assistantSendDelayRemaining > 0) {
+        this.assistantSendDelayRemaining -= 1;
+        await new Promise((resolve) => setTimeout(resolve, this.assistantSendDelayMs));
+      }
+      await route.fallback();
+    });
+  }
+
+  async assistantClearSendDelay(): Promise<void> {
+    this.assistantSendDelayRemaining = 0;
+    await this.page.unroute("**/api/workspaces/*/ai-assistant/threads/*/messages/");
+  }
+
+  async assistantLastToast(): Promise<{ title: string; message: string } | null> {
+    // Toasts stack bottom-right and auto-dismiss; only a currently
+    // visible one with text is reported, newest first.
+    const roots = this.page.locator("div.absolute.right-3.bottom-3");
+    const total = await roots.count();
+    for (let i = total - 1; i >= 0; i--) {
+      const text = (await roots.nth(i).innerText()).trim();
+      if (text === "") continue;
+      const lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
+    }
+    return null;
   }
 }

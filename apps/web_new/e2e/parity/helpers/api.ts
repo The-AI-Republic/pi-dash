@@ -5910,9 +5910,9 @@ function csrfFromCookie(sessionCookie: string): string {
   }
   return "";
 }
-/** POST/DELETE/PATCH JSON with the session jar plus a CSRF header when present. */
+/** POST/DELETE/PATCH/PUT JSON with the session jar plus a CSRF header when present. */
 async function mutateJSON(
-  method: "POST" | "PATCH" | "DELETE",
+  method: "POST" | "PATCH" | "DELETE" | "PUT",
   url: string,
   sessionCookie: string,
   body?: unknown
@@ -9926,4 +9926,431 @@ export async function serverAddRunnerRunnerNames(
   const payload: unknown = await res.json();
   const rows: unknown[] = Array.isArray(payload) ? payload : [];
   return rows.map((row) => String((row as Record<string, unknown>)["name"] ?? "")).filter((name) => name !== "");
+}
+
+// ---------------------------------------------------------------------------
+// Assistant chat core (NEWFRONT-187): provider/speech key config, threads,
+// transcript reads, sends, cancels, and tool-server registry rows. Raw
+// variants return status plus payload for the negative halves; strict
+// variants throw unless the golden status lands.
+// ---------------------------------------------------------------------------
+
+/** One assistant thread as the thread endpoints return it. */
+export interface AssistantThread {
+  id: string;
+  title: string;
+  is_archived: boolean;
+  has_active_turn: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One transcript row as the message endpoints return it. */
+export interface AssistantMessage {
+  id: string;
+  role: string;
+  content: string;
+  status: string;
+  seq: number;
+  turn_id: string | null;
+  payload: Record<string, unknown>;
+  created_at: string;
+  completed_at: string | null;
+}
+
+/** Provider-key config as the config endpoint returns it (never the key). */
+export interface AssistantConfig {
+  provider_kind: string;
+  base_url: string;
+  model_name: string;
+  has_api_key: boolean;
+  last_verified_at: string | null;
+}
+
+/** Speech-key config as the stt-config endpoint returns it. */
+export interface AssistantSttConfig {
+  base_url: string;
+  model_name: string;
+  has_api_key: boolean;
+  last_verified_at: string | null;
+}
+
+/** One tool-server registry row. */
+export interface AssistantMcpServer {
+  id: string;
+  name: string;
+  url: string;
+  has_auth_header: boolean;
+  is_enabled: boolean;
+}
+
+function assistantThreadOf(row: unknown): AssistantThread {
+  const thread = row as Record<string, unknown>;
+  if (typeof thread["id"] !== "string" || typeof thread["title"] !== "string") {
+    throw new Error("[parity] thread row carried no string id/title.");
+  }
+  return {
+    id: thread["id"],
+    title: thread["title"],
+    is_archived: thread["is_archived"] === true,
+    has_active_turn: thread["has_active_turn"] === true,
+    created_at: typeof thread["created_at"] === "string" ? thread["created_at"] : "",
+    updated_at: typeof thread["updated_at"] === "string" ? thread["updated_at"] : "",
+  };
+}
+
+function assistantMessageOf(row: unknown): AssistantMessage {
+  const message = row as Record<string, unknown>;
+  if (
+    typeof message["id"] !== "string" ||
+    typeof message["role"] !== "string" ||
+    typeof message["status"] !== "string" ||
+    typeof message["seq"] !== "number"
+  ) {
+    throw new Error("[parity] transcript row carried no id/role/status/seq.");
+  }
+  return {
+    id: message["id"],
+    role: message["role"],
+    content: typeof message["content"] === "string" ? message["content"] : "",
+    status: message["status"],
+    seq: message["seq"],
+    turn_id: typeof message["turn_id"] === "string" ? message["turn_id"] : null,
+    payload:
+      typeof message["payload"] === "object" && message["payload"] !== null
+        ? (message["payload"] as Record<string, unknown>)
+        : {},
+    created_at: typeof message["created_at"] === "string" ? message["created_at"] : "",
+    completed_at: typeof message["completed_at"] === "string" ? message["completed_at"] : null,
+  };
+}
+
+function assistantConfigOf(payload: unknown): AssistantConfig {
+  const config = payload as Record<string, unknown>;
+  return {
+    provider_kind: typeof config["provider_kind"] === "string" ? config["provider_kind"] : "",
+    base_url: typeof config["base_url"] === "string" ? config["base_url"] : "",
+    model_name: typeof config["model_name"] === "string" ? config["model_name"] : "",
+    has_api_key: config["has_api_key"] === true,
+    last_verified_at: typeof config["last_verified_at"] === "string" ? config["last_verified_at"] : null,
+  };
+}
+
+function assistantSttConfigOf(payload: unknown): AssistantSttConfig {
+  const config = payload as Record<string, unknown>;
+  return {
+    base_url: typeof config["base_url"] === "string" ? config["base_url"] : "",
+    model_name: typeof config["model_name"] === "string" ? config["model_name"] : "",
+    has_api_key: config["has_api_key"] === true,
+    last_verified_at: typeof config["last_verified_at"] === "string" ? config["last_verified_at"] : null,
+  };
+}
+
+function assistantMcpServerOf(row: unknown): AssistantMcpServer {
+  const server = row as Record<string, unknown>;
+  if (typeof server["id"] !== "string" || typeof server["name"] !== "string") {
+    throw new Error("[parity] tool-server row carried no string id/name.");
+  }
+  return {
+    id: server["id"],
+    name: server["name"],
+    url: typeof server["url"] === "string" ? server["url"] : "",
+    has_auth_header: server["has_auth_header"] === true,
+    is_enabled: server["is_enabled"] === true,
+  };
+}
+
+/** Read the caller's provider-key config (200 with has_api_key, never the key). */
+export async function serverAssistantConfigGet(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantConfig> {
+  const res = await apiJson("GET", "/api/users/me/ai-assistant/config/", sessionCookie, undefined, apiBase);
+  if (res.status !== 200) throw new Error(`[parity] config read failed with HTTP ${res.status}.`);
+  return assistantConfigOf(res.payload);
+}
+
+/**
+ * Save the caller's provider-key config. Dummy values only — never a real
+ * key; scenarios restore with serverAssistantConfigDelete afterwards.
+ */
+export async function serverAssistantConfigPut(
+  sessionCookie: string,
+  input: { provider_kind: string; base_url: string; model_name: string; api_key?: string },
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantConfig> {
+  const res = await mutateJSON("PUT", `${apiBase}/api/users/me/ai-assistant/config/`, sessionCookie, input);
+  if (res.status !== 200) throw new Error(`[parity] config save failed with HTTP ${res.status}.`);
+  return assistantConfigOf((await res.json()) as unknown);
+}
+
+/** Remove the caller's provider-key config (restores the keyless state). */
+export async function serverAssistantConfigDelete(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON("DELETE", `${apiBase}/api/users/me/ai-assistant/config/`, sessionCookie);
+  if (res.status !== 204) throw new Error(`[parity] config delete failed with HTTP ${res.status}.`);
+}
+
+/** Read the caller's speech-key config. */
+export async function serverAssistantSttGet(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantSttConfig> {
+  const res = await apiJson("GET", "/api/users/me/ai-assistant/stt-config/", sessionCookie, undefined, apiBase);
+  if (res.status !== 200) throw new Error(`[parity] stt-config read failed with HTTP ${res.status}.`);
+  return assistantSttConfigOf(res.payload);
+}
+
+/** Save the caller's speech-key config (dummy values only, restored after). */
+export async function serverAssistantSttPut(
+  sessionCookie: string,
+  input: { base_url: string; model_name: string; api_key?: string },
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantSttConfig> {
+  const res = await mutateJSON("PUT", `${apiBase}/api/users/me/ai-assistant/stt-config/`, sessionCookie, input);
+  if (res.status !== 200) throw new Error(`[parity] stt-config save failed with HTTP ${res.status}.`);
+  return assistantSttConfigOf((await res.json()) as unknown);
+}
+
+/** Remove the caller's speech-key config. */
+export async function serverAssistantSttDelete(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON("DELETE", `${apiBase}/api/users/me/ai-assistant/stt-config/`, sessionCookie);
+  if (res.status !== 204) throw new Error(`[parity] stt-config delete failed with HTTP ${res.status}.`);
+}
+
+/** List the caller's chat threads in a workspace (newest first). */
+export async function serverAssistantThreads(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantThread[]> {
+  const res = await serverAssistantThreadsRaw(workspaceSlug, sessionCookie, apiBase);
+  if (res.status !== 200) throw new Error(`[parity] thread list failed with HTTP ${res.status}.`);
+  if (!Array.isArray(res.payload)) throw new Error("[parity] thread list carried no array.");
+  return res.payload.map(assistantThreadOf);
+}
+
+/** Raw thread list for the guest-refusal halves (403 role_not_allowed). */
+export async function serverAssistantThreadsRaw(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  return apiJson("GET", `/api/workspaces/${workspaceSlug}/ai-assistant/threads/`, sessionCookie, undefined, apiBase);
+}
+
+/** Create an untitled chat thread. */
+export async function serverAssistantThreadCreate(
+  workspaceSlug: string,
+  sessionCookie: string,
+  title = "",
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantThread> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/ai-assistant/threads/`,
+    sessionCookie,
+    { title }
+  );
+  if (res.status !== 201) throw new Error(`[parity] thread create failed with HTTP ${res.status}.`);
+  return assistantThreadOf((await res.json()) as unknown);
+}
+
+/** Raw thread create for the guest-refusal halves. */
+export async function serverAssistantThreadCreateRaw(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/ai-assistant/threads/`,
+    sessionCookie,
+    { title: "" }
+  );
+  return { status: res.status, payload: (await res.text()) as unknown };
+}
+
+/** Patch a thread's title / archived flag (archived fixtures for the sidebar). */
+export async function serverAssistantThreadPatch(
+  workspaceSlug: string,
+  threadId: string,
+  sessionCookie: string,
+  patch: { title?: string; is_archived?: boolean },
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantThread> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/ai-assistant/threads/${threadId}/`,
+    sessionCookie,
+    patch
+  );
+  if (res.status !== 200) throw new Error(`[parity] thread patch failed with HTTP ${res.status}.`);
+  return assistantThreadOf((await res.json()) as unknown);
+}
+
+/** Read one transcript page (cursor `after`, explicit `limit` for paging). */
+export async function serverAssistantMessages(
+  workspaceSlug: string,
+  threadId: string,
+  sessionCookie: string,
+  after = 0,
+  limit = 100,
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantMessage[]> {
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/ai-assistant/threads/${threadId}/messages/?after=${after}&limit=${limit}`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) throw new Error(`[parity] transcript read failed with HTTP ${res.status}.`);
+  if (!Array.isArray(res.payload)) throw new Error("[parity] transcript read carried no array.");
+  return res.payload.map(assistantMessageOf);
+}
+
+/** Send a chat message; resolves with the 202 turn plus the user row. */
+export async function serverAssistantSend(
+  workspaceSlug: string,
+  threadId: string,
+  content: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ turnId: string; message: AssistantMessage }> {
+  const res = await serverAssistantSendRaw(workspaceSlug, threadId, content, sessionCookie, apiBase);
+  if (res.status !== 202) throw new Error(`[parity] send failed with HTTP ${res.status}.`);
+  const payload = res.payload as { turn?: { id?: unknown }; message?: unknown };
+  if (typeof payload.turn?.id !== "string" || payload.message === undefined) {
+    throw new Error("[parity] send response carried no turn/message.");
+  }
+  return { turnId: payload.turn.id, message: assistantMessageOf(payload.message) };
+}
+
+/** Raw send for the refusal halves (400 blank, 409 busy, 422 keyless). */
+export async function serverAssistantSendRaw(
+  workspaceSlug: string,
+  threadId: string,
+  content: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/ai-assistant/threads/${threadId}/messages/`,
+    sessionCookie,
+    { content }
+  );
+  let payload: unknown = null;
+  try {
+    payload = JSON.parse(await res.text()) as unknown;
+  } catch {
+    payload = null;
+  }
+  return { status: res.status, payload };
+}
+
+/** Event-stream status without consuming the stream (guest 404 halves). */
+export async function serverAssistantEventsStatus(
+  workspaceSlug: string,
+  threadId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/ai-assistant/threads/${threadId}/events/?after=0`,
+    { headers: { cookie: sessionCookie } }
+  );
+  // Fetch resolves on headers; cancel the body so a 200 stream does not
+  // hold the socket open.
+  await res.body?.cancel().catch(() => undefined);
+  return res.status;
+}
+
+/** Ask the worker to stop the active turn (204 while busy, 409 when idle). */
+export async function serverAssistantCancelRaw(
+  workspaceSlug: string,
+  threadId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number }> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/ai-assistant/threads/${threadId}/cancel/`,
+    sessionCookie,
+    {}
+  );
+  return { status: res.status };
+}
+
+/** List the caller's tool-server registry rows. */
+export async function serverAssistantMcpList(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantMcpServer[]> {
+  const res = await apiJson("GET", "/api/users/me/ai-assistant/mcp-servers/", sessionCookie, undefined, apiBase);
+  if (res.status !== 200) throw new Error(`[parity] tool-server list failed with HTTP ${res.status}.`);
+  if (!Array.isArray(res.payload)) throw new Error("[parity] tool-server list carried no array.");
+  return res.payload.map(assistantMcpServerOf);
+}
+
+/** Register a tool server (dead URLs welcome: they prove the skipped path). */
+export async function serverAssistantMcpCreate(
+  sessionCookie: string,
+  input: { name: string; url: string; is_enabled?: boolean },
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantMcpServer> {
+  const res = await mutateJSON("POST", `${apiBase}/api/users/me/ai-assistant/mcp-servers/`, sessionCookie, input);
+  if (res.status !== 201) throw new Error(`[parity] tool-server create failed with HTTP ${res.status}.`);
+  return assistantMcpServerOf((await res.json()) as unknown);
+}
+
+/** Remove a tool-server registry row (restores the pre-scenario registry). */
+export async function serverAssistantMcpDelete(
+  serverId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/users/me/ai-assistant/mcp-servers/${serverId}/`,
+    sessionCookie
+  );
+  if (res.status !== 204) throw new Error(`[parity] tool-server delete failed with HTTP ${res.status}.`);
+}
+
+/**
+ * Poll a transcript until the newest row is terminal (an assistant reply
+ * that finished, or an error row) or the budget runs out. The seeded stack
+ * has no model backend, so keyed sends always land on the error row within
+ * seconds; the poll keeps every scenario convergent on a shared stack.
+ */
+export async function serverAssistantPollTerminal(
+  workspaceSlug: string,
+  threadId: string,
+  sessionCookie: string,
+  timeoutMs = 120_000,
+  apiBase: string = apiBaseFromEnv()
+): Promise<AssistantMessage[]> {
+  const started = Date.now();
+  let messages: AssistantMessage[] = [];
+  for (;;) {
+    messages = await serverAssistantMessages(workspaceSlug, threadId, sessionCookie, 0, 200, apiBase);
+    const newest = messages[messages.length - 1];
+    if (
+      newest !== undefined &&
+      (newest.role === "error" || (newest.role === "assistant" && newest.status === "completed"))
+    ) {
+      return messages;
+    }
+    if (Date.now() - started > timeoutMs) {
+      throw new Error("[parity] transcript never reached a terminal row.");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
 }

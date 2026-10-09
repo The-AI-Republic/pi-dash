@@ -9,6 +9,12 @@ import type { Page } from "@playwright/test";
 import type {
   AddRunnerFormState,
   AddRunnerRemotePhase,
+  AssistantApiCounts,
+  AssistantBubble,
+  AssistantLandingGreeting,
+  AssistantSidebarThread,
+  AssistantStreamFrame,
+  AssistantToolActivity,
   AutomationCloseRow,
   AutomationMonthModal,
   AutomationRow,
@@ -5277,5 +5283,189 @@ export class WebNewDriver implements ParityDriver {
   }
   async addRunnerLastToast(): Promise<string | null> {
     return todo("addRunnerLastToast");
+  }
+
+  // --- Assistant chat core (NEWFRONT-187). Throwing stubs per the shared
+  // --- driver contract; the assistant area fills these in when it lands.
+
+  async assistantOpenLanding(_workspaceSlug: string): Promise<void> {
+    return todo("assistantOpenLanding");
+  }
+  async assistantOpenThread(_workspaceSlug: string, _threadId: string): Promise<void> {
+    return todo("assistantOpenThread");
+  }
+  async assistantOpenHome(_workspaceSlug: string): Promise<void> {
+    return todo("assistantOpenHome");
+  }
+  async assistantCurrentPath(): Promise<string> {
+    return todo("assistantCurrentPath");
+  }
+  async assistantGoBack(): Promise<void> {
+    return todo("assistantGoBack");
+  }
+  async assistantLandingGreeting(): Promise<AssistantLandingGreeting | null> {
+    return todo("assistantLandingGreeting");
+  }
+  async assistantLandingComposerVisible(): Promise<boolean> {
+    return todo("assistantLandingComposerVisible");
+  }
+  async assistantSetupCard(): Promise<{ title: string; body: string; button: string } | null> {
+    return todo("assistantSetupCard");
+  }
+  async assistantSetupCardClick(): Promise<void> {
+    return todo("assistantSetupCardClick");
+  }
+  async assistantFillDraft(_text: string): Promise<void> {
+    return todo("assistantFillDraft");
+  }
+  async assistantDraftValue(): Promise<string> {
+    return todo("assistantDraftValue");
+  }
+  async assistantPressEnter(): Promise<void> {
+    return todo("assistantPressEnter");
+  }
+  async assistantPressShiftEnter(): Promise<void> {
+    return todo("assistantPressShiftEnter");
+  }
+  async assistantPressControlEnter(): Promise<void> {
+    return todo("assistantPressControlEnter");
+  }
+  async assistantSendVisible(): Promise<boolean> {
+    return todo("assistantSendVisible");
+  }
+  async assistantSendEnabled(): Promise<boolean> {
+    return todo("assistantSendEnabled");
+  }
+  async assistantClickSend(): Promise<void> {
+    return todo("assistantClickSend");
+  }
+  async assistantStopVisible(): Promise<boolean> {
+    return todo("assistantStopVisible");
+  }
+  async assistantClickStop(): Promise<void> {
+    return todo("assistantClickStop");
+  }
+  async assistantComposerReason(): Promise<string | null> {
+    return todo("assistantComposerReason");
+  }
+  async assistantTextareaDisabled(): Promise<boolean> {
+    return todo("assistantTextareaDisabled");
+  }
+  async assistantErrorLine(): Promise<string | null> {
+    return todo("assistantErrorLine");
+  }
+  async assistantMicLabel(): Promise<string | null> {
+    return todo("assistantMicLabel");
+  }
+  async assistantClickMic(): Promise<void> {
+    return todo("assistantClickMic");
+  }
+  async assistantDictationHint(): Promise<string | null> {
+    return todo("assistantDictationHint");
+  }
+  async assistantBubbles(): Promise<AssistantBubble[]> {
+    return todo("assistantBubbles");
+  }
+  async assistantBubbleHtml(_index: number): Promise<string> {
+    return todo("assistantBubbleHtml");
+  }
+  async assistantToolActivities(): Promise<AssistantToolActivity[]> {
+    return todo("assistantToolActivities");
+  }
+  async assistantNoticeLines(): Promise<string[]> {
+    return todo("assistantNoticeLines");
+  }
+  async assistantEmptyState(): Promise<string | null> {
+    return todo("assistantEmptyState");
+  }
+  async assistantIsScrolledToBottom(): Promise<boolean> {
+    return todo("assistantIsScrolledToBottom");
+  }
+  async assistantClickToolLink(_activityIndex: number, _linkIndex: number): Promise<void> {
+    return todo("assistantClickToolLink");
+  }
+  async assistantSidebarThreads(): Promise<AssistantSidebarThread[]> {
+    return todo("assistantSidebarThreads");
+  }
+  async assistantSidebarEmptyVisible(): Promise<boolean> {
+    return todo("assistantSidebarEmptyVisible");
+  }
+  async assistantClickNewChat(): Promise<void> {
+    return todo("assistantClickNewChat");
+  }
+  async assistantClickSidebarThread(_index: number): Promise<void> {
+    return todo("assistantClickSidebarThread");
+  }
+  async assistantCardVisible(): Promise<boolean> {
+    return todo("assistantCardVisible");
+  }
+  async assistantCardFillDraft(_text: string): Promise<void> {
+    return todo("assistantCardFillDraft");
+  }
+  async assistantCardDraftValue(): Promise<string> {
+    return todo("assistantCardDraftValue");
+  }
+  async assistantCardPressEnter(): Promise<void> {
+    return todo("assistantCardPressEnter");
+  }
+  async assistantCardAskDisabled(): Promise<boolean> {
+    return todo("assistantCardAskDisabled");
+  }
+  async assistantCardClickAsk(): Promise<void> {
+    return todo("assistantCardClickAsk");
+  }
+  async assistantCardClickSuggestion(_text: string): Promise<void> {
+    return todo("assistantCardClickSuggestion");
+  }
+  async assistantCardSuggestions(): Promise<string[]> {
+    return todo("assistantCardSuggestions");
+  }
+  async assistantCardRecents(): Promise<{ title: string; href: string }[]> {
+    return todo("assistantCardRecents");
+  }
+  async assistantCardClickRecent(_index: number): Promise<void> {
+    return todo("assistantCardClickRecent");
+  }
+  async assistantStubStream(_threadId: string, _frames: AssistantStreamFrame[]): Promise<void> {
+    return todo("assistantStubStream");
+  }
+  async assistantClearStreamStub(_threadId: string): Promise<void> {
+    return todo("assistantClearStreamStub");
+  }
+  async assistantStreamRequestUrls(_threadId: string): Promise<string[]> {
+    return todo("assistantStreamRequestUrls");
+  }
+  async assistantBlockStream(_threadId: string): Promise<void> {
+    return todo("assistantBlockStream");
+  }
+  async assistantClearStreamBlock(_threadId: string): Promise<void> {
+    return todo("assistantClearStreamBlock");
+  }
+  async assistantStartApiSpy(): Promise<void> {
+    return todo("assistantStartApiSpy");
+  }
+  async assistantApiCounts(): Promise<AssistantApiCounts> {
+    return todo("assistantApiCounts");
+  }
+  async assistantStopApiSpy(): Promise<void> {
+    return todo("assistantStopApiSpy");
+  }
+  async assistantFailThreadCreateOnce(): Promise<void> {
+    return todo("assistantFailThreadCreateOnce");
+  }
+  async assistantDelayThreadCreate(_ms: number): Promise<void> {
+    return todo("assistantDelayThreadCreate");
+  }
+  async assistantClearThreadCreateStubs(): Promise<void> {
+    return todo("assistantClearThreadCreateStubs");
+  }
+  async assistantDelaySend(_ms: number): Promise<void> {
+    return todo("assistantDelaySend");
+  }
+  async assistantClearSendDelay(): Promise<void> {
+    return todo("assistantClearSendDelay");
+  }
+  async assistantLastToast(): Promise<{ title: string; message: string } | null> {
+    return todo("assistantLastToast");
   }
 }

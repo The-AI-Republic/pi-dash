@@ -125,6 +125,12 @@ services:
       WEB_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
       APP_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
       SPACE_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      # BYOK key storage (NEWFRONT-187): Fernet with a fixed scratch-only
+      # key, like SECRET_KEY above. Without it the default KMS backend is
+      # unconfigured and every provider/speech-key save 503s, so assistant
+      # oracles could never configure the key the chat needs.
+      ASSISTANT_CRYPTO_BACKEND: fernet
+      ASSISTANT_ENCRYPTION_KEY: aBpRyG1sxQfr1J0PQpxBXUgw79E4lXDzKu_bA1ZTmGM=
     ports:
       - "${PARITY_API_PORT:-18019}:8000"
     healthcheck:
@@ -158,7 +164,10 @@ services:
       context: ../../../../../apps/api
       dockerfile: Dockerfile.dev
     image: parity19-api:local
-    container_name: parity19-worker
+    # Slotted like every other service (NEWFRONT-187): the hardcoded name
+    # collided across PARITY_PROJECT stacks, so only the first stack ever
+    # got a worker and assistant turns in every other slot never ran.
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-worker
     command:
       [
         "bash",
@@ -191,6 +200,10 @@ services:
       WEB_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
       APP_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
       SPACE_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      # Same Fernet key as api (NEWFRONT-187): the turn worker decrypts
+      # stored provider keys at run time.
+      ASSISTANT_CRYPTO_BACKEND: fernet
+      ASSISTANT_ENCRYPTION_KEY: aBpRyG1sxQfr1J0PQpxBXUgw79E4lXDzKu_bA1ZTmGM=
 
   proxy:
     image: caddy:2-alpine
