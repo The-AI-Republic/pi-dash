@@ -16,6 +16,48 @@ const rules = [{ source: "NEWFRONT-1 allowlist", paths: cfg.base }];
 if (issue && cfg.issues[issue]) rules.push({ source: `${issue} (${cfg.issues[issue].reason})`, ...cfg.issues[issue] });
 if (issue && cfg.oracleIssues.ids.includes(issue)) rules.push({ source: `${issue} (oracle selectors)`, ...cfg.oracleIssues });
 
+// A file with every data-testid attribute removed and all whitespace dropped. Two versions
+// of a file that differ only by data-testid attributes (and the line breaks a formatter adds
+// around them) reduce to the same string.
+const withoutTestids = (src) => {
+  let out = "";
+  let i = 0;
+  const attr = /\s*\bdata-testid=/g;
+  for (;;) {
+    attr.lastIndex = i;
+    const m = attr.exec(src);
+    if (!m) break;
+    let j = attr.lastIndex;
+    const open = src[j];
+    if (open === '"' || open === "'") {
+      j = src.indexOf(open, j + 1) + 1;
+      if (j === 0) break;
+    } else if (open === "{") {
+      let depth = 0;
+      do {
+        if (src[j] === "{") depth++;
+        else if (src[j] === "}") depth--;
+        j++;
+      } while (depth > 0 && j < src.length);
+    } else {
+      out += src.slice(i, j);
+      i = j;
+      continue;
+    }
+    out += src.slice(i, m.index);
+    i = j;
+  }
+  return (out + src.slice(i)).replace(/\s+/g, "");
+};
+const show = (rev, file) => {
+  try {
+    return git("show", `${rev}:${file}`);
+  } catch {
+    return null;
+  }
+};
+const mergeBase = git("merge-base", base, "HEAD").trim();
+
 const changes = git("diff", "--name-status", `${base}...HEAD`).trim().split("\n").filter(Boolean)
   .map((line) => { const [status, ...rest] = line.split("\t"); return { status, file: rest[rest.length - 1] }; });
 
@@ -25,10 +67,21 @@ for (const { status, file } of changes) {
   if (!rule) { problems.push(`${file}: outside the allowlist${issue ? ` and ${issue}'s extras` : " (branch name has no NEWFRONT issue)"}`); continue; }
   if (rule.deletionsOnly && status !== "D") problems.push(`${file}: ${rule.source} only allows deleting files here`);
   if (rule.testidOnly) {
-    const diff = git("diff", "-U0", `${base}...HEAD`, "--", file).split("\n")
-      .filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---)/.test(l) && l.trim().length > 1);
-    const bad = diff.filter((l) => !l.includes("data-testid"));
-    if (bad.length) problems.push(`${file}: ${rule.source} only allows lines that add data-testid; found:\n    ${bad.slice(0, 5).join("\n    ")}`);
+    const before = show(mergeBase, file);
+    const after = show("HEAD", file);
+    if (before === null || after === null) {
+      problems.push(`${file}: ${rule.source} only allows adding data-testid to existing files, not adding or deleting files`);
+    } else {
+      const a = withoutTestids(before);
+      const b = withoutTestids(after);
+      if (a !== b) {
+        let k = 0;
+        while (k < a.length && a[k] === b[k]) k++;
+        problems.push(
+          `${file}: ${rule.source} only allows adding data-testid attributes; something else changed near:\n    was: ${a.slice(Math.max(0, k - 40), k + 60)}\n    now: ${b.slice(Math.max(0, k - 40), k + 60)}`,
+        );
+      }
+    }
   }
 }
 

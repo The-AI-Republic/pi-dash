@@ -1,5 +1,5 @@
 {
-  "$comment": "Human-maintained. Extra paths a NEWFRONT issue may touch beyond the NEWFRONT-1 allowlist, keyed by issue identifier (matched from the PR branch name, e.g. pi-dash/newfront-104). The gate reads this file from the base branch, never from the PR. testidOnly: every changed line in these paths must contain data-testid. deletionsOnly: files in these paths may only be deleted.",
+  "$comment": "Human-maintained. Extra paths a NEWFRONT issue may touch beyond the NEWFRONT-1 allowlist, keyed by issue identifier (matched from the PR branch name, e.g. pi-dash/newfront-104). The gate reads this file from the base branch, never from the PR. testidOnly: files in these paths may change only by gaining or losing data-testid attributes (whitespace and line breaks aside). deletionsOnly: files in these paths may only be deleted.",
   "base": [
     "^apps/web_new/",
     "^packages/kit/",
@@ -18,7 +18,7 @@
   },
   "oracleIssues": {
     "$comment": "Oracle issues may add data-testid attributes to the old apps, nothing else.",
-    "ids": ["NEWFRONT-24","NEWFRONT-26","NEWFRONT-28","NEWFRONT-30","NEWFRONT-32","NEWFRONT-34","NEWFRONT-36","NEWFRONT-38","NEWFRONT-40","NEWFRONT-42","NEWFRONT-44","NEWFRONT-46","NEWFRONT-48","NEWFRONT-50","NEWFRONT-52","NEWFRONT-54","NEWFRONT-56","NEWFRONT-58","NEWFRONT-60","NEWFRONT-62","NEWFRONT-64","NEWFRONT-66","NEWFRONT-68","NEWFRONT-95","NEWFRONT-97"],
+    "ids": ["NEWFRONT-24","NEWFRONT-26","NEWFRONT-28","NEWFRONT-30","NEWFRONT-32","NEWFRONT-34","NEWFRONT-36","NEWFRONT-38","NEWFRONT-40","NEWFRONT-42","NEWFRONT-44","NEWFRONT-46","NEWFRONT-48","NEWFRONT-50","NEWFRONT-52","NEWFRONT-54","NEWFRONT-56","NEWFRONT-58","NEWFRONT-60","NEWFRONT-62","NEWFRONT-64","NEWFRONT-66","NEWFRONT-68","NEWFRONT-95","NEWFRONT-97","NEWFRONT-198","NEWFRONT-199","NEWFRONT-200","NEWFRONT-201","NEWFRONT-202"],
     "paths": ["^apps/(web|admin|space)/"],
     "testidOnly": true
   }
