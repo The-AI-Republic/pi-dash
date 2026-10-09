@@ -260,8 +260,10 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // `v1_cycles_modules::routes`; D-22 runner delete,
         // PIDASHCONV-538, via `v1_cli_auth::routes`; D-18 link/comment
         // routes, PIDASHCONV-674, plus PR/review-link routes,
-        // PIDASHCONV-680, via `v1_work_items::routes`; sibling
-        // handler issues extend the merge; merges keep both sides;
+        // PIDASHCONV-680, via `v1_work_items::routes`; D-21
+        // assets/stickies/intake, PIDASHCONV-426, via
+        // `v1_assets::routes`; sibling handler issues extend the merge;
+        // merges keep both sides;
         // `auth_oauth::routes` already covers the device flow.
         // D-18 work-item action routes, PIDASHCONV-678, via
         // `v1_work_items::routes` (sibling handler issues extend that
@@ -272,7 +274,8 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::v1_projects::routes())
             .merge(crate::v1_cycles_modules::routes())
             .merge(crate::v1_cli_auth::routes())
-            .merge(crate::v1_work_items::routes()),
+            .merge(crate::v1_work_items::routes())
+            .merge(crate::v1_assets::routes()),
         // Auth handlers merge their routers here (D-17 Gitea OAuth
         // initiate/callback, PIDASHCONV-341; GitHub OAuth initiate/callback,
         // PIDASHCONV-336; GitLab OAuth initiate/callback, PIDASHCONV-339;
