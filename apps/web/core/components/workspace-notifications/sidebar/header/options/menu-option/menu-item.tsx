@@ -16,6 +16,7 @@ export const NotificationMenuOptionItem = observer(function NotificationMenuOpti
   if (type === "menu-item")
     return (
       <div
+        data-testid="notifications-mode-option"
         className="mx-2 flex cursor-pointer items-center gap-2 rounded-xs p-1 px-2 transition-all hover:bg-layer-1"
         onClick={() => onClick && onClick()}
       >

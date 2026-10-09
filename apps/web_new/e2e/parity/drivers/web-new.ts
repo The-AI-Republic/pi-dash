@@ -42,8 +42,13 @@ import type {
   SchedulerBindingValues,
   SchedulerCalendarBlock,
   RunnerChatStreamFrame,
+  NotificationsAppliedChip,
   NotificationsCard,
   NotificationsEmailPref,
+  NotificationsFilterOption,
+  NotificationsListQuery,
+  NotificationsMode,
+  NotificationsOrigin,
   NotificationsTab,
   SchedulerCatalogRow,
   SchedulerDefinitionValues,
@@ -5716,5 +5721,54 @@ export class WebNewDriver implements ParityDriver {
   }
   async notificationsClearEmailPreferenceSaveFailure(): Promise<void> {
     return todo("notificationsClearEmailPreferenceSaveFailure");
+  }
+
+  async notificationsEntryListQuery(_workspaceSlug: string): Promise<NotificationsListQuery> {
+    return todo("notificationsEntryListQuery");
+  }
+  async notificationsOpenFilterMenu(): Promise<void> {
+    return todo("notificationsOpenFilterMenu");
+  }
+  async notificationsFilterOptions(): Promise<NotificationsFilterOption[]> {
+    return todo("notificationsFilterOptions");
+  }
+  async notificationsToggleFilterOrigin(_origin: NotificationsOrigin): Promise<NotificationsListQuery> {
+    return todo("notificationsToggleFilterOrigin");
+  }
+  async notificationsAppliedChips(): Promise<NotificationsAppliedChip[]> {
+    return todo("notificationsAppliedChips");
+  }
+  async notificationsRemoveFilterChip(_origin: NotificationsOrigin): Promise<NotificationsListQuery> {
+    return todo("notificationsRemoveFilterChip");
+  }
+  async notificationsClearFilters(): Promise<NotificationsListQuery> {
+    return todo("notificationsClearFilters");
+  }
+  async notificationsCloseMenus(): Promise<void> {
+    return todo("notificationsCloseMenus");
+  }
+  async notificationsOpenOverflowMenu(): Promise<void> {
+    return todo("notificationsOpenOverflowMenu");
+  }
+  async notificationsOverflowOptions(): Promise<string[]> {
+    return todo("notificationsOverflowOptions");
+  }
+  async notificationsToggleMode(_mode: NotificationsMode): Promise<NotificationsListQuery> {
+    return todo("notificationsToggleMode");
+  }
+  async notificationsCardActionsVisible(_index: number): Promise<boolean> {
+    return todo("notificationsCardActionsVisible");
+  }
+  async notificationsHoverCard(_index: number): Promise<void> {
+    return todo("notificationsHoverCard");
+  }
+  async notificationsToggleCardRead(_index: number): Promise<void> {
+    return todo("notificationsToggleCardRead");
+  }
+  async notificationsToggleCardArchive(_index: number): Promise<void> {
+    return todo("notificationsToggleCardArchive");
+  }
+  async notificationsFailNextCardWrite(): Promise<void> {
+    return todo("notificationsFailNextCardWrite");
   }
 }

@@ -3608,6 +3608,47 @@ export interface ParityDriver {
   notificationsFailEmailPreferenceSaves(status: number): Promise<void>;
   /** Remove the email-preference save failure. */
   notificationsClearEmailPreferenceSaveFailure(): Promise<void>;
+
+  // ---------------------------------------------------------------------------
+  // Notifications filters, modes, read/archive (NEWFRONT-200, NTF-015..019,
+  // NTF-023). Observed on apps/web: the origin filter menu with its applied
+  // chips, the overflow menu's unread/archived/snoozed modes, and the
+  // hover-revealed per-card read/archive actions with their toasts.
+  // Appended; existing entries above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Reload the inbox and report the entry list fetch's query params. */
+  notificationsEntryListQuery(workspaceSlug: string): Promise<NotificationsListQuery>;
+  /** Open the origin filter menu and wait until its options show. */
+  notificationsOpenFilterMenu(): Promise<void>;
+  /** Origin-filter options in display order with their checked state. */
+  notificationsFilterOptions(): Promise<NotificationsFilterOption[]>;
+  /** Toggle one origin filter; resolves with the refetch's query params. */
+  notificationsToggleFilterOrigin(origin: NotificationsOrigin): Promise<NotificationsListQuery>;
+  /** Applied-filter chips in display order (origin key plus label). */
+  notificationsAppliedChips(): Promise<NotificationsAppliedChip[]>;
+  /** Remove one origin via its chip; resolves with the refetch's query params. */
+  notificationsRemoveFilterChip(origin: NotificationsOrigin): Promise<NotificationsListQuery>;
+  /** Clear all origins; resolves with the refetch's query params. */
+  notificationsClearFilters(): Promise<NotificationsListQuery>;
+  /** Dismiss any open inbox menus. */
+  notificationsCloseMenus(): Promise<void>;
+  /** Open the overflow menu and wait until its mode options show. */
+  notificationsOpenOverflowMenu(): Promise<void>;
+  /** Overflow-mode option labels in display order. */
+  notificationsOverflowOptions(): Promise<string[]>;
+  /** Toggle one overflow mode; resolves with the refetch's query params. */
+  notificationsToggleMode(mode: NotificationsMode): Promise<NotificationsListQuery>;
+  /** Whether the card's hover actions currently show. */
+  notificationsCardActionsVisible(index: number): Promise<boolean>;
+  /** Hover a card and wait until its actions show. */
+  notificationsHoverCard(index: number): Promise<void>;
+  /** Toggle one card's read state through its hover action. */
+  notificationsToggleCardRead(index: number): Promise<void>;
+  /** Toggle one card's archived state through its hover action. */
+  notificationsToggleCardArchive(index: number): Promise<void>;
+  /** Fail the next per-card read/archive write once (failure shaping). */
+  notificationsFailNextCardWrite(): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -4098,3 +4139,43 @@ export interface NotificationsCard {
 
 /** Email-preference toggle key (NEWFRONT-201, NTF-024). */
 export type NotificationsEmailPref = "property_change" | "state_change" | "issue_completed" | "comment" | "mention";
+
+/** Inbox origin-filter key (NEWFRONT-200, NTF-015). */
+export type NotificationsOrigin = "assigned" | "created" | "subscribed";
+
+/** Inbox overflow-mode key (NEWFRONT-200, NTF-016). */
+export type NotificationsMode = "unread" | "archived" | "snoozed";
+
+/** One origin-filter menu option as the user reads it (NEWFRONT-200, NTF-015). */
+export interface NotificationsFilterOption {
+  /** Origin key carried by the option's test hook. */
+  value: NotificationsOrigin;
+  /** Visible option label. */
+  label: string;
+  /** Whether the option currently shows its checkmark. */
+  checked: boolean;
+}
+
+/** One applied-filter chip as the user reads it (NEWFRONT-200, NTF-015). */
+export interface NotificationsAppliedChip {
+  /** Origin key carried by the chip's test hook. */
+  origin: NotificationsOrigin;
+  /** Visible chip label. */
+  label: string;
+}
+
+/** Query params of one inbox list fetch, as the UI requested them. */
+export interface NotificationsListQuery {
+  /** Selected origins the UI sent, or null when the param is absent. */
+  type: string | null;
+  /** Read flag the UI sent, or null when the param is absent. */
+  read: string | null;
+  /** Archived flag the UI sent, or null when the param is absent. */
+  archived: string | null;
+  /** Snoozed flag the UI sent, or null when the param is absent. */
+  snoozed: string | null;
+  /** Mentions flag the UI sent, or null when the param is absent. */
+  mentioned: string | null;
+  /** Page cursor the UI sent, or null when the param is absent. */
+  cursor: string | null;
+}

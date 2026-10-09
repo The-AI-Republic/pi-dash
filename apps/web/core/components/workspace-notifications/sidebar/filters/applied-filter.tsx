@@ -49,6 +49,7 @@ export const AppliedFilters = observer(function AppliedFilters(props: TAppliedFi
           return (
             <Tag
               key={filter.value}
+              data-testid={`notifications-filter-chip-${filter.value}`}
               className="flex-start flex flex-wrap"
               onClick={() => handleFilterTypeChange(filter?.value, !isSelected)}
             >
@@ -59,7 +60,7 @@ export const AppliedFilters = observer(function AppliedFilters(props: TAppliedFi
             </Tag>
           );
         })}
-        <button type="button" onClick={handleClearFilters}>
+        <button type="button" onClick={handleClearFilters} data-testid="notifications-filter-clear">
           <Tag>
             {t("Clear all")}
             <CloseIcon height={12} width={12} strokeWidth={2} />

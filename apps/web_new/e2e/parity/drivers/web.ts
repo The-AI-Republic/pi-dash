@@ -38,8 +38,13 @@ import type {
   LayoutsLayoutKey,
   DocumentShellFacts,
   NotFoundFacts,
+  NotificationsAppliedChip,
   NotificationsCard,
   NotificationsEmailPref,
+  NotificationsFilterOption,
+  NotificationsListQuery,
+  NotificationsMode,
+  NotificationsOrigin,
   NotificationsTab,
   ParityBrowserCookie,
   ParityDriver,
@@ -19589,7 +19594,7 @@ export class WebDriver implements ParityDriver {
   }
 
   async notificationsSetSnoozedMode(on: boolean): Promise<void> {
-    const menuButton = this.page.getByTestId("notifications-overflow-menu").first();
+    const menuButton = this.page.getByTestId("notifications-overflow-button").first();
     await menuButton.click({ timeout: WebDriver.WAIT_MS });
     const item = this.page.getByText("Show snoozed", { exact: true });
     await item.waitFor({ timeout: WebDriver.WAIT_MS });
@@ -19733,5 +19738,221 @@ export class WebDriver implements ParityDriver {
 
   async notificationsClearEmailPreferenceSaveFailure(): Promise<void> {
     await this.page.unroute("**/api/users/me/notification-preferences/");
+  }
+
+  // --- Notifications filters, modes, read/archive (NEWFRONT-200,
+  // --- NTF-015..019, NTF-023). Appended; existing methods above are
+  // --- untouched per the shared driver contract.
+
+  private static notificationsQueryOf(url: string): NotificationsListQuery {
+    const params = new URL(url).searchParams;
+    return {
+      type: params.get("type"),
+      read: params.get("read"),
+      archived: params.get("archived"),
+      snoozed: params.get("snoozed"),
+      mentioned: params.get("mentioned"),
+      cursor: params.get("cursor"),
+    };
+  }
+
+  private static notificationsCardWritePath(url: string): boolean {
+    return url.includes("/users/notifications/") && (url.endsWith("/read/") || url.endsWith("/archive/"));
+  }
+
+  private notificationsNextListQuery(): Promise<NotificationsListQuery> {
+    return this.page
+      .waitForResponse(
+        (response) => {
+          const url = response.url();
+          return (
+            response.request().method() === "GET" &&
+            url.includes("/users/notifications") &&
+            !url.includes("/unread/") &&
+            response.ok()
+          );
+        },
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then((response) => WebDriver.notificationsQueryOf(response.url()));
+  }
+
+  async notificationsEntryListQuery(workspaceSlug: string): Promise<NotificationsListQuery> {
+    const queryWait = this.notificationsNextListQuery();
+    await this.page.goto(`/${workspaceSlug}/notifications/`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.notificationsTabLocator("all")
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+    return queryWait;
+  }
+
+  async notificationsOpenFilterMenu(): Promise<void> {
+    await this.page.getByTestId("notifications-filter-button").first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .getByTestId(/notifications-filter-option-/)
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async notificationsFilterOptions(): Promise<NotificationsFilterOption[]> {
+    const options = this.page.getByTestId(/notifications-filter-option-/);
+    const count = await options.count();
+    const out: NotificationsFilterOption[] = [];
+    for (let i = 0; i < count; i++) {
+      const option = options.nth(i);
+      const hook = (await option.getAttribute("data-testid").catch(() => null)) ?? "";
+      const value = hook.replace("notifications-filter-option-", "") as NotificationsOrigin;
+      const label = WebDriver.cleanText(await option.innerText().catch(() => ""));
+      // The checkmark icon renders only inside a selected option.
+      const checked = (await option.locator("svg").count()) > 0;
+      out.push({ value, label, checked });
+    }
+    return out;
+  }
+
+  async notificationsToggleFilterOrigin(origin: NotificationsOrigin): Promise<NotificationsListQuery> {
+    const queryWait = this.notificationsNextListQuery();
+    await this.page.getByTestId(`notifications-filter-option-${origin}`).first().click({ timeout: WebDriver.WAIT_MS });
+    return queryWait;
+  }
+
+  async notificationsAppliedChips(): Promise<NotificationsAppliedChip[]> {
+    const chips = this.page.getByTestId(/notifications-filter-chip-/);
+    const count = await chips.count();
+    const out: NotificationsAppliedChip[] = [];
+    for (let i = 0; i < count; i++) {
+      const chip = chips.nth(i);
+      const hook = (await chip.getAttribute("data-testid").catch(() => null)) ?? "";
+      const origin = hook.replace("notifications-filter-chip-", "") as NotificationsOrigin;
+      const label = WebDriver.cleanText(await chip.innerText().catch(() => ""));
+      out.push({ origin, label });
+    }
+    return out;
+  }
+
+  async notificationsRemoveFilterChip(origin: NotificationsOrigin): Promise<NotificationsListQuery> {
+    const queryWait = this.notificationsNextListQuery();
+    await this.page.getByTestId(`notifications-filter-chip-${origin}`).first().click({ timeout: WebDriver.WAIT_MS });
+    return queryWait;
+  }
+
+  async notificationsClearFilters(): Promise<NotificationsListQuery> {
+    const queryWait = this.notificationsNextListQuery();
+    await this.page.getByTestId("notifications-filter-clear").first().click({ timeout: WebDriver.WAIT_MS });
+    return queryWait;
+  }
+
+  async notificationsCloseMenus(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByTestId(/notifications-filter-option-/)
+      .first()
+      .waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+    await this.page
+      .getByTestId("notifications-mode-option")
+      .first()
+      .waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async notificationsOpenOverflowMenu(): Promise<void> {
+    await this.page.getByTestId("notifications-overflow-button").first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByTestId("notifications-mode-option").first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async notificationsOverflowOptions(): Promise<string[]> {
+    const options = this.page.getByTestId("notifications-mode-option");
+    const count = await options.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      out.push(
+        WebDriver.cleanText(
+          await options
+            .nth(i)
+            .innerText()
+            .catch(() => "")
+        )
+      );
+    }
+    return out;
+  }
+
+  async notificationsToggleMode(mode: NotificationsMode): Promise<NotificationsListQuery> {
+    // Mode options render in menu order: unread, archived, snoozed.
+    const index = mode === "unread" ? 0 : mode === "archived" ? 1 : 2;
+    const queryWait = this.notificationsNextListQuery();
+    await this.page.getByTestId("notifications-mode-option").nth(index).click({ timeout: WebDriver.WAIT_MS });
+    return queryWait;
+  }
+
+  private notificationsCardActions(index: number): Locator {
+    return this.page.getByTestId("notification-card").nth(index).getByTestId("notifications-card-actions");
+  }
+
+  async notificationsCardActionsVisible(index: number): Promise<boolean> {
+    const actions = this.notificationsCardActions(index);
+    if ((await actions.count()) === 0) return false;
+    return actions.isVisible().catch(() => false);
+  }
+
+  async notificationsHoverCard(index: number): Promise<void> {
+    const card = this.page.getByTestId("notification-card").nth(index);
+    await card.scrollIntoViewIfNeeded().catch(() => undefined);
+    await card.hover({ timeout: WebDriver.WAIT_MS });
+    await this.notificationsCardActions(index).waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  private async notificationsClickCardAction(index: number, action: number): Promise<void> {
+    await this.notificationsHoverCard(index);
+    const actions = this.notificationsCardActions(index);
+    const writeWait = this.page
+      .waitForResponse(
+        (response) => {
+          const method = response.request().method();
+          return (
+            (method === "POST" || method === "DELETE") &&
+            WebDriver.notificationsCardWritePath(response.url()) &&
+            response.ok()
+          );
+        },
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    const abortWait = this.page
+      .waitForEvent("requestfailed", {
+        predicate: (request) => WebDriver.notificationsCardWritePath(request.url()),
+        timeout: WebDriver.WAIT_MS,
+      })
+      .then(
+        () => true,
+        () => false
+      );
+    // Read, archive, then snooze: the fixed render order while the snooze
+    // popover stays closed, so its panel buttons are absent.
+    await actions.locator("button").nth(action).click({ timeout: WebDriver.WAIT_MS });
+    await Promise.race([writeWait, abortWait]);
+    await this.page.unrouteAll({ behavior: "wait" }).catch(() => undefined);
+  }
+
+  async notificationsToggleCardRead(index: number): Promise<void> {
+    await this.notificationsClickCardAction(index, 0);
+  }
+
+  async notificationsToggleCardArchive(index: number): Promise<void> {
+    await this.notificationsClickCardAction(index, 1);
+  }
+
+  async notificationsFailNextCardWrite(): Promise<void> {
+    await this.page.route(
+      (url) => WebDriver.notificationsCardWritePath(url.toString()),
+      (route) => route.abort(),
+      { times: 1 }
+    );
   }
 }
