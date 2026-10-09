@@ -27,13 +27,39 @@ use tokio::sync::{Mutex, Notify};
 
 pub struct DesktopHttp {
     pub api_url: Url,
+    // The edition's session-refresh endpoint. `None` for a server whose
+    // session cannot be refreshed (OSS): there a 401 is final.
+    refresh_url: Option<Url>,
+    refresh_timeout: Duration,
     client: Client,
     // Serialize cookie writes with logout, and discard responses from the old
     // session so an in-flight refresh cannot sign the user back in.
-    pub generation: Mutex<u64>,
+    pub generation: Arc<Mutex<u64>>,
+    // Held for the whole of a refresh, so there is one in flight at most and
+    // everything that started before it finished shares its outcome.
+    refresh: Arc<Mutex<RefreshState>>,
     // Abort signals for in-flight requests and streams, keyed by the page's
     // request id, so a canceled request stops instead of completing unseen.
     inflight: std::sync::Mutex<HashMap<String, Arc<Notify>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Refresh {
+    /// The server rotated the session cookies; replay the request.
+    Rotated,
+    /// The refresh endpoint answered 401/403: the session is over.
+    Rejected,
+    /// Network error, timeout, 5xx or anything else. Says nothing about the
+    /// session, so it must never be reported to the page as a 401.
+    Failed,
+}
+
+struct RefreshState {
+    // Counts finished refresh attempts. A request records it before it is
+    // sent; if it has moved by the time that request sees a 401, the attempt
+    // that moved it already covers this request.
+    epoch: u64,
+    last: Refresh,
 }
 
 impl DesktopHttp {
@@ -43,12 +69,36 @@ impl DesktopHttp {
         let _ = rustls::crypto::ring::default_provider().install_default();
         Ok(Self {
             api_url,
+            refresh_url: None,
+            refresh_timeout: Duration::from_secs(30),
             client: Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
-            generation: Mutex::new(0),
+            generation: Default::default(),
+            refresh: Arc::new(Mutex::new(RefreshState {
+                epoch: 0,
+                last: Refresh::Failed,
+            })),
             inflight: Default::default(),
         })
+    }
+
+    /// Refresh the session at `path` when a request gets a 401, then replay
+    /// it. For editions with a short-lived access cookie and a refresh
+    /// endpoint; `path` is on the API origin.
+    pub fn with_session_refresh(mut self, path: &str) -> Result<Self, String> {
+        let url = self
+            .api_url
+            .join(path)
+            .ok()
+            .filter(|url| path.starts_with('/') && allowed_api_url(url, &self.api_url))
+            .ok_or_else(|| format!("session refresh path is not an API path: {path}"))?;
+        self.refresh_url = Some(url);
+        Ok(self)
+    }
+
+    pub fn refreshes_session(&self) -> bool {
+        self.refresh_url.is_some()
     }
 
     fn track(&self, id: &str) -> Inflight<'_> {
@@ -93,6 +143,27 @@ impl Drop for Inflight<'_> {
 
 const CANCELED: &str = "API request canceled";
 const TIMED_OUT: &str = "API request timed out";
+const REFRESH_FAILED: &str = "session refresh failed";
+const SESSION_CHANGED: &str = "session changed during request";
+
+/// The webview's persistent cookie store, as far as this module uses it.
+pub(crate) trait SessionCookies: Clone + Send + Sync + 'static {
+    fn all(&self) -> Option<Vec<Cookie<'static>>>;
+    fn set(&self, cookie: Cookie<'static>) -> bool;
+    fn delete(&self, cookie: Cookie<'static>) -> bool;
+}
+
+impl<R: tauri::Runtime> SessionCookies for tauri::WebviewWindow<R> {
+    fn all(&self) -> Option<Vec<Cookie<'static>>> {
+        self.cookies().ok()
+    }
+    fn set(&self, cookie: Cookie<'static>) -> bool {
+        self.set_cookie(cookie).is_ok()
+    }
+    fn delete(&self, cookie: Cookie<'static>) -> bool {
+        self.delete_cookie(cookie).is_ok()
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -276,18 +347,254 @@ fn response_head(response: &reqwest::Response) -> ResponseHead {
 
 async fn check_session(state: &DesktopHttp, generation: u64) -> Result<(), String> {
     if *state.generation.lock().await != generation {
-        return Err("session changed during request".into());
+        return Err(SESSION_CHANGED.into());
     }
     Ok(())
 }
 
-/// Send `request`, following same-origin API redirects, and return the final
-/// response with its cookies already written to the webview.
+async fn within<T>(deadline: Option<Instant>, work: impl Future<Output = T>) -> Result<T, String> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline.into(), work)
+            .await
+            .map_err(|_| TIMED_OUT.into()),
+        None => Ok(work.await),
+    }
+}
+
+/// One session's view of the API: the cookie store to read and write, and the
+/// generation that must still be current when it does.
+#[derive(Clone)]
+struct Transport<C> {
+    client: Client,
+    api_url: Url,
+    generation: Arc<Mutex<u64>>,
+    session: u64,
+    cookies: C,
+}
+
+impl<C: SessionCookies> Transport<C> {
+    /// Send one request, following same-origin API redirects, and return the
+    /// final response with its cookies already written to the webview.
+    async fn fetch(
+        &self,
+        mut method: Method,
+        mut url: Url,
+        mut headers: header::HeaderMap,
+        mut body: Option<Vec<u8>>,
+        deadline: Option<Instant>,
+    ) -> Result<reqwest::Response, String> {
+        for _ in 0..10 {
+            let mut request = self
+                .client
+                .request(method.clone(), url.clone())
+                .headers(headers.clone());
+            if let Some(deadline) = deadline {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or(TIMED_OUT)?;
+                request = request.timeout(remaining);
+            }
+            {
+                let guard = self.generation.lock().await;
+                if *guard != self.session {
+                    return Err(SESSION_CHANGED.into());
+                }
+                if let Some(cookies) = cookie_header(
+                    self.cookies.all().ok_or("cannot read session cookies")?,
+                    &url,
+                ) {
+                    request = request.header(header::COOKIE, cookies);
+                }
+            }
+            if let Some(data) = &body {
+                request = request.body(data.clone());
+            }
+            // Do not return reqwest's URL-bearing errors: auth URLs may contain codes.
+            let response = request.send().await.map_err(|e| {
+                if e.is_timeout() {
+                    TIMED_OUT
+                } else {
+                    "API request failed"
+                }
+            })?;
+            let status = response.status();
+            {
+                let guard = self.generation.lock().await;
+                if *guard != self.session {
+                    return Err(SESSION_CHANGED.into());
+                }
+                for header in response.headers().get_all(header::SET_COOKIE) {
+                    if let Some(cookie) = header
+                        .to_str()
+                        .ok()
+                        .and_then(|raw| response_cookie(raw, &url))
+                    {
+                        let stored = if cookie_expired(&cookie) {
+                            self.cookies.delete(cookie)
+                        } else {
+                            self.cookies.set(cookie)
+                        };
+                        if !stored {
+                            return Err("cannot update session cookies".into());
+                        }
+                    }
+                }
+            }
+            if matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308)
+                && let Some(location) = response.headers().get(header::LOCATION)
+            {
+                let target = location
+                    .to_str()
+                    .ok()
+                    .and_then(|v| url.join(v).ok())
+                    .ok_or("invalid API redirect")?;
+                if !allowed_api_url(&target, &self.api_url) {
+                    return Err("API redirect is not allowed".into());
+                }
+                if (status.as_u16() == 303 && method != Method::HEAD)
+                    || (matches!(status.as_u16(), 301 | 302) && method == Method::POST)
+                {
+                    method = Method::GET;
+                    body = None;
+                    headers.remove(header::CONTENT_TYPE);
+                }
+                url = target;
+                continue;
+            }
+            return Ok(response);
+        }
+        Err("too many API redirects".into())
+    }
+}
+
+impl DesktopHttp {
+    /// Send `request` for the page at `origin`. A 401 is answered by one
+    /// session refresh and a replay, so the page sees a 401 only when the
+    /// session is really over.
+    async fn send_as<C: SessionCookies>(
+        &self,
+        cookies: C,
+        origin: &str,
+        request: ApiRequest,
+        body: Option<Vec<u8>>,
+        deadline: Option<Instant>,
+    ) -> Result<(reqwest::Response, u64), String> {
+        let url = request.url;
+        if !allowed_api_url(&url, &self.api_url) {
+            return Err("API URL is not allowed".into());
+        }
+        let method =
+            Method::from_bytes(request.method.as_bytes()).map_err(|_| "invalid HTTP method")?;
+        if !matches!(
+            method,
+            Method::GET
+                | Method::HEAD
+                | Method::POST
+                | Method::PUT
+                | Method::PATCH
+                | Method::DELETE
+                | Method::OPTIONS
+        ) {
+            return Err("HTTP method is not allowed".into());
+        }
+        let mut headers = header::HeaderMap::new();
+        for (name, value) in request.headers {
+            let name = header::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| "invalid header name")?;
+            if safe_request_header(&name) {
+                headers.append(name, value.parse().map_err(|_| "invalid header value")?);
+            }
+        }
+        headers.insert(
+            header::ORIGIN,
+            origin.parse().map_err(|_| "invalid origin")?,
+        );
+        let session = *self.generation.lock().await;
+        let transport = Transport {
+            client: self.client.clone(),
+            api_url: self.api_url.clone(),
+            generation: self.generation.clone(),
+            session,
+            cookies,
+        };
+        // Waits out a refresh in flight rather than racing it with cookies
+        // that are about to be replaced.
+        let seen = within(deadline, self.refresh.lock()).await?.epoch;
+        let response = transport
+            .fetch(
+                method.clone(),
+                url.clone(),
+                headers.clone(),
+                body.clone(),
+                deadline,
+            )
+            .await?;
+        let Some(refresh_url) = self.refresh_url.as_ref().filter(|refresh| {
+            response.status() == reqwest::StatusCode::UNAUTHORIZED && refresh.path() != url.path()
+        }) else {
+            return Ok((response, session));
+        };
+        let mut refresh_headers = header::HeaderMap::new();
+        refresh_headers.insert(header::ORIGIN, headers[header::ORIGIN].clone());
+        let refresh = self.refresh_session(&transport, refresh_url, refresh_headers, seen);
+        match within(deadline, refresh).await? {
+            Refresh::Rotated => {
+                let response = transport
+                    .fetch(method, url, headers, body, deadline)
+                    .await?;
+                Ok((response, session))
+            }
+            Refresh::Rejected => Ok((response, session)),
+            Refresh::Failed => {
+                check_session(self, session).await?;
+                Err(REFRESH_FAILED.into())
+            }
+        }
+    }
+
+    async fn refresh_session<C: SessionCookies>(
+        &self,
+        transport: &Transport<C>,
+        url: &Url,
+        headers: header::HeaderMap,
+        seen: u64,
+    ) -> Refresh {
+        let mut state = self.refresh.clone().lock_owned().await;
+        if state.epoch != seen {
+            return state.last;
+        }
+        let transport = transport.clone();
+        let url = url.clone();
+        let deadline = Instant::now() + self.refresh_timeout;
+        // Detached: the page can cancel the request that happened to start
+        // the refresh while others wait on it, and a rotation abandoned after
+        // the server answered would leave the cookies it replaced in the store.
+        tauri::async_runtime::spawn(async move {
+            let outcome = match transport
+                .fetch(Method::POST, url, headers, None, Some(deadline))
+                .await
+            {
+                Ok(response) if response.status().is_success() => Refresh::Rotated,
+                Ok(response) if matches!(response.status().as_u16(), 401 | 403) => {
+                    Refresh::Rejected
+                }
+                _ => Refresh::Failed,
+            };
+            state.epoch += 1;
+            state.last = outcome;
+            outcome
+        })
+        .await
+        .unwrap_or(Refresh::Failed)
+    }
+}
+
+/// Send `request` on behalf of the app UI in `window`.
 async fn send(
     window: &tauri::WebviewWindow,
     state: &DesktopHttp,
     request: ApiRequest,
-    mut body: Option<Vec<u8>>,
+    body: Option<Vec<u8>>,
     deadline: Option<Instant>,
 ) -> Result<(reqwest::Response, u64), String> {
     let config = window.state::<crate::AppConfig>();
@@ -297,124 +604,14 @@ async fn send(
     if !from_app_ui(window.label(), &source, &config) {
         return Err("native API requests require the app UI".into());
     }
-    let mut url = request.url;
-    if !allowed_api_url(&url, &state.api_url) {
-        return Err("API URL is not allowed".into());
-    }
-    let mut method =
-        Method::from_bytes(request.method.as_bytes()).map_err(|_| "invalid HTTP method")?;
-    if !matches!(
-        method,
-        Method::GET
-            | Method::HEAD
-            | Method::POST
-            | Method::PUT
-            | Method::PATCH
-            | Method::DELETE
-            | Method::OPTIONS
-    ) {
-        return Err("HTTP method is not allowed".into());
-    }
-    let mut headers = header::HeaderMap::new();
-    for (name, value) in request.headers {
-        let name =
-            header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| "invalid header name")?;
-        if safe_request_header(&name) {
-            headers.append(name, value.parse().map_err(|_| "invalid header value")?);
-        }
-    }
     let origin = if source.scheme() == "tauri" {
         crate::BUNDLE_ORIGIN.to_owned()
     } else {
         source.origin().ascii_serialization()
     };
-    headers.insert(
-        header::ORIGIN,
-        origin.parse().map_err(|_| "invalid origin")?,
-    );
-    let generation = *state.generation.lock().await;
-
-    for _ in 0..10 {
-        let mut request = state
-            .client
-            .request(method.clone(), url.clone())
-            .headers(headers.clone());
-        if let Some(deadline) = deadline {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or(TIMED_OUT)?;
-            request = request.timeout(remaining);
-        }
-        {
-            let guard = state.generation.lock().await;
-            if *guard != generation {
-                return Err("session changed during request".into());
-            }
-            if let Some(cookies) = cookie_header(
-                window
-                    .cookies()
-                    .map_err(|_| "cannot read session cookies")?,
-                &url,
-            ) {
-                request = request.header(header::COOKIE, cookies);
-            }
-        }
-        if let Some(data) = &body {
-            request = request.body(data.clone());
-        }
-        // Do not return reqwest's URL-bearing errors: auth URLs may contain codes.
-        let response = request.send().await.map_err(|e| {
-            if e.is_timeout() {
-                TIMED_OUT
-            } else {
-                "API request failed"
-            }
-        })?;
-        let status = response.status();
-        {
-            let guard = state.generation.lock().await;
-            if *guard != generation {
-                return Err("session changed during request".into());
-            }
-            for header in response.headers().get_all(header::SET_COOKIE) {
-                if let Some(cookie) = header
-                    .to_str()
-                    .ok()
-                    .and_then(|raw| response_cookie(raw, &url))
-                {
-                    if cookie_expired(&cookie) {
-                        window.delete_cookie(cookie)
-                    } else {
-                        window.set_cookie(cookie)
-                    }
-                    .map_err(|_| "cannot update session cookies")?;
-                }
-            }
-        }
-        if matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308)
-            && let Some(location) = response.headers().get(header::LOCATION)
-        {
-            let target = location
-                .to_str()
-                .ok()
-                .and_then(|v| url.join(v).ok())
-                .ok_or("invalid API redirect")?;
-            if !allowed_api_url(&target, &state.api_url) {
-                return Err("API redirect is not allowed".into());
-            }
-            if (status.as_u16() == 303 && method != Method::HEAD)
-                || (matches!(status.as_u16(), 301 | 302) && method == Method::POST)
-            {
-                method = Method::GET;
-                body = None;
-                headers.remove(header::CONTENT_TYPE);
-            }
-            url = target;
-            continue;
-        }
-        return Ok((response, generation));
-    }
-    Err("too many API redirects".into())
+    state
+        .send_as(window.clone(), &origin, request, body, deadline)
+        .await
 }
 
 fn read_request(
@@ -467,6 +664,34 @@ pub async fn desktop_api_request(
     }
 }
 
+/// Forward a response to `emit` as a head, then its body as UTF-8 text.
+async fn pump(
+    state: &DesktopHttp,
+    mut response: reqwest::Response,
+    generation: u64,
+    emit: impl Fn(StreamEvent) -> Result<(), String>,
+) -> Result<(), String> {
+    emit(StreamEvent::Head(response_head(&response)))?;
+    let mut pending = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| "API stream failed")? {
+        check_session(state, generation).await?;
+        pending.extend_from_slice(&chunk);
+        // Emit only whole UTF-8 characters; keep a split one for the next chunk.
+        let valid = match std::str::from_utf8(&pending) {
+            Ok(_) => pending.len(),
+            Err(e) if e.error_len().is_none() => e.valid_up_to(),
+            Err(_) => return Err("API stream is not UTF-8".into()),
+        };
+        if valid > 0 {
+            let rest = pending.split_off(valid);
+            let text = String::from_utf8(std::mem::replace(&mut pending, rest))
+                .map_err(|_| "API stream is not UTF-8")?;
+            emit(StreamEvent::Data { text })?;
+        }
+    }
+    emit(StreamEvent::End)
+}
+
 /// Stream a response body (Server-Sent Events) to the page as UTF-8 text.
 /// Resolves when the body ends; the page cancels it with
 /// `desktop_api_cancel`.
@@ -479,33 +704,11 @@ pub async fn desktop_api_stream(
 ) -> Result<(), String> {
     let inflight = state.track(&request.id);
     let work = async {
-        let (mut response, generation) = send(&window, &state, request, None, None).await?;
-        channel
-            .send(StreamEvent::Head(response_head(&response)))
-            .map_err(|_| "stream closed")?;
-        let mut pending = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| "API stream failed")? {
-            check_session(&state, generation).await?;
-            pending.extend_from_slice(&chunk);
-            // Emit only whole UTF-8 characters; keep a split one for the next chunk.
-            let valid = match std::str::from_utf8(&pending) {
-                Ok(_) => pending.len(),
-                Err(e) if e.error_len().is_none() => e.valid_up_to(),
-                Err(_) => return Err("API stream is not UTF-8".into()),
-            };
-            if valid > 0 {
-                let rest = pending.split_off(valid);
-                let text = String::from_utf8(std::mem::replace(&mut pending, rest))
-                    .map_err(|_| "API stream is not UTF-8")?;
-                channel
-                    .send(StreamEvent::Data { text })
-                    .map_err(|_| "stream closed")?;
-            }
-        }
-        channel
-            .send(StreamEvent::End)
-            .map_err(|_| "stream closed")?;
-        Ok(())
+        let (response, generation) = send(&window, &state, request, None, None).await?;
+        pump(&state, response, generation, |event| {
+            channel.send(event).map_err(|_| "stream closed".into())
+        })
+        .await
     };
     tokio::select! {
         result = work => result,
@@ -521,8 +724,507 @@ pub fn desktop_api_cancel(state: tauri::State<'_, DesktopHttp>, id: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     fn api() -> Url {
         Url::parse("https://api.example.com").unwrap()
+    }
+
+    /// The webview's cookie store, for tests.
+    #[derive(Clone, Default)]
+    struct Jar(Arc<std::sync::Mutex<Vec<Cookie<'static>>>>);
+
+    impl Jar {
+        fn holding(cookies: &[&str]) -> Self {
+            let jar = Self::default();
+            for raw in cookies {
+                jar.set(cookie(raw));
+            }
+            jar
+        }
+        fn value(&self, name: &str) -> Option<String> {
+            let cookies = self.0.lock().unwrap();
+            let found = cookies.iter().find(|c| c.name() == name);
+            found.map(|c| c.value().to_owned())
+        }
+    }
+
+    impl SessionCookies for Jar {
+        fn all(&self) -> Option<Vec<Cookie<'static>>> {
+            Some(self.0.lock().unwrap().clone())
+        }
+        fn set(&self, cookie: Cookie<'static>) -> bool {
+            self.delete(cookie.clone());
+            self.0.lock().unwrap().push(cookie);
+            true
+        }
+        fn delete(&self, cookie: Cookie<'static>) -> bool {
+            self.0
+                .lock()
+                .unwrap()
+                .retain(|c| c.name() != cookie.name() || c.path() != cookie.path());
+            true
+        }
+    }
+
+    struct Reply {
+        status: u16,
+        headers: Vec<(&'static str, String)>,
+        body: &'static str,
+        delay: Duration,
+        // Close the connection without answering, like a dropped network.
+        hang_up: bool,
+    }
+
+    fn reply(status: u16, body: &'static str) -> Reply {
+        Reply {
+            status,
+            headers: Vec::new(),
+            body,
+            delay: Duration::ZERO,
+            hang_up: false,
+        }
+    }
+
+    /// A stand-in for the cloud API: `pidash_access` lasts until the server
+    /// forgets it, and `POST /api/auth/refresh/` trades `pidash_refresh` for a
+    /// new pair. `refresh` decides how that endpoint answers.
+    struct Cloud {
+        url: Url,
+        refreshes: Arc<AtomicUsize>,
+        // (method, path, cookie header) of every request, in arrival order.
+        seen: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+    }
+
+    const REFRESH_PATH: &str = "/api/auth/refresh/";
+    const EXPIRED: &[&str] = &[
+        "pidash_access=stale; Path=/; HttpOnly",
+        "pidash_refresh=r1; Path=/api/auth/refresh/; HttpOnly",
+    ];
+
+    fn rotated() -> Reply {
+        Reply {
+            headers: vec![
+                (
+                    "set-cookie",
+                    "pidash_access=fresh; Path=/; HttpOnly; Max-Age=600".into(),
+                ),
+                (
+                    "set-cookie",
+                    "pidash_refresh=r2; Path=/api/auth/refresh/; HttpOnly; Max-Age=3600".into(),
+                ),
+            ],
+            ..reply(200, "{}")
+        }
+    }
+
+    async fn cloud(refresh: impl Fn(&str) -> Reply + Send + Sync + 'static) -> Cloud {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let refresh = Arc::new(refresh);
+        let (count, log) = (refreshes.clone(), seen.clone());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let (count, log, refresh) = (count.clone(), log.clone(), refresh.clone());
+                tokio::spawn(async move {
+                    let mut raw = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match socket.read(&mut chunk).await {
+                            Ok(n) if n > 0 => raw.extend_from_slice(&chunk[..n]),
+                            _ => return,
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&raw).into_owned();
+                    let mut lines = head.lines();
+                    let mut request_line = lines.next().unwrap_or("").split(' ');
+                    let method = request_line.next().unwrap_or("").to_owned();
+                    let path = request_line.next().unwrap_or("").to_owned();
+                    let cookies = lines
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(": ")?;
+                            name.eq_ignore_ascii_case("cookie")
+                                .then(|| value.to_owned())
+                        })
+                        .unwrap_or_default();
+                    log.lock()
+                        .unwrap()
+                        .push((method, path.clone(), cookies.clone()));
+                    let reply = if path == REFRESH_PATH {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        refresh(&cookies)
+                    } else if !cookies.contains("pidash_access=fresh") {
+                        reply(
+                            401,
+                            r#"{"detail":"Authentication credentials were not provided."}"#,
+                        )
+                    } else if path.ends_with("/events/") {
+                        Reply {
+                            headers: vec![("content-type", "text/event-stream".into())],
+                            ..reply(200, "data: hello\n\n")
+                        }
+                    } else {
+                        reply(200, r#"{"id":"user-1"}"#)
+                    };
+                    tokio::time::sleep(reply.delay).await;
+                    if reply.hang_up {
+                        return;
+                    }
+                    let mut out = format!(
+                        "HTTP/1.1 {} X\r\ncontent-length: {}\r\nconnection: close\r\n",
+                        reply.status,
+                        reply.body.len()
+                    );
+                    for (name, value) in reply.headers {
+                        out.push_str(&format!("{name}: {value}\r\n"));
+                    }
+                    out.push_str("\r\n");
+                    out.push_str(reply.body);
+                    let _ = socket.write_all(out.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        Cloud {
+            url,
+            refreshes,
+            seen,
+        }
+    }
+
+    impl Cloud {
+        fn http(&self) -> DesktopHttp {
+            DesktopHttp::new(self.url.clone())
+                .unwrap()
+                .with_session_refresh(REFRESH_PATH)
+                .unwrap()
+        }
+        fn refreshes(&self) -> usize {
+            self.refreshes.load(Ordering::SeqCst)
+        }
+        fn request(&self, method: &str, path: &str) -> ApiRequest {
+            ApiRequest {
+                id: "r1".into(),
+                url: self.url.join(path).unwrap(),
+                method: method.into(),
+                headers: Vec::new(),
+                has_body: false,
+                timeout_ms: None,
+            }
+        }
+    }
+
+    const UI: &str = "tauri://localhost";
+
+    async fn get(
+        http: &DesktopHttp,
+        server: &Cloud,
+        jar: &Jar,
+        path: &str,
+    ) -> Result<(u16, String), String> {
+        let (response, _) = http
+            .send_as(jar.clone(), UI, server.request("GET", path), None, None)
+            .await?;
+        let status = response.status().as_u16();
+        Ok((status, response.text().await.unwrap()))
+    }
+
+    #[tokio::test]
+    async fn an_expired_access_cookie_is_refreshed_and_the_request_replayed() {
+        let server = cloud(|_| rotated()).await;
+        let http = server.http();
+        let jar = Jar::holding(EXPIRED);
+        // The 60s agent-runtime poll; any other request takes the same path.
+        let path = "/api/users/me/ai-assistant/agent-profile/";
+        assert_eq!(
+            get(&http, &server, &jar, path).await,
+            Ok((200, r#"{"id":"user-1"}"#.into()))
+        );
+        assert_eq!(server.refreshes(), 1);
+        assert_eq!(jar.value("pidash_access").as_deref(), Some("fresh"));
+        assert_eq!(jar.value("pidash_refresh").as_deref(), Some("r2"));
+        // The jar's order within a Cookie header is not stable.
+        let seen: Vec<_> = server
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(method, path, cookies)| {
+                let mut cookies: Vec<_> = cookies.split("; ").collect();
+                cookies.sort();
+                format!("{method} {path} {}", cookies.join("; "))
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                format!("GET {path} pidash_access=stale"),
+                // The refresh cookie only ever travels to the refresh endpoint.
+                format!("POST {REFRESH_PATH} pidash_access=stale; pidash_refresh=r1"),
+                format!("GET {path} pidash_access=fresh"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_body_survives_the_replay() {
+        let server = cloud(|_| rotated()).await;
+        let http = server.http();
+        let jar = Jar::holding(EXPIRED);
+        let mut request = server.request("POST", "/api/workspaces/acme/issues/");
+        request.has_body = true;
+        let (response, _) = http
+            .send_as(jar, UI, request, Some(b"{}".to_vec()), None)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let seen = server.seen.lock().unwrap();
+        assert_eq!(seen[0].0, "POST");
+        assert_eq!(seen[2].0, "POST");
+    }
+
+    #[tokio::test]
+    async fn an_event_stream_opens_after_a_refresh_instead_of_showing_its_401_head() {
+        let server = cloud(|_| rotated()).await;
+        let http = server.http();
+        let request = server.request("GET", "/api/runners/chat/sessions/s1/events/");
+        let (response, generation) = http
+            .send_as(Jar::holding(EXPIRED), UI, request, None, None)
+            .await
+            .unwrap();
+        let events = std::sync::Mutex::new(Vec::new());
+        pump(&http, response, generation, |event| {
+            events.lock().unwrap().push(match event {
+                StreamEvent::Head(head) => format!("head {}", head.status),
+                StreamEvent::Data { text } => format!("data {text:?}"),
+                StreamEvent::End => "end".into(),
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            events.into_inner().unwrap(),
+            ["head 200", r#"data "data: hello\n\n""#, "end"]
+        );
+        assert_eq!(server.refreshes(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_401s_share_one_refresh() {
+        let server = cloud(|_| Reply {
+            delay: Duration::from_millis(200),
+            ..rotated()
+        })
+        .await;
+        let http = Arc::new(server.http());
+        let jar = Jar::holding(EXPIRED);
+        let requests: Vec<_> = (0..8)
+            .map(|n| {
+                let (http, jar) = (http.clone(), jar.clone());
+                let request = server.request("GET", &format!("/api/items/{n}/"));
+                tokio::spawn(async move {
+                    let (response, _) = http.send_as(jar, UI, request, None, None).await?;
+                    Ok::<_, String>(response.status().as_u16())
+                })
+            })
+            .collect();
+        for request in requests {
+            assert_eq!(request.await.unwrap(), Ok(200));
+        }
+        assert_eq!(server.refreshes(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_transient_refresh_failure_is_an_error_never_a_401() {
+        for failure in [
+            || reply(503, "busy"),
+            || reply(500, "oops"),
+            // Not this server's refresh endpoint: a misconfiguration.
+            || reply(404, "not found"),
+            || Reply {
+                hang_up: true,
+                ..reply(0, "")
+            },
+        ] {
+            let server = cloud(move |_| Reply {
+                delay: Duration::from_millis(100),
+                ..failure()
+            })
+            .await;
+            let http = Arc::new(server.http());
+            let jar = Jar::holding(EXPIRED);
+            let requests: Vec<_> = (0..4)
+                .map(|n| {
+                    let (http, jar) = (http.clone(), jar.clone());
+                    let request = server.request("GET", &format!("/api/items/{n}/"));
+                    tokio::spawn(async move {
+                        let sent = http.send_as(jar, UI, request, None, None).await;
+                        sent.map(|(response, _)| response.status().as_u16())
+                    })
+                })
+                .collect();
+            for request in requests {
+                assert_eq!(request.await.unwrap(), Err(REFRESH_FAILED.to_owned()));
+            }
+            // One attempt for the whole burst, and the session is untouched.
+            assert_eq!(server.refreshes(), 1);
+            assert_eq!(jar.value("pidash_refresh").as_deref(), Some("r1"));
+
+            // Nothing is remembered: the next request tries again.
+            let path = "/api/users/me/";
+            assert_eq!(
+                get(&http, &server, &jar, path).await,
+                Err(REFRESH_FAILED.to_owned())
+            );
+            assert_eq!(server.refreshes(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refresh_that_never_answers_times_out_as_a_failure() {
+        let server = cloud(|_| Reply {
+            delay: Duration::from_secs(30),
+            ..rotated()
+        })
+        .await;
+        let mut http = server.http();
+        http.refresh_timeout = Duration::from_millis(100);
+        let jar = Jar::holding(EXPIRED);
+        assert_eq!(
+            get(&http, &server, &jar, "/api/users/me/").await,
+            Err(REFRESH_FAILED.to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_refresh_hands_the_page_the_original_401() {
+        for status in [401, 403] {
+            let server = cloud(move |_| reply(status, r#"{"detail":"session_revoked"}"#)).await;
+            let http = server.http();
+            let jar = Jar::holding(EXPIRED);
+            let (status, body) = get(&http, &server, &jar, "/api/users/me/").await.unwrap();
+            assert_eq!(status, 401);
+            assert!(body.contains("Authentication credentials were not provided"));
+            assert_eq!(server.refreshes(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_401_after_a_successful_refresh_is_final() {
+        // The server rotates the refresh cookie but keeps refusing the access
+        // cookie it issues.
+        let server = cloud(|_| Reply {
+            headers: vec![("set-cookie", "pidash_access=refused; Path=/".into())],
+            ..reply(200, "{}")
+        })
+        .await;
+        let http = server.http();
+        let jar = Jar::holding(EXPIRED);
+        let (status, _) = get(&http, &server, &jar, "/api/users/me/").await.unwrap();
+        assert_eq!(status, 401);
+        assert_eq!(server.refreshes(), 1);
+        assert_eq!(server.seen.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn the_refresh_endpoint_itself_is_never_refreshed() {
+        let server = cloud(|_| reply(401, r#"{"detail":"expired"}"#)).await;
+        let http = server.http();
+        let request = server.request("POST", REFRESH_PATH);
+        let (response, _) = http
+            .send_as(Jar::holding(EXPIRED), UI, request, None, None)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+        assert_eq!(server.refreshes(), 1);
+    }
+
+    #[tokio::test]
+    async fn without_a_refresh_endpoint_a_401_is_final() {
+        let server = cloud(|_| rotated()).await;
+        let http = DesktopHttp::new(server.url.clone()).unwrap();
+        assert!(!http.refreshes_session());
+        let jar = Jar::holding(EXPIRED);
+        let (status, _) = get(&http, &server, &jar, "/api/users/me/").await.unwrap();
+        assert_eq!(status, 401);
+        assert_eq!(server.refreshes(), 0);
+    }
+
+    // The page aborts requests freely (route changes, SWR dedupe). If the one
+    // that started the refresh is among them, the rotation must still land:
+    // every other caller is waiting on it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn canceling_the_request_that_started_a_refresh_does_not_abandon_it() {
+        let server = cloud(|_| Reply {
+            delay: Duration::from_millis(200),
+            ..rotated()
+        })
+        .await;
+        let http = Arc::new(server.http());
+        let jar = Jar::holding(EXPIRED);
+        let first = {
+            let (http, jar) = (http.clone(), jar.clone());
+            let request = server.request("GET", "/api/users/me/");
+            tokio::spawn(async move { http.send_as(jar, UI, request, None, None).await.is_ok() })
+        };
+        while server.refreshes() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        first.abort();
+        assert_eq!(
+            get(&http, &server, &jar, "/api/users/me/").await,
+            Ok((200, r#"{"id":"user-1"}"#.into()))
+        );
+        assert_eq!(server.refreshes(), 1);
+        assert_eq!(jar.value("pidash_refresh").as_deref(), Some("r2"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sign_out_during_a_refresh_discards_the_rotated_cookies() {
+        let server = cloud(|_| Reply {
+            delay: Duration::from_millis(200),
+            ..rotated()
+        })
+        .await;
+        let http = Arc::new(server.http());
+        let jar = Jar::holding(EXPIRED);
+        let request = {
+            let (http, jar) = (http.clone(), jar.clone());
+            let request = server.request("GET", "/api/users/me/");
+            tokio::spawn(async move {
+                let sent = http.send_as(jar, UI, request, None, None).await;
+                sent.map(|(response, _)| response.status().as_u16())
+            })
+        };
+        while server.refreshes() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // What desktop_clear_web_data does.
+        *http.generation.lock().await += 1;
+        jar.0.lock().unwrap().clear();
+        assert_eq!(request.await.unwrap(), Err(SESSION_CHANGED.to_owned()));
+        assert_eq!(jar.value("pidash_access"), None);
+    }
+
+    #[test]
+    fn the_refresh_path_must_be_an_api_path() {
+        let http = || DesktopHttp::new(api()).unwrap();
+        assert!(http().with_session_refresh("/api/auth/refresh/").is_ok());
+        for bad in [
+            "/sign-in",
+            "https://evil.test/api/auth/refresh/",
+            "api/x",
+            "",
+        ] {
+            assert!(http().with_session_refresh(bad).is_err(), "{bad}");
+        }
     }
 
     #[tokio::test]

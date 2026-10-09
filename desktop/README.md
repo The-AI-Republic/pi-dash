@@ -113,6 +113,8 @@ PIDASH_SKIP_DEV_PREP=1 \
 | `PIDASH_DESKTOP_DEV_TREE`                        | Where the merged web tree is built (dev-prep.sh, test-overlay.sh).                                                                                                           | `desktop/.dev-tree`                                                          |
 | `PIDASH_DESKTOP_VERIFY_HOOK`                     | Script dev-prep.sh runs with the built client directory after its own checks.                                                                                                | unset                                                                        |
 | `PIDASH_DESKTOP_EXTERNAL_SIGNIN`                 | `=1` makes the release `build.rs` require that the bundled sign-in screen hands off to the system browser (`open_in_browser`).                                               | unset                                                                        |
+| `PIDASH_DESKTOP_SESSION_REFRESH_PATH`            | API path of the edition's session-refresh endpoint, compiled into the binary. Set, the native transport refreshes on a 401 and replays; unset, a 401 means signed out.     | unset                                                                        |
+| `PIDASH_DESKTOP_CSP_CONNECT_SRC`                 | Space-separated CSP sources the page may send presigned storage uploads to, compiled into the binary. A source that covers the API itself fails startup.                     | `<VITE_API_BASE_URL origin>/uploads`                                         |
 | `PIDASH_RUNNER_PROFILE` / `CODEX_BUNDLE_VERSION` | Cargo profile for the locally built runner / pinned agent-engine release staged by prepare-agent.sh.                                                                         | `dev` / `rust-v0.153.4`                                                      |
 
 Set both together for non-default targets. A release build with
@@ -139,7 +141,7 @@ when the login navigation stored them successfully and CORS is configured.
 The API services use `getDesktopApiAdapter()` to send requests through
 `desktop_api_request` in Rust. It shares the webview's persistent cookie
 store with the login navigation, applies cookie domain/path/expiry rules,
-and writes refreshed cookies back. HttpOnly cookie values stay in native
+and writes rotated cookies back. HttpOnly cookie values stay in native
 code. The command accepts only the main app UI and `/api/` or `/auth/` URLs
 on the compiled `VITE_API_BASE_URL` origin, including redirects. Sign-out
 clears the store and prevents pending requests from restoring old cookies.
@@ -152,10 +154,54 @@ streams open through `createApiEventSource()`, which uses
 `desktop_api_stream` on desktop and a plain `EventSource` elsewhere. Use it
 for any new credentialed API stream.
 
-Edition code that makes standalone Axios requests, such as token refresh,
-must also pass `adapter: getDesktopApiAdapter()`. Browser builds and older
-desktop binaries keep the default adapter. External storage uploads stay
-on the browser adapter so upload progress and cancellation keep working.
+Every request to the server takes this route, and one that cannot fails
+rather than going out through the webview without the session:
+
+- **Session refresh is the transport's job.** An edition whose session is a
+  short-lived access cookie plus a refresh endpoint names that endpoint in
+  `PIDASH_DESKTOP_SESSION_REFRESH_PATH`. A request or stream that gets a 401
+  then triggers one refresh, shared by everything in flight, and is replayed.
+  The page sees a 401 only when the refresh endpoint itself answered 401 or
+  403 (or the replay was refused again), so there a 401 means the session is
+  over. A refresh that fails any other way (network error, timeout, 5xx) is
+  reported as a failed request with no status and must never be treated as a
+  sign-out. `window.__PIDASH_NATIVE_SESSION__.refresh` tells the page the
+  transport does this; `refreshSession()` in `@pi-dash/services`, the single
+  page-side refresh an edition registers for the browser, then stands down.
+  The community server's session cannot be refreshed, so the plain build
+  leaves the variable unset.
+- **No fallback to the webview.** In the bundled app
+  (`__PIDASH_NATIVE_SESSION__.strict`), a request with `withCredentials: true`
+  or a credentialed `createApiEventSource()` that is not for `/api/` or
+  `/auth/` on the compiled API origin throws `DesktopTransportError`, which
+  names the request origin and the API origin. The usual cause is a web bundle
+  and a binary built for different servers (`VITE_API_BASE_URL` vs
+  `PI_DASH_URL`). The webview's own adapter is kept only for requests sent
+  with `withCredentials: false` (presigned storage uploads, with their
+  progress and cancellation) and for uncredentialed requests to other hosts.
+  Hot-reload mode is not strict: there the page is served by the server host
+  and the webview's networking is first-party.
+- **The CSP backs this up.** `tauri.conf.json` sets a policy whose
+  `connect-src` lists the app itself, Tauri's IPC and a few named hosts, and
+  no bare scheme: `fetch`, XHR, `EventSource` and WebSocket cannot reach the
+  API origin from page code. Storage uploads are added at startup from
+  `PIDASH_DESKTOP_CSP_CONNECT_SRC`; the default is the `/uploads` bucket path
+  the self-hosted proxy serves on the API origin, so a deployment with another
+  bucket name or an external object store must set it (for example
+  `https://<bucket>.s3.<region>.amazonaws.com`). Images, media and frames are
+  not restricted to named hosts, because work-item content embeds arbitrary
+  ones. Tauri hashes the bundle's inline scripts into the policy at build
+  time, which is why the policy lives in the config file and only the upload
+  sources are added in `main.rs`.
+
+Images that the server only serves to a signed-in user (work-item and page
+images under `/api/assets/v2/workspaces/…`) are requested by the webview
+itself and are not routed through the native transport yet, so whether they
+carry the session depends on the platform's cross-site cookie policy. Public
+ones (avatars, covers, workspace logos) need no session.
+
+Edition code that makes standalone Axios requests must also pass
+`adapter: getDesktopApiAdapter()`. Browser builds keep the default adapter.
 
 Native requests send the app's actual `Origin`; the server's CSRF allowlist
 must still permit it. Keep the CORS allowlist for older desktop clients and
