@@ -172,6 +172,11 @@ export const SchedulerBindingDetail = observer(function SchedulerBindingDetail(p
                 {t("Disabled for the whole workspace")}
               </Badge>
             )}
+            {binding.series_exhausted && (
+              <Badge variant="accent-neutral" size="sm">
+                {t("Completed")}
+              </Badge>
+            )}
           </div>
           <div className="mt-1 text-12 text-secondary">
             <code>{binding.scheduler_slug}</code>
@@ -311,7 +316,9 @@ export const SchedulerBindingDetail = observer(function SchedulerBindingDetail(p
                     ? binding.next_run_at
                       ? t("No runs yet — next run at {ts}", { ts: new Date(binding.next_run_at).toLocaleString() })
                       : t("No runs yet.")
-                    : t("Scheduler is disabled — it will not fire until re-enabled.")}
+                    : binding.series_exhausted
+                      ? t("Schedule completed — every occurrence has run.")
+                      : t("Scheduler is disabled — it will not fire until re-enabled.")}
                 </td>
               </tr>
             )}
