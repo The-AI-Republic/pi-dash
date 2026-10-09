@@ -189,7 +189,7 @@ pub enum Denial {
     BadError(String),
     /// 400, serializer `errors` dict (pre-rendered bytes, field order).
     FieldErrors(String),
-    /// 415, `{"Detail": ...}` (DRF `UnsupportedMediaType`).
+    /// 415, `{"detail": ...}` (DRF `UnsupportedMediaType`).
     UnsupportedMediaType(String),
     /// 403, view-inline `{"error": ...}` (page access/archive guards).
     ForbiddenError(String),
@@ -213,7 +213,7 @@ impl Denial {
             ),
             Denial::InvalidToken => (
                 StatusCode::FORBIDDEN,
-                r#"{"Detail":"Given API token is not valid"}"#.to_owned(),
+                r#"{"detail":"Given API token is not valid"}"#.to_owned(),
             ),
             Denial::Forbidden => (
                 StatusCode::FORBIDDEN,
@@ -221,11 +221,11 @@ impl Denial {
             ),
             Denial::ProjectNotFound => (
                 StatusCode::NOT_FOUND,
-                r#"{"Detail":"Project not found"}"#.to_owned(),
+                r#"{"detail":"Project not found"}"#.to_owned(),
             ),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
-                format!("{{\"Detail\":{}}}", json_string(message)),
+                format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::BadError(message) => (
                 StatusCode::BAD_REQUEST,
@@ -234,7 +234,7 @@ impl Denial {
             Denial::FieldErrors(body) => (StatusCode::BAD_REQUEST, body.clone()),
             Denial::UnsupportedMediaType(message) => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                format!("{{\"Detail\":{}}}", json_string(message)),
+                format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::ForbiddenError(body) => (StatusCode::FORBIDDEN, body.clone()),
             Denial::NotFound(body) => (StatusCode::NOT_FOUND, body.clone()),
