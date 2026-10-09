@@ -1194,11 +1194,13 @@ async fn move_issue(
                     Value::Array(enqueue.args.clone()),
                     Value::Object(enqueue.kwargs.clone()),
                 );
-                // `.delay` past the commit: a broker failure is a 500
-                // with the move standing, as in Django.
-                pidash_jobs::queue::enqueue(&pool, &job)
-                    .await
-                    .map_err(|_| Denial::ServerError)?;
+                // `.delay` past the commit: best-effort, the response
+                // stands on enqueue failure, as in Django (where the
+                // broker is up so `.delay` never raises here) and as in
+                // every sibling app_issues handler.
+                if let Err(error) = pidash_jobs::queue::enqueue(&pool, &job).await {
+                    tracing::warn!(%error, task = enqueue.task, "task enqueue failed; response stands");
+                }
             }
             let body = render_moved_issue(&pool, &moved.issue.row, &tenant.timezone).await?;
             Ok(json_response(StatusCode::OK, body))
