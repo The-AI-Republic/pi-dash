@@ -145,3 +145,45 @@ def test_page_archive_unarchive(api, world, seeder):
     restored = api.delete(page_url(world, page["id"], "archive"))
     assert restored.status_code == 200
     assert restored.json()["archived_at"] is None
+
+
+def test_page_unarchive_finds_soft_deleted_archived_parent(api, world, seeder, db):
+    # `page.parent` is an unscoped FK fetch (`_base_manager`): a soft-deleted
+    # parent is FOUND and only its `archived_at` decides the detach
+    # (PIDASHCONV-796). Still archived here, so the child detaches.
+    parent = seeder.create_page(
+        world["workspace"]["id"], world["owner"]["id"], name="Parent", archived=True
+    )
+    seeder.link_page_to_project(parent["id"], world["project"]["id"], world["workspace"]["id"])
+    child = seeder.create_page(
+        world["workspace"]["id"],
+        world["owner"]["id"],
+        name="Child",
+        parent_id=parent["id"],
+        archived=True,
+    )
+    seeder.link_page_to_project(child["id"], world["project"]["id"], world["workspace"]["id"])
+    db.execute("UPDATE pages SET deleted_at=now() WHERE id=%s", (parent["id"],))
+    restored = api.delete(page_url(world, child["id"], "archive"))
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["archived_at"] is None
+    assert restored.json()["parent"] is None
+
+
+def test_page_unarchive_keeps_soft_deleted_live_parent(api, world, seeder, db):
+    # Soft-deleted but NOT archived parent: found, no detach, still 200.
+    parent = seeder.create_page(world["workspace"]["id"], world["owner"]["id"], name="Parent")
+    seeder.link_page_to_project(parent["id"], world["project"]["id"], world["workspace"]["id"])
+    child = seeder.create_page(
+        world["workspace"]["id"],
+        world["owner"]["id"],
+        name="Child",
+        parent_id=parent["id"],
+        archived=True,
+    )
+    seeder.link_page_to_project(child["id"], world["project"]["id"], world["workspace"]["id"])
+    db.execute("UPDATE pages SET deleted_at=now() WHERE id=%s", (parent["id"],))
+    restored = api.delete(page_url(world, child["id"], "archive"))
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["archived_at"] is None
+    assert restored.json()["parent"] == parent["id"]

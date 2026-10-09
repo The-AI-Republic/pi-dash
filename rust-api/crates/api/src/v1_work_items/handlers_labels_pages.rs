@@ -3748,17 +3748,17 @@ async fn page_archive_inner(
     } else if archived {
         // Same as the first-party view (`:566-571`): an unarchived child
         // of a still-archived parent would be unreachable, so it moves
-        // to the top. `page.parent` is an unscoped FK fetch — a dangling
-        // `parent_id` raises `DoesNotExist` → the v1 `handle_exception`
-        // 404 branch (the D-30 merged precedent ports the same line).
+        // to the top. `page.parent` is an unscoped FK fetch (`_base_manager`):
+        // a soft-deleted parent is FOUND and only its `archived_at` decides
+        // the detach; a hard-missing `parent_id` raises `DoesNotExist` →
+        // the v1 `handle_exception` 404 branch (no `deleted_at` scope here).
         if let Some(parent_id) = row_uuid_opt(&row, "parent_id")? {
-            let parent: Option<(Option<chrono::NaiveDate>,)> = sqlx::query_as(
-                r#"SELECT p.archived_at FROM pages p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-            )
-            .bind(parent_id)
-            .fetch_optional(&pre.pool)
-            .await
-            .map_err(|error| db_error(error, "unarchive-parent"))?;
+            let parent: Option<(Option<chrono::NaiveDate>,)> =
+                sqlx::query_as(r#"SELECT p.archived_at FROM pages p WHERE p.id = $1"#)
+                    .bind(parent_id)
+                    .fetch_optional(&pre.pool)
+                    .await
+                    .map_err(|error| db_error(error, "unarchive-parent"))?;
             let Some((parent_archived,)) = parent else {
                 return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
             };
@@ -8122,13 +8122,33 @@ mod converter_tests {
         serde_json::from_str(text).expect("vectors parse")
     }
 
+    fn floor_char_boundary(text: &str, max: usize) -> usize {
+        let mut end = text.len().min(max);
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        end
+    }
+
     fn short(text: &str) -> String {
         const MAX: usize = 240;
         if text.len() <= MAX {
             text.to_owned()
         } else {
-            format!("{}…<{} bytes>", &text[..MAX], text.len())
+            let end = floor_char_boundary(text, MAX);
+            format!("{}…<{} bytes>", &text[..end], text.len())
         }
+    }
+
+    #[test]
+    fn short_floors_to_char_boundary() {
+        // `…` is 3 bytes: byte 240 lands mid-char, which must not panic.
+        let text = "a".repeat(239) + "…";
+        assert_eq!(floor_char_boundary(&text, 240), 239);
+        let clipped = short(&text);
+        assert!(clipped.starts_with(&"a".repeat(239)));
+        assert!(clipped.ends_with(&format!("<{} bytes>", text.len())));
+        assert_eq!(short("tiny"), "tiny");
     }
 
     #[test]

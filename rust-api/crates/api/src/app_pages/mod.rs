@@ -1680,20 +1680,22 @@ pub async fn unarchive_page(
     // Detach when the parent is still archived (`:360-362`): unarchiving
     // a child of an archived parent breaks the hierarchy — the page is
     // reparented to the top before the CTE clears its own subtree, and
-    // the archived parent keeps its timestamp.
+    // the archived parent keeps its timestamp. `page.parent` is an unscoped
+    // FK fetch (`_base_manager`): a soft-deleted parent is FOUND and only
+    // its `archived_at` decides the detach (no `deleted_at` scope here).
     if let Some(parent_id) = page.parent_id {
-        let parent: Option<(Option<chrono::NaiveDate>,)> = match sqlx::query_as(
-            r#"SELECT p.archived_at FROM pages p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-        )
-        .bind(parent_id)
-        .fetch_optional(pool)
-        .await
-        {
-            Ok(parent) => parent,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
-        // A dangling `parent_id` (row gone) raises `DoesNotExist` on
-        // `page.parent` in Django → the 404 branch, ported as observed.
+        let parent: Option<(Option<chrono::NaiveDate>,)> =
+            match sqlx::query_as(r#"SELECT p.archived_at FROM pages p WHERE p.id = $1"#)
+                .bind(parent_id)
+                .fetch_optional(pool)
+                .await
+            {
+                Ok(parent) => parent,
+                Err(_) => return Denial::ServerError.into_response(),
+            };
+        // A dangling `parent_id` (row hard-missing; soft-deleted rows
+        // are found above) raises `DoesNotExist` on `page.parent` in
+        // Django → the 404 branch, ported as observed.
         let Some((parent_archived,)) = parent else {
             return Denial::ObjectNotFound.into_response();
         };
