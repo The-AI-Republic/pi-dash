@@ -5,6 +5,8 @@ they fail with 503 and nothing is written. That 503 shape is asserted here
 as the contract; reads and archive actions run against SQL-seeded pages.
 """
 
+import uuid
+
 import pytest
 
 from .conftest import ENVELOPE_KEYS
@@ -187,3 +189,61 @@ def test_page_unarchive_keeps_soft_deleted_live_parent(api, world, seeder, db):
     assert restored.status_code == 200, restored.text
     assert restored.json()["archived_at"] is None
     assert restored.json()["parent"] == parent["id"]
+
+
+def _soft_delete_project(db, project_id, *, archived=False):
+    """Soft-delete a seeded project, keeping its membership rows live.
+
+    Mirrors the project-delete sweep window: ``delete(soft=True)`` stamps
+    ``deleted_at`` first and the membership sweep lands later, so the
+    permission gate still passes while every live-scoped project read
+    misses (PIDASHCONV-795).
+    """
+    db.execute(
+        "UPDATE projects SET deleted_at=now(),"
+        " archived_at=CASE WHEN %s THEN now() ELSE NULL END WHERE id=%s",
+        (archived, project_id),
+    )
+
+
+def test_page_create_deleted_project_is_503(api, world, db):
+    """Without a live document service the 503 wins over the
+    post-conversion live-project 404: the 795 check must sit after
+    conversion, so a soft-deleted project still 503s here."""
+    _soft_delete_project(db, world["project"]["id"])
+    response = api.post(page_url(world), json={"name": "Gone"})
+    assert response.status_code == 503, response.text
+    assert set(response.json()) == {"error"}
+    assert (
+        db.fetchval(
+            "SELECT count(*) FROM pages WHERE workspace_id=%s",
+            (world["workspace"]["id"],),
+        )
+        == 0
+    )
+
+
+def test_page_create_deleted_archived_project_is_503_not_409(api, world, db):
+    """The archived-project check is live-scoped (``Project.objects``): a
+    soft-deleted+archived project never 409s (PIDASHCONV-795)."""
+    _soft_delete_project(db, world["project"]["id"], archived=True)
+    response = api.post(page_url(world), json={"name": "Gone"})
+    assert response.status_code == 503, response.text
+    assert set(response.json()) == {"error"}
+
+
+def test_page_create_deleted_archived_project_bad_parent_is_400(api, world, db):
+    """No 409 shadows the parent check on a soft-deleted+archived project."""
+    _soft_delete_project(db, world["project"]["id"], archived=True)
+    response = api.post(
+        page_url(world), json={"name": "Gone", "parent": str(uuid.uuid4())}
+    )
+    assert response.status_code == 400, response.text
+    assert response.json() == {"error": "Parent page not found in this project"}
+
+
+def test_page_create_deleted_project_invalid_body_is_400(api, world, db):
+    """Validation still runs first on a soft-deleted project."""
+    _soft_delete_project(db, world["project"]["id"])
+    response = api.post(page_url(world), json={})
+    assert response.status_code == 400, response.text

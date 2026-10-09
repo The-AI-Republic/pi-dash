@@ -3144,8 +3144,11 @@ async fn page_post_inner(
     let validated = validate_page_write(&parsed.value, WriteMode::Create)
         .map_err(|errors| Denial::FieldErrors(errors.body()))?;
     // Order: archived-project check → parent → convert (`:308-323`).
+    // The filter is live-scoped (`Project.objects`, `SoftDeletionManager`):
+    // a soft-deleted project never 409s — it falls through to the 404 in
+    // `PageSerializer.create` after conversion.
     let project_archived: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "projects" WHERE "id" = $1 AND "archived_at" IS NOT NULL)"#,
+        r#"SELECT EXISTS(SELECT 1 FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL AND "archived_at" IS NOT NULL)"#,
     )
     .bind(project_id)
     .fetch_optional(&pre.pool)
@@ -3221,6 +3224,23 @@ async fn page_post_inner(
         .begin()
         .await
         .map_err(|error| db_error(error, "page-post-tx"))?;
+    // `PageSerializer.create` reads the project live-scoped
+    // (`app/serializers/page.py:70`, inside the atomic block): a
+    // soft-deleted (or race-deleted) project raises `DoesNotExist` → the
+    // `handle_exception` 404, after every 400/409/503 above — and the
+    // in-transaction read keeps the race window closed.
+    let project_live: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL)"#,
+    )
+    .bind(project_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| db_error(error, "page-post-project-live"))?
+    .unwrap_or(false);
+    if !project_live {
+        let _ = tx.rollback().await;
+        return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
+    }
     let insert_page = sqlx::query(
         r#"INSERT INTO "pages" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
             "workspace_id", "name", "description_json", "description_binary", "description_html",
