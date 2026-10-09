@@ -227,7 +227,7 @@ pub enum Denial {
     BadDetail(String),
     /// 400/403/409, `{"error": ...}` (the move's `IssueMoveError` mapping).
     MoveRejection { status: u16, message: String },
-    /// 415, `{"Detail": ...}` (DRF `UnsupportedMediaType`).
+    /// 415, `{"detail": ...}` (DRF `UnsupportedMediaType`).
     UnsupportedMediaType(String),
     /// 413, the `RequestBodySizeLimitMiddleware` JSON body past 5 MiB
     /// (a plain `JsonResponse`, so default separators — with spaces).
@@ -262,7 +262,7 @@ impl Denial {
             ),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
-                format!("{{\"Detail\":{}}}", json_string(message)),
+                format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::MoveRejection { status, message } => (
                 StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -270,11 +270,11 @@ impl Denial {
             ),
             Denial::UnsupportedMediaType(message) => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                format!("{{\"Detail\":{}}}", json_string(message)),
+                format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::RequestTooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                r#"{"error": "REQUEST_BODY_TOO_LARGE", "Detail": "The size of the request body exceeds the maximum allowed size."}"#.to_owned(),
+                r#"{"error": "REQUEST_BODY_TOO_LARGE", "detail": "The size of the request body exceeds the maximum allowed size."}"#.to_owned(),
             ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -321,7 +321,7 @@ fn json_response(status: StatusCode, body: String) -> Response {
         .expect("handler json response")
 }
 
-/// Quote one JSON string value (DRF `Detail`/`error` wrappers).
+/// Quote one JSON string value (DRF `detail`/`error` wrappers).
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
@@ -390,12 +390,17 @@ pub fn owned_search_advanced(
 /// after `super().initial()`). A missing zone defaults to UTC; an unknown
 /// zone name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`,
 /// which subclasses `KeyError`, so `handle_exception` answers the
-/// `KeyError` branch (`api/views/base.py:160-164`), never a 500.
+/// `KeyError` branch (`api/views/base.py:160-164`), never a 500. An EMPTY
+/// zone 500s: `ZoneInfo('')` raises `ValueError` (not `KeyError`), which
+/// falls through to the generic 500 (`api/views/base.py:166-171`).
 fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
-    timezone
-        .unwrap_or("UTC")
-        .parse()
-        .map_err(|_| Denial::BadError(r#"{"error":"The required key does not exist."}"#.to_owned()))
+    match timezone {
+        None => Ok(chrono_tz::UTC),
+        Some("") => Err(Denial::ServerError),
+        Some(zone) => zone.parse().map_err(|_| {
+            Denial::BadError(r#"{"error":"The required key does not exist."}"#.to_owned())
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1210,7 +1215,7 @@ async fn require_gate(
 
 /// Map the 650 driver's failures onto the view's responses: the
 /// recoverable `{"error"}` + status, the source-miss 404, the
-/// resolve-miss 404 Detail, anything else the 500.
+/// resolve-miss 404 `detail`, anything else the 500.
 fn map_move_error(error: MoveError) -> Denial {
     match error {
         MoveError::Issue(issue) => Denial::MoveRejection {
@@ -2970,6 +2975,8 @@ mod tests {
             ))
         );
         assert!(activate_timezone(None).is_ok());
+        // Empty stored zone: `ZoneInfo('')` is a `ValueError` → 500.
+        assert_eq!(activate_timezone(Some("")), Err(Denial::ServerError));
     }
 
     #[test]
@@ -3004,12 +3011,12 @@ mod tests {
             )
         );
         // DRF `ParseError` / `UnsupportedMediaType` render lowercase
-        // `Detail` (the DRF default, via `auth_exception_handler`).
+        // `detail` (the DRF default, via `auth_exception_handler`).
         assert_eq!(
             Denial::BadDetail("JSON parse error - x".to_owned()).status_and_body(),
             (
                 StatusCode::BAD_REQUEST,
-                r#"{"Detail":"JSON parse error - x"}"#.to_owned()
+                r#"{"detail":"JSON parse error - x"}"#.to_owned()
             )
         );
         assert_eq!(
@@ -3025,7 +3032,7 @@ mod tests {
             Denial::RequestTooLarge.status_and_body(),
             (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                r#"{"error": "REQUEST_BODY_TOO_LARGE", "Detail": "The size of the request body exceeds the maximum allowed size."}"#.to_owned()
+                r#"{"error": "REQUEST_BODY_TOO_LARGE", "detail": "The size of the request body exceeds the maximum allowed size."}"#.to_owned()
             )
         );
         // The gate denial is the shared class body.
