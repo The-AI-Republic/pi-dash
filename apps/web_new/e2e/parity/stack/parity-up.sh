@@ -25,6 +25,10 @@ docker compose -f "$COMPOSE_FILE" build api oracle
 echo "[parity] starting pg, redis, mq, api, worker, oracle, proxy"
 docker compose -f "$COMPOSE_FILE" up -d pg redis mq api worker oracle proxy
 
+# Inside a Pi Dash agent run the stack is torn down when the run ends (no-op
+# for a person's shell or CI; PARITY_KEEP_STACK=1 opts out).
+"$STACK_DIR/parity-reaper.sh" arm || true
+
 echo "[parity] waiting for the API on port $PARITY_API_PORT"
 for _ in $(seq 1 60); do
   if python3 -c "import socket; socket.create_connection(('localhost', $PARITY_API_PORT), timeout=2).close()" 2>/dev/null; then
