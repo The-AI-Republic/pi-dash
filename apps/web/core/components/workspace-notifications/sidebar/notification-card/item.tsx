@@ -71,7 +71,6 @@ export const NotificationItem = observer(function NotificationItem(props: TNotif
   return (
     <Row
       data-testid="notification-card"
-      data-selected={currentSelectedNotificationId === notification?.id}
       className={cn(
         "group relative flex cursor-pointer items-center gap-2 border-b border-subtle py-4 transition-all",
         {

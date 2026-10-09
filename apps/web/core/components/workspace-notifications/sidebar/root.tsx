@@ -73,7 +73,6 @@ export const NotificationsSidebarRoot = observer(function NotificationsSidebarRo
             <div
               key={tab.value}
               data-testid={`notifications-tab-${tab.value}`}
-              data-active={currentNotificationTab === tab.value}
               className="relative h-full cursor-pointer px-3"
               onClick={() => handleTabClick(tab.value)}
             >

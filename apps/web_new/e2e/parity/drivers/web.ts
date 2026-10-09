@@ -19189,11 +19189,22 @@ export class WebDriver implements ParityDriver {
   }
 
   async notificationsSelectCard(index: number): Promise<void> {
+    const detail = this.page.getByTestId("notifications-detail-pane").first();
+    const before = WebDriver.cleanText(await detail.innerText().catch(() => ""));
     const card = this.page.getByTestId("notification-card").nth(index);
     await card.scrollIntoViewIfNeeded().catch(() => undefined);
     await card.click({ timeout: WebDriver.WAIT_MS });
-    const selected = this.page.locator(`[data-testid="notification-card"][data-selected="true"]`);
-    await selected.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    // Selecting swaps the detail pane from its empty state to the issue
+    // peek overview, so its text changing settles the selection.
+    await this.page.waitForFunction(
+      (expected: string) => {
+        const pane = document.querySelector('[data-testid="notifications-detail-pane"]');
+        const text = (pane?.textContent ?? "").replace(/\s+/g, " ").trim();
+        return text !== expected;
+      },
+      before,
+      { timeout: WebDriver.WAIT_MS }
+    );
   }
 
   async notificationsTabNames(): Promise<string[]> {
@@ -19215,20 +19226,26 @@ export class WebDriver implements ParityDriver {
     return names;
   }
 
+  private notificationsTabUnderline(tab: NotificationsTab): Locator {
+    // The underline marker renders only inside the active tab.
+    return this.notificationsTabLocator(tab).first().locator("div.absolute.bottom-0");
+  }
+
   async notificationsActiveTab(): Promise<NotificationsTab> {
-    const active = this.page.locator('[data-testid^="notifications-tab-"][data-active="true"]');
-    await active.first().waitFor({ timeout: WebDriver.WAIT_MS });
-    const testId = await active
+    await this.page
+      .locator('[data-testid^="notifications-tab-"] div.absolute.bottom-0')
       .first()
-      .getAttribute("data-testid")
-      .catch(() => null);
-    return testId === "notifications-tab-mentions" ? "mentions" : "all";
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+    const tabs: NotificationsTab[] = ["all", "mentions"];
+    for (const tab of tabs) {
+      if ((await this.notificationsTabUnderline(tab).count()) > 0) return tab;
+    }
+    return "all";
   }
 
   async notificationsSelectTab(tab: NotificationsTab): Promise<void> {
     await this.notificationsTabLocator(tab).first().click({ timeout: WebDriver.WAIT_MS });
-    const active = this.page.locator(`[data-testid="notifications-tab-${tab}"][data-active="true"]`);
-    await active.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    await this.notificationsTabUnderline(tab).waitFor({ timeout: WebDriver.WAIT_MS });
   }
 
   async notificationsTabBadge(tab: NotificationsTab): Promise<string | null> {
