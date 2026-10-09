@@ -3,8 +3,9 @@
 //! PIDASHCONV-678), link + comment routes (handlers B, PIDASHCONV-674),
 //! PR / code-review link routes (handlers H, PIDASHCONV-680), plus
 //! activity + attachment routes (handlers C, PIDASHCONV-675), relation +
-//! workpad routes (handlers D, PIDASHCONV-676) and label + page routes
-//! (handlers G, PIDASHCONV-679).
+//! workpad routes (handlers D, PIDASHCONV-676), label + page routes
+//! (handlers G, PIDASHCONV-679), and the search and move routes
+//! (handlers E, PIDASHCONV-677).
 //!
 //! Ports `apps/api/pi_dash/api/urls/work_item.py:133-151` (the four action
 //! paths), `urls/work_item.py:60-77,154-171` (the eight link/comment paths:
@@ -14,11 +15,14 @@
 //! `urls/work_item.py:79-98,173-192` (the eight activity/attachment paths
 //! plus their deprecated twins), `urls/work_item.py:194-216` (the five
 //! relation/workpad paths, which have no deprecated twins),
-//! `urls/label.py` (the two label paths) and `urls/page.py` (the three
-//! page paths) onto the merged D-18 foundation. Cutover granularity is
-//! the route + method (the pilot `owned()` pattern): the owned methods
-//! serve from Rust, every other
-//! method on these paths proxies to Django so its 405-after-auth and
+//! `urls/label.py` (the two label paths), `urls/page.py` (the three page
+//! paths), `urls/work_item.py:39-42,103-111` (the three search paths: the
+//! legacy route plus its deprecated twin, which share the view class,
+//! and the advanced route) and `urls/work_item.py:128-132` (the move
+//! path, no deprecated twin) onto the merged D-18 foundation. Cutover
+//! granularity is the route + method (the pilot `owned()` pattern): the
+//! owned methods serve from Rust, every other method on these paths
+//! proxies to Django so its 405-after-auth and
 //! metadata responses are preserved byte for byte.
 //!
 //! Sibling D-18 handler issues register their own routes here; on rebase
@@ -57,6 +61,10 @@ use super::handlers_relations::{
     patch_workpad, post_relate, post_relation, post_unrelate,
 };
 
+use super::handlers_move_search::{
+    get_search, get_search_advanced, owned_move, owned_search, owned_search_advanced, post_move,
+};
+
 use super::handlers_social::{
     delete_comment, delete_link, get_comment_detail, get_comment_list, get_link_detail,
     get_link_list, owned_comment_detail, owned_comment_list, owned_link_detail, owned_link_list,
@@ -69,8 +77,10 @@ use super::handlers_social::{
 /// PR/review-link paths (`urls/work_item.py:218-236`, PIDASHCONV-680),
 /// the activity/attachment paths (`urls/work_item.py:79-98,173-192`,
 /// PIDASHCONV-675), the relation/workpad paths
-/// (`urls/work_item.py:194-216`, PIDASHCONV-676), and the label/page
-/// paths (`urls/label.py`, `urls/page.py`, PIDASHCONV-679).
+/// (`urls/work_item.py:194-216`, PIDASHCONV-676), the label/page paths
+/// (`urls/label.py`, `urls/page.py`, PIDASHCONV-679), the three search
+/// paths (`urls/work_item.py:39-42,103-111`, PIDASHCONV-677) and the move
+/// path (`urls/work_item.py:128-132`, PIDASHCONV-677).
 ///
 /// Sibling `v1_work_items` paths have no Rust route yet and keep proxying
 /// to Django through the fallback; on rebase keep both sides.
@@ -316,6 +326,26 @@ pub fn routes() -> Router<AppState> {
                     .delete(delete_issue_detail),
             ),
         )
+        // `work_item.py:103-106` — legacy search (get).
+        .route(
+            "/api/v1/workspaces/{slug}/work-items/search/",
+            owned_search(axum::routing::get(get_search)),
+        )
+        // `work_item.py:39-42` — deprecated twin (shares the view class).
+        .route(
+            "/api/v1/workspaces/{slug}/issues/search/",
+            owned_search(axum::routing::get(get_search)),
+        )
+        // `work_item.py:108-111` — advanced search (get).
+        .route(
+            "/api/v1/workspaces/{slug}/work-items/search/advanced/",
+            owned_search_advanced(axum::routing::get(get_search_advanced)),
+        )
+        // `work_item.py:128-132` — move (post; no deprecated twin).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/move/",
+            owned_move(axum::routing::post(post_move)),
+        )
 }
 
 #[cfg(test)]
@@ -473,6 +503,20 @@ mod tests {
             (
                 "DELETE",
                 format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/archive/"),
+            ),
+            // PIDASHCONV-677: the three search paths + the move path.
+            (
+                "GET",
+                "/api/v1/workspaces/acme/work-items/search/".to_owned(),
+            ),
+            ("GET", "/api/v1/workspaces/acme/issues/search/".to_owned()),
+            (
+                "GET",
+                "/api/v1/workspaces/acme/work-items/search/advanced/".to_owned(),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/move/"),
             ),
         ] {
             assert_eq!(
@@ -748,10 +792,32 @@ mod tests {
             .await,
             StatusCode::BAD_GATEWAY
         );
+        // PIDASHCONV-677: unowned verbs on the search/move paths.
+        assert_eq!(
+            status("POST", "/api/v1/workspaces/acme/work-items/search/",).await,
+            StatusCode::BAD_GATEWAY
+        );
         assert_eq!(
             status(
                 "DELETE",
                 &format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        // PIDASHCONV-677: unowned verbs on the search/move paths.
+        assert_eq!(
+            status(
+                "DELETE",
+                "/api/v1/workspaces/acme/work-items/search/advanced/",
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "GET",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/move/"),
             )
             .await,
             StatusCode::BAD_GATEWAY
@@ -866,6 +932,15 @@ mod tests {
             status(
                 "DELETE",
                 &format!("/api/v1/workspaces/acme/projects/{pid}/issues/not-a-uuid/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        // PIDASHCONV-677: move path.
+        assert_eq!(
+            status(
+                "POST",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/not-a-uuid/move/"),
             )
             .await,
             StatusCode::BAD_GATEWAY

@@ -15,6 +15,8 @@
 //!   (`IssueActivityListAPIEndpoint`, `IssueActivityDetailAPIEndpoint`,
 //!   `IssueAttachmentListCreateAPIEndpoint`,
 //!   `IssueAttachmentDetailAPIEndpoint`, PIDASHCONV-675).
+//! * [`handlers_move_search`] — the move + legacy + advanced search
+//!   handlers (PIDASHCONV-677), registered by [`routes`].
 //! * [`handlers_pr_links`] — the four PR/review-link endpoints
 //!   (`views/github_pr.py:29-100`, `views/git_code_review.py:24-100`)
 //!   plus the `pr_links`/`code_reviews` sqlx stores and the production
@@ -37,8 +39,9 @@
 //!   PIDASHCONV-676).
 //! * [`routes`] — the `urls/work_item.py` route registration with
 //!   owned-method cutover (created by PIDASHCONV-680; extended by
-//!   PIDASHCONV-673, PIDASHCONV-674, PIDASHCONV-675, PIDASHCONV-676, PIDASHCONV-678 and
-//!   PIDASHCONV-679; sibling handler issues extend it,
+//!   PIDASHCONV-673, PIDASHCONV-674, PIDASHCONV-675, PIDASHCONV-676,
+//!   PIDASHCONV-677, PIDASHCONV-678 and PIDASHCONV-679; sibling handler
+//!   issues extend it,
 //!   never fork it).
 //!
 //! Wiring note: the crate root declares `pub mod v1_work_items;` (seam for
@@ -53,6 +56,7 @@ pub mod handlers_actions;
 pub mod handlers_activity;
 pub mod handlers_core;
 pub mod handlers_labels_pages;
+pub mod handlers_move_search;
 pub mod handlers_pr_links;
 pub mod handlers_relations;
 pub mod handlers_social;
@@ -66,12 +70,13 @@ use crate::state::AppState;
 /// Domain router: core routes (PIDASHCONV-673), action routes
 /// (PIDASHCONV-678), link/comment routes (PIDASHCONV-674),
 /// activity/attachment routes (PIDASHCONV-675), PR/review-link routes
-/// (PIDASHCONV-680), relation/workpad routes (PIDASHCONV-676), and
-/// label/page routes (PIDASHCONV-679) in
-/// [`routes::routes`]. Owned D-18 api-v1 routes serve from Rust (cutover
-/// granularity); everything else keeps proxying to Django through the
-/// edge fallback. Sibling D-18 handler issues (PIDASHCONV-673…679) merge
-/// their routers here; merges keep both sides, never fork this file.
+/// (PIDASHCONV-680), relation/workpad routes (PIDASHCONV-676),
+/// label/page routes (PIDASHCONV-679), and the search routes plus the
+/// move route (PIDASHCONV-677) in [`routes::routes`]. Owned D-18 api-v1
+/// routes serve from Rust (cutover granularity); everything else keeps
+/// proxying to Django through the edge fallback. Sibling D-18 handler
+/// issues (PIDASHCONV-673…679) merge their routers here; merges keep
+/// both sides, never fork this file.
 pub fn routes() -> Router<AppState> {
     routes::routes()
 }
