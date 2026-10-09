@@ -3552,6 +3552,62 @@ export interface ParityDriver {
   deskRuntimeDispatchWindowFocus(): Promise<void>;
   /** Client-side database names the page currently holds (residue checks). */
   deskRuntimeIndexedDatabaseNames(): Promise<string[]>;
+
+  // ---------------------------------------------------------------------------
+  // Notifications snooze + email preferences (NEWFRONT-201, NTF-020..022,
+  // NTF-024..025). Observed on apps/web: the card snooze picker with preset
+  // delays and a remove entry, the custom resume dialog with half-hour time
+  // slots, the resume label on snoozed cards, and the profile-settings email
+  // preference page with instant-save toggles. Appended; existing entries
+  // above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Preset labels the snooze picker offers for a card (opens and closes it). */
+  notificationsSnoozePresets(index: number): Promise<string[]>;
+  /**
+   * Snooze a card via a preset label; resolves once the per-item PATCH
+   * settles so the stream membership read after it is post-write.
+   */
+  notificationsSnoozeWithPreset(index: number, preset: string): Promise<void>;
+  /** Whether the snooze picker for a card offers the remove-snooze entry. */
+  notificationsSnoozeRemovalOffered(index: number): Promise<boolean>;
+  /**
+   * Remove a card's snooze via the picker; resolves once the per-item
+   * PATCH settles.
+   */
+  notificationsUnsnooze(index: number): Promise<void>;
+  /** Fail per-item PATCH writes with `status` from here on (snooze failure path). */
+  notificationsFailItemWrites(status: number): Promise<void>;
+  /** Remove the per-item write failure. */
+  notificationsClearItemWriteFailure(): Promise<void>;
+  /** Open the custom-resume dialog for a card. */
+  notificationsOpenCustomSnooze(index: number): Promise<void>;
+  /** Whether the custom-resume dialog currently shows. */
+  notificationsCustomSnoozeVisible(): Promise<boolean>;
+  /** Pick a resume day `offsetDays` out from today in the custom dialog. */
+  notificationsCustomSnoozePickDay(offsetDays: number): Promise<void>;
+  /** Time-slot labels the custom dialog offers for a period (AM/PM). */
+  notificationsCustomSnoozeTimeSlots(period: "AM" | "PM"): Promise<string[]>;
+  /** Choose a period (AM/PM) then a time slot in the custom dialog. */
+  notificationsCustomSnoozePickTime(period: "AM" | "PM", slot: string): Promise<void>;
+  /** Submit the custom dialog (caller asserts close vs stay-open). */
+  notificationsCustomSnoozeSubmit(): Promise<void>;
+  /** Enable/disable the snoozed-only stream; waits until the list reloads. */
+  notificationsSetSnoozedMode(on: boolean): Promise<void>;
+  /** Open the profile-settings email-preferences page; waits until toggles mount. */
+  notificationsOpenEmailPreferences(): Promise<void>;
+  /** Whether the email-preferences loader showed during a delayed entry. */
+  notificationsEmailPreferencesLoaderShown(): Promise<boolean>;
+  /** Current toggle states keyed by preference key. */
+  notificationsEmailPreferences(): Promise<Record<NotificationsEmailPref, boolean>>;
+  /** Flip one email-preference toggle; waits until its save request settles. */
+  notificationsEmailPreferencesToggle(pref: NotificationsEmailPref): Promise<void>;
+  /** Whether the completed-only toggle nests under the state toggle. */
+  notificationsEmailPreferencesCompletedNested(): Promise<boolean>;
+  /** Fail email-preference saves with `status` from here on. */
+  notificationsFailEmailPreferenceSaves(status: number): Promise<void>;
+  /** Remove the email-preference save failure. */
+  notificationsClearEmailPreferenceSaveFailure(): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -4039,3 +4095,6 @@ export interface NotificationsCard {
   /** Whether the unread marker currently shows on the card. */
   unread: boolean;
 }
+
+/** Email-preference toggle key (NEWFRONT-201, NTF-024). */
+export type NotificationsEmailPref = "property_change" | "state_change" | "issue_completed" | "comment" | "mention";

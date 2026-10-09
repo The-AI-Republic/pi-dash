@@ -43,6 +43,7 @@ import type {
   SchedulerCalendarBlock,
   RunnerChatStreamFrame,
   NotificationsCard,
+  NotificationsEmailPref,
   NotificationsTab,
   SchedulerCatalogRow,
   SchedulerDefinitionValues,
@@ -5652,5 +5653,68 @@ export class WebNewDriver implements ParityDriver {
   }
   async deskRuntimeIndexedDatabaseNames(): Promise<string[]> {
     return todo("deskRuntimeIndexedDatabaseNames");
+  }
+
+  // --- Notifications snooze + email preferences (NEWFRONT-201, NTF-020..022,
+  // --- NTF-024..025). Throwing stubs per the shared driver contract.
+  async notificationsSnoozePresets(_index: number): Promise<string[]> {
+    return todo("notificationsSnoozePresets");
+  }
+  async notificationsSnoozeWithPreset(_index: number, _preset: string): Promise<void> {
+    return todo("notificationsSnoozeWithPreset");
+  }
+  async notificationsSnoozeRemovalOffered(_index: number): Promise<boolean> {
+    return todo("notificationsSnoozeRemovalOffered");
+  }
+  async notificationsUnsnooze(_index: number): Promise<void> {
+    return todo("notificationsUnsnooze");
+  }
+  async notificationsFailItemWrites(_status: number): Promise<void> {
+    return todo("notificationsFailItemWrites");
+  }
+  async notificationsClearItemWriteFailure(): Promise<void> {
+    return todo("notificationsClearItemWriteFailure");
+  }
+  async notificationsOpenCustomSnooze(_index: number): Promise<void> {
+    return todo("notificationsOpenCustomSnooze");
+  }
+  async notificationsCustomSnoozeVisible(): Promise<boolean> {
+    return todo("notificationsCustomSnoozeVisible");
+  }
+  async notificationsCustomSnoozePickDay(_offsetDays: number): Promise<void> {
+    return todo("notificationsCustomSnoozePickDay");
+  }
+  async notificationsCustomSnoozeTimeSlots(_period: "AM" | "PM"): Promise<string[]> {
+    return todo("notificationsCustomSnoozeTimeSlots");
+  }
+  async notificationsCustomSnoozePickTime(_period: "AM" | "PM", _slot: string): Promise<void> {
+    return todo("notificationsCustomSnoozePickTime");
+  }
+  async notificationsCustomSnoozeSubmit(): Promise<void> {
+    return todo("notificationsCustomSnoozeSubmit");
+  }
+  async notificationsSetSnoozedMode(_on: boolean): Promise<void> {
+    return todo("notificationsSetSnoozedMode");
+  }
+  async notificationsOpenEmailPreferences(): Promise<void> {
+    return todo("notificationsOpenEmailPreferences");
+  }
+  async notificationsEmailPreferencesLoaderShown(): Promise<boolean> {
+    return todo("notificationsEmailPreferencesLoaderShown");
+  }
+  async notificationsEmailPreferences(): Promise<Record<NotificationsEmailPref, boolean>> {
+    return todo("notificationsEmailPreferences");
+  }
+  async notificationsEmailPreferencesToggle(_pref: NotificationsEmailPref): Promise<void> {
+    return todo("notificationsEmailPreferencesToggle");
+  }
+  async notificationsEmailPreferencesCompletedNested(): Promise<boolean> {
+    return todo("notificationsEmailPreferencesCompletedNested");
+  }
+  async notificationsFailEmailPreferenceSaves(_status: number): Promise<void> {
+    return todo("notificationsFailEmailPreferenceSaves");
+  }
+  async notificationsClearEmailPreferenceSaveFailure(): Promise<void> {
+    return todo("notificationsClearEmailPreferenceSaveFailure");
   }
 }
