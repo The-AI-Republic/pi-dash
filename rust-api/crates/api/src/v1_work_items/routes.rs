@@ -1,4 +1,5 @@
-//! D-18 work-item route registration: action routes (handlers F,
+//! D-18 work-item route registration: core by-identifier / list / detail
+//! routes (handlers A, PIDASHCONV-673), action routes (handlers F,
 //! PIDASHCONV-678), link + comment routes (handlers B, PIDASHCONV-674),
 //! PR / code-review link routes (handlers H, PIDASHCONV-680), plus
 //! activity + attachment routes (handlers C, PIDASHCONV-675), relation +
@@ -30,6 +31,10 @@ use axum::Router;
 use crate::state::AppState;
 
 use super::handlers_actions::{owned_action, post_retick, post_run_ai, post_wait, post_yield};
+use super::handlers_core::{
+    delete_issue_detail, get_by_identifier, get_issue_detail, get_issue_list, owned_by_identifier,
+    owned_issue_detail, owned_issue_list, patch_issue_detail, post_issue_list,
+};
 use super::handlers_activity::{
     delete_attachment, get_activity_detail, get_activity_list, get_attachment, get_attachment_list,
     owned_activity, owned_attachment_detail, owned_attachment_list, patch_attachment,
@@ -271,6 +276,44 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/archive/",
             owned_page_archive(
                 axum::routing::post(post_page_archive).delete(delete_page_archive),
+            ),
+        )
+        // `work_item.py:113-117` — by-identifier (get, PIDASHCONV-673).
+        .route(
+            "/api/v1/workspaces/{slug}/work-items/{segment}/",
+            owned_by_identifier(axum::routing::get(get_by_identifier)),
+        )
+        // `work_item.py:44-48` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/issues/{segment}/",
+            owned_by_identifier(axum::routing::get(get_by_identifier)),
+        )
+        // `work_item.py:118-122` — issue list (get + post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/",
+            owned_issue_list(axum::routing::get(get_issue_list).post(post_issue_list)),
+        )
+        // `work_item.py:49-53` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/",
+            owned_issue_list(axum::routing::get(get_issue_list).post(post_issue_list)),
+        )
+        // `work_item.py:123-127` — issue detail (get + patch + delete).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/",
+            owned_issue_detail(
+                axum::routing::get(get_issue_detail)
+                    .patch(patch_issue_detail)
+                    .delete(delete_issue_detail),
+            ),
+        )
+        // `work_item.py:54-58` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/",
+            owned_issue_detail(
+                axum::routing::get(get_issue_detail)
+                    .patch(patch_issue_detail)
+                    .delete(delete_issue_detail),
             ),
         )
 }
@@ -522,6 +565,66 @@ mod tests {
         }
     }
 
+    /// PIDASHCONV-673: the six core paths own their methods.
+    #[tokio::test]
+    async fn core_methods_answer_401_anonymous() {
+        let pid = "11111111-1111-1111-1111-111111111111";
+        let pk = "22222222-2222-2222-2222-222222222222";
+        for (method, uri) in [
+            (
+                "GET",
+                "/api/v1/workspaces/acme/work-items/CT-1/".to_string(),
+            ),
+            ("GET", "/api/v1/workspaces/acme/issues/CT-1/".to_string()),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{pk}/"),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{pk}/"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{pk}/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{pk}/"),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{pk}/"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{pk}/"),
+            ),
+        ] {
+            assert_eq!(
+                status(method, &uri).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+        }
+    }
+
     /// Unowned methods proxy to Django (502 fail-closed with the test
     /// edge), preserving its 405-after-auth and metadata responses.
     #[tokio::test]
@@ -653,6 +756,39 @@ mod tests {
             .await,
             StatusCode::BAD_GATEWAY
         );
+        // PIDASHCONV-673: PUT on the detail paths stays Django-owned (the
+        // pinned `put_405` body), as do POST on by-identifier and
+        // PATCH/DELETE on the list paths.
+        let pid = "11111111-1111-1111-1111-111111111111";
+        let pk = "22222222-2222-2222-2222-222222222222";
+        assert_eq!(
+            status(
+                "PUT",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{pk}/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "PUT",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/issues/{pk}/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status("POST", "/api/v1/workspaces/acme/work-items/CT-1/",).await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "DELETE",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
     }
 
     /// Non-UUID path segments proxy to Django (its `<uuid:>` converter
@@ -712,6 +848,24 @@ mod tests {
             status(
                 "GET",
                 "/api/v1/workspaces/acme/projects/p1/pages/not-a-uuid/",
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        // PIDASHCONV-673: non-UUID detail pks proxy (Django's `<uuid:pk>`
+        // converter would not match).
+        assert_eq!(
+            status(
+                "PATCH",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/not-a-uuid/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "DELETE",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/issues/not-a-uuid/"),
             )
             .await,
             StatusCode::BAD_GATEWAY

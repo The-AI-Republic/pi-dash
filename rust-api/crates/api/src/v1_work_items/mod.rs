@@ -27,6 +27,9 @@
 //!   (`LabelListCreateAPIEndpoint`, `LabelDetailAPIEndpoint`,
 //!   `PageListAPIEndpoint`, `PageDetailAPIEndpoint`,
 //!   `PageArchiveAPIEndpoint`, PIDASHCONV-679).
+//! * [`handlers_core`] — the by-identifier / list / detail endpoints
+//!   (`WorkspaceIssueAPIEndpoint`, `IssueListCreateAPIEndpoint`,
+//!   `IssueDetailAPIEndpoint`, PIDASHCONV-673).
 //! * [`handlers_relations`] — the relation + workpad endpoints
 //!   (`IssueRelationListCreateAPIEndpoint`, `_IssueRelationAgentBase`,
 //!   `IssueRelationGroupedAPIEndpoint`, `IssueRelationRelateAPIEndpoint`,
@@ -34,7 +37,7 @@
 //!   PIDASHCONV-676).
 //! * [`routes`] — the `urls/work_item.py` route registration with
 //!   owned-method cutover (created by PIDASHCONV-680; extended by
-//!   PIDASHCONV-674, PIDASHCONV-675, PIDASHCONV-676, PIDASHCONV-678 and
+//!   PIDASHCONV-673, PIDASHCONV-674, PIDASHCONV-675, PIDASHCONV-676, PIDASHCONV-678 and
 //!   PIDASHCONV-679; sibling handler issues extend it,
 //!   never fork it).
 //!
@@ -60,10 +63,11 @@ use axum::Router;
 
 use crate::state::AppState;
 
-/// Domain router: action routes (PIDASHCONV-678), link/comment routes
-/// (PIDASHCONV-674), activity/attachment routes (PIDASHCONV-675),
-/// PR/review-link routes (PIDASHCONV-680), relation/workpad routes
-/// (PIDASHCONV-676), and label/page routes (PIDASHCONV-679) in
+/// Domain router: core routes (PIDASHCONV-673), action routes
+/// (PIDASHCONV-678), link/comment routes (PIDASHCONV-674),
+/// activity/attachment routes (PIDASHCONV-675), PR/review-link routes
+/// (PIDASHCONV-680), relation/workpad routes (PIDASHCONV-676), and
+/// label/page routes (PIDASHCONV-679) in
 /// [`routes::routes`]. Owned D-18 api-v1 routes serve from Rust (cutover
 /// granularity); everything else keeps proxying to Django through the
 /// edge fallback. Sibling D-18 handler issues (PIDASHCONV-673…679) merge

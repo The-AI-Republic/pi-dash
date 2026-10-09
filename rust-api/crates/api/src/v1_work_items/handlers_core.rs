@@ -51,6 +51,7 @@ use chrono::{DateTime, NaiveDate, TimeZone as _, Utc};
 use chrono_tz::Tz;
 use markup5ever_rcdom::{Handle, NodeData};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -63,7 +64,8 @@ use pidash_services::v1_work_items::{filter_fields, python_number_str, FieldSpec
 
 use crate::state::AppState;
 
-use super::perms::{decide, gate_for, V1WorkItemsRoute};
+use super::perms::{decide, gate_for, resolve_moved_by_run, RunFacts, V1WorkItemsRoute};
+use pidash_types::runner_runs::AgentRunStatus;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -244,15 +246,6 @@ async fn enqueue_best_effort(
     );
     if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
         tracing::warn!(%error, task, "task enqueue failed; response stands");
-    }
-}
-
-/// Whether a sqlx failure is a foreign-key violation (`IntegrityError` →
-/// `{"error": "The payload is not valid"}`).
-fn is_fk_violation(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(db) => db.code().as_deref() == Some("23503"),
-        _ => false,
     }
 }
 
@@ -5873,6 +5866,1687 @@ async fn issue_detail_inner(
         StatusCode::OK,
         serde_json::to_string(&rendered).map_err(|_| Denial::ServerError)?,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Write validation (`IssueSerializer.validate`, `serializers/issue.py:182-288`)
+// ---------------------------------------------------------------------------
+
+/// `convert_uuid_to_integer` (`utils/uuid.py:22-29`): the
+/// `pg_advisory_xact_lock` key for the create path — sha256 of the
+/// canonical UUID string, first 8 bytes big-endian signed.
+fn advisory_lock_key(project_id: &Uuid) -> i64 {
+    let mut hasher = Sha256::new();
+    hasher.update(project_id.to_string().as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    i64::from_be_bytes(bytes)
+}
+
+/// `base_host(request, is_app=True)` (`utils/host.py:18-66`) for the
+/// `model_activity` origin: `APP_BASE_URL`, else `WEB_URL`, else the
+/// `ImproperlyConfigured` 500 (raised after every write lands, so the row
+/// persists and only the response is the 500).
+fn app_origin(urls: &pidash_db::config::UrlSettings) -> Result<String, Denial> {
+    if let Some(url) = urls.app_base_url.as_deref().filter(|s| !s.is_empty()) {
+        return Ok(url.to_owned());
+    }
+    if let Some(url) = urls.web_url.as_deref().filter(|s| !s.is_empty()) {
+        return Ok(url.to_owned());
+    }
+    Err(Denial::ServerError)
+}
+
+/// The non-dict write body (`serializers.py` `to_internal_value`): DRF
+/// answers `{"non_field_errors": ["Invalid data. Expected a dictionary,
+/// but got <type>."]}` with the CPython type name.
+fn non_dict_body(value: &Value) -> String {
+    format!(
+        "{{\"non_field_errors\":[{}]}}",
+        json_string(&format!(
+            "Invalid data. Expected a dictionary, but got {}.",
+            json_type_name(value)
+        ))
+    )
+}
+
+/// Map a save-time failure (`IntegrityError` → 400, anything else → 500):
+/// Django's `IntegrityError` is pgcode class 23 (not-null 23502, FK 23503,
+/// unique 23505, check 23514), so every `23xxx` answers the
+/// payload-not-valid body.
+fn save_error(error: &sqlx::Error, site: &str) -> Denial {
+    let integrity = matches!(error, sqlx::Error::Database(db) if db.code().as_deref().is_some_and(|code| code.starts_with("23")));
+    if integrity {
+        tracing::warn!(%error, site, "v1_work_items core integrity failure");
+        Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
+    } else {
+        db_error(error, site)
+    }
+}
+
+/// The project facts the write paths read: `Project.objects.get(pk)`
+/// (`views/issue.py:471,793`) 404s through `handle_exception`, and `post`
+/// passes `workspace_id` / `default_assignee_id` into the serializer
+/// context.
+struct WriteProject {
+    workspace_id: Uuid,
+    default_assignee_id: Option<Uuid>,
+}
+
+async fn fetch_project_for_write(pool: &PgPool, project_id: &Uuid) -> Result<WriteProject, Denial> {
+    let row: Option<(Uuid, Option<Uuid>)> =
+        sqlx::query_as(r#"SELECT "workspace_id", "default_assignee_id" FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL"#)
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| db_error(error, "write-project"))?;
+    match row {
+        Some((workspace_id, default_assignee_id)) => Ok(WriteProject {
+            workspace_id,
+            default_assignee_id,
+        }),
+        None => Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned())),
+    }
+}
+
+/// `Issue.save`'s default-state resolution (`db/models/issue.py:288-301`):
+/// the `default=True` non-triage state of the project, else the first
+/// non-triage state, both in `Meta.ordering = ("sequence",)`. The
+/// `is_triage` exclusion rides beside the manager's `group != 'triage'`
+/// scope; either miss resolves `None` (kept, never an error).
+async fn fetch_default_state(
+    pool: &PgPool,
+    project_id: &Uuid,
+) -> Result<Option<(Uuid, String)>, Denial> {
+    for default_only in [true, false] {
+        let sql = if default_only {
+            r#"SELECT "id", "group" FROM "states" WHERE "project_id" = $1 AND "deleted_at" IS NULL AND NOT ("group" = 'triage') AND NOT "is_triage" AND "default" ORDER BY "sequence" ASC LIMIT 1"#
+        } else {
+            r#"SELECT "id", "group" FROM "states" WHERE "project_id" = $1 AND "deleted_at" IS NULL AND NOT ("group" = 'triage') AND NOT "is_triage" ORDER BY "sequence" ASC LIMIT 1"#
+        };
+        let row: Option<(Uuid, String)> = sqlx::query_as(sql)
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| db_error(error, "write-default-state"))?;
+        if row.is_some() {
+            return Ok(row);
+        }
+    }
+    Ok(None)
+}
+
+/// The `self.state.group` read in `Issue.save`'s completed arm: the
+/// validated state arrives as a model instance, so the group is an
+/// in-memory attribute read (plain by-id lookup, no manager scope).
+async fn fetch_state_group(pool: &PgPool, state_id: &Uuid) -> Result<Option<String>, Denial> {
+    sqlx::query_scalar(r#"SELECT "group" FROM "states" WHERE "id" = $1"#)
+        .bind(state_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| db_error(error, "write-state-group"))
+        .map(|row: Option<String>| row)
+}
+
+/// `Pod.default_for_project_id` (`runner/models.py:174-176`): the
+/// project-default pod (`PodManager` scope, `Meta.ordering =
+/// ("-is_default", "created_at")` — every candidate is default, so the
+/// earliest `created_at` wins).
+async fn fetch_default_pod(pool: &PgPool, project_id: &Uuid) -> Result<Option<Uuid>, Denial> {
+    sqlx::query_scalar(
+        r#"SELECT "id" FROM "pod" WHERE "project_id" = $1 AND "is_default" AND "deleted_at" IS NULL ORDER BY "created_at" ASC LIMIT 1"#,
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "write-default-pod"))
+    .map(|row: Option<Uuid>| row)
+}
+
+/// The create-time default type
+/// (`serializers/issue.py:297-300`): `IssueType.objects.filter(
+/// project_issue_types__project_id=..., is_default=True).first()` —
+/// unordered `.first()` (no `Meta.ordering` on `IssueType`), both tables
+/// under the soft-deletion scope.
+async fn fetch_default_issue_type(pool: &PgPool, project_id: &Uuid) -> Result<Option<Uuid>, Denial> {
+    sqlx::query_scalar(
+        r#"SELECT "it"."id" FROM "issue_types" AS "it" WHERE "it"."deleted_at" IS NULL AND "it"."is_default" AND EXISTS(SELECT 1 FROM "project_issue_types" AS "pit" WHERE "pit"."issue_type_id" = "it"."id" AND "pit"."project_id" = $1 AND "pit"."deleted_at" IS NULL) LIMIT 1"#,
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "write-default-type"))
+    .map(|row: Option<Uuid>| row)
+}
+
+/// `Issue.has_active_run` (`db/models/issue.py:232-248`):
+/// `AgentRun.objects.filter(work_item=self,
+/// status__in=NON_TERMINAL_STATUSES).exists()` — the plain manager, no
+/// liveness scope. The set is `runner/services/matcher.py:54-66` (the
+/// retired `waiting_for_worktree` still gates, PDASHOSS01-137).
+const NON_TERMINAL_STATUSES: &[&str] = &[
+    "queued",
+    "assigned",
+    "waiting_for_worktree",
+    "running",
+    "cancel_requested",
+    "awaiting_approval",
+    "awaiting_reauth",
+    "paused_awaiting_input",
+];
+
+async fn issue_has_active_run(pool: &PgPool, issue_id: &Uuid) -> Result<bool, Denial> {
+    sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM "agent_run" WHERE "work_item_id" = $1 AND "status" = ANY($2))"#,
+    )
+    .bind(issue_id)
+    .bind(NON_TERMINAL_STATUSES)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "write-active-run"))
+    .map(|found: Option<bool>| found.unwrap_or(false))
+}
+
+/// The pod's project for the `_same_uuid` check
+/// (`serializers/issue.py:199-203`): both sides are typed UUIDs here, so
+/// the canonical-compare fallback arms are unreachable — plain equality.
+async fn fetch_pod_project_id(pool: &PgPool, pod_id: &Uuid) -> Result<Option<Uuid>, Denial> {
+    sqlx::query_scalar(r#"SELECT "project_id" FROM "pod" WHERE "id" = $1"#)
+        .bind(pod_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| db_error(error, "write-pod-project"))
+        .map(|row: Option<Uuid>| row)
+}
+
+/// The `ProjectMember` filter backing the assignee allow-list
+/// (`serializers/issue.py:246-252`): active members with `role >= 15` in
+/// `ProjectMember.Meta.ordering = ("-created_at",)`.
+async fn filter_assignee_ids(
+    pool: &PgPool,
+    project_id: &Uuid,
+    ids: &[Uuid],
+) -> Result<Vec<Uuid>, Denial> {
+    sqlx::query_scalar(
+        r#"SELECT "member_id" FROM "project_members" WHERE "project_id" = $1 AND "is_active" AND "role" >= 15 AND "member_id" = ANY($2) AND "deleted_at" IS NULL ORDER BY "created_at" DESC"#,
+    )
+    .bind(project_id)
+    .bind(ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| db_error(error, "write-assignee-filter"))
+}
+
+/// The `Label` filter backing the label allow-list
+/// (`serializers/issue.py:255-259`), in `Label.Meta.ordering =
+/// ("-created_at",)`.
+async fn filter_label_ids(pool: &PgPool, project_id: &Uuid, ids: &[Uuid]) -> Result<Vec<Uuid>, Denial> {
+    sqlx::query_scalar(
+        r#"SELECT "id" FROM "labels" WHERE "project_id" = $1 AND "id" = ANY($2) AND "deleted_at" IS NULL ORDER BY "created_at" DESC"#,
+    )
+    .bind(project_id)
+    .bind(ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| db_error(error, "write-label-filter"))
+}
+
+/// The create-time default-assignee arm
+/// (`serializers/issue.py:332-348`): the project's default assignee only
+/// lands when it is itself a valid (active, `role >= 15`) member.
+async fn default_assignee_exists(
+    pool: &PgPool,
+    project_id: &Uuid,
+    member_id: &Uuid,
+) -> Result<bool, Denial> {
+    sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM "project_members" WHERE "member_id" = $1 AND "project_id" = $2 AND "role" >= 15 AND "is_active" AND "deleted_at" IS NULL)"#,
+    )
+    .bind(member_id)
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "write-default-assignee"))
+    .map(|found: Option<bool>| found.unwrap_or(false))
+}
+
+/// Port of `IssueSerializer.validate()` (`serializers/issue.py:182-288`),
+/// in source order — first failure wins, every arm a 400. `parsed` is the
+/// field-level value (mutated in place exactly like `data`: the lxml and
+/// sanitizer substitutes, the assignee/label allow-lists). `instance` is
+/// the patch/delete current row (`None` on create, skipping the reassign
+/// gate). The `description_binary` branch is dead: DRF maps `BinaryField`
+/// to a read-only `ModelField` (probed live), so the key never reaches
+/// `validated_data`.
+async fn run_write_validate(
+    pool: &PgPool,
+    parsed: &mut ParsedWrite,
+    project_id: &Uuid,
+    workspace_id: &Uuid,
+    instance: Option<&DecodedIssue>,
+    from_markdown: bool,
+) -> Result<(), Denial> {
+    use shape::ValidateError;
+    let fail = |error: ValidateError| Denial::FieldErrors(error.body().to_owned());
+
+    // Start / target (`:183-188`).
+    if let (Some(Some(start)), Some(Some(target))) = (parsed.start_date, parsed.target_date) {
+        if start > target {
+            return Err(fail(ValidateError::StartExceedsTarget));
+        }
+    }
+
+    // Assigned pod (`:193-216`).
+    if let Some(pod) = parsed.assigned_pod {
+        if let Some(pod_id) = pod {
+            let pod_project = fetch_pod_project_id(pool, &pod_id).await?;
+            if pod_project.as_ref() != Some(project_id) {
+                return Err(fail(ValidateError::PodWrongProject));
+            }
+        }
+        // The reassign gate only exists on update (`self.instance`), and
+        // `has_active_run` only queries on a real change — assign,
+        // reassign, or clear, compared as `str()` (`None` spells `None`).
+        if let Some(current) = instance {
+            let new_text = pod.map(|id| id.to_string());
+            if new_text != current.assigned_pod
+                && issue_has_active_run(pool, &current.id.parse::<Uuid>().map_err(|_| Denial::ServerError)?)
+                    .await?
+            {
+                return Err(fail(ValidateError::PodReassignActiveRun));
+            }
+        }
+    }
+
+    // lxml round-trip (`:222-229`): every non-`None` value round-trips
+    // (empty strings raise `ParserError` like any other failure) unless
+    // the HTML came from markdown.
+    if let Some(html) = parsed.description_html.take() {
+        let mut html = html;
+        if !from_markdown {
+            match lxml_roundtrip(&html) {
+                Some(roundtripped) => html = roundtripped,
+                None => return Err(fail(ValidateError::InvalidHtml)),
+            }
+            // Sanitizer substitute (`:232-238`): only truthy HTML
+            // validates, and the clean output always substitutes.
+            if !html.is_empty() {
+                match crate::space::sanitize::sanitize_html(&html) {
+                    crate::space::sanitize::Sanitize::Clean(clean) => html = clean,
+                    crate::space::sanitize::Sanitize::Invalid => {
+                        return Err(fail(ValidateError::HtmlContentInvalid));
+                    }
+                }
+            }
+        }
+        parsed.description_html = Some(html);
+    }
+
+    // Assignee / label allow-lists (`:246-259`): falsy inputs (absent or
+    // `[]`) skip the filter and keep their value.
+    if let Some(ids) = parsed.assignees.take() {
+        let filtered = if ids.is_empty() {
+            ids
+        } else {
+            filter_assignee_ids(pool, project_id, &ids).await?
+        };
+        parsed.assignees = Some(filtered);
+    }
+    if let Some(ids) = parsed.labels.take() {
+        let filtered = if ids.is_empty() {
+            ids
+        } else {
+            filter_label_ids(pool, project_id, &ids).await?
+        };
+        parsed.labels = Some(filtered);
+    }
+
+    // State / parent / estimate project checks (`:261-286`), each under
+    // its field's manager scope (`StateManager` excludes triage;
+    // `Issue.objects` keeps drafts, archived and triage rows).
+    if let Some(Some(state_id)) = parsed.state {
+        let ok: Option<bool> = sqlx::query_scalar(
+            r#"SELECT EXISTS(SELECT 1 FROM "states" WHERE "project_id" = $1 AND "id" = $2 AND "deleted_at" IS NULL AND NOT ("group" = 'triage'))"#,
+        )
+        .bind(project_id)
+        .bind(state_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| db_error(error, "write-state-check"))?;
+        if !ok.unwrap_or(false) {
+            return Err(fail(ValidateError::StateWrongProject));
+        }
+    }
+    if let Some(Some(parent_id)) = parsed.parent {
+        let ok: Option<bool> = sqlx::query_scalar(
+            r#"SELECT EXISTS(SELECT 1 FROM "issues" WHERE "workspace_id" = $1 AND "project_id" = $2 AND "id" = $3 AND "deleted_at" IS NULL)"#,
+        )
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(parent_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| db_error(error, "write-parent-check"))?;
+        if !ok.unwrap_or(false) {
+            return Err(fail(ValidateError::ParentWrongProject));
+        }
+    }
+    if let Some(Some(estimate_id)) = parsed.estimate_point {
+        let ok: Option<bool> = sqlx::query_scalar(
+            r#"SELECT EXISTS(SELECT 1 FROM "estimate_points" WHERE "workspace_id" = $1 AND "project_id" = $2 AND "id" = $3 AND "deleted_at" IS NULL)"#,
+        )
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(estimate_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| db_error(error, "write-estimate-check"))?;
+        if !ok.unwrap_or(false) {
+            return Err(fail(ValidateError::EstimatePointWrongProject));
+        }
+    }
+
+    Ok(())
+}
+
+/// Coerce the raw `created_at` override
+/// (`views/issue.py:511-514` — `DateTimeField.get_prep_value`, probed
+/// live): strings parse as datetimes (date-only falls back to midnight),
+/// naive takes the request zone, aware keeps its instant; `null` stores
+/// `NULL` (the not-null column then 400s); every other JSON type raises
+/// `TypeError` into the 500.
+fn coerce_created_at_override(
+    value: &Value,
+    tz: &Tz,
+    tz_name: &str,
+) -> Result<Option<DateTime<Utc>>, Denial> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Value::String(text) = value else {
+        return Err(Denial::ServerError);
+    };
+    match parse_drf_datetime(value, tz, tz_name) {
+        Ok(instant) => Ok(Some(instant)),
+        Err(_) => match parse_django_date(text) {
+            Some(date) => {
+                let naive = date.and_hms_opt(0, 0, 0).expect("midnight exists");
+                match tz.from_local_datetime(&naive) {
+                    chrono::LocalResult::Single(aware) => Ok(Some(aware.with_timezone(&Utc))),
+                    chrono::LocalResult::Ambiguous(first, _) => Ok(Some(first.with_timezone(&Utc))),
+                    chrono::LocalResult::None => Err(Denial::ServerError),
+                }
+            }
+            None => Err(Denial::BadError("Please provide valid detail".to_owned())),
+        },
+    }
+}
+
+/// Coerce the raw `created_by` override (`UUIDField.to_python`, probed
+/// live): strings parse flexibly (braces, `urn:`, unhyphenated),
+/// non-negative ints (bools spell 0/1) take the `int=` form, `null`
+/// stores `NULL` (the column is nullable); everything else is the
+/// `ValidationError` 400.
+fn coerce_created_by_override(value: &Value) -> Result<Option<Uuid>, Denial> {
+    let invalid = || Denial::BadError("Please provide valid detail".to_owned());
+    match value {
+        Value::Null => Ok(None),
+        Value::String(text) => parse_uuid_hex(text).ok_or_else(invalid).map(Some),
+        Value::Bool(flag) => Ok(Some(Uuid::from_u128(u128::from(*flag as u8)))),
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                if int < 0 {
+                    return Err(invalid());
+                }
+                return Ok(Some(Uuid::from_u128(int as u128)));
+            }
+            if let Some(uint) = number.as_u64() {
+                return Ok(Some(Uuid::from_u128(u128::from(uint))));
+            }
+            if number.is_f64() {
+                return Err(invalid());
+            }
+            number
+                .to_string()
+                .parse::<u128>()
+                .map(Uuid::from_u128)
+                .map(Some)
+                .map_err(|_| invalid())
+        }
+        Value::Array(_) | Value::Object(_) => Err(invalid()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Create (`IssueListCreateAPIEndpoint.post`, `views/issue.py:470-540`)
+// ---------------------------------------------------------------------------
+
+/// Python `str()` for the external-dupe guards' raw scalars (`CharField`
+/// stringifies filter values: numbers spell plainly, bools `True`/`False`).
+/// Composites are unreachable (the serializer 400s them before the guard).
+fn raw_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(python_number_str(number)),
+        Value::Bool(true) => Some("True".to_owned()),
+        Value::Bool(false) => Some("False".to_owned()),
+        _ => None,
+    }
+}
+
+/// Python truthiness for the guards' `request.data.get(...)` tests.
+fn raw_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                return int != 0;
+            }
+            if let Some(uint) = number.as_u64() {
+                return uint != 0;
+            }
+            number.as_f64().is_some_and(|float| float != 0.0)
+        }
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+    }
+}
+
+/// The create/patch external-duplicate guard's `exists()` + `.first()`
+/// pair (`views/issue.py:484-503,823-841`): same filter (project, slug,
+/// source, id under the soft-deletion scope), the first in
+/// `Meta.ordering = ("-created_at",)`.
+async fn external_dup_first(
+    pool: &PgPool,
+    project_id: &Uuid,
+    slug: &str,
+    source: &str,
+    external_id: &str,
+) -> Result<Option<Uuid>, Denial> {
+    let exists: Option<bool> = sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM "issues" INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id") WHERE "issues"."project_id" = $1 AND "workspaces"."slug" = $2 AND "issues"."external_source" = $3 AND "issues"."external_id" = $4 AND "issues"."deleted_at" IS NULL)"#,
+    )
+    .bind(project_id)
+    .bind(slug)
+    .bind(source)
+    .bind(external_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "write-dup-exists"))?;
+    if !exists.unwrap_or(false) {
+        return Ok(None);
+    }
+    sqlx::query_scalar(
+        r#"SELECT "issues"."id" FROM "issues" INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id") WHERE "issues"."project_id" = $1 AND "workspaces"."slug" = $2 AND "issues"."external_source" = $3 AND "issues"."external_id" = $4 AND "issues"."deleted_at" IS NULL ORDER BY "issues"."created_at" DESC LIMIT 1"#,
+    )
+    .bind(project_id)
+    .bind(slug)
+    .bind(source)
+    .bind(external_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "write-dup-first"))
+    .map(|row: Option<Uuid>| row)
+}
+
+/// The 409 body (`views/issue.py:502-508,836-841`): insertion order
+/// `error`, `id`.
+fn external_dup_body(dup_id: &Uuid) -> String {
+    format!(
+        "{{\"error\":{},\"id\":{}}}",
+        json_string(EXTERNAL_DUP_MESSAGE),
+        json_string(&dup_id.to_string())
+    )
+}
+
+/// Fetch one row for the write paths (`Issue.objects.get(workspace__slug,
+/// project_id, pk)`): the DEFAULT manager scope (`deleted_at IS NULL`
+/// only — drafts, archived and triage rows are visible, unlike the GET
+/// paths). Miss → the 404 `handle_exception` body.
+async fn fetch_issue_for_write(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    pk: &Uuid,
+    tz: &Tz,
+) -> Result<DecodedIssue, Denial> {
+    let sql = format!(
+        "SELECT {}, {} FROM \"issues\" {} WHERE \"issues\".\"deleted_at\" IS NULL AND \"issues\".\"id\" = $1 AND \"issues\".\"project_id\" = $2 AND \"workspaces\".\"slug\" = $3 LIMIT 1",
+        ISSUE_SELECT_COLS,
+        ISSUE_EXTRA_COLS,
+        core_queries::inline_lookup_joins_sql()
+    );
+    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
+        .bind(pk)
+        .bind(project_id)
+        .bind(slug)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| db_error(error, "write-fetch"))?;
+    match row {
+        Some(row) => decode_issue(&row, tz),
+        None => Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned())),
+    }
+}
+
+/// Render a write response / `current_instance` image: the full
+/// representation (`serializer.data` with no `fields`/`expand`, no viewer
+/// — relations omitted, blocker keys present).
+async fn render_write_response(
+    pool: &PgPool,
+    decoded: &DecodedIssue,
+    tz: &Tz,
+    web_base: Option<&str>,
+) -> Result<Value, Denial> {
+    let kept = filter_fields(shape::FIELDS_IN_ORDER, None).map_err(|_| Denial::ServerError)?;
+    let expand_refs: Vec<&str> = Vec::new();
+    render_decoded(
+        pool,
+        decoded,
+        tz,
+        &RenderRequest {
+            field_specs: None,
+            kept: &kept,
+            expand: &expand_refs,
+            is_list: false,
+            viewer: None,
+            web_base,
+        },
+    )
+    .await
+}
+
+/// Every `issues` column for the create `INSERT`, in bind order
+/// (`Issue.objects.create(**validated_data, project_id, type)` +
+/// `Issue.save` + `BaseModel.save` + `ProjectBaseModel.save`).
+#[allow(clippy::too_many_arguments)]
+async fn insert_issue_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: &Uuid,
+    created_at: &DateTime<Utc>,
+    updated_at: &DateTime<Utc>,
+    deleted_at: Option<DateTime<Utc>>,
+    point: Option<i32>,
+    name: &str,
+    description_html: &str,
+    description_stripped: Option<String>,
+    priority: &str,
+    complexity_score: i32,
+    start_date: Option<NaiveDate>,
+    target_date: Option<NaiveDate>,
+    sequence_id: i32,
+    sort_order: f64,
+    completed_at: Option<DateTime<Utc>>,
+    archived_at: Option<NaiveDate>,
+    is_draft: bool,
+    external_source: Option<String>,
+    external_id: Option<String>,
+    git_work_branch: &str,
+    created_via: Option<String>,
+    agent_executor: Option<String>,
+    created_by_id: Option<Uuid>,
+    project_id: &Uuid,
+    workspace_id: &Uuid,
+    parent_id: Option<Uuid>,
+    state_id: Option<Uuid>,
+    estimate_point_id: Option<Uuid>,
+    type_id: Option<Uuid>,
+    assigned_pod_id: Option<Uuid>,
+) -> Result<(), Denial> {
+    sqlx::query(
+        r#"INSERT INTO "issues" ("id", "created_at", "updated_at", "deleted_at", "point", "name", "description_json", "description_html", "description_stripped", "description_binary", "priority", "complexity_score", "start_date", "target_date", "sequence_id", "sort_order", "completed_at", "archived_at", "is_draft", "external_source", "external_id", "git_work_branch", "workpad", "created_via", "agent_executor", "created_by_id", "updated_by_id", "project_id", "workspace_id", "parent_id", "state_id", "estimate_point_id", "type_id", "assigned_pod_id") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)"#,
+    )
+    .bind(id)
+    .bind(created_at)
+    .bind(updated_at)
+    .bind(deleted_at)
+    .bind(point)
+    .bind(name)
+    .bind(Value::Object(Map::new()))
+    .bind(description_html)
+    .bind(description_stripped)
+    .bind(None::<Vec<u8>>)
+    .bind(priority)
+    .bind(complexity_score)
+    .bind(start_date)
+    .bind(target_date)
+    .bind(sequence_id)
+    .bind(sort_order)
+    .bind(completed_at)
+    .bind(archived_at)
+    .bind(is_draft)
+    .bind(external_source)
+    .bind(external_id)
+    .bind(git_work_branch)
+    .bind(String::new())
+    .bind(created_via)
+    .bind(agent_executor)
+    .bind(created_by_id)
+    .bind(None::<Uuid>)
+    .bind(project_id)
+    .bind(workspace_id)
+    .bind(parent_id)
+    .bind(state_id)
+    .bind(estimate_point_id)
+    .bind(type_id)
+    .bind(assigned_pod_id)
+    .execute(&mut **tx)
+    .await
+    .map(|_| ())
+    .map_err(|error| save_error(&error, "write-insert"))
+}
+
+/// The `IssueSequence` row `Issue.save` writes after the insert
+/// (`db/models/issue.py:340`): audit columns from `BaseModel.save`
+/// (creating → actor / `None`), the workspace from the project, `deleted`
+/// `False`.
+async fn insert_issue_sequence(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    project_id: &Uuid,
+    workspace_id: &Uuid,
+    issue_id: &Uuid,
+    sequence: i32,
+    actor_id: &Uuid,
+) -> Result<(), Denial> {
+    sqlx::query(
+        r#"INSERT INTO "issue_sequences" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at", "project_id", "workspace_id", "issue_id", "sequence", "deleted") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(now_utc())
+    .bind(now_utc())
+    .bind(actor_id)
+    .bind(None::<Uuid>)
+    .bind(None::<DateTime<Utc>>)
+    .bind(project_id)
+    .bind(workspace_id)
+    .bind(issue_id)
+    .bind(i64::from(sequence))
+    .bind(false)
+    .execute(&mut **tx)
+    .await
+    .map(|_| ())
+    .map_err(|error| save_error(&error, "write-sequence"))
+}
+
+/// One M2M batch (`bulk_create(..., batch_size=10)`): a single multi-row
+/// `INSERT`, `ON CONFLICT DO NOTHING` exactly when the call site passes
+/// `ignore_conflicts=True` (update only). Audit columns ride from the
+/// issue instance (`created_by` / `updated_by` as read there); every
+/// failure returns `Err` and the caller swallows it (`except
+/// IntegrityError: pass` — aborting the remaining batches on create).
+#[allow(clippy::too_many_arguments)]
+async fn insert_m2m_batch(
+    pool: &PgPool,
+    table: &str,
+    id_column: &str,
+    issue_id: &Uuid,
+    project_id: &Uuid,
+    workspace_id: &Uuid,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+    ids: &[Uuid],
+    ignore_conflicts: bool,
+) -> Result<(), sqlx::Error> {
+    let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new("");
+    qb.push("INSERT INTO ");
+    qb.push(table);
+    qb.push(
+        " (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", ",
+    );
+    qb.push(id_column);
+    qb.push(") VALUES ");
+    let mut separated = qb.separated(", ");
+    for id in ids {
+        separated.push("(");
+        separated.push_bind(Uuid::new_v4());
+        separated.push(", ");
+        separated.push_bind(now_utc());
+        separated.push(", ");
+        separated.push_bind(now_utc());
+        separated.push(", ");
+        separated.push_bind(created_by_id);
+        separated.push(", ");
+        separated.push_bind(updated_by_id);
+        separated.push(", ");
+        separated.push_bind(None::<DateTime<Utc>>);
+        separated.push(", ");
+        separated.push_bind(project_id);
+        separated.push(", ");
+        separated.push_bind(workspace_id);
+        separated.push(", ");
+        separated.push_bind(issue_id);
+        separated.push(", ");
+        separated.push_bind(id);
+        separated.push_unseparated(")");
+    }
+    if ignore_conflicts {
+        qb.push(" ON CONFLICT DO NOTHING");
+    }
+    qb.build().execute(pool).await.map(|_| ())
+}
+
+/// The create M2M writes (`serializers/issue.py:307-365`): batches of 10
+/// WITHOUT `ignore_conflicts`, aborting the remaining batches on the
+/// first `IntegrityError` (silently); without assignees the default
+/// assignee lands when valid (also `IntegrityError`-swallowed).
+async fn create_m2m(
+    pool: &PgPool,
+    new_id: &Uuid,
+    project_id: &Uuid,
+    workspace_id: &Uuid,
+    actor_id: &Uuid,
+    default_assignee_id: Option<Uuid>,
+    assignees: Option<Vec<Uuid>>,
+    labels: Option<Vec<Uuid>>,
+) -> Result<(), Denial> {
+    match assignees {
+        Some(ids) if !ids.is_empty() => {
+            for batch in ids.chunks(10) {
+                if insert_m2m_batch(
+                    pool,
+                    "\"issue_assignees\"",
+                    "\"assignee_id\"",
+                    new_id,
+                    project_id,
+                    workspace_id,
+                    Some(*actor_id),
+                    None,
+                    batch,
+                    false,
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+            }
+        }
+        _ => {
+            if let Some(member_id) = default_assignee_id {
+                if default_assignee_exists(pool, project_id, &member_id).await? {
+                    let _ = insert_m2m_batch(
+                        pool,
+                        "\"issue_assignees\"",
+                        "\"assignee_id\"",
+                        new_id,
+                        project_id,
+                        workspace_id,
+                        Some(*actor_id),
+                        None,
+                        std::slice::from_ref(&member_id),
+                        false,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+    if let Some(ids) = labels {
+        if !ids.is_empty() {
+            for batch in ids.chunks(10) {
+                if insert_m2m_batch(
+                    pool,
+                    "\"issue_labels\"",
+                    "\"label_id\"",
+                    new_id,
+                    project_id,
+                    workspace_id,
+                    Some(*actor_id),
+                    None,
+                    batch,
+                    false,
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn create_issue_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    raw_body: &[u8],
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        Some(&project_id),
+        None,
+        V1WorkItemsRoute::IssueList,
+        "POST",
+    )
+    .await?;
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    let tz_name = pre.actor.timezone.as_deref().unwrap_or("UTC");
+    // `Project.objects.get` precedes normalization (`:471-474`), so a
+    // missing project 404s before a bad markdown body 400s.
+    let project = fetch_project_for_write(&pre.pool, &project_id).await?;
+    let parsed_body = parse_write_body(headers, raw_body)?;
+    let norm_input = if parsed_body.from_form {
+        form_dict_for_normalize(&parsed_body.value)
+    } else {
+        parsed_body.value.clone()
+    };
+    let (data, from_markdown) = normalize_view_body(&norm_input, &markdown_to_html_port)?;
+    let Value::Object(map) = &data else {
+        return Err(Denial::FieldErrors(non_dict_body(&data)));
+    };
+    let mut parsed = parse_issue_write(&pre.pool, map, false, parsed_body.from_form, &tz, tz_name).await?;
+    // The create-only model default that reaches `validate()`: a missing
+    // `description_html` validates (and stores) as `"<p></p>"`.
+    if parsed.description_html.is_none() {
+        parsed.description_html = Some("<p></p>".to_owned());
+    }
+    run_write_validate(&pre.pool, &mut parsed, &project_id, &workspace_id, None, from_markdown).await?;
+
+    // External-duplicate guard (`:483-503`): raw truthy values, the
+    // conflicting row's id in the 409.
+    if let (Some(raw_id), Some(raw_source)) = (
+        parsed_body.value.get("external_id"),
+        parsed_body.value.get("external_source"),
+    ) {
+        if raw_truthy(raw_id) && raw_truthy(raw_source) {
+            if let (Some(external_id), Some(source)) = (raw_text(raw_id), raw_text(raw_source)) {
+                if let Some(dup_id) =
+                    external_dup_first(&pre.pool, &project_id, slug, &source, &external_id).await?
+                {
+                    return Err(Denial::Conflict(external_dup_body(&dup_id)));
+                }
+            }
+        }
+    }
+
+    // `serializer.save()` → `create()` (`:291-366`) + `Issue.save`
+    // (`db/models/issue.py:267-351`).
+    let issue_type = match parsed.issue_type {
+        Some(Some(id)) => Some(id),
+        _ => fetch_default_issue_type(&pre.pool, &project_id).await?,
+    };
+    let assigned_pod = match parsed.assigned_pod {
+        // `save()` resolves the project-default pod whenever the new
+        // instance holds `None` — absent and explicit-null alike.
+        Some(Some(id)) => Some(id),
+        _ => fetch_default_pod(&pre.pool, &project_id).await?,
+    };
+    // A provided state takes the completed arm (`save()`'s `else` — the
+    // validated `completed_at` is ignored); a missing/null state resolves
+    // the default and keeps the validated `completed_at` (the `if` branch
+    // never touches it).
+    let (state_id, completed_at) = match parsed.state {
+        Some(Some(id)) => {
+            let group = fetch_state_group(&pre.pool, &id).await?;
+            let completed_at = if group.as_deref() == Some("completed") {
+                Some(now_utc())
+            } else {
+                None
+            };
+            (Some(id), completed_at)
+        }
+        _ => {
+            let resolved = fetch_default_state(&pre.pool, &project_id).await?;
+            (resolved.map(|(id, _)| id), parsed.completed_at.flatten())
+        }
+    };
+
+    let new_id = Uuid::new_v4();
+    let created_at = now_utc();
+    let updated_at = now_utc();
+    let description_html = parsed.description_html.clone().unwrap_or_default();
+    let description_stripped = if description_html.is_empty() {
+        None
+    } else {
+        Some(crate::space::sanitize::strip_tags(&description_html))
+    };
+    // Sibling-maximum `sort_order` (`:333-338`): the validated value (or
+    // 65535) survives only when no `(project, state)` sibling exists —
+    // `state IS NOT DISTINCT FROM` matches the `state=None` siblings too.
+    let sort_input = parsed.sort_order.unwrap_or(65535.0);
+    let largest_sort: Option<Option<f64>> = sqlx::query_scalar(
+        r#"SELECT MAX("sort_order") FROM "issues" WHERE "project_id" = $1 AND "state_id" IS NOT DISTINCT FROM $2 AND "deleted_at" IS NULL"#,
+    )
+    .bind(project_id)
+    .bind(state_id)
+    .fetch_optional(&pre.pool)
+    .await
+    .map_err(|error| db_error(error, "write-max-sort"))?;
+    let sort_order = match largest_sort.flatten() {
+        Some(largest) => largest + 10000.0,
+        None => sort_input,
+    };
+
+    let mut tx = pre.pool.begin().await.map_err(|error| db_error(error, "write-begin"))?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(advisory_lock_key(&project_id))
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| db_error(error, "write-lock"))?;
+    let last_sequence: Option<Option<i64>> = sqlx::query_scalar(
+        r#"SELECT MAX("sequence") FROM "issue_sequences" WHERE "project_id" = $1 AND "deleted_at" IS NULL"#,
+    )
+    .bind(project_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| db_error(error, "write-max-sequence"))?;
+    // `last_sequence + 1 if last_sequence else 1`: `0` and `None` both
+    // restart at 1 (falsy either way).
+    let sequence_id =
+        i32::try_from(last_sequence.flatten().filter(|last| *last != 0).map(|last| last + 1).unwrap_or(1))
+            .map_err(|_| Denial::ServerError)?;
+    insert_issue_row(
+        &mut tx,
+        &new_id,
+        &created_at,
+        &updated_at,
+        parsed.deleted_at.flatten(),
+        parsed.point.flatten().map(|point| point as i32),
+        parsed.name.as_deref().unwrap_or_default(),
+        &description_html,
+        description_stripped,
+        parsed.priority.as_deref().unwrap_or("none"),
+        parsed.complexity_score.unwrap_or(0) as i32,
+        parsed.start_date.flatten(),
+        parsed.target_date.flatten(),
+        sequence_id,
+        sort_order,
+        completed_at,
+        parsed.archived_at.flatten(),
+        parsed.is_draft.unwrap_or(false),
+        parsed.external_source.flatten(),
+        parsed.external_id.flatten(),
+        parsed.git_work_branch.as_deref().unwrap_or_default(),
+        parsed.created_via.flatten(),
+        parsed.agent_executor.flatten(),
+        // `BaseModel.save` overwrites any validated `created_by` with the
+        // actor at insert; `updated_by` stays `None`.
+        Some(pre.actor.id),
+        &project_id,
+        &project.workspace_id,
+        parsed.parent.flatten(),
+        state_id,
+        parsed.estimate_point.flatten(),
+        issue_type,
+        assigned_pod,
+    )
+    .await?;
+    insert_issue_sequence(&mut tx, &project_id, &project.workspace_id, &new_id, sequence_id, &pre.actor.id)
+        .await?;
+    tx.commit().await.map_err(|error| db_error(error, "write-commit"))?;
+
+    create_m2m(
+        &pre.pool,
+        &new_id,
+        &project_id,
+        &project.workspace_id,
+        &pre.actor.id,
+        project.default_assignee_id,
+        parsed.assignees,
+        parsed.labels,
+    )
+    .await?;
+
+    // The raw-data overrides (`:509-514`): a second save limited to
+    // `update_fields=["created_at", "created_by"]` on the refetched row —
+    // the `save()` recomputes run in memory only, never reaching the row.
+    let override_created_at = match parsed_body.value.get("created_at") {
+        None => Some(now_utc()),
+        Some(value) => coerce_created_at_override(value, &tz, tz_name)?,
+    };
+    let override_created_by = match parsed_body.value.get("created_by") {
+        None => Some(pre.actor.id),
+        Some(value) => coerce_created_by_override(value)?,
+    };
+    sqlx::query(r#"UPDATE "issues" SET "created_at" = $1, "created_by_id" = $2 WHERE "id" = $3"#)
+        .bind(override_created_at)
+        .bind(override_created_by)
+        .bind(new_id)
+        .execute(&pre.pool)
+        .await
+        .map(|_| ())
+        .map_err(|error| save_error(&error, "write-override"))?;
+
+    // Task fan-out (`:516-539`): the activity carries the `django_dumps`
+    // text of the NORMALIZED body, the webhook the body object itself.
+    let requested_text = requested_data_text(&data);
+    let kwargs = work_tasks::issue_activity_kwargs(
+        work_tasks::ACTIVITY_ISSUE_CREATED,
+        Some(&requested_text),
+        &pre.actor.id.to_string(),
+        &new_id.to_string(),
+        &project_id.to_string(),
+        None,
+        Utc::now().timestamp(),
+    );
+    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
+    let origin = app_origin(&state.settings().urls)?;
+    let webhook = work_tasks::issue_model_activity_kwargs(
+        &new_id.to_string(),
+        data.clone(),
+        None,
+        &pre.actor.id.to_string(),
+        slug,
+        &origin,
+    );
+    enqueue_best_effort(&pre.pool, work_tasks::MODEL_ACTIVITY_TASK, vec![], webhook).await;
+
+    // The 201 renders the PRE-override in-memory instance: refetch the
+    // row, then restore the insert-time `created_at` / `created_by`.
+    let mut decoded = fetch_issue_for_write(&pre.pool, slug, &project_id, &new_id, &tz).await?;
+    decoded.created_at = render_dt(&created_at, &tz);
+    decoded.created_at_dt = created_at;
+    decoded.created_by = Some(pre.actor.id.to_string());
+    let web_base = shape::web_base_url(
+        state.settings().urls.web_url.as_deref(),
+        state.settings().urls.app_base_url.as_deref(),
+    );
+    let rendered = render_write_response(&pre.pool, &decoded, &tz, web_base.as_deref()).await?;
+    Ok(json_created(
+        serde_json::to_string(&rendered).map_err(|_| Denial::ServerError)?,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Patch + delete (`IssueDetailAPIEndpoint`, `views/issue.py:790-909`)
+// ---------------------------------------------------------------------------
+
+/// The agent-run columns `resolve_moved_by_run` reads (the
+/// `handlers_actions` fetch shape: `AgentRun` + the `runner` join for
+/// ownership).
+const RUN_FACTS_COLS: &str = r#"r."id", r."created_by_id", r."owner_id", r."runner_id", ru."owner_id" AS "runner_owner_id", r."work_item_id", r."status""#;
+
+fn map_run_facts(row: &sqlx::postgres::PgRow) -> Result<RunFacts, Denial> {
+    let status: String = row.try_get("status").map_err(|error| db_error(error, "map-run"))?;
+    Ok(RunFacts {
+        id: row.try_get("id").map_err(|error| db_error(error, "map-run"))?,
+        created_by_id: row.try_get("created_by_id").map_err(|error| db_error(error, "map-run"))?,
+        owner_id: row.try_get("owner_id").map_err(|error| db_error(error, "map-run"))?,
+        runner_id: row.try_get("runner_id").map_err(|error| db_error(error, "map-run"))?,
+        runner_owner_id: row
+            .try_get("runner_owner_id")
+            .map_err(|error| db_error(error, "map-run"))?,
+        work_item_id: row.try_get("work_item_id").map_err(|error| db_error(error, "map-run"))?,
+        status: AgentRunStatus::from_value(&status).unwrap_or(AgentRunStatus::Cancelled),
+    })
+}
+
+/// `AgentRun.objects.select_related("runner").filter(pk=run_id).first()`
+/// — the header path's row (`views/issue.py:1113`).
+async fn fetch_run_by_id(pool: &PgPool, run_id: &Uuid) -> Result<Option<RunFacts>, Denial> {
+    let sql = format!(
+        "SELECT {RUN_FACTS_COLS} FROM \"agent_run\" r LEFT JOIN \"runner\" ru ON ru.\"id\" = r.\"runner_id\" WHERE r.\"id\" = $1 LIMIT 1"
+    );
+    let row: Option<sqlx::postgres::PgRow> =
+        sqlx::query(&sql).bind(run_id).fetch_optional(pool).await.map_err(|error| db_error(error, "fetch-run"))?;
+    row.map(|row| map_run_facts(&row)).transpose()
+}
+
+/// `AgentRun.objects.select_related("runner").filter(work_item_id=pk)
+/// .order_by("-created_at")[:5]` — the no-header inference rows (`:1127`).
+async fn fetch_newest_runs_on_issue(pool: &PgPool, issue_id: &Uuid) -> Result<Vec<RunFacts>, Denial> {
+    let sql = format!(
+        "SELECT {RUN_FACTS_COLS} FROM \"agent_run\" r LEFT JOIN \"runner\" ru ON ru.\"id\" = r.\"runner_id\" WHERE r.\"work_item_id\" = $1 ORDER BY r.\"created_at\" DESC LIMIT 5"
+    );
+    let rows: Vec<sqlx::postgres::PgRow> =
+        sqlx::query(&sql).bind(issue_id).fetch_all(pool).await.map_err(|error| db_error(error, "fetch-runs"))?;
+    rows.iter().map(map_run_facts).collect()
+}
+
+/// The patch guard's nullable-`external_source` variant
+/// (`request.data.get("external_source", issue.external_source)` —
+/// `None` filters `IS NULL`).
+async fn external_dup_first_nullable(
+    pool: &PgPool,
+    project_id: &Uuid,
+    slug: &str,
+    source: Option<&str>,
+    external_id: &str,
+) -> Result<Option<Uuid>, Denial> {
+    let exists: Option<bool> = sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM "issues" INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id") WHERE "issues"."project_id" = $1 AND "workspaces"."slug" = $2 AND "issues"."external_source" IS NOT DISTINCT FROM $3 AND "issues"."external_id" = $4 AND "issues"."deleted_at" IS NULL)"#,
+    )
+    .bind(project_id)
+    .bind(slug)
+    .bind(source)
+    .bind(external_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "write-dup-exists"))?;
+    if !exists.unwrap_or(false) {
+        return Ok(None);
+    }
+    sqlx::query_scalar(
+        r#"SELECT "issues"."id" FROM "issues" INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id") WHERE "issues"."project_id" = $1 AND "workspaces"."slug" = $2 AND "issues"."external_source" IS NOT DISTINCT FROM $3 AND "issues"."external_id" = $4 AND "issues"."deleted_at" IS NULL ORDER BY "issues"."created_at" DESC LIMIT 1"#,
+    )
+    .bind(project_id)
+    .bind(slug)
+    .bind(source)
+    .bind(external_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "write-dup-first"))
+    .map(|row: Option<Uuid>| row)
+}
+
+/// Resolve the post-save `(state_id, completed_at)` pair for the update
+/// and delete saves (`Issue.save`'s state branch, `db/models/issue.py:288-
+/// 310` — no `_state.adding` check, so it runs on every save): a provided
+/// state takes the completed arm; a null state (provided or carried)
+/// resolves the default and leaves `completed_at` untouched; an absent
+/// state recomputes the arm from the current row. Returns the
+/// `SET`-or-skip pair for each column.
+async fn resolve_save_state(
+    pool: &PgPool,
+    project_id: &Uuid,
+    current: &DecodedIssue,
+    parsed_state: Option<Option<Uuid>>,
+) -> Result<(Option<Option<Uuid>>, Option<Option<DateTime<Utc>>>), Denial> {
+    let current_state: Option<Uuid> = current.state.as_deref().and_then(|id| id.parse().ok());
+    match parsed_state {
+        Some(Some(id)) => {
+            // A vanished row (probe passed, row gone) reads as
+            // non-completed and lets the `UPDATE` FK decide the 400.
+            let group = fetch_state_group(pool, &id).await?.unwrap_or_default();
+            let completed_at = if group == "completed" { Some(now_utc()) } else { None };
+            Ok((Some(Some(id)), Some(completed_at)))
+        }
+        Some(None) => {
+            let resolved = fetch_default_state(pool, project_id).await?;
+            Ok((Some(resolved.map(|(id, _)| id)), None))
+        }
+        None => match current_state {
+            Some(_) => {
+                let completed_at = if current.state_group.as_deref() == Some("completed") {
+                    Some(now_utc())
+                } else {
+                    None
+                };
+                Ok((None, Some(completed_at)))
+            }
+            None => {
+                let resolved = fetch_default_state(pool, project_id).await?;
+                Ok((Some(resolved.map(|(id, _)| id)), None))
+            }
+        },
+    }
+}
+
+/// The update M2M writes (`serializers/issue.py:368-413`): only when the
+/// key was provided — soft-delete the old rows (queryset `.delete()` is
+/// the `deleted_at` sweep, never a hard delete), then batches of 10 WITH
+/// `ignore_conflicts`, the whole `bulk_create` `IntegrityError`-swallowed.
+async fn update_m2m_side(
+    pool: &PgPool,
+    table: &str,
+    issue_id: &Uuid,
+    project_id: &Uuid,
+    workspace_id: &Uuid,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+    ids: Vec<Uuid>,
+) -> Result<(), Denial> {
+    let sweep = format!("UPDATE {table} SET \"deleted_at\" = $1 WHERE \"issue_id\" = $2 AND \"deleted_at\" IS NULL");
+    sqlx::query(&sweep)
+        .bind(now_utc())
+        .bind(issue_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(|error| db_error(error, "write-m2m-sweep"))?;
+    let column = if table.contains("assignee") { "\"assignee_id\"" } else { "\"label_id\"" };
+    for batch in ids.chunks(10) {
+        if insert_m2m_batch(
+            pool,
+            table,
+            column,
+            issue_id,
+            project_id,
+            workspace_id,
+            created_by_id,
+            updated_by_id,
+            batch,
+            true,
+        )
+        .await
+        .is_err()
+        {
+            break;
+        }
+    }
+    Ok(())
+}
+
+async fn patch_issue_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    pk: &Uuid,
+    raw_body: &[u8],
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        Some(&project_id),
+        None,
+        V1WorkItemsRoute::IssueDetail,
+        "PATCH",
+    )
+    .await?;
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    let tz_name = pre.actor.timezone.as_deref().unwrap_or("UTC");
+    // The issue fetch precedes the project fetch (`:792-793`).
+    let current = fetch_issue_for_write(&pre.pool, slug, &project_id, pk, &tz).await?;
+    fetch_project_for_write(&pre.pool, &project_id).await?;
+
+    // The run header (`:794-807`): a blank/missing header infers the
+    // caller's active run, a malformed id 400s. The resolved run id is
+    // stamped for the orchestration signal only (no wire effect — the
+    // `fire_state_transition` mirror is deferred, see the PR).
+    let header = match headers.get("X-Pi-Dash-Run-Id") {
+        None => None,
+        Some(value) => Some(value.to_str().unwrap_or("\u{fffd}").to_owned()),
+    };
+    let header_ref = header.as_deref();
+    let run_by_id = match header_ref.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(raw) => match raw.parse::<Uuid>() {
+            Ok(id) => fetch_run_by_id(&pre.pool, &id).await?,
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let newest_runs = if header_ref.map(str::trim).is_some_and(|h| !h.is_empty()) {
+        Vec::new()
+    } else {
+        fetch_newest_runs_on_issue(&pre.pool, pk).await?
+    };
+    let (_moved_by_run, header_error) =
+        resolve_moved_by_run(header_ref, Some(pre.actor.id), *pk, run_by_id.as_ref(), &newest_runs);
+    if let Some(error) = header_error {
+        return Err(Denial::BadError(error.message().to_owned()));
+    }
+
+    // `current_instance` renders before normalization (`:808-811`), with
+    // the same settings-derived web base as the response (`get_url` reads
+    // deployment config, never the request).
+    let web_base = shape::web_base_url(
+        state.settings().urls.web_url.as_deref(),
+        state.settings().urls.app_base_url.as_deref(),
+    );
+    let current_rendered = render_write_response(&pre.pool, &current, &tz, web_base.as_deref()).await?;
+    let current_text =
+        pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&current_rendered);
+
+    let parsed_body = parse_write_body(headers, raw_body)?;
+    let norm_input = if parsed_body.from_form {
+        form_dict_for_normalize(&parsed_body.value)
+    } else {
+        parsed_body.value.clone()
+    };
+    let (data, from_markdown) = normalize_view_body(&norm_input, &markdown_to_html_port)?;
+    let Value::Object(map) = &data else {
+        return Err(Denial::FieldErrors(non_dict_body(&data)));
+    };
+    let mut parsed = parse_issue_write(&pre.pool, map, true, parsed_body.from_form, &tz, tz_name).await?;
+    run_write_validate(&pre.pool, &mut parsed, &project_id, &workspace_id, Some(&current), from_markdown)
+        .await?;
+
+    // External-duplicate guard (`:822-841`): only when the raw id is
+    // truthy AND changed (`stored != str(incoming)`), the source
+    // defaulting to the stored one — and the 409 carries the CURRENT
+    // issue's id, not the conflicting row's.
+    if let Some(raw_id) = parsed_body.value.get("external_id") {
+        if raw_truthy(raw_id) {
+            let incoming = raw_text(raw_id);
+            if current.external_id.as_deref() != incoming.as_deref() {
+                let source: Option<String> = match parsed_body.value.get("external_source") {
+                    Some(value) => raw_text(value),
+                    None => current.external_source.clone(),
+                };
+                if let Some(external_id) = incoming {
+                    if external_dup_first_nullable(&pre.pool, &project_id, slug, source.as_deref(), &external_id)
+                        .await?
+                        .is_some()
+                    {
+                        return Err(Denial::Conflict(external_dup_body(pk)));
+                    }
+                }
+            }
+        }
+    }
+
+    // `serializer.save()` → `update()` (`:368-416`).
+    let row_created_by: Option<Uuid> = current.created_by.as_deref().and_then(|id| id.parse().ok());
+    let row_updated_by: Option<Uuid> = current.updated_by.as_deref().and_then(|id| id.parse().ok());
+    if let Some(ids) = parsed.assignees.clone() {
+        update_m2m_side(
+            &pre.pool,
+            "\"issue_assignees\"",
+            pk,
+            &project_id,
+            &workspace_id,
+            row_created_by,
+            row_updated_by,
+            ids,
+        )
+        .await?;
+    }
+    if let Some(ids) = parsed.labels.clone() {
+        update_m2m_side(
+            &pre.pool,
+            "\"issue_labels\"",
+            pk,
+            &project_id,
+            &workspace_id,
+            row_created_by,
+            row_updated_by,
+            ids,
+        )
+        .await?;
+    }
+
+    // `super().update()` → full `save()`: `updated_at`/`updated_by` and
+    // the stripped/completed recomputes always land (even for `{}`).
+    let (set_state, set_completed) =
+        resolve_save_state(&pre.pool, &project_id, &current, parsed.state).await?;
+    let html_new = parsed.description_html.clone().unwrap_or_else(|| current.description_html.clone());
+    let stripped_new = if html_new.is_empty() {
+        None
+    } else {
+        Some(crate::space::sanitize::strip_tags(&html_new))
+    };
+    // A provided `sequence_id` must fit `int4` (save-time `DataError` →
+    // 500); the overflow flag is the beyond-`i64` arm of the same error.
+    if parsed.sequence_overflow {
+        return Err(Denial::ServerError);
+    }
+    let sequence_new: Option<i32> = match parsed.sequence_id {
+        Some(number) => Some(i32::try_from(number).map_err(|_| Denial::ServerError)?),
+        None => None,
+    };
+    let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new("");
+    qb.push("UPDATE \"issues\" SET ");
+    let mut sep = qb.separated(", ");
+    sep.push("\"updated_at\" = ");
+    sep.push_bind_unseparated(now_utc());
+    sep.push("\"updated_by_id\" = ");
+    sep.push_bind_unseparated(pre.actor.id);
+    sep.push("\"description_stripped\" = ");
+    sep.push_bind_unseparated(stripped_new);
+    if let Some(completed) = set_completed {
+        sep.push("\"completed_at\" = ");
+        sep.push_bind_unseparated(completed);
+    }
+    if let Some(state) = set_state {
+        sep.push("\"state_id\" = ");
+        sep.push_bind_unseparated(state);
+    }
+    macro_rules! set_col {
+        ($column:literal, $value:expr) => {
+            if let Some(value) = $value {
+                sep.push(concat!($column, " = "));
+                sep.push_bind_unseparated(value);
+            }
+        };
+    }
+    // Nullable columns bind the OUTER option: explicit null stores
+    // `NULL`, absent skips the column.
+    set_col!("\"deleted_at\"", parsed.deleted_at);
+    set_col!(
+        "\"point\"",
+        parsed.point.map(|point| point.map(|point| point as i32))
+    );
+    set_col!("\"name\"", parsed.name.clone());
+    set_col!("\"description_html\"", parsed.description_html.clone());
+    set_col!("\"priority\"", parsed.priority.clone());
+    set_col!(
+        "\"complexity_score\"",
+        parsed.complexity_score.map(|score| score as i32)
+    );
+    set_col!("\"start_date\"", parsed.start_date);
+    set_col!("\"target_date\"", parsed.target_date);
+    set_col!("\"sequence_id\"", sequence_new);
+    set_col!("\"sort_order\"", parsed.sort_order);
+    if set_completed.is_none() {
+        set_col!("\"completed_at\"", parsed.completed_at);
+    }
+    set_col!("\"archived_at\"", parsed.archived_at);
+    set_col!("\"is_draft\"", parsed.is_draft);
+    set_col!("\"external_source\"", parsed.external_source.clone());
+    set_col!("\"external_id\"", parsed.external_id.clone());
+    set_col!("\"git_work_branch\"", parsed.git_work_branch.clone());
+    set_col!("\"created_via\"", parsed.created_via.clone());
+    set_col!("\"agent_executor\"", parsed.agent_executor.clone());
+    set_col!("\"created_by_id\"", parsed.created_by);
+    set_col!("\"parent_id\"", parsed.parent);
+    set_col!("\"estimate_point_id\"", parsed.estimate_point);
+    set_col!("\"type_id\"", parsed.issue_type);
+    set_col!("\"assigned_pod_id\"", parsed.assigned_pod);
+    qb.push(" WHERE \"id\" = ");
+    qb.push_bind(pk);
+    qb.build().execute(&pre.pool).await.map(|_| ()).map_err(|error| save_error(&error, "write-update"))?;
+
+    // Task fan-out (`:844-865`): both activities carry the before-image.
+    let requested_text = requested_data_text(&data);
+    let kwargs = work_tasks::issue_activity_kwargs(
+        work_tasks::ACTIVITY_ISSUE_UPDATED,
+        Some(&requested_text),
+        &pre.actor.id.to_string(),
+        &pk.to_string(),
+        &project_id.to_string(),
+        Some(&current_text),
+        Utc::now().timestamp(),
+    );
+    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
+    let origin = app_origin(&state.settings().urls)?;
+    let webhook = work_tasks::issue_model_activity_kwargs(
+        &pk.to_string(),
+        data.clone(),
+        Some(&current_text),
+        &pre.actor.id.to_string(),
+        slug,
+        &origin,
+    );
+    enqueue_best_effort(&pre.pool, work_tasks::MODEL_ACTIVITY_TASK, vec![], webhook).await;
+
+    let decoded = fetch_issue_for_write(&pre.pool, slug, &project_id, pk, &tz).await?;
+    let rendered = render_write_response(&pre.pool, &decoded, &tz, web_base.as_deref()).await?;
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::to_string(&rendered).map_err(|_| Denial::ServerError)?,
+    ))
+}
+
+async fn delete_issue_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    pk: &Uuid,
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        Some(&project_id),
+        None,
+        V1WorkItemsRoute::IssueDetail,
+        "DELETE",
+    )
+    .await?;
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    let current = fetch_issue_for_write(&pre.pool, slug, &project_id, pk, &tz).await?;
+
+    // Creator-or-admin (`:887-898`): the creator short-circuits, anyone
+    // else needs an active `role=20` membership.
+    let is_creator = current
+        .created_by
+        .as_deref()
+        .and_then(|id| id.parse::<Uuid>().ok())
+        .is_some_and(|id| id == pre.actor.id);
+    if !is_creator {
+        let is_admin: Option<bool> = sqlx::query_scalar(
+            r#"SELECT EXISTS(SELECT 1 FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "role" = 20 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL)"#,
+        )
+        .bind(workspace_id)
+        .bind(pre.actor.id)
+        .bind(project_id)
+        .fetch_optional(&pre.pool)
+        .await
+        .map_err(|error| db_error(error, "write-delete-admin"))?;
+        if !is_admin.unwrap_or(false) {
+            return Err(Denial::ForbiddenBody(
+                format!("{{\"error\":{}}}", json_string(DELETE_DENIAL_MESSAGE)),
+            ));
+        }
+    }
+
+    let web_base = shape::web_base_url(
+        state.settings().urls.web_url.as_deref(),
+        state.settings().urls.app_base_url.as_deref(),
+    );
+    let current_rendered = render_write_response(&pre.pool, &current, &tz, web_base.as_deref()).await?;
+    let current_text =
+        pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&current_rendered);
+
+    // `issue.delete()` → `SoftDeleteModel.delete` (`db/mixins.py:72-78`):
+    // `deleted_at` now plus a FULL `save()` (the state branch resolves or
+    // recompletes, `updated_by`/`updated_at` stamp), then the sweep task.
+    let (set_state, set_completed) = resolve_save_state(&pre.pool, &project_id, &current, None).await?;
+    let stripped_new = if current.description_html.is_empty() {
+        None
+    } else {
+        Some(crate::space::sanitize::strip_tags(&current.description_html))
+    };
+    let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new("");
+    qb.push("UPDATE \"issues\" SET ");
+    let mut sep = qb.separated(", ");
+    sep.push("\"deleted_at\" = ");
+    sep.push_bind_unseparated(now_utc());
+    sep.push("\"updated_at\" = ");
+    sep.push_bind_unseparated(now_utc());
+    sep.push("\"updated_by_id\" = ");
+    sep.push_bind_unseparated(pre.actor.id);
+    sep.push("\"description_stripped\" = ");
+    sep.push_bind_unseparated(stripped_new);
+    if let Some(completed) = set_completed {
+        sep.push("\"completed_at\" = ");
+        sep.push_bind_unseparated(completed);
+    }
+    if let Some(state) = set_state {
+        sep.push("\"state_id\" = ");
+        sep.push_bind_unseparated(state);
+    }
+    qb.push(" WHERE \"id\" = ");
+    qb.push_bind(pk);
+    qb.build().execute(&pre.pool).await.map(|_| ()).map_err(|error| save_error(&error, "write-delete"))?;
+
+    let (sweep_args, sweep_kwargs) = soft_delete_sweep("issue", &pk.to_string());
+    enqueue_best_effort(&pre.pool, SOFT_DELETE_TASK, sweep_args, sweep_kwargs).await;
+    let mut requested = Map::with_capacity(1);
+    requested.insert("issue_id".to_owned(), Value::String(pk.to_string()));
+    let requested_text =
+        pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&Value::Object(requested));
+    let kwargs = work_tasks::issue_activity_kwargs(
+        work_tasks::ACTIVITY_ISSUE_DELETED,
+        Some(&requested_text),
+        &pre.actor.id.to_string(),
+        &pk.to_string(),
+        &project_id.to_string(),
+        Some(&current_text),
+        Utc::now().timestamp(),
+    );
+    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
+
+    Ok(Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(axum::body::Body::empty())
+        .expect("empty response"))
+}
+
+// ---------------------------------------------------------------------------
+// Write handlers
+// ---------------------------------------------------------------------------
+
+/// `POST .../projects/<project_id>/work-items/` and the deprecated
+/// `issues/` twin (`urls/work_item.py:49-53,118-122`).
+pub async fn post_issue_list(
+    State(state): State<AppState>,
+    Path((slug, project_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Response {
+    let raw = match read_body(body).await {
+        Ok(raw) => raw,
+        Err(denial) => return denial.into_response(),
+    };
+    match create_issue_inner(&state, &headers, &slug, &project_id, &raw).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+/// `PATCH .../projects/<project_id>/work-items/<pk>/` and the deprecated
+/// twin (`urls/work_item.py:54-58,123-127`).
+pub async fn patch_issue_detail(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, pk)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&pk) {
+        return proxy_request(&state, "PATCH", original.to_string()).await;
+    }
+    let pk = pk.parse::<Uuid>().expect("checked segment");
+    let raw = match read_body(body).await {
+        Ok(raw) => raw,
+        Err(denial) => return denial.into_response(),
+    };
+    match patch_issue_inner(&state, &headers, &slug, &project_id, &pk, &raw).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+/// `DELETE .../projects/<project_id>/work-items/<pk>/` and the deprecated
+/// twin (`urls/work_item.py:54-58,123-127`).
+pub async fn delete_issue_detail(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, pk)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&pk) {
+        return proxy_request(&state, "DELETE", original.to_string()).await;
+    }
+    let pk = pk.parse::<Uuid>().expect("checked segment");
+    match delete_issue_inner(&state, &headers, &slug, &project_id, &pk).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------
