@@ -218,7 +218,10 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // join-requests (PIDASHCONV-617) + accounts/profile/graphs/
         // dashboard (PIDASHCONV-620) in `app_workspace`
         // (siblings 615-619/621-624 extend that module's merge,
-        // keeping both sides); the D-23 OpenAPI schema trio
+        // keeping both sides); D-25 project core (PIDASHCONV-571) +
+        // members (PIDASHCONV-572) + invites/favorites/boards
+        // (PIDASHCONV-573) + states/estimates (PIDASHCONV-574) in
+        // `app_project` (cutover: PIDASHCONV-575); the D-23 OpenAPI schema trio
         // (`v1_openapi`, PIDASHCONV-535): `/api/schema/`,
         // `/api/schema/swagger-ui/`, `/api/schema/redoc/` plus the
         // slashless 301 — registered on the first tied `api/` row and
@@ -237,6 +240,7 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::app_pages::routes())
             .merge(crate::app_scheduler::routes())
             .merge(crate::app_workspace::routes())
+            .merge(crate::app_project::routes())
             .merge(crate::v1_openapi::routes()),
         RouteGroup::License => crate::license::routes(),
         // Space handlers merge their routers here (intake: PIDASHCONV-177;
@@ -458,6 +462,26 @@ mod tests {
             .await
             .expect("serve");
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn app_group_mounts_project_routes() {
+        // D-25 cutover (PIDASHCONV-575): the App group merges
+        // `app_project::routes()`, so an owned project path resolves to a
+        // Rust handler instead of falling through to the Django proxy
+        // (502 fail-closed here — the silent-fallback regression this pins:
+        // unmounted, the contract suite stays green against Django while
+        // proving nothing about Rust).
+        let app = build_router_with_overlay(test_state(), Overlay::new());
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/workspaces/nope/projects/")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_ne!(response.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]
