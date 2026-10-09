@@ -680,7 +680,7 @@ pub async fn preamble(
 /// `project_id` becomes the canonical project UUID before permission
 /// checks. UUID-looking input passes through unverified (the view body
 /// 404/403s it as before); identifier misses answer the
-/// `{"Detail":"Project not found"}` 404. Reuses the `v1_projects`
+/// `{"detail":"Project not found"}` 404. Reuses the `v1_projects`
 /// `Project.resolve` port — the rewrite is shared view code, never
 /// re-ported per domain.
 pub async fn rewrite_project_id(
