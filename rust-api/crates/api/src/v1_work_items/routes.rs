@@ -1,12 +1,15 @@
 //! D-18 work-item route registration: action routes (handlers F,
 //! PIDASHCONV-678), link + comment routes (handlers B, PIDASHCONV-674),
-//! plus PR / code-review link routes (handlers H, PIDASHCONV-680).
+//! PR / code-review link routes (handlers H, PIDASHCONV-680), plus
+//! activity + attachment routes (handlers C, PIDASHCONV-675).
 //!
 //! Ports `apps/api/pi_dash/api/urls/work_item.py:133-151` (the four action
 //! paths), `urls/work_item.py:60-77,154-171` (the eight link/comment paths:
 //! four `work-items/` routes plus their deprecated `issues/` twins, which
-//! share the view classes and therefore the handlers) and
-//! `urls/work_item.py:218-236` (the four PR/review-link paths) onto the
+//! share the view classes and therefore the handlers),
+//! `urls/work_item.py:218-236` (the four PR/review-link paths) and
+//! `urls/work_item.py:79-98,173-192` (the eight activity/attachment paths
+//! plus their deprecated twins) onto the
 //! merged D-18 foundation. Cutover granularity is the route + method (the
 //! pilot `owned()` pattern): the owned methods serve from Rust, every other
 //! method on these paths proxies to Django so its 405-after-auth and
@@ -22,6 +25,11 @@ use axum::Router;
 use crate::state::AppState;
 
 use super::handlers_actions::{owned_action, post_retick, post_run_ai, post_wait, post_yield};
+use super::handlers_activity::{
+    delete_attachment, get_activity_detail, get_activity_list, get_attachment, get_attachment_list,
+    owned_activity, owned_attachment_detail, owned_attachment_list, patch_attachment,
+    post_attachment,
+};
 
 use super::handlers_pr_links::{
     pr_create, pr_destroy, pr_list, review_create, review_destroy, review_list,
@@ -36,7 +44,9 @@ use super::handlers_social::{
 /// Register the four action paths (`urls/work_item.py:133-151`,
 /// PIDASHCONV-678), the D-18 link/comment paths
 /// (`urls/work_item.py:60-77,154-171`, PIDASHCONV-674) and the
-/// PR/review-link paths (`urls/work_item.py:218-236`, PIDASHCONV-680).
+/// PR/review-link paths (`urls/work_item.py:218-236`, PIDASHCONV-680), and
+/// the activity/attachment paths (`urls/work_item.py:79-98,173-192`,
+/// PIDASHCONV-675).
 ///
 /// Sibling `v1_work_items` paths have no Rust route yet and keep proxying
 /// to Django through the fallback; on rebase keep both sides.
@@ -138,6 +148,56 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/workspaces/{slug}/agent-runs/{run_id}/yield/",
             owned_action(axum::routing::post(post_yield)),
         )
+        // Activities (IssueActivityListAPIEndpoint `views/issue.py:2124-2175`).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/activities/",
+            owned_activity(axum::routing::get(get_activity_list)),
+        )
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/activities/",
+            owned_activity(axum::routing::get(get_activity_list)),
+        )
+        // Activity detail (IssueActivityDetailAPIEndpoint `views/issue.py:2176-2234`).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/activities/{pk}/",
+            owned_activity(axum::routing::get(get_activity_detail)),
+        )
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/activities/{pk}/",
+            owned_activity(axum::routing::get(get_activity_detail)),
+        )
+        // Attachment list + upload (IssueAttachmentListCreateAPIEndpoint
+        // `views/issue.py:2235-2449`).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/attachments/",
+            owned_attachment_list(
+                axum::routing::get(get_attachment_list).post(post_attachment),
+            ),
+        )
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/issue-attachments/",
+            owned_attachment_list(
+                axum::routing::get(get_attachment_list).post(post_attachment),
+            ),
+        )
+        // Attachment detail (IssueAttachmentDetailAPIEndpoint
+        // `views/issue.py:2450-2653`).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/attachments/{pk}/",
+            owned_attachment_detail(
+                axum::routing::get(get_attachment)
+                    .patch(patch_attachment)
+                    .delete(delete_attachment),
+            ),
+        )
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/issue-attachments/{pk}/",
+            owned_attachment_detail(
+                axum::routing::get(get_attachment)
+                    .patch(patch_attachment)
+                    .delete(delete_attachment),
+            ),
+        )
 }
 
 #[cfg(test)]
@@ -229,6 +289,88 @@ mod tests {
                 "{method} {uri}"
             );
         }
+        // PIDASHCONV-675: all eight activity/attachment paths.
+        let pid = "44444444-4444-4444-4444-444444444444";
+        let iid = "55555555-5555-5555-5555-555555555555";
+        let aid = "66666666-6666-6666-6666-666666666666";
+        for (method, uri) in [
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/activities/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/activities/"),
+            ),
+            (
+                "GET",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/activities/{aid}/"
+                ),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/activities/{aid}/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/issue-attachments/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/issue-attachments/"),
+            ),
+            (
+                "GET",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/{aid}/"
+                ),
+            ),
+            (
+                "PATCH",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/{aid}/"
+                ),
+            ),
+            (
+                "DELETE",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/{aid}/"
+                ),
+            ),
+            (
+                "GET",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/issue-attachments/{aid}/"
+                ),
+            ),
+            (
+                "PATCH",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/issue-attachments/{aid}/"
+                ),
+            ),
+            (
+                "DELETE",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/issue-attachments/{aid}/"
+                ),
+            ),
+        ] {
+            assert_eq!(
+                status(method, &uri).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+        }
     }
 
     /// Unowned methods proxy to Django (502 fail-closed with the test
@@ -293,6 +435,36 @@ mod tests {
             .await,
             StatusCode::BAD_GATEWAY
         );
+        // PIDASHCONV-675: unowned verbs on the activity/attachment paths.
+        let pid = "44444444-4444-4444-4444-444444444444";
+        let iid = "55555555-5555-5555-5555-555555555555";
+        let aid = "66666666-6666-6666-6666-666666666666";
+        assert_eq!(
+            status(
+                "POST",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/activities/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "PUT",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "PUT",
+                &format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/{aid}/"
+                ),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
     }
 
     /// Non-UUID path segments proxy to Django (its `<uuid:>` converter
@@ -312,6 +484,29 @@ mod tests {
             status(
                 "POST",
                 "/api/v1/workspaces/acme/agent-runs/not-a-uuid/yield/",
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        // PIDASHCONV-675: activity/attachment paths.
+        let pid = "44444444-4444-4444-4444-444444444444";
+        let iid = "55555555-5555-5555-5555-555555555555";
+        assert_eq!(
+            status(
+                "GET",
+                &format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/not-a-uuid/activities/"
+                ),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "GET",
+                &format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/not-a-uuid/"
+                ),
             )
             .await,
             StatusCode::BAD_GATEWAY
