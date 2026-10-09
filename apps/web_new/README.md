@@ -95,7 +95,7 @@ e2e/parity/           parity scenarios and drivers (NEWFRONT-19)
 checks/               check-boundaries.mjs check-headers.mjs check-deps.mjs
 LICENSE_HEADER.txt    the ONE file defining the license header (interim
                       AGPL-3.0-only text per F-11/NEWFRONT-22).
-                      JSON manifests (package.json, tsconfig, oxlintrc, size-limit,
+                      JSON manifests (package.json, tsconfig, oxlintrc,
                       allowlist) cannot carry it — JSON has no comment syntax —
                       so the header check covers code extensions (ts/tsx/mjs/cjs/css)
 ```

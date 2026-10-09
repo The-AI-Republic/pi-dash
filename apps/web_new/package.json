@@ -24,6 +24,7 @@
     "coexistence:generate": "node checks/coexistence-routes.mjs",
     "check:coexistence": "node checks/coexistence-routes.mjs --check",
     "test:coexistence": "node --test checks/coexistence-routes.test.mjs",
+    "test:size-initial": "node --test checks/size-initial.test.mjs",
     "test:parity": "playwright test --config e2e/parity/playwright.config.ts",
     "test:parity:oracle": "playwright test --config e2e/parity/playwright.config.ts --project oracle",
     "test:parity:new": "playwright test --config e2e/parity/playwright.config.ts --project new",

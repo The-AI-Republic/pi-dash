@@ -70,6 +70,10 @@ export default defineConfig(({ mode }) => {
       emptyOutDir: true,
       sourcemap: false,
       chunkSizeWarningLimit: 200,
+      // The size gate (.size-limit.mjs) resolves the initial route chain
+      // from this manifest, so chunk hashes can rotate without touching
+      // the budget config (NEWFRONT-190).
+      manifest: true,
     },
   };
 });
