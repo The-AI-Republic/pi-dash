@@ -55,9 +55,11 @@
 //!   all render floats through serde.
 //! * `order_by=?` (random) is honored; forward related-span orders
 //!   (`project__name`, `actor__email`, …) JOIN and 200 like Django
-//!   (PIDASHCONV-748). Spans through reverse relations, M2M fields
-//!   (Django 200s with row fanout), datetime transforms
-//!   (`created_at__date`), and models outside the span graph
+//!   (PIDASHCONV-748), and bare FK names (`actor`) order by the
+//!   related `Meta.ordering` while bare attnames (`actor_id`) order by
+//!   the local column (PIDASHCONV-759). Spans through reverse
+//!   relations, M2M fields (Django 200s with row fanout), datetime
+//!   transforms (`created_at__date`), and models outside the span graph
 //!   (`DraftIssue`, `Page`, auth tables) still 500 here — narrowed
 //!   residual edge, all verified by live-Django probe.
 //!
@@ -1231,11 +1233,44 @@ fn match_hop(
     None
 }
 
+/// Emit the JOIN for one order hop. First-hop `project`/`workspace` reuse
+/// the list/detail queries' existing `p`/`w` aliases (the same joins Django
+/// reuses off its filter path, verified by probe); every other hop adds a
+/// row-preserving `LEFT JOIN` (`o1`, `o2`, …) like Django's ordering joins.
+/// Returns the hop's alias; `counter` feeds the `oN` numbering.
+fn emit_order_join(
+    joins: &mut String,
+    counter: &mut u32,
+    parent: &str,
+    attname: &str,
+    target: usize,
+    first: bool,
+) -> String {
+    if first && (target == IDX_PROJECT || target == IDX_WORKSPACE) {
+        return if target == IDX_PROJECT {
+            "p".to_owned()
+        } else {
+            "w".to_owned()
+        };
+    }
+    *counter += 1;
+    let alias = format!("o{counter}", counter = *counter);
+    let table = SPAN_MODELS[target].table;
+    let pk = SPAN_MODELS[target].pk;
+    joins.push_str(&format!(
+        "\n           LEFT JOIN \"{table}\" {alias} ON {alias}.\"{pk}\" = {parent}.\"{attname}\""
+    ));
+    alias
+}
+
 /// `order_by` resolution for the activity chains (`.order_by(...)`,
 /// `:2165`, `:2222`): exactly `?` orders randomly; otherwise one leading
 /// `-` selects descending and the rest is either a model field name, an
 /// FK attname, or `pk` (verified against Django's `names_to_path`), or a
-/// forward `__` span across relations. Span hops reuse the list/detail
+/// forward `__` span across relations. A bare FK *field* name (`actor`)
+/// follows the relation and orders by the target's `Meta.ordering`
+/// (PIDASHCONV-759); a bare attname (`actor_id`) is a concrete column
+/// and keeps the local-column order. Span hops reuse the list/detail
 /// queries' existing `p`/`w` joins for first-hop `project`/`workspace`
 /// (the same joins Django reuses off its filter path, verified by probe)
 /// and add row-preserving `LEFT JOIN`s (`o1`, `o2`, …) for every other
@@ -1261,15 +1296,6 @@ fn resolve_activity_order(raw: Option<&str>) -> Result<ActivityOrder, Denial> {
         "epoch",
         "deleted_at",
     ];
-    const FK: &[(&str, &str)] = &[
-        ("created_by", "created_by_id"),
-        ("issue", "issue_id"),
-        ("issue_comment", "issue_comment_id"),
-        ("project", "project_id"),
-        ("updated_by", "updated_by_id"),
-        ("workspace", "workspace_id"),
-        ("actor", "actor_id"),
-    ];
     fn direction(descending: bool) -> &'static str {
         if descending {
             "DESC"
@@ -1289,18 +1315,48 @@ fn resolve_activity_order(raw: Option<&str>) -> Result<ActivityOrder, Denial> {
         None => (false, text),
     };
     if !name.contains("__") {
+        // Bare FK field name (`actor`): Django follows the relation and
+        // orders by the target's `Meta.ordering` — the terminal-FK rule
+        // at the top level — and a leading `-` flips every term. Targets
+        // without ordering collapse to the local FK column with no join
+        // (no activity FK target lacks ordering today; the arm mirrors
+        // the terminal rule so a future one stays local).
+        if let Some((attname, target)) = match_hop(ACTIVITY_FK, name) {
+            if ACTIVITY_FK.iter().any(|(field, _, _)| *field == name) {
+                let ordering = SPAN_MODELS[target].ordering;
+                if ordering.is_empty() {
+                    return Ok(ActivityOrder {
+                        joins: String::new(),
+                        order: format!(r#"a."{attname}" {}"#, direction(descending)),
+                    });
+                }
+                let mut joins = String::new();
+                let mut counter = 0u32;
+                let alias = emit_order_join(&mut joins, &mut counter, "a", attname, target, true);
+                let mut terms = Vec::with_capacity(ordering.len());
+                for &(column, term_descending) in ordering {
+                    terms.push(format!(
+                        r#"{alias}."{column}" {}"#,
+                        direction(term_descending ^ descending)
+                    ));
+                }
+                return Ok(ActivityOrder {
+                    joins,
+                    order: terms.join(", "),
+                });
+            }
+            // Bare attname (`actor_id`): a concrete column, so the order
+            // stays on the local FK column (verified by probe).
+            return Ok(ActivityOrder {
+                joins: String::new(),
+                order: format!(r#"a."{attname}" {}"#, direction(descending)),
+            });
+        }
         let mut column: Option<&str> = None;
         if name == "pk" {
             column = Some("id");
         } else if COLUMNS.contains(&name) {
             column = Some(name);
-        } else {
-            for (field, attname) in FK {
-                if name == *field || name == *attname {
-                    column = Some(attname);
-                    break;
-                }
-            }
         }
         let Some(column) = column else {
             return Err(Denial::ServerError);
@@ -1331,30 +1387,6 @@ fn resolve_activity_span(name: &str, descending: bool) -> Result<ActivityOrder, 
     let mut parent_alias = "a".to_owned();
     // Model index the next hop resolves against (`None` = IssueActivity).
     let mut model: Option<usize> = None;
-    // Emit the JOIN for one hop; first-hop project/workspace reuse the
-    // base query's `p`/`w` aliases. Returns the hop's alias.
-    let mut join_hop = |joins: &mut String,
-                        parent: &str,
-                        attname: &str,
-                        target: usize,
-                        first: bool|
-     -> String {
-        if first && (target == IDX_PROJECT || target == IDX_WORKSPACE) {
-            return if target == IDX_PROJECT {
-                "p".to_owned()
-            } else {
-                "w".to_owned()
-            };
-        }
-        alias_counter += 1;
-        let alias = format!("o{alias_counter}");
-        let table = SPAN_MODELS[target].table;
-        let pk = SPAN_MODELS[target].pk;
-        joins.push_str(&format!(
-            "\n           LEFT JOIN \"{table}\" {alias} ON {alias}.\"{pk}\" = {parent}.\"{attname}\""
-        ));
-        alias
-    };
     // Join every hop but the last (the last hop joins only when the
     // terminal needs its table: plain columns and FK names do, a
     // terminal pk collapses to the parent's FK column without one).
@@ -1373,12 +1405,19 @@ fn resolve_activity_span(name: &str, descending: bool) -> Result<ActivityOrder, 
                 attname,
                 descending,
                 index == 0,
-                &mut join_hop,
+                &mut alias_counter,
                 &mut joins,
             )?;
             return Ok(ActivityOrder { joins, order });
         }
-        let alias = join_hop(&mut joins, &parent_alias, attname, target, index == 0);
+        let alias = emit_order_join(
+            &mut joins,
+            &mut alias_counter,
+            &parent_alias,
+            attname,
+            target,
+            index == 0,
+        );
         parent_alias = alias;
         model = Some(target);
     }
@@ -1396,7 +1435,7 @@ fn resolve_span_terminal(
     attname: &str,
     descending: bool,
     first_hop: bool,
-    join_hop: &mut impl FnMut(&mut String, &str, &str, usize, bool) -> String,
+    counter: &mut u32,
     joins: &mut String,
 ) -> Result<String, Denial> {
     fn direction(descending: bool) -> &'static str {
@@ -1422,7 +1461,7 @@ fn resolve_span_terminal(
             .iter()
             .any(|(_, fk_attname, _)| terminal == *fk_attname)
     {
-        let alias = join_hop(joins, parent, attname, target, first_hop);
+        let alias = emit_order_join(joins, counter, parent, attname, target, first_hop);
         return Ok(format!(r#"{alias}."{terminal}" {}"#, direction(descending)));
     }
     // Terminal FK name orders by the target's `Meta.ordering`
@@ -1437,7 +1476,7 @@ fn resolve_span_terminal(
         .map(|(_, fk_attname, fk_target)| (*fk_attname, *fk_target));
     if let Some((fk_attname, fk_target)) = fk_hit {
         let ordering = SPAN_MODELS[fk_target].ordering;
-        let alias = join_hop(&mut *joins, parent, attname, target, first_hop);
+        let alias = emit_order_join(joins, counter, parent, attname, target, first_hop);
         if ordering.is_empty() {
             return Ok(format!(
                 r#"{alias}."{fk_attname}" {}"#,
@@ -1445,7 +1484,7 @@ fn resolve_span_terminal(
             ));
         }
         let mut terms = Vec::with_capacity(ordering.len());
-        let target_alias = join_hop(&mut *joins, &alias, fk_attname, fk_target, false);
+        let target_alias = emit_order_join(joins, counter, &alias, fk_attname, fk_target, false);
         for &(column, term_descending) in ordering {
             terms.push(format!(
                 r#"{target_alias}."{column}" {}"#,
@@ -4806,11 +4845,65 @@ mod tests {
             resolved(Some("-updated_at")),
             plain(r#"a."updated_at" DESC"#)
         );
-        // Bare FK names keep the 675 mapping (local FK column); Django
-        // orders these by the related Meta.ordering instead — tracked
-        // separately as PIDASHCONV-759, out of 748 scope.
-        assert_eq!(resolved(Some("issue")), plain(r#"a."issue_id" ASC"#));
+        // Bare FK field names follow the relation into the target's
+        // Meta.ordering (PIDASHCONV-759); a leading `-` flips every
+        // term. Bare attnames stay on the local FK column.
+        assert_eq!(
+            resolved(Some("actor")),
+            ActivityOrder {
+                joins: "\n           LEFT JOIN \"users\" o1 ON o1.\"id\" = a.\"actor_id\""
+                    .to_owned(),
+                order: r#"o1."created_at" DESC"#.to_owned(),
+            }
+        );
+        assert_eq!(
+            resolved(Some("-actor")),
+            ActivityOrder {
+                joins: "\n           LEFT JOIN \"users\" o1 ON o1.\"id\" = a.\"actor_id\""
+                    .to_owned(),
+                order: r#"o1."created_at" ASC"#.to_owned(),
+            }
+        );
+        assert_eq!(
+            resolved(Some("issue")),
+            ActivityOrder {
+                joins: "\n           LEFT JOIN \"issues\" o1 ON o1.\"id\" = a.\"issue_id\""
+                    .to_owned(),
+                order: r#"o1."created_at" DESC"#.to_owned(),
+            }
+        );
+        assert_eq!(
+            resolved(Some("issue_comment")),
+            ActivityOrder {
+                joins: "\n           LEFT JOIN \"issue_comments\" o1 ON o1.\"id\" = a.\"issue_comment_id\""
+                    .to_owned(),
+                order: r#"o1."created_at" DESC"#.to_owned(),
+            }
+        );
+        assert_eq!(
+            resolved(Some("-created_by")),
+            ActivityOrder {
+                joins: "\n           LEFT JOIN \"users\" o1 ON o1.\"id\" = a.\"created_by_id\""
+                    .to_owned(),
+                order: r#"o1."created_at" ASC"#.to_owned(),
+            }
+        );
+        assert_eq!(
+            resolved(Some("updated_by")),
+            ActivityOrder {
+                joins: "\n           LEFT JOIN \"users\" o1 ON o1.\"id\" = a.\"updated_by_id\""
+                    .to_owned(),
+                order: r#"o1."created_at" DESC"#.to_owned(),
+            }
+        );
+        // Bare `project`/`workspace` reuse the base query's `p`/`w`
+        // joins with no extra JOIN.
+        assert_eq!(resolved(Some("project")), plain(r#"p."created_at" DESC"#));
+        assert_eq!(resolved(Some("-project")), plain(r#"p."created_at" ASC"#));
+        assert_eq!(resolved(Some("workspace")), plain(r#"w."created_at" DESC"#));
+        assert_eq!(resolved(Some("actor_id")), plain(r#"a."actor_id" ASC"#));
         assert_eq!(resolved(Some("-actor_id")), plain(r#"a."actor_id" DESC"#));
+        assert_eq!(resolved(Some("project_id")), plain(r#"a."project_id" ASC"#));
         assert_eq!(resolved(Some("pk")), plain(r#"a."id" ASC"#));
         assert_eq!(resolved(Some("?")), plain("RANDOM()"));
         // Forward spans (PIDASHCONV-748): first-hop project/workspace
