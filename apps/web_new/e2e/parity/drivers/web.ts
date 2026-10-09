@@ -16,6 +16,8 @@
 // workspace main so sidebar rows and issue rows never leak in.
 import { expect, type ElementHandle, type Locator, type Page } from "@playwright/test";
 import type {
+  AddRunnerFormState,
+  AddRunnerRemotePhase,
   AutomationCloseRow,
   AutomationMonthModal,
   AutomationRow,
@@ -17683,5 +17685,470 @@ export class WebDriver implements ParityDriver {
     const known = new Set(["Auto-archive closed work items", "Auto-close work items"]);
     const rows = await this.automationsBuiltInRows();
     return rows.some((row) => row !== "" && !known.has(row));
+  }
+
+  // --- Add-runner modal + creation (NEWFRONT-179, RUN-006–009) ---
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract. Every selector was observed on the running old app: the
+  // --- modal hangs under the z-30 panel wrapper, the pickers are
+  // --- body-portalled comboboxes opened through their field buttons, and
+  // --- the command panel renders the generated command in a pre.
+
+  /** Matches the cloud-driven creation calls (create POST + status polls). */
+  private static readonly ADD_RUNNER_PATTERN = "**/api/runners/dev-machines/**";
+
+  /** Manual sentinel option label in the machine picker. */
+  private static readonly ADD_RUNNER_MANUAL_LABEL = "Run `pidash runner add` manually";
+
+  private static addRunnerEscapeRegExp(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  /** The open add-runner modal's panel (only one modal opens at a time here). */
+  private addRunnerDialog(): Locator {
+    return this.page.locator("div.fixed.inset-0.z-30").last();
+  }
+
+  private async addRunnerWaitForm(): Promise<void> {
+    const dialog = this.addRunnerDialog();
+    await dialog.getByRole("button", { name: "Generate Runner", exact: true }).waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  private async addRunnerOpenModal(): Promise<void> {
+    const open = this.page.getByRole("button", { name: "Add runner", exact: true }).first();
+    await open.waitFor({ timeout: WebDriver.WAIT_MS });
+    await open.click({ timeout: WebDriver.WAIT_MS });
+    await this.addRunnerWaitForm();
+  }
+
+  async addRunnerOpenFromRunners(workspaceSlug: string, projectId?: string): Promise<void> {
+    const base =
+      projectId !== undefined ? `/${workspaceSlug}/projects/${projectId}/runners` : `/${workspaceSlug}/runners`;
+    await this.page.goto(base);
+    await this.addRunnerOpenModal();
+  }
+
+  async addRunnerOpenFromMachines(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/ai-dev-machines`);
+    await this.addRunnerOpenModal();
+  }
+
+  async addRunnerVisible(): Promise<boolean> {
+    const dialog = this.addRunnerDialog();
+    if ((await dialog.count()) === 0) return false;
+    const title = dialog.getByText("Add runner", { exact: false }).first();
+    const created = dialog.getByText("Runner created", { exact: false }).first();
+    return (await this.isShown(title)) || (await this.isShown(created));
+  }
+
+  async addRunnerLayout(): Promise<"form" | "remote" | "command"> {
+    const dialog = this.addRunnerDialog();
+    if ((await dialog.getByRole("button", { name: "Generate Runner", exact: true }).count()) > 0) return "form";
+    if ((await dialog.locator("pre").count()) > 0) return "command";
+    return "remote";
+  }
+
+  /** The combobox trigger button inside the `labelText` field wrapper. */
+  private addRunnerPickerButton(labelText: string): Locator {
+    const exact = new RegExp(`^${WebDriver.addRunnerEscapeRegExp(labelText)}$`);
+    return this.addRunnerDialog().locator("label", { hasText: exact }).locator("xpath=..").getByRole("button").first();
+  }
+
+  /**
+   * Shut any open picker portal. Escapes ONLY while options render: a
+   * bare Escape with no portal open reaches the modal itself and closes
+   * it, while an Escape into an open portal stops at the portal.
+   */
+  private async addRunnerShutPicker(): Promise<void> {
+    if ((await this.page.getByRole("option").count()) === 0) return;
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("option")
+      .first()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .catch(() => undefined);
+  }
+
+  /**
+   * Open the `labelText` picker; resolves once its portalled options
+   * render. Converges from every trigger state (closed, stale-open, or
+   * expanded-but-empty): shut what is open, then toggle, then verify.
+   */
+  private async addRunnerOpenPicker(labelText: string): Promise<void> {
+    const button = this.addRunnerPickerButton(labelText);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await this.addRunnerShutPicker();
+      await button.click({ timeout: WebDriver.WAIT_MS });
+      try {
+        await this.page.getByRole("option").first().waitFor({ timeout: 5_000 });
+        return;
+      } catch {
+        // A real outside pointerdown unsticks an expanded-but-empty
+        // trigger: the custom open state only resyncs through the
+        // outside-click detector, never through Escape alone.
+        await this.addRunnerDialog()
+          .getByText("Add runner", { exact: false })
+          .first()
+          .click({ timeout: 5_000 })
+          .catch(() => undefined);
+        if (attempt === 2) throw new Error(`[parity] the ${labelText} picker never rendered options.`);
+      }
+    }
+  }
+
+  private async addRunnerReadOptions(labelText: string): Promise<string[]> {
+    await this.addRunnerOpenPicker(labelText);
+    const labels = await this.page.getByRole("option").allInnerTexts();
+    await this.addRunnerShutPicker();
+    return labels.map((label) => label.trim());
+  }
+
+  private async addRunnerPickOption(labelText: string, optionName: string): Promise<void> {
+    await this.addRunnerOpenPicker(labelText);
+    const option = this.page.getByRole("option", { name: optionName, exact: true });
+    await option.waitFor({ timeout: WebDriver.WAIT_MS });
+    await option.click({ timeout: WebDriver.WAIT_MS });
+    await this.addRunnerShutPicker();
+  }
+
+  async addRunnerForm(): Promise<AddRunnerFormState> {
+    const dialog = this.addRunnerDialog();
+    const buttonText = async (labelText: string): Promise<string> =>
+      (
+        (await this.addRunnerPickerButton(labelText)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+    const projectButton = this.addRunnerPickerButton("Project");
+    // The project picker disables while the projects list loads, which
+    // reads exactly like the route lock. Settle first: an unlocked picker
+    // enables, a locked one fills with the route project (fail-open — the
+    // spec's own polls own the outcome, this just de-flakes the read).
+    const settleDeadline = Date.now() + 15_000;
+    for (;;) {
+      const label = await buttonText("Project");
+      const klass = (await projectButton.getAttribute("class").catch(() => "")) ?? "";
+      const disabled = (await projectButton.isDisabled().catch(() => false)) || klass.includes("cursor-not-allowed");
+      if (!disabled || label !== "Select a project" || Date.now() >= settleDeadline) break;
+      await this.page.waitForTimeout(250);
+    }
+    const projectClass = (await projectButton.getAttribute("class").catch(() => "")) ?? "";
+    const projectLocked =
+      (await projectButton.isDisabled().catch(() => false)) || projectClass.includes("cursor-not-allowed");
+    return {
+      machine: await buttonText("Dev machine"),
+      project: await buttonText("Project"),
+      projectLocked,
+      pod: await buttonText("Pod (optional)"),
+      name: await dialog.locator("#add-runner-name").inputValue({ timeout: WebDriver.WAIT_MS }),
+      workingDir: await dialog.locator("#add-runner-working-dir").inputValue({ timeout: WebDriver.WAIT_MS }),
+      agent: await buttonText("Agent"),
+      model: await buttonText("Model (optional)"),
+    };
+  }
+
+  async addRunnerMachineOptions(): Promise<string[]> {
+    return this.addRunnerReadOptions("Dev machine");
+  }
+
+  async addRunnerProjectOptions(): Promise<string[]> {
+    return this.addRunnerReadOptions("Project");
+  }
+
+  async addRunnerPodOptions(): Promise<string[]> {
+    return this.addRunnerReadOptions("Pod (optional)");
+  }
+
+  async addRunnerAgentOptions(): Promise<string[]> {
+    return this.addRunnerReadOptions("Agent");
+  }
+
+  async addRunnerModelOptions(): Promise<string[]> {
+    return this.addRunnerReadOptions("Model (optional)");
+  }
+
+  async addRunnerProjectError(): Promise<string | null> {
+    const error = this.addRunnerDialog().getByText("Pick a project.", { exact: true });
+    if ((await error.count()) === 0) return null;
+    return ((
+      (await error
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim() || null) as string | null;
+  }
+
+  async addRunnerNameError(): Promise<string | null> {
+    const error = this.addRunnerDialog().getByText("Runner name cannot contain spaces.", { exact: false });
+    if ((await error.count()) === 0) return null;
+    return ((
+      (await error
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim() || null) as string | null;
+  }
+
+  async addRunnerPickMachine(label: string): Promise<void> {
+    // The picker auto-selects the first connected machine; spare the
+    // portal a toggle when it already shows the target.
+    const current = (
+      (await this.addRunnerPickerButton("Dev machine")
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    if (current === label) return;
+    await this.addRunnerPickOption("Dev machine", label);
+  }
+
+  async addRunnerPickManual(): Promise<void> {
+    await this.addRunnerPickOption("Dev machine", WebDriver.ADD_RUNNER_MANUAL_LABEL);
+  }
+
+  async addRunnerPickProject(name: string): Promise<void> {
+    await this.addRunnerPickOption("Project", name);
+  }
+
+  async addRunnerPickPod(name: string): Promise<void> {
+    if (name === "") {
+      await this.addRunnerPickOption("Pod (optional)", "(default pod)");
+      return;
+    }
+    // Pod options carry a project-identifier suffix; match the bare name or
+    // the bare name plus that suffix.
+    const pattern = new RegExp(`^${WebDriver.addRunnerEscapeRegExp(name)}( \\([^)]*\\)|$)`);
+    await this.addRunnerOpenPicker("Pod (optional)");
+    const option = this.page.getByRole("option", { name: pattern });
+    await option.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    await option.first().click({ timeout: WebDriver.WAIT_MS });
+    await this.addRunnerShutPicker();
+  }
+
+  async addRunnerSetName(name: string): Promise<void> {
+    await this.addRunnerDialog().locator("#add-runner-name").fill(name, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async addRunnerSetWorkingDir(dir: string): Promise<void> {
+    await this.addRunnerDialog().locator("#add-runner-working-dir").fill(dir, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async addRunnerPickAgent(label: string): Promise<void> {
+    await this.addRunnerPickOption("Agent", label);
+  }
+
+  async addRunnerPickModel(label: string): Promise<void> {
+    await this.addRunnerPickOption("Model (optional)", label);
+  }
+
+  async addRunnerSubmit(): Promise<void> {
+    await this.addRunnerDialog()
+      .getByRole("button", { name: "Generate Runner", exact: true })
+      .click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async addRunnerClose(): Promise<void> {
+    const dialog = this.addRunnerDialog();
+    // Error/timeout panels offer no dismiss control of their own: step
+    // back to the form first, then cancel from there.
+    const phase = await this.addRunnerRemotePhase().catch(() => null);
+    if (phase === "error" || phase === "timeout") {
+      await dialog.getByRole("button", { name: "Back", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+      await dialog
+        .getByRole("button", { name: "Generate Runner", exact: true })
+        .waitFor({ timeout: WebDriver.WAIT_MS });
+    }
+    for (const name of ["Cancel", "Close", "Done"]) {
+      const control = dialog.getByRole("button", { name, exact: true });
+      if ((await control.count()) > 0) {
+        await control.first().click({ timeout: WebDriver.WAIT_MS });
+        return;
+      }
+    }
+    throw new Error("[parity] add-runner modal shows no Cancel/Close/Done control.");
+  }
+
+  async addRunnerRemotePhase(): Promise<AddRunnerRemotePhase | null> {
+    if ((await this.addRunnerLayout()) !== "remote") return null;
+    const body =
+      (await this.addRunnerDialog()
+        .innerText()
+        .catch(() => "")) ?? "";
+    if (body.includes("Runner created")) return "ok";
+    if (body.includes("Runner creation failed")) return "error";
+    if (body.includes("did not report back in time")) return "timeout";
+    return "creating";
+  }
+
+  async addRunnerRemoteText(): Promise<string | null> {
+    if ((await this.addRunnerLayout()) !== "remote") return null;
+    return ((
+      (await this.addRunnerDialog()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim() || null) as string | null;
+  }
+
+  async addRunnerRemoteRunnerName(): Promise<string | null> {
+    if ((await this.addRunnerLayout()) !== "remote") return null;
+    const code = this.addRunnerDialog().locator("code").first();
+    if ((await code.count()) === 0) return null;
+    return (((await code.innerText().catch(() => "")) ?? "").trim() || null) as string | null;
+  }
+
+  async addRunnerRemoteBack(): Promise<void> {
+    await this.addRunnerDialog()
+      .getByRole("button", { name: "Back", exact: true })
+      .click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async addRunnerRemoteManual(): Promise<void> {
+    await this.addRunnerDialog()
+      .getByRole("button", { name: "Show manual command", exact: true })
+      .click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  // One shared route handler feeds both spies: separate handlers on the
+  // same pattern starve each other (the later registration shadows the
+  // earlier one), so the create and status halves multiplex here.
+  private addRunnerSpyCreateBodies: string[] | null = null;
+  private addRunnerSpyStatusUrls: string[] | null = null;
+  private addRunnerSpyInstalled = false;
+
+  private async addRunnerSpyEnsure(): Promise<void> {
+    if (this.addRunnerSpyInstalled) return;
+    this.addRunnerSpyInstalled = true;
+    await this.page.route(WebDriver.ADD_RUNNER_PATTERN, async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      if (request.method() === "POST" && pathname.endsWith("/create-runner/")) {
+        this.addRunnerSpyCreateBodies?.push(request.postData() ?? "");
+      }
+      if (request.method() === "GET" && pathname.includes("/create-runner/") && !pathname.endsWith("/create-runner/")) {
+        this.addRunnerSpyStatusUrls?.push(request.url());
+      }
+      await route.continue();
+    });
+  }
+
+  private async addRunnerSpyMaybeUninstall(): Promise<void> {
+    if (this.addRunnerSpyCreateBodies !== null || this.addRunnerSpyStatusUrls !== null) return;
+    this.addRunnerSpyInstalled = false;
+    await this.page.unroute(WebDriver.ADD_RUNNER_PATTERN).catch(() => undefined);
+  }
+
+  async addRunnerCreateSpyStart(): Promise<void> {
+    this.addRunnerSpyCreateBodies = [];
+    await this.addRunnerSpyEnsure();
+  }
+
+  async addRunnerCreateSpyBodies(): Promise<string[]> {
+    return [...(this.addRunnerSpyCreateBodies ?? [])];
+  }
+
+  async addRunnerCreateSpyStop(): Promise<void> {
+    this.addRunnerSpyCreateBodies = null;
+    await this.addRunnerSpyMaybeUninstall();
+  }
+
+  async addRunnerStatusSpyStart(): Promise<void> {
+    this.addRunnerSpyStatusUrls = [];
+    await this.addRunnerSpyEnsure();
+  }
+
+  async addRunnerStatusSpyUrls(): Promise<string[]> {
+    return [...(this.addRunnerSpyStatusUrls ?? [])];
+  }
+
+  async addRunnerStatusSpyStop(): Promise<void> {
+    this.addRunnerSpyStatusUrls = null;
+    await this.addRunnerSpyMaybeUninstall();
+  }
+
+  async addRunnerCommandText(): Promise<string | null> {
+    if ((await this.addRunnerLayout()) !== "command") return null;
+    const pre = this.addRunnerDialog().locator("pre").first();
+    if ((await pre.count()) === 0) return null;
+    return ((await pre.textContent().catch(() => "")) ?? "") as string | null;
+  }
+
+  async addRunnerCommandHeader(): Promise<string | null> {
+    if ((await this.addRunnerLayout()) !== "command") return null;
+    const header = this.addRunnerDialog().locator("p").filter({ hasText: "Project" }).first();
+    if ((await header.count()) === 0) return null;
+    return (((await header.innerText().catch(() => "")) ?? "").trim() || null) as string | null;
+  }
+
+  /** The shell tab strip next to the "Shell" caption. */
+  private addRunnerShellStrip(): Locator {
+    return this.addRunnerDialog()
+      .getByText("Shell", { exact: true })
+      .locator("xpath=following-sibling::div[1]")
+      .getByRole("button");
+  }
+
+  async addRunnerShellOptions(): Promise<string[]> {
+    const labels = await this.addRunnerShellStrip().allInnerTexts();
+    return labels.map((label) => label.trim());
+  }
+
+  async addRunnerActiveShell(): Promise<string | null> {
+    const pressed = this.addRunnerDialog().locator('button[aria-pressed="true"]').first();
+    if ((await pressed.count()) === 0) return null;
+    return (((await pressed.innerText().catch(() => "")) ?? "").trim() || null) as string | null;
+  }
+
+  async addRunnerPickShell(label: string): Promise<void> {
+    // The strip is already a button locator: filter it, never chain a
+    // second getByRole (buttons contain no nested buttons).
+    const exact = new RegExp(`^${WebDriver.addRunnerEscapeRegExp(label)}$`);
+    await this.addRunnerShellStrip().filter({ hasText: exact }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  private addRunnerCopyButton(): Locator {
+    return this.addRunnerDialog().getByRole("button", { name: /^(Copy command|Copied!)$/ });
+  }
+
+  async addRunnerCopy(): Promise<void> {
+    // The panel writes through the async clipboard API, which headless
+    // Chromium denies without an explicit grant.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.addRunnerCopyButton().first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async addRunnerCopyState(): Promise<string | null> {
+    const button = this.addRunnerCopyButton().first();
+    if ((await button.count()) === 0) return null;
+    return (((await button.innerText().catch(() => "")) ?? "").trim() || null) as string | null;
+  }
+
+  async addRunnerReadClipboard(): Promise<string> {
+    return this.readClipboard();
+  }
+
+  async addRunnerBreakClipboard(): Promise<void> {
+    await this.page.evaluate(() => {
+      window.Clipboard.prototype.writeText = () => Promise.reject(new Error("parity: clipboard blocked"));
+    });
+  }
+
+  async addRunnerOriginNote(): Promise<string | null> {
+    const note = this.addRunnerDialog().getByText("Using the current browser origin", { exact: false });
+    if ((await note.count()) === 0) return null;
+    return ((
+      (await note
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim() || null) as string | null;
+  }
+
+  async addRunnerCommandBack(): Promise<void> {
+    await this.addRunnerDialog()
+      .getByRole("button", { name: "Back", exact: true })
+      .click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async addRunnerLastToast(): Promise<string | null> {
+    return this.lastToast();
   }
 }

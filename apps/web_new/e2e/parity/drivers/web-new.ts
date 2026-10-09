@@ -7,6 +7,8 @@
 // fill these in method by method; the oracle driver stays untouched.
 import type { Page } from "@playwright/test";
 import type {
+  AddRunnerFormState,
+  AddRunnerRemotePhase,
   AutomationCloseRow,
   AutomationMonthModal,
   AutomationRow,
@@ -5137,5 +5139,143 @@ export class WebNewDriver implements ParityDriver {
   }
   async automationsHasExtensionRows(): Promise<boolean> {
     return todo("automationsHasExtensionRows");
+  }
+
+  // --- Add-runner modal + creation (NEWFRONT-179, RUN-006–009) ---
+
+  async addRunnerOpenFromRunners(_workspaceSlug: string, _projectId?: string): Promise<void> {
+    return todo("addRunnerOpenFromRunners");
+  }
+  async addRunnerOpenFromMachines(_workspaceSlug: string): Promise<void> {
+    return todo("addRunnerOpenFromMachines");
+  }
+  async addRunnerVisible(): Promise<boolean> {
+    return todo("addRunnerVisible");
+  }
+  async addRunnerLayout(): Promise<"form" | "remote" | "command"> {
+    return todo("addRunnerLayout");
+  }
+  async addRunnerForm(): Promise<AddRunnerFormState> {
+    return todo("addRunnerForm");
+  }
+  async addRunnerMachineOptions(): Promise<string[]> {
+    return todo("addRunnerMachineOptions");
+  }
+  async addRunnerProjectOptions(): Promise<string[]> {
+    return todo("addRunnerProjectOptions");
+  }
+  async addRunnerPodOptions(): Promise<string[]> {
+    return todo("addRunnerPodOptions");
+  }
+  async addRunnerAgentOptions(): Promise<string[]> {
+    return todo("addRunnerAgentOptions");
+  }
+  async addRunnerModelOptions(): Promise<string[]> {
+    return todo("addRunnerModelOptions");
+  }
+  async addRunnerProjectError(): Promise<string | null> {
+    return todo("addRunnerProjectError");
+  }
+  async addRunnerNameError(): Promise<string | null> {
+    return todo("addRunnerNameError");
+  }
+  async addRunnerPickMachine(_label: string): Promise<void> {
+    return todo("addRunnerPickMachine");
+  }
+  async addRunnerPickManual(): Promise<void> {
+    return todo("addRunnerPickManual");
+  }
+  async addRunnerPickProject(_name: string): Promise<void> {
+    return todo("addRunnerPickProject");
+  }
+  async addRunnerPickPod(_name: string): Promise<void> {
+    return todo("addRunnerPickPod");
+  }
+  async addRunnerSetName(_name: string): Promise<void> {
+    return todo("addRunnerSetName");
+  }
+  async addRunnerSetWorkingDir(_dir: string): Promise<void> {
+    return todo("addRunnerSetWorkingDir");
+  }
+  async addRunnerPickAgent(_label: string): Promise<void> {
+    return todo("addRunnerPickAgent");
+  }
+  async addRunnerPickModel(_label: string): Promise<void> {
+    return todo("addRunnerPickModel");
+  }
+  async addRunnerSubmit(): Promise<void> {
+    return todo("addRunnerSubmit");
+  }
+  async addRunnerClose(): Promise<void> {
+    return todo("addRunnerClose");
+  }
+  async addRunnerRemotePhase(): Promise<AddRunnerRemotePhase | null> {
+    return todo("addRunnerRemotePhase");
+  }
+  async addRunnerRemoteText(): Promise<string | null> {
+    return todo("addRunnerRemoteText");
+  }
+  async addRunnerRemoteRunnerName(): Promise<string | null> {
+    return todo("addRunnerRemoteRunnerName");
+  }
+  async addRunnerRemoteBack(): Promise<void> {
+    return todo("addRunnerRemoteBack");
+  }
+  async addRunnerRemoteManual(): Promise<void> {
+    return todo("addRunnerRemoteManual");
+  }
+  async addRunnerCreateSpyStart(): Promise<void> {
+    return todo("addRunnerCreateSpyStart");
+  }
+  async addRunnerCreateSpyBodies(): Promise<string[]> {
+    return todo("addRunnerCreateSpyBodies");
+  }
+  async addRunnerCreateSpyStop(): Promise<void> {
+    return todo("addRunnerCreateSpyStop");
+  }
+  async addRunnerStatusSpyStart(): Promise<void> {
+    return todo("addRunnerStatusSpyStart");
+  }
+  async addRunnerStatusSpyUrls(): Promise<string[]> {
+    return todo("addRunnerStatusSpyUrls");
+  }
+  async addRunnerStatusSpyStop(): Promise<void> {
+    return todo("addRunnerStatusSpyStop");
+  }
+  async addRunnerCommandText(): Promise<string | null> {
+    return todo("addRunnerCommandText");
+  }
+  async addRunnerCommandHeader(): Promise<string | null> {
+    return todo("addRunnerCommandHeader");
+  }
+  async addRunnerShellOptions(): Promise<string[]> {
+    return todo("addRunnerShellOptions");
+  }
+  async addRunnerActiveShell(): Promise<string | null> {
+    return todo("addRunnerActiveShell");
+  }
+  async addRunnerPickShell(_label: string): Promise<void> {
+    return todo("addRunnerPickShell");
+  }
+  async addRunnerCopy(): Promise<void> {
+    return todo("addRunnerCopy");
+  }
+  async addRunnerCopyState(): Promise<string | null> {
+    return todo("addRunnerCopyState");
+  }
+  async addRunnerReadClipboard(): Promise<string> {
+    return todo("addRunnerReadClipboard");
+  }
+  async addRunnerBreakClipboard(): Promise<void> {
+    return todo("addRunnerBreakClipboard");
+  }
+  async addRunnerOriginNote(): Promise<string | null> {
+    return todo("addRunnerOriginNote");
+  }
+  async addRunnerCommandBack(): Promise<void> {
+    return todo("addRunnerCommandBack");
+  }
+  async addRunnerLastToast(): Promise<string | null> {
+    return todo("addRunnerLastToast");
   }
 }
