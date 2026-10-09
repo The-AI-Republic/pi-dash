@@ -10,10 +10,10 @@
 //! | --- | --- |
 //! | `POST runners/<uuid>/sessions/` | sibling `runner_open` (PIDASHCONV-557, Backlog) |
 //! | `DELETE runners/<uuid>/sessions/<uuid>/` | sibling `runner_open` (PIDASHCONV-557, Backlog) |
-//! | `POST runners/<uuid>/sessions/<uuid>/poll` | sibling `runner_poll` (PIDASHCONV-558, Backlog) |
-//! | `POST dev-machines/<uuid>/sessions/` | [`machine`] (this issue) |
-//! | `DELETE dev-machines/<uuid>/sessions/<uuid>/` | [`machine`] (this issue) |
-//! | `POST dev-machines/<uuid>/sessions/<uuid>/poll` | [`machine`] (this issue) |
+//! | `POST runners/<uuid>/sessions/<uuid>/poll` | [`runner_poll`] (PIDASHCONV-558) |
+//! | `POST dev-machines/<uuid>/sessions/` | [`machine`] (PIDASHCONV-559) |
+//! | `DELETE dev-machines/<uuid>/sessions/<uuid>/` | [`machine`] (PIDASHCONV-559) |
+//! | `POST dev-machines/<uuid>/sessions/<uuid>/poll` | [`machine`] (PIDASHCONV-559) |
 //!
 //! # Reuse, not forks
 //!
@@ -54,6 +54,7 @@
 //! re-render, route registration).
 
 pub mod machine;
+pub mod runner_poll;
 
 use axum::Router;
 
@@ -80,10 +81,17 @@ pub fn owned(
     router
 }
 
-/// Register the owned machine-session routes (sibling handler issues
+/// Register the owned session routes (sibling handler issues
 /// merge their own routers here; merges keep both sides).
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/v1/runner/runners/{runner_id}/sessions/{sid}/poll",
+            owned(
+                axum::routing::post(runner_poll::runner_session_poll),
+                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
         .route(
             "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/",
             owned(
@@ -137,6 +145,21 @@ mod tests {
 
     const MID: &str = "e985a543-b79a-48a8-bdfe-7e0aaa937914";
     const SID: &str = "399779fa-1d90-4aa0-8a64-501c6ba7ae0b";
+    const RID: &str = "88d03d06-e974-463d-a76e-33b773bb7850";
+
+    /// The runner poll path is registered with its owned method
+    /// (pool-less state 500s inside the handler, proving the request
+    /// reached Rust); unowned methods proxy to Django (502 against
+    /// the dead test upstream).
+    #[tokio::test]
+    async fn routes_register_runner_poll_path() {
+        let poll = format!("/api/v1/runner/runners/{RID}/sessions/{SID}/poll");
+        assert_eq!(
+            status_for("POST", &poll).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(status_for("GET", &poll).await, StatusCode::BAD_GATEWAY);
+    }
 
     /// All three machine paths are registered with their owned methods
     /// (pool-less state 500s inside the handler, proving the request
