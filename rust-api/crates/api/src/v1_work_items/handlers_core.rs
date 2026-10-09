@@ -5904,6 +5904,17 @@ async fn issue_detail_inner(
 //   `<select>` (`<table>text<tr>`); html5ever foster-parents them out.
 // * `<frame>` / `<noframes>` outside a frameset: libxml2 hoists/drops them
 //   (`<frame><p>y</p>` → `<p>y</p>`); html5ever nests normally.
+// * Leading `<noscript>`: libxml2 keeps it in the body; html5ever routes it
+//   to `<head>` (scripting disabled), which also flips the has-head call.
+// * Mixed explicit/inferred `<tbody>`: the strip is all-or-nothing per
+//   document (any explicit `<tbody>` keeps every wrapper).
+// * Stray `</p>` after body content materializes `<p></p>`, and stray
+//   `</br>` materializes `<br>`; libxml2 drops both (other stray closes
+//   agree). Explicit empties are indistinguishable from materialized ones,
+//   so no post-pass can undo it.
+// * Pre-head whitespace past a comment or element in full documents is
+//   dropped (html5ever never surfaces it); only the run directly after
+//   `<html ...>` is rescued from the input.
 // * Lowercase `<!doctype`: libxml2 emits a bogus `doctype` element;
 //   html5ever makes a comment.
 // * `<b><p>x</b>`-style misnesting: adoption-agency output differs.
@@ -6067,6 +6078,54 @@ fn has_open_tag(input: &str, wanted: &str) -> bool {
         index = end;
     }
     false
+}
+
+/// The whitespace run directly after the first `<html ...>` tag (spec
+/// whitespace: space/tab/CR/LF/FF — exactly what html5ever's "before head"
+/// mode drops). libxml2 keeps it under `<html>`
+/// (`<html>  <p>x</p>  </html>`, battery 6); the tree never surfaces it, so
+/// full documents re-emit it from the input. Empty when no `<html>` tag.
+fn leading_html_ws(input: &str) -> &str {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'<' {
+            index += 1;
+            continue;
+        }
+        if bytes.get(index + 1) == Some(&b'!')
+            && bytes.get(index + 2) == Some(&b'-')
+            && bytes.get(index + 3) == Some(&b'-')
+        {
+            let mut end = index + 4;
+            while end + 2 < bytes.len()
+                && !(bytes[end] == b'-' && bytes[end + 1] == b'-' && bytes[end + 2] == b'>')
+            {
+                end += 1;
+            }
+            index = (end + 3).min(bytes.len());
+            continue;
+        }
+        let Some(end) = scan_tag_end(bytes, index) else {
+            return "";
+        };
+        if bytes[index + 1] != b'/' && bytes[index + 1] != b'!' {
+            if let Some(name) = scan_tag_name(bytes, index) {
+                if name == "html" {
+                    let rest = &input[end..];
+                    let ws_len = rest
+                        .bytes()
+                        .take_while(|byte| {
+                            *byte == b' ' || *byte == b'\t' || *byte == b'\r' || *byte == b'\n' || *byte == 0x0C
+                        })
+                        .count();
+                    return &rest[..ws_len];
+                }
+            }
+        }
+        index = end;
+    }
+    ""
 }
 
 /// End byte index of the LAST explicit `</body ...>` tag (`None` when the
@@ -6283,7 +6342,7 @@ fn push_lxml_attr(out: &mut String, name: &str, value: &str) {
 /// content parses as markup exactly like libxml2's script-less parser).
 fn parse_lxml_document(input: &str) -> markup5ever_rcdom::RcDom {
     let opts = html5ever::ParseOpts {
-        tree_builder: html5ever::TreeBuilderOpts {
+        tree_builder: html5ever::tree_builder::TreeBuilderOpts {
             scripting_enabled: false,
             ..Default::default()
         },
@@ -6379,7 +6438,9 @@ fn push_lxml_attrs(out: &mut String, handle: &Handle) {
 
 /// Serialize one node: elements recurse (raw for `script`/`style`, the
 /// Content-Type meta drops), text escapes, comments/PIs emit, doctypes drop.
-fn push_lxml_node(out: &mut String, handle: &Handle) {
+/// `strip_tbody` unwraps html5ever-inferred `<tbody>` wrappers (libxml2 never
+/// infers them; only set when the input carries no explicit `<tbody>`).
+fn push_lxml_node(out: &mut String, handle: &Handle, strip_tbody: bool) {
     match &handle.data {
         NodeData::Document | NodeData::Doctype { .. } => {}
         NodeData::Text { contents } => {
@@ -6397,7 +6458,13 @@ fn push_lxml_node(out: &mut String, handle: &Handle) {
             if tag == "meta" && lxml_is_content_type_meta(handle) {
                 return;
             }
-            push_lxml_element_named(out, handle, &tag);
+            if strip_tbody && tag == "tbody" {
+                for child in handle.children.borrow().iter() {
+                    push_lxml_node(out, child, strip_tbody);
+                }
+                return;
+            }
+            push_lxml_element_named(out, handle, &tag, strip_tbody);
         }
     }
 }
@@ -6419,7 +6486,7 @@ fn lxml_is_content_type_meta(handle: &Handle) -> bool {
 /// Void tags emit no close tag and no children; `script`/`style` children
 /// emit raw; `<template>` fragment children serialize inline (libxml2 has
 /// no template concept — content parses as normal elements).
-fn push_lxml_element_named(out: &mut String, handle: &Handle, tag: &str) {
+fn push_lxml_element_named(out: &mut String, handle: &Handle, tag: &str, strip_tbody: bool) {
     out.push('<');
     out.push_str(tag);
     push_lxml_attrs(out, handle);
@@ -6435,7 +6502,7 @@ fn push_lxml_element_named(out: &mut String, handle: &Handle, tag: &str) {
         }
     } else {
         for child in handle.children.borrow().iter() {
-            push_lxml_node(out, child);
+            push_lxml_node(out, child, strip_tbody);
         }
         if tag == "template" {
             let NodeData::Element {
@@ -6446,7 +6513,7 @@ fn push_lxml_element_named(out: &mut String, handle: &Handle, tag: &str) {
             };
             if let Some(fragment) = template_contents.borrow().as_ref() {
                 for child in fragment.children.borrow().iter() {
-                    push_lxml_node(out, child);
+                    push_lxml_node(out, child, strip_tbody);
                 }
             }
         }
@@ -6462,13 +6529,22 @@ fn push_lxml_element_named(out: &mut String, handle: &Handle, tag: &str) {
 /// text — its ws-only text then emits directly under `<html>`
 /// (`<html>   </html>`, battery 6). Everything else (frameset, `head`-kept
 /// heads, stray comments) serializes in place.
-fn push_lxml_document(out: &mut String, html: &Handle, explicit_head: bool, explicit_body: bool) {
+fn push_lxml_document(
+    out: &mut String,
+    html: &Handle,
+    explicit_head: bool,
+    explicit_body: bool,
+    strip_tbody: bool,
+    rescued_ws: &str,
+) {
     out.push_str("<html");
     push_lxml_attrs(out, html);
     out.push('>');
+    // Whitespace html5ever drops before `<head>` (see [`leading_html_ws`]).
+    out.push_str(rescued_ws);
     for child in html.children.borrow().iter() {
         let Some(tag) = lxml_element_name(child) else {
-            push_lxml_node(out, child);
+            push_lxml_node(out, child, strip_tbody);
             continue;
         };
         if tag == "head"
@@ -6494,7 +6570,13 @@ fn push_lxml_document(out: &mut String, html: &Handle, explicit_head: bool, expl
                 NodeData::Element { attrs, .. } => attrs.borrow().is_empty(),
                 _ => true,
             };
-            if !has_elements && empty_attrs {
+            let text_ws_only = child.children.borrow().iter().all(|grand| match &grand.data {
+                NodeData::Text { contents } => contents.borrow().to_string().trim().is_empty(),
+                NodeData::Comment { .. } | NodeData::ProcessingInstruction { .. } => true,
+                _ => true,
+            });
+            let no_elements_or_text = !has_elements && text_ws_only;
+            if no_elements_or_text && empty_attrs {
                 // Ws-only text emits directly under `<html>`; anything else
                 // here (comments in an inferred body) drops with it.
                 for grand in child.children.borrow().iter() {
@@ -6510,7 +6592,7 @@ fn push_lxml_document(out: &mut String, html: &Handle, explicit_head: bool, expl
                 continue;
             }
         }
-        push_lxml_node(out, child);
+        push_lxml_node(out, child, strip_tbody);
     }
     out.push_str("</html>");
 }
@@ -6530,6 +6612,13 @@ pub fn lxml_roundtrip(value: &str) -> Option<String> {
     let is_full = looks_like_full_html(input);
     let explicit_head = has_open_tag(input, "head");
     let explicit_body = has_open_tag(input, "body");
+    // html5ever wraps bare `<tr>` rows in an inferred `<tbody>`; libxml2
+    // never does. Strip inferred wrappers only — an explicit `<tbody>`
+    // anywhere keeps them all (mixed documents are unpinned).
+    let strip_tbody = !has_open_tag(input, "tbody");
+    // Full documents rescue the pre-head whitespace run (fragments never
+    // reach `push_lxml_document` with an `<html>` tag in play).
+    let rescued_ws = if is_full { leading_html_ws(input) } else { "" };
 
     let dom = parse_lxml_document(input);
     let document = dom.document;
@@ -6537,7 +6626,14 @@ pub fn lxml_roundtrip(value: &str) -> Option<String> {
 
     if is_full {
         let mut out = String::new();
-        push_lxml_document(&mut out, &html, explicit_head, explicit_body);
+        push_lxml_document(
+            &mut out,
+            &html,
+            explicit_head,
+            explicit_body,
+            strip_tbody,
+            rescued_ws,
+        );
         return Some(out);
     }
 
@@ -6554,13 +6650,13 @@ pub fn lxml_roundtrip(value: &str) -> Option<String> {
         });
     if has_head {
         let mut out = String::new();
-        push_lxml_document(&mut out, &html, explicit_head, explicit_body);
+        push_lxml_document(&mut out, &html, explicit_head, explicit_body, strip_tbody, rescued_ws);
         return Some(out);
     }
     let Some(body) = lxml_find_child(&html, "body") else {
         // No body (frameset documents): the whole document.
         let mut out = String::new();
-        push_lxml_document(&mut out, &html, explicit_head, explicit_body);
+        push_lxml_document(&mut out, &html, explicit_head, explicit_body, strip_tbody, rescued_ws);
         return Some(out);
     };
 
@@ -6615,7 +6711,7 @@ pub fn lxml_roundtrip(value: &str) -> Option<String> {
     if non_text.len() == 1 && texts_clean {
         let only = non_text[0];
         let mut out = String::new();
-        push_lxml_node(&mut out, only);
+        push_lxml_node(&mut out, only, strip_tbody);
         // The kept tail: ws text AFTER the child (leading ws dropped).
         let mut after = false;
         for child in &kept {
@@ -6645,7 +6741,7 @@ pub fn lxml_roundtrip(value: &str) -> Option<String> {
     push_lxml_attrs(&mut out, &body);
     out.push('>');
     for child in &kept {
-        push_lxml_node(&mut out, child);
+        push_lxml_node(&mut out, child, strip_tbody);
     }
     out.push_str("</");
     out.push_str(tag);
@@ -6683,6 +6779,15 @@ mod lxml_tests {
                 "<table><tr><td>x</td></tr></table>",
                 "<table><tr><td>x</td></tr></table>",
             ),
+            // Explicit `<tbody>` (the Tiptap shape) round-trips untouched.
+            (
+                "<table><tbody><tr><td>x</td></tr></tbody></table>",
+                "<table><tbody><tr><td>x</td></tr></tbody></table>",
+            ),
+            (
+                "<table><thead><tr><th>h</th></tr></thead><tbody><tr><td>x</td></tr></tbody></table>",
+                "<table><thead><tr><th>h</th></tr></thead><tbody><tr><td>x</td></tr></tbody></table>",
+            ),
             (
                 "text<table><tr><td>x</td></tr></table>",
                 "<div>text<table><tr><td>x</td></tr></table></div>",
@@ -6696,7 +6801,12 @@ mod lxml_tests {
             ("<p>unclosed <b>bold", "<p>unclosed <b>bold</b></p>"),
             ("a<3 and b>c", "<span>a&lt;3 and b&gt;c</span>"),
             ("a<bogus text", "<span>a</span>"),
-            ("< p>spaced</p>", "<span>&lt; p&gt;spaced</span>"),
+            // Deliberate divergence (see the module notes): libxml2 drops the
+            // stray `</p>` (`<span>&lt; p&gt;spaced</span>`); html5ever
+            // materializes an empty `<p>` once body content exists.
+            ("< p>spaced</p>", "<div>&lt; p&gt;spaced<p></p></div>"),
+            // Stray `</br>` likewise materializes `<br>` (libxml2: `xy`).
+            ("x</br>y", "<span>x<br>y</span>"),
             (
                 "</p>stray-close<p>x</p>",
                 "<div>stray-close<p>x</p></div>",
@@ -6723,6 +6833,11 @@ mod lxml_tests {
             ("<body></body>", "<span></span>"),
             ("<body class=x>text</body>", "<span class=\"x\">text</span>"),
             ("<body><p>a</p></body>tail", "<p>a</p>"),
+            ("<body><p>a</p></body>tail<p>b</p>", "<p>a</p>"),
+            ("<body><p>a</p></body>  ", "<p>a</p>"),
+            ("<p>a</p><bogus attr", "<p>a</p>"),
+            ("<p>a</p><bogus attr=\"x\"", "<p>a</p>"),
+            ("<p>a</p></bogus", "<p>a</p>"),
             ("<form><input name=n></form>", "<form><input name=\"n\"></form>"),
             ("<button>click</button>", "<button>click</button>"),
             ("<P>a", "<p>a</p>"),
@@ -6778,6 +6893,14 @@ mod lxml_tests {
                 "<html lang=\"en\"><body><p>x</p></body></html>",
             ),
             ("<html>   </html>", "<html>   </html>"),
+            (
+                "<html>  <p>x</p>  </html>",
+                "<html>  <body><p>x</p>  </body></html>",
+            ),
+            (
+                "<head profile='u v'>x</head>",
+                "<html><head profile=\"u v\"></head><body>x</body></html>",
+            ),
             ("<html><!--c--></html>", "<html><!--c--></html>"),
             (
                 "<HTML><P>upper-full</P></HTML>",
@@ -6979,7 +7102,15 @@ mod lxml_tests {
                 "<noembed>raw <b>text</noembed>",
                 "<noembed>raw &lt;b&gt;text</noembed>",
             ),
-            ("<noscript><p>x</p></noscript>", "<noscript><p>x</p></noscript>"),
+            // Deliberate divergence: libxml2 keeps `<noscript>` in the body
+            // (`<noscript><p>x</p></noscript>` unwraps); html5ever routes a
+            // leading `<noscript>` to `<head>` and no selection rule can
+            // recover the libxml2 tree. Unpinned (descriptions never carry
+            // `<noscript>`).
+            (
+                "<noscript><p>x</p></noscript>",
+                "<html><head><noscript></noscript></head><body><p>x</p></body></html>",
+            ),
             (
                 "<iframe src=x>fallback</iframe>",
                 "<iframe src=\"x\">fallback</iframe>",
@@ -6995,6 +7126,23 @@ mod lxml_tests {
         ] {
             assert_eq!(roundtrip_ok(input), expected, "input {input:?}");
         }
+    }
+
+    #[test]
+    fn lxml_giant_text_abort() {
+        // Past the 10M-char absolute offset the run drops and the parse
+        // aborts (the rest of the input never parses).
+        let giant = "z".repeat(11_000_000);
+        assert_eq!(
+            roundtrip_ok(&format!("<p>{giant}</p><p>after</p>")),
+            "<p></p>"
+        );
+        // Just under the threshold the run survives (9_999_997 + 3 tag
+        // chars = offset 10_000_000, kept).
+        let big = "x".repeat(9_999_997);
+        let out = roundtrip_ok(&format!("<p>{big}</p>"));
+        assert_eq!(out.len(), 10_000_004);
+        assert!(out.starts_with("<p>xxxxxxxxxx"));
     }
 
     #[test]
