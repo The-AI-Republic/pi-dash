@@ -1697,14 +1697,15 @@ class Seeder:
         *,
         verb: str = "created",
         comment: str = "contract activity",
+        actor_id: str | None = None,
     ) -> dict[str, Any]:
         activity_id = _uid()
         self.db.execute(
             """INSERT INTO issue_activities
                (id, verb, comment, attachments, issue_id, project_id, workspace_id,
-                created_at, updated_at)
-               VALUES (%s,%s,%s,'{}',%s,%s,%s,now(),now())""",
-            (activity_id, verb, comment, issue_id, project_id, workspace_id),
+                actor_id, created_at, updated_at)
+               VALUES (%s,%s,%s,'{}',%s,%s,%s,%s,now(),now())""",
+            (activity_id, verb, comment, issue_id, project_id, workspace_id, actor_id),
         )
         self._put("issue_activities", activity_id)
         return {"id": activity_id}

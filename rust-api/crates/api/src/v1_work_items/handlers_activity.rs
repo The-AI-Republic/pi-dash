@@ -53,8 +53,13 @@
 //!   exponent spelling (`1e16`, `1.5e-5`) where CPython spells `1e+16`,
 //!   `1.5e-05` — same accepted edge as every merged shape module, which
 //!   all render floats through serde.
-//! * `order_by=?` (random) is honored; related-span orders
-//!   (`project__name`) 500 like any other unknown column.
+//! * `order_by=?` (random) is honored; forward related-span orders
+//!   (`project__name`, `actor__email`, …) JOIN and 200 like Django
+//!   (PIDASHCONV-748). Spans through reverse relations, M2M fields
+//!   (Django 200s with row fanout), datetime transforms
+//!   (`created_at__date`), and models outside the span graph
+//!   (`DraftIssue`, `Page`, auth tables) still 500 here — narrowed
+//!   residual edge, all verified by live-Django probe.
 //!
 //! Fixture: `F18-11` (`rust-api/fixtures/v1_work_items/handlers/` —
 //! `activity_list`, `activity_detail`, `attachment_list`,
@@ -764,13 +769,483 @@ async fn fetch_workspace_id(pool: &PgPool, slug: &str) -> Result<Option<Uuid>, D
     .map_err(|error| db_error(error, "attachment-workspace"))
 }
 
+/// Resolved activity `ORDER BY`: the extra JOIN clauses (empty when the
+/// order needs none) plus the `ORDER BY` fragment (without the keywords).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActivityOrder {
+    /// `LEFT JOIN ...` clauses (each already newline+indent prefixed, so an
+    /// empty string leaves the base SQL byte-identical).
+    joins: String,
+    /// `ORDER BY` terms without the keywords, e.g. `p."name" ASC`.
+    order: String,
+}
+
+/// One node of the forward-span model graph (`db/models/*.py`,
+/// `runner/models.py`): table, pk column, `Meta.ordering` terms and the
+/// forward many-to-one (plus the one forward one-to-one,
+/// `IssueComment.description`, which spans like an FK) map. Field names
+/// come from live Django introspection (all columns equal their field
+/// names; every pk is `id`); reverse relations and M2M fields are absent,
+/// so spans through them 500 (residual edge — Django 200s with row
+/// fanout, verified by probe).
+struct SpanModel {
+    table: &'static str,
+    pk: &'static str,
+    /// `Meta.ordering` as `(column, descending)` terms; empty means the
+    /// model declares no ordering (terminal FKs then collapse to the
+    /// parent's FK column, per the `issue__type` probe).
+    ordering: &'static [(&'static str, bool)],
+    /// Concrete non-FK field names (all are their own columns), plus the
+    /// attnames of FKs whose targets sit outside the graph
+    /// (`FileAsset.draft_issue_id/page_id`) so they still resolve as
+    /// terminal columns.
+    columns: &'static [&'static str],
+    /// Forward FKs: `(field name, attname, target model index)`.
+    /// Hops match the field name or the attname (`project_id__name`
+    /// 200s in Django, verified by probe).
+    fks: &'static [(&'static str, &'static str, usize)],
+}
+
+const IDX_PROJECT: usize = 0;
+const IDX_WORKSPACE: usize = 1;
+const IDX_ISSUE: usize = 2;
+const IDX_USER: usize = 3;
+const IDX_COMMENT: usize = 4;
+const IDX_FILE_ASSET: usize = 5;
+const IDX_STATE: usize = 6;
+const IDX_ESTIMATE: usize = 7;
+const IDX_ESTIMATE_POINT: usize = 8;
+const IDX_ISSUE_TYPE: usize = 9;
+const IDX_DESCRIPTION: usize = 10;
+const IDX_POD: usize = 11;
+
+const SPAN_MODELS: &[SpanModel] = &[
+    SpanModel {
+        // db.Project
+        table: "projects",
+        pk: "id",
+        ordering: &[("created_at", true)],
+        columns: &[
+            "agent_default_interval_seconds",
+            "agent_default_max_ticks",
+            "agent_review_default_interval_seconds",
+            "agent_test_default_interval_seconds",
+            "agent_ticking_enabled",
+            "archive_in",
+            "archived_at",
+            "base_branch",
+            "close_in",
+            "cover_image",
+            "created_at",
+            "cycle_view",
+            "default_agent_executor",
+            "deleted_at",
+            "description",
+            "description_html",
+            "description_text",
+            "emoji",
+            "external_id",
+            "external_source",
+            "guest_view_all_features",
+            "icon_prop",
+            "id",
+            "identifier",
+            "intake_view",
+            "is_default",
+            "is_issue_type_enabled",
+            "is_time_tracking_enabled",
+            "issue_views_view",
+            "logo_props",
+            "members_can_edit_states",
+            "module_view",
+            "name",
+            "network",
+            "page_view",
+            "repo_url",
+            "timezone",
+            "updated_at",
+        ],
+        fks: &[
+            ("cover_image_asset", "cover_image_asset_id", IDX_FILE_ASSET),
+            ("created_by", "created_by_id", IDX_USER),
+            ("default_assignee", "default_assignee_id", IDX_USER),
+            ("default_state", "default_state_id", IDX_STATE),
+            ("estimate", "estimate_id", IDX_ESTIMATE),
+            ("project_lead", "project_lead_id", IDX_USER),
+            ("updated_by", "updated_by_id", IDX_USER),
+            ("workspace", "workspace_id", IDX_WORKSPACE),
+        ],
+    },
+    SpanModel {
+        // db.Workspace
+        table: "workspaces",
+        pk: "id",
+        ordering: &[("created_at", true)],
+        columns: &[
+            "background_color",
+            "created_at",
+            "deleted_at",
+            "id",
+            "logo",
+            "name",
+            "organization_size",
+            "slug",
+            "timezone",
+            "updated_at",
+        ],
+        fks: &[
+            ("created_by", "created_by_id", IDX_USER),
+            ("logo_asset", "logo_asset_id", IDX_FILE_ASSET),
+            ("owner", "owner_id", IDX_USER),
+            ("updated_by", "updated_by_id", IDX_USER),
+        ],
+    },
+    SpanModel {
+        // db.Issue
+        table: "issues",
+        pk: "id",
+        ordering: &[("created_at", true)],
+        columns: &[
+            "agent_executor",
+            "archived_at",
+            "completed_at",
+            "complexity_score",
+            "created_at",
+            "created_via",
+            "deleted_at",
+            "description_binary",
+            "description_html",
+            "description_json",
+            "description_stripped",
+            "external_id",
+            "external_source",
+            "git_work_branch",
+            "id",
+            "is_draft",
+            "name",
+            "point",
+            "priority",
+            "sequence_id",
+            "sort_order",
+            "start_date",
+            "target_date",
+            "updated_at",
+            "workpad",
+        ],
+        fks: &[
+            ("assigned_pod", "assigned_pod_id", IDX_POD),
+            ("created_by", "created_by_id", IDX_USER),
+            ("estimate_point", "estimate_point_id", IDX_ESTIMATE_POINT),
+            ("parent", "parent_id", IDX_ISSUE),
+            ("project", "project_id", IDX_PROJECT),
+            ("state", "state_id", IDX_STATE),
+            ("type", "type_id", IDX_ISSUE_TYPE),
+            ("updated_by", "updated_by_id", IDX_USER),
+            ("workspace", "workspace_id", IDX_WORKSPACE),
+        ],
+    },
+    SpanModel {
+        // db.User
+        table: "users",
+        pk: "id",
+        ordering: &[("created_at", true)],
+        columns: &[
+            "avatar",
+            "bot_type",
+            "cover_image",
+            "created_at",
+            "created_location",
+            "date_joined",
+            "display_name",
+            "email",
+            "first_name",
+            "id",
+            "is_active",
+            "is_bot",
+            "is_email_valid",
+            "is_email_verified",
+            "is_managed",
+            "is_password_autoset",
+            "is_password_expired",
+            "is_password_reset_required",
+            "is_staff",
+            "is_superuser",
+            "last_active",
+            "last_location",
+            "last_login",
+            "last_login_ip",
+            "last_login_medium",
+            "last_login_time",
+            "last_login_uagent",
+            "last_logout_ip",
+            "last_logout_time",
+            "last_name",
+            "masked_at",
+            "mobile_number",
+            "password",
+            "token",
+            "token_updated_at",
+            "updated_at",
+            "user_timezone",
+            "username",
+        ],
+        fks: &[
+            ("avatar_asset", "avatar_asset_id", IDX_FILE_ASSET),
+            ("cover_image_asset", "cover_image_asset_id", IDX_FILE_ASSET),
+        ],
+    },
+    SpanModel {
+        // db.IssueComment
+        table: "issue_comments",
+        pk: "id",
+        ordering: &[("created_at", true)],
+        columns: &[
+            "access",
+            "attachments",
+            "comment_html",
+            "comment_json",
+            "comment_stripped",
+            "created_at",
+            "deleted_at",
+            "edited_at",
+            "external_id",
+            "external_source",
+            "id",
+            "labels",
+            "speaker_agent_run_id",
+            "speaker_label",
+            "speaker_type",
+            "updated_at",
+        ],
+        fks: &[
+            ("actor", "actor_id", IDX_USER),
+            ("created_by", "created_by_id", IDX_USER),
+            ("description", "description_id", IDX_DESCRIPTION),
+            ("issue", "issue_id", IDX_ISSUE),
+            ("parent", "parent_id", IDX_COMMENT),
+            ("project", "project_id", IDX_PROJECT),
+            ("updated_by", "updated_by_id", IDX_USER),
+            ("workspace", "workspace_id", IDX_WORKSPACE),
+        ],
+    },
+    SpanModel {
+        // db.FileAsset (`draft_issue`/`page` targets sit outside the
+        // graph: their attnames resolve as terminal columns but hops
+        // through them 500 — residual edge).
+        table: "file_assets",
+        pk: "id",
+        ordering: &[("created_at", true)],
+        columns: &[
+            "asset",
+            "attributes",
+            "created_at",
+            "deleted_at",
+            "draft_issue_id",
+            "entity_identifier",
+            "entity_type",
+            "external_id",
+            "external_source",
+            "id",
+            "is_archived",
+            "is_deleted",
+            "is_uploaded",
+            "page_id",
+            "size",
+            "storage_metadata",
+            "updated_at",
+        ],
+        fks: &[
+            ("comment", "comment_id", IDX_COMMENT),
+            ("created_by", "created_by_id", IDX_USER),
+            ("issue", "issue_id", IDX_ISSUE),
+            ("project", "project_id", IDX_PROJECT),
+            ("updated_by", "updated_by_id", IDX_USER),
+            ("user", "user_id", IDX_USER),
+            ("workspace", "workspace_id", IDX_WORKSPACE),
+        ],
+    },
+    SpanModel {
+        // db.State
+        table: "states",
+        pk: "id",
+        ordering: &[("sequence", false)],
+        columns: &[
+            "color",
+            "created_at",
+            "default",
+            "deleted_at",
+            "description",
+            "external_id",
+            "external_source",
+            "group",
+            "id",
+            "is_triage",
+            "name",
+            "sequence",
+            "slug",
+            "updated_at",
+        ],
+        fks: &[
+            ("created_by", "created_by_id", IDX_USER),
+            ("project", "project_id", IDX_PROJECT),
+            ("updated_by", "updated_by_id", IDX_USER),
+            ("workspace", "workspace_id", IDX_WORKSPACE),
+        ],
+    },
+    SpanModel {
+        // db.Estimate
+        table: "estimates",
+        pk: "id",
+        ordering: &[("name", false)],
+        columns: &[
+            "created_at",
+            "deleted_at",
+            "description",
+            "id",
+            "last_used",
+            "name",
+            "type",
+            "updated_at",
+        ],
+        fks: &[
+            ("created_by", "created_by_id", IDX_USER),
+            ("project", "project_id", IDX_PROJECT),
+            ("updated_by", "updated_by_id", IDX_USER),
+            ("workspace", "workspace_id", IDX_WORKSPACE),
+        ],
+    },
+    SpanModel {
+        // db.EstimatePoint
+        table: "estimate_points",
+        pk: "id",
+        ordering: &[("value", false)],
+        columns: &[
+            "created_at",
+            "deleted_at",
+            "description",
+            "id",
+            "key",
+            "updated_at",
+            "value",
+        ],
+        fks: &[
+            ("created_by", "created_by_id", IDX_USER),
+            ("estimate", "estimate_id", IDX_ESTIMATE),
+            ("project", "project_id", IDX_PROJECT),
+            ("updated_by", "updated_by_id", IDX_USER),
+            ("workspace", "workspace_id", IDX_WORKSPACE),
+        ],
+    },
+    SpanModel {
+        // db.IssueType (no Meta.ordering: terminal FKs to it collapse
+        // to the parent's FK column, verified by the `issue__type` probe).
+        table: "issue_types",
+        pk: "id",
+        ordering: &[],
+        columns: &[
+            "created_at",
+            "deleted_at",
+            "description",
+            "external_id",
+            "external_source",
+            "id",
+            "is_active",
+            "is_default",
+            "is_epic",
+            "level",
+            "logo_props",
+            "name",
+            "updated_at",
+        ],
+        fks: &[
+            ("created_by", "created_by_id", IDX_USER),
+            ("updated_by", "updated_by_id", IDX_USER),
+            ("workspace", "workspace_id", IDX_WORKSPACE),
+        ],
+    },
+    SpanModel {
+        // db.Description
+        table: "descriptions",
+        pk: "id",
+        ordering: &[("created_at", true)],
+        columns: &[
+            "created_at",
+            "deleted_at",
+            "description_binary",
+            "description_html",
+            "description_json",
+            "description_stripped",
+            "id",
+            "updated_at",
+        ],
+        fks: &[
+            ("created_by", "created_by_id", IDX_USER),
+            ("project", "project_id", IDX_PROJECT),
+            ("updated_by", "updated_by_id", IDX_USER),
+            ("workspace", "workspace_id", IDX_WORKSPACE),
+        ],
+    },
+    SpanModel {
+        // runner.Pod (multi-term Meta.ordering, verified by probe).
+        table: "pod",
+        pk: "id",
+        ordering: &[("is_default", true), ("created_at", false)],
+        columns: &[
+            "created_at",
+            "deleted_at",
+            "description",
+            "id",
+            "is_default",
+            "name",
+            "updated_at",
+        ],
+        fks: &[
+            ("created_by", "created_by_id", IDX_USER),
+            ("project", "project_id", IDX_PROJECT),
+            ("workspace", "workspace_id", IDX_WORKSPACE),
+        ],
+    },
+];
+
+/// `IssueActivity` forward FKs: `(field name, attname, target model index)`.
+const ACTIVITY_FK: &[(&str, &str, usize)] = &[
+    ("created_by", "created_by_id", IDX_USER),
+    ("issue", "issue_id", IDX_ISSUE),
+    ("issue_comment", "issue_comment_id", IDX_COMMENT),
+    ("project", "project_id", IDX_PROJECT),
+    ("updated_by", "updated_by_id", IDX_USER),
+    ("workspace", "workspace_id", IDX_WORKSPACE),
+    ("actor", "actor_id", IDX_USER),
+];
+
+/// Match one hop segment against an FK map by field name or attname.
+fn match_hop(
+    fks: &[(&'static str, &'static str, usize)],
+    segment: &str,
+) -> Option<(&'static str, usize)> {
+    for (field, attname, target) in fks {
+        if segment == *field || segment == *attname {
+            return Some((attname, *target));
+        }
+    }
+    None
+}
+
 /// `order_by` resolution for the activity chains (`.order_by(...)`,
 /// `:2165`, `:2222`): exactly `?` orders randomly; otherwise one leading
-/// `-` selects descending and the rest must be a model field name, an FK
-/// attname, or `pk` (verified against Django's `names_to_path`). Anything
-/// else raises `FieldError` into the generic 500. Related spans
-/// (`project__name`) are valid in Django but 500 here (deliberate edge).
-fn resolve_activity_order(raw: Option<&str>) -> Result<String, Denial> {
+/// `-` selects descending and the rest is either a model field name, an
+/// FK attname, or `pk` (verified against Django's `names_to_path`), or a
+/// forward `__` span across relations. Span hops reuse the list/detail
+/// queries' existing `p`/`w` joins for first-hop `project`/`workspace`
+/// (the same joins Django reuses off its filter path, verified by probe)
+/// and add row-preserving `LEFT JOIN`s (`o1`, `o2`, …) for every other
+/// hop, like Django's ordering joins. A terminal `pk`/pk-column
+/// collapses to the parent's FK column with no new join
+/// (`project__workspace__id` → `p."workspace_id"`); a terminal FK name
+/// orders by the target's `Meta.ordering` (`issue__state` →
+/// `states."sequence"`), and a leading `-` flips every term. Anything
+/// else raises `FieldError` into the generic 500.
+fn resolve_activity_order(raw: Option<&str>) -> Result<ActivityOrder, Denial> {
     const COLUMNS: &[&str] = &[
         "created_at",
         "updated_at",
@@ -795,36 +1270,191 @@ fn resolve_activity_order(raw: Option<&str>) -> Result<String, Denial> {
         ("workspace", "workspace_id"),
         ("actor", "actor_id"),
     ];
+    fn direction(descending: bool) -> &'static str {
+        if descending {
+            "DESC"
+        } else {
+            "ASC"
+        }
+    }
     let text = raw.unwrap_or(queries_sub::ACTIVITY_ORDER_DEFAULT);
     if text == "?" {
-        return Ok("RANDOM()".to_owned());
+        return Ok(ActivityOrder {
+            joins: String::new(),
+            order: "RANDOM()".to_owned(),
+        });
     }
     let (descending, name) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, text),
     };
-    let mut column: Option<&str> = None;
-    if name == "pk" {
-        column = Some("id");
-    } else if COLUMNS.contains(&name) {
-        column = Some(name);
-    } else {
-        for (field, attname) in FK {
-            if name == *field || name == *attname {
-                column = Some(attname);
-                break;
+    if !name.contains("__") {
+        let mut column: Option<&str> = None;
+        if name == "pk" {
+            column = Some("id");
+        } else if COLUMNS.contains(&name) {
+            column = Some(name);
+        } else {
+            for (field, attname) in FK {
+                if name == *field || name == *attname {
+                    column = Some(attname);
+                    break;
+                }
             }
         }
+        let Some(column) = column else {
+            return Err(Denial::ServerError);
+        };
+        // Qualified with the list/detail queries' `a` alias (a bare
+        // `"issue_activities"` reference is invisible once aliased).
+        return Ok(ActivityOrder {
+            joins: String::new(),
+            order: format!(r#"a."{column}" {}"#, direction(descending)),
+        });
     }
-    let Some(column) = column else {
+    resolve_activity_span(name, descending)
+}
+
+/// Forward-span `order_by` (`project__name`, `actor__email`,
+/// `project__workspace__name`, …): join every hop but the last, then
+/// resolve the terminal on the last hop's target.
+fn resolve_activity_span(name: &str, descending: bool) -> Result<ActivityOrder, Denial> {
+    let segments: Vec<&str> = name.split("__").collect();
+    if segments.iter().any(|segment| segment.is_empty()) {
         return Err(Denial::ServerError);
+    }
+    let (hops, terminal) = segments.split_at(segments.len() - 1);
+    let terminal = terminal[0];
+    let mut joins = String::new();
+    let mut alias_counter = 0u32;
+    // Parent alias of the hop being joined (`a` for the first hop).
+    let mut parent_alias = "a".to_owned();
+    // Model index the next hop resolves against (`None` = IssueActivity).
+    let mut model: Option<usize> = None;
+    // Emit the JOIN for one hop; first-hop project/workspace reuse the
+    // base query's `p`/`w` aliases. Returns the hop's alias.
+    let mut join_hop = |joins: &mut String,
+                        parent: &str,
+                        attname: &str,
+                        target: usize,
+                        first: bool|
+     -> String {
+        if first && (target == IDX_PROJECT || target == IDX_WORKSPACE) {
+            return if target == IDX_PROJECT {
+                "p".to_owned()
+            } else {
+                "w".to_owned()
+            };
+        }
+        alias_counter += 1;
+        let alias = format!("o{alias_counter}");
+        let table = SPAN_MODELS[target].table;
+        let pk = SPAN_MODELS[target].pk;
+        joins.push_str(&format!(
+            "\n           LEFT JOIN \"{table}\" {alias} ON {alias}.\"{pk}\" = {parent}.\"{attname}\""
+        ));
+        alias
     };
-    // Qualified with the list/detail queries' `a` alias (a bare
-    // `"issue_activities"` reference is invisible once aliased).
-    Ok(format!(
-        r#"a."{column}" {}"#,
-        if descending { "DESC" } else { "ASC" }
-    ))
+    // Join every hop but the last (the last hop joins only when the
+    // terminal needs its table: plain columns and FK names do, a
+    // terminal pk collapses to the parent's FK column without one).
+    for (index, segment) in hops.iter().enumerate() {
+        let last = index + 1 == hops.len();
+        let (attname, target) = match model {
+            None => match_hop(ACTIVITY_FK, segment),
+            Some(model) => match_hop(SPAN_MODELS[model].fks, segment),
+        }
+        .ok_or(Denial::ServerError)?;
+        if last {
+            let order = resolve_span_terminal(
+                terminal,
+                target,
+                &parent_alias,
+                attname,
+                descending,
+                index == 0,
+                &mut join_hop,
+                &mut joins,
+            )?;
+            return Ok(ActivityOrder { joins, order });
+        }
+        let alias = join_hop(&mut joins, &parent_alias, attname, target, index == 0);
+        parent_alias = alias;
+        model = Some(target);
+    }
+    // Unreachable: spans hold at least one hop plus a terminal.
+    Err(Denial::ServerError)
+}
+
+/// Resolve the terminal segment against the last hop's target. `parent`
+/// is the alias the last hop joins from, `attname` its FK column.
+#[allow(clippy::too_many_arguments)]
+fn resolve_span_terminal(
+    terminal: &str,
+    target: usize,
+    parent: &str,
+    attname: &str,
+    descending: bool,
+    first_hop: bool,
+    join_hop: &mut impl FnMut(&mut String, &str, &str, usize, bool) -> String,
+    joins: &mut String,
+) -> Result<String, Denial> {
+    fn direction(descending: bool) -> &'static str {
+        if descending {
+            "DESC"
+        } else {
+            "ASC"
+        }
+    }
+    let model = &SPAN_MODELS[target];
+    // Terminal pk collapses to the parent's FK column (no new join):
+    // `actor__id` → `a."actor_id"`, `project__workspace__id` →
+    // `p."workspace_id"` (verified by probe).
+    if terminal == "pk" || terminal == model.pk {
+        return Ok(format!(r#"{parent}."{attname}" {}"#, direction(descending)));
+    }
+    // Terminal concrete column (field name and attname coincide for
+    // non-FK fields; FK attnames resolve to their columns too, e.g.
+    // `project__workspace_id` → `p."workspace_id"`).
+    if model.columns.contains(&terminal)
+        || model
+            .fks
+            .iter()
+            .any(|(_, fk_attname, _)| terminal == *fk_attname)
+    {
+        let alias = join_hop(joins, parent, attname, target, first_hop);
+        return Ok(format!(r#"{alias}."{terminal}" {}"#, direction(descending)));
+    }
+    // Terminal FK name orders by the target's `Meta.ordering`
+    // (`issue__state` → `o1."sequence" ASC`); a leading `-` flips
+    // every term. Models without ordering collapse to the parent's FK
+    // column with no target join (`issue__type` → `o1."type_id"`).
+    // (Attnames resolved as columns above, so only field names match.)
+    let fk_hit = model
+        .fks
+        .iter()
+        .find(|(field, _, _)| terminal == *field)
+        .map(|(_, fk_attname, fk_target)| (*fk_attname, *fk_target));
+    if let Some((fk_attname, fk_target)) = fk_hit {
+        let ordering = SPAN_MODELS[fk_target].ordering;
+        let alias = join_hop(&mut *joins, parent, attname, target, first_hop);
+        if ordering.is_empty() {
+            return Ok(format!(
+                r#"{alias}."{fk_attname}" {}"#,
+                direction(descending)
+            ));
+        }
+        let mut terms = Vec::with_capacity(ordering.len());
+        let target_alias = join_hop(&mut *joins, &alias, fk_attname, fk_target, false);
+        for &(column, term_descending) in ordering {
+            terms.push(format!(
+                r#"{target_alias}."{column}" {}"#,
+                direction(term_descending ^ descending)
+            ));
+        }
+        return Ok(terms.join(", "));
+    }
+    Err(Denial::ServerError)
 }
 
 /// Activity list rows (`:2156-2165`): the recorded F18-07 predicates —
@@ -838,19 +1468,21 @@ async fn fetch_activity_rows(
     project_id: &Uuid,
     issue_id: &Uuid,
     user_id: &Uuid,
-    order_sql: &str,
+    order: &ActivityOrder,
 ) -> Result<Vec<sqlx::postgres::PgRow>, Denial> {
     let sql = format!(
         r#"SELECT a.* FROM "issue_activities" a
            INNER JOIN "workspaces" w ON w."id" = a."workspace_id"
            INNER JOIN "projects" p ON p."id" = a."project_id"
-           INNER JOIN "project_members" pm ON pm."project_id" = p."id"
+           INNER JOIN "project_members" pm ON pm."project_id" = p."id"{joins}
            WHERE a."deleted_at" IS NULL
              AND a."issue_id" = $1 AND a."project_id" = $2 AND w."slug" = $3
              AND NOT (a."field" IN ('comment', 'vote', 'reaction', 'draft') AND a."field" IS NOT NULL)
              AND pm."member_id" = $4 AND pm."is_active"
              AND p."archived_at" IS NULL
-           ORDER BY {order_sql}"#,
+           ORDER BY {terms}"#,
+        joins = order.joins,
+        terms = order.order,
     );
     sqlx::query(&sql)
         .bind(issue_id)
@@ -871,19 +1503,21 @@ async fn fetch_activity_detail(
     issue_id: &Uuid,
     user_id: &Uuid,
     pk: &Uuid,
-    order_sql: &str,
+    order: &ActivityOrder,
 ) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
     let sql = format!(
         r#"SELECT a.* FROM "issue_activities" a
            INNER JOIN "workspaces" w ON w."id" = a."workspace_id"
            INNER JOIN "projects" p ON p."id" = a."project_id"
-           INNER JOIN "project_members" pm ON pm."project_id" = p."id"
+           INNER JOIN "project_members" pm ON pm."project_id" = p."id"{joins}
            WHERE a."deleted_at" IS NULL
              AND a."issue_id" = $1 AND a."project_id" = $2 AND w."slug" = $3 AND a."id" = $4
              AND NOT (a."field" IN ('comment', 'vote', 'reaction', 'draft') AND a."field" IS NOT NULL)
              AND pm."member_id" = $5 AND pm."is_active"
              AND p."archived_at" IS NULL
-           ORDER BY {order_sql} LIMIT 1"#,
+           ORDER BY {terms} LIMIT 1"#,
+        joins = order.joins,
+        terms = order.order,
     );
     sqlx::query(&sql)
         .bind(issue_id)
@@ -2649,14 +3283,14 @@ async fn activity_list_inner(
             .map_err(page_denial)?;
     let cursor_raw = query_last(query, "cursor").unwrap_or_else(|| format!("{per_page}:0:0"));
     let cursor = crate::paginator::Cursor::from_string(&cursor_raw).map_err(page_denial)?;
-    let order_sql = resolve_activity_order(query_last(query, "order_by").as_deref())?;
+    let order = resolve_activity_order(query_last(query, "order_by").as_deref())?;
     let rows = fetch_activity_rows(
         &pre.pool,
         slug,
         &project_id,
         issue_id,
         &pre.actor.id,
-        &order_sql,
+        &order,
     )
     .await?;
     let window = crate::paginator::offset_window(
@@ -2791,7 +3425,7 @@ async fn activity_detail_inner(
     // `TimezoneMixin.initial` runs after the gate but before the body: a
     // bad zone wins over the row 404 below.
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
-    let order_sql = resolve_activity_order(query_last(query, "order_by").as_deref())?;
+    let order = resolve_activity_order(query_last(query, "order_by").as_deref())?;
     let row = fetch_activity_detail(
         &pre.pool,
         slug,
@@ -2799,7 +3433,7 @@ async fn activity_detail_inner(
         issue_id,
         &pre.actor.id,
         pk,
-        &order_sql,
+        &order,
     )
     .await?;
     let Some(row) = row else {
@@ -4157,42 +4791,147 @@ mod tests {
 
     #[test]
     fn activity_order_resolution() {
+        fn resolved(raw: Option<&str>) -> ActivityOrder {
+            resolve_activity_order(raw).expect("order")
+        }
+        fn plain(order: &str) -> ActivityOrder {
+            ActivityOrder {
+                joins: String::new(),
+                order: order.to_owned(),
+            }
+        }
+        assert_eq!(resolved(None), plain(r#"a."created_at" ASC"#));
+        assert_eq!(resolved(Some("created_at")), plain(r#"a."created_at" ASC"#));
         assert_eq!(
-            resolve_activity_order(None).expect("default"),
-            r#"a."created_at" ASC"#
+            resolved(Some("-updated_at")),
+            plain(r#"a."updated_at" DESC"#)
+        );
+        // Bare FK names keep the 675 mapping (local FK column); Django
+        // orders these by the related Meta.ordering instead — tracked
+        // separately as PIDASHCONV-759, out of 748 scope.
+        assert_eq!(resolved(Some("issue")), plain(r#"a."issue_id" ASC"#));
+        assert_eq!(resolved(Some("-actor_id")), plain(r#"a."actor_id" DESC"#));
+        assert_eq!(resolved(Some("pk")), plain(r#"a."id" ASC"#));
+        assert_eq!(resolved(Some("?")), plain("RANDOM()"));
+        // Forward spans (PIDASHCONV-748): first-hop project/workspace
+        // reuse the base query's `p`/`w` joins with no extra JOIN.
+        assert_eq!(resolved(Some("project__name")), plain(r#"p."name" ASC"#));
+        assert_eq!(resolved(Some("-project__name")), plain(r#"p."name" DESC"#));
+        assert_eq!(resolved(Some("project_id__name")), plain(r#"p."name" ASC"#));
+        assert_eq!(resolved(Some("workspace__slug")), plain(r#"w."slug" ASC"#));
+        assert_eq!(
+            resolved(Some("project__workspace_id")),
+            plain(r#"p."workspace_id" ASC"#)
+        );
+        // Terminal pk collapses to the parent's FK column (no new join).
+        assert_eq!(resolved(Some("actor__id")), plain(r#"a."actor_id" ASC"#));
+        assert_eq!(
+            resolved(Some("project__pk")),
+            plain(r#"a."project_id" ASC"#)
         );
         assert_eq!(
-            resolve_activity_order(Some("created_at")).expect("plain"),
-            r#"a."created_at" ASC"#
+            resolved(Some("project__workspace__id")),
+            plain(r#"p."workspace_id" ASC"#)
+        );
+        // Other hops add row-preserving LEFT JOINs (`o1`, `o2`, …).
+        assert_eq!(
+            resolved(Some("actor__email")),
+            ActivityOrder {
+                joins: "\n           LEFT JOIN \"users\" o1 ON o1.\"id\" = a.\"actor_id\""
+                    .to_owned(),
+                order: r#"o1."email" ASC"#.to_owned(),
+            }
         );
         assert_eq!(
-            resolve_activity_order(Some("-updated_at")).expect("desc"),
-            r#"a."updated_at" DESC"#
+            resolved(Some("-issue__created_at")),
+            ActivityOrder {
+                joins: "\n           LEFT JOIN \"issues\" o1 ON o1.\"id\" = a.\"issue_id\""
+                    .to_owned(),
+                order: r#"o1."created_at" DESC"#.to_owned(),
+            }
         );
         assert_eq!(
-            resolve_activity_order(Some("issue")).expect("fk name"),
-            r#"a."issue_id" ASC"#
+            resolved(Some("project__workspace__name")),
+            ActivityOrder {
+                joins: "\n           LEFT JOIN \"workspaces\" o1 ON o1.\"id\" = p.\"workspace_id\""
+                    .to_owned(),
+                order: r#"o1."name" ASC"#.to_owned(),
+            }
         );
         assert_eq!(
-            resolve_activity_order(Some("-actor_id")).expect("attname"),
-            r#"a."actor_id" DESC"#
+            resolved(Some("issue__project__name")),
+            ActivityOrder {
+                joins: [
+                    "\n           LEFT JOIN \"issues\" o1 ON o1.\"id\" = a.\"issue_id\"",
+                    "\n           LEFT JOIN \"projects\" o2 ON o2.\"id\" = o1.\"project_id\"",
+                ]
+                .concat(),
+                order: r#"o2."name" ASC"#.to_owned(),
+            }
+        );
+        // Terminal FK names order by the target's Meta.ordering (a
+        // leading `-` flips every term); targets without ordering
+        // collapse to the parent's FK column with no target join.
+        assert_eq!(
+            resolved(Some("issue__state")),
+            ActivityOrder {
+                joins: [
+                    "\n           LEFT JOIN \"issues\" o1 ON o1.\"id\" = a.\"issue_id\"",
+                    "\n           LEFT JOIN \"states\" o2 ON o2.\"id\" = o1.\"state_id\"",
+                ]
+                .concat(),
+                order: r#"o2."sequence" ASC"#.to_owned(),
+            }
         );
         assert_eq!(
-            resolve_activity_order(Some("pk")).expect("pk"),
-            r#"a."id" ASC"#
+            resolved(Some("-project__created_by")),
+            ActivityOrder {
+                joins: "\n           LEFT JOIN \"users\" o1 ON o1.\"id\" = p.\"created_by_id\""
+                    .to_owned(),
+                order: r#"o1."created_at" ASC"#.to_owned(),
+            }
         );
         assert_eq!(
-            resolve_activity_order(Some("?")).expect("random"),
-            "RANDOM()"
+            resolved(Some("issue__type")),
+            ActivityOrder {
+                joins: "\n           LEFT JOIN \"issues\" o1 ON o1.\"id\" = a.\"issue_id\""
+                    .to_owned(),
+                order: r#"o1."type_id" ASC"#.to_owned(),
+            }
+        );
+        assert_eq!(
+            resolved(Some("issue__assigned_pod")),
+            ActivityOrder {
+                joins: [
+                    "\n           LEFT JOIN \"issues\" o1 ON o1.\"id\" = a.\"issue_id\"",
+                    "\n           LEFT JOIN \"pod\" o2 ON o2.\"id\" = o1.\"assigned_pod_id\"",
+                ]
+                .concat(),
+                order: r#"o2."is_default" DESC, o2."created_at" ASC"#.to_owned(),
+            }
         );
         for bad in [
             "",
             "nope",
             "-?",
             "+id",
-            "project__name",
-            "issue__id",
             "?,created_at",
+            // Unknown relation / terminal / empty segments: FieldError.
+            "project__bogus",
+            "bogus__name",
+            "project__",
+            "__name",
+            "name__",
+            "project___name",
+            "project__name__",
+            // Hop through a concrete column, not a relation.
+            "verb__x",
+            "id__name",
+            // Residual edges (Django 200s; documented in the module docs).
+            "created_at__date",
+            "issue__assignees__email",
+            "project__project_issueactivity__verb",
+            "actor__avatar_asset__draft_issue__name",
         ] {
             assert!(
                 resolve_activity_order(Some(bad)).is_err(),
