@@ -62,12 +62,15 @@
 //! * BUG-1 (Q3-1, `:2718`): legacy `?limit=` is an unguarded `int()` —
 //!   garbage and negatives 500 (mapped here to 500
 //!   [`SERVER_ERROR_BODY`]).
-//! * BUG-2 (Q3-2, `:2709`): legacy `?project_id=` with a non-UUID 500s.
-//!   The `UUIDField` `ValidationError` raises at response-render time
-//!   (the `values()` queryset stays lazy through `Response(...)`), so
-//!   Django answers its technical-500 page — outside `handle_exception`
-//!   and with no JSON contract. Mapped here to 500
-//!   [`SERVER_ERROR_BODY`] (deliberate bytes edge, unpinned).
+//! * BUG-2 (Q3-2, `:2709`): legacy `?project_id=` with a non-UUID 400s.
+//!   The `UUIDField.get_prep_value` `ValidationError` raises at
+//!   `filter()` time, inside the handler — inside DRF dispatch's `try`
+//!   — so `handle_exception`'s `ValidationError` branch
+//!   (`api/views/base.py:148-152`) answers 400
+//!   `{"error":"Please provide valid detail"}` (39 bytes, live-probed
+//!   byte-identical on Django). Mapped here to 400
+//!   `handlers_social::VALID_DETAIL_BODY` (the earlier render-time-500
+//!   theory was wrong; the live probe refuted it).
 //! * BUG-3 (Q3-5, `:2837`): advanced `?since=` well-formed-but-invalid
 //!   500s (`parse_datetime`'s `ValueError` propagates past the view).
 //! * BUG-4 (Q3-3): `?status=` is unvalidated — anything but
@@ -420,10 +423,9 @@ struct LegacyStatement {
 /// Compose the legacy statement (`views/issue.py:2696-2718`): the Q3 text
 /// with `:name` placeholders numbered to `$N` (`$1` member, `$2` slug,
 /// `$3` project when the filter applies, then fts/seq/like in order).
-/// `LegacyProject::InvalidUuid` 500s (BUG-2: the `ValidationError` raises
-/// at response-render time, outside `handle_exception`, so Django answers
-/// its technical-500 page — no JSON contract — and Rust answers the
-/// generic JSON 500).
+/// `LegacyProject::InvalidUuid` 400s (BUG-2: the `ValidationError` raises
+/// at `filter()` time inside the handler, so `handle_exception` answers
+/// 400 `handlers_social::VALID_DETAIL_BODY`, byte-identical to Django).
 fn legacy_statement(
     query: &str,
     workspace_search: Option<&str>,
@@ -432,7 +434,9 @@ fn legacy_statement(
 ) -> Result<LegacyStatement, Denial> {
     let project = q::legacy_project_filter(workspace_search, project_id);
     if matches!(project, q::LegacyProject::InvalidUuid) {
-        return Err(Denial::ServerError);
+        return Err(Denial::BadError(
+            super::handlers_social::VALID_DETAIL_BODY.to_owned(),
+        ));
     }
     let limit_sql = q::legacy_limit_sql(limit).map_err(|_| Denial::ServerError)?;
     let sql = q::legacy_search_sql(query, project, &limit_sql);
@@ -2821,12 +2825,23 @@ mod tests {
     }
 
     #[test]
-    fn legacy_statement_invalid_project_and_limit_500() {
-        // BUG-2: non-UUID `project_id` 500s (render-time ValidationError).
+    fn legacy_statement_invalid_project_is_400_valid_detail() {
+        // BUG-2: non-UUID `project_id` 400s — the `ValidationError`
+        // raises at `filter()` time inside the handler, so Django's
+        // `handle_exception` answers 400 (live-probed, byte-identical).
+        let denial = legacy_statement("q", Some("false"), Some("NOPE"), None)
+            .expect_err("non-UUID project_id rejects");
         assert_eq!(
-            legacy_statement("q", Some("false"), Some("NOPE"), None),
-            Err(Denial::ServerError)
+            denial.status_and_body(),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"error":"Please provide valid detail"}"#.to_owned()
+            )
         );
+    }
+
+    #[test]
+    fn legacy_statement_bad_limit_500() {
         // BUG-1: garbage and negative limits 500.
         assert_eq!(
             legacy_statement("q", None, None, Some("abc")),
