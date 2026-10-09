@@ -26,6 +26,7 @@ import type {
   SchedulerBindingRunRow,
   SchedulerBindingValues,
   SchedulerCalendarBlock,
+  RunnerChatStreamFrame,
   SchedulerCatalogRow,
   SchedulerDefinitionValues,
   SchedulerInstallOption,
@@ -4758,5 +4759,197 @@ export class WebNewDriver implements ParityDriver {
   }
   async schedulerRunsExportControls(): Promise<string[]> {
     return todo("schedulerRunsExportControls");
+  }
+
+  // --- Runner chat on cloud/web (NEWFRONT-181, RUN-025–032). Throwing
+  // --- stubs per the shared driver contract; the chat area fills these
+  // --- in when it lands in apps/web_new.
+
+  async runnerChatOpen(_workspaceSlug: string, _runnerId: string, _sessionId?: string): Promise<void> {
+    return todo("runnerChatOpen");
+  }
+
+  async runnerChatContactNames(): Promise<string[]> {
+    return todo("runnerChatContactNames");
+  }
+
+  async runnerChatContactDotClass(_runnerName: string): Promise<string> {
+    return todo("runnerChatContactDotClass");
+  }
+
+  async runnerChatOpenContact(_runnerName: string): Promise<void> {
+    return todo("runnerChatOpenContact");
+  }
+
+  async runnerChatHeader(): Promise<{ name: string; secondary: string; badge: string }> {
+    return todo("runnerChatHeader");
+  }
+
+  async runnerChatHistoryEmptyVisible(): Promise<boolean> {
+    return todo("runnerChatHistoryEmptyVisible");
+  }
+
+  async runnerChatHistoryItems(): Promise<{ title: string; subtitle: string; active: boolean }[]> {
+    return todo("runnerChatHistoryItems");
+  }
+
+  async runnerChatClickHistoryItem(_index: number): Promise<void> {
+    return todo("runnerChatClickHistoryItem");
+  }
+
+  async runnerChatNewChat(): Promise<void> {
+    return todo("runnerChatNewChat");
+  }
+
+  async runnerChatNewChatDisabled(): Promise<boolean> {
+    return todo("runnerChatNewChatDisabled");
+  }
+
+  async runnerChatFailSessionCreate(): Promise<void> {
+    return todo("runnerChatFailSessionCreate");
+  }
+
+  async runnerChatDelaySessionCreate(_ms: number): Promise<void> {
+    return todo("runnerChatDelaySessionCreate");
+  }
+
+  async runnerChatClearSessionCreateStubs(): Promise<void> {
+    return todo("runnerChatClearSessionCreateStubs");
+  }
+
+  async runnerChatFillDraft(_text: string): Promise<void> {
+    return todo("runnerChatFillDraft");
+  }
+
+  async runnerChatDraftValue(): Promise<string> {
+    return todo("runnerChatDraftValue");
+  }
+
+  async runnerChatPressEnter(): Promise<void> {
+    return todo("runnerChatPressEnter");
+  }
+
+  async runnerChatPressShiftEnter(): Promise<void> {
+    return todo("runnerChatPressShiftEnter");
+  }
+
+  async runnerChatSendEnabled(): Promise<boolean> {
+    return todo("runnerChatSendEnabled");
+  }
+
+  async runnerChatClickSend(): Promise<void> {
+    return todo("runnerChatClickSend");
+  }
+
+  async runnerChatComposerReason(): Promise<string | null> {
+    return todo("runnerChatComposerReason");
+  }
+
+  async runnerChatTextareaDisabled(): Promise<boolean> {
+    return todo("runnerChatTextareaDisabled");
+  }
+
+  async runnerChatAlertText(): Promise<string | null> {
+    return todo("runnerChatAlertText");
+  }
+
+  async runnerChatDismissAlert(): Promise<void> {
+    return todo("runnerChatDismissAlert");
+  }
+
+  async runnerChatLastToast(): Promise<{ title: string; message: string } | null> {
+    return todo("runnerChatLastToast");
+  }
+
+  async runnerChatFailNextSend(): Promise<void> {
+    return todo("runnerChatFailNextSend");
+  }
+
+  async runnerChatClearSendFailure(): Promise<void> {
+    return todo("runnerChatClearSendFailure");
+  }
+
+  async runnerChatVoiceButtonLabel(): Promise<string | null> {
+    return todo("runnerChatVoiceButtonLabel");
+  }
+
+  async runnerChatClickVoiceButton(): Promise<void> {
+    return todo("runnerChatClickVoiceButton");
+  }
+
+  async runnerChatStartApiSpy(): Promise<void> {
+    return todo("runnerChatStartApiSpy");
+  }
+
+  async runnerChatApiCounts(): Promise<{
+    warm: number;
+    sessionCreate: number;
+    send: number;
+    cancel: number;
+    close: number;
+    sessionList: number;
+    messageList: number;
+  }> {
+    return todo("runnerChatApiCounts");
+  }
+
+  async runnerChatStopApiSpy(): Promise<void> {
+    return todo("runnerChatStopApiSpy");
+  }
+
+  async runnerChatDelayRunnerDetail(_runnerId: string, _ms: number): Promise<void> {
+    return todo("runnerChatDelayRunnerDetail");
+  }
+
+  async runnerChatClearRunnerDetailDelay(): Promise<void> {
+    return todo("runnerChatClearRunnerDetailDelay");
+  }
+
+  async runnerChatStubStream(_sessionId: string, _frames: RunnerChatStreamFrame[]): Promise<void> {
+    return todo("runnerChatStubStream");
+  }
+
+  async runnerChatClearStreamStub(_sessionId: string): Promise<void> {
+    return todo("runnerChatClearStreamStub");
+  }
+
+  async runnerChatStreamRequestUrls(_sessionId: string): Promise<string[]> {
+    return todo("runnerChatStreamRequestUrls");
+  }
+
+  async runnerChatMessageBubbles(): Promise<{ role: string; text: string }[]> {
+    return todo("runnerChatMessageBubbles");
+  }
+
+  async runnerChatAssistantBubbleHtml(_index: number): Promise<string> {
+    return todo("runnerChatAssistantBubbleHtml");
+  }
+
+  async runnerChatActivityStrip(): Promise<string[]> {
+    return todo("runnerChatActivityStrip");
+  }
+
+  async runnerChatStopVisible(): Promise<boolean> {
+    return todo("runnerChatStopVisible");
+  }
+
+  async runnerChatClickStop(): Promise<void> {
+    return todo("runnerChatClickStop");
+  }
+
+  async runnerChatClickClose(): Promise<void> {
+    return todo("runnerChatClickClose");
+  }
+
+  async runnerChatApprovalPromptVisible(): Promise<boolean> {
+    return todo("runnerChatApprovalPromptVisible");
+  }
+
+  async runnerChatHoldMessageList(_ms: number): Promise<void> {
+    return todo("runnerChatHoldMessageList");
+  }
+
+  async runnerChatReleaseMessageList(): Promise<void> {
+    return todo("runnerChatReleaseMessageList");
   }
 }

@@ -2972,6 +2972,111 @@ export interface ParityDriver {
   schedulerSettingsPanelVisible(): Promise<boolean>;
   /** Export/download/print/share controls on the run-history table, if any (the row says none). */
   schedulerRunsExportControls(): Promise<string[]>;
+
+  // --- Runner chat on cloud/web (NEWFRONT-181, RUN-025–032). Appended;
+  // --- existing methods above are untouched per the shared driver
+  // --- contract. Covers the chat page (contacts, history, composer,
+  // --- warm-up, streaming, stop, close, header gating) plus the API
+  // --- spy and SSE stub the oracle needs without a live runner daemon.
+
+  /** Open a runner's chat page, optionally deep-linking one session. */
+  runnerChatOpen(workspaceSlug: string, runnerId: string, sessionId?: string): Promise<void>;
+  /** Runner contact names in the side-nav rail, in display order. */
+  runnerChatContactNames(): Promise<string[]>;
+  /** Class list of a contact's status dot (proves live per-status dots). */
+  runnerChatContactDotClass(runnerName: string): Promise<string>;
+  /** Open a runner's chat through its side-nav contact. */
+  runnerChatOpenContact(runnerName: string): Promise<void>;
+  /** Chat header: runner name, secondary line, and status badge text. */
+  runnerChatHeader(): Promise<{ name: string; secondary: string; badge: string }>;
+  /** Whether the history panel shows its empty state. */
+  runnerChatHistoryEmptyVisible(): Promise<boolean>;
+  /** History entries in display order with their active flag. */
+  runnerChatHistoryItems(): Promise<{ title: string; subtitle: string; active: boolean }[]>;
+  /** Click the history entry at `index` (display order). */
+  runnerChatClickHistoryItem(index: number): Promise<void>;
+  /** Start a fresh session through the New-chat control. */
+  runnerChatNewChat(): Promise<void>;
+  /** Whether the New-chat control is currently disabled (working state). */
+  runnerChatNewChatDisabled(): Promise<boolean>;
+  /** Fail the next session-create POST once (new-chat error state). */
+  runnerChatFailSessionCreate(): Promise<void>;
+  /** Delay the next session-create POST by `ms` (new-chat working state). */
+  runnerChatDelaySessionCreate(ms: number): Promise<void>;
+  /** Remove the session-create failure/delay stubs. */
+  runnerChatClearSessionCreateStubs(): Promise<void>;
+  /** Replace the composer draft. */
+  runnerChatFillDraft(text: string): Promise<void>;
+  /** Current composer draft text. */
+  runnerChatDraftValue(): Promise<string>;
+  /** Press Enter in the composer (send). */
+  runnerChatPressEnter(): Promise<void>;
+  /** Press Shift+Enter in the composer (newline, no send). */
+  runnerChatPressShiftEnter(): Promise<void>;
+  /** Whether the send control is currently enabled. */
+  runnerChatSendEnabled(): Promise<boolean>;
+  /** Click the send control. */
+  runnerChatClickSend(): Promise<void>;
+  /** Composer block reason text, or null when chat can proceed. */
+  runnerChatComposerReason(): Promise<string | null>;
+  /** Whether the composer textarea is disabled. */
+  runnerChatTextareaDisabled(): Promise<boolean>;
+  /** Inline stream-error banner text, or null when none shows. */
+  runnerChatAlertText(): Promise<string | null>;
+  /** Dismiss the inline stream-error banner. */
+  runnerChatDismissAlert(): Promise<void>;
+  /** Most recently shown toast, if any is still visible. */
+  runnerChatLastToast(): Promise<{ title: string; message: string } | null>;
+  /** Fail the next message-send POST once (send error state). */
+  runnerChatFailNextSend(): Promise<void>;
+  /** Remove the message-send failure stub. */
+  runnerChatClearSendFailure(): Promise<void>;
+  /** Voice-dictation control label, or null when the control is absent. */
+  runnerChatVoiceButtonLabel(): Promise<string | null>;
+  /** Activate the voice-dictation control (push-to-talk press). */
+  runnerChatClickVoiceButton(): Promise<void>;
+  /** Start counting chat API calls (warm/create/send/cancel/close/lists). */
+  runnerChatStartApiSpy(): Promise<void>;
+  /** Cumulative chat API call counts since the spy started. */
+  runnerChatApiCounts(): Promise<{
+    warm: number;
+    sessionCreate: number;
+    send: number;
+    cancel: number;
+    close: number;
+    sessionList: number;
+    messageList: number;
+  }>;
+  /** Stop counting chat API calls. */
+  runnerChatStopApiSpy(): Promise<void>;
+  /** Delay the next runner-detail GET by `ms` (loading state). */
+  runnerChatDelayRunnerDetail(runnerId: string, ms: number): Promise<void>;
+  /** Remove the runner-detail delay stub. */
+  runnerChatClearRunnerDetailDelay(): Promise<void>;
+  /** Serve canned SSE frames for one session's event stream (re-stubbable). */
+  runnerChatStubStream(sessionId: string, frames: RunnerChatStreamFrame[]): Promise<void>;
+  /** Remove the SSE stub for one session. */
+  runnerChatClearStreamStub(sessionId: string): Promise<void>;
+  /** Event-stream request URLs observed since the stub was installed. */
+  runnerChatStreamRequestUrls(sessionId: string): Promise<string[]>;
+  /** Message bubbles in display order (user + assistant + status rows). */
+  runnerChatMessageBubbles(): Promise<{ role: string; text: string }[]>;
+  /** Rendered HTML of the assistant bubble at `index` (markdown proof). */
+  runnerChatAssistantBubbleHtml(index: number): Promise<string>;
+  /** Activity-strip labels above the composer, in display order. */
+  runnerChatActivityStrip(): Promise<string[]>;
+  /** Whether the stop/interrupt control currently shows. */
+  runnerChatStopVisible(): Promise<boolean>;
+  /** Click the stop/interrupt control. */
+  runnerChatClickStop(): Promise<void>;
+  /** Click the header close-session control. */
+  runnerChatClickClose(): Promise<void>;
+  /** Whether an inline approval prompt shows above the composer. */
+  runnerChatApprovalPromptVisible(): Promise<boolean>;
+  /** Hold chat message-list GETs by `ms` so stream bubbles stay assertable. */
+  runnerChatHoldMessageList(ms: number): Promise<void>;
+  /** Release the message-list hold. */
+  runnerChatReleaseMessageList(): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -3257,4 +3362,17 @@ export interface DevMachineInstallCard {
   command: string;
   /** Direct download link target, or null when the card has none. */
   downloadHref: string | null;
+}
+
+/**
+ * One canned chat-stream frame (NEWFRONT-181, RUN-029). The driver turns
+ * these into SSE `chat.event` frames on the wire shape the backend
+ * serializes (session id, sequence, kind, payload, message link, stamp).
+ */
+export interface RunnerChatStreamFrame {
+  seq: number;
+  kind: string;
+  payload: Record<string, unknown>;
+  /** Assistant-delta target bubble; null for session-level frames. */
+  message?: string | null;
 }
