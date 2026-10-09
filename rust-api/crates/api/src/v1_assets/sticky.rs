@@ -1427,11 +1427,11 @@ fn parse_json_body(body: &[u8], headers: &HeaderMap) -> Result<Value, Denial> {
         .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}")))
 }
 
-/// Django `QueryDict.get`: the last value, or `None`.
-fn query_last(params: &HashMap<String, Vec<String>>, key: &str) -> Option<String> {
-    params
-        .get(key)
-        .and_then(|values| values.iter().last().cloned())
+/// Django `QueryDict.get`: the last value, or `None`. Axum's
+/// `Query<HashMap<String, String>>` keeps the last duplicate the same way,
+/// and unlike the `Vec<String>` form it accepts a single `?key=value`.
+fn query_last(params: &HashMap<String, String>, key: &str) -> Option<String> {
+    params.get(key).cloned()
 }
 
 /// Badly-formed UUIDs in detail paths are `get_object` misses: DRF's
@@ -1619,7 +1619,7 @@ async fn sticky_list(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     headers: HeaderMap,
-    Query(params): Query<HashMap<String, Vec<String>>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     match list_inner(&state, &headers, &slug, &params).await {
         Ok(response) => response,
@@ -1631,7 +1631,7 @@ async fn list_inner(
     state: &AppState,
     headers: &HeaderMap,
     slug: &str,
-    params: &HashMap<String, Vec<String>>,
+    params: &HashMap<String, String>,
 ) -> HandlerResult {
     use crate::paginator::{
         apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor, Cursor,
