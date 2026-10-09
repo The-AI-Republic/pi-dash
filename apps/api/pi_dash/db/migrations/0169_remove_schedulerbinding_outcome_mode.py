@@ -15,6 +15,9 @@ goes each binding's directive is folded into its ``extra_context``:
   prompts do, and repeating the directive there adds nothing.
 
 The builtin prompts also named the CLI ``pi-dash``; the agent has ``pidash``.
+Their filing command carried no ``--project`` either — the create-issue
+directive supplied it — so it is added, or the CLI falls back to the
+workspace default project rather than the one the scheduler is installed on.
 """
 
 from __future__ import annotations
@@ -74,7 +77,18 @@ BUILTIN_SLUGS = ("security-audit", "fable-security-audit")
 CLI_RENAMES = (
     ("`pi-dash` CLI", "`pidash` CLI"),
     ("    pi-dash issue create", "    pidash issue create"),
+    (
+        "    pidash issue create \\\n      --title",
+        "    pidash issue create \\\n      --project <this project's identifier> \\\n      --title",
+    ),
 )
+
+
+def refreshed_builtin_prompt(prompt: str) -> str:
+    """A stored builtin prompt with the CLI name and ``--project`` fixed."""
+    for old, new in CLI_RENAMES:
+        prompt = prompt.replace(old, new)
+    return prompt
 
 
 def prompt_files_issues(prompt: str) -> bool:
@@ -104,9 +118,7 @@ def fold_directive_into_extra_context(apps, schema_editor):
     SchedulerBinding = apps.get_model("db", "SchedulerBinding")
 
     for scheduler in Scheduler.objects.filter(source="builtin", slug__in=BUILTIN_SLUGS):
-        prompt = scheduler.prompt
-        for old, new in CLI_RENAMES:
-            prompt = prompt.replace(old, new)
+        prompt = refreshed_builtin_prompt(scheduler.prompt)
         if prompt != scheduler.prompt:
             scheduler.prompt = prompt
             scheduler.save(update_fields=["prompt"])

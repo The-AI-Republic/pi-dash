@@ -87,6 +87,7 @@ def test_builtin_scheduler_files_issues_with_no_extra_context(binding, fake_run,
     body = build_scheduler_task_body(binding)
     assert body == builtin.prompt.strip()
     assert "pidash issue create" in body
+    assert "--project <this project's identifier>" in body
     assert "skip any finding that already has a" in body
     assert "pi-dash" not in body
     assert "pidash issue create" in build_scheduler_turn(binding, fake_run)

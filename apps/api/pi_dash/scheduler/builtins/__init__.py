@@ -35,6 +35,7 @@ insecure defaults).
 
 For each finding, create a Pi Dash issue using the `pidash` CLI:
     pidash issue create \\
+      --project <this project's identifier> \\
       --title "[security] <short summary>" \\
       --description "<file path, line range, vulnerable snippet,
                      severity (high|medium|low), and suggested fix>"
@@ -84,6 +85,7 @@ title prefix "[fable-security]" for security findings and "[fable-bug]" for
 correctness findings (a dedicated namespace so this audit does not collide with
 the basic "[security]" Security Audit scheduler):
     pidash issue create \\
+      --project <this project's identifier> \\
       --title "[fable-security] <short summary>" \\
       --description "<file path + line range, category/subtype, severity,
                      confidence, explanation, and suggested fix>"

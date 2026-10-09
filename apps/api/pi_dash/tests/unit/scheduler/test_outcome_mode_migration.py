@@ -80,3 +80,17 @@ def test_reverse_recovers_mode_and_extra_context(mode, extra_context):
 @pytest.mark.unit
 def test_reverse_leaves_hand_written_extra_context_alone():
     assert migration.split_extra_context("File at most three issues.") == ("create_issue", "File at most three issues.")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("builtin", BUILTINS, ids=lambda b: b.slug)
+def test_stored_builtin_prompt_is_refreshed_to_the_current_one(builtin):
+    """Existing workspaces keep the prompt seeded before this change; the
+    migration must bring it to the shipped text, including ``--project`` —
+    the create-issue directive used to supply it."""
+    stored = builtin.prompt.replace("      --project <this project's identifier> \\\n", "").replace(
+        "pidash", "pi-dash"
+    )
+    assert "--project" not in stored and "pidash" not in stored
+    assert migration.refreshed_builtin_prompt(stored) == builtin.prompt
+    assert migration.refreshed_builtin_prompt(builtin.prompt) == builtin.prompt
