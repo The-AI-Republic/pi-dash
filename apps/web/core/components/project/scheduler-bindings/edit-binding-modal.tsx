@@ -184,6 +184,9 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
     setTemplateLoading(true);
     try {
       const scheduler = await schedulerService.retrieveScheduler(workspaceSlug, binding.scheduler);
+      // The dialog may have been closed, or reopened on another install,
+      // while this was loading — never show one install another's template.
+      if (loadedBindingId.current !== binding.id) return;
       fillTemplateFields(scheduler);
       setTemplate(scheduler);
     } catch (e: unknown) {

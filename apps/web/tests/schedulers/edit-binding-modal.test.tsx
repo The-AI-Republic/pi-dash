@@ -265,6 +265,33 @@ describe("EditSchedulerBindingModal", () => {
       await waitFor(() => expect(setToast).toHaveBeenCalledWith(expect.objectContaining({ message: "Nope" })));
       expect(screen.queryByLabelText("Prompt")).toBeNull();
     });
+
+    it("drops a template that finishes loading after the dialog moved to another install", async () => {
+      const user = userEvent.setup();
+      const load: { resolve?: (scheduler: IScheduler) => void } = {};
+      retrieveScheduler.mockReturnValue(
+        new Promise<IScheduler>((resolve) => {
+          load.resolve = resolve;
+        })
+      );
+      const { rerender, onClose, onUpdated } = renderModal();
+
+      await user.click(screen.getByRole("button", { name: TEMPLATE_BUTTON }));
+      rerender(
+        <EditSchedulerBindingModal
+          isOpen
+          onClose={onClose}
+          workspaceSlug="acme"
+          projectId="proj-1"
+          binding={{ ...BINDING, id: "bind-2", scheduler: "sched-2" }}
+          onUpdated={onUpdated}
+        />
+      );
+      load.resolve?.(TEMPLATE);
+
+      await waitFor(() => expect(screen.getByRole("button", { name: TEMPLATE_BUTTON })).toBeEnabled());
+      expect(screen.queryByLabelText("Prompt")).toBeNull();
+    });
   });
 
   describe("single save", () => {
