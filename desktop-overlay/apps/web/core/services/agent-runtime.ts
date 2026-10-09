@@ -104,6 +104,14 @@ const workspaces = new Set<string>();
 let tokenExpiresAt = 0;
 let hostLabel = "";
 let activeUserId = "";
+// Workspaces whose local chat is fully provisioned in this page, each stamped
+// with the sign-in and host it was provisioned under. Deliberately not
+// persisted: a reload provisions once more, then is back on the fast path.
+const chatReady = new Map<string, string>();
+
+function chatStamp() {
+  return `${generation}:${activeUserId}:${hostLabel}`;
+}
 
 function enrollmentKey() {
   return `pidash-managed-workspaces:${activeUserId}`;
@@ -156,6 +164,7 @@ export function resumeAgentRuntime(userId?: string) {
 async function configure() {
   const profile = await api<Profile>("/api/users/me/ai-assistant/agent-profile/");
   if (!profile.available) {
+    chatReady.clear();
     await invoke("managed_stop_daemon", { graceSeconds: 5 });
     throw new Error(AGENT_RUNTIME_REASON_MESSAGES[profile.reason_code] ?? profile.reason_code);
   }
@@ -234,8 +243,10 @@ export async function connectAgentProject(workspaceSlug: string, projectId: stri
  * Same sequence as {@link connectAgentProject}, minus the caller-supplied
  * project: enrolment still registers this machine against one project, so the
  * workspace's first project is used. It is idempotent and serialised through
- * the same queue, so calling it before every warm/send is cheap once the
- * daemon is up.
+ * the same queue, and the full sequence runs once per workspace per page: after
+ * that a warm/send only renews an expiring model credential and checks the
+ * daemon, so it costs no network. Profile changes are picked up by
+ * {@link refreshAgentRuntime}, not here.
  */
 /**
  * Whether this server will let the bundled agent run, and why not when it
@@ -266,6 +277,13 @@ export async function ensureChatRuntime(workspaceSlug: string): Promise<void> {
   const current = generation;
   return enqueue(async () => {
     if (stopped || current !== generation) throw new Error("Pi Dash Agent is signed out.");
+    if (chatReady.get(workspaceSlug) === chatStamp()) {
+      if (tokenExpiresAt < Date.now() + 120_000) await configure();
+      if (stopped || current !== generation) return;
+      // A no-op while the daemon runs; restarts it if it died.
+      await invoke("managed_start_daemon", { account: requireAccount(), workspace: workspaceSlug });
+      return;
+    }
     const doctor = await invoke<{
       runner_present: boolean;
       engine_present: boolean;
@@ -313,6 +331,7 @@ export async function ensureChatRuntime(workspaceSlug: string): Promise<void> {
     });
     if (stopped || current !== generation) return;
     await invoke("managed_start_daemon", { account: requireAccount(), workspace: workspaceSlug });
+    chatReady.set(workspaceSlug, chatStamp());
   });
 }
 
@@ -350,6 +369,7 @@ export async function refreshAgentRuntime() {
     try {
       await configure();
     } catch (error) {
+      chatReady.clear();
       if (tokenExpiresAt <= Date.now()) await invoke("managed_stop_daemon", { graceSeconds: 5 });
       throw error;
     }
