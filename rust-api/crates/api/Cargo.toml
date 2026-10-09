@@ -109,6 +109,15 @@ jsonwebtoken = "9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream"] }
 zxcvbn = "3.1.1"
 serde_urlencoded = "0.7.1"
+# v1 page-body converters (D-18 PIDASHCONV-679): `html_to_markdown` is a
+# markdownify 1.1.0 port over the HTML5 parser (same 0.24 line the
+# services crate builds on), and `markdown_to_html` renders the
+# markdown-it token model over this CommonMark parser (0.13 line).
+scraper = "0.24"
+pulldown-cmark = "0.13"
+# NodeRef for the markdownify DOM walk above (scraper's own tree type, same
+# 0.10 line it builds on, so the lockfile gains no new downloads).
+ego-tree = "0.10"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

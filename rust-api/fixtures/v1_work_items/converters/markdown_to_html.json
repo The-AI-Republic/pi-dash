@@ -1,0 +1,1112 @@
+[
+ {
+  "id": "empty",
+  "input": "",
+  "output": "<p></p>"
+ },
+ {
+  "id": "blank",
+  "input": "   \n\t \n",
+  "output": "<p></p>"
+ },
+ {
+  "id": "para",
+  "input": "hello world",
+  "output": "<p>hello world</p>"
+ },
+ {
+  "id": "para-multi",
+  "input": "one\n\ntwo",
+  "output": "<p>one</p><p>two</p>"
+ },
+ {
+  "id": "para-lines",
+  "input": "line1\nline2",
+  "output": "<p>line1 line2</p>"
+ },
+ {
+  "id": "h1",
+  "input": "# hi",
+  "output": "<h1>hi</h1>"
+ },
+ {
+  "id": "h1-close",
+  "input": "# h1 #",
+  "output": "<h1>h1</h1>"
+ },
+ {
+  "id": "h2",
+  "input": "## h2 ##",
+  "output": "<h2>h2</h2>"
+ },
+ {
+  "id": "h6",
+  "input": "###### h6",
+  "output": "<h6>h6</h6>"
+ },
+ {
+  "id": "h7",
+  "input": "####### h7",
+  "output": "<p>####### h7</p>"
+ },
+ {
+  "id": "h-empty",
+  "input": "#",
+  "output": "<h1></h1>"
+ },
+ {
+  "id": "setext1",
+  "input": "title\n===",
+  "output": "<h1>title</h1>"
+ },
+ {
+  "id": "setext2",
+  "input": "title\n---",
+  "output": "<h2>title</h2>"
+ },
+ {
+  "id": "em",
+  "input": "*em*",
+  "output": "<p><em>em</em></p>"
+ },
+ {
+  "id": "em-u",
+  "input": "_em_",
+  "output": "<p><em>em</em></p>"
+ },
+ {
+  "id": "strong",
+  "input": "**strong**",
+  "output": "<p><strong>strong</strong></p>"
+ },
+ {
+  "id": "strong-u",
+  "input": "__strong__",
+  "output": "<p><strong>strong</strong></p>"
+ },
+ {
+  "id": "strike",
+  "input": "~~strike~~",
+  "output": "<p><s>strike</s></p>"
+ },
+ {
+  "id": "nested-em",
+  "input": "**a *b* c**",
+  "output": "<p><strong>a <em>b</em> c</strong></p>"
+ },
+ {
+  "id": "intra-word",
+  "input": "a_b_c",
+  "output": "<p>a_b_c</p>"
+ },
+ {
+  "id": "star-word",
+  "input": "*a*b",
+  "output": "<p><em>a</em>b</p>"
+ },
+ {
+  "id": "code",
+  "input": "`code`",
+  "output": "<p><code>code</code></p>"
+ },
+ {
+  "id": "code-multi",
+  "input": "``a ` b``",
+  "output": "<p><code>a ` b</code></p>"
+ },
+ {
+  "id": "code-nl",
+  "input": "`a\nb`",
+  "output": "<p><code>a b</code></p>"
+ },
+ {
+  "id": "link",
+  "input": "[a](http://e.com/x)",
+  "output": "<p><a href=\"http://e.com/x\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-title-dq",
+  "input": "[a](http://e.com/x \"ti\")",
+  "output": "<p><a href=\"http://e.com/x\" title=\"ti\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-title-sq",
+  "input": "[a](http://e.com/x 'ti')",
+  "output": "<p><a href=\"http://e.com/x\" title=\"ti\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-title-par",
+  "input": "[a](http://e.com/x (ti))",
+  "output": "<p><a href=\"http://e.com/x\" title=\"ti\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-case-url",
+  "input": "[a](HTTP://Ex.COM/p?q=1&r=2)",
+  "output": "<p><a href=\"HTTP://Ex.COM/p?q=1&amp;r=2\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-encoded",
+  "input": "[a](foo%20bar)",
+  "output": "<p><a href=\"foo%20bar\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-angle",
+  "input": "[a](<foo bar>)",
+  "output": "<p><a href=\"foo%20bar\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-angle-space",
+  "input": "[a](< foo >)",
+  "output": "<p><a href=\"foo\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-empty",
+  "input": "[a]()",
+  "output": "<p><a href=\"\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-empty-title",
+  "input": "[a]( \"t\")",
+  "output": "<p><a href=\"%22t%22\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-js",
+  "input": "[a](javascript:alert(1))",
+  "output": "<p>[a](javascript:alert(1))</p>"
+ },
+ {
+  "id": "link-vbs",
+  "input": "[a](vbscript:x)",
+  "output": "<p>[a](vbscript:x)</p>"
+ },
+ {
+  "id": "link-file",
+  "input": "[a](file:///x)",
+  "output": "<p>[a](file:///x)</p>"
+ },
+ {
+  "id": "link-data-bad",
+  "input": "[a](data:text/plain,hi)",
+  "output": "<p>[a](data:text/plain,hi)</p>"
+ },
+ {
+  "id": "link-data-img",
+  "input": "[a](data:image/png;base64,AA==)",
+  "output": "<p><a rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-data-img-upper",
+  "input": "[a](DATA:IMAGE/PNG;BASE64,AA==)",
+  "output": "<p><a rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-relative",
+  "input": "[a](/rel/path)",
+  "output": "<p><a href=\"/rel/path\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-frag",
+  "input": "[a](#frag)",
+  "output": "<p><a href=\"#frag\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-query",
+  "input": "[a](?q=1)",
+  "output": "<p><a href=\"?q=1\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-tab-in-dest",
+  "input": "[u](java\tscript:x)",
+  "output": "<p>[u](java\tscript:x)</p>"
+ },
+ {
+  "id": "link-entity-dest",
+  "input": "[a](http://e.com/?a=1&amp;b=2)",
+  "output": "<p><a href=\"http://e.com/?a=1&amp;b=2\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-escape-dest",
+  "input": "[a](foo\\*bar)",
+  "output": "<p><a href=\"foo*bar\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-title-entity",
+  "input": "[a](http://e.com/x \"a&amp;b\")",
+  "output": "<p><a href=\"http://e.com/x\" title=\"a&amp;b\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-nested-em",
+  "input": "[a *b*](http://e.com/x)",
+  "output": "<p><a href=\"http://e.com/x\" rel=\"noopener noreferrer\">a <em>b</em></a></p>"
+ },
+ {
+  "id": "link-invalid-nested-em",
+  "input": "[a *b*](javascript:x)",
+  "output": "<p>[a <em>b</em>](javascript:x)</p>"
+ },
+ {
+  "id": "link-bare-brackets",
+  "input": "[a][b]",
+  "output": "<p>[a][b]</p>"
+ },
+ {
+  "id": "autolink",
+  "input": "<http://ex.com/x>",
+  "output": "<p><a href=\"http://ex.com/x\" rel=\"noopener noreferrer\">http://ex.com/x</a></p>"
+ },
+ {
+  "id": "autolink-bad",
+  "input": "<http://ex.com/a b>",
+  "output": "<p>&lt;http://ex.com/a b&gt;</p>"
+ },
+ {
+  "id": "autolink-https",
+  "input": "<https://ex.com:8443/p?q#f>",
+  "output": "<p><a href=\"https://ex.com:8443/p?q#f\" rel=\"noopener noreferrer\">https://ex.com:8443/p?q#f</a></p>"
+ },
+ {
+  "id": "email",
+  "input": "<foo@bar.com>",
+  "output": "<p><a href=\"mailto:foo@bar.com\" rel=\"noopener noreferrer\">foo@bar.com</a></p>"
+ },
+ {
+  "id": "email-mailto",
+  "input": "<mailto:foo@bar.com>",
+  "output": "<p><a href=\"mailto:foo@bar.com\" rel=\"noopener noreferrer\">mailto:foo@bar.com</a></p>"
+ },
+ {
+  "id": "email-plus",
+  "input": "<a+b@c-mail.com>",
+  "output": "<p><a href=\"mailto:a+b@c-mail.com\" rel=\"noopener noreferrer\">a+b@c-mail.com</a></p>"
+ },
+ {
+  "id": "ref-basic",
+  "input": "[a][r]\n\n[r]: /u \"t\"",
+  "output": "<p><a href=\"/u\" title=\"t\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "ref-collapsed",
+  "input": "[a][]\n\n[a]: /u",
+  "output": "<p><a href=\"/u\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "ref-shortcut",
+  "input": "[a]\n\n[a]: /u",
+  "output": "<p><a href=\"/u\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "ref-missing",
+  "input": "[a][zz]",
+  "output": "<p>[a][zz]</p>"
+ },
+ {
+  "id": "ref-case",
+  "input": "[A][R]\n\n[r]: /u",
+  "output": "<p><a href=\"/u\" rel=\"noopener noreferrer\">A</a></p>"
+ },
+ {
+  "id": "ref-multi",
+  "input": "[a][r] [b][r]\n\n[r]: /u",
+  "output": "<p><a href=\"/u\" rel=\"noopener noreferrer\">a</a> <a href=\"/u\" rel=\"noopener noreferrer\">b</a></p>"
+ },
+ {
+  "id": "ref-title-sq",
+  "input": "[a][r]\n\n[r]: /u 't'",
+  "output": "<p><a href=\"/u\" title=\"t\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "image",
+  "input": "![alt](http://e.com/i.png)",
+  "output": "<img src=\"http://e.com/i.png\" alt=\"alt\">"
+ },
+ {
+  "id": "image-title",
+  "input": "![alt](http://e.com/i.png \"ti\")",
+  "output": "<img src=\"http://e.com/i.png\" alt=\"alt\" title=\"ti\">"
+ },
+ {
+  "id": "image-fmt-alt",
+  "input": "![alt **b**](http://e.com/i.png)",
+  "output": "<img src=\"http://e.com/i.png\" alt=\"alt b\">"
+ },
+ {
+  "id": "image-rel",
+  "input": "![a](/rel)",
+  "output": "<img src=\"/rel\" alt=\"a\">"
+ },
+ {
+  "id": "image-js",
+  "input": "![unsafe](javascript:x)",
+  "output": "<p>![unsafe](javascript:x)</p>"
+ },
+ {
+  "id": "image-empty-src",
+  "input": "![](  )",
+  "output": "<p></p>"
+ },
+ {
+  "id": "image-ref",
+  "input": "![a][r]\n\n[r]: /u",
+  "output": "<img src=\"/u\" alt=\"a\">"
+ },
+ {
+  "id": "image-nested",
+  "input": "![a ![b](http://e.com/1) c](http://e.com/2)",
+  "output": "<img src=\"http://e.com/2\" alt=\"a b c\">"
+ },
+ {
+  "id": "image-code-alt",
+  "input": "![`c`](http://e.com/i.png)",
+  "output": "<img src=\"http://e.com/i.png\">"
+ },
+ {
+  "id": "image-softbreak-alt",
+  "input": "![a\nb](http://e.com/i.png)",
+  "output": "<img src=\"http://e.com/i.png\" alt=\"a\nb\">"
+ },
+ {
+  "id": "image-para-wrap",
+  "input": "x ![a](http://e.com/i.png) y",
+  "output": "<p>x <img src=\"http://e.com/i.png\" alt=\"a\"> y</p>"
+ },
+ {
+  "id": "image-blocked-nest",
+  "input": "> ![a](http://e.com/i.png)",
+  "output": "<blockquote><p><img src=\"http://e.com/i.png\" alt=\"a\"></p></blockquote>"
+ },
+ {
+  "id": "fence",
+  "input": "```python extra\nprint(1)\n```\n",
+  "output": "<pre><code class=\"language-python\">print(1)</code></pre>"
+ },
+ {
+  "id": "fence-plain",
+  "input": "```\nno info\n```",
+  "output": "<pre><code>no info</code></pre>"
+ },
+ {
+  "id": "fence-blank-info",
+  "input": "```   \nblank info\n```",
+  "output": "<pre><code>blank info</code></pre>"
+ },
+ {
+  "id": "fence-tilde",
+  "input": "~~~rust\nx\n~~~",
+  "output": "<pre><code class=\"language-rust\">x</code></pre>"
+ },
+ {
+  "id": "fence-unclosed",
+  "input": "```python\nx\n",
+  "output": "<pre><code class=\"language-python\">x</code></pre>"
+ },
+ {
+  "id": "fence-empty",
+  "input": "```\n```",
+  "output": "<pre><code></code></pre>"
+ },
+ {
+  "id": "fence-info-entity",
+  "input": "```a&amp;b\nx\n```",
+  "output": "<pre><code class=\"language-a&amp;amp;b\">x</code></pre>"
+ },
+ {
+  "id": "fence-inner-fence",
+  "input": "````\n```\nx\n````",
+  "output": "<pre><code>```\nx</code></pre>"
+ },
+ {
+  "id": "indented",
+  "input": "    indented\n",
+  "output": "<pre><code>indented</code></pre>"
+ },
+ {
+  "id": "indented-multi",
+  "input": "    a\n    b\n",
+  "output": "<pre><code>a\nb</code></pre>"
+ },
+ {
+  "id": "table",
+  "input": "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 |\n",
+  "output": "<table><tbody><tr><th><p>a</p></th><th><p>b</p></th></tr><tr><td><p>1</p></td><td><p>2</p></td></tr><tr><td><p>3</p></td><td><p></p></td></tr></tbody></table>"
+ },
+ {
+  "id": "table-align",
+  "input": "| a | b | c |\n|:--|:-:|---:|\n| 1 | 2 | 3 |\n",
+  "output": "<table><tbody><tr><th><p>a</p></th><th><p>b</p></th><th><p>c</p></th></tr><tr><td><p>1</p></td><td><p>2</p></td><td><p>3</p></td></tr></tbody></table>"
+ },
+ {
+  "id": "table-head-only",
+  "input": "| a |\n|---|\n",
+  "output": "<table><tbody><tr><th><p>a</p></th></tr></tbody></table>"
+ },
+ {
+  "id": "table-extra-cell",
+  "input": "| a |\n|---|\n| 1 | 2 |\n",
+  "output": "<table><tbody><tr><th><p>a</p></th></tr><tr><td><p>1</p></td></tr></tbody></table>"
+ },
+ {
+  "id": "table-escaped-pipe",
+  "input": "| a\\|b |\n|---|\n| 1 |\n",
+  "output": "<table><tbody><tr><th><p>a|b</p></th></tr><tr><td><p>1</p></td></tr></tbody></table>"
+ },
+ {
+  "id": "table-inline-fmt",
+  "input": "| **a** | `b` |\n|---|---|\n| *c* | d |\n",
+  "output": "<table><tbody><tr><th><p><strong>a</strong></p></th><th><p><code>b</code></p></th></tr><tr><td><p><em>c</em></p></td><td><p>d</p></td></tr></tbody></table>"
+ },
+ {
+  "id": "table-no-lead",
+  "input": "a | b\n---|---\n1 | 2\n",
+  "output": "<table><tbody><tr><th><p>a</p></th><th><p>b</p></th></tr><tr><td><p>1</p></td><td><p>2</p></td></tr></tbody></table>"
+ },
+ {
+  "id": "tasks-all",
+  "input": "- [ ] todo\n- [x] done\n- [X] caps",
+  "output": "<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p>todo</p></div></li><li data-type=\"taskItem\" data-checked=\"true\"><label><input type=\"checkbox\" checked=\"checked\"><span></span></label><div><p>done</p></div></li><li data-type=\"taskItem\" data-checked=\"true\"><label><input type=\"checkbox\" checked=\"checked\"><span></span></label><div><p>caps</p></div></li></ul>"
+ },
+ {
+  "id": "tasks-mixed",
+  "input": "- [ ] todo\n- [x] done\n- [X] caps\n- [y] nope\n- [] empty",
+  "output": "<ul><li><p>[ ] todo</p></li><li><p>[x] done</p></li><li><p>[x] caps</p></li><li><p>[y] nope</p></li><li><p>[] empty</p></li></ul>"
+ },
+ {
+  "id": "tasks-nocheck-space",
+  "input": "- [ ]todo",
+  "output": "<ul><li><p>[ ]todo</p></li></ul>"
+ },
+ {
+  "id": "tasks-tab",
+  "input": "- [ ]\ttabbed",
+  "output": "<ul><li><p>\ttabbed</p></li></ul>"
+ },
+ {
+  "id": "tasks-ordered",
+  "input": "1. [ ] a\n2. [x] b",
+  "output": "<ol><li><p>[ ] a</p></li><li><p>[x] b</p></li></ol>"
+ },
+ {
+  "id": "tasks-nested",
+  "input": "- [ ] a\n  - [x] b",
+  "output": "<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p>a</p><ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"true\"><label><input type=\"checkbox\" checked=\"checked\"><span></span></label><div><p>b</p></div></li></ul></div></li></ul>"
+ },
+ {
+  "id": "tasks-fmt",
+  "input": "- [ ] **bold** task",
+  "output": "<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p><strong>bold</strong> task</p></div></li></ul>"
+ },
+ {
+  "id": "tasks-multi-para",
+  "input": "- [ ] a\n\n  continued",
+  "output": "<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p>a</p><p>continued</p></div></li></ul>"
+ },
+ {
+  "id": "tasks-loose",
+  "input": "- [ ] a\n\n- [x] b",
+  "output": "<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p>a</p></div></li><li data-type=\"taskItem\" data-checked=\"true\"><label><input type=\"checkbox\" checked=\"checked\"><span></span></label><div><p>b</p></div></li></ul>"
+ },
+ {
+  "id": "list-bullet",
+  "input": "- a\n- b",
+  "output": "<ul><li><p>a</p></li><li><p>b</p></li></ul>"
+ },
+ {
+  "id": "list-plus",
+  "input": "+ a\n+ b",
+  "output": "<ul><li><p>a</p></li><li><p>b</p></li></ul>"
+ },
+ {
+  "id": "list-star",
+  "input": "* a\n* b",
+  "output": "<ul><li><p>a</p></li><li><p>b</p></li></ul>"
+ },
+ {
+  "id": "list-nested",
+  "input": "- a\n  - b\n    - c",
+  "output": "<ul><li><p>a</p><ul><li><p>b</p><ul><li><p>c</p></li></ul></li></ul></li></ul>"
+ },
+ {
+  "id": "list-loose",
+  "input": "- loose\n\n- items",
+  "output": "<ul><li><p>loose</p></li><li><p>items</p></li></ul>"
+ },
+ {
+  "id": "list-ordered",
+  "input": "1. a\n2. b",
+  "output": "<ol><li><p>a</p></li><li><p>b</p></li></ol>"
+ },
+ {
+  "id": "list-ordered-paren",
+  "input": "1) paren",
+  "output": "<ol><li><p>paren</p></li></ol>"
+ },
+ {
+  "id": "list-ordered-start",
+  "input": "003. a\n004. b",
+  "output": "<ol start=\"3\"><li><p>a</p></li><li><p>b</p></li></ol>"
+ },
+ {
+  "id": "list-ordered-zero",
+  "input": "0. a",
+  "output": "<ol start=\"0\"><li><p>a</p></li></ol>"
+ },
+ {
+  "id": "list-ordered-big",
+  "input": "99999999999999999999. a",
+  "output": "<p>99999999999999999999. a</p>"
+ },
+ {
+  "id": "list-ordered-nest",
+  "input": "1. a\n   1. b",
+  "output": "<ol><li><p>a</p><ol><li><p>b</p></li></ol></li></ol>"
+ },
+ {
+  "id": "list-mixed-nest",
+  "input": "- a\n  1. b",
+  "output": "<ul><li><p>a</p><ol><li><p>b</p></li></ol></li></ul>"
+ },
+ {
+  "id": "list-single",
+  "input": "- solo",
+  "output": "<ul><li><p>solo</p></li></ul>"
+ },
+ {
+  "id": "dash-alone",
+  "input": "-",
+  "output": "<ul><li></li></ul>"
+ },
+ {
+  "id": "blockquote",
+  "input": "> quote",
+  "output": "<blockquote><p>quote</p></blockquote>"
+ },
+ {
+  "id": "blockquote-nest",
+  "input": "> a\n>> b",
+  "output": "<blockquote><p>a</p><blockquote><p>b</p></blockquote></blockquote>"
+ },
+ {
+  "id": "blockquote-lazy",
+  "input": "> a\nb",
+  "output": "<blockquote><p>a b</p></blockquote>"
+ },
+ {
+  "id": "blockquote-list",
+  "input": "> - a\n> - b",
+  "output": "<blockquote><ul><li><p>a</p></li><li><p>b</p></li></ul></blockquote>"
+ },
+ {
+  "id": "hr-dash",
+  "input": "---",
+  "output": "<div data-type=\"horizontalRule\"><div></div></div>"
+ },
+ {
+  "id": "hr-star",
+  "input": "***",
+  "output": "<div data-type=\"horizontalRule\"><div></div></div>"
+ },
+ {
+  "id": "hr-under",
+  "input": "___",
+  "output": "<div data-type=\"horizontalRule\"><div></div></div>"
+ },
+ {
+  "id": "hr-spaced",
+  "input": "- - -",
+  "output": "<div data-type=\"horizontalRule\"><div></div></div>"
+ },
+ {
+  "id": "hardbreak-spaces",
+  "input": "a  \nb",
+  "output": "<p>a<br>b</p>"
+ },
+ {
+  "id": "hardbreak-bs",
+  "input": "a\\\nb",
+  "output": "<p>a<br>b</p>"
+ },
+ {
+  "id": "softbreak",
+  "input": "a\nb",
+  "output": "<p>a b</p>"
+ },
+ {
+  "id": "entities",
+  "input": "a &amp; b &#65; &#x42; &bogus; &copy;",
+  "output": "<p>a &amp; b A B &amp;bogus; ©</p>"
+ },
+ {
+  "id": "entity-unknown-num",
+  "input": "&#0; &#xD800; &#99999999;",
+  "output": "<p>� � &amp;#99999999;</p>"
+ },
+ {
+  "id": "escapes",
+  "input": "\\*\\[\\]\\\\\\`\\_\\{\\}\\#\\+\\-\\.\\!",
+  "output": "<p>*[]\\`_{}#+-.!</p>"
+ },
+ {
+  "id": "escape-nonspecial",
+  "input": "\\a \\1",
+  "output": "<p>\\a \\1</p>"
+ },
+ {
+  "id": "html-inline",
+  "input": "<div>raw</div>",
+  "output": "<p>&lt;div&gt;raw&lt;/div&gt;</p>"
+ },
+ {
+  "id": "html-compare",
+  "input": "a < b > c",
+  "output": "<p>a &lt; b &gt; c</p>"
+ },
+ {
+  "id": "html-span-mid",
+  "input": "a <span>x</span> b",
+  "output": "<p>a &lt;span&gt;x&lt;/span&gt; b</p>"
+ },
+ {
+  "id": "html-block-multi",
+  "input": "<div>\nfoo\n</div>",
+  "output": "<p>&lt;div&gt; foo &lt;/div&gt;</p>"
+ },
+ {
+  "id": "html-comment",
+  "input": "<!-- hi -->",
+  "output": "<p>&lt;!-- hi --&gt;</p>"
+ },
+ {
+  "id": "html-script-text",
+  "input": "<script>alert(1)</script>",
+  "output": "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>"
+ },
+ {
+  "id": "amp",
+  "input": "AT&T",
+  "output": "<p>AT&amp;T</p>"
+ },
+ {
+  "id": "quote-text",
+  "input": "a\"b",
+  "output": "<p>a\"b</p>"
+ },
+ {
+  "id": "squote",
+  "input": "a'b",
+  "output": "<p>a'b</p>"
+ },
+ {
+  "id": "text-url-plain",
+  "input": "/relative/path",
+  "output": "<p>/relative/path</p>"
+ },
+ {
+  "id": "text-www",
+  "input": "www.example.com",
+  "output": "<p>www.example.com</p>"
+ },
+ {
+  "id": "text-footnote",
+  "input": "[^1]\n\n[^1]: def",
+  "output": "<p><a href=\"def\" rel=\"noopener noreferrer\">^1</a></p>"
+ },
+ {
+  "id": "text-math",
+  "input": "$x^2$ and $$y$$",
+  "output": "<p>$x^2$ and $$y$$</p>"
+ },
+ {
+  "id": "text-heading-attr",
+  "input": "# t {#id}",
+  "output": "<h1>t {#id}</h1>"
+ },
+ {
+  "id": "text-alert",
+  "input": "> [!NOTE]\n> hi",
+  "output": "<blockquote><p>[!NOTE] hi</p></blockquote>"
+ },
+ {
+  "id": "text-frontmatter",
+  "input": "---\ntitle: x\n---\n\nbody",
+  "output": "<div data-type=\"horizontalRule\"><div></div></div><h2>title: x</h2><p>body</p>"
+ },
+ {
+  "id": "text-deflist",
+  "input": "term\n: def",
+  "output": "<p>term : def</p>"
+ },
+ {
+  "id": "text-abbr",
+  "input": "*[HTML]: Hypertext",
+  "output": "<p>*[HTML]: Hypertext</p>"
+ },
+ {
+  "id": "amps-edge",
+  "input": "&& &; &#; &#x;",
+  "output": "<p>&amp;&amp; &amp;; &amp;#; &amp;#x;</p>"
+ },
+ {
+  "id": "link-angle-mailto",
+  "input": "[a](<mailto:x@y.z>)",
+  "output": "<p><a href=\"mailto:x@y.z\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-puny-host",
+  "input": "[a](http://münchen.de/x)",
+  "output": "<p><a href=\"http://xn--mnchen-3ya.de/x\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-upper-host",
+  "input": "[a](HTTP://MÜNCHEN.de/)",
+  "output": "<p><a href=\"HTTP://M%C3%9CNCHEN.de/\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-proto-rel",
+  "input": "[a](//h.c/p)",
+  "output": "<p><a href=\"//h.c/p\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-mailto",
+  "input": "[a](mailto:a@b.c)",
+  "output": "<p><a href=\"mailto:a@b.c\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-tel",
+  "input": "[a](tel:+123)",
+  "output": "<p><a href=\"tel:+123\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-skype",
+  "input": "[a](skype:name)",
+  "output": "<p><a rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-ipv6",
+  "input": "[a](http://[::1]/x)",
+  "output": "<p><a rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-auth-port",
+  "input": "[a](https://u:p@h.com:8080/a?b#c)",
+  "output": "<p><a href=\"https://u:p@h.com:8080/a?b#c\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-cjk-path",
+  "input": "[a](http://h/é中)",
+  "output": "<p><a href=\"http://h/%C3%A9%E4%B8%AD\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-title-bs",
+  "input": "[a](http://e.com/x \"a\\\"b\")",
+  "output": "<p><a href=\"http://e.com/x\" title=\"a&quot;b\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-multi-line",
+  "input": "[a\nb](http://e.com/x)",
+  "output": "<p><a href=\"http://e.com/x\" rel=\"noopener noreferrer\">a b</a></p>"
+ },
+ {
+  "id": "list-task-only-one",
+  "input": "- [x] single",
+  "output": "<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"true\"><label><input type=\"checkbox\" checked=\"checked\"><span></span></label><div><p>single</p></div></li></ul>"
+ },
+ {
+  "id": "quote-task",
+  "input": "> - [ ] q",
+  "output": "<blockquote><ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p>q</p></div></li></ul></blockquote>"
+ },
+ {
+  "id": "code-in-task",
+  "input": "- [ ] `c`",
+  "output": "<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p><code>c</code></p></div></li></ul>"
+ },
+ {
+  "id": "link-in-task",
+  "input": "- [ ] [a](http://e.com)",
+  "output": "<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p><a href=\"http://e.com\" rel=\"noopener noreferrer\">a</a></p></div></li></ul>"
+ },
+ {
+  "id": "fence-in-list",
+  "input": "- a\n  ```\n  code\n  ```",
+  "output": "<ul><li><p>a</p><pre><code>code</code></pre></li></ul>"
+ },
+ {
+  "id": "table-in-quote",
+  "input": "> | a |\n> |---|\n> | 1 |",
+  "output": "<blockquote><table><tbody><tr><th><p>a</p></th></tr><tr><td><p>1</p></td></tr></tbody></table></blockquote>"
+ },
+ {
+  "id": "hr-in-list",
+  "input": "- a\n  ---",
+  "output": "<ul><li><h2>a</h2></li></ul>"
+ },
+ {
+  "id": "setext-in-quote",
+  "input": "> t\n> ==",
+  "output": "<blockquote><h1>t</h1></blockquote>"
+ },
+ {
+  "id": "html-entity-regression",
+  "input": "&lt;div&gt;",
+  "output": "<p>&lt;div&gt;</p>"
+ },
+ {
+  "id": "nbsp-md",
+  "input": "a b",
+  "output": "<p>a&nbsp;b</p>"
+ },
+ {
+  "id": "zwsp",
+  "input": "a​b",
+  "output": "<p>a​b</p>"
+ },
+ {
+  "id": "crlf",
+  "input": "a\r\nb\r\n",
+  "output": "<p>a b</p>"
+ },
+ {
+  "id": "trailing-spaces",
+  "input": "a   ",
+  "output": "<p>a</p>"
+ },
+ {
+  "id": "unicode-para",
+  "input": "héllo 世界 😀",
+  "output": "<p>héllo 世界 😀</p>"
+ },
+ {
+  "id": "lone-stars",
+  "input": "* * *x",
+  "output": "<ul><li><ul><li><p>*x</p></li></ul></li></ul>"
+ },
+ {
+  "id": "emph-across-nl",
+  "input": "*a\nb*",
+  "output": "<p><em>a b</em></p>"
+ },
+ {
+  "id": "link-def-only",
+  "input": "[r]: /u",
+  "output": "<p></p>"
+ },
+ {
+  "id": "link-def-title-next-line",
+  "input": "[a][r]\n\n[r]: /u\n\"t\"",
+  "output": "<p><a href=\"/u\" title=\"t\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "image-title-paren",
+  "input": "![a](http://e.com/i.png (ti))",
+  "output": "<img src=\"http://e.com/i.png\" alt=\"a\" title=\"ti\">"
+ },
+ {
+  "id": "autolink-query",
+  "input": "<http://e.com/?a=1&b=2>",
+  "output": "<p><a href=\"http://e.com/?a=1&amp;b=2\" rel=\"noopener noreferrer\">http://e.com/?a=1&amp;b=2</a></p>"
+ },
+ {
+  "id": "autolink-upper",
+  "input": "<HTTP://E.COM/X>",
+  "output": "<p><a href=\"HTTP://E.COM/X\" rel=\"noopener noreferrer\">HTTP://E.COM/X</a></p>"
+ },
+ {
+  "id": "autolink-puny",
+  "input": "<http://xn--mnchen-3ya.de/>",
+  "output": "<p><a href=\"http://xn--mnchen-3ya.de/\" rel=\"noopener noreferrer\">http://münchen.de/</a></p>"
+ },
+ {
+  "id": "tasks-marker-newline",
+  "input": "- [ ]\n  continued",
+  "output": "<ul><li><p> continued</p></li></ul>"
+ },
+ {
+  "id": "tasks-marker-eof",
+  "input": "- [ ]",
+  "output": "<ul><li><p>[ ]</p></li></ul>"
+ },
+ {
+  "id": "tasks-marker-eof-space",
+  "input": "- [ ] ",
+  "output": "<ul><li><p>[ ]</p></li></ul>"
+ },
+ {
+  "id": "hb-space-task",
+  "input": "- [ ]  \ncont",
+  "output": "<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p><br>cont</p></div></li></ul>"
+ },
+ {
+  "id": "hb-bs-literal",
+  "input": "- [ ]\\\ncont",
+  "output": "<ul><li><p>[ ]<br>cont</p></li></ul>"
+ },
+ {
+  "id": "html-script-multi",
+  "input": "<script>\n\nalert\n</script>",
+  "output": "<p>&lt;script&gt;</p><p>alert &lt;/script&gt;</p>"
+ },
+ {
+  "id": "html-block-indent",
+  "input": "<div>\n      deep\n</div>",
+  "output": "<p>&lt;div&gt; deep &lt;/div&gt;</p>"
+ },
+ {
+  "id": "html-indented-first",
+  "input": "  <div>\n  foo",
+  "output": "<p>&lt;div&gt; foo</p>"
+ },
+ {
+  "id": "html-blank-tab",
+  "input": "<div>\n\t\nfoo",
+  "output": "<p>&lt;div&gt;</p><p>foo</p>"
+ },
+ {
+  "id": "html-trail-1sp",
+  "input": "<div>a \nfoo",
+  "output": "<p>&lt;div&gt;a foo</p>"
+ },
+ {
+  "id": "html-trail-tab",
+  "input": "<div>a\t\nfoo",
+  "output": "<p>&lt;div&gt;a\t foo</p>"
+ },
+ {
+  "id": "html-em-in-block",
+  "input": "<div>\n*a*\n</div>",
+  "output": "<p>&lt;div&gt; <em>a</em> &lt;/div&gt;</p>"
+ },
+ {
+  "id": "html-escape-line",
+  "input": "<div>\n\\*x\\*\n</div>",
+  "output": "<p>&lt;div&gt; *x* &lt;/div&gt;</p>"
+ },
+ {
+  "id": "html-entity-line",
+  "input": "<div>\n&copy;\n</div>",
+  "output": "<p>&lt;div&gt; © &lt;/div&gt;</p>"
+ },
+ {
+  "id": "html-link-line",
+  "input": "<div>\n[a](b)\n</div>",
+  "output": "<p>&lt;div&gt; <a href=\"b\" rel=\"noopener noreferrer\">a</a> &lt;/div&gt;</p>"
+ },
+ {
+  "id": "html-in-list",
+  "input": "- <div>\n  foo",
+  "output": "<ul><li><p>&lt;div&gt; foo</p></li></ul>"
+ },
+ {
+  "id": "html-code-line",
+  "input": "<div>\n`c`\n</div>",
+  "output": "<p>&lt;div&gt; <code>c</code> &lt;/div&gt;</p>"
+ },
+ {
+  "id": "link-angle-nl",
+  "input": "[a](<foo\nbar>)",
+  "output": "<p>[a](&lt;foo bar&gt;)</p>"
+ },
+ {
+  "id": "link-angle-tab",
+  "input": "[a](<foo\tbar>)",
+  "output": "<p><a href=\"foo%09bar\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "link-nested-valid",
+  "input": "[a [b](http://ok)](javascript:x)",
+  "output": "<p>[a <a href=\"http://ok\" rel=\"noopener noreferrer\">b</a>](javascript:x)</p>"
+ },
+ {
+  "id": "link-js-upper",
+  "input": "[a](JAVASCRIPT:x)",
+  "output": "<p>[a](JAVASCRIPT:x)</p>"
+ },
+ {
+  "id": "link-upper-puny",
+  "input": "[a](HTTP://MÜNCHEN.de/)",
+  "output": "<p><a href=\"HTTP://M%C3%9CNCHEN.de/\" rel=\"noopener noreferrer\">a</a></p>"
+ },
+ {
+  "id": "image-invalid-nested-em",
+  "input": "![a *b*](javascript:x)",
+  "output": "<p>![a <em>b</em>](javascript:x)</p>"
+ },
+ {
+  "id": "fence-info-bs",
+  "input": "```a\\*b\nx\n```",
+  "output": "<pre><code class=\"language-a\\*b\">x</code></pre>"
+ },
+ {
+  "id": "table-pipe-end",
+  "input": "| a |\n|---|\n| 1 | 2 | 3 |\n",
+  "output": "<table><tbody><tr><th><p>a</p></th></tr><tr><td><p>1</p></td></tr></tbody></table>"
+ },
+ {
+  "id": "blockquote-code",
+  "input": ">     code?",
+  "output": "<blockquote><pre><code>code?</code></pre></blockquote>"
+ },
+ {
+  "id": "autolink-js",
+  "input": "<javascript:alert(1)>",
+  "output": "<p>&lt;javascript:alert(1)&gt;</p>"
+ },
+ {
+  "id": "autolink-ftp",
+  "input": "<ftp://h/f>",
+  "output": "<p><a rel=\"noopener noreferrer\">ftp://h/f</a></p>"
+ },
+ {
+  "id": "autolink-skype",
+  "input": "<skype:name>",
+  "output": "<p><a rel=\"noopener noreferrer\">skype:name</a></p>"
+ },
+ {
+  "id": "autolink-caps",
+  "input": "<HTTP://H/X>",
+  "output": "<p><a href=\"HTTP://H/X\" rel=\"noopener noreferrer\">HTTP://H/X</a></p>"
+ },
+ {
+  "id": "autolink-entity",
+  "input": "<http://h/a&amp;b>",
+  "output": "<p><a href=\"http://h/a&amp;amp;b\" rel=\"noopener noreferrer\">http://h/a&amp;amp;b</a></p>"
+ },
+ {
+  "id": "email-encoded",
+  "input": "<foo%40@bar.com>",
+  "output": "<p><a href=\"mailto:foo%40@bar.com\" rel=\"noopener noreferrer\">foo%40@bar.com</a></p>"
+ },
+ {
+  "id": "email-caps",
+  "input": "<FOO@BAR.COM>",
+  "output": "<p><a href=\"mailto:FOO@BAR.COM\" rel=\"noopener noreferrer\">FOO@BAR.COM</a></p>"
+ },
+ {
+  "id": "email-space",
+  "input": "<a b@c.d>",
+  "output": "<p>&lt;a b@c.d&gt;</p>"
+ },
+ {
+  "id": "sp-cont",
+  "input": "a\n   b",
+  "output": "<p>a b</p>"
+ },
+ {
+  "id": "trail-tab",
+  "input": "a\t\nb",
+  "output": "<p>a\t b</p>"
+ },
+ {
+  "id": "trail-1sp",
+  "input": "a \nb",
+  "output": "<p>a b</p>"
+ },
+ {
+  "id": "title-junk",
+  "input": "[a](b \"t\" extra)",
+  "output": "<p>[a](b \"t\" extra)</p>"
+ },
+ {
+  "id": "none",
+  "input": null,
+  "output": "<p></p>"
+ }
+]
