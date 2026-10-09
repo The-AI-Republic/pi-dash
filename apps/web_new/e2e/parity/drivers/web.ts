@@ -38,6 +38,8 @@ import type {
   LayoutsLayoutKey,
   DocumentShellFacts,
   NotFoundFacts,
+  NotificationsCard,
+  NotificationsTab,
   ParityBrowserCookie,
   ParityDriver,
   ParityTarget,
@@ -19141,5 +19143,229 @@ export class WebDriver implements ParityDriver {
 
   async pageEditorRephraseRequests(): Promise<string[]> {
     return [...this.pageEditorRephraseSeen];
+  }
+
+  // --- Notifications inbox foundation (NEWFRONT-198, NTF-001..006).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. Selectors use the notifications test hooks the
+  // --- area added to the old app plus structural reads within a card.
+
+  private notificationsTabLocator(tab: NotificationsTab): Locator {
+    return this.page.getByTestId(`notifications-tab-${tab}`);
+  }
+
+  private static cleanText(raw: string | null): string {
+    return (raw ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  private static badgeLike(token: string): boolean {
+    return token !== "" && /^[\d@+,.kKmM]+$/.test(token);
+  }
+
+  async notificationsOpenInbox(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/notifications/`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.notificationsTabLocator("all").first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async notificationsListPaneVisible(): Promise<boolean> {
+    const pane = this.page.getByTestId("notifications-list-pane").first();
+    if ((await pane.count()) === 0) return false;
+    return pane.isVisible().catch(() => false);
+  }
+
+  async notificationsDetailPaneVisible(): Promise<boolean> {
+    const pane = this.page.getByTestId("notifications-detail-pane").first();
+    if ((await pane.count()) === 0) return false;
+    return pane.isVisible().catch(() => false);
+  }
+
+  async notificationsPaneWidths(): Promise<{ list: number; detail: number }> {
+    const list = this.page.getByTestId("notifications-list-pane").first();
+    const detail = this.page.getByTestId("notifications-detail-pane").first();
+    const listBox = await list.boundingBox().catch(() => null);
+    const detailBox = await detail.boundingBox().catch(() => null);
+    return { list: listBox?.width ?? 0, detail: detailBox?.width ?? 0 };
+  }
+
+  async notificationsSelectCard(index: number): Promise<void> {
+    const card = this.page.getByTestId("notification-card").nth(index);
+    await card.scrollIntoViewIfNeeded().catch(() => undefined);
+    await card.click({ timeout: WebDriver.WAIT_MS });
+    const selected = this.page.locator(`[data-testid="notification-card"][data-selected="true"]`);
+    await selected.first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async notificationsTabNames(): Promise<string[]> {
+    const tabs = this.page.getByTestId(/notifications-tab-(all|mentions)/);
+    const count = await tabs.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      // The badge (when present) renders after the label; strip it.
+      const tokens = WebDriver.cleanText(
+        await tabs
+          .nth(i)
+          .innerText()
+          .catch(() => "")
+      ).split(" ");
+      const last = tokens[tokens.length - 1] ?? "";
+      const labelTokens = tokens.length > 1 && WebDriver.badgeLike(last) ? tokens.slice(0, -1) : tokens;
+      names.push(labelTokens.join(" "));
+    }
+    return names;
+  }
+
+  async notificationsActiveTab(): Promise<NotificationsTab> {
+    const active = this.page.locator('[data-testid^="notifications-tab-"][data-active="true"]');
+    await active.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const testId = await active
+      .first()
+      .getAttribute("data-testid")
+      .catch(() => null);
+    return testId === "notifications-tab-mentions" ? "mentions" : "all";
+  }
+
+  async notificationsSelectTab(tab: NotificationsTab): Promise<void> {
+    await this.notificationsTabLocator(tab).first().click({ timeout: WebDriver.WAIT_MS });
+    const active = this.page.locator(`[data-testid="notifications-tab-${tab}"][data-active="true"]`);
+    await active.first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async notificationsTabBadge(tab: NotificationsTab): Promise<string | null> {
+    const tabRoot = this.notificationsTabLocator(tab).first();
+    if ((await tabRoot.count()) === 0) return null;
+    // Label and badge render as successive text runs; a lone run means no badge.
+    const full = WebDriver.cleanText(await tabRoot.innerText().catch(() => ""));
+    if (full === "") return null;
+    const tokens = full.split(" ");
+    if (tokens.length < 2) return null;
+    const badge = tokens[tokens.length - 1] ?? "";
+    return WebDriver.badgeLike(badge) ? badge : null;
+  }
+
+  async notificationsNavBadge(): Promise<string | null> {
+    const badge = this.page.getByTestId("notifications-nav-badge").first();
+    if ((await badge.count()) === 0) return null;
+    if (!(await badge.isVisible().catch(() => false))) return null;
+    const text = WebDriver.cleanText(await badge.innerText().catch(() => ""));
+    return text === "" ? null : text;
+  }
+
+  async notificationsProjectNavBadge(
+    workspaceSlug: string,
+    projectId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<string | null> {
+    const unreadPath = `/api/workspaces/${workspaceSlug}/users/notifications/unread/`;
+    const fetchWait = this.page
+      .waitForResponse(
+        (response) => response.request().method() === "GET" && response.url().includes(unreadPath) && response.ok(),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.openAuthenticated(`/${workspaceSlug}/projects/${projectId}/issues`, cookies);
+    await fetchWait;
+    return this.notificationsNavBadge();
+  }
+
+  async notificationsCards(): Promise<NotificationsCard[]> {
+    const cards = this.page.getByTestId("notification-card");
+    const count = await cards.count();
+    const out: NotificationsCard[] = [];
+    for (let i = 0; i < count; i++) {
+      const card = cards.nth(i);
+      const summaryRoot = card.getByTestId("notification-summary").first();
+      const summary = WebDriver.cleanText(await summaryRoot.innerText().catch(() => ""));
+      const actor = WebDriver.cleanText(
+        await summaryRoot
+          .locator("span")
+          .first()
+          .innerText()
+          .catch(() => "")
+      );
+      const itemLine = WebDriver.cleanText(
+        await card
+          .getByTestId("notification-item-line")
+          .first()
+          .innerText()
+          .catch(() => "")
+      );
+      const age = WebDriver.cleanText(
+        await card
+          .getByTestId("notification-age")
+          .first()
+          .innerText()
+          .catch(() => "")
+      );
+      const unread = (await card.getByTestId("notification-unread-dot").count()) > 0;
+      const firstSpace = itemLine.indexOf(" ");
+      out.push({
+        actor,
+        summary,
+        reference: firstSpace === -1 ? itemLine : itemLine.slice(0, firstSpace),
+        title: firstSpace === -1 ? "" : itemLine.slice(firstSpace + 1),
+        age,
+        unread,
+      });
+    }
+    return out;
+  }
+
+  async notificationsCardBackgrounds(): Promise<string[]> {
+    const cards = this.page.getByTestId("notification-card");
+    const count = await cards.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const background = await cards
+        .nth(i)
+        .evaluate((node) => window.getComputedStyle(node).backgroundColor)
+        .catch(() => "");
+      out.push(background ?? "");
+    }
+    return out;
+  }
+
+  async notificationsEntryFetches(workspaceSlug: string): Promise<{ list: boolean; unread: boolean }> {
+    const listPath = `/api/workspaces/${workspaceSlug}/users/notifications`;
+    const seen = { list: false, unread: false };
+    const listWait = this.page
+      .waitForResponse(
+        (response) => {
+          const url = response.url();
+          return (
+            response.request().method() === "GET" &&
+            url.includes(listPath) &&
+            !url.includes("/unread/") &&
+            response.ok()
+          );
+        },
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    const unreadWait = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "GET" && response.url().includes(`${listPath}/unread/`) && response.ok(),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.page.goto(`/${workspaceSlug}/notifications/`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.notificationsTabLocator("all")
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+    seen.list = await listWait;
+    seen.unread = await unreadWait;
+    return seen;
   }
 }

@@ -3492,6 +3492,54 @@ export interface ParityDriver {
   pageEditorAiMenuVisible(): Promise<boolean>;
   /** Rephrase/grammar request URLs seen (missing-backend proofs). */
   pageEditorRephraseRequests(): Promise<string[]>;
+
+  // ---------------------------------------------------------------------------
+  // Notifications inbox foundation (NEWFRONT-198, NTF-001..006). Observed on
+  // apps/web: the two-pane inbox shell, the stream tabs with their badges,
+  // the navigation badge, the newest-first card list, and the unread marks.
+  // Appended; existing entries above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Open the workspace inbox and wait until its tab strip has mounted. */
+  notificationsOpenInbox(workspaceSlug: string): Promise<void>;
+  /** Whether the inbox list pane currently renders. */
+  notificationsListPaneVisible(): Promise<boolean>;
+  /** Whether the inbox detail pane currently renders. */
+  notificationsDetailPaneVisible(): Promise<boolean>;
+  /** Rendered widths of the list and detail panes in CSS pixels. */
+  notificationsPaneWidths(): Promise<{ list: number; detail: number }>;
+  /** Select a card by index and wait until it becomes selected. */
+  notificationsSelectCard(index: number): Promise<void>;
+  /** Visible stream-tab labels in display order. */
+  notificationsTabNames(): Promise<string[]>;
+  /** Key of the currently active stream tab. */
+  notificationsActiveTab(): Promise<NotificationsTab>;
+  /** Activate a stream tab and wait until it becomes active. */
+  notificationsSelectTab(tab: NotificationsTab): Promise<void>;
+  /** Badge text on a stream tab, or null when the tab carries no badge. */
+  notificationsTabBadge(tab: NotificationsTab): Promise<string | null>;
+  /** Badge text on the sidebar notifications entry, or null when hidden. */
+  notificationsNavBadge(): Promise<string | null>;
+  /**
+   * Enter a project's issues page as the owner of `cookies` and read the
+   * sidebar notifications badge once its unread fetch lands (or null when
+   * the entry carries no badge). The fetch wait starts before navigation,
+   * so zero-state reads are post-load rather than mid-flight.
+   */
+  notificationsProjectNavBadge(
+    workspaceSlug: string,
+    projectId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<string | null>;
+  /** Inbox cards in display order, each as the user reads it. */
+  notificationsCards(): Promise<NotificationsCard[]>;
+  /** Computed background of each card in display order (tint comparison). */
+  notificationsCardBackgrounds(): Promise<string[]>;
+  /**
+   * Reload the inbox and report whether the list fetch and the unread-count
+   * fetch each fired during entry.
+   */
+  notificationsEntryFetches(workspaceSlug: string): Promise<{ list: boolean; unread: boolean }>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -3959,4 +4007,23 @@ export interface AssistantApiCounts {
   cancel: number;
   threadList: number;
   messageList: number;
+}
+
+/** Inbox stream-tab key (NEWFRONT-198, NTF-002). */
+export type NotificationsTab = "all" | "mentions";
+
+/** One inbox card as the user reads it (NEWFRONT-198, NTF-005..006). */
+export interface NotificationsCard {
+  /** Actor display text (who acted). */
+  actor: string;
+  /** Human-readable change summary line. */
+  summary: string;
+  /** Work-item reference as shown (identifier plus sequence). */
+  reference: string;
+  /** Work-item title as shown. */
+  title: string;
+  /** Relative age label as shown. */
+  age: string;
+  /** Whether the unread marker currently shows on the card. */
+  unread: boolean;
 }

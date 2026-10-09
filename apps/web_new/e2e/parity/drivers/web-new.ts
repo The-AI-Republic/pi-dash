@@ -42,6 +42,8 @@ import type {
   SchedulerBindingValues,
   SchedulerCalendarBlock,
   RunnerChatStreamFrame,
+  NotificationsCard,
+  NotificationsTab,
   SchedulerCatalogRow,
   SchedulerDefinitionValues,
   SchedulerInstallOption,
@@ -5590,5 +5592,55 @@ export class WebNewDriver implements ParityDriver {
   }
   async pageEditorRephraseRequests(): Promise<string[]> {
     return todo("pageEditorRephraseRequests");
+  }
+
+  // --- Notifications inbox foundation (NEWFRONT-198, NTF-001..006).
+  // --- Throwing stubs per the shared driver contract; the notifications
+  // --- area fills these in when it lands in apps/web_new.
+  async notificationsOpenInbox(_workspaceSlug: string): Promise<void> {
+    return todo("notificationsOpenInbox");
+  }
+  async notificationsListPaneVisible(): Promise<boolean> {
+    return todo("notificationsListPaneVisible");
+  }
+  async notificationsDetailPaneVisible(): Promise<boolean> {
+    return todo("notificationsDetailPaneVisible");
+  }
+  async notificationsPaneWidths(): Promise<{ list: number; detail: number }> {
+    return todo("notificationsPaneWidths");
+  }
+  async notificationsSelectCard(_index: number): Promise<void> {
+    return todo("notificationsSelectCard");
+  }
+  async notificationsTabNames(): Promise<string[]> {
+    return todo("notificationsTabNames");
+  }
+  async notificationsActiveTab(): Promise<NotificationsTab> {
+    return todo("notificationsActiveTab");
+  }
+  async notificationsSelectTab(_tab: NotificationsTab): Promise<void> {
+    return todo("notificationsSelectTab");
+  }
+  async notificationsTabBadge(_tab: NotificationsTab): Promise<string | null> {
+    return todo("notificationsTabBadge");
+  }
+  async notificationsNavBadge(): Promise<string | null> {
+    return todo("notificationsNavBadge");
+  }
+  async notificationsProjectNavBadge(
+    _workspaceSlug: string,
+    _projectId: string,
+    _cookies: ParityBrowserCookie[]
+  ): Promise<string | null> {
+    return todo("notificationsProjectNavBadge");
+  }
+  async notificationsCards(): Promise<NotificationsCard[]> {
+    return todo("notificationsCards");
+  }
+  async notificationsCardBackgrounds(): Promise<string[]> {
+    return todo("notificationsCardBackgrounds");
+  }
+  async notificationsEntryFetches(_workspaceSlug: string): Promise<{ list: boolean; unread: boolean }> {
+    return todo("notificationsEntryFetches");
   }
 }

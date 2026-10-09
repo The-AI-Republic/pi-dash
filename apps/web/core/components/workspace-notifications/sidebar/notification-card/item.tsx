@@ -70,6 +70,8 @@ export const NotificationItem = observer(function NotificationItem(props: TNotif
 
   return (
     <Row
+      data-testid="notification-card"
+      data-selected={currentSelectedNotificationId === notification?.id}
       className={cn(
         "group relative flex cursor-pointer items-center gap-2 border-b border-subtle py-4 transition-all",
         {
@@ -80,7 +82,10 @@ export const NotificationItem = observer(function NotificationItem(props: TNotif
       onClick={handleNotificationIssuePeekOverview}
     >
       {notification.read_at === null && (
-        <div className="absolute top-[50%] left-2 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-accent-primary" />
+        <div
+          data-testid="notification-unread-dot"
+          className="absolute top-[50%] left-2 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-accent-primary"
+        />
       )}
 
       <div className="relative flex w-full gap-2">
@@ -98,7 +103,10 @@ export const NotificationItem = observer(function NotificationItem(props: TNotif
 
         <div className="-mt-2 w-full space-y-1">
           <div className="relative flex h-8 items-center gap-3">
-            <div className="line-clamp-1 w-full truncate overflow-hidden text-body-xs-medium break-all whitespace-normal text-primary">
+            <div
+              data-testid="notification-summary"
+              className="line-clamp-1 w-full truncate overflow-hidden text-body-xs-medium break-all whitespace-normal text-primary"
+            >
               <NotificationContent
                 notification={notification}
                 workspaceId={workspace.id}
@@ -117,11 +125,14 @@ export const NotificationItem = observer(function NotificationItem(props: TNotif
           </div>
 
           <div className="relative flex items-center gap-3 text-caption-sm-regular text-secondary">
-            <div className="line-clamp-1 w-full truncate overflow-hidden break-words whitespace-normal">
+            <div
+              data-testid="notification-item-line"
+              className="line-clamp-1 w-full truncate overflow-hidden break-words whitespace-normal"
+            >
               {notification?.data?.issue?.identifier}-{notification?.data?.issue?.sequence_id}&nbsp;
               {notification?.data?.issue?.name}
             </div>
-            <div className="flex-shrink-0">
+            <div data-testid="notification-age" className="flex-shrink-0">
               {notification?.snoozed_till ? (
                 <p className="flex flex-shrink-0 items-center justify-end gap-x-1 text-tertiary">
                   <Clock className="h-4 w-4" />
