@@ -928,6 +928,25 @@ fn check_deleted_at(value: &Value, timezone: &Tz) -> Result<Option<DateTime<Utc>
 ///   `overflow` message.
 fn parse_deleted_at(text: &str, timezone: &Tz) -> Result<DateTime<Utc>, String> {
     let invalid = || DATETIME_INVALID_MESSAGE.to_owned();
+    // DRF's `strptime(value, 'iso-8601')` fallthrough (`to_internal_value`
+    // runs it when `parse_datetime` returns `None` — PIDASHCONV-773):
+    // the literal matches case-insensitively and yields naive
+    // 1900-01-01 through the request-zone arm (mirrored below).
+    // Checked on the RAW text, before the `\n`-strip: Django's
+    // `strptime` sees the unstripped value, so a padded literal still
+    // fails. The letter-led literal can never reach a core arm (all
+    // need leading date digits), so checking it first is order-exact.
+    // Exact match (probed); ASCII-only (765 unicode-gap family).
+    if text.eq_ignore_ascii_case("iso-8601") {
+        let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("1900-01-01 valid");
+        return match timezone.from_local_datetime(&naive) {
+            LocalResult::Single(aware) => Ok(aware.with_timezone(&Utc)),
+            LocalResult::Ambiguous(first, _) => Ok(first.with_timezone(&Utc)),
+            LocalResult::None => Err(make_aware_message(timezone)),
+        };
+    }
     let text = text.strip_suffix('\n').unwrap_or(text);
     let bytes = text.as_bytes();
     let len = bytes.len();
@@ -2642,6 +2661,35 @@ mod tests {
         let validation = validate_sticky_input(&json_map(&[("deleted_at", Value::Null)]), &utc());
         assert!(validation.errors.is_empty());
         assert_eq!(validation.write.deleted_at, Some(None));
+    }
+
+    #[test]
+    fn deleted_at_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01 in the request zone (probed live both backends).
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let parsed = parse_deleted_at(text, &utc()).expect(text);
+            assert_eq!(parsed.to_rfc3339(), "1900-01-01T00:00:00+00:00", "{text:?}");
+        }
+        // Near-misses stay invalid (exact match on the raw text, both
+        // sides probed — padding fails even though this parser strips
+        // one trailing newline).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert!(parse_deleted_at(text, &utc()).is_err(), "{text:?}");
+        }
     }
 
     #[test]

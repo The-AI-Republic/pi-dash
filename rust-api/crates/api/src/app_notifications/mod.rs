@@ -2529,8 +2529,9 @@ async fn preference_patch(
 /// (default `iso-8601` input formats, JSON null clears the column when
 /// the model allows it): null → `None`; RFC 3339 / naive
 /// `YYYY-MM-DD[T ]hh:mm:ss[.f]` (naive read as UTC — `TIME_ZONE` is
-/// UTC) → the instant; anything else → the exact 400 field error keyed
-/// by `field`.
+/// UTC) → the instant; the `strptime(value, 'iso-8601')` fallthrough
+/// literal → naive 1900-01-01 as UTC; anything else → the exact 400
+/// field error keyed by `field`.
 fn parse_datetime_field(
     value: Option<&Value>,
     field: &str,
@@ -2561,6 +2562,18 @@ fn parse_datetime_field(
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(raw, format) {
             return Ok(Some(naive.and_utc()));
         }
+    }
+    // DRF's `strptime(value, 'iso-8601')` fallthrough (`to_internal_value`
+    // runs it when `parse_datetime` returns `None` — PIDASHCONV-773):
+    // the literal matches case-insensitively and yields naive
+    // 1900-01-01, read as UTC like every naive input here. Exact match:
+    // padding fails on both sides (probed); ASCII-only (765
+    // unicode-gap family).
+    if raw.eq_ignore_ascii_case("iso-8601") {
+        let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("1900-01-01 valid");
+        return Ok(Some(naive.and_utc()));
     }
     Err(invalid())
 }
@@ -2724,6 +2737,40 @@ mod tests {
             assert_eq!(
                 errors,
                 serde_json::json!({"snoozed_till": [INVALID_SNOOZED_MESSAGE]})
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_field_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01, read as UTC (probed live both backends).
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let value = Value::String(text.to_owned());
+            let parsed = parse_datetime_field(Some(&value), "deleted_at")
+                .expect(text)
+                .expect("some");
+            assert_eq!(parsed.to_rfc3339(), "1900-01-01T00:00:00+00:00", "{text:?}");
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            let value = Value::String(text.to_owned());
+            assert!(
+                parse_datetime_field(Some(&value), "deleted_at").is_err(),
+                "{text:?}"
             );
         }
     }

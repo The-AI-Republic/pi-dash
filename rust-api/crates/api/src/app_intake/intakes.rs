@@ -261,23 +261,35 @@ fn validate_datetime(
         }
         return None;
     }
-    let text = match value {
-        serde_json::Value::String(text) => text.trim().to_string(),
+    let raw = match value {
+        serde_json::Value::String(text) => text,
         _ => {
             push_error(errors, field, datetime_format_message());
             return None;
         }
     };
+    let text = raw.trim().to_string();
     if let Ok(date) = chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d") {
         return Some(date.and_hms_opt(0, 0, 0).expect("midnight").and_utc());
     }
-    match chrono::DateTime::parse_from_rfc3339(&text) {
-        Ok(dt) => Some(dt.with_timezone(&Utc)),
-        Err(_) => {
-            push_error(errors, field, datetime_format_message());
-            None
-        }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&text) {
+        return Some(dt.with_timezone(&Utc));
     }
+    // DRF's `strptime(value, 'iso-8601')` fallthrough (`to_internal_value`
+    // runs it when `parse_datetime` returns `None` — PIDASHCONV-773):
+    // the literal matches case-insensitively and yields naive
+    // 1900-01-01, read as UTC like the date arm above. Checked on the RAW
+    // text — Django's `strptime` sees the value before any strip (this
+    // port's trim is a pre-existing quirk), so a padded literal still
+    // fails. Exact match (probed); ASCII-only (765 unicode-gap family).
+    if raw.eq_ignore_ascii_case("iso-8601") {
+        let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("1900-01-01 valid");
+        return Some(naive.and_utc());
+    }
+    push_error(errors, field, datetime_format_message());
+    None
 }
 
 fn datetime_format_message() -> String {
@@ -509,14 +521,18 @@ pub async fn fetch_intake(
     slug: &str,
     project_id: &Uuid,
     pk: Option<Uuid>,
+    include_deleted: bool,
 ) -> Result<Option<(IntakeRow, i64)>, Denial> {
     let mut sql = format!(
         r#"SELECT {cols}, COUNT(ii.id) FILTER (WHERE ii.status = -2) AS pending_issue_count
            FROM intakes i INNER JOIN workspaces w ON (w.id = i.workspace_id)
            LEFT OUTER JOIN intake_issues ii ON (i.id = ii.intake_id AND ii.deleted_at IS NULL)
-           WHERE (w.slug = $1 AND i.project_id = $2 AND i.deleted_at IS NULL"#,
+           WHERE (w.slug = $1 AND i.project_id = $2"#,
         cols = INTAKE_COLS,
     );
+    if !include_deleted {
+        sql.push_str(" AND i.deleted_at IS NULL");
+    }
     if pk.is_some() {
         sql.push_str(" AND i.id = $3");
     }
@@ -860,7 +876,7 @@ pub async fn list(
     if gate.is_err() {
         return guard_denial(gate);
     }
-    let first = match fetch_intake(pool, &slug, &project_id, None).await {
+    let first = match fetch_intake(pool, &slug, &project_id, None, false).await {
         Ok(first) => first,
         Err(denial) => return denial.into_response(),
     };
@@ -948,7 +964,7 @@ pub async fn retrieve(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let found = match fetch_intake(pool, &slug, &project_id, Some(pk)).await {
+    let found = match fetch_intake(pool, &slug, &project_id, Some(pk), false).await {
         Ok(found) => found,
         Err(denial) => return denial.into_response(),
     };
@@ -992,7 +1008,7 @@ pub async fn partial_update(
     };
     // `get_object` runs before the body parses: a miss 404s even with a
     // malformed payload.
-    let stored = match fetch_intake(pool, &slug, &project_id, Some(pk)).await {
+    let stored = match fetch_intake(pool, &slug, &project_id, Some(pk), false).await {
         Ok(stored) => stored,
         Err(denial) => return denial.into_response(),
     };
@@ -1058,7 +1074,11 @@ pub async fn partial_update(
         }
         return Denial::ServerError.into_response();
     }
-    let updated = match fetch_intake(pool, &slug, &project_id, Some(pk)).await {
+    // Re-read the just-written row for the response (`serializer.data`
+    // renders the saved instance): the live-only scope would miss a row
+    // this PATCH soft-deleted and 500 where Django 200s (PIDASHCONV-773
+    // probe find).
+    let updated = match fetch_intake(pool, &slug, &project_id, Some(pk), true).await {
         Ok(updated) => updated,
         Err(denial) => return denial.into_response(),
     };
@@ -1103,7 +1123,7 @@ pub async fn destroy(
     };
     // `Intake.objects.filter(workspace__slug, project_id, pk).first()`
     // — soft-delete-scoped, so deleted rows read as missing.
-    let found = match fetch_intake(pool, &slug, &project_id, Some(pk)).await {
+    let found = match fetch_intake(pool, &slug, &project_id, Some(pk), false).await {
         Ok(found) => found,
         Err(denial) => return denial.into_response(),
     };
@@ -1168,6 +1188,41 @@ mod tests {
         let mut errs = errors();
         let out = validate_boolean(&mut errs, "is_default", value, false);
         (out, errs)
+    }
+
+    #[test]
+    fn validate_datetime_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01, read as UTC (probed live both backends).
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let mut errs = errors();
+            let parsed =
+                validate_datetime(&mut errs, "deleted_at", &json!(text), true).expect(text);
+            assert_eq!(parsed.to_rfc3339(), "1900-01-01T00:00:00+00:00", "{text:?}");
+            assert!(errs.is_empty(), "{text:?}");
+        }
+        // Near-misses stay invalid (exact match on the raw text, both
+        // sides probed — padding fails even though this port trims).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            let mut errs = errors();
+            assert!(
+                validate_datetime(&mut errs, "deleted_at", &json!(text), true).is_none(),
+                "{text:?}"
+            );
+        }
     }
 
     /// DRF `TRUE_VALUES` / `FALSE_VALUES` (`fields.py:665-686`),
