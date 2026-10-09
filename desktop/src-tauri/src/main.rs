@@ -11,6 +11,7 @@ mod desktop_http;
 mod ipc;
 mod managed_runner;
 mod pidash_cli;
+mod system_proxy;
 mod updates;
 
 use std::sync::Mutex;

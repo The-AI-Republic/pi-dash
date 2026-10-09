@@ -68,7 +68,12 @@ impl PendingUpdate {
 }
 
 async fn check(handle: &AppHandle) -> Option<Update> {
-    let updater = match handle.updater() {
+    // The plugin builds its own client for the check and the download.
+    let updater = match handle
+        .updater_builder()
+        .configure_client(crate::system_proxy::configure)
+        .build()
+    {
         Ok(u) => u,
         Err(e) => {
             eprintln!("updater: construction failed: {e}");
