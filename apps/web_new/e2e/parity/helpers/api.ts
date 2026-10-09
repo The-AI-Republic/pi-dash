@@ -9480,3 +9480,316 @@ export async function serverReadChatStream(
     clearTimeout(timer);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Prompt sections + compiled receipts + project automations (NEWFRONT-186,
+// rows AGT-023..037). Added additively; existing helpers above are untouched.
+// Prompt endpoints carry no trailing slash (prompting/urls.py); PUT takes the
+// scope in the body while DELETE takes it as a query param.
+// ---------------------------------------------------------------------------
+
+/** Prompt-section resolution scope, mirroring the backend. */
+export type ParityPromptScope = "workspace" | "user";
+
+/** Prompt kinds the /prompts page browses. */
+export type ParityPromptKind = "coding-task" | "review" | "scheduler";
+
+/** One resolved prompt section, as the list endpoint returns it. */
+export interface ParityPromptSection {
+  key: string;
+  title: string;
+  customizable: "locked" | "workspace" | "overridable";
+  body: string;
+  default_body: string;
+  source: string;
+  version: number;
+  needs_attention: boolean;
+  editable_at_workspace: boolean;
+  editable_at_personal: boolean;
+}
+
+/** Ordered resolved sections for one kind + scope. */
+export async function serverPromptSections(
+  workspaceSlug: string,
+  kind: string,
+  scope: ParityPromptScope,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityPromptSection[]> {
+  const params = new URLSearchParams({ kind, scope });
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/prompt-sections?${params.toString()}`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] prompt-sections read failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+  const sections = (res.payload as { sections?: unknown }).sections;
+  if (!Array.isArray(sections)) throw new Error("[parity] prompt-sections carried no sections array.");
+  return sections as ParityPromptSection[];
+}
+
+/** A stored section override row, as the upsert endpoint returns it. */
+export interface ParityPromptOverride {
+  id: string;
+  workspace: string;
+  user: string | null;
+  section_key: string;
+  body: string;
+  is_active: boolean;
+  version: number;
+  needs_attention: boolean;
+  is_workspace_level: boolean;
+}
+
+/** Upsert a section override at a scope (workspace writes are admin-gated). */
+export async function serverPromptSectionUpsert(
+  workspaceSlug: string,
+  sectionKey: string,
+  scope: ParityPromptScope,
+  body: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityPromptOverride> {
+  const res = await serverPromptSectionUpsertStatus(workspaceSlug, sectionKey, scope, body, sessionCookie, apiBase);
+  if (res.status !== 200 && res.status !== 201) {
+    throw new Error(`[parity] prompt-section upsert failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+  return res.payload as ParityPromptOverride;
+}
+
+/**
+ * CSRF-paired sibling of apiJson. The prompting endpoints authenticate with
+ * DRF's stock session auth, which enforces CSRF (bug NEWFRONT-193: the
+ * sibling REST views use the exempt base). These helpers pair the session
+ * with a fresh token so they prove the endpoints' own role/tier behavior
+ * instead of the CSRF gate; the UI specs assert the headerless reality.
+ */
+async function apiJsonCsrf(
+  method: string,
+  path: string,
+  sessionCookie: string,
+  body?: unknown,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  const { token, cookie } = await csrfPair(apiBase);
+  const res = await fetchWithRetry(`${apiBase}${path}`, {
+    method,
+    headers: {
+      cookie: `${sessionCookie}; ${cookie}`,
+      "X-CSRFToken": token,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const text = await res.text();
+  let payload: unknown = null;
+  try {
+    payload = text === "" ? null : (JSON.parse(text) as unknown);
+  } catch {
+    payload = text;
+  }
+  return { status: res.status, payload };
+}
+
+/** Upsert a section override; resolves with the outcome instead of throwing on 4xx. */
+export async function serverPromptSectionUpsertStatus(
+  workspaceSlug: string,
+  sectionKey: string,
+  scope: ParityPromptScope,
+  body: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  return apiJsonCsrf(
+    "PUT",
+    `/api/workspaces/${workspaceSlug}/prompt-sections/${sectionKey}`,
+    sessionCookie,
+    { scope, body },
+    apiBase
+  );
+}
+
+/** Revert (deactivate) the override at a scope; 204 on success. */
+export async function serverPromptSectionRevert(
+  workspaceSlug: string,
+  sectionKey: string,
+  scope: ParityPromptScope,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await serverPromptSectionRevertStatus(workspaceSlug, sectionKey, scope, sessionCookie, apiBase);
+  if (res.status !== 200 && res.status !== 204) {
+    throw new Error(`[parity] prompt-section revert failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+}
+
+/** Revert an override; resolves with the outcome instead of throwing on 4xx. */
+export async function serverPromptSectionRevertStatus(
+  workspaceSlug: string,
+  sectionKey: string,
+  scope: ParityPromptScope,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  return apiJsonCsrf(
+    "DELETE",
+    `/api/workspaces/${workspaceSlug}/prompt-sections/${sectionKey}?scope=${scope}`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+}
+
+/** The assembled template for one kind, plus the automatic-run variant when set. */
+export interface ParityPromptCompiled {
+  kind: string;
+  scope: ParityPromptScope;
+  template_body: string;
+  automatic_template_body?: string;
+}
+
+/** Read the compiled receipt for one kind + scope. */
+export async function serverPromptCompiled(
+  workspaceSlug: string,
+  kind: string,
+  scope: ParityPromptScope,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityPromptCompiled> {
+  const params = new URLSearchParams({ scope });
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/prompts/${kind}/compiled?${params.toString()}`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] prompt compiled read failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+  return res.payload as ParityPromptCompiled;
+}
+
+/** Preview payload: a render target plus an optional unsaved draft. */
+export interface ParityPromptPreviewInput {
+  issue_id?: string;
+  binding_id?: string;
+  scope?: ParityPromptScope;
+  section_key?: string;
+  body?: string;
+}
+
+/** Render a prompt against a real issue or install. */
+export async function serverPromptPreview(
+  workspaceSlug: string,
+  kind: string,
+  input: ParityPromptPreviewInput,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ kind: string; prompt: string }> {
+  const res = await serverPromptPreviewStatus(workspaceSlug, kind, input, sessionCookie, apiBase);
+  if (res.status !== 200) {
+    throw new Error(`[parity] prompt preview failed with HTTP ${res.status}: ${JSON.stringify(res.payload)}`);
+  }
+  return res.payload as { kind: string; prompt: string };
+}
+
+/** Render a prompt; resolves with the outcome instead of throwing on 4xx. */
+export async function serverPromptPreviewStatus(
+  workspaceSlug: string,
+  kind: string,
+  input: ParityPromptPreviewInput,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  return apiJsonCsrf("POST", `/api/workspaces/${workspaceSlug}/prompts/${kind}/preview`, sessionCookie, input, apiBase);
+}
+
+/** Project automation fields, as the project detail endpoint returns them. */
+export interface ParityProjectAutomations {
+  archive_in: number;
+  close_in: number;
+  default_state: string | null;
+}
+
+/** Read a project's idle-automation settings (any project role may read). */
+export async function serverProjectAutomations(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityProjectAutomations> {
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] project automations read failed with HTTP ${res.status}.`);
+  }
+  const record = res.payload as { archive_in?: unknown; close_in?: unknown; default_state?: unknown };
+  if (typeof record.archive_in !== "number" || typeof record.close_in !== "number") {
+    throw new Error("[parity] project carried no numeric archive_in/close_in.");
+  }
+  if (record.default_state !== null && typeof record.default_state !== "string") {
+    throw new Error("[parity] project carried a non-string default_state.");
+  }
+  return { archive_in: record.archive_in, close_in: record.close_in, default_state: record.default_state };
+}
+
+/** Persist automation fields through the project update (project admin only). */
+export async function serverPatchProjectAutomations(
+  workspaceSlug: string,
+  projectId: string,
+  patch: Partial<ParityProjectAutomations>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityProjectAutomations> {
+  const res = await apiJson(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    patch,
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] project automations patch failed with HTTP ${res.status}.`);
+  }
+  return serverProjectAutomations(workspaceSlug, projectId, sessionCookie, apiBase);
+}
+
+/** Cancelled-group project states (the auto-close target pool). */
+export async function serverProjectCancelledStates(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; name: string }[]> {
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/states/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(`[parity] project states read failed with HTTP ${res.status}.`);
+  }
+  const rows: unknown[] = Array.isArray(res.payload)
+    ? res.payload
+    : ((res.payload as { results?: unknown[] }).results ?? []);
+  return (rows as { id?: unknown; name?: unknown; group?: unknown }[])
+    .filter((row) => row.group === "cancelled")
+    .map((row) => {
+      if (typeof row.id !== "string" || typeof row.name !== "string") {
+        throw new Error("[parity] state row carried no string id/name.");
+      }
+      return { id: row.id, name: row.name };
+    });
+}
