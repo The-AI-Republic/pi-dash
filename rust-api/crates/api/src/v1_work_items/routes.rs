@@ -1,9 +1,9 @@
 //! D-18 work-item route registration: action routes (handlers F,
 //! PIDASHCONV-678), link + comment routes (handlers B, PIDASHCONV-674),
 //! PR / code-review link routes (handlers H, PIDASHCONV-680), plus
-//! activity + attachment routes (handlers C, PIDASHCONV-675), relation
-//! + workpad routes (handlers D, PIDASHCONV-676) and label + page
-//! routes (handlers G, PIDASHCONV-679).
+//! activity + attachment routes (handlers C, PIDASHCONV-675), relation +
+//! workpad routes (handlers D, PIDASHCONV-676) and label + page routes
+//! (handlers G, PIDASHCONV-679).
 //!
 //! Ports `apps/api/pi_dash/api/urls/work_item.py:133-151` (the four action
 //! paths), `urls/work_item.py:60-77,154-171` (the eight link/comment paths:

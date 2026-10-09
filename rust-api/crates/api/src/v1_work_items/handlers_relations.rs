@@ -190,7 +190,7 @@ pub enum Denial {
     /// 403, the DRF-default `PermissionDenied` body (no D-18 guard class
     /// sets `message`).
     Forbidden,
-    /// 404, `{"Detail":"Project not found"}` (identifier rewrite miss —
+    /// 404, `{"detail":"Project not found"}` (identifier rewrite miss —
     /// `Project.resolve` raises `Http404`, `db/models/project.py:213-217`).
     ProjectNotFound,
     /// 400, `{"detail": ...}` (DRF `ParseError`: malformed JSON).
@@ -217,7 +217,7 @@ impl Denial {
             ),
             Denial::InvalidToken => (
                 StatusCode::FORBIDDEN,
-                r#"{"Detail":"Given API token is not valid"}"#.to_owned(),
+                r#"{"detail":"Given API token is not valid"}"#.to_owned(),
             ),
             Denial::Forbidden => (
                 StatusCode::FORBIDDEN,
@@ -225,11 +225,11 @@ impl Denial {
             ),
             Denial::ProjectNotFound => (
                 StatusCode::NOT_FOUND,
-                r#"{"Detail":"Project not found"}"#.to_owned(),
+                r#"{"detail":"Project not found"}"#.to_owned(),
             ),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
-                format!("{{\"Detail\":{}}}", json_string(message)),
+                format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::BadError(message) => (
                 StatusCode::BAD_REQUEST,
@@ -257,8 +257,8 @@ impl IntoResponse for Denial {
 }
 
 /// Map the reused D-19 shell's denial onto this module's. Only messages
-/// cross the boundary — every body re-renders here, so the D-19
-/// capital-`Detail` spellings can never leak onto these routes.
+/// cross the boundary — every body re-renders here, so this module
+/// owns the exact `detail`-key bytes on every denial it emits.
 impl From<crate::v1_projects::handlers_project::Denial> for Denial {
     fn from(denial: crate::v1_projects::handlers_project::Denial) -> Self {
         use crate::v1_projects::handlers_project::Denial as D;
@@ -666,8 +666,9 @@ async fn fetch_relation_aggregate(
 
 /// `Project.objects.get(pk=project_id, workspace__slug=slug)`
 /// (`views/issue.py:3074`): the relation POST's workspace id source. A
-/// miss answers the `ObjectDoesNotExist` 404 (unreachable past the gate —
-/// membership implies the project — but kept for faithfulness).
+/// miss answers the `ObjectDoesNotExist` 404 — including soft-deleted
+/// projects, whose live memberships still pass the gate but which the
+/// `SoftDeletionManager` excludes here.
 async fn fetch_project_workspace(
     pool: &PgPool,
     slug: &str,
@@ -676,7 +677,8 @@ async fn fetch_project_workspace(
     let workspace_id: Option<Uuid> = sqlx::query_scalar(
         r#"SELECT "projects"."workspace_id" FROM "projects"
            INNER JOIN "workspaces" ON ("projects"."workspace_id" = "workspaces"."id")
-           WHERE "projects"."id" = $1 AND "workspaces"."slug" = $2"#,
+           WHERE "projects"."id" = $1 AND "projects"."deleted_at" IS NULL
+             AND "workspaces"."slug" = $2"#,
     )
     .bind(project_id)
     .bind(slug)
@@ -709,6 +711,14 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 // Agent vocabulary (`orchestration/relations.py`, PDASHOSS01-199)
 // ---------------------------------------------------------------------------
 
+/// Python `str.strip()` with no argument: ASCII whitespace plus every
+/// `str.isspace()` character. Rust `char::is_whitespace` (the Unicode
+/// `White_Space` property) matches it except for U+001C–U+001F, which
+/// Python strips and Rust excludes — hence the explicit arm.
+fn py_stripped(text: &str) -> &str {
+    text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+}
+
 /// `validate_relation_type` (`relations.py:81-85`): strip + lowercase, then
 /// the ten names. A non-string truthy value raises `AttributeError`
 /// (REL-3, uncaught → 500); falsy values (`None`, `0`, `false`, `""`,
@@ -725,11 +735,7 @@ fn validate_relation_type(raw: Option<&Value>) -> Result<String, Denial> {
         // `.strip()` on them raises `AttributeError` → generic 500.
         Some(_) => return Err(Denial::ServerError),
     };
-    // Python `str.strip()` trims ASCII whitespace plus Unicode spaces;
-    // `char::is_whitespace` matches it for this lowercase alpha vocabulary
-    // (unpinned either way).
-    let normalized: String = text
-        .trim_matches(|c: char| c.is_whitespace())
+    let normalized: String = py_stripped(&text)
         .chars()
         .flat_map(|c| c.to_lowercase())
         .collect();
@@ -838,7 +844,7 @@ async fn resolve_refs(
     let mut unresolved = Vec::new();
     for raw in refs {
         let text = python_ref_text(raw);
-        let stripped = text.trim_matches(|c: char| c.is_whitespace()).to_owned();
+        let stripped = py_stripped(&text).to_owned();
         let mut matched: Option<ResolvedIssue> = None;
         if !stripped.is_empty() {
             if let Some(id) = parse_python_uuid(&stripped) {
@@ -1497,7 +1503,8 @@ async fn relate_op(
             // `created_by`/`updated_by` pass through `BaseModel.save`,
             // whose adding branch keeps `created_by` but NULLS
             // `updated_by` (REL-5). A concurrent writer's unique
-            // violation re-reads below instead of 500ing.
+            // violation re-reads below (Python's `IntegrityError`
+            // catch does the same).
             let inserted = sqlx::query(
                 r#"INSERT INTO "issue_relations" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
                      "project_id", "workspace_id", "issue_id", "related_issue_id", "relation_type")
@@ -2505,11 +2512,7 @@ async fn workpad_patch_inner(
         completed_at,
     )
     .await?;
-    let stripped = if description_html.is_empty() {
-        None
-    } else {
-        Some(crate::space::sanitize::strip_tags(&description_html))
-    };
+    let stripped = workpad_stripped(&description_html);
     let updated_at = now_utc();
     sqlx::query(
         r#"UPDATE "issues" SET "workpad" = $1, "description_stripped" = $2, "completed_at" = $3,
@@ -2539,13 +2542,26 @@ async fn workpad_patch_inner(
     Ok(json_response(StatusCode::OK, body))
 }
 
-/// `"body" in request.data` (`:3287`): key membership on objects, the
-/// always-false membership on arrays, substring on strings — and
-/// `TypeError` (500) on numbers/bools/null.
+/// The workpad-PATCH `description_stripped` recompute
+/// (`db/models/issue.py:346-350`): `None` for empty HTML, else
+/// `html_processor.strip_tags` — the entity-decoding MLStripper
+/// (`pidash_db::app_pages::strip::ml_strip_tags`), NOT Django's
+/// verbatim-entity kernel.
+fn workpad_stripped(description_html: &str) -> Option<String> {
+    if description_html.is_empty() {
+        None
+    } else {
+        Some(pidash_db::app_pages::strip::ml_strip_tags(description_html))
+    }
+}
+
+/// `"body" in request.data` (`:3287`): key membership on objects,
+/// element membership on arrays, substring on strings — and `TypeError`
+/// (500) on numbers/bools/null.
 fn workpad_has_body(value: &Value) -> Result<bool, Denial> {
     match value {
         Value::Object(map) => Ok(map.contains_key("body")),
-        Value::Array(_) => Ok(false),
+        Value::Array(items) => Ok(items.iter().any(|item| item.as_str() == Some("body"))),
         Value::String(text) => Ok(text.contains("body")),
         // `"body" in 5` / `in True` / `in None` raises `TypeError` →
         // generic 500.
@@ -2876,6 +2892,13 @@ mod tests {
                 .expect("strip+lower"),
             "blocking"
         );
+        // Python `str.strip()` also strips U+001C–U+001F, which Rust
+        // `char::is_whitespace` excludes.
+        assert_eq!(
+            validate_relation_type(Some(&Value::String("blocking\u{1c}".to_owned()))).expect("fs"),
+            "blocking"
+        );
+        assert_eq!(py_stripped("a"), "a");
         assert_eq!(
             validate_relation_type(None).expect_err("missing"),
             Denial::BadError(format!(
@@ -3065,7 +3088,10 @@ mod tests {
     fn workpad_body_membership() {
         assert!(workpad_has_body(&serde_json::json!({"body": "x"})).expect("bool"));
         assert!(!workpad_has_body(&serde_json::json!({"workpad": "x"})).expect("bool"));
-        assert!(!workpad_has_body(&serde_json::json!(["body"])).expect("bool"));
+        // `"body" in [...]` is ELEMENT membership, not always-false.
+        assert!(workpad_has_body(&serde_json::json!(["body"])).expect("bool"));
+        assert!(!workpad_has_body(&serde_json::json!(["other"])).expect("bool"));
+        assert!(!workpad_has_body(&serde_json::json!([5])).expect("bool"));
         assert!(workpad_has_body(&Value::String("has body inside".to_owned())).expect("bool"));
         assert!(!workpad_has_body(&Value::String("nope".to_owned())).expect("bool"));
         // `TypeError` wart → 500.
@@ -3197,23 +3223,32 @@ mod tests {
             Denial::InvalidToken.status_and_body(),
             (
                 StatusCode::FORBIDDEN,
-                r#"{"Detail":"Given API token is not valid"}"#.to_owned()
+                r#"{"detail":"Given API token is not valid"}"#.to_owned()
             )
         );
         assert_eq!(
             Denial::ProjectNotFound.status_and_body(),
             (
                 StatusCode::NOT_FOUND,
-                r#"{"Detail":"Project not found"}"#.to_owned()
+                r#"{"detail":"Project not found"}"#.to_owned()
             )
         );
         assert_eq!(
             Denial::BadDetail("x".to_owned()).status_and_body(),
-            (StatusCode::BAD_REQUEST, r#"{"Detail":"x"}"#.to_owned())
+            (StatusCode::BAD_REQUEST, r#"{"detail":"x"}"#.to_owned())
         );
         assert_eq!(
             Denial::BadError("x".to_owned()).status_and_body(),
             (StatusCode::BAD_REQUEST, r#"{"error":"x"}"#.to_owned())
+        );
+        // DRF `exception_handler` renders every APIException (including
+        // `UnsupportedMediaType`) under lowercase-`detail`.
+        assert_eq!(
+            Denial::UnsupportedMediaType("Unsupported media type".to_owned()).status_and_body(),
+            (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                r#"{"detail":"Unsupported media type"}"#.to_owned()
+            )
         );
         assert_eq!(
             Denial::ServerError.status_and_body(),
@@ -3249,6 +3284,18 @@ mod tests {
         ));
         assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
         assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
+    }
+
+    #[test]
+    fn workpad_stripped_decodes_entities() {
+        // `Issue.save` recomputes via `html_processor.strip_tags`
+        // (MLStripper, entity-decoding) — not Django's verbatim kernel.
+        assert_eq!(workpad_stripped(""), None);
+        assert_eq!(
+            workpad_stripped("<p>a &amp; b</p>").as_deref(),
+            Some("a & b")
+        );
+        assert_eq!(workpad_stripped("<p></p>").as_deref(), Some(""));
     }
 
     #[test]
