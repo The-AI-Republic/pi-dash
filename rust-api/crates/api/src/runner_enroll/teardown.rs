@@ -73,10 +73,10 @@
 //! * Unhandled failures answer the JSON 500 (`SERVER_ERROR_BODY`): Django
 //!   renders its HTML error page here, so only the status is
 //!   contract-pinned (the `manage.rs` position).
-//! * Non-UUID daemon path segments answer `{"error": "Page not found."}`
-//!   404 (the `machine.rs` `PAGE_NOT_FOUND_BODY` position — Django's
-//!   `<uuid:…>` resolver 404s before auth); non-UUID web path segments
-//!   answer the view's JSON 404 (`manage.rs` position).
+//! * Non-canonical path segments fall through to Django, which renders
+//!   its own framework 404: Django's `<uuid:…>` converter 404s at
+//!   URL-resolve with its HTML page, before auth runs (the `enroll.rs`
+//!   `strict_uuid` position, PIDASHCONV-798).
 //! * `.get()`/lazy single-row reads emit `LIMIT 1`, omitting Django's
 //!   `LIMIT 21` multi-row probe (the queries-A precedent —
 //!   behaviorally identical for PK lookups).
@@ -175,11 +175,6 @@ fn revoke_frame(reason: &str) -> Map<String, Value> {
     frame.insert("reason".to_owned(), Value::String(reason.to_owned()));
     frame
 }
-/// Resolver-404 for a non-UUID daemon path id (the `machine.rs`
-/// `PAGE_NOT_FOUND_BODY` position, restated — that module's const is
-/// private): Django's `<uuid:…>` converter 404s before auth.
-const DAEMON_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
-
 // The web bodies live on the sibling `manage` module (already `pub` —
 // same file family, same F7 source): workspace-required 400, forbidden
 // 403, not-found 404.
@@ -203,10 +198,6 @@ fn conflict(body: &str) -> Response {
 
 fn unauthorized(body: &str) -> Response {
     json_response(StatusCode::UNAUTHORIZED, body.to_owned())
-}
-
-fn daemon_not_found() -> Response {
-    json_response(StatusCode::NOT_FOUND, DAEMON_NOT_FOUND_BODY.to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -392,15 +383,18 @@ fn parse_uuid(raw: &str) -> Result<Uuid, Response> {
     raw.parse().map_err(|_| server_error())
 }
 
-/// UUID-typed web path segments: the view's JSON 404 on garbage
-/// (Django's `<uuid:…>` converter 404s at URL-resolve).
-fn path_uuid_web(raw: &str) -> Result<Uuid, Response> {
-    raw.parse().map_err(|_| not_found())
-}
-
-/// UUID-typed daemon path segments: the resolver-style 404 on garbage.
-fn path_uuid_daemon(raw: &str) -> Result<Uuid, Response> {
-    raw.parse().map_err(|_| daemon_not_found())
+/// Django's `<uuid:>` converter (`[0-9a-f]{8}-...`, lowercase-only):
+/// the only segment form that reaches the view. `Uuid::parse_str`
+/// alone also accepts uppercase/braced/simple forms, which Django
+/// 404s before auth runs; comparing against the canonical lowercase
+/// form reproduces the converter exactly (neither side checks
+/// version bits). The `enroll.rs` position (PIDASHCONV-791), twinned —
+/// the sibling's helper is private.
+fn strict_uuid(segment: &str) -> Option<Uuid> {
+    match segment.parse::<Uuid>() {
+        Ok(id) if id.hyphenated().to_string() == segment => Some(id),
+        _ => None,
+    }
 }
 
 /// Read `request.data` for a POST body: content-length 0 validates as
@@ -576,18 +570,20 @@ fn refresh_ok_body(
 /// (`enrollment.py:394-476`): parse-only Bearer [REDACTED] the row-locked
 /// rotation. QUIRK-replay-commits: the replay and membership 401s commit
 /// their nested revoke (the `return` exits the outer `atomic` normally)
-/// and fire its post-commit effects before answering.
+/// and fire its post-commit effects before answering. A non-canonical
+/// segment falls through to Django (which renders its own 404) before
+/// auth runs.
 pub async fn runner_refresh(
     State(state): State<AppState>,
     Path(raw_id): Path<String>,
     headers: HeaderMap,
+    req: Request,
 ) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let pool = match pool_of(&state) {
         Ok(pool) => pool.clone(),
-        Err(response) => return response,
-    };
-    let runner_id = match path_uuid_daemon(&raw_id) {
-        Ok(runner_id) => runner_id,
         Err(response) => return response,
     };
     let secret = state.settings().secret_key.clone();
@@ -776,18 +772,20 @@ pub async fn runner_refresh(
 /// self-deletion. Anonymous (or a mismatched id) answers the view's 403 —
 /// `permission_classes` is empty, so no DRF gate runs first. The revoke
 /// runs on its own transaction (its post-commit effects fire before the
-/// frame); the frame, close, and collector delete run outside any tx.
+/// frame); the frame, close, and collector delete run outside any tx. A
+/// non-canonical segment falls through to Django (which renders its
+/// own 404) before auth runs.
 pub async fn runner_self_revoke(
     State(state): State<AppState>,
     Path(raw_id): Path<String>,
     headers: HeaderMap,
+    req: Request,
 ) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let pool = match pool_of(&state) {
         Ok(pool) => pool.clone(),
-        Err(response) => return response,
-    };
-    let runner_id = match path_uuid_daemon(&raw_id) {
-        Ok(runner_id) => runner_id,
         Err(response) => return response,
     };
     let secret = state.settings().secret_key.clone();
@@ -989,6 +987,9 @@ pub async fn dev_machine_revoke(
     axum::extract::Query(params): axum::extract::Query<crate::license::QueryMap>,
     req: Request,
 ) -> Response {
+    let Some(machine_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
@@ -999,10 +1000,6 @@ pub async fn dev_machine_revoke(
     };
     let workspace_id = match machine_workspace_gate(&pool, user_id, &data, &params).await {
         Ok(workspace_id) => workspace_id,
-        Err(response) => return response,
-    };
-    let machine_id = match path_uuid_web(&raw_id) {
-        Ok(machine_id) => machine_id,
         Err(response) => return response,
     };
 
@@ -1161,6 +1158,9 @@ pub async fn dev_machine_rotate(
     axum::extract::Query(params): axum::extract::Query<crate::license::QueryMap>,
     req: Request,
 ) -> Response {
+    let Some(machine_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
@@ -1171,10 +1171,6 @@ pub async fn dev_machine_rotate(
     };
     let workspace_id = match machine_workspace_gate(&pool, user_id, &data, &params).await {
         Ok(workspace_id) => workspace_id,
-        Err(response) => return response,
-    };
-    let machine_id = match path_uuid_web(&raw_id) {
-        Ok(machine_id) => machine_id,
         Err(response) => return response,
     };
 
@@ -1266,18 +1262,20 @@ pub async fn dev_machine_rotate(
 /// `POST /api/runners/<runner_id>/revoke/` (`:471-492`): the row lock
 /// spans the read-then-revoke window; view/manage gates; idempotent 200
 /// (an already-revoked row returns its current state with no frame, no
-/// close, no bundle). The frame + close + re-read run OUTSIDE the tx.
+/// close, no bundle). The frame + close + re-read run OUTSIDE the tx. A
+/// non-canonical segment falls through to Django (which renders its
+/// own 404) before auth runs.
 pub async fn runner_revoke(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     Path(raw_id): Path<String>,
+    req: Request,
 ) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
-        Err(response) => return response,
-    };
-    let runner_id = match path_uuid_web(&raw_id) {
-        Ok(runner_id) => runner_id,
         Err(response) => return response,
     };
 
@@ -2643,6 +2641,34 @@ pub fn web_routes() -> Router<AppState> {
 mod tests {
     use super::*;
     use crate::runner_enroll::manage::{FORBIDDEN_BODY, NOT_FOUND_BODY, WORKSPACE_REQUIRED_BODY};
+
+    // -- UUID path gating (PIDASHCONV-798) --
+
+    #[test]
+    fn strict_uuid_pins_django_converter() {
+        let lower = "12345678-1234-abcd-ef01-234567890abc";
+        assert_eq!(
+            strict_uuid(lower)
+                .expect("lowercase")
+                .hyphenated()
+                .to_string(),
+            lower
+        );
+        // Django's `<uuid:>` converter 404s every one of these
+        // (several of which `Uuid::parse_str` would accept), so the
+        // gate rejects them.
+        for rejected in [
+            lower.to_uppercase(),
+            "not-a-uuid".to_owned(),
+            "123".to_owned(),
+            format!("{{{lower}}}"),
+            lower.replace('-', ""),
+            format!("urn:uuid:{lower}"),
+            format!("{lower}/"),
+        ] {
+            assert!(strict_uuid(&rejected).is_none(), "{rejected}");
+        }
+    }
     use pidash_db::runner_enroll::columns::revoke_reasons::KNOWN_REVOKE_REASONS;
     use pidash_services::runner_enroll::queries::{enroll_reads, manage_reads};
     use pidash_services::runner_enroll::revoke::check_revoke_reason;
