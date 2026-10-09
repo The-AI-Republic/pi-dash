@@ -121,7 +121,11 @@ pub(crate) async fn drain_one_publish(
 }
 
 /// Drain finalized runs' publish pairs in order.
-async fn drain_publish_effects(pool: &PgPool, state: &AppState, effects: Vec<LifecycleEffect>) {
+pub(crate) async fn drain_publish_effects(
+    pool: &PgPool,
+    state: &AppState,
+    effects: Vec<LifecycleEffect>,
+) {
     if effects.is_empty() {
         return;
     }
@@ -140,8 +144,8 @@ async fn drain_publish_effects(pool: &PgPool, state: &AppState, effects: Vec<Lif
 /// trait is sync; only cloud admission paths touch it). An unset or
 /// unusable `REDIS_URL` fails closed like Python's backend failure.
 #[derive(Clone)]
-struct RedisAdmissionCache {
-    client: Option<redis::Client>,
+pub(crate) struct RedisAdmissionCache {
+    pub(crate) client: Option<redis::Client>,
 }
 
 fn cache_unavailable<T>(what: &'static str) -> Result<T, redis::RedisError> {
@@ -189,9 +193,10 @@ impl AdmissionCache for RedisAdmissionCache {
 /// twin of `jobs::LiveCreationStore` (same builders, same order, same
 /// decodes — cited per method). The jobs store cannot serve api
 /// requests (its `StoreDeps` closures are sync and have no production
-/// factory), and the quarantine keeps the twin in this file; the
-/// D-12 decisions stay in the services driver in both.
-struct HandoffStore<'t, 'p> {
+/// factory). Shared crate-wide through `crate::orchestration` (743),
+/// which lends it a caller-owned span transaction; the D-12 decisions
+/// stay in the services driver in both.
+pub(crate) struct HandoffStore<'t, 'p> {
     tx: DbTransaction<'t>,
     pool: &'p PgPool,
     cloud: CloudAgentSettings,
@@ -205,7 +210,7 @@ struct HandoffStore<'t, 'p> {
 
 impl<'t, 'p> HandoffStore<'t, 'p> {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub(crate) fn new(
         tx: DbTransaction<'t>,
         pool: &'p PgPool,
         cloud: CloudAgentSettings,
@@ -230,7 +235,7 @@ impl<'t, 'p> HandoffStore<'t, 'p> {
         CreationError::Db(error.to_string())
     }
 
-    fn into_parts(
+    pub(crate) fn into_parts(
         self,
     ) -> (
         DbTransaction<'t>,

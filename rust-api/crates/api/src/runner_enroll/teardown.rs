@@ -508,7 +508,7 @@ fn body_workspace(data: &JVal) -> Result<Option<String>, Response> {
 /// Api-crate-owned Redis client (the `machine.rs` `redis_client`
 /// position): `None` when `REDIS_URL` is unset, empty, or unparsable,
 /// mirroring `redis_instance()` returning `None`.
-fn redis_client(state: &AppState) -> Option<redis::Client> {
+pub(crate) fn redis_client(state: &AppState) -> Option<redis::Client> {
     state
         .settings()
         .redis

@@ -39,7 +39,8 @@
 //! (`serializers_detail`), the 650 move driver (`issue_move`), the 594
 //! signal entries (`orchestration::entries`), the D-14 drain recipe
 //! (`runner_sessions::drain`) + pubsub verbs, the shared DRF body
-//! negotiator (`v1_cycles_modules::body`), and the jobs Celery enqueue.
+//! negotiator (`v1_cycles_modules::body`), the D-12 creation seam
+//! (`crate::orchestration`), and the jobs Celery enqueue.
 //!
 //! # Ported bugs (translate, don't redesign — also listed in the PR)
 //!
@@ -58,13 +59,6 @@
 //!
 //! # Known gaps (documented, not silent)
 //!
-//! * The immediate-handoff insert (`create_handoff_run`: a move whose
-//!   handoff runs are all QUEUED/PAUSED) needs the D-11/D-12 creation
-//!   runtime (`execution_fields`, prompt render, dispatch), which has no
-//!   API-side factory (the `runner_enroll::teardown` twin documents the
-//!   same wall). It answers an explicit 500 naming the gap;
-//!   PIDASHCONV-743 owns the seam. Unreachable in every automated gate (seeds
-//!   carry no agent runs) and loud when hit — never a silent no-op.
 //! * Past a ticking-state transition the 594 fire needs the same runtime
 //!   (ticker reconcile, entry-run dispatch); the seam answers store
 //!   errors there, which the fire swallows by design (counter + the
@@ -86,8 +80,7 @@ use axum::Router;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
-use sqlx::pool::PoolConnection;
-use sqlx::{PgPool, Postgres, Row};
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_auth::permissions::membership::ProjectRoleFacts;
@@ -101,6 +94,7 @@ use pidash_db::runner_sessions::outbox as runner_outbox;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_db::runner_sessions::RunnerSession;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
+use pidash_db::tx::Transaction as DbTransaction;
 use pidash_services::app_issues::issue_move::{
     CREATE_ADVISORY_LOCK_SQL, CREATE_SAVE_DEFAULT_STATE_SQL, CREATE_SAVE_FALLBACK_STATE_SQL,
     CREATE_SEQ_SCAN_SQL, DEFAULT_FOR_PROJECT_ID_SQL,
@@ -127,9 +121,10 @@ use pidash_services::dispatch::policy::UserFlags;
 use pidash_services::orchestration::blockers::{has_open_blockers_sql, summary_sql, BlockerRow};
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
-    AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest,
-    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RenderedTurn, RunView, RunnerView, StateView, STATE_SELECT_SQL,
+    create_project_move_handoff_run, AdmissionError, CreationError, CreationSeam, ExecutionError,
+    ExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, HandoffCreateRequest, IssueView,
+    LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle, RenderedTurn, RunView,
+    RunnerView, StateView, STATE_SELECT_SQL,
 };
 use pidash_services::orchestration::entries::{
     capture_prior_state, fire_state_transition, BindingView, EntriesSeam, FireOutcome, FireRequest,
@@ -152,6 +147,10 @@ use super::queries_engage::{
 };
 use super::render::{v2_page, V2Page};
 use super::{query_last, Binder, QueryMap};
+use crate::orchestration::{
+    drain_creation_outboxes, handoff_store, split_outboxes, CreationDrainError, CreationOutboxes,
+    SpanCreationDeps,
+};
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json_cpython::{
@@ -1123,8 +1122,9 @@ const MOVE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
 
 /// `POST .../work-items/<pk>/move/`: the ADMIN/MEMBER gate, the body
 /// read, the pre-save snapshot, the 650 move driver over the pool
-/// store, the post-commit cancel/drain, the explicit 594 fire, the two
-/// enqueues, then the refreshed issue in the 22-key APP read shape.
+/// store, the creation-outbox drain, the post-commit cancel/drain,
+/// the explicit 594 fire, the two enqueues, then the refreshed issue
+/// in the 22-key APP read shape.
 async fn move_issue(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
@@ -1149,7 +1149,7 @@ async fn move_issue(
     let prev = capture_prior_state(&mut signal, Some(pk))
         .await
         .map_err(|_| Denial::ServerError)?;
-    let store = PoolMoveStore::new(pool.clone());
+    let store = PoolMoveStore::new(&pool, SpanCreationDeps::from_state(&state));
     let outcome = match move_work_item_to_project(
         &store,
         &slug,
@@ -1177,6 +1177,33 @@ async fn move_issue(
             Ok(json_response(StatusCode::OK, body))
         }
         MoveResult::Moved(moved) => {
+            // The creation registered its `on_commit` entries first
+            // (the dispatch precedes the cancel send and pod drains),
+            // so its outboxes drain before the move's own post-commit
+            // work. A drain failure is a 500 with the move standing.
+            if let Some(outboxes) = store.take_creation_outboxes().await {
+                let redis = redis_client(&state);
+                let pubsub = MovePubsub {
+                    pool: &pool,
+                    redis: redis.as_ref(),
+                    runner: &state.settings().runner,
+                };
+                drain_creation_outboxes(&pool, &state, outboxes, |pod_id| {
+                    drain_pod_by_id(&pool, &pubsub, pod_id)
+                })
+                .await
+                .map_err(|error| {
+                    match error {
+                        CreationDrainError::Dispatch(db) => {
+                            tracing::warn!("move creation dispatch failed: {db}")
+                        }
+                        CreationDrainError::PodDrain(denial) => {
+                            tracing::warn!("move creation pod drain failed: {denial:?}")
+                        }
+                    }
+                    Denial::ServerError
+                })?;
+            }
             run_post_commit(&state, &pool, &moved.post_commit).await?;
             fire_after_move(
                 &pool,
@@ -1371,68 +1398,76 @@ async fn fire_after_move(
 // ---------------------------------------------------------------------------
 
 /// The 650 [`MoveStore`] over the pool: guard reads run on pool
-/// checkouts, the `:173-373` span runs on one held connection (`BEGIN`
-/// at [`MoveStore::lock_source_issue`], `COMMIT` at
+/// checkouts, the `:173-373` span runs on one held transaction
+/// (`BEGIN` at [`MoveStore::lock_source_issue`], `COMMIT` at
 /// [`MoveStore::moved_issue`], `ROLLBACK` via [`PoolMoveStore::abort`]
 /// on any driver error), and every statement is the 650 SQL text
 /// executed verbatim.
 ///
-/// The mutex only bridges `&self` to the held connection — the store
+/// The span is a [`DbTransaction`], borrowed from the pool, so
+/// [`MoveStore::create_handoff_run`] can lend it to the D-12 creation
+/// seam in-span; the creation outboxes wait on the store for the
+/// handler's post-commit drain.
+///
+/// The mutex only bridges `&self` to the held transaction — the store
 /// is per-request, so it is never contended. It is a tokio mutex so
 /// the guard stays `Send` across awaits (a std guard would poison the
 /// handler future's `Send` bound).
-struct PoolMoveStore {
-    pool: PgPool,
-    txn: Mutex<Option<PoolConnection<Postgres>>>,
+struct PoolMoveStore<'p> {
+    pool: &'p PgPool,
+    txn: Mutex<Option<DbTransaction<'p>>>,
+    creation_deps: SpanCreationDeps,
+    creation: Mutex<Option<CreationOutboxes>>,
 }
 
-impl PoolMoveStore {
-    fn new(pool: PgPool) -> Self {
+impl<'p> PoolMoveStore<'p> {
+    fn new(pool: &'p PgPool, creation_deps: SpanCreationDeps) -> Self {
         Self {
             pool,
             txn: Mutex::new(None),
+            creation_deps,
+            creation: Mutex::new(None),
         }
+    }
+
+    /// Take the creation outboxes for the post-commit drain (`None`
+    /// when the move created no handoff run — every pre-743 path).
+    async fn take_creation_outboxes(&self) -> Option<CreationOutboxes> {
+        self.creation.lock().await.take()
     }
 
     /// Roll back the span when the driver failed (Django's
     /// `transaction.atomic` exit on raise). A no-op when no span is
     /// open (pre-span failures).
     async fn abort(&self) {
-        let conn = self.txn.lock().await.take();
-        if let Some(mut conn) = conn {
-            if let Err(error) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
+        let tx = self.txn.lock().await.take();
+        if let Some(tx) = tx {
+            if let Err(error) = tx.rollback().await {
                 tracing::warn!(%error, "move store: rollback failed");
             }
         }
     }
 
-    /// Open the span: hold one connection and `BEGIN`.
+    /// Open the span: hold one transaction on the pool.
     async fn begin_span(&self) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
         use pidash_services::app_issues::issue_move::StoreError;
-        let mut conn = self
-            .pool
-            .acquire()
+        let tx = DbTransaction::begin(self.pool)
             .await
             .map_err(|error| StoreError(error.to_string()))?;
-        sqlx::query("BEGIN")
-            .execute(&mut *conn)
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        self.txn.lock().await.replace(conn);
+        self.txn.lock().await.replace(tx);
         Ok(())
     }
 
     /// Close the span: `COMMIT` and release the connection.
     async fn commit_span(&self) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
         use pidash_services::app_issues::issue_move::StoreError;
-        let mut conn = self
+        let tx = self
             .txn
             .lock()
             .await
             .take()
             .ok_or_else(|| StoreError("move store: commit without a span".to_owned()))?;
-        sqlx::query("COMMIT")
-            .execute(&mut *conn)
+        tx.commit()
             .await
             .map_err(|error| StoreError(error.to_string()))?;
         Ok(())
@@ -1548,7 +1583,7 @@ fn issue_param(sql: String) -> String {
 }
 
 #[allow(async_fn_in_trait)]
-impl MoveStore for PoolMoveStore {
+impl MoveStore for PoolMoveStore<'_> {
     async fn source_issue(
         &self,
         slug: &str,
@@ -1559,7 +1594,7 @@ impl MoveStore for PoolMoveStore {
             .bind(slug)
             .bind(project_id)
             .bind(pk)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.pool)
             .await
             .map_err(store_error)?;
         row.map(|row| map_source_row(&row)).transpose()
@@ -1574,14 +1609,14 @@ impl MoveStore for PoolMoveStore {
             ProjectLookup::Pk(id) => sqlx::query_as(PROJECT_RESOLVE_BY_PK_SQL)
                 .bind(id)
                 .bind(slug)
-                .fetch_optional(&self.pool)
+                .fetch_optional(self.pool)
                 .await
                 .map_err(store_error)?,
             ProjectLookup::Identifier(identifier) => {
                 sqlx::query_as(PROJECT_RESOLVE_BY_IDENTIFIER_SQL)
                     .bind(identifier)
                     .bind(slug)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(self.pool)
                     .await
                     .map_err(store_error)?
             }
@@ -1603,7 +1638,7 @@ impl MoveStore for PoolMoveStore {
             .bind(slug)
             .bind(target_project_id)
             .bind(actor_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.pool)
             .await
             .map_err(store_error)?;
         Ok(hit.is_some())
@@ -1615,7 +1650,7 @@ impl MoveStore for PoolMoveStore {
     ) -> Result<Option<String>, pidash_services::app_issues::issue_move::StoreError> {
         let row: Option<(String,)> = sqlx::query_as(WORKSPACE_SLUG_SQL)
             .bind(workspace_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.pool)
             .await
             .map_err(store_error)?;
         Ok(row.map(|row| row.0))
@@ -1627,7 +1662,7 @@ impl MoveStore for PoolMoveStore {
     ) -> Result<Option<String>, pidash_services::app_issues::issue_move::StoreError> {
         let row: Option<(String,)> = sqlx::query_as(PROJECT_IDENTIFIER_SQL)
             .bind(project_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.pool)
             .await
             .map_err(store_error)?;
         Ok(row.map(|row| row.0))
@@ -1639,7 +1674,7 @@ impl MoveStore for PoolMoveStore {
     ) -> Result<Vec<Uuid>, pidash_services::app_issues::issue_move::StoreError> {
         let rows: Vec<(Uuid,)> = sqlx::query_as(ASSIGNEE_IDS_SQL)
             .bind(issue_id)
-            .fetch_all(&self.pool)
+            .fetch_all(self.pool)
             .await
             .map_err(store_error)?;
         Ok(rows.into_iter().map(|row| row.0).collect())
@@ -1651,7 +1686,7 @@ impl MoveStore for PoolMoveStore {
     ) -> Result<Vec<Uuid>, pidash_services::app_issues::issue_move::StoreError> {
         let rows: Vec<(Uuid,)> = sqlx::query_as(LABEL_IDS_SQL)
             .bind(issue_id)
-            .fetch_all(&self.pool)
+            .fetch_all(self.pool)
             .await
             .map_err(store_error)?;
         Ok(rows.into_iter().map(|row| row.0).collect())
@@ -1663,7 +1698,7 @@ impl MoveStore for PoolMoveStore {
     ) -> Result<Vec<BlockerRow>, pidash_services::app_issues::issue_move::StoreError> {
         let rows = sqlx::query(&issue_param(summary_sql(false)))
             .bind(issue_id)
-            .fetch_all(&self.pool)
+            .fetch_all(self.pool)
             .await
             .map_err(store_error)?;
         rows.iter().map(map_blocker_row).collect()
@@ -1675,7 +1710,7 @@ impl MoveStore for PoolMoveStore {
     ) -> Result<Vec<BlockerRow>, pidash_services::app_issues::issue_move::StoreError> {
         let rows = sqlx::query(&issue_param(summary_sql(true)))
             .bind(issue_id)
-            .fetch_all(&self.pool)
+            .fetch_all(self.pool)
             .await
             .map_err(store_error)?;
         rows.iter().map(map_blocker_row).collect()
@@ -1687,7 +1722,7 @@ impl MoveStore for PoolMoveStore {
     ) -> Result<bool, pidash_services::app_issues::issue_move::StoreError> {
         let hit: Option<(i32,)> = sqlx::query_as(&issue_param(has_open_blockers_sql()))
             .bind(issue_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.pool)
             .await
             .map_err(store_error)?;
         Ok(hit.is_some())
@@ -1699,7 +1734,7 @@ impl MoveStore for PoolMoveStore {
     ) -> Result<Option<StateRow>, pidash_services::app_issues::issue_move::StoreError> {
         let row: Option<(Uuid,)> = sqlx::query_as(CREATE_SAVE_DEFAULT_STATE_SQL)
             .bind(target_project_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.pool)
             .await
             .map_err(store_error)?;
         Ok(row.map(|row| StateRow { id: row.0 }))
@@ -1711,7 +1746,7 @@ impl MoveStore for PoolMoveStore {
     ) -> Result<Option<StateRow>, pidash_services::app_issues::issue_move::StoreError> {
         let row: Option<(Uuid,)> = sqlx::query_as(CREATE_SAVE_FALLBACK_STATE_SQL)
             .bind(target_project_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.pool)
             .await
             .map_err(store_error)?;
         Ok(row.map(|row| StateRow { id: row.0 }))
@@ -1733,7 +1768,7 @@ impl MoveStore for PoolMoveStore {
             .bind(slug)
             .bind(project_id)
             .bind(pk)
-            .fetch_optional(&mut **conn)
+            .fetch_optional(&mut **conn.inner())
             .await
             .map_err(|error| StoreError(error.to_string()))?;
         row.map(|row| map_source_row(&row)).transpose()
@@ -1750,7 +1785,7 @@ impl MoveStore for PoolMoveStore {
             .ok_or_else(|| StoreError("move store: advisory lock outside a span".to_owned()))?;
         sqlx::query(CREATE_ADVISORY_LOCK_SQL)
             .bind(lock_key)
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|_| ())
             .map_err(|error| StoreError(error.to_string()))
@@ -1767,7 +1802,7 @@ impl MoveStore for PoolMoveStore {
             .ok_or_else(|| StoreError("move store: handoff lock outside a span".to_owned()))?;
         let rows = sqlx::query(HANDOFF_RUNS_LOCK_SQL)
             .bind(issue_id)
-            .fetch_all(&mut **conn)
+            .fetch_all(&mut **conn.inner())
             .await
             .map_err(|error| StoreError(error.to_string()))?;
         rows.iter().map(map_handoff_row).collect()
@@ -1784,7 +1819,7 @@ impl MoveStore for PoolMoveStore {
             .ok_or_else(|| StoreError("move store: sequence scan outside a span".to_owned()))?;
         let row: Option<(Option<i64>,)> = sqlx::query_as(CREATE_SEQ_SCAN_SQL)
             .bind(target_project_id)
-            .fetch_optional(&mut **conn)
+            .fetch_optional(&mut **conn.inner())
             .await
             .map_err(|error| StoreError(error.to_string()))?;
         Ok(row.and_then(|row| row.0))
@@ -1801,7 +1836,7 @@ impl MoveStore for PoolMoveStore {
             .ok_or_else(|| StoreError("move store: pod lookup outside a span".to_owned()))?;
         let row: Option<sqlx::postgres::PgRow> = sqlx::query(DEFAULT_FOR_PROJECT_ID_SQL)
             .bind(target_project_id)
-            .fetch_optional(&mut **conn)
+            .fetch_optional(&mut **conn.inner())
             .await
             .map_err(|error| StoreError(error.to_string()))?;
         row.map(|row| {
@@ -1836,7 +1871,7 @@ impl MoveStore for PoolMoveStore {
             .bind(None::<Uuid>)
             .bind(now)
             .bind(issue_id)
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|_| ())
             .map_err(|error| StoreError(error.to_string()))
@@ -1855,7 +1890,7 @@ impl MoveStore for PoolMoveStore {
         sqlx::query(INERT_RUN_UPDATE_SQL)
             .bind(run_id)
             .bind(now)
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|_| ())
             .map_err(|error| StoreError(error.to_string()))
@@ -1874,7 +1909,7 @@ impl MoveStore for PoolMoveStore {
         sqlx::query(HANDOFF_PARENT_UPDATE_SQL)
             .bind(run_id)
             .bind(run_config)
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|_| ())
             .map_err(|error| StoreError(error.to_string()))
@@ -1893,7 +1928,7 @@ impl MoveStore for PoolMoveStore {
         sqlx::query(SEQUENCE_DETACH_SQL)
             .bind(issue_id)
             .bind(target_project_id)
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|done| done.rows_affected())
             .map_err(|error| StoreError(error.to_string()))
@@ -1924,7 +1959,7 @@ impl MoveStore for PoolMoveStore {
             .bind(sequence)
             .bind(target_project_id)
             .bind(target_workspace_id)
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|_| ())
             .map_err(|error| StoreError(error.to_string()))
@@ -1945,7 +1980,7 @@ impl MoveStore for PoolMoveStore {
             .bind(now)
             .bind(issue_id)
             .bind(target_project_id)
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|done| done.rows_affected())
             .map_err(|error| StoreError(error.to_string()))
@@ -1966,7 +2001,7 @@ impl MoveStore for PoolMoveStore {
             .bind(target_project_id)
             .bind(target_workspace_id)
             .bind(issue_id)
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|done| done.rows_affected())
             .map_err(|error| StoreError(error.to_string()))
@@ -1985,7 +2020,7 @@ impl MoveStore for PoolMoveStore {
         sqlx::query(LABEL_DELETE_SQL)
             .bind(now)
             .bind(issue_id)
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|done| done.rows_affected())
             .map_err(|error| StoreError(error.to_string()))
@@ -2004,7 +2039,7 @@ impl MoveStore for PoolMoveStore {
         sqlx::query(CYCLE_DELETE_SQL)
             .bind(now)
             .bind(issue_id)
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|done| done.rows_affected())
             .map_err(|error| StoreError(error.to_string()))
@@ -2023,7 +2058,7 @@ impl MoveStore for PoolMoveStore {
         sqlx::query(MODULE_DELETE_SQL)
             .bind(now)
             .bind(issue_id)
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|done| done.rows_affected())
             .map_err(|error| StoreError(error.to_string()))
@@ -2042,7 +2077,7 @@ impl MoveStore for PoolMoveStore {
         sqlx::query(RELATION_DELETE_SQL)
             .bind(now)
             .bind(issue_id)
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|done| done.rows_affected())
             .map_err(|error| StoreError(error.to_string()))
@@ -2061,7 +2096,7 @@ impl MoveStore for PoolMoveStore {
         sqlx::query(CHILDREN_DETACH_SQL)
             .bind(issue_id)
             .bind(target_project_id)
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|done| done.rows_affected())
             .map_err(|error| StoreError(error.to_string()))
@@ -2078,7 +2113,7 @@ impl MoveStore for PoolMoveStore {
             .ok_or_else(|| StoreError("move store: comment ids outside a span".to_owned()))?;
         let rows: Vec<(Uuid,)> = sqlx::query_as(COMMENT_IDS_SQL)
             .bind(issue_id)
-            .fetch_all(&mut **conn)
+            .fetch_all(&mut **conn.inner())
             .await
             .map_err(|error| StoreError(error.to_string()))?;
         Ok(rows.into_iter().map(|row| row.0).collect())
@@ -2095,7 +2130,7 @@ impl MoveStore for PoolMoveStore {
             .ok_or_else(|| StoreError("move store: description ids outside a span".to_owned()))?;
         let rows: Vec<(Uuid,)> = sqlx::query_as(DESCRIPTION_IDS_SQL)
             .bind(issue_id)
-            .fetch_all(&mut **conn)
+            .fetch_all(&mut **conn.inner())
             .await
             .map_err(|error| StoreError(error.to_string()))?;
         Ok(rows.into_iter().map(|row| row.0).collect())
@@ -2128,7 +2163,7 @@ impl MoveStore for PoolMoveStore {
             _ => query,
         };
         query
-            .execute(&mut **conn)
+            .execute(&mut **conn.inner())
             .await
             .map(|done| done.rows_affected())
             .map_err(|error| StoreError(error.to_string()))
@@ -2136,17 +2171,53 @@ impl MoveStore for PoolMoveStore {
 
     async fn create_handoff_run(
         &self,
-        _issue_id: Uuid,
-        _parent_run: &HandoffRunRow,
-        _pod_id: Uuid,
-        _now: &chrono::DateTime<chrono::Utc>,
+        issue_id: Uuid,
+        parent_run: &HandoffRunRow,
+        pod_id: Uuid,
+        now: &chrono::DateTime<chrono::Utc>,
     ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        // Documented gap (see the module docs): the immediate-handoff
-        // insert needs the D-11/D-12 creation runtime, which has no
-        // API-side factory. Loud 500, never a silent skip.
-        Err(pidash_services::app_issues::issue_move::StoreError(
-            "move store: immediate handoff creation needs the D-12 creation runtime (no API-side factory)".to_owned(),
-        ))
+        use pidash_services::app_issues::issue_move::StoreError;
+        // Lend the span to the D-12 creation seam: the create must see
+        // the move's uncommitted writes (the moved issue, the cancelled
+        // parent, the repoints), exactly like Python's in-atomic call
+        // (`issue_move.py:353-362`).
+        let tx =
+            self.txn.lock().await.take().ok_or_else(|| {
+                StoreError("move store: handoff create outside a span".to_owned())
+            })?;
+        let mut creation = handoff_store(tx, self.pool, &self.creation_deps);
+        // The locked row is the parent's pre-cancel snapshot, and the
+        // `RunView` projection needs the full row: re-read it in-span,
+        // under the held lock. The cancel touched only
+        // status/ended_at/queue_position, so this is the row Python's
+        // mutated in-memory instance describes.
+        let parent = creation
+            .run(parent_run.id)
+            .await
+            .map_err(|error| StoreError(error.to_string()))?
+            .ok_or_else(|| {
+                StoreError(format!(
+                    "move store: handoff parent {} gone under its lock",
+                    parent_run.id
+                ))
+            })?;
+        let outcome = create_project_move_handoff_run(
+            &mut creation,
+            &HandoffCreateRequest {
+                issue_id,
+                parent,
+                pod_id,
+                now: *now,
+            },
+        )
+        .await;
+        // The span goes back on the store before any error return, so
+        // `abort` still rolls it back.
+        let (tx, outboxes) = split_outboxes(creation);
+        self.txn.lock().await.replace(tx);
+        let _created = outcome.map_err(|error| StoreError(error.to_string()))?;
+        self.creation.lock().await.replace(outboxes);
+        Ok(())
     }
 
     async fn moved_issue(
@@ -2156,7 +2227,7 @@ impl MoveStore for PoolMoveStore {
         self.commit_span().await?;
         let row: Option<sqlx::postgres::PgRow> = sqlx::query(MOVED_ISSUE_REFETCH_SQL)
             .bind(pk)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.pool)
             .await
             .map_err(store_error)?;
         row.map(|row| {
