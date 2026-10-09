@@ -114,10 +114,16 @@ serde_urlencoded = "0.7.1"
 # services crate builds on), and `markdown_to_html` renders the
 # markdown-it token model over this CommonMark parser (0.13 line).
 scraper = "0.24"
-pulldown-cmark = "0.13"
+pulldown-cmark = "0.13.4"
 # NodeRef for the markdownify DOM walk above (scraper's own tree type, same
 # 0.10 line it builds on, so the lockfile gains no new downloads).
 ego-tree = "0.10"
+# v1 work-item core (D-18 PIDASHCONV-673): lxml.html fromstring/tostring port
+# over the HTML5 parser + reference DOM. Both pinned to the 0.39 line:
+# rcdom's `RcDom` implements that line's `TreeSink`, so the parser and the
+# DOM must resolve together (0.40's sink trait is a different trait).
+html5ever = "0.39"
+markup5ever_rcdom = "0.39.0"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
