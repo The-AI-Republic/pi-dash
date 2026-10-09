@@ -42,9 +42,20 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { version = "1", default-features = false, features = ["time", "macros", "sync"] }
 
 [target.'cfg(unix)'.dependencies]
-# Only for SIGTERM on the bundled daemon: killing it outright would turn a
-# normal window close into a failed run in the user's history.
+# For signalling the bundled daemon: SIGTERM first, because killing it outright
+# would turn a normal window close into a failed run in the user's history, then
+# its whole process group (see `process_tree`).
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Only for the Job Object the bundled daemon runs in, so that stopping the
+# daemon also stops the agent engine it started (see `process_tree`).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"

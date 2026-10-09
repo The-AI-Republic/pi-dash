@@ -32,6 +32,8 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, Runtime};
 
+use crate::process_tree::ProcessTree;
+
 /// Name the agent engine ships under.
 ///
 /// Deliberately not `codex`: the engine is a component of this app, not a
@@ -62,8 +64,11 @@ fn engine_bin_path(resource_dir: &Path) -> PathBuf {
 ///
 /// Empty whenever no daemon is running — which is the normal state before
 /// sign-in and after sign-out, not an error.
+///
+/// Each is held as a [`ProcessTree`], not a bare child: the daemon starts the
+/// agent engine, and stopping the daemon has to take the engine with it.
 #[derive(Default)]
-pub struct DaemonState(pub Mutex<BTreeMap<String, Child>>);
+pub struct DaemonState(pub Mutex<BTreeMap<String, ProcessTree>>);
 
 /// Absolute paths of the managed tree, derived once from Tauri's app-data dir.
 ///
@@ -450,15 +455,13 @@ fn spawn_daemon_locked<R: Runtime>(
 ) -> Result<DaemonStart, String> {
     let state = app.state::<DaemonState>();
     let mut guard = state.0.lock().map_err(|_| "daemon state poisoned")?;
-    if let Some(child) = guard.get_mut(workspace) {
-        match child.try_wait() {
-            // Already running — starting a second daemon on the same config
-            // would have two processes claiming the same runner rows.
-            Ok(None) => return Ok(DaemonStart::AlreadyRunning),
-            _ => {
-                guard.remove(workspace);
-            }
+    if let Some(daemon) = guard.get_mut(workspace) {
+        // Already running — starting a second daemon on the same config
+        // would have two processes claiming the same runner rows.
+        if daemon.is_running() {
+            return Ok(DaemonStart::AlreadyRunning);
         }
+        guard.remove(workspace);
     }
 
     // Refresh every configured project's paths, even when sessionStorage
@@ -485,14 +488,15 @@ fn spawn_daemon_locked<R: Runtime>(
         .append(true)
         .open(paths.data_dir.join("desktop-daemon.log"))
         .map_err(|e| format!("opening daemon log: {e}"))?;
-    let child = base_command(paths, &paths.runner)
-        .arg("__run")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(log))
-        .spawn()
-        .map_err(|e| format!("spawning pidash __run: {e}"))?;
-    guard.insert(workspace.to_string(), child);
+    let daemon = ProcessTree::spawn(
+        base_command(paths, &paths.runner)
+            .arg("__run")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(log)),
+    )
+    .map_err(|e| format!("spawning pidash __run: {e}"))?;
+    guard.insert(workspace.to_string(), daemon);
     Ok(DaemonStart::Spawned)
 }
 
@@ -520,7 +524,7 @@ async fn wait_for_daemon(paths: &ManagedPaths) {
 /// patience on a normal window close.
 ///
 /// `grace_seconds` applies on Unix only; on Windows there is no way to ask this
-/// daemon to exit, so the stop is immediate (see `stop_daemon`).
+/// daemon to exit, so the stop is immediate (see `ProcessTree::stop`).
 #[tauri::command]
 pub async fn managed_stop_daemon<R: Runtime>(
     app: AppHandle<R>,
@@ -697,45 +701,10 @@ fn stop_daemon<R: Runtime>(app: &AppHandle<R>, grace_seconds: u64) {
     let Ok(mut guard) = state.0.lock() else {
         return;
     };
-    let children = std::mem::take(&mut *guard);
-    // Windows has no way to ask this daemon to exit (see the loop below), so the
-    // grace period does not apply there.
-    #[cfg(not(unix))]
-    let _ = grace_seconds;
-    for (_, mut child) in children {
-        // Ask the daemon to finish its current run and exit, then wait for it.
-        //
-        // Unix only. `base_command` spawns every `pidash` invocation with
-        // CREATE_NO_WINDOW on Windows so a GUI app never flashes a console, and
-        // a process with no console cannot receive console control events —
-        // GenerateConsoleCtrlEvent only reaches a process group sharing the
-        // caller's console. A real graceful stop on Windows needs an
-        // out-of-band channel the daemon listens on (a control socket, or a
-        // stop file polled by `pidash __run`); none exists today. Until one
-        // does, waiting out the grace period on Windows would only delay a kill
-        // that is going to happen regardless, so go straight to it rather than
-        // hanging every app exit for `grace_seconds`.
-        #[cfg(unix)]
-        {
-            unsafe {
-                // SIGTERM asks the daemon to finish its current run and shut
-                // down cleanly; the kill below is the fallback if it does not.
-                libc::kill(child.id() as i32, libc::SIGTERM);
-            }
-            // Poll rather than sleeping the full grace period: a daemon with
-            // nothing in flight exits immediately and the user should not wait
-            // for a timer.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(grace_seconds);
-            while std::time::Instant::now() < deadline {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
-                    Err(_) => break,
-                }
-            }
-        }
-        let _ = child.kill();
-        let _ = child.wait();
+    // Ask each daemon to finish its current run and exit, wait for it, then
+    // kill whatever it left behind — see `ProcessTree::stop`.
+    for (_, daemon) in std::mem::take(&mut *guard) {
+        daemon.stop(Duration::from_secs(grace_seconds));
     }
 }
 
