@@ -3197,6 +3197,94 @@ export interface ParityDriver {
   automationsBuiltInRows(): Promise<string[]>;
   /** Whether any extension contributed rows below the built-ins. */
   automationsHasExtensionRows(): Promise<boolean>;
+
+  // --- Add-runner modal + creation (NEWFRONT-179, RUN-006–009) ---
+  /** Open the runners page (workspace scope, or project scope when `projectId` is set) and open the add-runner modal; resolves once the form shows. */
+  addRunnerOpenFromRunners(workspaceSlug: string, projectId?: string): Promise<void>;
+  /** Open the AI-dev-machines page and open the add-runner modal; resolves once the form shows. */
+  addRunnerOpenFromMachines(workspaceSlug: string): Promise<void>;
+  /** Whether the add-runner modal is currently open. */
+  addRunnerVisible(): Promise<boolean>;
+  /** Which modal layout shows: the entry form, the remote-create panel, or the command panel. */
+  addRunnerLayout(): Promise<"form" | "remote" | "command">;
+  /** Current form values as the controls render them. */
+  addRunnerForm(): Promise<AddRunnerFormState>;
+  /** Machine picker option labels in display order. */
+  addRunnerMachineOptions(): Promise<string[]>;
+  /** Project picker option labels in display order. */
+  addRunnerProjectOptions(): Promise<string[]>;
+  /** Pod picker option labels in display order. */
+  addRunnerPodOptions(): Promise<string[]>;
+  /** Agent picker option labels in display order. */
+  addRunnerAgentOptions(): Promise<string[]>;
+  /** Model picker option labels in display order. */
+  addRunnerModelOptions(): Promise<string[]>;
+  /** Project-field validation message, or null when none shows. */
+  addRunnerProjectError(): Promise<string | null>;
+  /** Name-field validation message, or null when none shows. */
+  addRunnerNameError(): Promise<string | null>;
+  /** Pick the machine option labelled `label`. */
+  addRunnerPickMachine(label: string): Promise<void>;
+  /** Pick the manual-command sentinel in the machine picker. */
+  addRunnerPickManual(): Promise<void>;
+  /** Pick the project option labelled `name`. */
+  addRunnerPickProject(name: string): Promise<void>;
+  /** Pick the pod option for `name` (`""` for the default-pod sentinel). */
+  addRunnerPickPod(name: string): Promise<void>;
+  /** Fill the runner name field. */
+  addRunnerSetName(name: string): Promise<void>;
+  /** Fill the working-directory field. */
+  addRunnerSetWorkingDir(dir: string): Promise<void>;
+  /** Pick the agent option labelled `label`. */
+  addRunnerPickAgent(label: string): Promise<void>;
+  /** Pick the model option labelled `label`. */
+  addRunnerPickModel(label: string): Promise<void>;
+  /** Submit the form (specs poll for the outcome: the form stays on validation errors). */
+  addRunnerSubmit(): Promise<void>;
+  /** Dismiss the modal via its Cancel/Close/Done control. */
+  addRunnerClose(): Promise<void>;
+  /** Remote-create panel phase, or null when the panel is not showing. */
+  addRunnerRemotePhase(): Promise<AddRunnerRemotePhase | null>;
+  /** Remote-create panel body text, or null when the panel is not showing. */
+  addRunnerRemoteText(): Promise<string | null>;
+  /** Runner name the success panel reports, or null when absent. */
+  addRunnerRemoteRunnerName(): Promise<string | null>;
+  /** Activate the remote panel's Back control (returns to the form). */
+  addRunnerRemoteBack(): Promise<void>;
+  /** Activate the remote panel's manual-command control (carries values over). */
+  addRunnerRemoteManual(): Promise<void>;
+  /** Record create-runner POST bodies until stopped. */
+  addRunnerCreateSpyStart(): Promise<void>;
+  addRunnerCreateSpyBodies(): Promise<string[]>;
+  addRunnerCreateSpyStop(): Promise<void>;
+  /** Record create-runner status GETs until stopped. */
+  addRunnerStatusSpyStart(): Promise<void>;
+  addRunnerStatusSpyUrls(): Promise<string[]>;
+  addRunnerStatusSpyStop(): Promise<void>;
+  /** Generated command text, or null when the command panel is not showing. */
+  addRunnerCommandText(): Promise<string | null>;
+  /** Command panel header line (project echo), or null when absent. */
+  addRunnerCommandHeader(): Promise<string | null>;
+  /** Shell tab labels in display order. */
+  addRunnerShellOptions(): Promise<string[]>;
+  /** Currently pressed shell tab label, or null when absent. */
+  addRunnerActiveShell(): Promise<string | null>;
+  /** Activate the shell tab labelled `label`. */
+  addRunnerPickShell(label: string): Promise<void>;
+  /** Activate the copy control (grants clipboard first). */
+  addRunnerCopy(): Promise<void>;
+  /** The copy control's current label (transient confirm). */
+  addRunnerCopyState(): Promise<string | null>;
+  /** Current clipboard text (grants clipboard permission first). */
+  addRunnerReadClipboard(): Promise<string>;
+  /** Make the next clipboard write reject (copy-failure shaping). */
+  addRunnerBreakClipboard(): Promise<void>;
+  /** Origin-fallback note, or null when absent. */
+  addRunnerOriginNote(): Promise<string | null>;
+  /** Activate the command panel's Back control (returns to the form). */
+  addRunnerCommandBack(): Promise<void>;
+  /** Newest toast text, or null when no toast shows. */
+  addRunnerLastToast(): Promise<string | null>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -3586,3 +3674,26 @@ export interface AutomationMonthModal {
   /** Inline range error, or null when none shows. */
   error: string | null;
 }
+
+/** Add-runner form values as the controls render them (NEWFRONT-179, RUN-006). */
+export interface AddRunnerFormState {
+  /** Machine picker button label. */
+  machine: string;
+  /** Project picker button label. */
+  project: string;
+  /** Whether the project picker is locked (project-scoped entry). */
+  projectLocked: boolean;
+  /** Pod picker button label. */
+  pod: string;
+  /** Runner name field value. */
+  name: string;
+  /** Working-directory field value. */
+  workingDir: string;
+  /** Agent picker button label. */
+  agent: string;
+  /** Model picker button label. */
+  model: string;
+}
+
+/** Remote-create panel phase (NEWFRONT-179, RUN-007). */
+export type AddRunnerRemotePhase = "creating" | "ok" | "error" | "timeout";

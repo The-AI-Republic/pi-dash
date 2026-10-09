@@ -9793,3 +9793,137 @@ export async function serverProjectCancelledStates(
       return { id: row.id, name: row.name };
     });
 }
+
+// --- Add-runner oracle helpers (NEWFRONT-179, RUN-006–009). Appended;
+// --- existing helpers above are untouched per the shared harness contract.
+// --- Shell snippets reuse devMachinesShell (env-aware container); machine
+// --- rows reuse serverDevMachinesPlantMachine/CleanupMachine.
+
+/**
+ * Open a fresh control session for a planted machine so the dev-machines
+ * list reports it control-online. Resolves with the session id.
+ */
+export async function serverAddRunnerPlantSession(machineId: string): Promise<string> {
+  const out = await devMachinesShell(
+    `import json\n` +
+      `from django.utils import timezone\n` +
+      `from pi_dash.runner.models import DevMachine, MachineSession\n` +
+      `machine = DevMachine.objects.get(pk=${JSON.stringify(machineId)})\n` +
+      `session = MachineSession.objects.create(dev_machine=machine, last_seen_at=timezone.now())\n` +
+      `print("PARITY_AR_SESSION:" + json.dumps({"id": str(session.id)}))\n`
+  );
+  const line = /^PARITY_AR_SESSION:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (line === "") throw new Error(`[parity] session plant produced no row for machine ${machineId}.`);
+  return (JSON.parse(line) as { id: string }).id;
+}
+
+/** Refresh a machine's control session to right now (the 90s online window can lapse during a slow sign-in). */
+export async function serverAddRunnerTouchSession(machineId: string): Promise<void> {
+  await devMachinesShell(
+    `from django.utils import timezone\n` +
+      `from pi_dash.runner.models import MachineSession\n` +
+      `MachineSession.objects.filter(dev_machine_id=${JSON.stringify(machineId)}, revoked_at__isnull=True).update(last_seen_at=timezone.now())\n` +
+      `print("PARITY_AR_TOUCH_OK")\n`
+  );
+}
+
+/** Age a machine's control session by `ageSecs` (dropping it offline past 90s). */
+export async function serverAddRunnerAgeSession(machineId: string, ageSecs: number): Promise<void> {
+  await devMachinesShell(
+    `from datetime import timedelta\n` +
+      `from django.utils import timezone\n` +
+      `from pi_dash.runner.models import MachineSession\n` +
+      `MachineSession.objects.filter(dev_machine_id=${JSON.stringify(machineId)}, revoked_at__isnull=True).update(last_seen_at=(timezone.now() - timedelta(seconds=${ageSecs})))\n` +
+      `print("PARITY_AR_AGE_OK")\n`
+  );
+}
+
+/** Drop a machine's control sessions so delivery fails with machine_offline. */
+export async function serverAddRunnerDropSession(machineId: string): Promise<void> {
+  await devMachinesShell(
+    `from pi_dash.runner.models import MachineSession\n` +
+      `MachineSession.objects.filter(dev_machine_id=${JSON.stringify(machineId)}).delete()\n` +
+      `print("PARITY_AR_DROP_OK")\n`
+  );
+}
+
+/**
+ * Write a daemon result for a create-runner request (the scratch stack runs
+ * no live daemon, so the spec stands in for the write-back exactly as the
+ * daemon endpoint would store it).
+ */
+export async function serverAddRunnerSetResult(requestId: string, payload: Record<string, unknown>): Promise<void> {
+  await devMachinesShell(
+    `import json\n` +
+      `from pi_dash.runner.services.machine_outbox import set_command_result\n` +
+      `set_command_result(${JSON.stringify(requestId)}, json.loads(${JSON.stringify(JSON.stringify(payload))}))\n` +
+      `print("PARITY_AR_RESULT_OK")\n`
+  );
+}
+
+/** Raw outcome of a create-runner POST (status + parsed body). */
+export interface AddRunnerCreateResult {
+  status: number;
+  body: unknown;
+}
+
+/** Drive the create-runner POST directly (advisory-model acceptance proof). */
+export async function serverAddRunnerCreate(
+  machineId: string,
+  workspaceId: string,
+  body: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<AddRunnerCreateResult> {
+  const res = await authedApi(
+    `/runners/dev-machines/${machineId}/create-runner/`,
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace: workspaceId, ...body }),
+    },
+    apiBase
+  );
+  const parsed: unknown = await res.json().catch(() => null);
+  return { status: res.status, body: parsed };
+}
+
+/** Raw outcome of a create-runner status GET (status + parsed body). */
+export interface AddRunnerStatusResult {
+  status: number;
+  body: Record<string, unknown>;
+}
+
+/** Read a create-runner request's server-side result. */
+export async function serverAddRunnerStatus(
+  machineId: string,
+  requestId: string,
+  workspaceId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<AddRunnerStatusResult> {
+  const res = await authedApi(
+    `/runners/dev-machines/${machineId}/create-runner/${requestId}/?workspace=${encodeURIComponent(workspaceId)}`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  const parsed = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  return { status: res.status, body: parsed ?? {} };
+}
+
+/** Runner names in the workspace (manual-path-makes-no-server-write proof). */
+export async function serverAddRunnerRunnerNames(
+  workspaceId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string[]> {
+  const res = await fetchTolerant(`${apiBase}/api/runners/?workspace=${encodeURIComponent(workspaceId)}`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] runner list failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : [];
+  return rows.map((row) => String((row as Record<string, unknown>)["name"] ?? "")).filter((name) => name !== "");
+}
