@@ -3285,6 +3285,129 @@ export interface ParityDriver {
   addRunnerCommandBack(): Promise<void>;
   /** Newest toast text, or null when no toast shows. */
   addRunnerLastToast(): Promise<string | null>;
+
+  // -- Assistant chat core (NEWFRONT-187, AGT-038-049, AGT-053-057) --------
+
+  /** Open the assistant landing for a workspace and settle. */
+  assistantOpenLanding(workspaceSlug: string): Promise<void>;
+  /** Open one thread view and settle. */
+  assistantOpenThread(workspaceSlug: string, threadId: string): Promise<void>;
+  /** Open the workspace dashboard and settle. */
+  assistantOpenHome(workspaceSlug: string): Promise<void>;
+  /** Current pathname (navigation proofs). */
+  assistantCurrentPath(): Promise<string>;
+  /** Browser back plus settle (handoff-state proofs). */
+  assistantGoBack(): Promise<void>;
+  /** Landing greeting headline plus caption; null when the setup card shows. */
+  assistantLandingGreeting(): Promise<AssistantLandingGreeting | null>;
+  /** Whether the landing composer is present. */
+  assistantLandingComposerVisible(): Promise<boolean>;
+  /** Setup card title, body and button label; null when chat entry shows. */
+  assistantSetupCard(): Promise<{ title: string; body: string; button: string } | null>;
+  /** Follow the setup card's provider-settings button. */
+  assistantSetupCardClick(): Promise<void>;
+  /** Type into the assistant composer (landing or thread). */
+  assistantFillDraft(text: string): Promise<void>;
+  /** Current composer draft. */
+  assistantDraftValue(): Promise<string>;
+  /** Press Enter in the composer. */
+  assistantPressEnter(): Promise<void>;
+  /** Press Shift+Enter in the composer. */
+  assistantPressShiftEnter(): Promise<void>;
+  /** Press Control+Enter in the composer (modified-Enter halves). */
+  assistantPressControlEnter(): Promise<void>;
+  /** Whether the send button is present (absent while a turn runs). */
+  assistantSendVisible(): Promise<boolean>;
+  /** Whether the send button is enabled. */
+  assistantSendEnabled(): Promise<boolean>;
+  /** Click the send button. */
+  assistantClickSend(): Promise<void>;
+  /** Whether the stop button is present (a turn is running). */
+  assistantStopVisible(): Promise<boolean>;
+  /** Click the stop button. */
+  assistantClickStop(): Promise<void>;
+  /** Composer lockdown line; null when the composer is not locked down. */
+  assistantComposerReason(): Promise<string | null>;
+  /** Whether the composer textarea is disabled (lockdown or posting). */
+  assistantTextareaDisabled(): Promise<boolean>;
+  /** Inline send/turn error line; null when none shows. */
+  assistantErrorLine(): Promise<string | null>;
+  /** Dictation button label; null when the control hides. */
+  assistantMicLabel(): Promise<string | null>;
+  /** Press the dictation control (push-to-talk down; c5 owns the hold). */
+  assistantClickMic(): Promise<void>;
+  /** Dictation status hint above the composer; null when idle. */
+  assistantDictationHint(): Promise<string | null>;
+  /** Transcript bubbles top to bottom: user, assistant, tool, error, notice. */
+  assistantBubbles(): Promise<AssistantBubble[]>;
+  /** Rendered HTML of the transcript bubble at `index` (markdown proof). */
+  assistantBubbleHtml(index: number): Promise<string>;
+  /** Tool-activity rows with their deep links. */
+  assistantToolActivities(): Promise<AssistantToolActivity[]>;
+  /** Skipped-server notice lines in display order. */
+  assistantNoticeLines(): Promise<string[]>;
+  /** Empty-transcript placeholder text; null once rows render. */
+  assistantEmptyState(): Promise<string | null>;
+  /** Whether the transcript follows the tail (newest row fully visible). */
+  assistantIsScrolledToBottom(): Promise<boolean>;
+  /** Follow a tool-activity deep link. */
+  assistantClickToolLink(activityIndex: number, linkIndex: number): Promise<void>;
+  /** Sidebar threads top to bottom with hrefs and the active mark. */
+  assistantSidebarThreads(): Promise<AssistantSidebarThread[]>;
+  /** Whether the sidebar shows the no-conversations placeholder. */
+  assistantSidebarEmptyVisible(): Promise<boolean>;
+  /** Click the sidebar's New chat entry. */
+  assistantClickNewChat(): Promise<void>;
+  /** Click a sidebar thread by index. */
+  assistantClickSidebarThread(index: number): Promise<void>;
+  /** Whether the dashboard assistant card renders. */
+  assistantCardVisible(): Promise<boolean>;
+  /** Type into the dashboard card input. */
+  assistantCardFillDraft(text: string): Promise<void>;
+  /** Current dashboard card draft. */
+  assistantCardDraftValue(): Promise<string>;
+  /** Press Enter in the dashboard card input. */
+  assistantCardPressEnter(): Promise<void>;
+  /** Whether the card's Ask button is disabled. */
+  assistantCardAskDisabled(): Promise<boolean>;
+  /** Click the card's Ask button. */
+  assistantCardClickAsk(): Promise<void>;
+  /** Click a suggestion chip by its text (fills the draft). */
+  assistantCardClickSuggestion(text: string): Promise<void>;
+  /** Suggestion chip texts in display order (empty when the card hides). */
+  assistantCardSuggestions(): Promise<string[]>;
+  /** Card recents top to bottom with deep-link hrefs. */
+  assistantCardRecents(): Promise<{ title: string; href: string }[]>;
+  /** Follow a card recent by index. */
+  assistantCardClickRecent(index: number): Promise<void>;
+  /** Serve canned SSE frames for a thread's event stream (transport proofs). */
+  assistantStubStream(threadId: string, frames: AssistantStreamFrame[]): Promise<void>;
+  /** Remove a thread's SSE stub. */
+  assistantClearStreamStub(threadId: string): Promise<void>;
+  /** Event-stream request URLs seen per thread (replay cursor proofs). */
+  assistantStreamRequestUrls(threadId: string): Promise<string[]>;
+  /** Abort a thread's event stream (poll-path proofs). */
+  assistantBlockStream(threadId: string): Promise<void>;
+  /** Remove a thread's stream block. */
+  assistantClearStreamBlock(threadId: string): Promise<void>;
+  /** Count assistant API calls from here on. */
+  assistantStartApiSpy(): Promise<void>;
+  /** Calls seen since the spy started. */
+  assistantApiCounts(): Promise<AssistantApiCounts>;
+  /** Remove the API spy. */
+  assistantStopApiSpy(): Promise<void>;
+  /** Fail the next thread-create POST once with a 500. */
+  assistantFailThreadCreateOnce(): Promise<void>;
+  /** Delay the next thread-create POST by `ms`. */
+  assistantDelayThreadCreate(ms: number): Promise<void>;
+  /** Remove thread-create stubs. */
+  assistantClearThreadCreateStubs(): Promise<void>;
+  /** Delay the next message-send POST by `ms`. */
+  assistantDelaySend(ms: number): Promise<void>;
+  /** Remove the send delay. */
+  assistantClearSendDelay(): Promise<void>;
+  /** Newest visible toast; null when none shows. */
+  assistantLastToast(): Promise<{ title: string; message: string } | null>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -3697,3 +3820,59 @@ export interface AddRunnerFormState {
 
 /** Remote-create panel phase (NEWFRONT-179, RUN-007). */
 export type AddRunnerRemotePhase = "creating" | "ok" | "error" | "timeout";
+
+/** Landing greeting headline plus caption (NEWFRONT-187, AGT-038). */
+export interface AssistantLandingGreeting {
+  /** Headline text. */
+  headline: string;
+  /** Caption text. */
+  caption: string;
+}
+
+/** One transcript bubble: role plus visible text (NEWFRONT-187, AGT-047). */
+export interface AssistantBubble {
+  /** user, assistant, tool, error or notice. */
+  role: string;
+  /** Visible text. */
+  text: string;
+}
+
+/** One tool-activity row with its deep links (NEWFRONT-187, AGT-046). */
+export interface AssistantToolActivity {
+  /** Activity text without link labels. */
+  text: string;
+  /** Deep links in display order. */
+  links: { label: string; href: string }[];
+}
+
+/** One sidebar thread row (NEWFRONT-187, AGT-044). */
+export interface AssistantSidebarThread {
+  /** Title or the untitled fallback. */
+  title: string;
+  /** Deep-link href. */
+  href: string;
+  /** Whether this is the open thread. */
+  active: boolean;
+}
+
+/**
+ * One canned assistant SSE frame (NEWFRONT-187, AGT-042). The driver renders
+ * these into SSE `chat.event` frames on the wire shape the backend
+ * serializes (thread id, sequence, kind, payload, message link, stamp).
+ */
+export interface AssistantStreamFrame {
+  seq: number;
+  kind: string;
+  payload: Record<string, unknown>;
+  /** Delta/message target row; null for turn-level frames. */
+  message?: string | null;
+}
+
+/** Assistant API call counts between spy start and read (NEWFRONT-187). */
+export interface AssistantApiCounts {
+  threadCreate: number;
+  send: number;
+  cancel: number;
+  threadList: number;
+  messageList: number;
+}
