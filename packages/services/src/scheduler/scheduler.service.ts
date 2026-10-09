@@ -45,6 +45,12 @@ export interface IScheduler {
   /** 7-char hex like "#3b82f6". Used to color this scheduler's calendar blocks. */
   color: string;
   source: SchedulerSource;
+  /**
+   * True for a scheduler seeded from the built-in catalog. `source` can't
+   * tell: it is `builtin` for user-created schedulers too. A built-in's slug
+   * is locked — the catalog sync matches rows by it.
+   */
+  is_builtin: boolean;
   is_enabled: boolean;
   active_binding_count: number;
   created_at: string;
@@ -61,7 +67,7 @@ export interface ISchedulerCreatePayload {
 }
 
 export type ISchedulerUpdatePayload = Partial<
-  Pick<IScheduler, "name" | "description" | "prompt" | "color" | "is_enabled">
+  Pick<IScheduler, "slug" | "name" | "description" | "prompt" | "color" | "is_enabled">
 >;
 
 export interface ISchedulerBinding {

@@ -333,7 +333,7 @@ One row per `Scheduler` (active, `deleted_at IS NULL`):
 Single editable form for one scheduler:
 
 - Name, description, prompt textarea (multi-line, monospace).
-- Slug shown but immutable after create (part of the unique constraint).
+- Slug editable for user-created schedulers (same format and per-workspace uniqueness rules as on create; bindings reference the scheduler by id, so a rename keeps installs and run history). Locked for built-in schedulers — in the form and by the API — because the built-in sync matches rows by slug.
 - `is_enabled` toggle.
 - "Save" (PATCH) / "Delete" (soft-delete; conditional unique allows re-create with the same slug).
 

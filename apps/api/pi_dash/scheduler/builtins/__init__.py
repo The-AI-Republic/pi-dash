@@ -121,6 +121,13 @@ BUILTINS: List[BuiltinScheduler] = [
 ]
 
 
+#: Slugs owned by the catalog. ``ensure_builtin_schedulers`` matches rows by
+#: slug, so this is also how the API tells a built-in apart from a
+#: user-created scheduler — ``Scheduler.source`` can't, since it defaults to
+#: ``builtin`` for both.
+BUILTIN_SLUGS = frozenset(b.slug for b in BUILTINS)
+
+
 def ensure_builtin_schedulers(workspace, *, builtins: Iterable[BuiltinScheduler] | None = None) -> int:
     """Idempotent upsert of every BUILTINS entry for ``workspace``.
 
