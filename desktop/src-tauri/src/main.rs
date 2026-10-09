@@ -8,6 +8,10 @@ mod account_settings;
 mod chat;
 mod chat_history;
 mod desktop_http;
+// build.rs owns this module; it is compiled here only so its tests run.
+#[cfg(test)]
+#[path = "../dist_guard.rs"]
+mod dist_guard;
 mod ipc;
 mod managed_runner;
 mod pidash_cli;

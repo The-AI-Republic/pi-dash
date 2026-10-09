@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 
+mod dist_guard;
+
+use dist_guard::scan_text_assets;
+
 fn main() {
     println!("cargo:rerun-if-env-changed=PI_DASH_URL");
     println!("cargo:rerun-if-env-changed=VITE_API_BASE_URL");
@@ -188,35 +192,6 @@ fn collect_home_signin_chunks(dir: &std::path::Path, chunks: &mut Vec<String>) {
             chunks.push(contents);
         }
     }
-}
-
-fn scan_text_assets(dir: &std::path::Path, expected: &str, saw_expected: &mut bool) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            scan_text_assets(&path, expected, saw_expected);
-            continue;
-        }
-        if !is_text_asset(&path) {
-            continue;
-        }
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if contents.contains(expected) {
-            *saw_expected = true;
-        }
-    }
-}
-
-fn is_text_asset(path: &std::path::Path) -> bool {
-    matches!(
-        path.extension().and_then(|ext| ext.to_str()),
-        Some("css" | "html" | "js" | "json" | "mjs" | "txt")
-    )
 }
 
 /// Shared validity check used by both the release-build guard (panic) and
