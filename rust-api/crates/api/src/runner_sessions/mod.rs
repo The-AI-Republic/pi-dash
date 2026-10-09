@@ -1,15 +1,18 @@
-//! Runner + machine session handlers (D-14, stage 5, PIDASHCONV-559).
+//! Runner + machine session handlers (D-14, stage 5).
 //!
-//! Ports `apps/api/pi_dash/runner/views/machine_sessions.py:54-352`
-//! (machine open / delete / long-poll) to axum. This module owns the
-//! final `routes()` + [`owned()`] assembly for all six D-14 session
-//! routes; the sibling handler files merge their routers here when
-//! they land (merges keep both sides, never drop a route).
+//! Ports `apps/api/pi_dash/runner/views/sessions.py:50-313` (runner
+//! open / delete, PIDASHCONV-557) and
+//! `apps/api/pi_dash/runner/views/machine_sessions.py:54-352`
+//! (machine open / delete / long-poll, PIDASHCONV-559) to axum. This
+//! module owns the final `routes()` + [`owned()`] assembly for all
+//! six D-14 session routes; the sibling handler files merge their
+//! routers here when they land (merges keep both sides, never drop a
+//! route).
 //!
 //! | Django path | Owner |
 //! | --- | --- |
-//! | `POST runners/<uuid>/sessions/` | sibling `runner_open` (PIDASHCONV-557, Backlog) |
-//! | `DELETE runners/<uuid>/sessions/<uuid>/` | sibling `runner_open` (PIDASHCONV-557, Backlog) |
+//! | `POST runners/<uuid>/sessions/` | [`runner_open`] (PIDASHCONV-557) |
+//! | `DELETE runners/<uuid>/sessions/<uuid>/` | [`runner_open`] (PIDASHCONV-557) |
 //! | `POST runners/<uuid>/sessions/<uuid>/poll` | [`runner_poll`] (PIDASHCONV-558) |
 //! | `POST dev-machines/<uuid>/sessions/` | [`machine`] (PIDASHCONV-559) |
 //! | `DELETE dev-machines/<uuid>/sessions/<uuid>/` | [`machine`] (PIDASHCONV-559) |
@@ -49,11 +52,12 @@
 //!   `AutoSi`.
 //!
 //! Fixture: `rust-api/fixtures/runner_sessions/fx-rses-02-shapes.json`
-//! (FX-RSES-02, machine sections); the `#[cfg(test)]` suites replay the
-//! handler-owned branches (ack parsing, plan, slices, the poll 401
-//! re-render, route registration).
+//! (FX-RSES-02); the `#[cfg(test)]` suites replay the handler-owned
+//! branches (ack parsing, plan, slices, 401 re-renders, the protocol
+//! matrix, route registration).
 
 pub mod machine;
+pub mod runner_open;
 pub mod runner_poll;
 
 use axum::Router;
@@ -86,10 +90,24 @@ pub fn owned(
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
+            "/api/v1/runner/runners/{runner_id}/sessions/",
+            owned(
+                axum::routing::post(runner_open::runner_session_open),
+                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
             "/api/v1/runner/runners/{runner_id}/sessions/{sid}/poll",
             owned(
                 axum::routing::post(runner_poll::runner_session_poll),
                 &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/v1/runner/runners/{runner_id}/sessions/{sid}/",
+            owned(
+                axum::routing::delete(runner_open::runner_session_delete),
+                &["GET", "POST", "PUT", "PATCH", "OPTIONS"],
             ),
         )
         .route(
@@ -189,5 +207,25 @@ mod tests {
             status_for("POST", "/api/v1/runner/dev-machines/nope/").await,
             StatusCode::NOT_FOUND
         );
+    }
+
+    /// Both runner paths are registered with their owned methods
+    /// (same pool-less-500 / proxy-502 proof as the machine test).
+    #[tokio::test]
+    async fn routes_register_both_runner_paths() {
+        let open = format!("/api/v1/runner/runners/{MID}/sessions/");
+        let delete = format!("/api/v1/runner/runners/{MID}/sessions/{SID}/");
+        assert_eq!(
+            status_for("POST", &open).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(status_for("GET", &open).await, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            status_for("DELETE", &delete).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(status_for("POST", &delete).await, StatusCode::BAD_GATEWAY);
+        // The runner poll path is owned by the merged sibling
+        // (PIDASHCONV-558); `routes_register_runner_poll_path` pins it.
     }
 }
