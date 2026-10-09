@@ -10696,3 +10696,206 @@ export async function serverOnboardSession(sessionCookie: string, apiBase: strin
   if (!onboard.ok) throw new Error(`[parity] onboard marker update failed with HTTP ${onboard.status}.`);
   await serverSetTourCompleted(sessionCookie, true, apiBase);
 }
+
+// --- Desktop agent-runtime web-observable sides (NEWFRONT-207, DESK-001–010,
+// --- DESK-026). Appended; existing helpers above are untouched per the shared
+// --- harness contract. Session-cookie style like the serverDesktopRuntime*
+// --- block (NEWFRONT-182): every helper takes a signed-in session cookie plus
+// --- the ids it needs. Refusal halves (*Status / raw outcomes) resolve with
+// --- the outcome so scenarios can assert instead of throwing.
+
+/** One executor option as project detail serializes it. */
+export interface DeskRuntimeExecutorOption {
+  kind: string;
+  available: boolean;
+  reasonCode: string;
+}
+
+function deskRuntimeExecutorOptionOf(raw: unknown): DeskRuntimeExecutorOption {
+  const record = raw as { kind?: unknown; available?: unknown; reason_code?: unknown };
+  if (
+    typeof record.kind !== "string" ||
+    typeof record.available !== "boolean" ||
+    typeof record.reason_code !== "string"
+  ) {
+    throw new Error("[parity] executor option missed kind/available/reason_code.");
+  }
+  return { kind: record.kind, available: record.available, reasonCode: record.reason_code };
+}
+
+/** Executor options for a project (the managed-runner reason-code surface). */
+export async function serverDeskRuntimeProjectExecutorOptions(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DeskRuntimeExecutorOption[]> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { agent_executor_options?: unknown };
+  const rows: unknown[] = Array.isArray(payload.agent_executor_options) ? payload.agent_executor_options : [];
+  return rows.map(deskRuntimeExecutorOptionOf);
+}
+
+/** Raw outcome of pinning an issue's executor (refusal halves resolve). */
+export interface DeskRuntimePinOutcome {
+  status: number;
+  body: string;
+}
+
+/**
+ * Pin an issue's executor, resolving with the raw outcome. A pin the server
+ * refuses (e.g. the desktop target from a web session) resolves with its
+ * 4xx status instead of throwing.
+ */
+export async function serverDeskRuntimePinIssueExecutorStatus(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  executor: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DeskRuntimePinOutcome> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/`,
+    sessionCookie,
+    { agent_executor: executor }
+  );
+  return { status: res.status, body: await res.text() };
+}
+
+/** Current executor selection of an issue (null when inheriting the default). */
+export async function serverDeskRuntimeIssueExecutor(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string | null> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] issue read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { agent_executor?: unknown };
+  if (payload.agent_executor === null || payload.agent_executor === undefined) return null;
+  if (typeof payload.agent_executor !== "string") throw new Error("[parity] issue row carried no agent executor.");
+  return payload.agent_executor;
+}
+
+/** Raw outcome of a chat lifecycle call (resolves, never throws). */
+export interface DeskRuntimeChatAction {
+  status: number;
+  body: string;
+}
+
+async function deskRuntimeChatActionOf(res: Response): Promise<DeskRuntimeChatAction> {
+  return { status: res.status, body: await res.text() };
+}
+
+/** Warm a chat session through the app's own endpoint. */
+export async function serverDeskRuntimeWarmChatSession(
+  sessionId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DeskRuntimeChatAction> {
+  const res = await mutateJSON("POST", `${apiBase}/api/runners/chat/sessions/${sessionId}/warm/`, sessionCookie, {});
+  return deskRuntimeChatActionOf(res);
+}
+
+/** Cancel a chat session's active turn through the app's own endpoint. */
+export async function serverDeskRuntimeCancelChatSession(
+  sessionId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DeskRuntimeChatAction> {
+  const res = await mutateJSON("POST", `${apiBase}/api/runners/chat/sessions/${sessionId}/cancel/`, sessionCookie, {});
+  return deskRuntimeChatActionOf(res);
+}
+
+/** Close a chat session through the app's own endpoint. */
+export async function serverDeskRuntimeCloseChatSession(
+  sessionId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DeskRuntimeChatAction> {
+  const res = await mutateJSON("POST", `${apiBase}/api/runners/chat/sessions/${sessionId}/close/`, sessionCookie, {});
+  return deskRuntimeChatActionOf(res);
+}
+
+/** Minimal session detail the cancel/close halves assert on. */
+export interface DeskRuntimeChatSessionDetail {
+  id: string;
+  status: string;
+  closeRequested: boolean;
+}
+
+/** One chat session through the app's own endpoint. */
+export async function serverDeskRuntimeChatSessionDetail(
+  sessionId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DeskRuntimeChatSessionDetail> {
+  const res = await fetchTolerant(`${apiBase}/api/runners/chat/sessions/${sessionId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] chat-session read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as { id?: unknown; status?: unknown; close_requested?: unknown };
+  if (typeof record.id !== "string" || typeof record.status !== "string") {
+    throw new Error("[parity] chat-session payload carried no id/status.");
+  }
+  return { id: record.id, status: record.status, closeRequested: record.close_requested === true };
+}
+
+/** A decided chat approval as the decide endpoint returns it. */
+export interface DeskRuntimeChatDecision {
+  id: string;
+  status: string;
+  decisionSource: string;
+}
+
+/**
+ * Settle a session's active turn exactly the way the daemon's
+ * message-complete upstream would (status the active message completed,
+ * clear the turn), so the next send is admitted. The scratch stack runs no
+ * live daemon, so without this every session accepts exactly one turn;
+ * this stands in for the daemon write-back the way the approval plant
+ * does. It invents no transcript content — only the turn bookkeeping.
+ */
+export async function serverDeskRuntimeSettleChatTurn(sessionId: string): Promise<void> {
+  const out = await desktopRuntimeShell(
+    `from django.db import transaction\n` +
+      `from pi_dash.runner.models import AgentChatSession\n` +
+      `from pi_dash.runner.services import chat as chat_service\n` +
+      `with transaction.atomic():\n` +
+      `    session = AgentChatSession.objects.select_for_update().get(pk=${JSON.stringify(sessionId)})\n` +
+      `    chat_service.complete_active_turn_locked(session)\n` +
+      `print("PARITY_CHAT_SETTLED")\n`
+  );
+  if (!out.includes("PARITY_CHAT_SETTLED")) throw new Error("[parity] chat-turn settle produced no marker.");
+}
+
+/** Decide a pending chat approval through the user-facing queue endpoint. */
+export async function serverDeskRuntimeDecideChatApproval(
+  approvalId: string,
+  decision: "accept" | "decline",
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<DeskRuntimeChatDecision> {
+  const res = await mutateJSON("POST", `${apiBase}/api/runners/chat/approvals/${approvalId}/decide/`, sessionCookie, {
+    decision,
+  });
+  if (res.status !== 200) throw new Error(`[parity] chat-approval decide failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as { id?: unknown; status?: unknown; decision_source?: unknown };
+  if (
+    typeof record.id !== "string" ||
+    typeof record.status !== "string" ||
+    typeof record.decision_source !== "string"
+  ) {
+    throw new Error("[parity] chat-decision payload missed id/status/decision_source.");
+  }
+  return { id: record.id, status: record.status, decisionSource: record.decision_source };
+}

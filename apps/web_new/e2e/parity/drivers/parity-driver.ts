@@ -3540,6 +3540,18 @@ export interface ParityDriver {
    * fetch each fired during entry.
    */
   notificationsEntryFetches(workspaceSlug: string): Promise<{ list: boolean; unread: boolean }>;
+
+  // --- Desktop agent-runtime web-observable sides (NEWFRONT-207, DESK-001–010,
+  // --- DESK-026). Appended; existing methods above are untouched per the
+  // --- shared driver contract. Targeted absence probes the desktopRuntime*
+  // --- verbs (NEWFRONT-182) do not cover: rendered page text, window-focus
+  // --- refresh traffic, and client-side database residue.
+  /** Rendered text of the current page (absence scans for desktop-only copy). */
+  deskRuntimePageText(): Promise<string>;
+  /** Dispatch a window focus event, as if the user returned to the app. */
+  deskRuntimeDispatchWindowFocus(): Promise<void>;
+  /** Client-side database names the page currently holds (residue checks). */
+  deskRuntimeIndexedDatabaseNames(): Promise<string[]>;
 }
 
 /** One catalog table row: the user-visible definition facts. */

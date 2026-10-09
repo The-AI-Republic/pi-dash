@@ -5643,4 +5643,14 @@ export class WebNewDriver implements ParityDriver {
   async notificationsEntryFetches(_workspaceSlug: string): Promise<{ list: boolean; unread: boolean }> {
     return todo("notificationsEntryFetches");
   }
+
+  async deskRuntimePageText(): Promise<string> {
+    return todo("deskRuntimePageText");
+  }
+  async deskRuntimeDispatchWindowFocus(): Promise<void> {
+    return todo("deskRuntimeDispatchWindowFocus");
+  }
+  async deskRuntimeIndexedDatabaseNames(): Promise<string[]> {
+    return todo("deskRuntimeIndexedDatabaseNames");
+  }
 }
