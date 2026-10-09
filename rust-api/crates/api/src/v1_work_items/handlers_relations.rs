@@ -75,8 +75,10 @@
 //!   every full `save()` re-stamps actors from the request user, so
 //!   `relate()` rows land with `updated_by=NULL` (the adding branch
 //!   nulls it, discarding the explicit actor), workpad PATCH stamps
-//!   `updated_by` and recomputes `description_stripped` / `completed_at`,
-//!   and a workpad PATCH on a stateless issue ASSIGNS a default state.
+//!   `updated_by` and recomputes `description_stripped` / `completed_at`
+//!   (untouched when the issue had no state — the recompute is the `else`
+//!   arm), and a workpad PATCH on a stateless issue ASSIGNS a default
+//!   state.
 //!
 //! Deliberate edges (all unpinned — no fixture or contract case sends
 //! them):
@@ -421,12 +423,17 @@ pub fn owned_workpad(
 /// after `super().initial()`). A missing zone defaults to UTC; an unknown
 /// zone name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`,
 /// which subclasses `KeyError`, so `handle_exception` answers the
-/// `KeyError` branch (`api/views/base.py:160-164`), never a 500.
+/// `KeyError` branch (`api/views/base.py:160-164`). An EMPTY zone 500s:
+/// `ZoneInfo('')` raises `ValueError` (not `KeyError`), which falls
+/// through to the generic 500 (`api/views/base.py:166-171`).
 fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
-    timezone
-        .unwrap_or("UTC")
-        .parse()
-        .map_err(|_| Denial::BadError("The required key does not exist.".to_owned()))
+    match timezone {
+        None => Ok(chrono_tz::UTC),
+        Some("") => Err(Denial::ServerError),
+        Some(zone) => zone
+            .parse()
+            .map_err(|_| Denial::BadError("The required key does not exist.".to_owned())),
+    }
 }
 
 /// Run the route's gate; deny 403 on failure. All five routes carry
@@ -2487,9 +2494,9 @@ async fn workpad_patch_inner(
         .map_err(|_| Denial::ServerError)?;
     let state_group: Option<String> = row_string_opt(&row, "state_group")?;
     // `Issue.save` (REL-5): a stateless issue is ASSIGNED the default
-    // non-triage state (else the first by `sequence`); `completed_at`
-    // follows the (possibly new) state's group; `description_stripped`
-    // recomputes; `updated_by` stamps the actor.
+    // non-triage state (else the first by `sequence`), but its
+    // `completed_at` is untouched (the recompute needs a prior state);
+    // `description_stripped` recomputes; `updated_by` stamps the actor.
     let (state_id, completed_at) = resolve_workpad_state(
         &mut txn,
         &project_id,
@@ -2549,7 +2556,9 @@ fn workpad_has_body(value: &Value) -> Result<bool, Denial> {
 /// The NULL-state arm of `Issue.save` (`db/models/issue.py:288-308`):
 /// default non-triage state first, else the first non-triage state, both
 /// by `Meta.ordering` (`sequence`); with no states at all the issue keeps
-/// its NULL state and its `completed_at` is untouched.
+/// its NULL state. `completed_at` is untouched in every NULL-state case —
+/// the recompute runs only when the issue already had a state (the `else`
+/// arm, `issue.py:300-308`).
 async fn resolve_workpad_state(
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     project_id: &Uuid,
@@ -2587,14 +2596,11 @@ async fn resolve_workpad_state(
         .await
         .map_err(|error| db_error(error, "workpad-random-state"))?,
     };
+    // The `completed_at` recompute lives in the `else` arm of the
+    // `self.state is None` branch (`issue.py:300-308`): a stateless issue
+    // keeps its `completed_at` untouched whether or not a state is found.
     match found {
-        Some((id, group)) => {
-            if group == "completed" {
-                Ok((Some(id), Some(now_utc())))
-            } else {
-                Ok((Some(id), None))
-            }
-        }
+        Some((id, _group)) => Ok((Some(id), completed_at)),
         // No states at all: `self.state` stays `None`, `completed_at`
         // untouched (the `else` arm never runs).
         None => Ok((None, completed_at)),
@@ -3225,6 +3231,24 @@ mod tests {
             activate_timezone(Some("Nope/Nowhere")),
             Err(Denial::BadError(_))
         ));
+    }
+
+    #[test]
+    fn activate_timezone_empty_zone_500s() {
+        // `ZoneInfo('')` raises `ValueError` (not `KeyError`), so an
+        // empty stored zone is the generic 500 while an unknown zone is
+        // the `KeyError`-branch 400 (PIDASHCONV-747, live-probed; same
+        // arm as PIDASHCONV-786 ported to social/pr_links).
+        assert!(matches!(
+            activate_timezone(Some("")),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(
+            activate_timezone(Some("Not/AZone")),
+            Err(Denial::BadError(_))
+        ));
+        assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
+        assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
     }
 
     #[test]
