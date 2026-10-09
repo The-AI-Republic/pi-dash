@@ -739,4 +739,102 @@ describe("LocalChatTransport.subscribeChatEvents", () => {
     expect(appended).toEqual(["first", "second"]);
     unsubscribe();
   });
+
+  it("persists the reply and thread id of a turn that finishes after the view unsubscribed", async () => {
+    // PIDESKAPP-19: the chat view unsubscribes when the user starts a new chat,
+    // picks another session or leaves the route, but nothing cancels the turn —
+    // the daemon finishes it and the host keeps emitting `chat://frame`. History
+    // is the only copy of the reply, so it must be written whether or not a
+    // view is subscribed.
+    const ctx = makeBridge({
+      chat_append_event: {
+        id: "u1",
+        session_id: SESSION,
+        seq: 1,
+        role: "user",
+        content: "take your time",
+        tool_calls: null,
+        approval_decision: null,
+        created_at: 20,
+      },
+    });
+    const transport = new LocalChatTransport(ctx.bridge);
+    const onEvent = vi.fn();
+    const unsubscribe = transport.subscribeChatEvents(SESSION, 0, onEvent, vi.fn());
+    await Promise.resolve();
+    await transport.sendChatMessage(SESSION, "take your time");
+
+    // The view goes away before the engine has reported anything.
+    unsubscribe();
+
+    emit(ctx.listeners, "chat://frame", {
+      result: "chat_started",
+      data: { chat_session_id: SESSION, local_thread_id: "thread-77", started_at: "2026-09-15T00:00:00Z" },
+    });
+    emit(ctx.listeners, "chat://frame", {
+      result: "chat_message_started",
+      data: { chat_session_id: SESSION, message_id: "m1", started_at: "2026-09-15T00:00:00Z" },
+    });
+    emit(ctx.listeners, "chat://frame", {
+      result: "chat_message_completed",
+      data: {
+        chat_session_id: SESSION,
+        message_id: "m1",
+        assistant_message: "finished while you were away",
+        status: "completed",
+        completed_at: "2026-09-15T00:00:05Z",
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve));
+
+    expect(ctx.invoke).toHaveBeenCalledWith("chat_set_thread_id", {
+      account: "acct-1",
+      sessionId: SESSION,
+      engineThreadId: "thread-77",
+    });
+    expect(ctx.invoke).toHaveBeenCalledWith("chat_append_event", {
+      account: "acct-1",
+      sessionId: SESSION,
+      event: { role: "assistant", content: "finished while you were away" },
+    });
+    // The unmounted view itself hears nothing.
+    expect(onEvent).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed history write to the view instead of swallowing it", async () => {
+    // History is the only copy of the reply; if the write fails the user must
+    // hear about it rather than be left with a turn that silently has no answer.
+    const ctx = makeBridge();
+    ctx.invoke.mockImplementation(async (command: string) => {
+      if (command === "chat_append_event") throw new Error("database is locked");
+      return undefined;
+    });
+    const transport = new LocalChatTransport(ctx.bridge);
+    const onEvent = vi.fn();
+    const onError = vi.fn();
+    const unsubscribe = transport.subscribeChatEvents(SESSION, 0, onEvent, onError);
+    await Promise.resolve();
+
+    emit(ctx.listeners, "chat://frame", {
+      result: "chat_message_completed",
+      data: {
+        chat_session_id: SESSION,
+        message_id: "m1",
+        assistant_message: "unsaved answer",
+        status: "completed",
+        completed_at: "2026-09-15T00:00:01Z",
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve));
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0][0] as Error).message).toContain("database is locked");
+    // The turn still ends for the view — and before the error arrives: the
+    // page clears its error on every event, so an error reported ahead of
+    // `turn_completed` would be wiped before the user could see it.
+    const completedAt = onEvent.mock.calls.findIndex((c) => c[0].kind === "turn_completed");
+    expect(completedAt).toBeGreaterThanOrEqual(0);
+    expect(onEvent.mock.invocationCallOrder[completedAt]).toBeLessThan(onError.mock.invocationCallOrder[0]);
+    unsubscribe();
+  });
 });
