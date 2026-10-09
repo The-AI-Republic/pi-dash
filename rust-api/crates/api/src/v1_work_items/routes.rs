@@ -1,17 +1,19 @@
 //! D-18 work-item route registration: action routes (handlers F,
 //! PIDASHCONV-678), link + comment routes (handlers B, PIDASHCONV-674),
 //! PR / code-review link routes (handlers H, PIDASHCONV-680), plus
-//! activity + attachment routes (handlers C, PIDASHCONV-675).
+//! activity + attachment routes (handlers C, PIDASHCONV-675) and label
+//! + page routes (handlers G, PIDASHCONV-679).
 //!
 //! Ports `apps/api/pi_dash/api/urls/work_item.py:133-151` (the four action
 //! paths), `urls/work_item.py:60-77,154-171` (the eight link/comment paths:
 //! four `work-items/` routes plus their deprecated `issues/` twins, which
 //! share the view classes and therefore the handlers),
-//! `urls/work_item.py:218-236` (the four PR/review-link paths) and
+//! `urls/work_item.py:218-236` (the four PR/review-link paths),
 //! `urls/work_item.py:79-98,173-192` (the eight activity/attachment paths
-//! plus their deprecated twins) onto the
-//! merged D-18 foundation. Cutover granularity is the route + method (the
-//! pilot `owned()` pattern): the owned methods serve from Rust, every other
+//! plus their deprecated twins), `urls/label.py` (the two label paths)
+//! and `urls/page.py` (the three page paths) onto the merged D-18
+//! foundation. Cutover granularity is the route + method (the pilot
+//! `owned()` pattern): the owned methods serve from Rust, every other
 //! method on these paths proxies to Django so its 405-after-auth and
 //! metadata responses are preserved byte for byte.
 //!
@@ -31,6 +33,12 @@ use super::handlers_activity::{
     post_attachment,
 };
 
+use super::handlers_labels_pages::{
+    delete_label, delete_page_archive, get_label_detail, get_label_list, get_page_detail,
+    get_page_list, owned_label_detail, owned_label_list, owned_page_archive, owned_page_detail,
+    owned_page_list, patch_label, patch_page, post_label, post_page, post_page_archive,
+};
+
 use super::handlers_pr_links::{
     pr_create, pr_destroy, pr_list, review_create, review_destroy, review_list,
 };
@@ -43,10 +51,11 @@ use super::handlers_social::{
 
 /// Register the four action paths (`urls/work_item.py:133-151`,
 /// PIDASHCONV-678), the D-18 link/comment paths
-/// (`urls/work_item.py:60-77,154-171`, PIDASHCONV-674) and the
-/// PR/review-link paths (`urls/work_item.py:218-236`, PIDASHCONV-680), and
+/// (`urls/work_item.py:60-77,154-171`, PIDASHCONV-674), the
+/// PR/review-link paths (`urls/work_item.py:218-236`, PIDASHCONV-680),
 /// the activity/attachment paths (`urls/work_item.py:79-98,173-192`,
-/// PIDASHCONV-675).
+/// PIDASHCONV-675) and the label/page paths (`urls/label.py`,
+/// `urls/page.py`, PIDASHCONV-679).
 ///
 /// Sibling `v1_work_items` paths have no Rust route yet and keep proxying
 /// to Django through the fallback; on rebase keep both sides.
@@ -198,6 +207,37 @@ pub fn routes() -> Router<AppState> {
                     .delete(delete_attachment),
             ),
         )
+        // `label.py:11-15` — label list (get + post, PIDASHCONV-679).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/labels/",
+            owned_label_list(axum::routing::get(get_label_list).post(post_label)),
+        )
+        // `label.py:16-21` — label detail (get + patch + delete).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/labels/{pk}/",
+            owned_label_detail(
+                axum::routing::get(get_label_detail)
+                    .patch(patch_label)
+                    .delete(delete_label),
+            ),
+        )
+        // `page.py:14-18` — page list (get + post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/pages/",
+            owned_page_list(axum::routing::get(get_page_list).post(post_page)),
+        )
+        // `page.py:19-23` — page detail (get + patch).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/",
+            owned_page_detail(axum::routing::get(get_page_detail).patch(patch_page)),
+        )
+        // `page.py:24-29` — page archive (post + delete).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/archive/",
+            owned_page_archive(
+                axum::routing::post(post_page_archive).delete(delete_page_archive),
+            ),
+        )
 }
 
 #[cfg(test)]
@@ -281,6 +321,50 @@ mod tests {
             (
                 "POST",
                 format!("/api/v1/workspaces/acme/agent-runs/{rid}/yield/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/labels/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/p1/labels/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/labels/{pk}/"),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/workspaces/acme/projects/p1/labels/{pk}/"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/acme/projects/p1/labels/{pk}/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/pages/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/p1/pages/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/"),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/archive/"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/archive/"),
             ),
         ] {
             assert_eq!(
@@ -455,12 +539,29 @@ mod tests {
             .await,
             StatusCode::BAD_GATEWAY
         );
+        // PIDASHCONV-679: unowned verbs on the label/page paths.
+        assert_eq!(
+            status(
+                "PUT",
+                &format!("/api/v1/workspaces/acme/projects/p1/labels/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
         assert_eq!(
             status(
                 "PUT",
                 &format!(
                     "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/{aid}/"
                 ),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "DELETE",
+                &format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/"),
             )
             .await,
             StatusCode::BAD_GATEWAY
@@ -501,12 +602,29 @@ mod tests {
             .await,
             StatusCode::BAD_GATEWAY
         );
+        // PIDASHCONV-679: label/page paths.
+        assert_eq!(
+            status(
+                "GET",
+                "/api/v1/workspaces/acme/projects/p1/labels/not-a-uuid/",
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
         assert_eq!(
             status(
                 "GET",
                 &format!(
                     "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/not-a-uuid/"
                 ),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "GET",
+                "/api/v1/workspaces/acme/projects/p1/pages/not-a-uuid/",
             )
             .await,
             StatusCode::BAD_GATEWAY
