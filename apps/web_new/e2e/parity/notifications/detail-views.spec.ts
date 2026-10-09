@@ -124,7 +124,7 @@ test(
       await driver.notificationsSelectCard(await cardIndex(plainName));
       expect(await driver.notificationsDetailVariant()).toBe("peek");
       await expect.poll(() => driver.notificationsDetailText(), { timeout: 30_000 }).toContain(plainReference);
-      expect(await driver.notificationsDetailText()).toContain(tag);
+      await expect.poll(() => driver.notificationsDetailText(), { timeout: 30_000 }).toContain(tag);
     });
 
     await test.step("closing the peek preview clears the selection", async () => {

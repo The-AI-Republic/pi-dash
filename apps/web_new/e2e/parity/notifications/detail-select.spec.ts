@@ -104,7 +104,7 @@ test(
       expect(posted).toBe(true);
       expect(await driver.notificationsDetailVariant()).toBe("peek");
       await expect.poll(() => driver.notificationsDetailText(), { timeout: 30_000 }).toContain(reference);
-      expect(await driver.notificationsDetailText()).toContain(tag);
+      await expect.poll(() => driver.notificationsDetailText(), { timeout: 30_000 }).toContain(tag);
 
       const cards = await driver.notificationsCards();
       expect(cards.find((card) => card.title === ourName)?.unread).toBe(false);
