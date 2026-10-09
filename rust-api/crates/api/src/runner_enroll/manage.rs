@@ -71,9 +71,10 @@
 //! * Unhandled failures answer the JSON 500 (`SERVER_ERROR_BODY`): Django
 //!   renders its HTML error page here, so only the status is
 //!   contract-pinned (the `runner_runs` precedent, documented there).
-//! * Non-UUID path segments answer the view's JSON 404 (`{"error":"not
-//!   found"}`): Django's `<uuid:…>` converter 404s at URL-resolve with
-//!   its HTML page — status-exact, body per the `chat.rs` precedent.
+//! * Non-canonical path segments fall through to Django, which renders
+//!   its own framework 404: Django's `<uuid:…>` converter 404s at
+//!   URL-resolve with its HTML page, before auth runs (the `enroll.rs`
+//!   `strict_uuid` position, PIDASHCONV-798).
 //! * Lone-surrogate strings in *stored* positions (runner rename,
 //!   description) answer 500: Django 500s encoding them for Postgres.
 //!   In compared/validated positions (UUIDs, pod names, query filters)
@@ -236,6 +237,20 @@ fn query_param(params: &crate::license::QueryMap, key: &str) -> Option<String> {
 /// `chat_sessions_list` precedent answers [`server_error`].
 fn parse_uuid(raw: &str) -> Result<Uuid, Response> {
     raw.parse().map_err(|_| server_error())
+}
+
+/// Django's `<uuid:>` converter (`[0-9a-f]{8}-...`, lowercase-only):
+/// the only segment form that reaches the view. `Uuid::parse_str`
+/// alone also accepts uppercase/braced/simple forms, which Django
+/// 404s before auth runs; comparing against the canonical lowercase
+/// form reproduces the converter exactly (neither side checks
+/// version bits). The `enroll.rs` position (PIDASHCONV-791), twinned —
+/// the sibling's helper is private.
+fn strict_uuid(segment: &str) -> Option<Uuid> {
+    match segment.parse::<Uuid>() {
+        Ok(id) if id.hyphenated().to_string() == segment => Some(id),
+        _ => None,
+    }
 }
 
 /// `timezone.now()` truncated to microseconds (Django datetimes are
@@ -1241,19 +1256,22 @@ fn can_manage_hit(runner: &RunnerOwned, user_id: Uuid, role: Option<i32>) -> boo
     )
 }
 
-/// `GET /api/runners/<runner_id>/` (`runners.py:354-360`).
+/// `GET /api/runners/<runner_id>/` (`runners.py:354-360`). A
+/// non-canonical segment falls through to Django (which renders its
+/// own 404) before auth runs — the `<uuid:runner_id>` converter
+/// position.
 pub async fn runner_detail(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     Path(raw_id): Path<String>,
+    req: Request,
 ) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
-    };
-    let runner_id: Uuid = match raw_id.parse() {
-        Ok(runner_id) => runner_id,
-        Err(_) => return not_found(),
     };
     let hit = match get_runner(&pool, user_id, runner_id).await {
         Ok(hit) => hit,
@@ -1279,13 +1297,12 @@ pub async fn runner_patch(
     Path(raw_id): Path<String>,
     req: Request,
 ) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
-    };
-    let runner_id: Uuid = match raw_id.parse() {
-        Ok(runner_id) => runner_id,
-        Err(_) => return not_found(),
     };
     let hit = match get_runner(&pool, user_id, runner_id).await {
         Ok(hit) => hit,
@@ -1704,19 +1721,21 @@ fn can_manage_pod(role: Option<i32>, pod: &PodOwned, user_id: Uuid) -> bool {
     membership::is_workspace_admin(role) || pod.created_by == Some(user_id)
 }
 
-/// `GET /api/runners/pods/<pod_id>/` (`pods.py:147-153`).
+/// `GET /api/runners/pods/<pod_id>/` (`pods.py:147-153`). A
+/// non-canonical segment falls through to Django (which renders its
+/// own 404) before auth runs — the `<uuid:pod_id>` converter position.
 pub async fn pod_detail(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     Path(raw_id): Path<String>,
+    req: Request,
 ) -> Response {
+    let Some(pod_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
-    };
-    let pod_id: Uuid = match raw_id.parse() {
-        Ok(pod_id) => pod_id,
-        Err(_) => return not_found(),
     };
     let hit = match get_pod(&pool, user_id, pod_id).await {
         Ok(hit) => hit,
@@ -1739,13 +1758,12 @@ pub async fn pod_patch(
     Path(raw_id): Path<String>,
     req: Request,
 ) -> Response {
+    let Some(pod_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
-    };
-    let pod_id: Uuid = match raw_id.parse() {
-        Ok(pod_id) => pod_id,
-        Err(_) => return not_found(),
     };
     let hit = match get_pod(&pool, user_id, pod_id).await {
         Ok(hit) => hit,
@@ -1886,19 +1904,20 @@ pub async fn pod_patch(
 /// §7.2 guards run inside the transaction with the pod row locked
 /// (runners → active runs → default, first hit wins), then the
 /// soft-delete stamp and the `Issue.assigned_pod` sweep. Answers 204
-/// with an empty body.
+/// with an empty body. A non-canonical segment falls through to
+/// Django (which renders its own 404) before auth runs.
 pub async fn pod_delete(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     Path(raw_id): Path<String>,
+    req: Request,
 ) -> Response {
+    let Some(pod_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
-    };
-    let pod_id: Uuid = match raw_id.parse() {
-        Ok(pod_id) => pod_id,
-        Err(_) => return not_found(),
     };
     let hit = match get_pod(&pool, user_id, pod_id).await {
         Ok(hit) => hit,
@@ -2103,6 +2122,34 @@ mod tests {
             map.insert(JStr::from_text(key), value.clone());
         }
         JVal::Object(map)
+    }
+
+    // -- UUID path gating (PIDASHCONV-798) --
+
+    #[test]
+    fn strict_uuid_pins_django_converter() {
+        let lower = "12345678-1234-abcd-ef01-234567890abc";
+        assert_eq!(
+            strict_uuid(lower)
+                .expect("lowercase")
+                .hyphenated()
+                .to_string(),
+            lower
+        );
+        // Django's `<uuid:>` converter 404s every one of these
+        // (several of which `Uuid::parse_str` would accept), so the
+        // gate rejects them.
+        for rejected in [
+            lower.to_uppercase(),
+            "not-a-uuid".to_owned(),
+            "123".to_owned(),
+            format!("{{{lower}}}"),
+            lower.replace('-', ""),
+            format!("urn:uuid:{lower}"),
+            format!("{lower}/"),
+        ] {
+            assert!(strict_uuid(&rejected).is_none(), "{rejected}");
+        }
     }
 
     // -- D13-F7: every recorded error body for these 10 routes --

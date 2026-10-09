@@ -72,10 +72,10 @@
 //! * Unhandled failures answer the JSON 500 (`SERVER_ERROR_BODY`): Django
 //!   renders its HTML error page here, so only the status is
 //!   contract-pinned (the `runner_runs` precedent).
-//! * Non-UUID path segments on the web routes answer the view's JSON 404
-//!   (`{"error":"not found"}`); on the daemon route they answer the
-//!   resolver page (`{"error": "Page not found."}`) — the manage.rs and
-//!   machine.rs precedents respectively.
+//! * Non-canonical path segments fall through to Django, which renders
+//!   its own framework 404: Django's `<uuid:…>` converter 404s at
+//!   URL-resolve with its HTML page, before auth runs (the `enroll.rs`
+//!   `strict_uuid` position, PIDASHCONV-798).
 //! * Lone-surrogate strings in Redis-bound positions store lossy
 //!   (`U+FFFD`): Python's `json.dumps(ensure_ascii)` escapes them, but
 //!   `serde_json::Value` cannot hold a surrogate at all. In DB-bound
@@ -165,9 +165,6 @@ pub const DEV_MACHINE_REVOKED_BODY: &str = r#"{"error":"dev_machine_revoked"}"#;
 pub const UNKNOWN_REQUEST_BODY: &str = r#"{"error":"unknown_request"}"#;
 /// `{"error": "invalid_status"}` — 400 (`machine_commands.py:246`).
 pub const INVALID_STATUS_BODY: &str = r#"{"error":"invalid_status"}"#;
-/// Django's `custom_404_view` bytes for a non-UUID daemon path segment
-/// (the machine.rs precedent).
-const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
 /// `{"error": "invalid_runner_name", "error_description": ...}` — 400
 /// (`machine_commands.py:113-122`; the description kernel is
@@ -206,10 +203,6 @@ fn conflict(body: &str) -> Response {
 
 fn unavailable(body: &str) -> Response {
     json_response(StatusCode::SERVICE_UNAVAILABLE, body.to_owned())
-}
-
-fn page_not_found() -> Response {
-    json_response(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +257,20 @@ async fn workspace_role(
 /// manage.rs precedent answers [`server_error`].
 fn parse_uuid(raw: &str) -> Result<Uuid, Response> {
     raw.parse().map_err(|_| server_error())
+}
+
+/// Django's `<uuid:>` converter (`[0-9a-f]{8}-...`, lowercase-only):
+/// the only segment form that reaches the view. `Uuid::parse_str`
+/// alone also accepts uppercase/braced/simple forms, which Django
+/// 404s before auth runs; comparing against the canonical lowercase
+/// form reproduces the converter exactly (neither side checks
+/// version bits). The `enroll.rs` position (PIDASHCONV-791), twinned —
+/// the sibling's helper is private.
+fn strict_uuid(segment: &str) -> Option<Uuid> {
+    match segment.parse::<Uuid>() {
+        Ok(id) if id.hyphenated().to_string() == segment => Some(id),
+        _ => None,
+    }
 }
 
 /// `timezone.now()` truncated to microseconds (Django datetimes are
@@ -1650,20 +1657,22 @@ async fn drain_delete_effects(
 
 /// `DELETE /api/runners/<runner_id>/` (`runners.py:427-452`): view /
 /// manage gates, `purge_local` parse, the `delete_runner` service, 204.
-/// `request.data` is never touched — only the query flag is parsed.
+/// `request.data` is never touched — only the query flag is parsed. A
+/// non-canonical segment falls through to Django (which renders its
+/// own 404) before auth runs.
 pub async fn runner_delete(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     Path(raw_id): Path<String>,
     Query(params): Query<crate::license::QueryMap>,
+    req: Request,
 ) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
-    };
-    let runner_id: Uuid = match raw_id.parse() {
-        Ok(runner_id) => runner_id,
-        Err(_) => return not_found(),
     };
     let (runner, role) = match get_runner(&pool, user_id, runner_id).await {
         Ok(hit) => hit,
@@ -1744,13 +1753,12 @@ pub async fn machine_delete(
     Query(params): Query<crate::license::QueryMap>,
     req: Request,
 ) -> Response {
+    let Some(machine_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
-    };
-    let machine_id: Uuid = match raw_id.parse() {
-        Ok(machine_id) => machine_id,
-        Err(_) => return not_found(),
     };
     let data = match read_request_data(&state, req).await {
         Ok(data) => data,
@@ -1838,13 +1846,12 @@ pub async fn machine_create_runner(
     Query(params): Query<crate::license::QueryMap>,
     req: Request,
 ) -> Response {
+    let Some(machine_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
-    };
-    let machine_id: Uuid = match raw_id.parse() {
-        Ok(machine_id) => machine_id,
-        Err(_) => return not_found(),
     };
     let data = match read_request_data(&state, req).await {
         Ok(data) => data,
@@ -2012,20 +2019,13 @@ pub async fn machine_create_runner_status(
     Query(params): Query<crate::license::QueryMap>,
     req: Request,
 ) -> Response {
+    let (Some(machine_id), Some(request_id)) = (strict_uuid(&raw_mid), strict_uuid(&raw_rid))
+    else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
-    };
-    let machine_id: Uuid = match raw_mid.parse() {
-        Ok(machine_id) => machine_id,
-        Err(_) => return not_found(),
-    };
-    // A non-UUID request id never reaches the view in Django (the
-    // `<uuid:>` converter 404s); the resolver analog here is the same
-    // view 404 as a bad machine id.
-    let request_id: Uuid = match raw_rid.parse() {
-        Ok(request_id) => request_id,
-        Err(_) => return not_found(),
     };
     let data = match read_request_data(&state, req).await {
         Ok(data) => data,
@@ -2087,17 +2087,13 @@ pub async fn machine_command_result(
     headers: HeaderMap,
     req: Request,
 ) -> Response {
+    let (Some(dev_machine_id), Some(request_id)) = (strict_uuid(&raw_mid), strict_uuid(&raw_rid))
+    else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
     let pool = match pool_of(&state) {
         Ok(pool) => pool.clone(),
         Err(response) => return response,
-    };
-    let dev_machine_id: Uuid = match raw_mid.parse() {
-        Ok(dev_machine_id) => dev_machine_id,
-        Err(_) => return page_not_found(),
-    };
-    let request_id: Uuid = match raw_rid.parse() {
-        Ok(request_id) => request_id,
-        Err(_) => return page_not_found(),
     };
     let secret = state.settings().secret_key.clone();
     let auth =
@@ -2258,6 +2254,34 @@ mod tests {
     use tower::ServiceExt as _;
 
     use crate::edge::EdgeHandle;
+
+    // -- UUID path gating (PIDASHCONV-798) --
+
+    #[test]
+    fn strict_uuid_pins_django_converter() {
+        let lower = "12345678-1234-abcd-ef01-234567890abc";
+        assert_eq!(
+            strict_uuid(lower)
+                .expect("lowercase")
+                .hyphenated()
+                .to_string(),
+            lower
+        );
+        // Django's `<uuid:>` converter 404s every one of these
+        // (several of which `Uuid::parse_str` would accept), so the
+        // gate rejects them.
+        for rejected in [
+            lower.to_uppercase(),
+            "not-a-uuid".to_owned(),
+            "123".to_owned(),
+            format!("{{{lower}}}"),
+            lower.replace('-', ""),
+            format!("urn:uuid:{lower}"),
+            format!("{lower}/"),
+        ] {
+            assert!(strict_uuid(&rejected).is_none(), "{rejected}");
+        }
+    }
 
     const FIXTURE_ENDPOINTS: &str =
         include_str!("../../../../fixtures/runner_enroll/handlers/endpoints.golden.json");
@@ -2801,8 +2825,8 @@ mod tests {
         );
         assert_eq!(
             status_for(web_routes(), "DELETE", "/api/runners/dev-machines/nope/").await,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "bad UUID reaches the view 404 only past the pool gate"
+            StatusCode::BAD_GATEWAY,
+            "a non-canonical segment proxies before the pool gate (502 here: dead test upstream)"
         );
     }
 
