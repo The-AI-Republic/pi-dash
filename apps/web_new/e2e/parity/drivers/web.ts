@@ -19760,7 +19760,7 @@ export class WebDriver implements ParityDriver {
     return url.includes("/users/notifications/") && (url.endsWith("/read/") || url.endsWith("/archive/"));
   }
 
-  private notificationsNextListQuery(): Promise<NotificationsListQuery> {
+  private notificationsNextListQuery(timeoutMs: number = WebDriver.WAIT_MS): Promise<NotificationsListQuery> {
     return this.page
       .waitForResponse(
         (response) => {
@@ -19772,13 +19772,15 @@ export class WebDriver implements ParityDriver {
             response.ok()
           );
         },
-        { timeout: WebDriver.WAIT_MS }
+        { timeout: timeoutMs }
       )
       .then((response) => WebDriver.notificationsQueryOf(response.url()));
   }
 
   async notificationsEntryListQuery(workspaceSlug: string): Promise<NotificationsListQuery> {
-    const queryWait = this.notificationsNextListQuery();
+    // The window spans the navigation itself: on a loaded host the dev
+    // server can take a while to compile and serve the inbox.
+    const queryWait = this.notificationsNextListQuery(120_000);
     await this.page.goto(`/${workspaceSlug}/notifications/`, { timeout: 60_000 });
     await this.page.waitForLoadState("domcontentloaded");
     await this.notificationsTabLocator("all")

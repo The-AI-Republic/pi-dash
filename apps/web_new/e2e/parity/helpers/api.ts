@@ -10685,6 +10685,24 @@ export async function serverNotificationUnarchive(
   if (!res.ok) throw new Error(`[parity] notification unarchive failed with HTTP ${res.status}.`);
 }
 
+/**
+ * Unsubscribe the session owner from an issue (fixture setup for origin
+ * isolation: keeps an assigned fixture out of the subscribed origin).
+ */
+export async function serverUnsubscribeIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/subscribe/`,
+    { method: "DELETE", headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] issue unsubscribe failed with HTTP ${res.status}.`);
+}
+
 /** Mark the scope read in bulk (fixture setup; the UI control is NTF-014's). */
 export async function serverNotificationsMarkAllRead(
   workspaceSlug: string,

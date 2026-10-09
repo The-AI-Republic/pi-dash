@@ -11,6 +11,11 @@
 // owner-subscribed-only), fanned out with sequential member comments, then
 // the assertions key on those titles, so reruns on one seeded stack stay
 // green.
+//
+// NTF-015 is a bug row (NEWFRONT-212): the subscribed branch never excludes
+// assigned issues (it joins the assignee row's own PK instead of its issue
+// FK), so an assigned issue the user is subscribed to also shows under the
+// subscribed origin. The second scenario pins that actual behavior instead.
 import { test, expect } from "../fixtures";
 import {
   requireMentionMember,
@@ -19,6 +24,7 @@ import {
   serverMe,
   serverNotificationsList,
   serverPatchIssue,
+  serverUnsubscribeIssue,
   signInSession,
   type NotificationsRow,
 } from "../helpers/api";
@@ -111,10 +117,13 @@ test(
         ownerSession,
         memberSession
       );
+      // The assigned fixture stays subscribed from its setup comment, which
+      // would also match the subscribed origin (bug NEWFRONT-212), so the
+      // owner unsubscribes after the fan-out to keep the origins isolated.
+      await serverUnsubscribeIssue(seed.workspaceSlug, seed.projectId, assignedId, ownerSession);
     });
 
     await test.step("each notification matches exactly one server origin", async () => {
-      const ours = [createdId, assignedId, subscribedId];
       const created = await serverNotificationsList(seed.workspaceSlug, ownerSession, { type: "created" });
       expect(created.map((row) => row.entityIdentifier)).toContain(createdId);
       expect(created.some((row) => row.entityIdentifier === assignedId)).toBe(false);
@@ -127,7 +136,6 @@ test(
       expect(subscribed.map((row) => row.entityIdentifier)).toContain(subscribedId);
       expect(subscribed.some((row) => row.entityIdentifier === createdId)).toBe(false);
       expect(subscribed.some((row) => row.entityIdentifier === assignedId)).toBe(false);
-      expect(ours).toHaveLength(3);
     });
 
     const entry = await test.step("enter the inbox with all three listed", async () => {
@@ -235,6 +243,74 @@ test(
       expect(rows.map((row) => row.entityIdentifier)).toContain(createdId);
       expect(rows.map((row) => row.entityIdentifier)).toContain(assignedId);
       expect(rows.map((row) => row.entityIdentifier)).toContain(subscribedId);
+    });
+  }
+);
+
+test(
+  specTitle(ROWS, "bug: NEWFRONT-212 subscribed filter also lists assigned issues"),
+  { tag: specTags(ROWS) },
+  async ({ driver, seed }) => {
+    const member = requireMentionMember(seed);
+    const tag = `ntf015b-${Date.now().toString(36)}`;
+    const bothName = `Filter both ${tag}`;
+
+    await test.step("sign in through the UI", async () => {
+      await driver.signInWithPassword(seed.email, seed.password);
+    });
+
+    const ownerSession = await signInSession(seed.email, seed.password);
+    const memberSession = await signInSession(member.email, member.password);
+    const owner = await serverMe(ownerSession);
+
+    const bothId = await serverCreateIssue(seed.workspaceSlug, seed.projectId, memberSession, bothName);
+    await test.step("fan out an assigned notification that stays subscribed", async () => {
+      await serverPatchIssue(seed.workspaceSlug, seed.projectId, bothId, { assignee_ids: [owner.id] }, memberSession);
+      await serverCreateComment(seed.workspaceSlug, seed.projectId, bothId, ownerSession, `<p>subscribing ${tag}</p>`);
+      await fanOutForIssue(
+        seed.workspaceSlug,
+        seed.projectId,
+        bothId,
+        `<p>both origins ${tag}</p>`,
+        ownerSession,
+        memberSession
+      );
+    });
+
+    await test.step("the server lists it under both origins", async () => {
+      const assigned = await serverNotificationsList(seed.workspaceSlug, ownerSession, { type: "assigned" });
+      expect(assigned.map((row) => row.entityIdentifier)).toContain(bothId);
+      const subscribed = await serverNotificationsList(seed.workspaceSlug, ownerSession, { type: "subscribed" });
+      expect(subscribed.map((row) => row.entityIdentifier)).toContain(bothId);
+    });
+
+    await test.step("the UI lists it under both origins", async () => {
+      await driver.notificationsEntryListQuery(seed.workspaceSlug);
+      await expect
+        .poll(async () => (await driver.notificationsCards()).map((card) => card.title), {
+          timeout: 30_000,
+        })
+        .toContain(bothName);
+      await driver.notificationsOpenFilterMenu();
+      const assignedQuery = await driver.notificationsToggleFilterOrigin("assigned");
+      expect(assignedQuery.type).toBe("assigned");
+      await driver.notificationsCloseMenus();
+      await expect
+        .poll(async () => (await driver.notificationsCards()).map((card) => card.title), {
+          timeout: 30_000,
+        })
+        .toContain(bothName);
+      await driver.notificationsClearFilters();
+      await driver.notificationsOpenFilterMenu();
+      const subscribedQuery = await driver.notificationsToggleFilterOrigin("subscribed");
+      expect(subscribedQuery.type).toBe("subscribed");
+      await driver.notificationsCloseMenus();
+      await expect
+        .poll(async () => (await driver.notificationsCards()).map((card) => card.title), {
+          timeout: 30_000,
+        })
+        .toContain(bothName);
+      await driver.notificationsClearFilters();
     });
   }
 );
