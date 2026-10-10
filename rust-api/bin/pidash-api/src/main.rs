@@ -279,14 +279,18 @@ async fn shutdown_signal() {
 type MainResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn main() -> MainResult {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
+    // Ops commands mirror Django management output byte for byte, so
+    // they emit no tracing events: the subscriber stays off and stderr
+    // carries only failures.
+    if !matches!(cli.mode, Mode::Ops { .. }) {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            )
+            .init();
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -380,6 +384,38 @@ mod tests {
         match worker.mode {
             Mode::Worker { concurrency } => assert_eq!(concurrency, 2),
             Mode::Serve { .. } | Mode::Ops { .. } => panic!("wrong mode"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_ops_instance_commands() {
+        let ops = Cli::try_parse_from(["pidash-api", "ops", "instance", "configure-instance"])
+            .expect("ops instance");
+        assert!(matches!(ops.mode, Mode::Ops { .. }));
+        let ops = Cli::try_parse_from([
+            "pidash-api",
+            "ops",
+            "instance",
+            "dry-run-scheduler-migration",
+            "--workspace",
+            "acme",
+            "--json",
+        ])
+        .expect("ops dry-run flags");
+        match ops.mode {
+            Mode::Ops {
+                command:
+                    ops::OpsCommand::Instance(
+                        ops::instance::InstanceCommand::DryRunSchedulerMigration {
+                            workspace,
+                            json,
+                        },
+                    ),
+            } => {
+                assert_eq!(workspace.as_deref(), Some("acme"));
+                assert!(json);
+            }
+            _ => panic!("wrong mode"),
         }
     }
 

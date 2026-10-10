@@ -15,19 +15,22 @@ pidash-services = { path = "../../crates/services" }
 pidash-api = { path = "../../crates/api" }
 pidash-jobs = { path = "../../crates/jobs" }
 axum = "0.8"
+# D-37 ops (PIDASHCONV-807/808/809, one line):
+# batch `now` + fresh row ids (807/808) and Utc timestamps for
+# register/dry-run (809). Same locked chrono 0.4.x as pidash-db, so
+# no lock churn; features are the union the groups need.
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# D-37 ops (PIDASHCONV-807/808/810): batch `now` + fresh row ids
-# (same locked chrono 0.4.x / uuid 1.x as pidash-db, no lock churn),
-# the pool handle for the ops SQL edge (same locked sqlx 0.8.x as the
-# workspace), and JSON write models (same locked serde_json 1.x).
-# chrono/uuid features are the union of the groups' needs.
-chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
+# D-37 ops row ids (PIDASHCONV-807/808/810):
+# same locked uuid 1.x as pidash-db/pidash-services (no lock churn);
+# features are the union of the groups' needs.
 uuid = { version = "1", features = ["serde", "v4"] }
-serde_json = "1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

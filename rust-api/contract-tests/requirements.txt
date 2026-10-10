@@ -31,3 +31,7 @@ websockets>=15
 # render check (test_data_plane_dual_engine.py). Same engine the Django
 # renderer uses; compared against minijinja, never Django imports.
 jinja2>=3.1
+
+# PIDASHCONV-809 (ops instance group): Fernet for decrypting seeded
+# instance_configurations rows when comparing plaintext (test_instance.py).
+cryptography>=42
