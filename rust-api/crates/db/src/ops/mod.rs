@@ -7,5 +7,5 @@
 //! * [`prompting`] — `PromptTemplate` / `PromptSectionOverride` statements
 //!   behind the prompting reseed + revalidate commands (PIDASHCONV-810).
 
-pub mod repair;
 pub mod prompting;
+pub mod repair;

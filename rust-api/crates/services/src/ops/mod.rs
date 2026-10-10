@@ -11,6 +11,6 @@
 //! * [`prompting`] — reseed + revalidate decisions over the prompting
 //!   kernels (PIDASHCONV-810, fixture F37-09).
 
+pub mod prompting;
 pub mod repair;
 pub mod seeds;
-pub mod prompting;

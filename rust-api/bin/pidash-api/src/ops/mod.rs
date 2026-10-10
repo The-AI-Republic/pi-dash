@@ -10,8 +10,8 @@
 //! * [`prompting`] — the prompting reseed + revalidate commands
 //!   (PIDASHCONV-810).
 
-pub mod repair;
 pub mod prompting;
+pub mod repair;
 
 use clap::Subcommand;
 

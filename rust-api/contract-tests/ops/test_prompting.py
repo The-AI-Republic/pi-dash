@@ -69,8 +69,10 @@ def _required(name: str) -> str:
     return value
 
 
-RUST_URL = _required("DATABASE_URL")
-ORACLE_URL = _required("ORACLE_DATABASE_URL")
+# NOTE: env is resolved at fixture/run time, never at import time, so a bare
+# `pytest --collect-only` (CI `collect` job) succeeds with no env set. Every
+# test uses the `pair` fixture (directly or via `owner`), which requires the
+# URLs and both binaries before touching either database.
 BIN = Path(os.environ.get("PIDASH_BIN", REPO_ROOT / "rust-api/target/debug/pidash-api"))
 DJANGO_PYTHON = os.environ.get("DJANGO_PYTHON", sys.executable)
 MANAGE_PY = Path(os.environ.get("MANAGE_PY", REPO_ROOT / "apps/api/manage.py"))
@@ -94,13 +96,12 @@ OLD_TS = "2020-01-01T00:00:00+00:00"  # backdated stamp: any write clearly moves
 
 
 def _check_prereqs() -> None:
+    _required("DATABASE_URL")
+    _required("ORACLE_DATABASE_URL")
     if not BIN.is_file():
         raise RuntimeError(f"Rust binary not found at {BIN} (cargo build -p pidash-api-bin)")
     if not MANAGE_PY.is_file():
         raise RuntimeError(f"manage.py not found at {MANAGE_PY}")
-
-
-_check_prereqs()
 
 
 # --------------------------------------------------------------------------
@@ -111,7 +112,7 @@ _check_prereqs()
 def run_oracle(command: str, *args: str) -> subprocess.CompletedProcess[bytes]:
     """Run the Django management command against the oracle DB."""
     env = dict(os.environ)
-    env["DATABASE_URL"] = ORACLE_URL
+    env["DATABASE_URL"] = _required("ORACLE_DATABASE_URL")
     env["DJANGO_SETTINGS_MODULE"] = DJANGO_SETTINGS
     env["PYTHONPATH"] = DJANGO_API_DIR + os.pathsep + env.get("PYTHONPATH", "")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -126,7 +127,7 @@ def run_oracle(command: str, *args: str) -> subprocess.CompletedProcess[bytes]:
 def run_rust(command: str, *args: str) -> subprocess.CompletedProcess[bytes]:
     """Run the Rust port (``pidash-api ops <command>``) against the Rust DB."""
     env = dict(os.environ)
-    env["DATABASE_URL"] = RUST_URL
+    env["DATABASE_URL"] = _required("DATABASE_URL")
     return subprocess.run(
         [str(BIN), "ops", command, *args],
         capture_output=True,
@@ -153,8 +154,9 @@ def assert_cli_parity(
 @pytest.fixture()
 def pair():
     """Autocommit connections to both scratch DBs with clean prompt tables."""
-    rust = psycopg.connect(RUST_URL, autocommit=True)
-    oracle = psycopg.connect(ORACLE_URL, autocommit=True)
+    _check_prereqs()
+    rust = psycopg.connect(_required("DATABASE_URL"), autocommit=True)
+    oracle = psycopg.connect(_required("ORACLE_DATABASE_URL"), autocommit=True)
     try:
         for conn in (rust, oracle):
             with conn.cursor() as cur:
