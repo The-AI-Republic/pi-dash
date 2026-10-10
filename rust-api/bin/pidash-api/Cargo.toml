@@ -22,8 +22,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # D-37 ops repair (PIDASHCONV-808): batch `now` + fresh row ids for the
 # copy loop (same locked chrono 0.4.x / uuid 1.x as pidash-db, no lock churn).
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-uuid = { version = "1", features = ["v4"] }
+# D-37 ops commands (PIDASHCONV-810): the pool handle for the ops SQL edge
+# (same locked sqlx 0.8.x as the workspace) and row-id parsing/generation
+# (same locked uuid 1.x as pidash-services — no lock churn). uuid features
+# are the union of both groups' needs.
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
+uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }

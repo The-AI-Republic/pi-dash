@@ -293,10 +293,7 @@ fn main() -> MainResult {
     match cli.mode {
         Mode::Serve { bind } => runtime.block_on(serve(&bind)),
         Mode::Worker { concurrency } => runtime.block_on(worker(concurrency)),
-        Mode::Ops { command } => {
-            runtime.block_on(ops::run(command));
-            Ok(())
-        }
+        Mode::Ops { command } => runtime.block_on(ops::run(command)),
     }
 }
 
