@@ -25280,5 +25280,4 @@ export class WebDriver implements ParityDriver {
       return { url, params };
     });
   }
-  }
 }

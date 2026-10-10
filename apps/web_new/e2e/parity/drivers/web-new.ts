@@ -7238,5 +7238,4 @@ export class WebNewDriver implements ParityDriver {
   async intakeShellListQueries(): Promise<IntakeShellListQuery[]> {
     return todo("intakeShellListQueries");
   }
-  }
 }
