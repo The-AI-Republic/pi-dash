@@ -73,10 +73,6 @@ and the `.{format}` suffix variants Django's router generates; no Rust
 route.
 
 ```expected-routes
-G3 :: /api/v1/workspaces/{slug}/ :: no-rust-route
-G3 :: /api/v1/workspaces/{slug}/invitations.{format}/? :: no-rust-route
-G3 :: /api/v1/workspaces/{slug}/stickies.{format}/? :: no-rust-route
-G3 :: /api/v1/workspaces/{slug}/{format} :: no-rust-route
 ```
 
 ### G4 — magic-link sign-in/up routes missing proxy arms (4 rows)
@@ -98,8 +94,6 @@ Fix: PIDASHCONV-828 (with G3). The `{pk}.{format}` detail variants; no
 Rust route.
 
 ```expected-routes
-G5 :: /api/v1/workspaces/{slug}/invitations/{pk}.{format}/? :: no-rust-route
-G5 :: /api/v1/workspaces/{slug}/stickies/{pk}.{format}/? :: no-rust-route
 ```
 
 ### G6 — handler-denial 405s pending contract proof (7 rows)
