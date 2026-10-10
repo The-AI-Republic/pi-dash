@@ -16,12 +16,14 @@
 //!   connect + `SELECT 1` probe and retries with Python's own verbatim
 //!   retry line (including the `waititng` typo). The success-path bytes are
 //!   identical to Python.
-//! * `wait_for_migrations`: Python crashes with an uncaught
-//!   `OperationalError` (traceback, exit 1) when the database is down or
-//!   `django_migrations` does not exist yet. The entrypoint starts API
-//!   containers before the migrator has created that table, so the Rust
-//!   port treats every probe failure as "pending" and keeps waiting. The
-//!   success-path bytes are identical to Python.
+//! * `wait_for_migrations`: a missing `django_migrations` table counts
+//!   as pending in both implementations (Django's loader plans every
+//!   migration then, so it waits too — verified live). When the database
+//!   itself is down, Python crashes with an uncaught `OperationalError`
+//!   (traceback, exit 1) while the Rust port keeps waiting: the
+//!   entrypoint starts API containers while Postgres is still coming up,
+//!   and crashing the container there would break the boot the command
+//!   exists for. The success-path bytes are identical to Python.
 //! * The pending check is leaf-node parity, not a reimplementation of
 //!   `MigrationExecutor`: Django applies migrations in dependency order,
 //!   so every leaf node being applied implies its ancestors are applied,
@@ -102,7 +104,8 @@ pub async fn fetch_applied_migrations(
 
 /// One `_pending_migrations()` probe: true while migrations are pending.
 /// Any failure (unreachable database, missing table) counts as pending —
-/// the loop waits instead of crashing (see the module docs).
+/// like Django's loader, which plans everything when the table is absent
+/// (see the module docs for the one divergence: a down database).
 pub async fn migrations_pending(connection: &mut sqlx::postgres::PgConnection) -> bool {
     match fetch_applied_migrations(connection).await {
         Ok(applied) => migrations_pending_from_applied(&applied),
@@ -154,8 +157,8 @@ async fn db_is_up(options: &sqlx::postgres::PgConnectOptions) -> bool {
 async fn migrations_pending_probe(options: &sqlx::postgres::PgConnectOptions) -> bool {
     let mut connection = match probe_connection(options).await {
         Ok(connection) => connection,
-        // Unreachable database: pending (Python crashes here instead —
-        // see the module docs).
+        // Unreachable database: pending (Python crashes with
+        // OperationalError here instead — see the module docs).
         Err(_) => return true,
     };
     let pending = migrations_pending(&mut connection).await;
