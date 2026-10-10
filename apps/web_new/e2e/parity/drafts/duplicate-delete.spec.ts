@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 // Oracle scenarios (NEWFRONT-32): duplicating a draft with its payload
 // carried over, and deleting through the confirmation dialog with the
-// creator-or-project-admin gate. Rows: DRAFT-010, DRAFT-011. Green on
+// creator-or-workspace-admin gate. Rows: DRAFT-010, DRAFT-011. Green on
 // apps/web first.
 import { test, expect } from "../fixtures";
 import {
@@ -84,7 +84,7 @@ test(
 );
 
 test(
-  specTitle(["DRAFT-011"], "deleting another user's draft is refused unless a project admin"),
+  specTitle(["DRAFT-011"], "deleting another user's draft is refused unless a workspace admin"),
   { tag: specTags(["DRAFT-011"]) },
   async ({ driver }) => {
     // The drafts list is owner-scoped, so a non-creator never reaches the
