@@ -1189,19 +1189,19 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "cloud_agent.run_agent_run",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "cloud_agent.scan_queued_runs",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "cloud_agent.sweep_stale_runs",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "managed_runner.expire_waiting_runs",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.agent_ticker.fire_tick",
@@ -1877,6 +1877,25 @@ mod tests {
             runner_seams.clone(),
             runner_seams,
         );
+        // D-11 execution tasks (PIDASHCONV-832): the same calls
+        // `worker()` makes — real register over the lazy pool, then
+        // the run forward override (handlers never run here).
+        let execute_settings =
+            pidash_db::config::Settings::from_env().expect("settings parse in test env");
+        pidash_jobs::dispatch_execute::register_execute_tasks(
+            &mut registry,
+            pool.clone(),
+            execute_settings.cloud_agent.clone(),
+            execute_settings.managed_runner.clone(),
+            std::sync::Arc::new(crate::execute_seams::LiveExecuteSeams::new(
+                pool.clone(),
+                execute_settings.cloud_agent.block_private_urls,
+            )),
+        );
+        registry.register(
+            pidash_jobs::dispatch::RUN_CLOUD_AGENT_TASK,
+            crate::execute_seams::forward_to_python_handler(None),
+        );
 
         // The const union, independent of the table.
         let mut expected_rust = std::collections::BTreeSet::new();
@@ -1903,6 +1922,10 @@ mod tests {
             pidash_jobs::tasks_ticker::scan::SCAN_DUE_BINDINGS_TASK,
             pidash_jobs::tasks_ticker::scan::FIRE_TICK_TASK,
             pidash_jobs::tasks_ticker::scan::FIRE_SCHEDULER_BINDING_TASK,
+            pidash_jobs::dispatch::RUN_CLOUD_AGENT_TASK,
+            pidash_jobs::dispatch_execute::SCAN_QUEUED_RUNS_TASK,
+            pidash_jobs::dispatch_execute::SWEEP_STALE_RUNS_TASK,
+            pidash_jobs::dispatch_execute::EXPIRE_WAITING_RUNS_TASK,
         ]);
         expected_rust.insert(pidash_jobs::tasks_mail::NOTIFICATIONS_TASK);
         expected_rust.extend(pidash_jobs::runner_runs::TASK_NAMES);
@@ -1937,7 +1960,7 @@ mod tests {
             11,
             "runner_runs group drifted"
         );
-        assert_eq!(expected_rust.len(), 47, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 51, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()
