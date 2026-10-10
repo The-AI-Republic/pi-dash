@@ -84,8 +84,10 @@ D-06 assistant fixtures. `runner/models.py` is READ-ONLY for this domain
   (wire-captured), the genai-prices usage-extractor table (43 provider
   URL patterns in snapshot order + `chat`/`default` mappings), and a
   17-case stub-driven validation/coercion battery (exact retry-message
-  renderings). Generator: `/tmp/probe866/gen_runtime.py` (not committed;
-  see `_meta.method`). Wire tool order is registration order (probed):
+  renderings, with replay inputs), and 66 usage-extraction vectors
+  (provider URL x usage shape, direct `_map_usage` calls). Generator:
+  `/tmp/probe866/gen_runtime.py` (not committed; see `_meta.method`).
+  Wire tool order is registration order (probed):
   `sorted(granted function names)` (build_tools sorts) + MCP tools in
   `build_github_toolset` source order + `final_result` last. Output-tool
   parameters carry `additionalProperties:false` LAST; function tools FIRST.

@@ -19,6 +19,7 @@
 
 mod execute_seams;
 mod inventory;
+mod model_runtime;
 mod ops;
 mod redis_origin;
 mod runner_seams;
