@@ -40,19 +40,22 @@ backend-independent — they assert on Django source text and the
 in-process wire builder, so they already pass with no worker at all.
 Only the live worker tests have a replay form.
 
-Ownership split (mirrors the worker registry on rust-dev): 9 of the
+Ownership split (mirrors the worker registry on rust-dev): 8 of the
 11 D-08 task names are Python-owned — the ``pidash-api`` binary
-registers exactly two ``tasks_webhooks`` handlers, ``process_logs``
+registers three ``tasks_webhooks`` handlers, ``process_logs``
 (``bin/pidash-api/src/main.rs`` wires cleanup + integrations +
-``PROCESS_LOGS_TASK``) and ``archive_and_close_old_issues``
+``PROCESS_LOGS_TASK``), ``archive_and_close_old_issues``
 (PIDASHCONV-837 wires ``register_automation_handlers`` in
-``worker()``), and ``crates/jobs/src/tasks_webhooks/mod.rs``
+``worker()``) and ``issue_activity`` (PIDASHCONV-836 wires
+``register_activity_task`` in ``worker()``), and
+``crates/jobs/src/tasks_webhooks/mod.rs``
 keeps the webhook send/fan-out path Python-owned deliberately
 (registering a local send handler would steal live traffic while the
 webhook-row fetch, HTTP send and SMTP send still live on Python).
-Every test below except the two owned-cases
-(``test_rust_process_logs_executes_locally`` and
-``test_rust_archive_and_close_executes_locally``)
+Every test below except the three owned-cases
+(``test_rust_process_logs_executes_locally``,
+``test_rust_archive_and_close_executes_locally`` and
+``test_rust_issue_activity_executes_locally``)
 therefore asserts observable AMQP forwarding — the
 ``rust_job_queue`` row is acked AND the broker ``celery`` queue grows
 while the Django worker is stopped — instead of local DB effects, plus
@@ -65,6 +68,14 @@ env) executes ``process_logs`` at worker boot, so the Rust worker owns
 ``PROCESS_LOGS_TASK`` too and ``test_rust_process_logs_executes_locally``
 asserts the local ``api_activity_logs`` row diff instead of forwarding.
 
+issue_activity note (PIDASHCONV-836 registers it): the Rust worker owns
+``ISSUE_ACTIVITY_TASK`` and ``test_rust_issue_activity_executes_locally``
+asserts the local ``issue_activities`` row diff instead of forwarding.
+
+archive_and_close note (PIDASHCONV-837 registers it without a replay
+flip): ``test_rust_light_tasks_forwarded_without_crash`` still pins
+its forward; this issue leaves that test untouched.
+
 Beat note: D-08 owns no beat entries (``test_no_beat_entries_owned`` —
 cleanup owns the webhook-log delete; the daily
 ``check-every-day-to-archive-and-close`` entry names
@@ -73,6 +84,7 @@ static test does not count as owned). Beat pins are source-text, so
 there is no replay form.
 """
 
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -479,25 +491,65 @@ def test_rust_light_tasks_forwarded_without_crash(db_conn, broker_url):
         _publish_and_observe_forward(task_name, args=args, kwargs=kwargs)
 
 
-def test_rust_issue_activity_forwards_to_python(db_conn, broker_url):
-    """issue_activity has no behavioral oracle test (wire + registration
-    pins only), so the replay pins the forward with the Python
-    positional-arg shape (``issue_activities_task.py:1504``)."""
+def test_rust_issue_activity_executes_locally(db_conn, broker_url):
+    """issue_activity, Rust side: EXECUTE locally (PIDASHCONV-836).
+
+    Revisits ``test_rust_issue_activity_forwards_to_python``: this issue
+    wires ``register_activity_task`` in ``worker()``, so the Rust worker
+    owns ``ISSUE_ACTIVITY_TASK``. There is no behavioral Django oracle
+    test to mirror (wire + registration pins only), so this publishes a
+    realistic ``issue.activity.created`` payload in the real call-site
+    shape — kwargs, JSON-string ``requested_data``, real uuids, numeric
+    epoch (e.g. ``api/views/cycle.py:594``) — and asserts the local
+    ``issue_activities`` row diff instead of forwarding.
+    ``requested_data`` carries no ``assignee_ids`` key, so exactly one
+    row (``created the issue`` / ``created``) is written, with the actor
+    taken from the issue row itself (``issue_activities_task.py:577-579``);
+    the caller actor is a different user to pin the override. Settlement
+    of the ``rust_job_queue`` row plus the new row is the proof: with the
+    Django worker stopped, a forward could never produce a local row.
+    No broker-depth assertion: the scheduler loop forwards other
+    domains' entries over the same broker, so only the row diff is
+    attributable to this job.
+    """
     chain = seed_helpers.issue_chain(db_conn, "rustreplayactivity")
-    issue, owner = chain["issue"], chain["owner"]
-    project = chain["project"]
-    _publish_and_observe_forward(
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    caller = seed_helpers.user(db_conn, "rust-replay-activity-caller")
+    # The create builder overwrites the caller actor with the issue's
+    # creator (:577-579); set it explicitly so the pin is deterministic.
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET created_by_id = %s WHERE id = %s",
+            (str(owner["id"]), str(issue["id"])),
+        )
+    db_conn.commit()
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_id = rust_queue.publish(
         ISSUE_ACTIVITY,
-        args=[
-            "created",
-            {"id": str(issue["id"])},
-            None,
-            str(issue["id"]),
-            str(owner["id"]),
-            str(project["id"]),
-            0.0,
-        ],
+        kwargs={
+            "type": "issue.activity.created",
+            "requested_data": json.dumps({"name": "contract issue"}),
+            "current_instance": None,
+            "issue_id": str(issue["id"]),
+            "actor_id": str(caller["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+        },
     )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    after = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="issue_activities row",
+    )
+    assert len(after) == 1
+    row = after[0]
+    assert row["comment"] == "created the issue"
+    assert row["verb"] == "created"
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
 
 
 def test_rust_crawl_link_forwards_to_python(db_conn, broker_url):
