@@ -7069,6 +7069,8 @@ export class WebNewDriver implements ParityDriver {
 
   async cyclesEditDetailReadOnlyNotice(): Promise<string | null> {
     return todo("cyclesEditDetailReadOnlyNotice");
+  }
+
   // --- Intake detail (NEWFRONT-258, INT-019/024/026-029). Stubs: the area
   // --- has not landed in apps/web_new, so every action throws.
 
