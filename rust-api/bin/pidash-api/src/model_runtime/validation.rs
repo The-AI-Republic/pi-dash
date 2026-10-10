@@ -109,12 +109,12 @@ pub fn render_retry_message(details: &[ValidationDetail]) -> String {
 /// inside a string becomes `\uXXXX` (lowercase hex; surrogate pairs for
 /// astral planes). String boundaries are tracked with escape awareness;
 /// structural characters are never touched.
-fn ensure_ascii(pretty: &str) -> String {
+pub(crate) fn ensure_ascii(pretty: &str) -> String {
     let mut out = String::with_capacity(pretty.len());
     let mut chars = pretty.chars().peekable();
     let mut in_string = false;
     let mut escaped = false;
-    while let Some(c) = chars.next() {
+    for c in chars.by_ref() {
         if !in_string {
             out.push(c);
             if c == '"' {
@@ -153,17 +153,26 @@ fn ensure_ascii(pretty: &str) -> String {
     out
 }
 
-/// Unknown-tool retry text (`Tool 'x' is unknown` path,
+/// The unknown-tool `ModelRetry` content (`_resolve_tool`,
 /// `tool_manager.py:356-369`): the available names are byte-sorted and
-/// include the output tool.
-pub fn unknown_tool_message(name: &str, available_sorted: &[&str]) -> String {
+/// include the output tool. The wire rendering appends the fix suffix
+/// (`RetryPromptPart.model_response`).
+pub fn unknown_tool_content(name: &str, available_sorted: &[&str]) -> String {
     let quoted: Vec<String> = available_sorted
         .iter()
         .map(|tool| format!("'{tool}'"))
         .collect();
     format!(
-        "Unknown tool name: '{name}'. Available tools: {}\n\nFix the errors and try again.",
+        "Unknown tool name: '{name}'. Available tools: {}",
         quoted.join(", ")
+    )
+}
+
+/// Unknown-tool retry text: the content rendered for the model.
+pub fn unknown_tool_message(name: &str, available_sorted: &[&str]) -> String {
+    format!(
+        "{}\n\nFix the errors and try again.",
+        unknown_tool_content(name, available_sorted)
     )
 }
 

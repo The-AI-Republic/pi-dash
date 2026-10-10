@@ -20,6 +20,8 @@
 //! Later runs add the provider HTTP lanes, the agent loop, and the tool
 //! executors behind the same `invoke` entry point.
 
+pub mod agent;
+pub mod provider;
 pub mod schemas;
 pub mod usage;
 pub mod validation;

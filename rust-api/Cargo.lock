@@ -2736,6 +2736,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "futures-util",
  "pidash-api",
  "pidash-auth",
  "pidash-db",
