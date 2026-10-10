@@ -21,7 +21,7 @@ Counts (2026-10-10, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 502 OWNED, 26 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 85 tasks — 28 OWNED, 34 proxied by design, 23 MISSING;
+- Jobs: 85 tasks — 28 OWNED, 35 proxied by design, 22 MISSING;
   beat 26/26 OWNED.
 
 ## Routes
@@ -193,12 +193,15 @@ W-mail :: pi_dash.bgtasks.email_notification_task.stack_email_notification :: mu
 W-mail :: pi_dash.bgtasks.notification_task.notifications :: must-wire (lost without python worker)
 ```
 
-### W-export (1 row)
+### W-export (0 rows; reclassified to PROXIED)
 
-Fix: PIDASHCONV-835.
+Fix: PIDASHCONV-835 (hybrid-worker decision, not wiring: the Python
+worker stays the owner post-switchover — see the `delete_old_s3_link`
+bullet under "Proxied by design". No register fn exists and Rust has
+no live S3 delete path, so there is nothing to wire; the `W-export`
+gap id stays reserved in `WIRE_GAPS`).
 
 ```expected-jobs
-W-export :: pi_dash.bgtasks.exporter_expired_task.delete_old_s3_link :: must-wire (lost without python worker)
 ```
 
 ### W-activity (1 row)
@@ -240,7 +243,7 @@ W-runner :: runner.sweep_agent_chat_state :: must-wire (lost without python work
 W-runner :: runner.sweep_chat_message_dedupe :: must-wire (lost without python worker)
 ```
 
-### Proxied by design (34 rows)
+### Proxied by design (35 rows)
 
 No fix issue: forwarding preserves Django's outcome on every row.
 
@@ -251,6 +254,18 @@ No fix issue: forwarding preserves Django's outcome on every row.
   because an early-return handler would swallow the forward.
 - `dormant` (4): registered but never published; forward preserves
   non-execution.
+- `delete_old_s3_link`: hybrid worker (PIDASHCONV-835). Registered
+  and beat-scheduled (twice daily), but the body deletes objects from
+  a live S3 bucket and Rust has no live S3 delete path (`ObjectStore`
+  has head/copy only; the worker wires `UnavailableObjectStore`;
+  "Sinks, never live buckets"). A Rust handler would clear `url`
+  without deleting objects, diverging from Django — so the Python
+  worker stays the owner post-switchover (the AMQP broker stays too:
+  the Rust scheduler keeps firing both beat entries and the Rust
+  worker forwards to Python over Celery protocol). Decision owner:
+  stage-8 switchover track (PIDASHCONV-835); revisit PIDASHCONV-858
+  by 2027-04-10, or when Rust ships a live S3 delete path, whichever
+  comes first.
 - `managed_runner.expire_waiting_runs`: cloud-only app; the OSS beat
   entry fires into the void on both sides.
 - `project_invitation`: never invoked (`invite.py:105` calls `.delay`
@@ -274,6 +289,7 @@ PROXIED :: pi_dash.bgtasks.analytic_plot_export.analytic_export_task :: django-d
 PROXIED :: pi_dash.bgtasks.analytic_plot_export.export_analytics_to_csv_email :: dead (defined, never referenced)
 PROXIED :: pi_dash.bgtasks.event_tracking_task.track_event :: django-drops-too (PDASHOSS01-292); rust explicitly unregistered (early-return would swallow forward)
 PROXIED :: pi_dash.bgtasks.export_task.issue_export_task :: django-drops-too (PDASHOSS01-292)
+PROXIED :: pi_dash.bgtasks.exporter_expired_task.delete_old_s3_link :: hybrid worker (no live S3 delete in Rust); forward preserves full python execution (PIDASHCONV-835)
 PROXIED :: pi_dash.bgtasks.forgot_password_task.forgot_password :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.magic_link_code_task.magic_link :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.page_transaction_task.page_transaction :: django-drops-too (PDASHOSS01-292)
