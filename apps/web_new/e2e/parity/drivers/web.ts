@@ -84,6 +84,11 @@ import type {
   RunnersTableRow,
   ServedShellMarkers,
   WorkspaceOnboardingView,
+  IntakeListChip,
+  IntakeListFilterKey,
+  IntakeListOrderField,
+  IntakeListOrderState,
+  IntakeListTooltip,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -25062,5 +25067,574 @@ export class WebDriver implements ParityDriver {
     const dialog = await this.runnersWaitForConfirm("Revoke runner?");
     const revoke = dialog.getByRole("button", { name: "Revoke", exact: true });
     await expect.poll(() => revoke.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  // --- Intake list content (NEWFRONT-256, INT-006/007/009/010/011). Observed
+  // --- on the running old app: rows are links keyed by nested issue id with
+  // --- a top line (project-scoped id label + status slot) and a bottom line
+  // --- (created date, priority glyph, label pills, author avatar); the
+  // --- sidebar header carries icon-only filter/order buttons at 1280px.
+
+  private intakeListRowLink(issueId: string): Locator {
+    return this.page.locator(`a[id="inbox-issue-list-item-${issueId}"]`);
+  }
+
+  private intakeListSidebarBar(): Locator {
+    // Tabs bar above the list: the "Open" tab text anchors it, and it holds
+    // exactly the filter + order buttons (chips below use plain divs).
+    return this.page.getByText("Open", { exact: true }).first().locator("xpath=ancestor::div[2]");
+  }
+
+  async intakeListOpen(workspaceSlug: string, projectId: string, tab: "open" | "closed"): Promise<void> {
+    // No load-state wait: on a loaded box the dev oracle settles load state
+    // long after first paint, and an unbounded wait hangs the test budget
+    // on a fully rendered page. The row wait below is the readiness signal.
+    // Callers enter pre-authenticated (cookies first); the closed tab keeps
+    // the same session.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake?currentTab=${tab}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 120_000,
+    });
+    await this.page.getByText("Open", { exact: true }).first().waitFor({ timeout: 180_000 });
+    await this.page.locator('a[id^="inbox-issue-list-item-"]').first().waitFor({ timeout: 180_000 });
+  }
+
+  async intakeListRowIds(): Promise<string[]> {
+    const ids = await this.page
+      .locator('a[id^="inbox-issue-list-item-"]')
+      .evaluateAll((links) => links.map((link) => link.id.replace("inbox-issue-list-item-", "")));
+    return ids.filter((id) => id.length > 0);
+  }
+
+  async intakeListRowIdLabel(issueId: string): Promise<string> {
+    const row = this.intakeListRowLink(issueId);
+    const topLine = row.locator("h3").locator("xpath=preceding-sibling::div[1]");
+    return (await topLine.locator("xpath=./div[1]").innerText()).trim();
+  }
+
+  async intakeListRowStatusChip(issueId: string): Promise<string | null> {
+    const row = this.intakeListRowLink(issueId);
+    const topLine = row.locator("h3").locator("xpath=preceding-sibling::div[1]");
+    const slot = topLine.locator("xpath=./div[2]");
+    if ((await slot.count()) === 0) return null;
+    const text = (await slot.innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async intakeListRowTitle(issueId: string): Promise<string> {
+    return (await this.intakeListRowLink(issueId).locator("h3").innerText()).trim();
+  }
+
+  async intakeListRowCreatedText(issueId: string): Promise<string> {
+    const row = this.intakeListRowLink(issueId);
+    const date = row.getByText(/^[A-Z][a-z]{2} \d{1,2}, \d{4}$/).first();
+    await date.waitFor({ timeout: WebDriver.WAIT_MS });
+    return (await date.innerText()).trim();
+  }
+
+  private async intakeListReadTooltip(target: Locator): Promise<IntakeListTooltip> {
+    // The tooltip popup carries no ARIA role; its positioned side attribute
+    // marks it, and only one hover tooltip is ever open at a time.
+    await target.hover({ timeout: WebDriver.WAIT_MS });
+    const popup = this.page.locator("[data-side]").last();
+    await popup.waitFor({ timeout: WebDriver.WAIT_MS });
+    const lines = await popup.locator("p").allInnerTexts();
+    const cleaned = lines.map((line) => line.trim()).filter((line) => line.length > 0);
+    return { heading: cleaned.length > 1 ? (cleaned[0] ?? "") : "", content: cleaned[cleaned.length - 1] ?? "" };
+  }
+
+  async intakeListRowCreatedTooltip(issueId: string): Promise<IntakeListTooltip> {
+    const row = this.intakeListRowLink(issueId);
+    const date = row.getByText(/^[A-Z][a-z]{2} \d{1,2}, \d{4}$/).first();
+    await date.waitFor({ timeout: WebDriver.WAIT_MS });
+    return this.intakeListReadTooltip(date);
+  }
+
+  private intakeListRowBottom(issueId: string): Locator {
+    // The row stacks a header block (id line + title) above a bottom line
+    // (date/priority/labels + avatar): the bottom line is the header
+    // block's following sibling, not the title's.
+    return this.intakeListRowLink(issueId).locator("h3").locator("xpath=parent::div/following-sibling::div[1]");
+  }
+
+  async intakeListRowPriority(issueId: string): Promise<string> {
+    // The marker's hover tooltip never opens (its icon renders a fragment,
+    // so the trigger listeners never reach the DOM — NEWFRONT-273); read
+    // the presented key from the marker's own styling hook instead.
+    const wrap = this.intakeListRowBottom(issueId).locator("xpath=./div[1]");
+    const marker = wrap.locator("xpath=./div[.//*[local-name()='svg']]");
+    await marker.waitFor({ timeout: WebDriver.WAIT_MS });
+    const classes = (await marker.getAttribute("class")) ?? "";
+    const match = /priority-(urgent|high|medium|low|none)/.exec(classes);
+    if (!match) throw new Error(`[parity] intake row marker carries no priority key: ${issueId}.`);
+    return match[1] as string;
+  }
+
+  async intakeListRowLabels(issueId: string): Promise<string[]> {
+    const wrap = this.intakeListRowBottom(issueId).locator("xpath=./div[1]");
+    const pills = wrap.locator("xpath=./div[.//*[local-name()='span']]");
+    const texts = await pills.allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
+  }
+
+  async intakeListRowAvatarKind(issueId: string): Promise<"member" | "intake" | "none"> {
+    const slot = this.intakeListRowBottom(issueId).locator("xpath=./div[2]");
+    if ((await slot.count()) === 0) return "none";
+    if ((await slot.innerText()).trim() === "" && (await slot.locator("img").count()) === 0) return "none";
+    const tooltip = await this.intakeListReadTooltip(slot);
+    const label = `${tooltip.heading} ${tooltip.content}`.trim();
+    return label.includes("Pi Dash") ? "intake" : "member";
+  }
+
+  async intakeListScrollToBottom(): Promise<void> {
+    // Scrolling the last row into view intersects the paging sentinel below
+    // it, which fetches the next page; the spec polls the row count after.
+    const rows = this.page.locator('a[id^="inbox-issue-list-item-"]');
+    await rows.last().scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async intakeListSkeletonsVisible(): Promise<boolean> {
+    // Placeholder rows render inside the paging sentinel (the div right
+    // below the list) while a next page exists; the sentinel sits empty
+    // once the list is exhausted.
+    const rows = this.page.locator('a[id^="inbox-issue-list-item-"]');
+    if ((await rows.count()) === 0) return false;
+    const sentinel = rows.last().locator("xpath=following-sibling::div[1]");
+    if ((await sentinel.count()) === 0) return false;
+    return (await sentinel.locator("xpath=./*").count()) > 0;
+  }
+
+  async intakeListSyncingVisible(): Promise<boolean> {
+    const hint = this.page.getByText("Syncing", { exact: false });
+    if ((await hint.count()) === 0) return false;
+    return hint.first().isVisible();
+  }
+
+  async intakeListWaitForRowCount(count: number): Promise<void> {
+    await expect.poll(async () => (await this.intakeListRowIds()).length, { timeout: 60_000 }).toBe(count);
+  }
+
+  async intakeListDelayNextListReads(ms: number): Promise<void> {
+    await this.page.route(
+      "**/api/workspaces/*/projects/*/inbox-issues/*",
+      async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+        await route.continue();
+      },
+      { times: 1 }
+    );
+  }
+
+  private intakeListRequests: URL[] = [];
+  private intakeListSpying = false;
+
+  async intakeListBeginRequestSpy(): Promise<void> {
+    if (this.intakeListSpying) return;
+    this.intakeListSpying = true;
+    this.page.on("request", (req) => {
+      const url = req.url();
+      if (/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/inbox-issues\/\?/.test(url)) {
+        this.intakeListRequests.push(new URL(url));
+      }
+    });
+  }
+
+  async intakeListLastRequestParams(): Promise<Record<string, string> | null> {
+    const last = this.intakeListRequests.at(-1);
+    if (!last) return null;
+    return Object.fromEntries(last.searchParams.entries());
+  }
+
+  // --- Intake list filters, chips and order (NEWFRONT-256, INT-009/010/011).
+  // --- Observed on the running old app: the filter popover carries one
+  // --- search box over seven collapsible sections; applied filters render
+  // --- as grouped chips below the tabs bar; the order menu lists three
+  // --- fields plus two directions with checks on the chosen ones.
+
+  private intakeListFilterButton(): Locator {
+    return this.intakeListSidebarBar().locator('button[id^="headlessui-popover-button-"]').first();
+  }
+
+  private intakeListOrderButton(): Locator {
+    return this.intakeListSidebarBar().locator('button[aria-haspopup="menu"]');
+  }
+
+  private intakeListFilterPanel(): Locator {
+    const search = this.page.getByRole("textbox", { name: "Search", exact: true });
+    return this.page.locator('div[id^="headlessui-popover-panel-"]', { has: search });
+  }
+
+  async intakeListOpenFilters(): Promise<void> {
+    const search = this.page.getByRole("textbox", { name: "Search", exact: true });
+    if ((await search.count()) > 0 && (await search.first().isVisible())) return;
+    await this.intakeListFilterButton().click({ timeout: WebDriver.WAIT_MS });
+    await search.first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async intakeListCloseFilters(): Promise<void> {
+    const search = this.page.getByRole("textbox", { name: "Search", exact: true });
+    if ((await search.count()) === 0) return;
+    if (!(await search.first().isVisible())) return;
+    await this.page.keyboard.press("Escape");
+    await search
+      .first()
+      .waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async intakeListFilterSearch(query: string): Promise<void> {
+    await this.intakeListOpenFilters();
+    const search = this.page.getByRole("textbox", { name: "Search", exact: true }).first();
+    await search.fill(query, { timeout: WebDriver.WAIT_MS });
+    await this.page.waitForTimeout(300);
+  }
+
+  private static readonly INTAKE_LIST_SECTION_TITLES: Record<IntakeListFilterKey, string> = {
+    status: "Work item Status",
+    priority: "Priority",
+    assignees: "Assignees",
+    createdBy: "Created By",
+    labels: "Label",
+    createdAt: "Created date",
+    updatedAt: "Last updated date",
+  };
+
+  private intakeListSection(key: IntakeListFilterKey): Locator {
+    const title = WebDriver.INTAKE_LIST_SECTION_TITLES[key];
+    const header = this.intakeListFilterPanel()
+      .getByText(new RegExp(`^${title}\\s*(\\(\\d+\\))?\\s*$`))
+      .first();
+    return header.locator("xpath=ancestor::div[2]");
+  }
+
+  async intakeListFilterSections(): Promise<IntakeListFilterKey[]> {
+    await this.intakeListOpenFilters();
+    const panel = this.intakeListFilterPanel();
+    const found: IntakeListFilterKey[] = [];
+    for (const key of Object.keys(WebDriver.INTAKE_LIST_SECTION_TITLES) as IntakeListFilterKey[]) {
+      const title = WebDriver.INTAKE_LIST_SECTION_TITLES[key];
+      const header = panel.getByText(new RegExp(`^${title}\\s*(\\(\\d+\\))?\\s*$`));
+      if ((await header.count()) > 0) found.push(key);
+    }
+    return found;
+  }
+
+  private async intakeListSectionOptions(section: Locator): Promise<Locator[]> {
+    const buttons = section.getByRole("button");
+    const count = await buttons.count();
+    const options: Locator[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const button = buttons.nth(index);
+      const text = (await button.innerText()).trim();
+      if (text === "" || /view (all|less)/i.test(text)) continue;
+      options.push(button);
+    }
+    return options;
+  }
+
+  private async intakeListOptionTitle(option: Locator): Promise<string> {
+    // The title is the last leaf-text cell: icon cells either nest elements
+    // or, for member avatars, carry the initial letter ahead of the name.
+    const leaves = option.locator("xpath=.//div[normalize-space(text())!='' and count(*)=0]");
+    const count = await leaves.count();
+    if (count === 0) return (await option.innerText()).trim();
+    return ((await leaves.nth(count - 1).innerText()) ?? "").trim();
+  }
+
+  async intakeListFilterOptions(key: IntakeListFilterKey): Promise<string[]> {
+    await this.intakeListOpenFilters();
+    const options = await this.intakeListSectionOptions(this.intakeListSection(key));
+    const texts: string[] = [];
+    for (const option of options) texts.push(await this.intakeListOptionTitle(option));
+    return texts;
+  }
+
+  async intakeListFilterPick(key: IntakeListFilterKey, option: string): Promise<void> {
+    await this.intakeListOpenFilters();
+    const options = await this.intakeListSectionOptions(this.intakeListSection(key));
+    for (const candidate of options) {
+      if ((await this.intakeListOptionTitle(candidate)) === option) {
+        const refetch = this.page
+          .waitForResponse(/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/inbox-issues\/\?/, { timeout: 15_000 })
+          .catch(() => undefined);
+        await candidate.click({ timeout: WebDriver.WAIT_MS });
+        await refetch;
+        await this.page.waitForTimeout(500);
+        return;
+      }
+    }
+    throw new Error(`[parity] intake filter option not found: ${key} / ${option}.`);
+  }
+
+  async intakeListFilterChecked(key: IntakeListFilterKey, option: string): Promise<boolean> {
+    await this.intakeListOpenFilters();
+    const options = await this.intakeListSectionOptions(this.intakeListSection(key));
+    for (const candidate of options) {
+      if ((await this.intakeListOptionTitle(candidate)) === option) {
+        const box = candidate.locator("xpath=./div[1]");
+        return (await box.locator("svg").count()) > 0;
+      }
+    }
+    throw new Error(`[parity] intake filter option not found: ${key} / ${option}.`);
+  }
+
+  async intakeListFilterSectionCount(key: IntakeListFilterKey): Promise<number> {
+    await this.intakeListOpenFilters();
+    const title = WebDriver.INTAKE_LIST_SECTION_TITLES[key];
+    const header = this.intakeListFilterPanel()
+      .getByText(new RegExp(`^${title}\\s*(\\(\\d+\\))?\\s*$`))
+      .first();
+    const text = (await header.innerText()).trim();
+    const match = /\((\d+)\)/.exec(text);
+    return match === null ? 0 : Number(match[1]);
+  }
+
+  private static readonly INTAKE_LIST_CHIP_LABELS: Record<IntakeListFilterKey, string> = {
+    status: "Status",
+    priority: "Priority",
+    assignees: "Assignees",
+    createdBy: "Created By",
+    labels: "Label",
+    createdAt: "Created date",
+    updatedAt: "Updated date",
+  };
+
+  private intakeListChipsColumn(): Locator {
+    return this.intakeListSidebarBar().locator("xpath=parent::div");
+  }
+
+  private async intakeListChipGroup(key: IntakeListFilterKey): Promise<Locator | null> {
+    const label = WebDriver.INTAKE_LIST_CHIP_LABELS[key];
+    const header = this.intakeListChipsColumn().getByText(label, { exact: true });
+    if ((await header.count()) === 0) return null;
+    return header.first().locator("xpath=parent::div");
+  }
+
+  async intakeListChips(): Promise<IntakeListChip[]> {
+    // The open panel lives inside the sidebar column too, so close it: its
+    // section titles would otherwise shadow the chip group labels.
+    await this.intakeListCloseFilters();
+    const chips: IntakeListChip[] = [];
+    for (const key of Object.keys(WebDriver.INTAKE_LIST_CHIP_LABELS) as IntakeListFilterKey[]) {
+      const group = await this.intakeListChipGroup(key);
+      if (!group) continue;
+      // Value pills carry their text in a direct leaf div; icon, avatar and
+      // close cells all nest elements, and the group label is the first
+      // child. (Descendant matching would also catch avatar initials.)
+      // Raw DOM text: pills render under a capitalize transform.
+      const texts = await group
+        .locator("xpath=./div[position()>1]/div[normalize-space(text())!='' and count(*)=0]")
+        .allTextContents();
+      chips.push({ key, values: texts.map((text) => text.trim()).filter((text) => text.length > 0) });
+    }
+    return chips;
+  }
+
+  async intakeListChipRemove(key: IntakeListFilterKey, value: string): Promise<void> {
+    await this.intakeListCloseFilters();
+    const group = await this.intakeListChipGroup(key);
+    if (!group) throw new Error(`[parity] intake chip group not found: ${key}.`);
+    const pills = group.locator("xpath=./div[position()>1]");
+    const count = await pills.count();
+    for (let index = 0; index < count; index += 1) {
+      const pill = pills.nth(index);
+      const texts = await pill.locator("xpath=./div[normalize-space(text())!='' and count(*)=0]").allTextContents();
+      if (!texts.map((text) => text.trim()).includes(value)) continue;
+      const close = pill.locator("xpath=./div[last()]");
+      const hasIcon = (await close.locator("svg").count()) > 0;
+      const closeText = (await close.innerText()).trim();
+      if (!hasIcon || closeText !== "") throw new Error(`[parity] intake chip value is not removable: ${value}.`);
+      const refetch = this.page
+        .waitForResponse(/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/inbox-issues\/\?/, { timeout: 15_000 })
+        .catch(() => undefined);
+      await close.click({ timeout: WebDriver.WAIT_MS });
+      await refetch;
+      await this.page.waitForTimeout(500);
+      return;
+    }
+    throw new Error(`[parity] intake chip value not found: ${key} / ${value}.`);
+  }
+
+  async intakeListChipClearGroup(key: IntakeListFilterKey): Promise<void> {
+    await this.intakeListCloseFilters();
+    const group = await this.intakeListChipGroup(key);
+    if (!group) throw new Error(`[parity] intake chip group not found: ${key}.`);
+    const clear = group.locator("xpath=./div[last()]");
+    const hasIcon = (await clear.locator("svg").count()) > 0;
+    const clearText = (await clear.innerText()).trim();
+    if (!hasIcon || clearText !== "") throw new Error(`[parity] intake chip group has no clear action: ${key}.`);
+    const refetch = this.page
+      .waitForResponse(/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/inbox-issues\/\?/, { timeout: 15_000 })
+      .catch(() => undefined);
+    await clear.click({ timeout: WebDriver.WAIT_MS });
+    await refetch;
+    await this.page.waitForTimeout(500);
+  }
+
+  private static readonly INTAKE_LIST_ORDER_FIELDS: Record<IntakeListOrderField, string> = {
+    created: "Created at",
+    updated: "Updated at",
+    id: "ID",
+  };
+
+  private static readonly INTAKE_LIST_ORDER_DIRECTIONS: Record<"asc" | "desc", string> = {
+    asc: "Ascending",
+    desc: "Descending",
+  };
+
+  private intakeListOrderMenu(): Locator {
+    // Scoped to the bar (every CustomMenu mounts its items); the fixed
+    // container sits at a zero box even when open, so callers wait on the
+    // items, which render with size.
+    return this.intakeListSidebarBar().getByRole("menu");
+  }
+
+  async intakeListOpenOrderMenu(): Promise<void> {
+    const items = this.intakeListOrderMenu().getByRole("menuitem");
+    if ((await items.count()) > 0 && (await items.first().isVisible())) return;
+    await this.intakeListOrderButton().click({ timeout: WebDriver.WAIT_MS });
+    await items.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async intakeListOrderState(): Promise<IntakeListOrderState> {
+    await this.intakeListOpenOrderMenu();
+    const menu = this.intakeListOrderMenu().first();
+    const items = menu.getByRole("menuitem");
+    const count = await items.count();
+    let field: IntakeListOrderField = "created";
+    let direction: "asc" | "desc" = "desc";
+    for (let index = 0; index < count; index += 1) {
+      const item = items.nth(index);
+      const checked = (await item.locator("svg").count()) > 0;
+      if (!checked) continue;
+      const text = (await item.innerText()).trim();
+      for (const [candidate, label] of Object.entries(WebDriver.INTAKE_LIST_ORDER_FIELDS)) {
+        if (text === label) field = candidate as IntakeListOrderField;
+      }
+      for (const [candidate, label] of Object.entries(WebDriver.INTAKE_LIST_ORDER_DIRECTIONS)) {
+        if (text === label) direction = candidate as "asc" | "desc";
+      }
+    }
+    await this.page.keyboard.press("Escape");
+    return { field, direction };
+  }
+
+  private async intakeListPickOrderItem(label: string): Promise<void> {
+    await this.intakeListOpenOrderMenu();
+    const menu = this.intakeListOrderMenu().first();
+    const item = menu.getByRole("menuitem", { name: label });
+    const refetch = this.page
+      .waitForResponse(/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/inbox-issues\/\?/, { timeout: 15_000 })
+      .catch(() => undefined);
+    await item.click({ timeout: WebDriver.WAIT_MS });
+    await refetch;
+    await this.page.waitForTimeout(500);
+  }
+
+  async intakeListPickOrderField(field: IntakeListOrderField): Promise<void> {
+    await this.intakeListPickOrderItem(WebDriver.INTAKE_LIST_ORDER_FIELDS[field]);
+  }
+
+  async intakeListPickOrderDirection(direction: "asc" | "desc"): Promise<void> {
+    await this.intakeListPickOrderItem(WebDriver.INTAKE_LIST_ORDER_DIRECTIONS[direction]);
+  }
+
+  // --- Intake custom date ranges (NEWFRONT-256, INT-010). Observed on the
+  // --- running old app: the Custom option opens a dialog with a before /
+  // --- after / range mode select (range by default) and one calendar per
+  // --- bound; days are month-grid buttons with full-date accessible names.
+
+  private intakeListCustomApply(): Locator {
+    // The dialog shell is zero-box (all children fixed-positioned), so the
+    // visible Apply action anchors the modal instead; only the open modal
+    // carries one.
+    return this.page.getByRole("dialog").getByRole("button", { name: "Apply", exact: true }).first();
+  }
+
+  private intakeListCustomDialog(): Locator {
+    return this.intakeListCustomApply().locator("xpath=ancestor::*[@role='dialog'][1]");
+  }
+
+  async intakeListOpenCustomDate(key: "createdAt" | "updatedAt"): Promise<void> {
+    await this.intakeListOpenFilters();
+    const options = await this.intakeListSectionOptions(this.intakeListSection(key));
+    for (const candidate of options) {
+      if ((await this.intakeListOptionTitle(candidate)) === "Custom") {
+        await candidate.click({ timeout: WebDriver.WAIT_MS });
+        await this.intakeListCustomApply().waitFor({ timeout: WebDriver.WAIT_MS });
+        return;
+      }
+    }
+    throw new Error(`[parity] intake custom-date option not found: ${key}.`);
+  }
+
+  private static intakeListMonthIndex(name: string): number {
+    const months = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+    const index = months.indexOf(name.trim());
+    if (index < 0) throw new Error(`[parity] unknown calendar month: ${name}.`);
+    return index;
+  }
+
+  private async intakeListPickCalendarDay(calendar: Locator, iso: string): Promise<void> {
+    const target = new Date(`${iso}T00:00:00Z`);
+    const day = target.getUTCDate();
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      const selects = calendar.locator("select");
+      const monthName = (await selects.nth(0).locator("option:checked").first().innerText()).trim();
+      const year = Number((await selects.nth(1).locator("option:checked").first().innerText()).trim());
+      const shown = year * 12 + WebDriver.intakeListMonthIndex(monthName);
+      const wanted = target.getUTCFullYear() * 12 + target.getUTCMonth();
+      if (shown === wanted) {
+        const cell = calendar.locator("td:not(.rdp-outside) button", { hasText: new RegExp(`^${day}$`) }).first();
+        await cell.click({ timeout: WebDriver.WAIT_MS });
+        return;
+      }
+      const nav = calendar.getByRole("button", {
+        name: shown < wanted ? "Go to the Next Month" : "Go to the Previous Month",
+      });
+      await nav.click({ timeout: WebDriver.WAIT_MS });
+    }
+    throw new Error(`[parity] calendar day out of navigation reach: ${iso}.`);
+  }
+
+  async intakeListCustomDateApply(fromISO: string, toISO: string): Promise<void> {
+    const dialog = this.intakeListCustomDialog();
+    await this.intakeListCustomApply().waitFor({ timeout: WebDriver.WAIT_MS });
+    // Range is the default; select it back when a previous run left the
+    // dialog on a single bound (matched by suffix: the title prefix is the
+    // section's own label).
+    const mode = dialog.locator("button[aria-haspopup='listbox']").first();
+    if (!(await mode.innerText()).trim().endsWith("range")) {
+      await mode.click({ timeout: WebDriver.WAIT_MS });
+      await dialog
+        .getByRole("option", { name: /range$/i })
+        .first()
+        .click({ timeout: WebDriver.WAIT_MS });
+    }
+    const calendars = dialog.locator(".rdp-root");
+    await this.intakeListPickCalendarDay(calendars.nth(0), fromISO);
+    await this.intakeListPickCalendarDay(calendars.nth(1), toISO);
+    const refetch = this.page
+      .waitForResponse(/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/inbox-issues\/\?/, { timeout: 15_000 })
+      .catch(() => undefined);
+    await dialog.getByRole("button", { name: "Apply", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await refetch;
+    await this.intakeListCustomApply()
+      .waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+    await this.page.waitForTimeout(500);
   }
 }
