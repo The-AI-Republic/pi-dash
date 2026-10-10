@@ -25022,9 +25022,17 @@ export class WebDriver implements ParityDriver {
 
   async runnersFailPodsLoad(): Promise<void> {
     // Trailing `**` covers every list-URL shape (`pods`, `pods?...`, `pods/?...`).
+    // Fail with an HTTP 500, not a network abort: the pods service rethrows
+    // the response body, and a bodyless abort throws undefined, which never
+    // surfaces as the load error the outage scenario asserts.
     await this.page.route("**/api/runners/pods**", async (route) => {
-      if (route.request().method() === "GET") await route.abort("failed");
-      else await route.continue();
+      if (route.request().method() === "GET") {
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: '{"error": "parity pods outage"}',
+        });
+      } else await route.continue();
     });
   }
 
@@ -25039,5 +25047,20 @@ export class WebDriver implements ParityDriver {
     const dialog = await this.runnersWaitForConfirm("Delete pod?");
     const remove = dialog.getByRole("button", { name: "Delete", exact: true });
     await expect.poll(() => remove.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  async runnersWaitRunnerDeleteWorking(): Promise<void> {
+    // Same gate as the pod twin: the runner confirm disables its Delete
+    // button while the DELETE is in flight.
+    const dialog = await this.runnersWaitForConfirm("Delete runner?");
+    const remove = dialog.getByRole("button", { name: "Delete", exact: true });
+    await expect.poll(() => remove.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  async runnersWaitRunnerRevokeWorking(): Promise<void> {
+    // Revoke twin of the gate above.
+    const dialog = await this.runnersWaitForConfirm("Revoke runner?");
+    const revoke = dialog.getByRole("button", { name: "Revoke", exact: true });
+    await expect.poll(() => revoke.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
   }
 }

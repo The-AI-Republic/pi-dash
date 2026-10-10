@@ -768,6 +768,10 @@ test(
       await test.step("the delete confirm ignores cancel mid-flight", async () => {
         await driver.runnersStallMutations(10_000);
         const done = driver.runnersDeleteRunner(doomed.runnerName);
+        // The confirm opens before the Delete click lands, so copy alone
+        // cannot prove mid-flight: gate the Cancel on the working state,
+        // else it may dismiss the modal before the submit fires.
+        await driver.runnersWaitRunnerDeleteWorking();
         await expect.poll(() => driver.runnersModalCopy(), { timeout: 30_000 }).not.toBeNull();
         await driver.runnersCancelModal();
         expect(await driver.runnersModalCopy()).not.toBeNull();
@@ -776,6 +780,7 @@ test(
 
       await test.step("the revoke confirm ignores cancel mid-flight", async () => {
         const done = driver.runnersRevokeRunner(revoked.runnerName);
+        await driver.runnersWaitRunnerRevokeWorking();
         await expect.poll(() => driver.runnersModalCopy(), { timeout: 30_000 }).not.toBeNull();
         await driver.runnersCancelModal();
         expect(await driver.runnersModalCopy()).not.toBeNull();

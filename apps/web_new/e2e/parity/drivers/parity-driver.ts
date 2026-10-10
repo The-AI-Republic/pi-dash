@@ -4671,6 +4671,10 @@ export interface ParityDriver {
   runnersReleasePodsFailure(): Promise<void>;
   /** Wait until the delete-pod confirm shows its in-flight state. */
   runnersWaitPodDeleteWorking(): Promise<void>;
+  /** Wait until the delete-runner confirm shows its in-flight state. */
+  runnersWaitRunnerDeleteWorking(): Promise<void>;
+  /** Wait until the revoke-runner confirm shows its in-flight state. */
+  runnersWaitRunnerRevokeWorking(): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */

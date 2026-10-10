@@ -7149,4 +7149,12 @@ export class WebNewDriver implements ParityDriver {
   async runnersWaitPodDeleteWorking(): Promise<void> {
     return todo("runnersWaitPodDeleteWorking");
   }
+
+  async runnersWaitRunnerDeleteWorking(): Promise<void> {
+    return todo("runnersWaitRunnerDeleteWorking");
+  }
+
+  async runnersWaitRunnerRevokeWorking(): Promise<void> {
+    return todo("runnersWaitRunnerRevokeWorking");
+  }
 }
