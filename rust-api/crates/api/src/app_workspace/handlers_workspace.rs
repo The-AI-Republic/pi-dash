@@ -3470,7 +3470,7 @@ const NO_SKIP_BLANK: &[&str] = &[];
 /// `RETURNING` stamps of the workspace/theme `INSERT`s.
 type InsertedStamps = Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>;
 
-/// One `ensure_select_sql` row: the seeder kernel's 15-column `SELECT`
+/// One `ensure_select_sql` row: the seeder kernel's 14-column `SELECT`
 /// in order (`created_at`, `updated_at`, `created_by_id`,
 /// `updated_by_id`, `deleted_at`, `id`, `workspace_id`, `slug`, `name`,
 /// `description`, `prompt`, `source`, `is_enabled`, `color`).
