@@ -312,8 +312,9 @@ fn json_response(status: StatusCode, body: String) -> Response {
 /// An owned path: the owned methods serve from Rust, every other method
 /// falls through to Django (its 405-after-auth, metadata, and CSRF-failure
 /// responses live there — answering 405 in Rust would mistranslate the
-/// body). `HEAD` rides axum's `get` handling like Django's `GET`-backed
-/// `HEAD` on the description path; on the favorite path both sides 405 it.
+/// body). List `"HEAD"` with the other unowned methods on GET-owned paths
+/// (axum would auto-serve it from `get`; Django 405s after auth); on
+/// GET-less paths HEAD rides the proxied `get` arm to Django's verdict.
 fn owned(
     handler: axum::routing::MethodRouter<AppState>,
     unowned: &[&str],
@@ -325,6 +326,7 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };
@@ -349,7 +351,7 @@ pub fn routes() -> Router<AppState> {
             "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/description/",
             owned(
                 axum::routing::get(description_retrieve).patch(description_partial_update),
-                &["POST", "PUT", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -377,7 +379,7 @@ pub fn routes() -> Router<AppState> {
             "/api/workspaces/{slug}/projects/{project_id}/pages/",
             owned(
                 axum::routing::post(page_create).get(list_pages),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -386,21 +388,21 @@ pub fn routes() -> Router<AppState> {
                 axum::routing::get(retrieve_page)
                     .patch(page_partial_update)
                     .delete(page_destroy),
-                &["PUT", "POST", "OPTIONS"],
+                &["PUT", "POST", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/versions/",
             owned(
                 axum::routing::get(handlers_versions::versions_list),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/versions/{pk}/",
             owned(
                 axum::routing::get(handlers_versions::version_detail),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -414,7 +416,7 @@ pub fn routes() -> Router<AppState> {
             "/api/workspaces/{slug}/projects/{project_id}/pages-summary/",
             owned(
                 axum::routing::get(pages_summary),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
 }

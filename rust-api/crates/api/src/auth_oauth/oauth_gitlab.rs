@@ -172,7 +172,7 @@ fn owned(
     owned: &[&str],
 ) -> axum::routing::MethodRouter<AppState> {
     let mut router = methods;
-    for other in ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
+    for other in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
         if owned.contains(&other) {
             continue;
         }
@@ -182,6 +182,7 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             _ => router.options(crate::edge::proxy),
         };
     }

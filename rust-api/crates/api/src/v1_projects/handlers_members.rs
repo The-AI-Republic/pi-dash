@@ -67,8 +67,8 @@
 //! * The `Provided workspace does not exist` 400 branches sit after the
 //!   gates, whose slug-scoped `exists()` denies first — unreachable through
 //!   the routes, ported in place.
-//! * `HEAD` on an owned GET rides axum's `get` handling where Django's
-//!   `http_method_names` would 405 (`app_issues::routes` precedent).
+//! * `HEAD` on an owned GET proxies explicitly where Django's
+//!   `http_method_names` would 405 (axum would auto-serve it from `get`).
 //!
 //! Throttles (verified, not ported): no view here declares
 //! `throttle_classes` — rate limiting is the shared `get_throttles`
@@ -156,6 +156,7 @@ fn owned(
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 
@@ -169,6 +170,7 @@ fn owned_get_post(
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 
@@ -183,6 +185,7 @@ fn owned_detail(
         .merge(delete_handler)
         .post(crate::edge::proxy)
         .put(crate::edge::proxy)
+        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 

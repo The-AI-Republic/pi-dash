@@ -103,8 +103,9 @@ pub const AUTHENTICATION_REQUIRED_BODY: &str = r#"{"error":"authentication requi
 pub const FORBIDDEN_BODY: &str = r#"{"error":"forbidden"}"#;
 
 /// An owned path: the listed methods serve from Rust, every other method
-/// falls through to Django (the `app_scheduler` precedent). `HEAD` rides
-/// axum's `get` handling like Django's `GET`-backed `HEAD`.
+/// falls through to Django (the `app_scheduler` precedent). List `"HEAD"`
+/// with the other unowned methods on GET-owned paths: axum would
+/// auto-serve it from `get`, but Django 405s after auth.
 fn owned(
     handler: axum::routing::MethodRouter<AppState>,
     unowned: &[&str],
@@ -116,6 +117,7 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };
@@ -128,7 +130,7 @@ fn owned(
 /// extend the merge, keeping both sides.
 pub fn web_routes() -> Router<AppState> {
     use axum::routing::get;
-    const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+    const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     Router::new().route(WEB_PROJECTS_PATH, owned(get(get_projects), GET_ONLY))
 }
 
@@ -137,7 +139,7 @@ pub fn web_routes() -> Router<AppState> {
 /// the merge, keeping both sides.
 pub fn daemon_routes() -> Router<AppState> {
     use axum::routing::get;
-    const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+    const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     Router::new().route(DAEMON_PROJECTS_PATH, owned(get(get_projects), GET_ONLY))
 }
 

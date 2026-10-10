@@ -100,8 +100,9 @@ pub fn password_routes() -> Router<AppState> {
 }
 
 /// An owned GET path: reads serve from Rust, everything else falls
-/// through to Django (its 405/401s live there). `HEAD` rides axum's
-/// `get` handling like Django's `GET`-backed `HEAD`.
+/// through to Django (its 405/401s live there). `HEAD` proxies
+/// explicitly: axum would auto-serve it from `get`, but Django defines
+/// no `head` and 405s after auth.
 fn owned_get(
     get_handler: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
@@ -110,6 +111,7 @@ fn owned_get(
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 

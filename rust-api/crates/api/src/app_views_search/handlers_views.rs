@@ -127,14 +127,14 @@ async fn detail_body(state: &AppState, req: axum::extract::Request) -> Result<Va
 
 /// An owned path: listed methods serve from Rust, everything else proxies
 /// to Django. OPTIONS proxies too: DRF answers metadata (401 anon / 200
-/// authed) where axum would 405. HEAD rides axum's `get` handling like
-/// Django's `GET`-backed `HEAD`.
+/// authed) where axum would 405. HEAD proxies as well: Django defines no
+/// `head` and 405s after auth (axum would auto-serve it from `get`).
 fn owned(
     router: axum::routing::MethodRouter<AppState>,
     methods: &[&str],
 ) -> axum::routing::MethodRouter<AppState> {
     let mut router = router;
-    for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
+    for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
         if methods.contains(&method) {
             continue;
         }
@@ -144,6 +144,7 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             _ => router.options(crate::edge::proxy),
         };
     }

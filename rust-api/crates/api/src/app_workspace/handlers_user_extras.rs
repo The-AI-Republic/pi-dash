@@ -112,6 +112,7 @@ pub fn routes() -> Router<AppState> {
                 .post(proxy)
                 .put(proxy)
                 .delete(proxy)
+                .head(proxy)
                 .options(proxy),
         )
         .route(
@@ -121,6 +122,7 @@ pub fn routes() -> Router<AppState> {
                 .put(proxy)
                 .patch(proxy)
                 .delete(proxy)
+                .head(proxy)
                 .options(proxy),
         )
         .route(
@@ -130,6 +132,7 @@ pub fn routes() -> Router<AppState> {
                 .post(proxy)
                 .put(proxy)
                 .patch(proxy)
+                .head(proxy)
                 .options(proxy),
         )
         .route(
@@ -139,6 +142,7 @@ pub fn routes() -> Router<AppState> {
                 .put(proxy)
                 .patch(proxy)
                 .delete(proxy)
+                .head(proxy)
                 .options(proxy),
         )
         .route(
@@ -148,6 +152,7 @@ pub fn routes() -> Router<AppState> {
                 .put(proxy)
                 .patch(proxy)
                 .delete(proxy)
+                .head(proxy)
                 .options(proxy),
         )
         .route(
@@ -157,6 +162,7 @@ pub fn routes() -> Router<AppState> {
                 .put(proxy)
                 .patch(proxy)
                 .delete(proxy)
+                .head(proxy)
                 .options(proxy),
         )
 }

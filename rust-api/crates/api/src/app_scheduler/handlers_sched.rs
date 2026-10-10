@@ -972,6 +972,7 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };
@@ -988,7 +989,7 @@ pub fn routes() -> Router<AppState> {
             "/api/workspaces/{slug}/schedulers/",
             owned(
                 get(scheduler_list).post(scheduler_create),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -997,7 +998,7 @@ pub fn routes() -> Router<AppState> {
                 get(scheduler_detail)
                     .patch(scheduler_patch)
                     .delete(scheduler_delete),
-                &["POST", "PUT", "OPTIONS"],
+                &["POST", "PUT", "HEAD", "OPTIONS"],
             ),
         )
 }

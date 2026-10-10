@@ -90,6 +90,7 @@ pub fn routes() -> Router<AppState> {
                 .put(edge::proxy)
                 .patch(edge::proxy)
                 .delete(edge::proxy)
+                .head(edge::proxy)
                 .options(edge::proxy),
         )
         .route(
@@ -99,6 +100,7 @@ pub fn routes() -> Router<AppState> {
                 .delete(delete_job)
                 .post(edge::proxy)
                 .put(edge::proxy)
+                .head(edge::proxy)
                 .options(edge::proxy),
         )
         .route(
@@ -108,6 +110,7 @@ pub fn routes() -> Router<AppState> {
                 .put(edge::proxy)
                 .patch(edge::proxy)
                 .delete(edge::proxy)
+                .head(edge::proxy)
                 .options(edge::proxy),
         )
 }

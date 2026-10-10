@@ -137,8 +137,9 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// A Google OAuth path: the GET handler owns reads, everything else falls
-/// through to Django (its 405/OPTIONS bodies live there). `HEAD` rides
-/// axum's `get` handling like Django's `GET`-backed `HEAD`.
+/// through to Django (its 405/OPTIONS bodies live there). `HEAD` proxies
+/// explicitly: axum would auto-serve it from `get`, but Django defines no
+/// `head` and 405s after auth.
 fn owned(
     get_handler: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
@@ -147,6 +148,7 @@ fn owned(
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 

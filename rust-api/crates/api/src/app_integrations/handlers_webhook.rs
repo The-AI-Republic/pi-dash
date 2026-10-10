@@ -103,7 +103,7 @@ pub fn routes() -> Router<AppState> {
             "/api/workspaces/{slug}/webhooks/",
             owned(
                 axum::routing::get(list_webhooks).post(create_webhook),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -112,7 +112,7 @@ pub fn routes() -> Router<AppState> {
                 axum::routing::get(retrieve_webhook)
                     .patch(partial_update_webhook)
                     .delete(destroy_webhook),
-                &["POST", "PUT", "OPTIONS"],
+                &["POST", "PUT", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -126,7 +126,7 @@ pub fn routes() -> Router<AppState> {
             "/api/workspaces/{slug}/webhook-logs/{webhook_id}/",
             owned(
                 axum::routing::get(list_webhook_logs),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
 }

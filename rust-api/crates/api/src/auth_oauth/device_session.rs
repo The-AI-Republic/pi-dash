@@ -106,6 +106,7 @@ fn owned_get(
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 

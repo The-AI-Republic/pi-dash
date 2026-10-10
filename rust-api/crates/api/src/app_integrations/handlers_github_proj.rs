@@ -154,6 +154,7 @@ pub fn routes() -> Router<AppState> {
                 .delete(delete_status)
                 .post(crate::edge::proxy)
                 .put(crate::edge::proxy)
+                .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
         .route(

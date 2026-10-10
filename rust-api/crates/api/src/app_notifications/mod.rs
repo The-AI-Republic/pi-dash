@@ -370,8 +370,9 @@ fn enforce(outcome: GateOutcome) -> Result<(), Response> {
 
 /// An owned path: the owned methods serve from Rust, everything else
 /// falls through to Django (its 405-after-auth and metadata responses
-/// live there). `HEAD` rides axum's `get` handling like Django's
-/// `GET`-backed `HEAD`.
+/// live there). List `"HEAD"` alongside the other unowned methods: axum
+/// would auto-serve it from `get`, but Django defines no `head` and 405s
+/// after auth.
 pub fn owned(
     handler: axum::routing::MethodRouter<AppState>,
     unowned: &[&str],
@@ -383,6 +384,7 @@ pub fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };
@@ -402,7 +404,7 @@ pub fn routes() -> Router<AppState> {
             "/api/workspaces/{slug}/users/notifications/",
             owned(
                 axum::routing::get(list),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -411,7 +413,7 @@ pub fn routes() -> Router<AppState> {
                 axum::routing::get(retrieve)
                     .patch(partial_update)
                     .delete(destroy),
-                &["POST", "PUT", "OPTIONS"],
+                &["POST", "PUT", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -432,7 +434,7 @@ pub fn routes() -> Router<AppState> {
             "/api/workspaces/{slug}/users/notifications/unread/",
             owned(
                 axum::routing::get(unread_get),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -446,7 +448,7 @@ pub fn routes() -> Router<AppState> {
             "/api/users/me/notification-preferences/",
             owned(
                 axum::routing::get(preference_get).patch(preference_patch),
-                &["POST", "PUT", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
 }

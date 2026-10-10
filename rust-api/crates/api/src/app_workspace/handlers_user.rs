@@ -3350,6 +3350,7 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };
@@ -3369,21 +3370,21 @@ pub fn routes() -> Router<AppState> {
                 get(me_retrieve)
                     .patch(me_partial_update)
                     .delete(me_deactivate),
-                &["POST", "PUT", "OPTIONS"],
+                &["POST", "PUT", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/users/session/",
             owned(
                 get(session_get),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/users/me/settings/",
             owned(
                 get(me_settings),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -3404,7 +3405,7 @@ pub fn routes() -> Router<AppState> {
             "/api/users/me/instance-admin/",
             owned(
                 get(me_instance_admin),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
