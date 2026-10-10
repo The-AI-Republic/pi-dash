@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from _harness import db, http  # noqa: E402
+from _harness import db, http, sessions  # noqa: E402
 
 KEY = "invites"
 
@@ -127,3 +127,79 @@ def test_isolation_other_workspace(seed, conn):
     http.get(seed["keys"][KEY],
              f"/api/v1/workspaces/{seed['ws_b']['slug']}/invitations/{inv_b['id']}/",
              expect=403)
+
+
+def api_root(seed):
+    return f"/api/v1/workspaces/{seed['ws_a']['slug']}/"
+
+
+def owner_session(seed, conn):
+    return sessions.login(conn, seed["owner"]["id"], "!")
+
+
+def test_api_root_index_lists_invitations(seed, conn):
+    # DRF DefaultRouter api-root (PIDASHCONV-828 G3): the invite router is
+    # mounted first, so its index wins and names only its own prefix. The
+    # root view carries no API-key backend, so the body needs a session.
+    r = http.make_client(owner_session(seed, conn)).get(api_root(seed))
+    assert r.status_code == 200, r.text[:400]
+    body = r.json()
+    assert set(body.keys()) == {"invitations"}
+    assert body["invitations"].endswith(f"{base(seed)}/")
+
+
+def test_api_root_api_key_denied(seed):
+    # No API-key backend on the api-root: keyed and anonymous callers 401
+    # alike (both backends answer Django's bytes through the proxy).
+    http.get(seed["keys"][KEY], api_root(seed), expect=401)
+    http.get(None, api_root(seed), expect=401)
+
+
+def test_api_root_format_suffix(seed, conn):
+    # The api-root format variant (`/{slug}/.json`, G3): same index with the
+    # suffix threaded into the reversed list URL.
+    r = http.make_client(owner_session(seed, conn)).get(api_root(seed) + ".json")
+    assert r.status_code == 200, r.text[:400]
+    body = r.json()
+    assert set(body.keys()) == {"invitations"}
+    assert body["invitations"].endswith(f"{base(seed)}.json")
+
+
+# Django answers every invite format-suffix URL with its generic 500: the
+# viewset actions declare explicit params, so the router's `format` kwarg
+# raises TypeError (`... got an unexpected keyword argument 'format'`).
+# Rust proxies these spellings, so the bug shines through byte for byte.
+SUFFIX_500 = {"error": "Something went wrong please try again later"}
+
+
+def test_list_format_suffix_json(seed, conn):
+    tag = db.new_tag()
+    db.create_invite(conn, seed["ws_a"]["id"], tag, created_by_id=seed["owner"]["id"])
+    for path in (base(seed) + ".json", base(seed) + ".json/"):
+        r = http.get(seed["keys"][KEY], path, expect=500)
+        assert r.json() == SUFFIX_500
+
+
+def test_detail_format_suffix_json(seed, conn):
+    tag = db.new_tag()
+    inv = db.create_invite(conn, seed["ws_a"]["id"], tag, created_by_id=seed["owner"]["id"])
+    # G5: the dotted spelling reaches Django (500), never the detail handler
+    # on a garbage pk (which would 400 here).
+    for path in (f"{base(seed)}/{inv['id']}.json", f"{base(seed)}/{inv['id']}.json/"):
+        r = http.get(seed["keys"][KEY], path, expect=500)
+        assert r.json() == SUFFIX_500
+
+
+def test_detail_format_suffix_patch_and_delete(seed, conn):
+    tag = db.new_tag()
+    inv = db.create_invite(conn, seed["ws_a"]["id"], tag, created_by_id=seed["owner"]["id"])
+    # PATCH rides the proxy with its real body; Django still 500s on the
+    # `format` kwarg before touching anything, so DELETE 500s too and the
+    # invite survives both.
+    r = http.patch(seed["keys"][KEY], f"{base(seed)}/{inv['id']}.json/",
+                   json={"role": db.GUEST}, expect=500)
+    assert r.json() == SUFFIX_500
+    r = http.delete(seed["keys"][KEY], f"{base(seed)}/{inv['id']}.json/", expect=500)
+    assert r.json() == SUFFIX_500
+    body = http.get(seed["keys"][KEY], f"{base(seed)}/{inv['id']}/").json()
+    assert body["email"] == inv["email"]
