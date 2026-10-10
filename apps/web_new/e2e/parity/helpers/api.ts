@@ -8,13 +8,16 @@
 // posts to, then reads back through the public REST API with that session.
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { ParitySeedFacts } from "../drivers/parity-driver";
+import { parityApiUrl, parityOracleUrl, resolveParityEnv } from "./parity-env";
 
 const execFileAsync = promisify(execFile);
 
 function apiBaseFromEnv(): string {
-  const raw = (process.env["PARITY_API_URL"] ?? "http://localhost:18019").trim().replace(/\/+$/, "");
+  const raw = parityApiUrl(process.env).trim().replace(/\/+$/, "");
   return raw;
 }
 
@@ -196,10 +199,19 @@ export async function emailCheckStatus(
 }
 
 export function seedFactsFromEnv(): ParitySeedFacts {
-  const file = process.env["PARITY_SEED_FILE"];
+  const file = process.env["PARITY_SEED_FILE"] || defaultSeedFile();
   if (!file)
     throw new Error("[parity] PARITY_SEED_FILE is not set; run the stack seed step first (see stack/README.md).");
   return JSON.parse(readFileSync(file, "utf8")) as ParitySeedFacts;
+}
+
+// Namespaced stacks (NEWFRONT-132) seed into .seed-<ns>.json, so the
+// suite finds its facts from PARITY_NS alone. The default stack keeps
+// requiring an explicit PARITY_SEED_FILE, exactly as before.
+function defaultSeedFile(): string | null {
+  const resolved = resolveParityEnv(process.env);
+  if (resolved.namespace === null) return null;
+  return join(dirname(fileURLToPath(import.meta.url)), "..", resolved.seedFileName);
 }
 
 function cookieHeader(setCookies: string[]): string {
@@ -2170,7 +2182,7 @@ export function uniqueSlug(prefix = "pw"): string {
 }
 
 function oracleHostFromEnv(): string {
-  const raw = process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000";
+  const raw = parityOracleUrl(process.env);
   try {
     return new URL(raw).hostname;
   } catch {
@@ -6900,7 +6912,7 @@ export async function signUpAuthedSession(
 }
 
 function oracleHost(): string {
-  const raw = process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000";
+  const raw = parityOracleUrl(process.env);
   try {
     return new URL(raw).hostname;
   } catch {

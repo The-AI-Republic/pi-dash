@@ -15,6 +15,17 @@ set -u
 
 export STACK_DIR
 STACK_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Namespaced stacks (NEWFRONT-132): resolve PARITY_NS to the project the
+# same way the other scripts do. If the resolver is gone (checked-out
+# stack removed out from under the watcher) fall back to the ambient
+# project, which parity-up.sh exported when it armed this watcher.
+if [ -z "${PARITY_PROJECT:-}" ] && [ -n "${PARITY_NS:-}" ] && [ -x "$STACK_DIR/parity-env.sh" ]; then
+  # Two steps on purpose: eval'ing the substitution directly would mask a
+  # resolver failure (eval succeeds on empty input).
+  export PARITY_ENV_OUT
+  PARITY_ENV_OUT="$("$STACK_DIR/parity-env.sh" 2>/dev/null)" || exit 2
+  eval "$PARITY_ENV_OUT"
+fi
 export PARITY_PROJECT
 PARITY_PROJECT="${PARITY_PROJECT:-parity19}"
 
