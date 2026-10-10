@@ -1,5 +1,5 @@
 
-# Generated parity seed facts (never committed)
-e2e/parity/.seed.json
+# Generated parity seed facts (never committed; one per namespace, NEWFRONT-132)
+e2e/parity/.seed*.json
 test-results/
 dist/

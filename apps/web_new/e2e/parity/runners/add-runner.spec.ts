@@ -16,6 +16,7 @@
 // halves of RUN-007/RUN-009 are not covered here.
 import { test, expect } from "../fixtures";
 import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
+import { parityOracleUrl } from "../helpers/parity-env";
 import {
   signInSession,
   projectFacts,
@@ -614,7 +615,7 @@ test(
       await test.step("no API base URL falls back to the browser origin", async () => {
         // The oracle builds with an empty API base URL, so the command
         // targets the serving origin and says so.
-        const oracleUrl = process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000";
+        const oracleUrl = parityOracleUrl(process.env);
         const cmd = (await driver.addRunnerCommandText()) ?? "";
         expect(cmd).toContain(`--url ${oracleUrl}`);
         expect(await driver.addRunnerOriginNote()).toContain("VITE_API_BASE_URL");
