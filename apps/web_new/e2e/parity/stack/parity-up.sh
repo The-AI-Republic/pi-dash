@@ -19,11 +19,22 @@ export PARITY_SEED_FILE
 PARITY_SEED_FILE="$PARITY_DIR/.seed.json"
 
 echo "[parity] repo root: $REPO_ROOT"
-echo "[parity] building scratch images (parity19-api, parity19-oracle)"
-docker compose -f "$COMPOSE_FILE" build api oracle
+# Which build of the old app serves as the oracle. dev (default): the dev
+# server, as before. prod: the production build behind nginx, far lighter on
+# CPU and memory (see oracle-prod in docker-compose.yml).
+export ORACLE_SERVICE
+ORACLE_SERVICE="oracle"
+if [ "${PARITY_ORACLE_MODE:-dev}" = "prod" ]; then
+  ORACLE_SERVICE="oracle-prod"
+  export ORACLE_UPSTREAM
+  ORACLE_UPSTREAM="oracle-prod:3000"
+fi
 
-echo "[parity] starting pg, redis, mq, api, worker, oracle, proxy"
-docker compose -f "$COMPOSE_FILE" up -d pg redis mq api worker oracle proxy
+echo "[parity] building scratch images (parity19-api, $ORACLE_SERVICE)"
+docker compose -f "$COMPOSE_FILE" build api "$ORACLE_SERVICE"
+
+echo "[parity] starting pg, redis, mq, api, worker, $ORACLE_SERVICE, proxy"
+docker compose -f "$COMPOSE_FILE" up -d pg redis mq api worker "$ORACLE_SERVICE" proxy
 
 # Inside a Pi Dash agent run the stack is torn down when the run ends (no-op
 # for a person's shell or CI; PARITY_KEEP_STACK=1 opts out).
