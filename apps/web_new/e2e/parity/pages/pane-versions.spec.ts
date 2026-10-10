@@ -13,6 +13,7 @@ import {
   serverCleanupProject,
   serverCreatePage,
   serverCreateProjectWithFlags,
+  serverEnsureProjectGuest,
   serverEnsureProjectMember,
   serverPageDescription,
   serverPageRecord,
@@ -86,7 +87,7 @@ async function waitVersions(
   }
 }
 
-/** Poll the live description until its HTML contains `text` (autosave). */
+/** Poll the live record until its HTML contains `text` (autosave). */
 async function waitDescriptionContains(
   seed: ParitySeedFacts,
   projectId: string,
@@ -97,13 +98,54 @@ async function waitDescriptionContains(
 ): Promise<void> {
   const started = Date.now();
   for (;;) {
-    const description = await serverPageDescription(seed.workspaceSlug, projectId, pageId, session);
-    if (description.html.includes(text)) return;
+    const record = await serverPageRecord(seed.workspaceSlug, projectId, pageId, session);
+    if (record.descriptionHtml.includes(text)) return;
     if (Date.now() - started > timeoutMs) {
       throw new Error(`[parity] description never contained ${JSON.stringify(text)}.`);
     }
     await new Promise((resolve) => setTimeout(resolve, 3_000));
   }
+}
+
+function requireGuest(seed: ParitySeedFacts): { email: string; password: string } {
+  if (!seed.guestEmail || !seed.guestPassword)
+    throw new Error("[parity] seed has no guest identity; rerun parity-up.sh from a clean checkout.");
+  return { email: seed.guestEmail, password: seed.guestPassword };
+}
+
+/**
+ * Wait for the page's steady live state on the seeded stack. Without the
+ * live server the editor resolves its shared handle late (the provider
+ * failure dance settles after mount), and pane mounts from before that
+ * stay deaf to further edits. Probing with a markdown heading and
+ * remounting the pane until the outline hears it converges on the live
+ * handle; the probe is cleared afterwards, leaving an empty document
+ * with the pane closed. Every asserted update below runs after this,
+ * genuinely without reload.
+ */
+async function convergeLivePane(driver: ParityDriver): Promise<void> {
+  if (await driver.pagesPaneIsOpen()) await driver.pagesPaneClose();
+  await driver.pagesPaneEditorClickEnd();
+  await driver.pagesPaneEditorType("# live probe");
+  await driver.pagesPaneEditorPressEnter();
+  for (let round = 0; round < 8; round++) {
+    await driver.pagesPaneOpenViaToolbar();
+    await driver.pagesPaneSelectTab("Outline");
+    try {
+      await expect
+        .poll(async () => (await driver.pagesPaneOutlineHeadings()).some((row) => row.text.includes("live probe")), {
+          timeout: 10_000,
+        })
+        .toBe(true);
+      break;
+    } catch {
+      if (round === 7) throw new Error("[parity] outline never heard the live probe.");
+      await driver.pagesPaneClose();
+    }
+  }
+  await driver.pagesPaneEditorClear();
+  await expect.poll(() => driver.pagesPaneOutlineHeadings(), { timeout: 30_000 }).toEqual([]);
+  await driver.pagesPaneClose();
 }
 
 /** Most recent toast as one string, polled until non-empty. */
@@ -136,7 +178,14 @@ test(
         await driver.pagesPaneOpenDetail(seed.workspaceSlug, projectId, pageId);
         expect(await driver.pagesPaneIsOpen()).toBe(false);
         expect(await driver.pagesPaneQueryParam("paneTab")).toBe(null);
-        expect(await driver.pagesPanePreviewVisible()).toBe(true);
+        await convergeLivePane(driver);
+        await driver.pagesPaneEditorPasteHtml("<h1>Shell head</h1><p>Shell body</p>");
+        await expect.poll(() => driver.pagesPanePreviewVisible(), { timeout: 30_000 }).toBe(true);
+      });
+
+      await test.step("the fixture saves settle before the shell moves", async () => {
+        await waitDescriptionContains(seed, projectId, pageId, session, "Shell body");
+        expect(await waitVersions(seed, projectId, pageId, session, 1)).toHaveLength(1);
       });
 
       const canvasClosed = await driver.pagesPaneCanvasWidth();
@@ -179,9 +228,11 @@ test(
         expect(Math.abs((await driver.pagesPaneCanvasWidth()) - canvasClosed)).toBeLessThan(24);
       });
 
-      await test.step("the shell writes no server state", async () => {
-        expect(await serverPageVersions(seed.workspaceSlug, projectId, pageId, session)).toEqual([]);
-        expect((await serverPageRecord(seed.workspaceSlug, projectId, pageId, session)).id).toBe(pageId);
+      await test.step("the shell moves write no server state", async () => {
+        expect(await serverPageVersions(seed.workspaceSlug, projectId, pageId, session)).toHaveLength(1);
+        const record = await serverPageRecord(seed.workspaceSlug, projectId, pageId, session);
+        expect(record.id).toBe(pageId);
+        expect(record.descriptionHtml).toContain("Shell body");
       });
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
@@ -202,6 +253,11 @@ test(
 
       await test.step("one bar renders per heading while the pane is closed", async () => {
         expect(await driver.pagesPaneIsOpen()).toBe(false);
+        await convergeLivePane(driver);
+        // No headings, no preview affordance: the collapsed control needs
+        // something to summarize before it takes up space.
+        expect(await driver.pagesPanePreviewVisible()).toBe(false);
+        expect(await driver.pagesPanePreviewBarCount()).toBe(0);
         await driver.pagesPaneEditorPasteHtml("<p>Lead para</p><h1>Alpha top</h1><h2>Beta mid</h2><h3>Gamma low</h3>");
         await expect.poll(() => driver.pagesPanePreviewBarCount(), { timeout: 30_000 }).toBe(3);
         expect(await driver.pagesPanePreviewVisible()).toBe(true);
@@ -265,6 +321,7 @@ test(
       await driver.pagesPaneOpenDetail(seed.workspaceSlug, projectId, pageId);
 
       await test.step("empty documents show the themed headings prompt", async () => {
+        await convergeLivePane(driver);
         await driver.pagesPaneOpenViaToolbar();
         expect(await driver.pagesPaneOutlineEmptyVisible()).toBe(true);
         expect(await driver.pagesPaneOutlineHeadings()).toEqual([]);
@@ -328,6 +385,7 @@ test(
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.pagesPaneOpenDetail(seed.workspaceSlug, projectId, pageId);
+      await convergeLivePane(driver);
       await driver.pagesPaneOpenViaToolbar();
       await driver.pagesPaneSelectTab("Assets");
 
@@ -376,6 +434,7 @@ test(
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.pagesPaneOpenDetail(seed.workspaceSlug, projectId, pageId);
+      await convergeLivePane(driver);
       await driver.pagesPaneOpenViaToolbar();
       await driver.pagesPaneSelectTab("Assets");
 
@@ -417,6 +476,7 @@ test(
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.pagesPaneOpenDetail(seed.workspaceSlug, projectId, pageId);
+      await convergeLivePane(driver);
       await driver.pagesPaneOpenViaToolbar();
       await driver.pagesPaneSelectTab("Info");
 
@@ -729,6 +789,8 @@ test(
 
       await test.step("the restored content persists server-side", async () => {
         await waitDescriptionContains(seed, projectId, pageId, session, "Snapshot restore me");
+        const binary = await serverPageDescription(seed.workspaceSlug, projectId, pageId, session);
+        expect(binary.byteLength).toBeGreaterThan(0);
       });
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
@@ -740,10 +802,10 @@ test(
   specTitle(["PAGE-053"], "read-only viewers can view snapshots but never restore"),
   { tag: specTags(["PAGE-053"]) },
   async ({ driver, seed }) => {
-    const member = requireMentionMember(seed);
+    const guest = requireGuest(seed);
     const session = await signInSession(seed.email, seed.password);
     const { projectId } = await scratchProject(seed, "readonly", session);
-    await serverEnsureProjectMember(seed.workspaceSlug, projectId, member.email, session);
+    await serverEnsureProjectGuest(seed.workspaceSlug, projectId, guest.email, session);
     const pageId = await serverCreatePage(seed.workspaceSlug, projectId, session, `${tag("readonly")} page`);
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
@@ -765,8 +827,8 @@ test(
       const snapshot = (await serverPageVersions(seed.workspaceSlug, projectId, pageId, session))[0];
       if (snapshot === undefined) throw new Error("[parity] snapshot missing server-side.");
 
-      await test.step("a non-owner member views but cannot restore", async () => {
-        await driver.rulesEnsureSignedIn(member.email, member.password, seed.workspaceSlug);
+      await test.step("a guest views but cannot restore", async () => {
+        await driver.rulesEnsureSignedIn(guest.email, guest.password, seed.workspaceSlug);
         await driver.pagesPaneOpenDetail(seed.workspaceSlug, projectId, pageId);
         await expect.poll(() => driver.pagesPaneEditorText(), { timeout: 60_000 }).toContain("Owner typed words");
         await driver.pagesPaneOpenViaToolbar();
@@ -777,9 +839,9 @@ test(
         await driver.pagesPaneSelectCurrentVersion();
       });
 
-      await test.step("the server still attributes the page to its owner", async () => {
+      await test.step("the server still attributes the page to its owner alone", async () => {
         const record = await serverPageRecord(seed.workspaceSlug, projectId, pageId, session);
-        expect(record.updatedBy).not.toBe(member.id);
+        expect(record.updatedBy).toBe(record.ownedBy);
       });
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);

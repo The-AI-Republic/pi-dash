@@ -13139,10 +13139,10 @@ export interface ParityPageVersionDetail extends ParityPageVersion {
   jsonText: string | null;
 }
 
-/** Live page description payloads. */
+/** Live page description binary (Yjs state stream, latin1-decoded for substring reads). */
 export interface ParityPageDescription {
-  html: string;
-  jsonText: string | null;
+  byteLength: number;
+  text: string;
 }
 
 /** Live page record identity and actor facts. */
@@ -13154,9 +13154,10 @@ export interface ParityPageRecord {
   updatedBy: string;
   createdAt: string;
   updatedAt: string;
+  descriptionHtml: string;
 }
 
-/** Read a page's live description payloads (HTML plus structured JSON). */
+/** Read a page's live description binary (Yjs state stream). */
 export async function serverPageDescription(
   workspaceSlug: string,
   projectId: string,
@@ -13169,14 +13170,8 @@ export async function serverPageDescription(
     { headers: { cookie: sessionCookie } }
   );
   if (!res.ok) throw new Error(`[parity] page description read failed with HTTP ${res.status}.`);
-  const rec = (await res.json()) as Record<string, unknown>;
-  return {
-    html: typeof rec["description_html"] === "string" ? rec["description_html"] : "",
-    jsonText:
-      rec["description_json"] === null || rec["description_json"] === undefined
-        ? null
-        : JSON.stringify(rec["description_json"]),
-  };
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  return { byteLength: bytes.length, text: new TextDecoder("latin1").decode(bytes) };
 }
 
 /**
@@ -13189,12 +13184,15 @@ export async function serverUpdatePageDescription(
   projectId: string,
   pageId: string,
   sessionCookie: string,
-  html: string,
+  html: string | null,
   jsonText: string | null = null,
+  binaryBase64: string | null = null,
   apiBase: string = apiBaseFromEnv()
 ): Promise<void> {
-  const body: Record<string, unknown> = { description_html: html };
+  const body: Record<string, unknown> = {};
+  if (html !== null) body["description_html"] = html;
   if (jsonText !== null) body["description_json"] = JSON.parse(jsonText) as unknown;
+  if (binaryBase64 !== null) body["description_binary"] = binaryBase64;
   const res = await fetchTolerant(
     `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/description/`,
     {
@@ -13286,6 +13284,7 @@ export async function serverPageRecord(
     updatedBy: rec["updated_by"] as string,
     createdAt: rec["created_at"] as string,
     updatedAt: rec["updated_at"] as string,
+    descriptionHtml: typeof rec["description_html"] === "string" ? rec["description_html"] : "",
   };
 }
 

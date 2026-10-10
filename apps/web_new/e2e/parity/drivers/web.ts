@@ -27814,9 +27814,20 @@ export class WebDriver implements ParityDriver {
     return this.page.locator("#page-content-container").locator("xpath=..");
   }
 
-  /** The live editor's editable regions (never the overlay's read-only editor). */
+  /**
+   * The live document body editor: the frame renderer's direct editor
+   * container inside the canvas column. The page title is a separate
+   * contenteditable nested in the header block (never a direct editor
+   * container of the frame), and the snapshot overlay's editor sits
+   * outside the canvas column, so this reads the body alone.
+   */
   private pagesPaneLiveEditor(): Locator {
-    return this.pagesPaneLiveScope().locator('[contenteditable="true"]');
+    return this.pagesPaneLiveScope().locator('.frame-renderer > .editor-container [contenteditable="true"]');
+  }
+
+  /** The live document body container (for text reads without an editable region). */
+  private pagesPaneLiveBody(): Locator {
+    return this.pagesPaneLiveScope().locator(".frame-renderer > .editor-container");
   }
 
   /** The overlay's read-only marker (only rendered while a snapshot loads or shows). */
@@ -27867,8 +27878,8 @@ export class WebDriver implements ParityDriver {
           .catch(() => "")) ?? ""
       ).trim();
     }
-    // Read-only viewers get no editable region; read the rendered canvas.
-    const rendered = this.pagesPaneLiveScope().locator(".frame-renderer");
+    // Read-only viewers get no editable region; read the rendered body.
+    const rendered = this.pagesPaneLiveBody();
     if ((await rendered.count()) === 0) return "";
     return (
       (await rendered
@@ -28393,7 +28404,7 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesPaneEditorClickText(text: string): Promise<void> {
-    await this.pagesPaneLiveScope().getByText(text).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesPaneLiveBody().getByText(text).first().click({ timeout: WebDriver.OPEN_MS });
   }
 
   async pagesPaneEditorClear(): Promise<void> {
