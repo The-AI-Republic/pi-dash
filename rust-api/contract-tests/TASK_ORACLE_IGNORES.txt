@@ -1,0 +1,25 @@
+# Task-oracle files excluded from the Rust HTTP matrix (PIDASHCONV-821).
+#
+# The rust-api-contract-rust workflow boots no Celery worker or beat (same as
+# the existing Django HTTP workflows: a running worker would consume .delay()
+# side effects that HTTP suites do not expect). These files publish jobs in
+# Celery wire format and wait for a worker to consume them, so they cannot
+# run in that workflow — on either backend — and are passed as --ignore.
+# The Django-first run uses the same selection, so oracle validity holds for
+# exactly what runs against Rust. This weakens nothing: every file below has
+# the same CI coverage it had before this workflow existed.
+#
+# Coverage of the excluded files (unchanged by V-02):
+#   assistant/test_tasks_turn.py           -> worker-plane oracle job in
+#                                             rust-api-contract-tests.yml
+#   loop/test_worker.py                    -> no CI coverage (local gate only)
+#   orchestration/test_beat_schedule.py    -> no CI coverage (local gate only)
+#   orchestration/test_ticker_tasks.py     -> no CI coverage (local gate only)
+# (Follow-up: extend the worker-plane oracle to the three local-only files.
+# They need a Redis-transport worker (orchestration) and a dedicated queue
+# worker plus LOOP_RECONCILE_EVERY_MINUTES=1 (loop), neither of which fits
+# the HTTP matrix job shape.)
+assistant/test_tasks_turn.py
+loop/test_worker.py
+orchestration/test_beat_schedule.py
+orchestration/test_ticker_tasks.py

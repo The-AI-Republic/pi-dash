@@ -1,0 +1,50 @@
+# HTTP contract suites run by .github/workflows/rust-api-contract-rust.yml (PIDASHCONV-821).
+#
+# One suite directory per line: every directory under rust-api/contract-tests/
+# that drives HTTP. The workflow shards one matrix job per line and runs the
+# suite against Django first (oracle validity) and then against the Rust
+# server with every PIDASH_RUST_* flag on.
+#
+# Directories NOT listed here are pure non-HTTP suites, covered elsewhere:
+#   dispatch, integrations, tasks_cleanup, tasks_mail, tasks_ticker,
+#   tasks_webhooks  -> worker-plane oracle + *-rust replay workflows
+#   ops               -> rust-api-contract-tests-ops*.yml (drives the pidash-api
+#                        ops binary via subprocess, never BASE_URL)
+#
+# The workflow's setup job fails when an on-disk suite directory is neither
+# listed here nor in the task-only set above, so a new suite cannot silently
+# miss the Rust matrix: add it here (HTTP) or to the task-only set in
+# _harness/rust_matrix.py with a justification.
+api_assets_stickies_intake
+app_analytics
+app_assets
+app_cycles
+app_intake
+app_integrations
+app_issues
+app_modules
+app_notifications
+app_pages
+app_project
+app_scheduler
+app_views_search
+app_workspace
+assistant
+auth_device
+auth_magic
+auth_oauth
+auth_session
+body_limit
+foundation
+license
+loop
+orchestration
+prompting
+runner
+space
+v1_cli_auth
+v1_cycles_modules
+v1_openapi
+v1_projects
+v1_work_items
+web_edge
