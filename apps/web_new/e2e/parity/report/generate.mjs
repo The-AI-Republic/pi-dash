@@ -39,6 +39,10 @@ function areaOf(filename) {
 
 function parseInventory() {
   const rows = [];
+  // Inventory files may re-list capability rows in a trailing checklist
+  // section; each row ID counts once, keeping the capability table's
+  // status (first occurrence wins).
+  const seen = new Set();
   for (const filename of readdirSync(inventoryDir).sort()) {
     if (!filename.endsWith(".md")) continue;
     const area = areaOf(filename);
@@ -48,6 +52,9 @@ function parseInventory() {
       const cells = line.split("|").map((cell) => cell.trim());
       const id = cells[1] ?? "";
       if (!/^[A-Z]+-\d+$/.test(id)) continue;
+      const key = `${area}|${id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       const status = (cells[cells.length - 2] ?? "").toLowerCase();
       rows.push({
         area,

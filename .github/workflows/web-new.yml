@@ -110,6 +110,7 @@ jobs:
       - run: pnpm --filter web_new test
       - run: pnpm --filter web_new test:coexistence
       - run: pnpm --filter web_new test:size-initial
+      - run: pnpm --filter web_new test:parity-report
       - run: pnpm --filter @pidash/kit test
       - run: pnpm --filter @pidash/api-client test
 
