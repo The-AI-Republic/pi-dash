@@ -7,6 +7,11 @@
 // fill these in method by method; the oracle driver stays untouched.
 import type { Page } from "@playwright/test";
 import type {
+  ArchivesArchiveDialog,
+  ArchivesMenuEntry,
+  ArchivesModuleChip,
+  ArchivesModulesEmptyKind,
+  ArchivesPeekReadOnly,
   AddRunnerFormState,
   AddRunnerRemotePhase,
   AssistantApiCounts,
@@ -5837,5 +5842,149 @@ export class WebNewDriver implements ParityDriver {
     _holdMs: number
   ): Promise<{ progress: boolean; requests: number; scopeBody: string | null }> {
     return todo("notificationsMarkAllReadHeld");
+  }
+
+  // --- Archived modules (NEWFRONT-225, ARCH-020..025). Throwing stubs;
+  // --- the new-app area issue implements them against apps/web_new.
+  async archivesOpenModulesTab(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("archivesOpenModulesTab");
+  }
+  async archivesOpenCyclesTab(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("archivesOpenCyclesTab");
+  }
+  async archivesGoToProjectArchives(_projectId: string): Promise<void> {
+    return todo("archivesGoToProjectArchives");
+  }
+  async archivesSelectArchivesTab(_tab: "Modules" | "Cycles"): Promise<void> {
+    return todo("archivesSelectArchivesTab");
+  }
+  async archivesClientNavigate(_path: string): Promise<void> {
+    return todo("archivesClientNavigate");
+  }
+  async archivesOpenLiveModulePeek(_name: string): Promise<void> {
+    return todo("archivesOpenLiveModulePeek");
+  }
+  async archivesOpenLiveModules(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("archivesOpenLiveModules");
+  }
+  async archivesOpenLiveCycles(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("archivesOpenLiveCycles");
+  }
+  async archivesDirectLoadRenders(_workspaceSlug: string, _projectId: string): Promise<boolean> {
+    return todo("archivesDirectLoadRenders");
+  }
+  async archivesAwaitModuleRow(_name: string): Promise<void> {
+    return todo("archivesAwaitModuleRow");
+  }
+  async archivesModuleRowNames(): Promise<string[]> {
+    return todo("archivesModuleRowNames");
+  }
+  async archivesCycleRowNames(): Promise<string[]> {
+    return todo("archivesCycleRowNames");
+  }
+  async archivesModuleSortLabel(): Promise<string> {
+    return todo("archivesModuleSortLabel");
+  }
+  async archivesSetModuleSort(_label: string): Promise<void> {
+    return todo("archivesSetModuleSort");
+  }
+  async archivesOpenModuleSearch(): Promise<void> {
+    return todo("archivesOpenModuleSearch");
+  }
+  async archivesModuleSearchVisible(): Promise<boolean> {
+    return todo("archivesModuleSearchVisible");
+  }
+  async archivesTypeModuleSearch(_text: string): Promise<void> {
+    return todo("archivesTypeModuleSearch");
+  }
+  async archivesModuleSearchText(): Promise<string> {
+    return todo("archivesModuleSearchText");
+  }
+  async archivesEscapeModuleSearch(): Promise<void> {
+    return todo("archivesEscapeModuleSearch");
+  }
+  async archivesClearModuleSearch(): Promise<void> {
+    return todo("archivesClearModuleSearch");
+  }
+  async archivesCollapseSearchOutside(): Promise<void> {
+    return todo("archivesCollapseSearchOutside");
+  }
+  async archivesOpenModuleFilters(): Promise<void> {
+    return todo("archivesOpenModuleFilters");
+  }
+  async archivesModuleFilterGroups(): Promise<string[]> {
+    return todo("archivesModuleFilterGroups");
+  }
+  async archivesToggleLeadFilter(_label: string): Promise<void> {
+    return todo("archivesToggleLeadFilter");
+  }
+  async archivesModuleChips(): Promise<ArchivesModuleChip[]> {
+    return todo("archivesModuleChips");
+  }
+  async archivesRemoveModuleChip(_key: string): Promise<void> {
+    return todo("archivesRemoveModuleChip");
+  }
+  async archivesClearModuleFilters(): Promise<void> {
+    return todo("archivesClearModuleFilters");
+  }
+  async archivesModuleFiltersActive(): Promise<boolean> {
+    return todo("archivesModuleFiltersActive");
+  }
+  async archivesCloseModuleFilters(): Promise<void> {
+    return todo("archivesCloseModuleFilters");
+  }
+  async archivesModulesEmptyKind(): Promise<ArchivesModulesEmptyKind> {
+    return todo("archivesModulesEmptyKind");
+  }
+  async archivesModulesShowsSkeleton(_workspaceSlug: string, _projectId: string): Promise<boolean> {
+    return todo("archivesModulesShowsSkeleton");
+  }
+  async archivesOpenModulePeek(_name: string): Promise<void> {
+    return todo("archivesOpenModulePeek");
+  }
+  async archivesModulePeekName(): Promise<string | null> {
+    return todo("archivesModulePeekName");
+  }
+  async archivesCloseModulePeek(): Promise<void> {
+    return todo("archivesCloseModulePeek");
+  }
+  async archivesOpenCyclePeek(_name: string): Promise<void> {
+    return todo("archivesOpenCyclePeek");
+  }
+  async archivesCyclePeekName(): Promise<string | null> {
+    return todo("archivesCyclePeekName");
+  }
+  async archivesCloseCyclePeek(): Promise<void> {
+    return todo("archivesCloseCyclePeek");
+  }
+  async archivesModulePeekReadOnly(): Promise<ArchivesPeekReadOnly> {
+    return todo("archivesModulePeekReadOnly");
+  }
+  async archivesCyclePeekReadOnly(): Promise<ArchivesPeekReadOnly> {
+    return todo("archivesCyclePeekReadOnly");
+  }
+  async archivesLiveModuleMenuEntries(_name: string): Promise<ArchivesMenuEntry[]> {
+    return todo("archivesLiveModuleMenuEntries");
+  }
+  async archivesChooseLiveModuleMenuEntry(_name: string, _title: string): Promise<void> {
+    return todo("archivesChooseLiveModuleMenuEntry");
+  }
+  async archivesArchivedModuleMenuEntries(_name: string): Promise<ArchivesMenuEntry[]> {
+    return todo("archivesArchivedModuleMenuEntries");
+  }
+  async archivesChooseArchivedModuleMenuEntry(_name: string, _title: string): Promise<void> {
+    return todo("archivesChooseArchivedModuleMenuEntry");
+  }
+  async archivesArchiveDialog(): Promise<ArchivesArchiveDialog | null> {
+    return todo("archivesArchiveDialog");
+  }
+  async archivesConfirmArchiveDialog(): Promise<void> {
+    return todo("archivesConfirmArchiveDialog");
+  }
+  async archivesCancelArchiveDialog(): Promise<void> {
+    return todo("archivesCancelArchiveDialog");
+  }
+  async archivesFailNextModuleWrite(): Promise<void> {
+    return todo("archivesFailNextModuleWrite");
   }
 }

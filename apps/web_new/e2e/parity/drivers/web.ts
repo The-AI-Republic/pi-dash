@@ -18,6 +18,11 @@ import { expect, type ElementHandle, type Locator, type Page } from "@playwright
 import type {
   AddRunnerFormState,
   AddRunnerRemotePhase,
+  ArchivesArchiveDialog,
+  ArchivesMenuEntry,
+  ArchivesModuleChip,
+  ArchivesModulesEmptyKind,
+  ArchivesPeekReadOnly,
   AssistantApiCounts,
   AssistantBubble,
   AssistantLandingGreeting,
@@ -20325,5 +20330,748 @@ export class WebDriver implements ParityDriver {
     } finally {
       await this.page.unroute(pattern).catch(() => undefined);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Archived modules (NEWFRONT-225, ARCH-020..025). Observed on the running
+  // old app: rows are anchors whose href carries the record UUID (nav and
+  // tab links never do), the search box is the header's "Search" placeholder
+  // (the filters popover carries the second one), sort/filter menus are
+  // headless popovers with plain-button options, row menus are read through
+  // the right-click context menu ([data-context-menu]), peek panels are
+  // address-driven (?peekModule=/?peekCycle=) beside h4-titled sidebars, and
+  // the archive dialog is the role=dialog headed "Archive module".
+  // Appended; existing methods above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  private archivesMain(): Locator {
+    // The shell nests a workspace main inside the app main; the tab
+    // content always lives in the last one in document order.
+    return this.page.getByRole("main").last();
+  }
+
+  private static archivesRowHref(kind: "modules" | "cycles", href: string): boolean {
+    return new RegExp(`/${kind}/[0-9a-fA-F-]{36}/?(?:\\?.*)?$`).test(href);
+  }
+
+  private async archivesRowNames(kind: "modules" | "cycles"): Promise<string[]> {
+    return this.page.evaluate((rowKind: "modules" | "cycles") => {
+      const main = document.querySelector("main");
+      const names: string[] = [];
+      main?.querySelectorAll(`a[href*="/${rowKind}/"]`).forEach((anchor) => {
+        if (!new RegExp(`/${rowKind}/[0-9a-fA-F-]{36}/?(?:\\?.*)?$`).test(anchor.getAttribute("href") ?? "")) return;
+        const title = anchor.querySelector("span.truncate")?.textContent?.trim() ?? "";
+        if (title !== "") names.push(title);
+      });
+      return names;
+    }, kind);
+  }
+
+  /** Center of a row's title; scrolls it into view first. Throws when absent. */
+  private async archivesRowPoint(name: string, kind: "modules" | "cycles"): Promise<{ x: number; y: number }> {
+    const point = await this.page.evaluate(
+      ({ rowName, rowKind }: { rowName: string; rowKind: "modules" | "cycles" }) => {
+        const main = document.querySelector("main");
+        const pattern = new RegExp(`/${rowKind}/[0-9a-fA-F-]{36}/?(?:\\?.*)?$`);
+        const anchors = [...(main?.querySelectorAll(`a[href*="/${rowKind}/"]`) ?? [])];
+        for (const anchor of anchors) {
+          if (!pattern.test(anchor.getAttribute("href") ?? "")) continue;
+          const titleEl = anchor.querySelector("span.truncate");
+          if ((titleEl?.textContent?.trim() ?? "") !== rowName) continue;
+          const target = titleEl ?? anchor;
+          target.scrollIntoView({ block: "center" });
+          const box = target.getBoundingClientRect();
+          return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+        }
+        return null;
+      },
+      { rowName: name, rowKind: kind }
+    );
+    if (point === null) throw new Error(`[parity] row never rendered ${JSON.stringify(name)}.`);
+    return point;
+  }
+
+  private async archivesAwaitModulesSettled(): Promise<void> {
+    await this.page.waitForFunction(
+      () => {
+        const main = document.querySelector("main");
+        if (!main) return false;
+        const rows = [...main.querySelectorAll('a[href*="/modules/"]')].filter((anchor) =>
+          /\/modules\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(anchor.getAttribute("href") ?? "")
+        );
+        if (rows.length > 0) return true;
+        const text = main.innerText ?? "";
+        return text.includes("No archived Modules yet") || text.includes("No matching modules");
+      },
+      null,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  private async archivesAwaitCyclesSettled(): Promise<void> {
+    await this.page.waitForFunction(
+      () => {
+        const main = document.querySelector("main");
+        if (!main) return false;
+        const rows = [...main.querySelectorAll('a[href*="/cycles/"]')].filter((anchor) =>
+          /\/cycles\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(anchor.getAttribute("href") ?? "")
+        );
+        if (rows.length > 0) return true;
+        const text = main.innerText ?? "";
+        return text.includes("No archived cycles yet") || text.includes("No matching cycles");
+      },
+      null,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async archivesOpenModulesTab(workspaceSlug: string, projectId: string): Promise<void> {
+    // Live-first client-side entry: a direct load hangs on the loader
+    // (NEWFRONT-228), so the live visit seeds the store and every hop
+    // after it stays inside the SPA session.
+    await this.archivesOpenLiveModules(workspaceSlug, projectId);
+    await this.archivesGoToProjectArchives(projectId);
+    await this.archivesSelectArchivesTab("Modules");
+    await this.archivesAwaitModulesSettled();
+  }
+
+  async archivesOpenCyclesTab(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.archivesOpenLiveCycles(workspaceSlug, projectId);
+    await this.archivesGoToProjectArchives(projectId);
+    await this.archivesSelectArchivesTab("Cycles");
+    await this.archivesAwaitCyclesSettled();
+  }
+
+  async archivesGoToProjectArchives(projectId: string): Promise<void> {
+    const row = this.page.locator(`div[id="${projectId}"]`).first();
+    await row.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await row.hover({ timeout: WebDriver.WAIT_MS });
+    await row.getByRole("button", { name: "Toggle quick actions menu" }).click({ timeout: WebDriver.WAIT_MS });
+    const item = this.page.locator('[role="menuitem"]:visible', { hasText: "Archives" });
+    await item.waitFor({ timeout: WebDriver.WAIT_MS });
+    await item.locator("button").click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForFunction(
+      (pid: string) => new URL(location.href).pathname.includes(`/projects/${pid}/archives/issues`),
+      projectId,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async archivesSelectArchivesTab(tab: "Modules" | "Cycles"): Promise<void> {
+    // Href-targeted: every archives header renders the same tab strip,
+    // but the header chrome around it differs per tab.
+    const slug = tab.toLowerCase();
+    await this.page.locator(`a[href*="/archives/${slug}"]`).first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForFunction(
+      (key: string) => new URL(location.href).pathname.includes(`/archives/${key}`),
+      slug,
+      {
+        timeout: WebDriver.WAIT_MS,
+      }
+    );
+  }
+
+  async archivesClientNavigate(path: string): Promise<void> {
+    await this.page.evaluate((target: string) => {
+      window.history.pushState({}, "", target);
+      window.dispatchEvent(new PopStateEvent("popstate", {}));
+    }, path);
+    await this.page.waitForFunction((target: string) => new URL(location.href).pathname.includes(target), path, {
+      timeout: WebDriver.WAIT_MS,
+    });
+  }
+
+  async archivesOpenLiveModulePeek(name: string): Promise<void> {
+    // The live row's UUID comes from its own link; the peek then opens
+    // through its address, which the live list honors on load.
+    const uuid = await this.page.evaluate((rowName: string) => {
+      const main = document.querySelector("main");
+      const anchors = [...(main?.querySelectorAll('a[href*="/modules/"]') ?? [])];
+      for (const anchor of anchors) {
+        const href = anchor.getAttribute("href") ?? "";
+        const match = /\/modules\/([0-9a-fA-F-]{36})\/?(?:\?.*)?$/.exec(href);
+        if (!match) continue;
+        if ((anchor.querySelector("span.truncate")?.textContent?.trim() ?? "") !== rowName) continue;
+        return match[1] ?? null;
+      }
+      return null;
+    }, name);
+    if (uuid === null) throw new Error(`[parity] live row never rendered ${JSON.stringify(name)}.`);
+    const detailWait = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          /\/modules\/[0-9a-fA-F-]{36}\/$/.test(new URL(response.url()).pathname),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    const base = new URL(this.page.url()).pathname.replace(/\/$/, "");
+    await this.page.goto(`${base}?peekModule=${uuid}`, { waitUntil: "domcontentloaded" });
+    if (!(await detailWait)) {
+      throw new Error(`[parity] opening live ${JSON.stringify(name)} fired no module detail read.`);
+    }
+    await expect.poll(() => this.archivesModulePeekName(), { timeout: WebDriver.WAIT_MS }).toBe(name);
+  }
+
+  /** Skip the reload when the live screen is already showing (single load per screen). */
+  private async archivesGotoLiveList(
+    workspaceSlug: string,
+    projectId: string,
+    kind: "modules" | "cycles"
+  ): Promise<void> {
+    const target = `/${workspaceSlug}/projects/${projectId}/${kind}`;
+    const current = new URL(this.page.url()).pathname.replace(/\/$/, "");
+    if (!current.endsWith(`/projects/${projectId}/${kind}`)) {
+      await this.page.goto(target, { waitUntil: "domcontentloaded" });
+    }
+  }
+
+  async archivesOpenLiveModules(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.archivesGotoLiveList(workspaceSlug, projectId, "modules");
+    await this.page.waitForFunction(
+      () => {
+        const main = document.querySelector("main");
+        if (!main) return false;
+        const rows = [...main.querySelectorAll('a[href*="/modules/"]')].filter((anchor) =>
+          /\/modules\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(anchor.getAttribute("href") ?? "")
+        );
+        if (rows.length > 0) return true;
+        return (main.innerText ?? "").includes("Map your project goals to Modules");
+      },
+      null,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async archivesAwaitModuleRow(name: string): Promise<void> {
+    await this.page.waitForFunction(
+      (rowName: string) => {
+        const main = document.querySelector("main");
+        const anchors = [...(main?.querySelectorAll('a[href*="/modules/"]') ?? [])];
+        return anchors.some(
+          (anchor) =>
+            /\/modules\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(anchor.getAttribute("href") ?? "") &&
+            (anchor.querySelector("span.truncate")?.textContent?.trim() ?? "") === rowName
+        );
+      },
+      name,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async archivesModuleRowNames(): Promise<string[]> {
+    return this.archivesRowNames("modules");
+  }
+
+  async archivesCycleRowNames(): Promise<string[]> {
+    return this.archivesRowNames("cycles");
+  }
+
+  /** The tab header strip: the only bar carrying group+relative+flex+border-b together. */
+  private archivesTabHeader(): Locator {
+    return this.archivesMain().locator("div.group.relative.flex.border-b").first();
+  }
+
+  private archivesSortTrigger(): Locator {
+    return this.archivesTabHeader().locator("[data-main-menu] button").first();
+  }
+
+  async archivesModuleSortLabel(): Promise<string> {
+    return (await this.archivesSortTrigger().innerText({ timeout: WebDriver.WAIT_MS })).trim();
+  }
+
+  async archivesSetModuleSort(label: string): Promise<void> {
+    await this.archivesSortTrigger().click({ timeout: WebDriver.WAIT_MS });
+    // Closed menus render statically, so only the visible item is clickable.
+    const item = this.page.locator('[role="menuitem"]:visible', { hasText: label });
+    await item.waitFor({ timeout: WebDriver.WAIT_MS });
+    await item.locator("button").click({ timeout: WebDriver.WAIT_MS });
+    await item.waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  /** The header search box renders before the filters popover's own "Search". */
+  private archivesSearchInput(): Locator {
+    return this.archivesMain().getByPlaceholder("Search").first();
+  }
+
+  async archivesOpenModuleSearch(): Promise<void> {
+    if (await this.archivesModuleSearchVisible()) return;
+    await this.archivesTabHeader().locator("button.-mr-5").first().click({ timeout: WebDriver.WAIT_MS });
+    await expect.poll(() => this.archivesModuleSearchVisible()).toBe(true);
+  }
+
+  async archivesModuleSearchVisible(): Promise<boolean> {
+    const box = await this.archivesSearchInput()
+      .boundingBox()
+      .catch(() => null);
+    return (box?.width ?? 0) > 50;
+  }
+
+  async archivesTypeModuleSearch(text: string): Promise<void> {
+    await this.archivesSearchInput().fill(text, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesModuleSearchText(): Promise<string> {
+    return this.archivesSearchInput().inputValue();
+  }
+
+  async archivesEscapeModuleSearch(): Promise<void> {
+    await this.archivesSearchInput().press("Escape", { timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesClearModuleSearch(): Promise<void> {
+    await this.archivesSearchInput().locator("xpath=../button").click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesCollapseSearchOutside(): Promise<void> {
+    // The tab strip sits outside the search box; re-selecting the current
+    // tab keeps the address while tripping the outside-click detector.
+    await this.page.locator('a[href*="/archives/modules"]').first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  private archivesFiltersTrigger(): Locator {
+    return this.archivesMain().getByRole("button", { name: "Filters", exact: true }).first();
+  }
+
+  /**
+   * A filter group header by key prefix. The popover panel itself is a
+   * zero-size fixed shell, so the menu is found by its visible content.
+   */
+  private archivesFilterGroupHeader(key: string): Locator {
+    return this.page.locator("div.text-caption-sm-medium:visible", {
+      hasText: new RegExp(`^${WebDriver.archivesEscapeRegExp(key)}`),
+    });
+  }
+
+  async archivesOpenModuleFilters(): Promise<void> {
+    await this.archivesFiltersTrigger().click({ timeout: WebDriver.WAIT_MS });
+    await this.archivesFilterGroupHeader("Lead").waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesModuleFilterGroups(): Promise<string[]> {
+    const texts = await this.page.locator("div.text-caption-sm-medium:visible").allTextContents();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
+  }
+
+  async archivesToggleLeadFilter(label: string): Promise<void> {
+    // Options carry avatars that pollute the accessible name, so the
+    // option is the button whose title div reads exactly the label.
+    const header = this.archivesFilterGroupHeader("Lead");
+    const group = header.locator("xpath=ancestor::div[contains(@class,'py-2')][1]");
+    const option = group.locator("button", {
+      has: this.page.locator("div.truncate", { hasText: new RegExp(`^${WebDriver.archivesEscapeRegExp(label)}$`) }),
+    });
+    await option.click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  private archivesChipRow(): Locator {
+    return this.archivesMain().locator("div.border-b.px-5.py-3");
+  }
+
+  async archivesModuleChips(): Promise<ArchivesModuleChip[]> {
+    const row = this.archivesChipRow();
+    if ((await row.count()) === 0) return [];
+    return row.evaluate((root) => {
+      const chips: { key: string; text: string }[] = [];
+      root.querySelectorAll("span.text-11.text-tertiary").forEach((keyEl) => {
+        const key = keyEl.textContent?.trim() ?? "";
+        if (key === "" || key === "Modules") return;
+        const tag = keyEl.closest("div.flex.flex-wrap.items-center.gap-1\\.5, div[class*='rounded-md']");
+        void tag;
+        const text = keyEl.parentElement?.textContent?.trim() ?? "";
+        chips.push({ key, text });
+      });
+      return chips;
+    });
+  }
+
+  async archivesRemoveModuleChip(key: string): Promise<void> {
+    const row = this.archivesChipRow();
+    const keyEl = row.locator("span.text-11.text-tertiary", { hasText: key }).first();
+    const chip = keyEl.locator("xpath=ancestor::div[contains(@class,'gap-1.5')][1]");
+    await chip.locator("button").last().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesClearModuleFilters(): Promise<void> {
+    await this.archivesChipRow()
+      .getByRole("button", { name: /Clear all/ })
+      .click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesModuleFiltersActive(): Promise<boolean> {
+    const trigger = this.archivesFiltersTrigger();
+    return (await trigger.locator("span.bg-accent-primary").count()) > 0;
+  }
+
+  async archivesCloseModuleFilters(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.archivesFilterGroupHeader("Lead")
+      .waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async archivesModulesEmptyKind(): Promise<ArchivesModulesEmptyKind> {
+    await this.archivesAwaitModulesSettled();
+    if ((await this.archivesModuleRowNames()).length > 0) return "rows";
+    const main = this.archivesMain();
+    if ((await main.getByText("No archived Modules yet", { exact: false }).count()) > 0) return "zero";
+    if ((await main.getByText("Remove the search criteria", { exact: false }).count()) > 0) return "search";
+    if ((await main.getByText("No matching modules", { exact: false }).count()) > 0) return "filters";
+    throw new Error("[parity] modules tab settled with neither rows nor a known empty state.");
+  }
+
+  async archivesOpenLiveCycles(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.archivesGotoLiveList(workspaceSlug, projectId, "cycles");
+    await this.page.waitForFunction(
+      () => {
+        const main = document.querySelector("main");
+        if (!main) return false;
+        const rows = [...main.querySelectorAll('a[href*="/cycles/"]')].filter((anchor) =>
+          /\/cycles\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(anchor.getAttribute("href") ?? "")
+        );
+        if (rows.length > 0) return true;
+        return (main.innerText ?? "").includes("No matching cycles");
+      },
+      null,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async archivesDirectLoadRenders(workspaceSlug: string, projectId: string): Promise<boolean> {
+    // A fresh session carries no live fetch, so the archived tab either
+    // renders from its own fetch (fixed) or sits on the loader (NEWFRONT-228).
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/modules`, {
+      waitUntil: "domcontentloaded",
+    });
+    await this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          new RegExp(`/projects/${projectId}/archived-modules/$`).test(new URL(response.url()).pathname),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => undefined);
+    await this.page.waitForTimeout(3000);
+    if ((await this.archivesModuleRowNames()).length > 0) return true;
+    const text =
+      (await this.archivesMain()
+        .innerText()
+        .catch(() => "")) ?? "";
+    return text.includes("No archived Modules yet") || text.includes("No matching modules");
+  }
+
+  async archivesModulesShowsSkeleton(workspaceSlug: string, projectId: string): Promise<boolean> {
+    // Live-first client-side entry (NEWFRONT-228): seed the store, walk
+    // to the archives shell, then delay only the modules fetch the tab
+    // click fires.
+    await this.archivesOpenLiveModules(workspaceSlug, projectId);
+    await this.archivesGoToProjectArchives(projectId);
+    const listPath = new RegExp(`/projects/${projectId}/archived-modules/$`);
+    await this.page.route(
+      (url) => url.pathname.endsWith("/archived-modules/") && listPath.test(url.pathname),
+      async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        await route.continue();
+      },
+      { times: 1 }
+    );
+    await this.archivesSelectArchivesTab("Modules");
+    let shown = false;
+    const deadline = Date.now() + 20_000;
+    const loader = this.archivesMain().locator("div.h-full.animate-pulse");
+    while (Date.now() < deadline) {
+      if ((await loader.count().catch(() => 0)) > 0) {
+        shown = true;
+        break;
+      }
+      if ((await this.archivesModuleRowNames()).length > 0) break;
+      await this.page.waitForTimeout(150);
+    }
+    await this.page.unrouteAll({ behavior: "wait" }).catch(() => undefined);
+    await this.archivesAwaitModulesSettled();
+    return shown;
+  }
+
+  private async archivesOpenPeek(
+    name: string,
+    kind: "modules" | "cycles",
+    param: "peekModule" | "peekCycle"
+  ): Promise<void> {
+    const point = await this.archivesRowPoint(name, kind);
+    // Either detail read satisfies the wait: on an archives tab only the
+    // archived read can fire (the peek fetches through isArchived), while
+    // the live twin asserts the same panel shape on live screens.
+    const detailPath =
+      kind === "modules" ? /\/(archived-)?modules\/[0-9a-fA-F-]{36}\/$/ : /\/(archived-)?cycles\/[0-9a-fA-F-]{36}\/$/;
+    const detailWait = this.page
+      .waitForResponse(
+        (response) => response.request().method() === "GET" && detailPath.test(new URL(response.url()).pathname),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.page.mouse.click(point.x, point.y);
+    if (!(await detailWait)) {
+      throw new Error(`[parity] opening ${JSON.stringify(name)} fired no archived-detail read.`);
+    }
+    await this.page.waitForFunction((key: string) => new URL(location.href).searchParams.has(key), param, {
+      timeout: WebDriver.WAIT_MS,
+    });
+  }
+
+  async archivesOpenModulePeek(name: string): Promise<void> {
+    await this.archivesOpenPeek(name, "modules", "peekModule");
+    await expect.poll(() => this.archivesModulePeekName(), { timeout: WebDriver.WAIT_MS }).toBe(name);
+  }
+
+  async archivesModulePeekName(): Promise<string | null> {
+    if (!new URL(this.page.url()).searchParams.has("peekModule")) return null;
+    const heading = this.archivesMain().locator("h4.text-18").first();
+    if ((await heading.count()) === 0) return null;
+    return (await heading.innerText()).trim();
+  }
+
+  private async archivesClosePeek(param: "peekModule" | "peekCycle"): Promise<void> {
+    await this.archivesMain().locator("div.sticky.top-0 button").first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForFunction((key: string) => !new URL(location.href).searchParams.has(key), param, {
+      timeout: WebDriver.WAIT_MS,
+    });
+  }
+
+  async archivesCloseModulePeek(): Promise<void> {
+    await this.archivesClosePeek("peekModule");
+  }
+
+  async archivesOpenCyclePeek(name: string): Promise<void> {
+    await this.archivesOpenPeek(name, "cycles", "peekCycle");
+    await expect.poll(() => this.archivesCyclePeekName(), { timeout: WebDriver.WAIT_MS }).toBe(name);
+  }
+
+  async archivesCyclePeekName(): Promise<string | null> {
+    if (!new URL(this.page.url()).searchParams.has("peekCycle")) return null;
+    const heading = this.archivesMain().locator("h4.text-18, h3.text-18").first();
+    if ((await heading.count()) === 0) return null;
+    return (await heading.innerText()).trim();
+  }
+
+  async archivesCloseCyclePeek(): Promise<void> {
+    await this.archivesClosePeek("peekCycle");
+  }
+
+  /** Nearest bordered ancestor of the peek heading: the panel itself. */
+  private archivesPeekPanel(): Locator {
+    return this.archivesMain()
+      .locator("h4.text-18, h3.text-18")
+      .first()
+      .locator("xpath=ancestor::div[contains(@class,'border-l')][1]");
+  }
+
+  private async archivesPeekReadOnlyFacts(): Promise<ArchivesPeekReadOnly> {
+    const panel = this.archivesPeekPanel();
+    const name = (
+      (await panel
+        .locator("h4.text-18, h3.text-18")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    // The status pill carries the current status text; clicking a locked
+    // one opens no options list.
+    const statusPill = panel
+      .locator("span", { hasText: /^(Backlog|Planned|In Progress|Paused|Completed|Cancelled)$/ })
+      .first();
+    let statusLocked = true;
+    if ((await statusPill.count()) > 0) {
+      await statusPill.click({ timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+      await this.page.waitForTimeout(800);
+      const options = await this.page.getByRole("option").count();
+      const menus = await this.page.locator('[role="menuitem"]:visible').count();
+      statusLocked = options === 0 && menus === 0;
+      await this.page.keyboard.press("Escape").catch(() => undefined);
+    }
+    // The Links disclosure starts collapsed, hiding the add action, so
+    // expand it before reading the offer (fixtures carry no links, which
+    // is what the empty label below proves).
+    const noLinks = panel.getByText("No links added yet", { exact: false });
+    if ((await noLinks.count()) === 0) {
+      const toggle = panel.getByRole("button", { name: "Links", exact: true });
+      if ((await toggle.count()) > 0) {
+        await toggle.click({ timeout: WebDriver.WAIT_MS });
+        await noLinks.waitFor({ timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+      }
+    }
+    const addLinkOffered = (await panel.getByRole("button", { name: "Add link", exact: true }).count()) > 0;
+    const summaryShown = (await panel.getByText("Work items", { exact: false }).count()) > 0;
+    return { name: name === "" ? null : name, statusLocked, addLinkOffered, summaryShown };
+  }
+
+  async archivesModulePeekReadOnly(): Promise<ArchivesPeekReadOnly> {
+    return this.archivesPeekReadOnlyFacts();
+  }
+
+  async archivesCyclePeekReadOnly(): Promise<ArchivesPeekReadOnly> {
+    const panel = this.archivesPeekPanel();
+    const name = (
+      (await panel
+        .locator("h4.text-18, h3.text-18")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    // Cycles carry no status pill; their date control is the editing
+    // affordance that stays shut on archived records.
+    const dateControl = panel.getByText("Start date", { exact: false }).first();
+    let statusLocked = true;
+    if ((await dateControl.count()) > 0) {
+      await dateControl.click({ timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+      await this.page.waitForTimeout(800);
+      const calendars = await this.page.locator('[role="dialog"]:visible, [role="menuitem"]:visible').count();
+      statusLocked = calendars === 0;
+      await this.page.keyboard.press("Escape").catch(() => undefined);
+    }
+    const addLinkOffered = (await panel.getByRole("button", { name: "Add link", exact: true }).count()) > 0;
+    const summaryShown = (await panel.getByText("Work items", { exact: false }).count()) > 0;
+    return { name: name === "" ? null : name, statusLocked, addLinkOffered, summaryShown };
+  }
+
+  private archivesOpenContextMenu(): Locator {
+    // Every row renders a full menu shell, so the open one is found by
+    // its wrapper's open-state opacity class, never by buttons alone.
+    return this.page.locator("div.opacity-100", { has: this.page.locator('[data-context-menu="true"]') });
+  }
+
+  private archivesContextMenuItems(): Locator {
+    return this.archivesOpenContextMenu().locator("button");
+  }
+
+  /** Dismiss the open context menu with an outside mousedown (no Escape handler exists). */
+  private async archivesDismissContextMenu(): Promise<void> {
+    await this.page.evaluate(() => {
+      document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    await expect.poll(() => this.archivesOpenContextMenu().count()).toBe(0);
+  }
+
+  private async archivesReadMenuEntries(name: string, kind: "modules" | "cycles"): Promise<ArchivesMenuEntry[]> {
+    const point = await this.archivesRowPoint(name, kind);
+    await this.page.mouse.click(point.x, point.y, { button: "right" });
+    const items = this.archivesContextMenuItems();
+    await items.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const entries = await items.evaluateAll((buttons) =>
+      buttons.map((button) => ({
+        title: button.querySelector("h5")?.textContent?.trim() ?? "",
+        disabled: (button as HTMLButtonElement).disabled,
+        description: button.querySelector("p")?.textContent?.trim() || null,
+      }))
+    );
+    await this.archivesDismissContextMenu();
+    // Both the mobile and desktop quick actions open on right-click with
+    // identical entries; collapse to one menu's worth by title.
+    const seen = new Set<string>();
+    return entries.filter((entry) => {
+      if (entry.title === "" || seen.has(entry.title)) return false;
+      seen.add(entry.title);
+      return true;
+    });
+  }
+
+  private static archivesEscapeRegExp(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  private async archivesChooseMenuEntry(name: string, kind: "modules" | "cycles", title: string): Promise<void> {
+    const point = await this.archivesRowPoint(name, kind);
+    await this.page.mouse.click(point.x, point.y, { button: "right" });
+    // Both quick-action menus stack at the cursor; the last in DOM order
+    // paints on top and takes the click.
+    const item = this.archivesContextMenuItems()
+      .filter({
+        has: this.page.locator("h5", { hasText: new RegExp(`^${WebDriver.archivesEscapeRegExp(title)}$`) }),
+      })
+      .last();
+    await item.click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesLiveModuleMenuEntries(name: string): Promise<ArchivesMenuEntry[]> {
+    return this.archivesReadMenuEntries(name, "modules");
+  }
+
+  async archivesChooseLiveModuleMenuEntry(name: string, title: string): Promise<void> {
+    await this.archivesChooseMenuEntry(name, "modules", title);
+  }
+
+  async archivesArchivedModuleMenuEntries(name: string): Promise<ArchivesMenuEntry[]> {
+    return this.archivesReadMenuEntries(name, "modules");
+  }
+
+  async archivesChooseArchivedModuleMenuEntry(name: string, title: string): Promise<void> {
+    await this.archivesChooseMenuEntry(name, "modules", title);
+  }
+
+  private archivesDialog(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Archive module" });
+  }
+
+  async archivesArchiveDialog(): Promise<ArchivesArchiveDialog | null> {
+    const dialog = this.archivesDialog();
+    // The modal mounts a beat after the menu click; wait briefly so a
+    // genuine dialog is never missed, then report absence honestly.
+    await dialog.waitFor({ timeout: 3000 }).catch(() => undefined);
+    if ((await dialog.count()) === 0) return null;
+    const title = (
+      (await dialog
+        .locator("h3")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    if (title === "") return null;
+    const body = (
+      (await dialog
+        .locator("p")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const confirm = dialog.getByRole("button", { name: /Archive|Archiving/ }).first();
+    const confirmLabel = ((await confirm.innerText().catch(() => "")) ?? "").trim();
+    return { title, body, confirmLabel };
+  }
+
+  async archivesConfirmArchiveDialog(): Promise<void> {
+    const dialog = this.archivesDialog();
+    await dialog.getByRole("button", { name: "Archive", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    // Either the write lands (dialog closes over the toast) or it fails
+    // (error toast while the dialog stays); resolve on the first signal
+    // instead of out-waiting the toasts' auto-dismiss.
+    await expect
+      .poll(
+        async () => {
+          if ((await this.rulesLastToast().catch(() => null)) !== null) return "toast";
+          if ((await dialog.count()) === 0) return "closed";
+          return "pending";
+        },
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .not.toBe("pending");
+  }
+
+  async archivesCancelArchiveDialog(): Promise<void> {
+    const dialog = this.archivesDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async archivesFailNextModuleWrite(): Promise<void> {
+    await this.page.route(
+      (url) => /\/modules\/[0-9a-fA-F-]{36}\/archive\/$/.test(url.pathname),
+      (route) => route.abort(),
+      { times: 1 }
+    );
   }
 }

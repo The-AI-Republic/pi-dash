@@ -3719,6 +3719,132 @@ export interface ParityDriver {
   notificationsMarkAllReadHeld(
     holdMs: number
   ): Promise<{ progress: boolean; requests: number; scopeBody: string | null }>;
+
+  // ---------------------------------------------------------------------------
+  // Archived modules (NEWFRONT-225, ARCH-020..025). Observed on apps/web: the
+  // archives modules tab (rows plus address-driven peek, sort control,
+  // expandable search, filters menu with chip row), the live-module archive
+  // dialog, the archived-row restore menu, and the read-only archived peek
+  // panels for modules and cycles. Row menus are read through the
+  // right-click context menu, which carries the same entries as the
+  // hover-revealed ellipsis. Appended; existing entries above are untouched
+  // per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Open the archived-modules tab; resolves once rows/empty/loader settle.
+   * Enters through the live screen plus client-side navigation because a
+   * direct load hangs on the loader (NEWFRONT-228).
+   */
+  archivesOpenModulesTab(workspaceSlug: string, projectId: string): Promise<void>;
+  /**
+   * Open the archived-cycles tab; resolves once rows/empty/loader settle.
+   * Same live-first client-side entry as the modules tab (NEWFRONT-228).
+   */
+  archivesOpenCyclesTab(workspaceSlug: string, projectId: string): Promise<void>;
+  /** From a live screen, follow the sidebar project menu's Archives entry. */
+  archivesGoToProjectArchives(projectId: string): Promise<void>;
+  /** Click an archives tab-strip tab and wait for its address to land. */
+  archivesSelectArchivesTab(tab: "Modules" | "Cycles"): Promise<void>;
+  /**
+   * Client-side navigate to a path without reloading (guests have no
+   * sidebar Archives entry, and a full load would drop the store).
+   */
+  archivesClientNavigate(path: string): Promise<void>;
+  /**
+   * Open a live module's peek panel through its address (live rows link
+   * to the detail page instead of peeking); waits for the detail read.
+   */
+  archivesOpenLiveModulePeek(name: string): Promise<void>;
+  /** Open the live modules screen; resolves once its rows settle. */
+  archivesOpenLiveModules(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Open the live cycles screen; resolves once its rows settle. */
+  archivesOpenLiveCycles(workspaceSlug: string, projectId: string): Promise<void>;
+  /**
+   * Direct-load the archived-modules tab in the current session and report
+   * whether rows or an empty state render without a prior live visit.
+   * False pins the fetchedMap hang (NEWFRONT-228).
+   */
+  archivesDirectLoadRenders(workspaceSlug: string, projectId: string): Promise<boolean>;
+  /** Wait until a module row with this exact name renders. */
+  archivesAwaitModuleRow(name: string): Promise<void>;
+  /** Module row names in display order on the current modules tab. */
+  archivesModuleRowNames(): Promise<string[]>;
+  /** Cycle row names in display order on the archived-cycles tab. */
+  archivesCycleRowNames(): Promise<string[]>;
+  /** Label the sort control currently shows (e.g. Name, Created date). */
+  archivesModuleSortLabel(): Promise<string>;
+  /** Pick a sort option (or Ascending/Descending) and wait for the reorder. */
+  archivesSetModuleSort(label: string): Promise<void>;
+  /** Open the archived-modules search box via its magnifier. */
+  archivesOpenModuleSearch(): Promise<void>;
+  /** Whether the search input is currently expanded and visible. */
+  archivesModuleSearchVisible(): Promise<boolean>;
+  /** Type into the search box (the list filters live). */
+  archivesTypeModuleSearch(text: string): Promise<void>;
+  /** Current search box text. */
+  archivesModuleSearchText(): Promise<string>;
+  /** Press Escape while the search box holds focus. */
+  archivesEscapeModuleSearch(): Promise<void>;
+  /** Clear the search through its in-box clear button. */
+  archivesClearModuleSearch(): Promise<void>;
+  /** Click away from the search box (outside-click collapse). */
+  archivesCollapseSearchOutside(): Promise<void>;
+  /** Open the filters menu and wait until its groups show. */
+  archivesOpenModuleFilters(): Promise<void>;
+  /** Filter group titles in display order (Lead, Members, dates). */
+  archivesModuleFilterGroups(): Promise<string[]>;
+  /** Toggle one lead-filter option by its label (current user reads "You"). */
+  archivesToggleLeadFilter(label: string): Promise<void>;
+  /** Applied-filter chips in display order (key plus rendered text). */
+  archivesModuleChips(): Promise<ArchivesModuleChip[]>;
+  /** Remove one applied filter through its chip's remove control. */
+  archivesRemoveModuleChip(key: string): Promise<void>;
+  /** Clear every applied filter through the clear-all control. */
+  archivesClearModuleFilters(): Promise<void>;
+  /** Whether the filters menu button indicates active filters. */
+  archivesModuleFiltersActive(): Promise<boolean>;
+  /** Dismiss the filters menu. */
+  archivesCloseModuleFilters(): Promise<void>;
+  /** Which empty state the modules tab shows (or rows when it lists). */
+  archivesModulesEmptyKind(): Promise<ArchivesModulesEmptyKind>;
+  /**
+   * Reload the modules tab with the list fetch delayed; resolves true when
+   * a skeleton loader showed before content. Restores the route after.
+   */
+  archivesModulesShowsSkeleton(workspaceSlug: string, projectId: string): Promise<boolean>;
+  /** Open a module's peek panel by clicking its row; waits for the detail read. */
+  archivesOpenModulePeek(name: string): Promise<void>;
+  /** Name the open module peek panel shows, or null when none is open. */
+  archivesModulePeekName(): Promise<string | null>;
+  /** Close the module peek panel. */
+  archivesCloseModulePeek(): Promise<void>;
+  /** Open a cycle's peek panel by clicking its row; waits for the detail read. */
+  archivesOpenCyclePeek(name: string): Promise<void>;
+  /** Name the open cycle peek panel shows, or null when none is open. */
+  archivesCyclePeekName(): Promise<string | null>;
+  /** Close the cycle peek panel. */
+  archivesCloseCyclePeek(): Promise<void>;
+  /** Read-only facts about the open archived-module peek panel. */
+  archivesModulePeekReadOnly(): Promise<ArchivesPeekReadOnly>;
+  /** Read-only facts about the open archived-cycle peek panel. */
+  archivesCyclePeekReadOnly(): Promise<ArchivesPeekReadOnly>;
+  /** Row-menu entries of a live module (right-click menu). */
+  archivesLiveModuleMenuEntries(name: string): Promise<ArchivesMenuEntry[]>;
+  /** Pick one entry of a live module's row menu. */
+  archivesChooseLiveModuleMenuEntry(name: string, title: string): Promise<void>;
+  /** Row-menu entries of an archived module (right-click menu). */
+  archivesArchivedModuleMenuEntries(name: string): Promise<ArchivesMenuEntry[]>;
+  /** Pick one entry of an archived module's row menu. */
+  archivesChooseArchivedModuleMenuEntry(name: string, title: string): Promise<void>;
+  /** The open archive dialog's copy, or null when none is open. */
+  archivesArchiveDialog(): Promise<ArchivesArchiveDialog | null>;
+  /** Confirm the open archive dialog; waits until its write settles. */
+  archivesConfirmArchiveDialog(): Promise<void>;
+  /** Cancel the open archive dialog. */
+  archivesCancelArchiveDialog(): Promise<void>;
+  /** Fail the next module archive/restore write once (failure shaping). */
+  archivesFailNextModuleWrite(): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -4255,4 +4381,47 @@ export interface NotificationsListQuery {
   mentioned: string | null;
   /** Page cursor the UI sent, or null when the param is absent. */
   cursor: string | null;
+}
+
+/** Which empty state the archived-modules tab shows (NEWFRONT-225, ARCH-022). */
+export type ArchivesModulesEmptyKind = "zero" | "filters" | "search" | "rows";
+
+/** One row-menu entry: title, disabled state, explanation line (NEWFRONT-225). */
+export interface ArchivesMenuEntry {
+  /** Visible entry title. */
+  title: string;
+  /** Whether the entry renders disabled. */
+  disabled: boolean;
+  /** Explanation line under the title, or null when none shows. */
+  description: string | null;
+}
+
+/** One applied-filter chip: filter key plus rendered chip text (NEWFRONT-225). */
+export interface ArchivesModuleChip {
+  /** Filter key as rendered (e.g. lead, members, start date). */
+  key: string;
+  /** Full rendered chip text. */
+  text: string;
+}
+
+/** Read-only facts about an open archived peek panel (NEWFRONT-225, ARCH-025). */
+export interface ArchivesPeekReadOnly {
+  /** Name the panel shows, or null when no panel is open. */
+  name: string | null;
+  /** Whether the status control refuses to open its options. */
+  statusLocked: boolean;
+  /** Whether an add-link action is offered. */
+  addLinkOffered: boolean;
+  /** Whether a progress summary section renders. */
+  summaryShown: boolean;
+}
+
+/** The archive confirmation dialog's copy (NEWFRONT-225, ARCH-023). */
+export interface ArchivesArchiveDialog {
+  /** Dialog heading (names the module). */
+  title: string;
+  /** Dialog body text. */
+  body: string;
+  /** Confirm button label (progress state while the write runs). */
+  confirmLabel: string;
 }
