@@ -4510,6 +4510,94 @@ export interface ParityDriver {
   cyclesEditFailNextDeleteWrite(): Promise<void>;
   /** Read-only notice on a finished cycle's detail, or null when absent. */
   cyclesEditDetailReadOnlyNotice(): Promise<string | null>;
+
+  // --- NEWFRONT-253 (cycles detail/sidebar, CYC-032-039). Appended;
+  // --- existing methods above are untouched per the shared driver
+  // --- contract. Layout switching itself reuses the layouts* methods
+  // --- (Issues area); these cover the cycle-detail host: header,
+  // --- crumbs, sidebar, dates, and progress.
+
+  /** Cycle name shown in the detail sidebar, or null when the panel is absent. */
+  cyclesDetailSidebarName(): Promise<string | null>;
+  /** Click the header sidebar toggle; resolves once the click lands. */
+  cyclesToggleSidebarViaHeader(): Promise<void>;
+  /** Click the sidebar's own close control; resolves once the click lands. */
+  cyclesCloseSidebarViaPanel(): Promise<void>;
+  /** Stored sidebar-collapsed flag for this browser (persistence proof). */
+  cyclesSidebarCollapsedStored(): Promise<boolean>;
+  /** Header count-badge text, or null when no badge renders. */
+  cyclesHeaderBadgeText(): Promise<string | null>;
+  /** Whether the header work-item creation button is visible. */
+  cyclesHeaderAddVisible(): Promise<boolean>;
+  /** Whether the header Analytics shortcut is visible. */
+  cyclesHeaderAnalyticsVisible(): Promise<boolean>;
+  /** Open the Analytics dialog; resolves once it renders. */
+  cyclesOpenAnalytics(): Promise<void>;
+  /** Whether the Analytics dialog is currently rendered. */
+  cyclesAnalyticsDialogVisible(): Promise<boolean>;
+  /** Dismiss the Analytics dialog; resolves once it detaches. */
+  cyclesDismissAnalytics(): Promise<void>;
+  /** Open the header cycle switcher; resolves once its options render. */
+  cyclesSwitcherOpen(currentName: string): Promise<void>;
+  /** Cycle names the open switcher offers, in display order. */
+  cyclesSwitcherOptions(): Promise<string[]>;
+  /** Pick a cycle in the open switcher; resolves once the header shows it. */
+  cyclesSwitcherPick(name: string): Promise<void>;
+  /** Follow the Cycles crumb; the caller polls the address. */
+  cyclesClickCyclesCrumb(): Promise<void>;
+  /** Follow the project crumb; the caller polls the address. */
+  cyclesClickProjectCrumb(projectName: string): Promise<void>;
+  /** Whether the small-screen trail back control is visible. */
+  cyclesMobileBackVisible(): Promise<boolean>;
+  /** Activate the small-screen trail back control. */
+  cyclesMobileBack(): Promise<void>;
+  /** Sidebar date control text (the rendered range). */
+  cyclesSidebarDateText(): Promise<string>;
+  /** Whether the sidebar date control refuses edits. */
+  cyclesSidebarDateDisabled(): Promise<boolean>;
+  /** Open the sidebar date picker; resolves once the calendar renders. */
+  cyclesSidebarOpenDatePicker(): Promise<void>;
+  /** Pick one calendar day by its accessible date label. */
+  cyclesPickDateDay(label: string): Promise<void>;
+  /** Dismiss the sidebar date picker; resolves once it detaches. */
+  cyclesDismissDatePicker(): Promise<void>;
+  /** Sidebar description text, or null when none renders. */
+  cyclesSidebarDescription(): Promise<string | null>;
+  /** Sidebar lead facts (avatar is the image source, else the fallback initial). */
+  cyclesSidebarLead(): Promise<{ name: string; avatar: string }>;
+  /** Sidebar Work-items count text (e.g. "0/3"). */
+  cyclesProgressWorkItemsText(): Promise<string>;
+  /** Sidebar Points count text, or null when the row is absent. */
+  cyclesProgressPointsText(): Promise<string | null>;
+  /** Whether the sidebar progress chart renders. */
+  cyclesProgressChartVisible(): Promise<boolean>;
+  /** Current measure label, or null when the dropdown is absent. */
+  cyclesProgressMeasureValue(): Promise<string | null>;
+  /** Measure options in display order (absent dropdown reads empty). */
+  cyclesProgressMeasureOptions(): Promise<string[]>;
+  /** Pick a measure; resolves once the dropdown shows it. */
+  cyclesProgressPickMeasure(label: string): Promise<void>;
+  /** Open a progress breakdown tab; resolves once it selects. */
+  cyclesProgressStatsTab(tab: "States" | "Assignees" | "Labels"): Promise<void>;
+  /** Rows of the selected breakdown tab (title, percent, total). */
+  cyclesProgressStatsRows(): Promise<CyclesProgressStatRow[]>;
+  /** Empty-progress notice text, or null when breakdowns render. */
+  cyclesProgressEmptyText(): Promise<string | null>;
+  /** Click a breakdown entry; the caller polls the narrowed list. */
+  cyclesProgressEntryClick(title: string): Promise<void>;
+  /** Open Analytics from the small-screen bar; resolves once the dialog renders. */
+  cyclesMobileOpenAnalytics(): Promise<void>;
+  /**
+   * Switch layouts through the desktop header switcher; resolves once the
+   * header marker shows the layout. Marker wait, not a container wait:
+   * the shared container heuristics misread this page (the sidebar's
+   * own "Work items" label trips the board/spreadsheet detection).
+   */
+  cyclesSwitchLayout(layout: LayoutsLayoutKey): Promise<void>;
+  /** Layout keys the small-screen layout menu offers, in display order. */
+  cyclesMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]>;
+  /** Switch layout through the small-screen menu; resolves once applied. */
+  cyclesMobileSwitchTo(layout: LayoutsLayoutKey): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -5112,6 +5200,16 @@ export interface ArchivesFilterExpression {
 
 /** Archives tab keys (NEWFRONT-226, ARCH-029). */
 export type ArchivesTab = "issues" | "cycles" | "modules";
+
+/** One selected progress-breakdown row (NEWFRONT-253, CYC-038/039). */
+export interface CyclesProgressStatRow {
+  /** Row title (state group, assignee, or label). */
+  title: string;
+  /** Whole percent the row shows. */
+  percent: number;
+  /** Denominator the row shows ("of N"). */
+  total: number;
+}
 
 /** Traffic counters since the archives spy began (NEWFRONT-226, ARCH-032). */
 export interface ArchivesTrafficCounts {

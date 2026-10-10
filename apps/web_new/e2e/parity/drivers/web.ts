@@ -37,6 +37,7 @@ import type {
   AutomationMonthModal,
   AutomationRow,
   BoardLayoutKey,
+  CyclesProgressStatRow,
   DevMachineInstallCard,
   DevMachineModal,
   DevMachineRow,
@@ -23907,6 +23908,65 @@ export class WebDriver implements ParityDriver {
     });
   }
 
+  // --- NEWFRONT-253 (cycles detail/sidebar, CYC-032-039). Appended;
+  // --- existing methods above are untouched per the shared driver
+  // --- contract. All selectors were observed on the running old app.
+
+  /** Detail header strip (crumbs left, layout/actions cluster right). */
+  private cyclesHeader(): Locator {
+    return this.page.locator("main").locator("div[class*='z-[18]']").first();
+  }
+
+  /** Floating detail sidebar panel (absent while collapsed). */
+  private cyclesPanel(): Locator {
+    return this.page.locator("main").locator("div[class*='w-[21.5rem]']").first();
+  }
+
+  /** Sidebar date control (nested buttons share the range text). */
+  private cyclesDateButtons(): Locator {
+    return this.cyclesPanel().getByRole("button", { name: /\w{3} \d{1,2}|Start date/ });
+  }
+
+  /** Sidebar measure dropdown trigger (reads the current measure). */
+  private cyclesMeasureButton(): Locator {
+    return this.cyclesPanel().getByRole("button", { name: /^(Work items|Estimates)$/ });
+  }
+
+  private async cyclesPanelSettled(): Promise<void> {
+    await this.cyclesPanel().locator("h4").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesDetailSidebarName(): Promise<string | null> {
+    const heading = this.cyclesPanel().locator("h4").first();
+    if ((await heading.count()) === 0) return null;
+    if (!(await heading.isVisible().catch(() => false))) return null;
+    return ((await heading.innerText()) ?? "").trim();
+  }
+
+  async cyclesToggleSidebarViaHeader(): Promise<void> {
+    await this.cyclesHeader()
+      .locator("button:has(svg.lucide-panel-right)")
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesCloseSidebarViaPanel(): Promise<void> {
+    await this.cyclesPanelSettled();
+    await this.cyclesPanel().locator("div.sticky").first().getByRole("button").first().click({
+      timeout: WebDriver.OPEN_MS,
+    });
+  }
+
+  async cyclesSidebarCollapsedStored(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      try {
+        return window.localStorage.getItem("cycle_sidebar_collapsed") === "true";
+      } catch {
+        return false;
+      }
+    });
+  }
+
   async cyclesEditClearStoredCycleTab(): Promise<void> {
     await this.page.evaluate(() => {
       window.localStorage.removeItem("cycle_tab");
@@ -24088,5 +24148,352 @@ export class WebDriver implements ParityDriver {
     if ((await notice.count()) === 0) return null;
     const text = (((await notice.textContent().catch(() => "")) ?? "") as string).trim();
     return text === "" ? null : text;
+  }
+
+  async cyclesHeaderBadgeText(): Promise<string | null> {
+    const badge = this.cyclesHeader().locator("span.rounded-xl").first();
+    if ((await badge.count()) === 0) return null;
+    if (!(await badge.isVisible().catch(() => false))) return null;
+    return ((await badge.innerText()) ?? "").trim();
+  }
+
+  async cyclesHeaderAddVisible(): Promise<boolean> {
+    const button = this.cyclesHeader().getByRole("button", { name: "Add work item" });
+    return (
+      (await button.count()) > 0 &&
+      (await button
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
+  }
+
+  async cyclesHeaderAnalyticsVisible(): Promise<boolean> {
+    const button = this.cyclesHeader().getByRole("button", { name: "Analytics", exact: true });
+    return (
+      (await button.count()) > 0 &&
+      (await button
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
+  }
+
+  async cyclesOpenAnalytics(): Promise<void> {
+    await this.cyclesHeader()
+      .getByRole("button", { name: "Analytics", exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("dialog").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesAnalyticsDialogVisible(): Promise<boolean> {
+    const dialog = this.page.getByRole("dialog").first();
+    return (await dialog.count()) > 0 && (await dialog.isVisible().catch(() => false));
+  }
+
+  async cyclesDismissAnalytics(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("dialog")
+      .first()
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS })
+      .catch(() => undefined);
+  }
+
+  async cyclesSwitcherOpen(currentName: string): Promise<void> {
+    await this.cyclesHeader().getByRole("button", { name: currentName }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesSwitcherOptions(): Promise<string[]> {
+    const options = this.page.getByRole("option");
+    const total = await options.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await options
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
+  async cyclesSwitcherPick(name: string): Promise<void> {
+    await this.page.getByRole("option", { name }).first().click({ timeout: WebDriver.OPEN_MS });
+    await expect
+      .poll(() => this.cyclesHeader().getByRole("button", { name }).count(), { timeout: WebDriver.OPEN_MS })
+      .toBeGreaterThan(0);
+  }
+
+  async cyclesClickCyclesCrumb(): Promise<void> {
+    await this.cyclesHeader().getByRole("link", { name: "Cycles" }).first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesClickProjectCrumb(projectName: string): Promise<void> {
+    // Nested pair: the outer trigger opens the project menu, the inner
+    // label navigates to the project. Click the innermost match.
+    const matches = this.cyclesHeader().getByRole("button", { name: projectName, exact: true });
+    const total = await matches.count();
+    if (total === 0) throw new Error("[parity] project crumb never rendered.");
+    await matches.nth(total - 1).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesMobileBackVisible(): Promise<boolean> {
+    const back = this.cyclesHeader()
+      .locator("span")
+      .filter({ hasText: /^\.\.\.$/ })
+      .first();
+    return (await back.count()) > 0 && (await back.isVisible().catch(() => false));
+  }
+
+  async cyclesMobileBack(): Promise<void> {
+    await this.cyclesHeader()
+      .locator("span")
+      .filter({ hasText: /^\.\.\.$/ })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesSidebarDateText(): Promise<string> {
+    await this.cyclesPanelSettled();
+    return ((await this.cyclesDateButtons().first().innerText({ timeout: WebDriver.OPEN_MS })) ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async cyclesSidebarDateDisabled(): Promise<boolean> {
+    await this.cyclesPanelSettled();
+    return this.cyclesDateButtons()
+      .first()
+      .isDisabled({ timeout: WebDriver.OPEN_MS })
+      .catch(() => true);
+  }
+
+  async cyclesSidebarOpenDatePicker(): Promise<void> {
+    await this.cyclesPanelSettled();
+    await this.cyclesDateButtons().first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.locator("button.rdp-day_button").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesPickDateDay(label: string): Promise<void> {
+    await this.page.getByRole("button", { name: label }).first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesDismissDatePicker(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .locator("button.rdp-day_button")
+      .first()
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS })
+      .catch(() => undefined);
+  }
+
+  async cyclesSidebarDescription(): Promise<string | null> {
+    await this.cyclesPanelSettled();
+    const area = this.cyclesPanel().locator("textarea").first();
+    if ((await area.count()) === 0) return null;
+    return area.inputValue({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesSidebarLead(): Promise<{ name: string; avatar: string }> {
+    await this.cyclesPanelSettled();
+    const row = this.cyclesPanel().getByText("Lead", { exact: true }).locator("xpath=ancestor::div[2]");
+    const name = ((await row.locator("span[class*='text-13']").first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+    const cell = row.locator("div[class*='w-3/5']").first();
+    const image = cell.locator("img").first();
+    if ((await image.count()) > 0) return { name, avatar: (await image.getAttribute("src")) ?? "" };
+    const cellText = ((await cell.innerText()) ?? "").replace(/\s+/g, " ").trim();
+    return { name, avatar: cellText.replace(name, "").trim() };
+  }
+
+  async cyclesProgressWorkItemsText(): Promise<string> {
+    await this.cyclesPanelSettled();
+    const row = this.cyclesPanel().getByText("Work items", { exact: true }).locator("xpath=ancestor::div[2]");
+    return ((await row.locator("span[class*='text-tertiary']").first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async cyclesProgressPointsText(): Promise<string | null> {
+    const label = this.cyclesPanel().getByText("Points", { exact: true });
+    if ((await label.count()) === 0) return null;
+    const row = label.locator("xpath=ancestor::div[2]");
+    return ((await row.locator("span[class*='text-tertiary']").first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async cyclesProgressChartVisible(): Promise<boolean> {
+    const chart = this.cyclesPanel().locator("div.recharts-wrapper").first();
+    return (await chart.count()) > 0 && (await chart.isVisible().catch(() => false));
+  }
+
+  async cyclesProgressMeasureValue(): Promise<string | null> {
+    const button = this.cyclesMeasureButton();
+    if ((await button.count()) === 0) return null;
+    if (
+      !(await button
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return null;
+    return ((await button.first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async cyclesProgressMeasureOptions(): Promise<string[]> {
+    const button = this.cyclesMeasureButton();
+    if ((await button.count()) === 0) return [];
+    await button.first().scrollIntoViewIfNeeded({ timeout: WebDriver.OPEN_MS });
+    await button.first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebDriver.OPEN_MS });
+    const options = this.page.getByRole("option");
+    const total = await options.count();
+    const labels: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await options
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") labels.push(text);
+    }
+    await this.page.keyboard.press("Escape");
+    return labels;
+  }
+
+  async cyclesProgressPickMeasure(label: string): Promise<void> {
+    await this.cyclesMeasureButton().first().scrollIntoViewIfNeeded({ timeout: WebDriver.OPEN_MS });
+    await this.cyclesMeasureButton().first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option", { name: label }).first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.cyclesProgressMeasureValue(), { timeout: WebDriver.OPEN_MS }).toBe(label);
+  }
+
+  async cyclesProgressStatsTab(tab: "States" | "Assignees" | "Labels"): Promise<void> {
+    const trigger = this.cyclesPanel().getByRole("tab", { name: tab });
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebDriver.OPEN_MS });
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => trigger.getAttribute("aria-selected"), { timeout: WebDriver.OPEN_MS }).toBe("true");
+  }
+
+  async cyclesProgressStatsRows(): Promise<CyclesProgressStatRow[]> {
+    const panel = this.cyclesPanel().locator("[role='tabpanel'][data-headlessui-state='selected']");
+    const rows = panel.locator("div.flex.w-full.items-center.justify-between");
+    const total = await rows.count();
+    const out: CyclesProgressStatRow[] = [];
+    for (let i = 0; i < total; i++) {
+      const row = rows.nth(i);
+      const title = (
+        (await row
+          .locator("div")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      const percentText = (
+        (await row
+          .getByText(/%/)
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).replace(/\D/g, "");
+      const totalText = (
+        (await row
+          .getByText(/of \d+/)
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).replace(/\D/g, "");
+      if (title === "") continue;
+      out.push({ title, percent: Number(percentText || "0"), total: Number(totalText || "0") });
+    }
+    return out;
+  }
+
+  async cyclesProgressEmptyText(): Promise<string | null> {
+    const notice = this.cyclesPanel().getByText("No Data yet", { exact: true });
+    if ((await notice.count()) === 0) return null;
+    if (
+      !(await notice
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return null;
+    return "No Data yet";
+  }
+
+  async cyclesProgressEntryClick(title: string): Promise<void> {
+    const panel = this.cyclesPanel().locator("[role='tabpanel'][data-headlessui-state='selected']");
+    const entry = panel.locator("div.cursor-pointer", { hasText: title }).first();
+    await entry.scrollIntoViewIfNeeded({ timeout: WebDriver.OPEN_MS });
+    await entry.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesMobileOpenAnalytics(): Promise<void> {
+    await this.page
+      .locator("div.md\\:hidden")
+      .first()
+      .getByText("Analytics", { exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("dialog").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesSwitchLayout(layout: LayoutsLayoutKey): Promise<void> {
+    const order: LayoutsLayoutKey[] = ["list", "kanban", "calendar", "spreadsheet", "gantt_chart"];
+    const index = order.indexOf(layout);
+    const buttons = this.page.locator("div.flex.items-center.gap-1.rounded-md.bg-layer-3.p-1 > button");
+    await buttons.nth(index).click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.layoutsActiveLayout(), { timeout: WebDriver.OPEN_MS }).toBe(layout);
+  }
+
+  async cyclesMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
+    const bar = this.page.locator("div.md\\:hidden").first();
+    await bar.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebDriver.OPEN_MS });
+    const items = this.page.getByRole("menuitem");
+    const total = await items.count();
+    const labels: string[] = [];
+    for (let i = 0; i < total; i++) {
+      labels.push(
+        (
+          (await items
+            .nth(i)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim()
+      );
+    }
+    await this.page.keyboard.press("Escape");
+    const known: Array<[LayoutsLayoutKey, string]> = [
+      ["list", "List"],
+      ["kanban", "Board"],
+      ["calendar", "Calendar"],
+    ];
+    return labels.map((label) => {
+      const found = known.find(([, text]) => text === label);
+      if (!found) throw new Error(`[parity] unknown cycle mobile layout label "${label}".`);
+      return found[0];
+    });
+  }
+
+  async cyclesMobileSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
+    const labels: Partial<Record<LayoutsLayoutKey, string>> = { list: "List", kanban: "Board", calendar: "Calendar" };
+    const label = labels[layout];
+    if (label === undefined) throw new Error(`[parity] the cycle mobile menu offers no "${layout}" layout.`);
+    const bar = this.page.locator("div.md\\:hidden").first();
+    await bar.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem", { name: label }).first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.layoutsActiveLayout(), { timeout: WebDriver.OPEN_MS }).toBe(layout);
   }
 }
