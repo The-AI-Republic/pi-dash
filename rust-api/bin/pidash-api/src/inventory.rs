@@ -1792,10 +1792,7 @@ mod tests {
         registry.register(pidash_jobs::tasks_webhooks::PROCESS_LOGS_TASK, stub());
         // `register_activity_task` takes `Pools` too (PIDASHCONV-836): a
         // stub over the same name const the real call registers.
-        registry.register(
-            pidash_jobs::tasks_webhooks::ISSUE_ACTIVITY_TASK,
-            stub(),
-        );
+        registry.register(pidash_jobs::tasks_webhooks::ISSUE_ACTIVITY_TASK, stub());
         // Real registrations (the same calls `worker()` makes).
         tasks_cleanup::register_versions(&mut registry, pool.clone());
         tasks_cleanup::assets::register_assets(
