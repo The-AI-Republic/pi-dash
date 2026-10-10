@@ -13,9 +13,11 @@ import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type {
   IPromptCompiledResponse,
+  IPromptLabel,
   IPromptSectionListResponse,
   IResolvedSection,
   TPromptKind,
+  TPromptLabelTargetType,
   TPromptScope,
 } from "@pi-dash/types";
 import { AlertModalCore, Badge, Button } from "@pi-dash/ui";
@@ -23,6 +25,18 @@ import { PageHead } from "@/components/core/page-title";
 import { usePromptSection } from "@/hooks/store/use-prompt-section";
 import { useUserPermissions } from "@/hooks/store/user";
 import { useWorkspace } from "@/hooks/store/use-workspace";
+import { PromptCardLabels, PromptLabelBar, useWorkspaceLabels } from "./prompt-labels";
+
+/** Bundle of label state threaded from the page into the section/receipt libraries. */
+type TLabelBundle = {
+  slug: string;
+  allLabels: IPromptLabel[];
+  labelsFor: (targetType: TPromptLabelTargetType, targetKey: string) => IPromptLabel[];
+  activeLabelId: string | null;
+  isAdmin: boolean;
+  onSelectLabel: (labelId: string | null) => void;
+  onLabelsChanged: () => Promise<unknown>;
+};
 
 const KINDS: TPromptKind[] = ["coding-task", "review", "scheduler"];
 type TPromptPageTab = "sections" | "receipt";
@@ -102,6 +116,18 @@ const PromptsListPage = observer(function PromptsListPage() {
   const slug = workspaceSlug ?? "";
   const isAdmin = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.WORKSPACE, slug);
   const [tab, setTab] = useState<TPromptPageTab>("sections");
+  const [activeLabelId, setActiveLabelId] = useState<string | null>(null);
+
+  const { labels, labelsFor, mutate: mutateLabels } = useWorkspaceLabels(slug);
+  const labelBundle: TLabelBundle = {
+    slug,
+    allLabels: labels,
+    labelsFor,
+    activeLabelId,
+    isAdmin,
+    onSelectLabel: setActiveLabelId,
+    onLabelsChanged: mutateLabels,
+  };
 
   const pageTitle = currentWorkspace?.name ? `${currentWorkspace.name} · ${t("Prompts")}` : t("Prompts");
 
@@ -131,16 +157,25 @@ const PromptsListPage = observer(function PromptsListPage() {
         ))}
       </div>
 
+      <PromptLabelBar
+        slug={slug}
+        labels={labels}
+        activeLabelId={activeLabelId}
+        isAdmin={isAdmin}
+        onSelect={setActiveLabelId}
+        onChanged={mutateLabels}
+      />
+
       {tab === "sections" ? (
-        <SectionsLibrary slug={slug} isAdmin={isAdmin} />
+        <SectionsLibrary slug={slug} isAdmin={isAdmin} labels={labelBundle} />
       ) : (
-        <ReceiptLibrary slug={slug} isAdmin={isAdmin} />
+        <ReceiptLibrary slug={slug} isAdmin={isAdmin} labels={labelBundle} />
       )}
     </div>
   );
 });
 
-function SectionsLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
+function SectionsLibrary({ slug, isAdmin, labels }: { slug: string; isAdmin: boolean; labels: TLabelBundle }) {
   const { t } = useTranslation();
   const { mutate } = useSWRConfig();
 
@@ -191,6 +226,14 @@ function SectionsLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) 
     return map;
   }, [wsLists]);
 
+  // When a label filter is active, show only the sections carrying it.
+  const visibleEntries = useMemo<TSectionEntry[]>(() => {
+    if (!labels.activeLabelId) return entries;
+    return entries.filter((entry) =>
+      labels.labelsFor("section", entry.section.key).some((label) => label.id === labels.activeLabelId)
+    );
+  }, [entries, labels]);
+
   const userError = codingUser.error || reviewUser.error || schedulerUser.error;
   const wsError = codingWs.error || reviewWs.error || schedulerWs.error;
   const userReady = codingUser.data !== undefined && reviewUser.data !== undefined && schedulerUser.data !== undefined;
@@ -221,7 +264,7 @@ function SectionsLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) 
 
   return (
     <section className="grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)]">
-      <SectionNavigation entries={entries} />
+      <SectionNavigation entries={visibleEntries} />
       <div className="flex min-w-0 flex-col gap-3">
         {isAdmin && wsError && (
           // The workspace-scope list is what gates the "Customize for
@@ -233,7 +276,12 @@ function SectionsLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) 
             )}
           </div>
         )}
-        {entries.map(({ section, kinds }) => (
+        {visibleEntries.length === 0 && labels.activeLabelId && (
+          <div className="rounded-md border border-subtle bg-layer-1 p-4 text-12 text-secondary">
+            {t("No sections carry this label.")}
+          </div>
+        )}
+        {visibleEntries.map(({ section, kinds }) => (
           <SectionCard
             key={section.key}
             sectionId={sectionAnchorId(section.key)}
@@ -244,6 +292,7 @@ function SectionsLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) 
             workspaceReady={workspaceReady}
             isAdmin={isAdmin}
             onChanged={refresh}
+            labels={labels}
           />
         ))}
       </div>
@@ -273,7 +322,7 @@ function SectionNavigation({ entries }: { entries: TSectionEntry[] }) {
   );
 }
 
-function ReceiptLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
+function ReceiptLibrary({ slug, isAdmin, labels }: { slug: string; isAdmin: boolean; labels: TLabelBundle }) {
   const { t } = useTranslation();
   const coding = useCompiledPrompt(slug, "coding-task");
   const review = useCompiledPrompt(slug, "review");
@@ -313,6 +362,12 @@ function ReceiptLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
     const sections = sectionsByKind[kind];
     if (compiled && sections) entries.push({ kind, compiled, sections });
   }
+  // When a label filter is active, show only the receipts carrying it.
+  const visibleEntries = labels.activeLabelId
+    ? entries.filter((entry) =>
+        labels.labelsFor("receipt", entry.kind).some((label) => label.id === labels.activeLabelId)
+      )
+    : entries;
 
   if (error) {
     return (
@@ -326,7 +381,7 @@ function ReceiptLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
 
   return (
     <section className="grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)]">
-      <ReceiptNavigation entries={entries} />
+      <ReceiptNavigation entries={visibleEntries} />
       <div className="flex min-w-0 flex-col gap-3">
         <div className="rounded-md border border-subtle bg-layer-1 px-4 py-3">
           <h2 className="text-13 font-medium text-primary">{t("Receipt")}</h2>
@@ -336,7 +391,12 @@ function ReceiptLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
             )}
           </p>
         </div>
-        {entries.map(({ kind, compiled, sections }) => (
+        {visibleEntries.length === 0 && labels.activeLabelId && (
+          <div className="rounded-md border border-subtle bg-layer-1 p-4 text-12 text-secondary">
+            {t("No receipts carry this label.")}
+          </div>
+        )}
+        {visibleEntries.map(({ kind, compiled, sections }) => (
           <ReceiptCard
             key={kind}
             receiptId={receiptAnchorId(kind)}
@@ -345,6 +405,7 @@ function ReceiptLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
             compiled={compiled}
             sections={sections}
             isAdmin={isAdmin}
+            labels={labels}
           />
         ))}
       </div>
@@ -393,6 +454,7 @@ type SectionCardProps = {
   workspaceReady: boolean;
   isAdmin: boolean;
   onChanged: () => Promise<void>;
+  labels: TLabelBundle;
 };
 
 function SectionCard({
@@ -404,6 +466,7 @@ function SectionCard({
   workspaceReady,
   isAdmin,
   onChanged,
+  labels,
 }: SectionCardProps) {
   const { t } = useTranslation();
   const kindLabel = useKindLabel();
@@ -452,6 +515,17 @@ function SectionCard({
               </Badge>
             ))}
           </div>
+          <PromptCardLabels
+            slug={labels.slug}
+            targetType="section"
+            targetKey={section.key}
+            labels={labels.labelsFor("section", section.key)}
+            allLabels={labels.allLabels}
+            activeLabelId={labels.activeLabelId}
+            isAdmin={labels.isAdmin}
+            onSelect={labels.onSelectLabel}
+            onChanged={labels.onLabelsChanged}
+          />
           {section.needs_attention && (
             <span className="text-11 text-warning-primary">
               {t("This override may no longer render after a recent change — review and re-save it.")}
@@ -711,6 +785,7 @@ function ReceiptCard({
   compiled,
   sections,
   isAdmin,
+  labels,
 }: {
   receiptId: string;
   slug: string;
@@ -718,6 +793,7 @@ function ReceiptCard({
   compiled: IPromptCompiledResponse;
   sections: IResolvedSection[];
   isAdmin: boolean;
+  labels: TLabelBundle;
 }) {
   const { t } = useTranslation();
   const kindLabel = useKindLabel();
@@ -738,6 +814,19 @@ function ReceiptCard({
         </span>
         <span className="text-11 text-secondary">{open ? t("Hide") : t("Show")}</span>
       </button>
+      <div className="flex flex-wrap items-center gap-1.5 px-4 pb-3">
+        <PromptCardLabels
+          slug={labels.slug}
+          targetType="receipt"
+          targetKey={kind}
+          labels={labels.labelsFor("receipt", kind)}
+          allLabels={labels.allLabels}
+          activeLabelId={labels.activeLabelId}
+          isAdmin={labels.isAdmin}
+          onSelect={labels.onSelectLabel}
+          onChanged={labels.onLabelsChanged}
+        />
+      </div>
       <div className="border-t border-subtle px-4 py-3">
         <h3 className="text-11 font-medium text-secondary">{t("Composed from")}</h3>
         <ol className="mt-2 grid gap-1.5 md:grid-cols-2">
