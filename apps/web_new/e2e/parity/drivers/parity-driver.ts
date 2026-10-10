@@ -4724,14 +4724,6 @@ export interface ParityDriver {
   intakeCreateInsertImage(file: { name: string; mime: string; bytes: Buffer }): Promise<void>;
   /** Images currently rendered in the dialog's description editor. */
   intakeCreateEditorImageCount(): Promise<number>;
-  /**
-   * Answer the editor-upload file hop locally with success. The parity
-   * stack's minio answers 502 on every slot (the binary never listens),
-   * so the byte transfer cannot run for real; the metadata POST, the
-   * status PATCH, the bulk attach and the attachment reads all stay real.
-   * Drop this once the stack's minio is healthy.
-   */
-  intakeCreateMockFileHop(): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */

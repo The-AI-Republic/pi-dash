@@ -25261,15 +25261,4 @@ export class WebDriver implements ParityDriver {
   async intakeCreateEditorImageCount(): Promise<number> {
     return this.intakeForm().locator(".tiptap img").count();
   }
-
-  async intakeCreateMockFileHop(): Promise<void> {
-    // Presigned file transfers go to the stack's minio bucket path,
-    // which 502s on every slot (verified across slots; the minio
-    // process never listens). Answering the hop locally lets the
-    // dialog's real upload chain — metadata POST, status PATCH,
-    // onAssetUpload, bulk attach — run end to end against the API.
-    await this.page.route("**/parity19-assets*", async (route) => {
-      await route.fulfill({ status: 200, contentType: "text/plain", body: "" });
-    });
-  }
 }

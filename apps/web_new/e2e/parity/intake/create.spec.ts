@@ -288,9 +288,6 @@ test(
       await test.step("drive the editor busy with a held upload", async () => {
         await driver.intakeCreateFillTitle(`${tag} request`);
         await driver.intakeCreateStallNextUpload();
-        // The file hop is answered locally (stack minio is down); the
-        // held metadata POST still drives the busy state deterministically.
-        await driver.intakeCreateMockFileHop();
         await driver.intakeCreateInsertImage({ name: "dot.png", mimeType: "image/png", bytes: tinyPng() });
       });
 
@@ -331,7 +328,6 @@ test(
       // Discard, dialog kept. See NEWFRONT-304 and the INT-016 row.
       await driver.intakeCreateFillTitle(`${tag} request`);
       await driver.intakeCreateStallNextUpload();
-      await driver.intakeCreateMockFileHop();
       await driver.intakeCreateInsertImage({ name: "dot.png", mimeType: "image/png", bytes: tinyPng() });
       await driver.intakeCreatePressEscape();
       await expect.poll(() => driver.intakeCreateDialogOpen(), { timeout: 15_000 }).toBe(false);
@@ -376,9 +372,6 @@ test(
       await test.step("compose with an image", async () => {
         await driver.intakeCreateFillTitle(title);
         await driver.intakeCreateFillDescription(`${tag} body`);
-        // The file hop is answered locally (stack minio is down); the
-        // metadata row, status update and bulk attach all run for real.
-        await driver.intakeCreateMockFileHop();
         await driver.intakeCreateInsertImage({ name: "dot.png", mimeType: "image/png", bytes: tinyPng() });
         await expect.poll(() => driver.intakeCreateEditorImageCount(), { timeout: 60_000 }).toBe(1);
       });

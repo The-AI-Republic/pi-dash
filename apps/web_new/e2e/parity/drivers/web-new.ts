@@ -7156,6 +7156,8 @@ export class WebNewDriver implements ParityDriver {
 
   async runnersWaitRunnerRevokeWorking(): Promise<void> {
     return todo("runnersWaitRunnerRevokeWorking");
+  }
+
   async intakeCreateDialogOpen(): Promise<boolean> {
     return todo("intakeCreateDialogOpen");
   }
@@ -7222,9 +7224,5 @@ export class WebNewDriver implements ParityDriver {
 
   async intakeCreateEditorImageCount(): Promise<number> {
     return todo("intakeCreateEditorImageCount");
-  }
-
-  async intakeCreateMockFileHop(): Promise<void> {
-    return todo("intakeCreateMockFileHop");
   }
 }
