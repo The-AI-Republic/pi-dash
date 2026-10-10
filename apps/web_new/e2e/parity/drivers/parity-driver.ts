@@ -4549,16 +4549,21 @@ export interface ParityDriver {
   /** Whether the detail address shows the not-found state. */
   archivesDetailNotFoundVisible(): Promise<boolean>;
   /**
-   * Enter the archived detail while its record fetch is held back
-   * `holdMs`, reporting whether the loading indicator showed mid-flight.
-   * Releases the hold and waits for the detail to settle.
+   * Enter the archived detail while gating its record read, reporting what
+   * the screen shows with the fetch provably outstanding (plus the
+   * intercepted read count). Releases the hold and settles on the detail.
    */
-  archivesDetailLoaderShownOnDelayedEntry(
+  archivesDetailPendingStateOnHeldFetch(
     workspaceSlug: string,
     projectId: string,
-    issueId: string,
-    holdMs: number
-  ): Promise<{ loaderShown: boolean }>;
+    issueId: string
+  ): Promise<{
+    heldRequests: number;
+    bannerDuringHold: string | null;
+    breadcrumbDuringHold: string;
+    activityDuringHold: boolean;
+    settled: boolean;
+  }>;
   /** Whether the archived detail renders the activity composer. */
   archivesDetailComposerVisible(): Promise<boolean>;
   /** Whether the archived detail's issue-level reaction control is enabled (false when absent or disabled). */

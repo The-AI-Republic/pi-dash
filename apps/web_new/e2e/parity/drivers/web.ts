@@ -24277,50 +24277,62 @@ export class WebDriver implements ParityDriver {
     return (await missing.count()) > 0 && (await missing.isVisible().catch(() => false));
   }
 
-  async archivesDetailLoaderShownOnDelayedEntry(
+  async archivesDetailPendingStateOnHeldFetch(
     workspaceSlug: string,
     projectId: string,
-    issueId: string,
-    holdMs: number
-  ): Promise<{ loaderShown: boolean }> {
-    // Hold the detail record fetch while entering, watching for the
-    // loading indicator mid-flight; release and settle on the detail.
-    // A URL predicate (not a glob) routes the request, matching the
-    // established pattern.
+    issueId: string
+  ): Promise<{
+    heldRequests: number;
+    bannerDuringHold: string | null;
+    breadcrumbDuringHold: string;
+    activityDuringHold: boolean;
+    settled: boolean;
+  }> {
+    // Gate the detail record read while entering, sampling what the screen
+    // shows with the fetch provably outstanding; release and settle on the
+    // detail. The first intercepted read is the fetch-gated proof: the
+    // sample below cannot be mistaken for a slow boot. A URL predicate
+    // (not a glob) routes the request, matching the established pattern.
     const matches = (url: URL): boolean =>
       url.pathname.includes("/api/workspaces/") && url.pathname.includes(`/projects/${projectId}/issues/${issueId}`);
+    let heldRequests = 0;
     let released = false;
-    const release = (): void => {
-      released = true;
-    };
+    let releaseGate: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
     const handler = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
       if (route.request().method() !== "GET" || released) {
         await route.continue();
         return;
       }
-      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      heldRequests++;
+      await gate;
       await route.continue();
     };
     await this.page.route(matches, handler);
+    const release = (): void => {
+      released = true;
+      releaseGate();
+    };
     try {
       await this.archivesOpenDetailRaw(workspaceSlug, projectId, issueId);
-      let loaderShown = false;
-      const deadline = Date.now() + holdMs + 15_000;
+      const engaged = Date.now() + 120_000;
       for (;;) {
-        const signals = await Promise.all([
-          this.page.locator('[role="status"]').count(),
-          this.page.locator(".animate-pulse").count(),
-        ]);
-        if ((signals[0] ?? 0) > 0 || (signals[1] ?? 0) > 0) {
-          loaderShown = true;
-          break;
-        }
-        if (Date.now() >= deadline) break;
-        await this.page.waitForTimeout(200);
+        if (heldRequests > 0) break;
+        if (Date.now() >= engaged)
+          throw new Error("[parity] archived detail never issued its record read; the hold predicate missed.");
+        await this.page.waitForTimeout(300);
       }
+      // The read is outstanding: dwell so any pending indicator would have
+      // painted, then sample the screen.
+      await this.page.waitForTimeout(3000);
+      const bannerDuringHold = await this.archivesDetailBannerText();
+      const breadcrumbDuringHold = await this.archivesDetailBreadcrumbText();
+      const activityDuringHold = (await this.activityHeading().count()) > 0;
       release();
       await this.activityHeading().waitFor({ timeout: WebDriver.WAIT_MS });
-      return { loaderShown };
+      return { heldRequests, bannerDuringHold, breadcrumbDuringHold, activityDuringHold, settled: true };
     } finally {
       release();
       await this.page.unroute(matches, handler).catch(() => {});

@@ -10,9 +10,10 @@
 // (ARCH-013). Green on apps/web first; every branch asserts what the
 // user sees plus the resulting server state.
 //
-// Three scenarios pin old-app bugs (bug:): the row menu omits Delete
+// Four scenarios pin old-app bugs (bug:): the row menu omits Delete
 // (NEWFRONT-165), row links point at a broken browse/undefined-N address
-// (NEWFRONT-235), and a missing item renders blank instead of not-found
+// (NEWFRONT-235), a cold detail entry shows no loader while fetching
+// (NEWFRONT-245), and a missing item renders blank instead of not-found
 // (NEWFRONT-236). Each asserts the actual behavior; the linked issue and
 // the inventory row record the intended behavior.
 import { test, expect } from "../fixtures";
@@ -358,11 +359,55 @@ test(
         await driver.archivesDetailBannerBack();
         await expect.poll(() => driver.currentUrlPath(), { timeout: 120_000 }).toMatch(/\/archives\/issues\/?$/);
       });
+    } finally {
+      await serverUnarchiveIssue(seed.workspaceSlug, projectId, issue.id, session).catch(() => {});
+      await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, issue.id, session);
+      await deleteOwnedState(seed.workspaceSlug, projectId, done.owned, session);
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
 
-      await test.step("a loader shows while the detail fetches", async () => {
-        const out = await driver.archivesDetailLoaderShownOnDelayedEntry(seed.workspaceSlug, projectId, issue.id, 4000);
-        expect(out.loaderShown).toBe(true);
-      });
+test(
+  specTitle(["ARCH-011"], "bug: NEWFRONT-245 archived detail shows no loader while fetching"),
+  { tag: specTags(["ARCH-011"]) },
+  async ({ driver, seed }) => {
+    test.setTimeout(720_000);
+    const tag = `NF223 noloader ${Date.now()}`;
+    const name = `${tag} item`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await makeProject(session, seed, tag, "A223H");
+    const done = await doneState(seed.workspaceSlug, projectId, tag, session);
+    const issue = await serverCreateIssueFull(seed.workspaceSlug, projectId, name, session);
+    await serverPatchIssue(seed.workspaceSlug, projectId, issue.id, { state_id: done.id }, session);
+    // Sequence first: the live-issues read behind issueSeqForName stops
+    // listing the issue once it is archived.
+    const identifier = (await serverProject(seed.workspaceSlug, projectId, session)).identifier;
+    const ref = await issueSeqForName(seed.workspaceSlug, projectId, identifier, name, session);
+    await serverArchiveIssue(seed.workspaceSlug, projectId, issue.id, session);
+    try {
+      await openPath(driver, `/${seed.workspaceSlug}/projects/${projectId}/archives/issues/${issue.id}`, session);
+
+      // Hold the record read on cold entry: the pending screen is sampled
+      // with the fetch provably outstanding, so the sample cannot be
+      // mistaken for a slow boot.
+      const out = await driver.archivesDetailPendingStateOnHeldFetch(seed.workspaceSlug, projectId, issue.id);
+
+      // Actual: the content area stays blank — no banner, no activity
+      // section — and the breadcrumb carries no identifier-plus-sequence
+      // reference until the record lands. Intended: a loader shows while
+      // fetching (bug NEWFRONT-245).
+      expect(out.heldRequests).toBeGreaterThan(0);
+      expect(out.bannerDuringHold).toBeNull();
+      expect(out.breadcrumbDuringHold).not.toContain(ref.seq);
+      expect(out.activityDuringHold).toBe(false);
+      expect(out.settled).toBe(true);
+
+      // The released fetch settles on the full detail, and the hold never
+      // mutated anything: the item is still archived on the server.
+      await expect.poll(() => driver.archivesDetailBannerText(), { timeout: 120_000 }).toContain("archived");
+      await expect.poll(() => driver.archivesDetailBreadcrumbText(), { timeout: 120_000 }).toContain(ref.seq);
+      expect((await serverIssue(seed.workspaceSlug, projectId, issue.id, session)).archived_at).not.toBeNull();
     } finally {
       await serverUnarchiveIssue(seed.workspaceSlug, projectId, issue.id, session).catch(() => {});
       await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, issue.id, session);

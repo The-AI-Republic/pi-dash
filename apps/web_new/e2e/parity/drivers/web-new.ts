@@ -6928,13 +6928,18 @@ export class WebNewDriver implements ParityDriver {
     return todo("archivesDetailNotFoundVisible");
   }
 
-  async archivesDetailLoaderShownOnDelayedEntry(
+  async archivesDetailPendingStateOnHeldFetch(
     _workspaceSlug: string,
     _projectId: string,
-    _issueId: string,
-    _holdMs: number
-  ): Promise<{ loaderShown: boolean }> {
-    return todo("archivesDetailLoaderShownOnDelayedEntry");
+    _issueId: string
+  ): Promise<{
+    heldRequests: number;
+    bannerDuringHold: string | null;
+    breadcrumbDuringHold: string;
+    activityDuringHold: boolean;
+    settled: boolean;
+  }> {
+    return todo("archivesDetailPendingStateOnHeldFetch");
   }
 
   async archivesDetailComposerVisible(): Promise<boolean> {
