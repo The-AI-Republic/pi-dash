@@ -54,6 +54,10 @@ function parseInventory() {
         id,
         oracle: status.includes("oracle green") || status.includes("new green"),
         fresh: status.includes("new green"),
+        // Built in apps/web_new and unit-tested, but not yet run through the
+        // parity suite: a slice appends "built" to the Status cell, and the
+        // area gate turns it into "new green".
+        built: status.includes("built") && !status.includes("new green"),
       });
     }
   }
@@ -103,6 +107,7 @@ for (const run of runs) {
 const areas = [...new Set(inventory.map((row) => row.area))].sort();
 let oracleTotal = 0;
 let freshTotal = 0;
+let builtTotal = 0;
 const out = [
   "# Parity report",
   "",
@@ -114,10 +119,17 @@ for (const area of areas) {
   const areaRows = inventory.filter((row) => row.area === area);
   const oracle = areaRows.filter((row) => row.oracle).length;
   const fresh = areaRows.filter((row) => row.fresh).length;
+  const built = areaRows.filter((row) => row.built).length;
   oracleTotal += oracle;
   freshTotal += fresh;
-  out.push(`## ${area} — ${oracle}/${areaRows.length} oracle green, ${fresh}/${areaRows.length} new green`, "");
-  const lit = areaRows.filter((row) => row.oracle || runById.has(`${row.id}|oracle`) || runById.has(`${row.id}|new`));
+  builtTotal += built;
+  out.push(
+    `## ${area} — ${oracle}/${areaRows.length} oracle green, ${fresh}/${areaRows.length} new green${built > 0 ? `, ${built} built (parity pending)` : ""}`,
+    ""
+  );
+  const lit = areaRows.filter(
+    (row) => row.oracle || row.built || runById.has(`${row.id}|oracle`) || runById.has(`${row.id}|new`)
+  );
   if (lit.length === 0) {
     out.push("No row green yet.", "");
     continue;
@@ -128,13 +140,14 @@ for (const area of areas) {
     const lastNew = runById.get(`${row.id}|new`);
     const mark = (value) => (value === undefined ? "—" : value ? "pass" : "fail");
     out.push(
-      `| ${row.id} | ${row.oracle ? "green" : "—"} | ${row.fresh ? "green" : "—"} | ${mark(lastOracle)} | ${mark(lastNew)} |`
+      `| ${row.id} | ${row.oracle ? "green" : "—"} | ${row.fresh ? "green" : row.built ? "built" : "—"} | ${mark(lastOracle)} | ${mark(lastNew)} |`
     );
   }
   out.push("");
 }
 
 out.push(`Total: ${oracleTotal}/${inventory.length} oracle green, ${freshTotal}/${inventory.length} new green.`, "");
+if (builtTotal > 0) out.push(`Built, parity pending: ${builtTotal}/${inventory.length}.`, "");
 const report = out.join("\n");
 
 if (outFile === null) process.stdout.write(report);

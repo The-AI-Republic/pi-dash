@@ -60,6 +60,13 @@ ignored.
 4. Make it green on `apps/web` first, then flip the matching rows to
    `oracle green`.
 
+Row status, in the inventory's Status cell: `not started`, then
+`oracle green` once the scenario passes on the old app. A build slice that
+implements the row in `apps/web_new` appends `built` (`oracle green,
+built`); slices are unit-tested and do not run the parity suite. The
+area gate runs the area's scenarios against `apps/web_new` once and turns
+passing rows into `new green`. The report counts all three.
+
 ## Extending the driver
 
 New areas need new actions: add the method to `parity-driver.ts`, implement
