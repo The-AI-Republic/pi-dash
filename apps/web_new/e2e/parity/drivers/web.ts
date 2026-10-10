@@ -504,8 +504,12 @@ export class WebDriver implements ParityDriver {
     for (;;) {
       // Bounded: a blank boot renders no <main> at all, and an unbounded
       // read would hang past the deadline instead of iterating to it.
+      // Non-strict (.last()): the shell nests a workspace main inside the
+      // app main, so a strict read always throws and burns the whole
+      // deadline; the tab content lives in the last one in document order.
       const text = await this.page
         .getByRole("main")
+        .last()
         .innerText({ timeout: 5000 })
         .catch(() => "");
       if (text.trim().length > 50) return;
