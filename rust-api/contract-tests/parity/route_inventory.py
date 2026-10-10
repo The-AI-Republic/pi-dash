@@ -198,24 +198,52 @@ def dump_django_routes(api_dir: str, settings_module: str) -> dict:
     return {"meta": meta, "routes": routes}
 
 
+def _effective_http_method_names(callback, view_cls) -> set[str] | None:
+    """Lowercase effective ``http_method_names`` for one view callback.
+
+    Per-route ``as_view(http_method_names=[...])`` pins arrive as
+    initkwargs (``view_initkwargs`` on Django CBVs, ``initkwargs`` on
+    DRF views) and shadow the class attribute at dispatch time.
+    ``None`` means neither source exists (assume Django's default,
+    which contains ``head``).
+    """
+    for attr in ("view_initkwargs", "initkwargs"):
+        initkwargs = getattr(callback, attr, None)
+        if isinstance(initkwargs, dict) and "http_method_names" in initkwargs:
+            return {m.lower() for m in initkwargs["http_method_names"]}
+    names = getattr(view_cls, "http_method_names", None)
+    if names is None:
+        return None
+    return {m.lower() for m in names}
+
+
 def _allowed_methods(callback) -> tuple[set[str], bool, str]:
     """Best-effort allowed tracked methods for one view callback.
 
     ViewSets carry the per-route ``actions`` mapping; DRF/plain class
     views carry ``http_method_names`` plus per-method handlers; plain
     functions receive everything (``any=True``). DRF views serve
-    OPTIONS via the metadata handler, so it is always added; HEAD is
-    never added (DRF defines no ``head`` — an authenticated HEAD falls
-    through to ``http_method_not_allowed``, verified in
-    ``rest_framework/views.py``). Returns ``(methods, any, kind)`` with
-    kind ``drf`` | ``cbv`` | ``function``: the kind decides what Django
-    answers for a disallowed method (DRF: JSON 405 body; plain CBV:
-    empty 405 + Allow, same status+body as axum's).
+    OPTIONS via the metadata handler, so it is always added. HEAD is
+    served wherever GET is via the runtime ``head = get`` binding —
+    Django's ``View.setup`` (``django/views/generic/base.py``) for
+    class views, DRF's ``ViewSetMixin.as_view``
+    (``rest_framework/viewsets.py``) for ViewSets — unless ``head``
+    is missing from the view's effective ``http_method_names``
+    (per-route ``as_view`` pins shadow the class attribute), in
+    which case dispatch still 405s. Returns ``(methods, any, kind)``
+    with kind ``drf`` | ``cbv`` | ``function``: the kind decides what
+    Django answers for a disallowed method (DRF: JSON 405 body;
+    plain CBV: empty 405 + Allow, same status+body as axum's).
     """
     actions = getattr(callback, "actions", None)
     if actions:
         methods = {m.upper() for m in actions}
         methods.add("OPTIONS")
+        lowered = {m.lower() for m in actions}
+        if "get" in lowered and "head" not in lowered:
+            names = _effective_http_method_names(callback, getattr(callback, "cls", None))
+            if names is None or "head" in names:
+                methods.add("HEAD")
         return methods & set(TRACKED_METHODS), False, "drf"
     view_cls = getattr(callback, "cls", None) or getattr(callback, "view_class", None)
     if view_cls is not None and hasattr(view_cls, "http_method_names"):
@@ -224,6 +252,12 @@ def _allowed_methods(callback) -> tuple[set[str], bool, str]:
             for m in view_cls.http_method_names
             if callable(getattr(view_cls, m, None))
         }
+        if callable(getattr(view_cls, "get", None)) and not callable(
+            getattr(view_cls, "head", None)
+        ):
+            names = _effective_http_method_names(callback, view_cls)
+            if names is None or "head" in names:
+                methods.add("HEAD")
         module = getattr(view_cls, "__module__", "")
         if module.startswith("rest_framework") or _is_drf_view(view_cls):
             methods.add("OPTIONS")

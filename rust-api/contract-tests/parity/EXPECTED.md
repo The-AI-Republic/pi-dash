@@ -29,13 +29,16 @@ Counts (2026-10-10, `pi_dash.settings.test`):
 ### G1 — axum auto-HEAD serves what Django 405s (0 rows; fixed)
 
 Fix: PIDASHCONV-826 (landed). Axum auto-served HEAD wherever GET was
-routed; Django has no HEAD arm, so HEAD 405s there. Every affected route
-now carries an explicit HEAD proxy arm and its inventory row lists HEAD
-as proxied, so the 247 rows reclassified to OWNED (signatures deleted
-below). The two magic-generate HEAD gaps lived under G1+G4 below
-(their HEAD gap was `drf-405body-vs-axum-405`, not
-`serves-but-django-405`); PIDASHCONV-829's proxy arms resolve them, so
-that section is empty too.
+routed; the premise was that Django 405s HEAD there for want of a HEAD
+arm. PIDASHCONV-864 corrected the premise — Django's `View.setup`
+binds `head = get`, so Django serves HEAD on plain GET views — but the
+proxy arms stay: the proxy returns Django's own answer either way.
+Every affected route now carries an explicit HEAD proxy arm and its
+inventory row lists HEAD as proxied, so the 247 rows reclassified to
+OWNED (signatures deleted below). The two magic-generate HEAD gaps
+lived under G1+G4 below (their HEAD gap was
+`drf-405body-vs-axum-405`, not `serves-but-django-405`);
+PIDASHCONV-829's proxy arms resolve them, so that section is empty too.
 
 ```expected-routes
 ```
@@ -86,36 +89,35 @@ plus contract pins, so the rows are deleted below.
 ```expected-routes
 ```
 
-### G6 — handler-denial 405s, proven (OWNED-by-denial) + HEAD artifact (7 rows)
+### G6 — handler-denial 405s, proven (OWNED-by-denial) (7 rows)
 
 Fix: PIDASHCONV-830. Proven by
 `contract-tests/app_workspace/test_denied_methods.py` (green on both
-backends): every non-HEAD `serves-but-django-405` segment below is an
+backends): every `serves-but-django-405` segment below is an
 explicit `*_not_allowed` handler replaying the view's auth + permission
 prelude — 401 anonymous, 403 or the exact 405 bytes authenticated, and
 DRF's `Allow` on all three — instead of proxying a byte-identical
 denial. Behaviorally OWNED; the diff reports it only because Rust
 serves where the inventory says Django 405s.
 
-The `HEAD:serves-but-django-405` segments are inventory artifacts, not
-gaps: Django's `View.setup` binds `head = get`
-(`django/views/generic/base.py`), so HEAD runs the GET handler at
-runtime on the 6 GET routes (Rust routes `.head(<get_handler>)`
-explicitly; `test_head_serves` pins the served statuses). Only the
-POST-only export route truly 405s HEAD, and that denial is proven like
-the rest. The checker (`route_inventory._allowed_methods`) does not
-model the binding yet, so the live signatures — and the fenced lines
-below — stay byte-identical until the inventory learns it (see
-PIDASHCONV-864).
+The 6 GET routes served HEAD all along: Django's `View.setup` binds
+`head = get` (`django/views/generic/base.py`), so HEAD runs the GET
+handler at runtime (Rust routes `.head(<get_handler>)` explicitly;
+`test_head_serves` pins the served statuses). The checker used to miss
+the binding and reported `HEAD:serves-but-django-405` artifacts on
+those routes; PIDASHCONV-864 taught
+`route_inventory._allowed_methods` the binding, so those segments are
+gone from the fenced lines below. Only the POST-only export route
+truly 405s HEAD, and that denial is proven like the rest.
 
 ```expected-routes
-G6 :: /api/users/me/workspaces/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405;HEAD:serves-but-django-405
-G6 :: /api/workspace-slug-check/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405;HEAD:serves-but-django-405
-G6 :: /api/workspaces/ :: PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405;HEAD:serves-but-django-405
-G6 :: /api/workspaces/{slug}/ :: POST:serves-but-django-405;HEAD:serves-but-django-405
+G6 :: /api/users/me/workspaces/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
+G6 :: /api/workspace-slug-check/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
+G6 :: /api/workspaces/ :: PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
+G6 :: /api/workspaces/{slug}/ :: POST:serves-but-django-405
 G6 :: /api/workspaces/{slug}/user-activity/{user_id}/export/ :: GET:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405;HEAD:serves-but-django-405
-G6 :: /api/workspaces/{slug}/workspace-themes/ :: PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405;HEAD:serves-but-django-405
-G6 :: /api/workspaces/{slug}/workspace-themes/{pk}/ :: POST:serves-but-django-405;PUT:serves-but-django-405;HEAD:serves-but-django-405
+G6 :: /api/workspaces/{slug}/workspace-themes/ :: PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
+G6 :: /api/workspaces/{slug}/workspace-themes/{pk}/ :: POST:serves-but-django-405;PUT:serves-but-django-405
 ```
 
 ### Rust-only routes (5, all justified in-script)
