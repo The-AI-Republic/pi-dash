@@ -266,6 +266,12 @@ async fn worker(concurrency: u32) -> MainResult {
     // gap W-loop).
     pidash_jobs::loop_scan::register_scanner(&mut registry, pools.primary().clone());
     pidash_jobs::loop_fire::register_fire(&mut registry, pools.primary().clone());
+    // D-08 archive-and-close (PIDASHCONV-837; kept in sync with
+    // `mirror_registry_matches_tasks_table` in inventory.rs). The
+    // daily beat entry fires it and the D-08 handler exists, so the
+    // Rust worker owns it — otherwise the task is lost at switchover
+    // (parity gap W-automation).
+    pidash_jobs::tasks_webhooks::register_automation_handlers(&mut registry, pools.clone());
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()

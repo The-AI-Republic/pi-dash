@@ -1313,7 +1313,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.issue_automation_task.archive_and_close_old_issues",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.issue_description_version_sync.schedule_issue_description_version",
@@ -1806,6 +1806,7 @@ mod tests {
             registry.register(name, stub());
         }
         registry.register(pidash_jobs::tasks_webhooks::PROCESS_LOGS_TASK, stub());
+        registry.register(pidash_jobs::tasks_webhooks::ARCHIVE_AND_CLOSE_TASK, stub());
         // Real registrations (the same calls `worker()` makes).
         tasks_cleanup::register_versions(&mut registry, pool.clone());
         tasks_cleanup::assets::register_assets(
@@ -1850,6 +1851,7 @@ mod tests {
         expected_rust.insert(pidash_jobs::license::tasks::TASK_NAME);
         expected_rust.extend([pidash_jobs::assistant::SWEEP_TASK]);
         expected_rust.extend(pidash_jobs::loop_scan::TASK_NAMES);
+        expected_rust.insert(pidash_jobs::tasks_webhooks::ARCHIVE_AND_CLOSE_TASK);
         // Count pins: a const that grows must update the table too.
         assert_eq!(
             tasks_cleanup::cleanup::TASKS.len(),
@@ -1876,7 +1878,7 @@ mod tests {
             2,
             "loop_scan group drifted"
         );
-        assert_eq!(expected_rust.len(), 30, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 31, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()
