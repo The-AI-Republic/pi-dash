@@ -12253,3 +12253,176 @@ export async function serverUnpinIssuePod(
 ): Promise<void> {
   await patchIssue(workspaceSlug, projectId, issueId, sessionCookie, { assigned_pod_id: null }, apiBase);
 }
+
+// --- Intake detail (NEWFRONT-258, INT-019/024/026-029). Observed against
+// --- the running old app: issue fields PATCH nested under `issue` while
+// --- the intake status PATCHes top-level; the retrieve nests the full
+// --- work-item detail (description, priority, assignees, labels, dates);
+// --- description versions list metadata only and retrieve one version's
+// --- stored markup. Guests may only write name/description server-side.
+
+/** Field snapshot of an intake issue's nested work item. */
+export interface ParityServerIntakeDetail {
+  name: string;
+  descriptionHtml: string;
+  priority: string | null;
+  assigneeIds: string[];
+  labelIds: string[];
+  targetDate: string | null;
+  status: number;
+}
+
+/** One description-version list row (metadata; markup needs retrieve). */
+export interface ParityServerIntakeDetailVersion {
+  id: string;
+  ownedBy: string;
+  createdAt: string;
+}
+
+/**
+ * Raw PATCH against an intake issue. Never throws on 4xx: refusal
+ * assertions (INT-026) read the status instead of catching.
+ */
+export async function serverIntakeDetailPatch(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  data: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; bodyText: string }> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`,
+    sessionCookie,
+    data
+  );
+  return { status: res.status, bodyText: await res.text() };
+}
+
+/** Set the intake status (resolved fixtures); throws unless the write lands. */
+export async function serverIntakeDetailSetStatus(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  status: number,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`,
+    sessionCookie,
+    { status }
+  );
+  if (!res.ok) throw new Error(`[parity] intake status patch failed with HTTP ${res.status}.`);
+}
+
+/** Field snapshot of an intake issue, read by the nested issue id. */
+export async function serverIntakeDetailRead(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerIntakeDetail> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] intake-detail read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const issue = rec["issue"] as Record<string, unknown> | undefined;
+  if (issue === undefined) throw new Error("[parity] intake-detail read carried no nested issue.");
+  const strArray = (key: string): string[] => {
+    const value = issue[key];
+    return Array.isArray(value) ? value.map(String) : [];
+  };
+  return {
+    name: typeof issue["name"] === "string" ? (issue["name"] as string) : "",
+    descriptionHtml: typeof issue["description_html"] === "string" ? (issue["description_html"] as string) : "",
+    priority: typeof issue["priority"] === "string" ? (issue["priority"] as string) : null,
+    assigneeIds: strArray("assignee_ids"),
+    labelIds: strArray("label_ids"),
+    targetDate: typeof issue["target_date"] === "string" ? (issue["target_date"] as string) : null,
+    status: typeof rec["status"] === "number" ? (rec["status"] as number) : 0,
+  };
+}
+
+/** Description versions of an intake work item, newest first. */
+export async function serverIntakeDetailVersions(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerIntakeDetailVersion[]> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/intake-work-items/${issueId}/description-versions/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] intake versions read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const record = row as Record<string, unknown>;
+    return {
+      id: typeof record["id"] === "string" ? (record["id"] as string) : "",
+      ownedBy: typeof record["owned_by"] === "string" ? (record["owned_by"] as string) : "",
+      createdAt: typeof record["created_at"] === "string" ? (record["created_at"] as string) : "",
+    };
+  });
+}
+
+/**
+ * Create a listed attachment on an intake work item: the metadata POST
+ * plus the uploaded-status PATCH the client sends after its byte PUT.
+ * The scratch stack's object storage is stubbed on this machine, so no
+ * bytes are stored — the row still lists and renders like an upload.
+ */
+export async function serverIntakeDetailCreateAttachment(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  name: string,
+  mime: string,
+  size: number,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const post = await mutateJSON(
+    "POST",
+    `${apiBase}/api/assets/v2/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/attachments/`,
+    sessionCookie,
+    { name, type: mime, size }
+  );
+  if (!post.ok) throw new Error(`[parity] attachment metadata post failed with HTTP ${post.status}.`);
+  const rec = (await post.json()) as Record<string, unknown>;
+  if (typeof rec["asset_id"] !== "string") throw new Error("[parity] attachment post carried no asset id.");
+  const assetId = rec["asset_id"] as string;
+  const mark = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/assets/v2/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/attachments/${assetId}/`,
+    sessionCookie
+  );
+  if (!mark.ok && mark.status !== 204)
+    throw new Error(`[parity] attachment status patch failed with HTTP ${mark.status}.`);
+  return assetId;
+}
+
+/** Stored markup of one description version. */
+export async function serverIntakeDetailVersion(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  versionId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ descriptionHtml: string }> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/intake-work-items/${issueId}/description-versions/${versionId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] intake version read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  return { descriptionHtml: typeof rec["description_html"] === "string" ? (rec["description_html"] as string) : "" };
+}
