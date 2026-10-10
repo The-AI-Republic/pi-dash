@@ -1978,7 +1978,7 @@ mod tests {
             11,
             "runner_runs group drifted"
         );
-        assert_eq!(expected_rust.len(), 51, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 52, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()
