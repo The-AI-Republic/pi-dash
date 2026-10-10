@@ -371,6 +371,12 @@ pub struct PatchArgs {
     /// other label flags.
     #[arg(long, conflicts_with_all = ["add_label", "remove_label"])]
     pub clear_labels: bool,
+
+    /// Record the git branch this issue's work lives on, so later agent runs
+    /// check it out instead of cutting a new one. Set it only after the
+    /// branch exists on the remote. `--git-work-branch ""` clears it.
+    #[arg(long = "git-work-branch", value_name = "BRANCH")]
+    pub git_work_branch: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -807,6 +813,7 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
         state_uuid,
         parent,
         labels,
+        args.git_work_branch.as_deref(),
     )?;
 
     let path = format!(
@@ -929,6 +936,7 @@ fn build_patch_body(
     state_uuid: Option<String>,
     parent: ParentPatch,
     label_uuids: Option<Vec<String>>,
+    git_work_branch: Option<&str>,
 ) -> Result<Map<String, Value>, CliError> {
     let mut body: Map<String, Value> = Map::new();
 
@@ -963,11 +971,15 @@ fn build_patch_body(
     if let Some(uuids) = label_uuids {
         body.insert("labels".into(), label_array(uuids));
     }
+    // An empty string is a real mutation too: it clears the recorded branch.
+    if let Some(branch) = git_work_branch {
+        body.insert("git_work_branch".into(), Value::String(branch.to_string()));
+    }
 
     if body.is_empty() {
         return Err(CliError::new(
             EXIT_INVALID,
-            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent/--label/--add-label/--remove-label/--clear-labels is required",
+            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent/--label/--add-label/--remove-label/--clear-labels/--git-work-branch is required",
         ));
     }
 
@@ -1313,6 +1325,7 @@ mod tests {
             None,
             ParentPatch::Unchanged,
             None,
+            None,
         )
         .expect("description alone is a valid mutation");
         assert_eq!(
@@ -1320,6 +1333,41 @@ mod tests {
             Some("| a |\n|---|\n| 1 |")
         );
         assert!(!body.contains_key("description_html"));
+    }
+
+    #[test]
+    fn build_patch_body_sends_git_work_branch_and_satisfies_guard() {
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            Some("pi-dash/eng-42"),
+        )
+        .expect("a work branch alone is a valid mutation");
+        assert_eq!(
+            body.get("git_work_branch").and_then(Value::as_str),
+            Some("pi-dash/eng-42")
+        );
+        assert_eq!(body.len(), 1);
+
+        // An explicit empty value clears the recorded branch.
+        let cleared = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            Some(""),
+        )
+        .expect("clearing is a valid mutation");
+        assert_eq!(
+            cleared.get("git_work_branch").and_then(Value::as_str),
+            Some("")
+        );
     }
 
     #[derive(Debug, clap::Parser)]
@@ -1564,6 +1612,7 @@ mod tests {
             None,
             ParentPatch::Set("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()),
             None,
+            None,
         )
         .expect("parent is a valid mutation");
         assert_eq!(
@@ -1574,7 +1623,7 @@ mod tests {
 
     #[test]
     fn build_patch_body_clear_parent_sends_null() {
-        let body = build_patch_body(None, None, None, None, ParentPatch::Clear, None)
+        let body = build_patch_body(None, None, None, None, ParentPatch::Clear, None, None)
             .expect("clear-parent is a valid mutation");
         // `--clear-parent` must emit an explicit JSON null (detach), not omit
         // the key — omitting it would leave the parent unchanged server-side.
@@ -1592,16 +1641,17 @@ mod tests {
                 None,
                 None,
                 ParentPatch::Set("x".to_string()),
-                None
+                None,
+                None,
             )
             .is_ok()
         );
-        assert!(build_patch_body(None, None, None, None, ParentPatch::Clear, None).is_ok());
+        assert!(build_patch_body(None, None, None, None, ParentPatch::Clear, None, None).is_ok());
     }
 
     #[test]
     fn build_patch_body_empty_is_rejected() {
-        let err = build_patch_body(None, None, None, None, ParentPatch::Unchanged, None)
+        let err = build_patch_body(None, None, None, None, ParentPatch::Unchanged, None, None)
             .expect_err("no mutations must be rejected");
         assert_eq!(err.exit_code, EXIT_INVALID);
         // The guard message advertises the parent flags so agents can discover them.
@@ -1790,6 +1840,7 @@ mod tests {
             None,
             ParentPatch::Unchanged,
             Some(vec!["l-bug".to_string()]),
+            None,
         )
         .expect("labels alone is a valid mutation");
         assert_eq!(body.get("labels"), Some(&json!(["l-bug"])));
@@ -1799,14 +1850,14 @@ mod tests {
     fn build_patch_body_clear_labels_sends_an_empty_array() {
         // `--clear-labels` must emit `[]` (detach all), not omit the key —
         // omitting it would leave the labels untouched server-side.
-        let body = build_patch_body(None, None, None, None, ParentPatch::Unchanged, Some(vec![]))
+        let body = build_patch_body(None, None, None, None, ParentPatch::Unchanged, Some(vec![]), None)
             .expect("clear-labels is a valid mutation");
         assert_eq!(body.get("labels"), Some(&json!([])));
     }
 
     #[test]
     fn build_patch_body_guard_advertises_the_label_flags() {
-        let err = build_patch_body(None, None, None, None, ParentPatch::Unchanged, None)
+        let err = build_patch_body(None, None, None, None, ParentPatch::Unchanged, None, None)
             .expect_err("no mutations must be rejected");
         for flag in ["--label", "--add-label", "--remove-label", "--clear-labels"] {
             assert!(
