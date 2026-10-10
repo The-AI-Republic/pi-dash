@@ -133,6 +133,13 @@ async fn serve(bind: &str) -> MainResult {
     let settings = Settings::from_env()?;
     let edge = EdgeHandle::from_env()?;
     let pools = connect_serve_pools().await?;
+    // Enqueue paths (magic-link mail, password mail, …) INSERT into the
+    // Rust-owned queue tables; without them every such handler 500s.
+    // `worker` runs the same DDL at its own boot, but `serve` also runs
+    // workerless (the V-02 matrix starts no worker for the Rust run), so
+    // `serve` must ensure the schema too (PIDASHCONV-854). Fail-fast like
+    // `worker`: refusing to start beats per-request 500s.
+    pidash_jobs::queue::ensure_schema(pools.primary()).await?;
     tracing::info!(
         %addr,
         upstream = edge.upstream(),
