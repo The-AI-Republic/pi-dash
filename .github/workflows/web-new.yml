@@ -84,6 +84,7 @@ jobs:
       - run: pnpm --filter web_new check:headers
       - run: pnpm --filter web_new check:deps
       - run: pnpm --filter web_new check:coexistence
+      - run: pnpm --filter web_new check:oracle-build
 
   similarity:
     name: similarity check (new vs old frontend)

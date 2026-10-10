@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Parity stack bring-up (NEWFRONT-19). One command from a clean checkout:
 # builds the scratch API image, starts Postgres plus the API, waits for it,
-# and seeds the deterministic parity workspace. Idempotent: safe to rerun;
-# for a from-zero rebuild use parity-reset.sh.
+# seeds the deterministic parity workspace, and warms the oracle's entry
+# routes so the first specs never meet a cold dev server. Idempotent: safe
+# to rerun; image builds reuse cached layers unless the Dockerfile or its
+# copied inputs changed (pass --rebuild for a clean no-cache rebuild).
 set -euo pipefail
 
 export STACK_DIR
@@ -15,8 +17,23 @@ export COMPOSE_FILE
 COMPOSE_FILE="$STACK_DIR/docker-compose.yml"
 export PARITY_API_PORT
 PARITY_API_PORT="${PARITY_API_PORT:-18019}"
+export PARITY_ORACLE_PORT
+PARITY_ORACLE_PORT="${PARITY_ORACLE_PORT:-13000}"
 export PARITY_SEED_FILE
 PARITY_SEED_FILE="$PARITY_DIR/.seed.json"
+
+# Image builds are cache-aware (NEWFRONT-134): a rerun reuses every layer
+# unless the Dockerfile or its copied inputs changed, so the oracle
+# container is NOT recreated by unrelated edits. Pass --rebuild (or set
+# PARITY_REBUILD=1) for a clean no-cache rebuild of both images.
+export PARITY_REBUILD
+PARITY_REBUILD="${PARITY_REBUILD:-0}"
+if [ "${1:-}" = "--rebuild" ]; then
+  PARITY_REBUILD=1
+elif [ -n "${1:-}" ]; then
+  echo "usage: parity-up.sh [--rebuild]" >&2
+  exit 2
+fi
 
 echo "[parity] repo root: $REPO_ROOT"
 # Which build of the old app serves as the oracle. dev (default): the dev
@@ -30,8 +47,13 @@ if [ "${PARITY_ORACLE_MODE:-dev}" = "prod" ]; then
   ORACLE_UPSTREAM="oracle-prod:3000"
 fi
 
-echo "[parity] building scratch images (parity19-api, $ORACLE_SERVICE)"
-docker compose -f "$COMPOSE_FILE" build api "$ORACLE_SERVICE"
+if [ "$PARITY_REBUILD" = "1" ]; then
+  echo "[parity] rebuilding scratch images from zero (parity19-api, $ORACLE_SERVICE)"
+  docker compose -f "$COMPOSE_FILE" build --no-cache api "$ORACLE_SERVICE"
+else
+  echo "[parity] building scratch images (parity19-api, $ORACLE_SERVICE; cached unless inputs changed)"
+  docker compose -f "$COMPOSE_FILE" build api "$ORACLE_SERVICE"
+fi
 
 echo "[parity] starting pg, redis, mq, api, worker, $ORACLE_SERVICE, proxy"
 docker compose -f "$COMPOSE_FILE" up -d pg redis mq api worker "$ORACLE_SERVICE" proxy
@@ -80,3 +102,34 @@ fi
 echo "$SEED_JSON" > "$PARITY_SEED_FILE"
 echo "[parity] seed facts: $PARITY_SEED_FILE"
 echo "$SEED_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print('[parity] workspace', d['workspaceSlug'], '| project', d['projectId'], '| issues', len(d['issueNames']))"
+
+# Warm the oracle before any spec runs (NEWFRONT-134). The dev server pays
+# its dependency-optimization spike on the first HTTP requests; without
+# this step the suite's first specs burn their waits on a cold boot and
+# flake. Entry plus one seeded project route, through the proxy — the same
+# two loads the manual workaround used. A 3xx counts as served (deep routes
+# redirect anonymous visitors to sign-in). On the production oracle this
+# passes instantly and doubles as a smoke test.
+echo "[parity] warming the oracle (entry + project routes)"
+export WARM_BASE
+WARM_BASE="http://localhost:$PARITY_ORACLE_PORT"
+export WARM_DEEP
+WARM_DEEP="$(echo "$SEED_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print('/%s/projects/%s/issues' % (d['workspaceSlug'], d['projectId']))" || echo "/")"
+export WARM_ROUTES
+WARM_ROUTES="/ $WARM_DEEP"
+for route in $WARM_ROUTES; do
+  warmed=0
+  for _ in $(seq 1 120); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$WARM_BASE$route" || true)"
+    case "$code" in
+      2*|3*) warmed=1; break ;;
+    esac
+    sleep 5
+  done
+  if [ "$warmed" != "1" ]; then
+    echo "[parity] oracle did not serve $route after 10 minutes; check 'docker logs <prefix>-oracle' (on a loaded host this usually means the dev server was OOM-killed during dependency optimization)" >&2
+    exit 1
+  fi
+  echo "[parity] warm: $route -> served"
+done
+echo "[parity] oracle is warm"
