@@ -8,7 +8,11 @@
 // starts servers itself. Results land as JSON for the parity report.
 import { defineConfig } from "@playwright/test";
 
-const oracleBase = process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000";
+import { parityOracleUrl } from "./helpers/parity-env";
+
+// Namespaced stacks (NEWFRONT-132): the oracle base follows PARITY_NS
+// (e.g. :13057 for 257) unless PARITY_ORACLE_URL is set explicitly.
+const oracleBase = parityOracleUrl(process.env);
 const newBase = process.env["PARITY_NEW_URL"] ?? "http://localhost:3010";
 
 export default defineConfig({

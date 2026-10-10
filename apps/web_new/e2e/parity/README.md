@@ -29,13 +29,20 @@ Bring up the stack (runbook in `stack/README.md`), start the frontend you
 want, then from `apps/web_new`:
 
 ```sh
-export PARITY_SEED_FILE="$PWD/e2e/parity/.seed.json"
-export PARITY_API_URL=http://localhost:18019
-export PARITY_ORACLE_URL=http://localhost:3000
+export PARITY_NS=257   # your namespace (see stack/README.md "Concurrent runs")
+eval "$(e2e/parity/stack/parity-env.sh)"   # ports, seed file and URLs for this shell
 export PARITY_NEW_URL=http://localhost:3010
 pnpm test:parity:oracle   # old app only
 pnpm test:parity:new      # new app only (until areas land, these throw by design)
 pnpm test:parity           # both projects
+```
+
+On the default stack (no namespace) the config already points at the
+legacy ports; only the seed file needs exporting:
+
+```sh
+export PARITY_SEED_FILE="$PWD/e2e/parity/.seed.json"
+pnpm test:parity:oracle
 ```
 
 Narrow a run by adding Playwright arguments after the script name:

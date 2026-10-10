@@ -1,29 +1,31 @@
 # Parity seeded stack (runbook)
 
 Scratch backend for parity runs. One command brings it up, one resets it.
-Nothing here is shared: dedicated `parity19-*` containers, ports, and the
-`parity19_pgdata` volume, so a reset can never touch dev data or another
-run's database.
+Nothing here is shared: dedicated containers, ports, and volumes, so a
+reset can never touch dev data or another run's database. Parallel runs
+on one host each take a namespace — see "Concurrent runs" below.
 
 ## Services
 
-| Service  | Image                                                                     | Port           | Notes                                                                                       |
-| -------- | ------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------- |
-| `pg`     | postgres:15.7-alpine                                                      | 15419          | Scratch database `pidash`, user `parity19`                                                  |
-| `redis`  | redis:7-alpine                                                            | 16319          | Django cache backend                                                                        |
-| `mq`     | rabbitmq:3-management-alpine                                              | none published | Broker for background tasks                                                                 |
-| `api`    | built from `apps/api` (`Dockerfile.dev`, lean migrate-plus-serve command) | 18019          | Django + uvicorn, migrates on boot                                                          |
-| `worker` | same image as `api` (celery worker, default queue)                        | none published | Consumes background tasks: mention links, notifications                                     |
-| `oracle` | built from the repo (`apps/web/Dockerfile.dev`)                           | internal :3000 | Old app with same-origin API calls                                                          |
-| `proxy`  | caddy:2-alpine (`stack/Caddyfile`)                                        | 13000          | One origin: frontend plus `/auth`, `/api`, `/static` to Django, `/parity19-assets` to minio |
+| Service  | Image                                                                              | Port           | Notes                                                                                       |
+| -------- | ---------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------- |
+| `pg`     | postgres:15.7-alpine                                                               | 15419          | Scratch database `pidash`, user `parity19`                                                  |
+| `redis`  | redis:7-alpine                                                                     | 16319          | Django cache backend                                                                        |
+| `mq`     | rabbitmq:3-management-alpine                                                       | none published | Broker for background tasks                                                                 |
+| `api`    | built from `apps/api` (`Dockerfile.dev`, lean migrate-plus-serve command)          | 18019          | Django + uvicorn, migrates on boot                                                          |
+| `worker` | same image as `api` (celery worker, default queue)                                 | none published | Consumes background tasks: mention links, notifications                                     |
+| `oracle` | built from the repo (`apps/web/Dockerfile.dev`)                                    | internal :3000 | Old app with same-origin API calls                                                          |
+| `proxy`  | caddy:2-alpine (`stack/Caddyfile`)                                                 | 13000          | One origin: frontend plus `/auth`, `/api`, `/static` to Django, `/parity19-assets` to minio |
 | `minio`  | bitnamilegacy/minio, pinned tag+digest (bucket `parity19-assets`, created at boot) | 19019          | Object storage backing presigned asset uploads                                              |
-| `live`   | built from `apps/live` (opt-in profile `full`)                            | 13001          | Realtime server for realtime rows                                                           |
+| `live`   | built from `apps/live` (opt-in profile `full`)                                     | 13001          | Realtime server for realtime rows                                                           |
 
 All ports move through `PARITY_PG_PORT`, `PARITY_REDIS_PORT`,
-`PARITY_API_PORT`, `PARITY_ORACLE_PORT`, `PARITY_MINIO_PORT`, `PARITY_LIVE_PORT`. The defaults
-are the contract the Playwright config assumes (`PARITY_ORACLE_URL`
-defaults to the proxy on `:13000`, `PARITY_NEW_URL` to web_new on `:3010`,
-`PARITY_API_URL` to `:18019`).
+`PARITY_API_PORT`, `PARITY_ORACLE_PORT`, `PARITY_MINIO_PORT`, `PARITY_LIVE_PORT`. A namespace
+derives them (per-service base plus its last two digits: namespace 257
+gets `:15457`, `:16357`, `:18057`, `:13057`, `:19057`, `:13157`); unset,
+the legacy defaults below apply, which is the contract the Playwright
+config assumes (`PARITY_ORACLE_URL` defaults to the proxy on `:13000`,
+`PARITY_NEW_URL` to web_new on `:3010`, `PARITY_API_URL` to `:18019`).
 
 The api service runs on `parity_scratch_settings.py` (mounted read-only),
 which widens only the default anonymous throttle to 600/minute: every
@@ -40,11 +42,20 @@ From the repo root:
 apps/web_new/e2e/parity/stack/parity-up.sh
 ```
 
-This builds `parity19-api:local`, starts pg/redis/mq/api, waits for the
-API, and seeds the deterministic parity workspace (one onboarded owner,
-one project, three named issues). Seed facts land in
-`apps/web_new/e2e/parity/.seed.json` (generated, never committed);
-scenarios read it through `PARITY_SEED_FILE`.
+This builds the scratch images, starts pg/redis/mq/api (plus worker,
+oracle and proxy), waits for the API, and seeds the deterministic parity
+workspace (one onboarded owner, one project, three named issues). Seed
+facts land in `apps/web_new/e2e/parity/.seed.json` under the default
+stack, or `.seed-<ns>.json` under a namespace (generated, never
+committed); scenarios read the file through `PARITY_SEED_FILE`, which
+`parity-up.sh` prints, along with the other suite exports, when it
+finishes. A preflight check refuses to start when another stack (or any
+foreign process) already holds one of this stack's ports — pick a free
+namespace instead of forcing it.
+
+Never pipe bring-up (or reset) to `tail`: the pipe's exit status is
+`tail`'s, so a failed bring-up looks green. Run the script bare, or with
+`set -o pipefail`, or log to a file.
 
 ## Reset
 
@@ -52,9 +63,54 @@ scenarios read it through `PARITY_SEED_FILE`.
 apps/web_new/e2e/parity/stack/parity-reset.sh
 ```
 
-Drops the scratch volume and rebuilds through `parity-up.sh`. The script
-prints its target first; if the names ever stop matching this stack, stop
-and ask a human instead of proceeding.
+Drops this stack's scratch volumes and rebuilds through `parity-up.sh`.
+It honors `PARITY_NS` like the other scripts, and prints its target
+(project, containers, volumes) first; if the names ever stop matching
+this stack, stop and ask a human instead of proceeding.
+
+## Concurrent runs
+
+Every oracle run on a shared host exports one setting before anything
+else:
+
+```sh
+export PARITY_NS=257   # your issue number (or slot number); see the rules below
+```
+
+That derives the compose project (`parity257`), the container names, the
+six published ports, the volumes (compose prefixes them with the
+project, so each namespace gets its own postgres datadir), the seed file
+(`.seed-257.json`) and the suite URLs — for the shell scripts and the
+suite alike. Bring the stack up, export the block `parity-up.sh` prints
+at the end, run the specs; `parity-reset.sh` and `parity-down.sh` target
+the same namespace. Anything set explicitly (`PARITY_PROJECT`,
+`PARITY_CONTAINER_PREFIX`, any `PARITY_*_PORT`, `PARITY_SEED_FILE`,
+`PARITY_API_URL`, `PARITY_ORACLE_URL`) wins over the derivation.
+
+Rules:
+
+- Numeric namespaces only for the one-setting flow. A non-numeric
+  `PARITY_NS` still namespaces the project and seed file, but its ports
+  must all be set explicitly. Slot `sN` maps to `PARITY_NS=N`.
+- Namespaces sharing last-two-digits share ports: 157 and 257 collide.
+  The preflight check fails fast with the busy ports; pick a free one
+  (`docker ps` shows who owns what). Suffixes `00` and `19` are refused
+  outright — they reproduce the default stack's own ports.
+- Bring-up and reset refuse when the namespace's project already has
+  containers from another checkout (docker records which checkout
+  created each container, and the guard compares it). Reruns from the
+  owning checkout stay idempotent. Namespaces are disjoint, so no
+  locking is needed across them; two concurrent `parity-up.sh` runs for
+  the SAME namespace fail loudly on container names instead.
+  `parity-down.sh` only warns on foreign ownership and proceeds — it is
+  the deliberate override for orphaned stacks.
+- Adopting a namespace for a checkout that used hand-set `PARITY_PROJECT`
+  - ports recreates its containers (same project, same volumes, so the
+    seeded data survives) and may move its ports to the derived ones —
+    re-export the printed block and carry on.
+- Bare `docker compose -f stack/docker-compose.yml ...` commands do not
+  resolve namespaces: prefix them with the same environment (at least
+  `PARITY_PROJECT`, or `-p`) the scripts would use.
 
 ## Oracle build: dev or production
 
@@ -83,7 +139,8 @@ apps/web_new/e2e/parity/stack/parity-down.sh
 ```
 
 Removes the stack's containers, network and scratch volumes (images stay,
-so the next bring-up is fast). Run it when you are done.
+so the next bring-up is fast). It honors `PARITY_NS`: it tears down your
+namespace's stack, never a sibling's. Run it when you are done.
 
 Inside a Pi Dash agent run you do not have to remember: `parity-up.sh` arms
 `parity-reaper.sh`, a detached watcher that runs the teardown when the
@@ -103,7 +160,9 @@ Most scenarios need only the API. When a scenario covers realtime rows,
 start the live service too:
 
 ```sh
-docker compose -f apps/web_new/e2e/parity/stack/docker-compose.yml --profile full up -d live
+export PARITY_NS=257   # or yours; the scripts resolve the rest from it
+eval "$(apps/web_new/e2e/parity/stack/parity-env.sh)"
+docker compose -p "$PARITY_PROJECT" -f apps/web_new/e2e/parity/stack/docker-compose.yml --profile full up -d live
 ```
 
 The document editor needs the live endpoint to become editable. The

@@ -20,6 +20,8 @@ import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveParityEnv } from "./parity-env";
+
 function composeFile(): string {
   const override = process.env["PARITY_STACK_COMPOSE"];
   if (override && override.length > 0) return override;
@@ -28,10 +30,27 @@ function composeFile(): string {
 }
 
 function runInApi(python: string): string {
+  // Namespaced stacks (NEWFRONT-132): address this run's compose project
+  // explicitly, so PARITY_NS suites never exec into the default stack.
+  const project = resolveParityEnv(process.env).project;
   try {
     return execFileSync(
       "docker",
-      ["compose", "-f", composeFile(), "exec", "-T", "api", "python", "manage.py", "shell", "-c", python],
+      [
+        "compose",
+        "-f",
+        composeFile(),
+        "-p",
+        project,
+        "exec",
+        "-T",
+        "api",
+        "python",
+        "manage.py",
+        "shell",
+        "-c",
+        python,
+      ],
       { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }
     );
   } catch (error) {

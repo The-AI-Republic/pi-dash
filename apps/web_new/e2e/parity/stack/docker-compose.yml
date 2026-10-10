@@ -6,10 +6,16 @@
 # dev work or with each other. Ports are overridable through the
 # PARITY_* environment variables; the defaults below are the contract
 # the Playwright config and the runbook assume.
-# Project (and therefore volume/network) isolation for parallel local runs:
-# set PARITY_PROJECT=parity19s4 (say) to get a fully private stack on the
-# same daemon. Unset keeps the stock parity19 names, so CI and the runbook
-# are unchanged. (Container names take PARITY_CONTAINER_PREFIX likewise.)
+# Isolation for parallel runs (NEWFRONT-132): export PARITY_NS once (e.g.
+# PARITY_NS=257) and the stack scripts resolve a fully private stack on
+# the same daemon — compose project (parity257), container names, the six
+# published ports, and, through the project prefix, the pgdata/miniodata
+# volumes and the network. Unset keeps the stock parity19 names, so CI
+# and the runbook are unchanged. Explicit PARITY_PROJECT,
+# PARITY_CONTAINER_PREFIX and PARITY_*_PORT settings always win over the
+# namespace derivation. The container prefix defaults to the resolved
+# project, so a namespace can never reuse another stack's container
+# names or mount its postgres datadir.
 # Every service carries a mem_limit: a stack that runs away is killed inside
 # its own containers instead of taking the runner host down with it.
 name: ${PARITY_PROJECT:-parity19}
