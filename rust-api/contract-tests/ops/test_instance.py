@@ -235,6 +235,11 @@ def traces_tap():
     """
     connection = pika.BlockingConnection(pika.URLParameters(broker_url()))
     channel = connection.channel()
+    # Declare before binding: a fresh broker (CI) has no `celery`
+    # exchange yet, and binding to a missing exchange raises 404. The
+    # params match Celery's own declare (direct, durable), so this is
+    # idempotent wherever a worker already declared it.
+    channel.exchange_declare(exchange="celery", exchange_type="direct", durable=True)
     queue = channel.queue_declare(
         queue="", exclusive=True, auto_delete=True
     ).method.queue
@@ -925,6 +930,14 @@ def test_dryrun_pre_migration_shapes(scratch_pair):
     envelope = json.loads(rust.stdout)
     assert envelope["summary"] == {"total": 4, "match": 0, "mismatch": 0, "fail": 4}
     assert list(envelope.keys()) == ["summary", "rows"]
+    # Query order is the model's -created_at (SchedulerBinding Meta
+    # ordering, preserved by .values()): newest seed first.
+    assert [row["cron"] for row in envelope["rows"]] == [
+        "0 9 * * *",
+        "",
+        "not a cron",
+        "*/15 * * * *",
+    ]
     by_cron = {row["cron"]: row for row in envelope["rows"]}
     assert set(by_cron) == {"*/15 * * * *", "not a cron", "", "0 9 * * *"}
     for row in envelope["rows"]:

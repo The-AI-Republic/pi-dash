@@ -106,12 +106,15 @@ pub struct DryRunRow {
     pub enabled: bool,
 }
 
-/// Unfiltered rows: no `ORDER BY` (the model declares no ordering),
-/// soft-delete-scoped like every default-manager query.
-pub const DRY_RUN_ROWS_SQL: &str = "SELECT b.id, w.slug AS workspace_slug, b.created_at, b.cron, b.enabled FROM scheduler_bindings b INNER JOIN workspaces w ON w.id = b.workspace_id WHERE b.deleted_at IS NULL";
+/// Unfiltered rows in `.values()` query order: the model declares
+/// `Meta.ordering = ("-created_at",)`, preserved by `.values()`
+/// (`scheduler.py:235`), soft-delete-scoped like every
+/// default-manager query.
+pub const DRY_RUN_ROWS_SQL: &str = "SELECT b.id, w.slug AS workspace_slug, b.created_at, b.cron, b.enabled FROM scheduler_bindings b INNER JOIN workspaces w ON w.id = b.workspace_id WHERE b.deleted_at IS NULL ORDER BY b.created_at DESC";
 
-/// Rows limited to one workspace slug (`--workspace`, `:108-109`).
-pub const DRY_RUN_ROWS_BY_WORKSPACE_SQL: &str = "SELECT b.id, w.slug AS workspace_slug, b.created_at, b.cron, b.enabled FROM scheduler_bindings b INNER JOIN workspaces w ON w.id = b.workspace_id WHERE b.deleted_at IS NULL AND w.slug = $1";
+/// Rows limited to one workspace slug (`--workspace`, `:108-109`),
+/// same newest-first order.
+pub const DRY_RUN_ROWS_BY_WORKSPACE_SQL: &str = "SELECT b.id, w.slug AS workspace_slug, b.created_at, b.cron, b.enabled FROM scheduler_bindings b INNER JOIN workspaces w ON w.id = b.workspace_id WHERE b.deleted_at IS NULL AND w.slug = $1 ORDER BY b.created_at DESC";
 
 fn map_dry_run_row(row: &sqlx::postgres::PgRow) -> Result<DryRunRow, sqlx::Error> {
     Ok(DryRunRow {
@@ -167,11 +170,11 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_rows_join_workspace_without_ordering() {
+    fn dry_run_rows_join_workspace_newest_first() {
         for sql in [DRY_RUN_ROWS_SQL, DRY_RUN_ROWS_BY_WORKSPACE_SQL] {
             assert!(sql.contains("INNER JOIN workspaces w ON w.id = b.workspace_id"));
             assert!(sql.contains("b.deleted_at IS NULL"));
-            assert!(!sql.contains("ORDER BY"));
+            assert!(sql.contains("ORDER BY b.created_at DESC"));
         }
         assert!(DRY_RUN_ROWS_BY_WORKSPACE_SQL.contains("w.slug = $1"));
     }
