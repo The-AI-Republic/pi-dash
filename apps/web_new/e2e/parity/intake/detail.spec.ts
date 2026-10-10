@@ -699,10 +699,18 @@ test(
       ids.push((await serverCreateInboxIssue(seed.workspaceSlug, projectId, name, session)).issueId);
     }
     const all = new Set(ids);
+    const nameOf = (id: string): string => names[ids.indexOf(id)]!;
+    // Settle the rendered detail on an id before the next input: clicks
+    // issued mid-swap can land on a detaching header and get silently
+    // swallowed, which reads as a broken chevron under load.
+    const settleOn = async (id: string): Promise<void> => {
+      await expect.poll(() => driver.intakeDetailCurrentInboxIssueId(), { timeout: 30_000 }).toBe(id);
+      await expect.poll(() => driver.intakeDetailTitle(), { timeout: 60_000 }).toBe(nameOf(id));
+    };
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await openOpenItem(driver, seed, projectId, ids[0]!, names[0]!);
-      await expect.poll(() => driver.intakeDetailCurrentInboxIssueId(), { timeout: 60_000 }).toBe(ids[0]);
+      await settleOn(ids[0]!);
 
       await test.step("arrow-down cycles through every request and wraps", async () => {
         const seen = new Set<string>([ids[0]!]);
@@ -712,6 +720,7 @@ test(
           await expect.poll(() => driver.intakeDetailCurrentInboxIssueId(), { timeout: 30_000 }).not.toBe(prev);
           prev = (await driver.intakeDetailCurrentInboxIssueId())!;
           seen.add(prev);
+          await settleOn(prev);
         }
         expect(seen).toEqual(all);
         expect(prev).toBe(ids[0]);
@@ -722,6 +731,7 @@ test(
         await expect.poll(() => driver.intakeDetailCurrentInboxIssueId(), { timeout: 30_000 }).not.toBe(ids[0]);
         const wrapped = await driver.intakeDetailCurrentInboxIssueId();
         expect(all.has(wrapped!)).toBe(true);
+        await settleOn(wrapped!);
       });
 
       await test.step("chevrons move to neighbours and back", async () => {
@@ -730,8 +740,9 @@ test(
         await expect.poll(() => driver.intakeDetailCurrentInboxIssueId(), { timeout: 30_000 }).not.toBe(start);
         const moved = await driver.intakeDetailCurrentInboxIssueId();
         expect(all.has(moved!)).toBe(true);
+        await settleOn(moved!);
         await driver.intakeDetailClickChevron("prev");
-        await expect.poll(() => driver.intakeDetailCurrentInboxIssueId(), { timeout: 30_000 }).toBe(start);
+        await settleOn(start!);
       });
 
       await test.step("arrows do nothing while typing in the title or description", async () => {
