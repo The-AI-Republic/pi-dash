@@ -19,7 +19,7 @@ id, and filed as a fix issue first.
 
 Counts (2026-10-10, `pi_dash.settings.test`):
 
-- Routes: 528 Django rows — 502 OWNED, 26 MISSING (all listed below),
+- Routes: 528 Django rows — 508 OWNED, 20 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
 - Jobs: 85 tasks — 27 OWNED, 34 proxied by design, 24 MISSING;
   beat 26/26 OWNED.
@@ -66,11 +66,13 @@ G2 :: /api/instances/admins/sign-up/ :: no-rust-route
 G2 :: /api/instances/admins/{pk}/ :: no-rust-route
 ```
 
-### G3 — DRF router artifacts: api-root index + format suffixes (4 rows)
+### G3 — DRF router artifacts: api-root index + format suffixes (0 rows; fixed)
 
-Fix: PIDASHCONV-828. The `/api/v1/workspaces/{slug}/` api-root index
-and the `.{format}` suffix variants Django's router generates; no Rust
-route.
+Fix: PIDASHCONV-828 (landed). The `/api/v1/workspaces/{slug}/` api-root
+index and the `.{format}` suffix variants Django's router generates had
+no Rust route; all four now reclassify to OWNED via all-proxied
+inventory rows (edge fallback) plus contract pins, so the rows are
+deleted below.
 
 ```expected-routes
 ```
@@ -88,10 +90,12 @@ G4 :: /auth/spaces/magic-sign-in/ :: OPTIONS:allows-but-405;cbv-405:GET,PUT,PATC
 G4 :: /auth/spaces/magic-sign-up/ :: OPTIONS:allows-but-405;cbv-405:GET,PUT,PATCH,DELETE,HEAD
 ```
 
-### G5 — DRF format suffixes on detail routes (2 rows)
+### G5 — DRF format suffixes on detail routes (0 rows; fixed)
 
-Fix: PIDASHCONV-828 (with G3). The `{pk}.{format}` detail variants; no
-Rust route.
+Fix: PIDASHCONV-828 (landed, with G3). The `{pk}.{format}` detail
+variants had no Rust route; both now reclassify to OWNED via
+all-proxied inventory rows (dotted-pk proxy in the detail handlers)
+plus contract pins, so the rows are deleted below.
 
 ```expected-routes
 ```
