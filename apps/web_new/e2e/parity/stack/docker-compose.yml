@@ -58,14 +58,24 @@ services:
       RABBITMQ_DEFAULT_VHOST: pidash
 
   minio:
-    image: minio/minio
+    # Pinned Bitnami-legacy MinIO (NEWFRONT-238): minio/minio vanished from
+    # Docker Hub and the quay mirror needs auth, which broke every fresh
+    # parity-up at the pull. The tag names the revision for humans; the
+    # digest pins it immutably (multi-arch manifest: amd64+arm64).
+    # bitnamilegacy is Bitnami's frozen legacy org — fine for a scratch
+    # stack. Re-pin deliberately, never float.
+    image: bitnamilegacy/minio:2025.5.24-debian-12-r5@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
     container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-minio
     mem_limit: 384m
+    # Bitnami runs as UID 1001, which cannot create /export; root matches
+    # the old minio/minio behavior on this scratch-only volume.
+    user: root
     # Object storage for asset uploads (NEWFRONT-143): without it every
     # presigned upload 500s (no bucket configured). Mirrors the dev minio
-    # setup; the bucket is created idempotently at boot. No healthcheck:
-    # the API only signs URLs (never contacts minio), and browsers upload
-    # minutes after boot, so start ordering is enough.
+    # setup; the bucket is created idempotently at boot (this image ships
+    # mc, unlike stock minio/minio, so the bootstrap below actually runs).
+    # No healthcheck: the API only signs URLs (never contacts minio), and
+    # browsers upload minutes after boot, so start ordering is enough.
     entrypoint: >
       /bin/sh -c "
       mkdir -p /export/parity19-assets &&
