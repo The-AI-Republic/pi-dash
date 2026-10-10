@@ -100,12 +100,27 @@ plus contract pins, so the rows are deleted below.
 ```expected-routes
 ```
 
-### G6 — handler-denial 405s pending contract proof (7 rows)
+### G6 — handler-denial 405s, proven (OWNED-by-denial) + HEAD artifact (7 rows)
 
-Fix: PIDASHCONV-830. Explicit `*_not_allowed` handlers replay the
-view's auth prelude and answer DRF's 405 bytes; read-verified, but no
-contract test pins the bytes yet, so the diff conservatively reports
-`serves-but-django-405`.
+Fix: PIDASHCONV-830. Proven by
+`contract-tests/app_workspace/test_denied_methods.py` (green on both
+backends): every non-HEAD `serves-but-django-405` segment below is an
+explicit `*_not_allowed` handler replaying the view's auth + permission
+prelude — 401 anonymous, 403 or the exact 405 bytes authenticated, and
+DRF's `Allow` on all three — instead of proxying a byte-identical
+denial. Behaviorally OWNED; the diff reports it only because Rust
+serves where the inventory says Django 405s.
+
+The `HEAD:serves-but-django-405` segments are inventory artifacts, not
+gaps: Django's `View.setup` binds `head = get`
+(`django/views/generic/base.py`), so HEAD runs the GET handler at
+runtime on the 6 GET routes (Rust routes `.head(<get_handler>)`
+explicitly; `test_head_serves` pins the served statuses). Only the
+POST-only export route truly 405s HEAD, and that denial is proven like
+the rest. The checker (`route_inventory._allowed_methods`) does not
+model the binding yet, so the live signatures — and the fenced lines
+below — stay byte-identical until the inventory learns it (see
+PIDASHCONV-864).
 
 ```expected-routes
 G6 :: /api/users/me/workspaces/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405;HEAD:serves-but-django-405

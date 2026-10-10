@@ -84,7 +84,7 @@
 use std::collections::BTreeMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{Datelike, TimeZone};
@@ -122,14 +122,51 @@ pub const THEME_PATH: &str = "/api/workspaces/{slug}/workspace-themes/{pk}/";
 /// (`urls/workspace.py:168-172`, W23).
 pub const EXPORT_PATH: &str = "/api/workspaces/{slug}/user-activity/{user_id}/export/";
 
+/// DRF `Allow` values (`APIView.default_response_headers`, stamped on
+/// error responses too via `finalize_response`): each view's
+/// `allowed_methods` in `http_method_names` order. HEAD rides with GET
+/// (Django's `View.setup` binds `head = get`), OPTIONS always served.
+const ALLOW_SLUG_CHECK: &str = "GET, HEAD, OPTIONS";
+const ALLOW_WORKSPACES: &str = "GET, POST, HEAD, OPTIONS";
+const ALLOW_WORKSPACE: &str = "GET, PUT, PATCH, DELETE, HEAD, OPTIONS";
+const ALLOW_ME_WORKSPACES: &str = "GET, HEAD, OPTIONS";
+const ALLOW_THEMES: &str = "GET, POST, HEAD, OPTIONS";
+const ALLOW_THEME: &str = "GET, PATCH, DELETE, HEAD, OPTIONS";
+const ALLOW_EXPORT: &str = "POST, OPTIONS";
+
 /// DRF `MethodNotAllowed` (`exceptions.py:194-199`): unmapped methods on
-/// owned paths answer it inline (byte-identical, Django-independent);
-/// OPTIONS proxies (DRF metadata is unportable).
-fn method_not_allowed_response(method: &str) -> Response {
-    json_response(
-        StatusCode::METHOD_NOT_ALLOWED,
-        format!("{{\"detail\":\"Method \\\"{method}\\\" not allowed.\"}}"),
-    )
+/// owned paths answer it inline (byte-identical, Django-independent),
+/// with the view's `Allow` value; OPTIONS proxies (DRF metadata is
+/// unportable).
+fn method_not_allowed_response(method: &str, allow: &'static str) -> Response {
+    Response::builder()
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ALLOW, HeaderValue::from_static(allow))
+        .body(axum::body::Body::from(format!(
+            "{{\"detail\":\"Method \\\"{method}\\\" not allowed.\"}}"
+        )))
+        .expect("view response")
+}
+
+/// Stamp a view's `Allow` on a denial built without one. The shared
+/// `Denial` variants render no `Allow`; the `*_not_allowed` handlers
+/// own their wire shape, so they add it at the return site.
+fn with_allow(mut response: Response, allow: &'static str) -> Response {
+    response
+        .headers_mut()
+        .insert(header::ALLOW, HeaderValue::from_static(allow));
+    response
+}
+
+/// `request.user` or the view's 401-with-`Allow` (DRF stamps `Allow` on
+/// `NotAuthenticated` too): the `*_not_allowed` prelude entry point.
+#[allow(clippy::result_large_err)]
+fn actor_or_401(
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    allow: &'static str,
+) -> Result<uuid::Uuid, Response> {
+    actor_user_id(extension).map_err(|denial| with_allow(denial.into_response(), allow))
 }
 
 /// Unowned methods on owned paths: DRF's `dispatch` runs `initial()`
@@ -139,18 +176,29 @@ fn method_not_allowed_response(method: &str) -> Response {
 /// when anonymous), then that view's `permission_classes` entry with
 /// the actual request method — and answers the 405 bytes only for
 /// survivors (the `v1_projects::handlers_state_estimate` precedent).
-/// The `@allow_permission` decorators never run here: they wrap
-/// dispatched actions, and no action dispatches on an unowned method.
-/// Object lookups never run either (`get_object` lives inside the
-/// actions), so bogus slugs/pks still 405 for survivors, never 404.
+/// Every denial carries the view's `Allow` (`finalize_response`
+/// stamps it on error responses too). HEAD never reaches these
+/// handlers on GET routes: Django's `View.setup` binds `head = get`,
+/// so HEAD runs the GET handler (routed explicitly below); only the
+/// POST-only export route 405s HEAD here. The `@allow_permission`
+/// decorators never run here: they wrap dispatched actions, and no
+/// action dispatches on an unowned method. Object lookups never run
+/// either (`get_object` lives inside the actions), so bogus slugs/pks
+/// still 405 for survivors, never 404.
 async fn slug_check_not_allowed(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     method: axum::http::Method,
 ) -> HandlerResult {
     // `WorkSpaceAvailabilityCheckEndpoint` keeps the default
     // `[IsAuthenticated]`: any login survives.
-    let _user_id = actor_user_id(extension)?;
-    Ok(method_not_allowed_response(method.as_str()))
+    let _user_id = match actor_or_401(extension, ALLOW_SLUG_CHECK) {
+        Ok(id) => id,
+        Err(response) => return Ok(response),
+    };
+    Ok(method_not_allowed_response(
+        method.as_str(),
+        ALLOW_SLUG_CHECK,
+    ))
 }
 
 async fn workspaces_not_allowed(
@@ -163,12 +211,18 @@ async fn workspaces_not_allowed(
     // deny (no membership row can match a null slug), POST and the
     // safe methods pass any login. The list-action decorator never
     // runs (no action dispatches), so no 400 here.
-    let user_id = actor_user_id(extension)?;
+    let user_id = match actor_or_401(extension, ALLOW_WORKSPACES) {
+        Ok(id) => id,
+        Err(response) => return Ok(response),
+    };
     let pool = pool_of(&state)?;
     if let Err(response) = check_class_base(&pool, None, &user_id, method.as_str()).await {
-        return Ok(response);
+        return Ok(with_allow(response, ALLOW_WORKSPACES));
     }
-    Ok(method_not_allowed_response(method.as_str()))
+    Ok(method_not_allowed_response(
+        method.as_str(),
+        ALLOW_WORKSPACES,
+    ))
 }
 
 async fn workspace_not_allowed(
@@ -177,14 +231,21 @@ async fn workspace_not_allowed(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     method: axum::http::Method,
 ) -> HandlerResult {
-    // Same class with the URL slug; POST and HEAD pass any login. No
-    // object lookup: `get_object` never runs before the 405.
-    let user_id = actor_user_id(extension)?;
+    // Same class with the URL slug; POST passes any login (HEAD serves
+    // via `retrieve_workspace`: Django binds `head = get`). No object
+    // lookup: `get_object` never runs before the 405.
+    let user_id = match actor_or_401(extension, ALLOW_WORKSPACE) {
+        Ok(id) => id,
+        Err(response) => return Ok(response),
+    };
     let pool = pool_of(&state)?;
     if let Err(response) = check_class_base(&pool, Some(&slug), &user_id, method.as_str()).await {
-        return Ok(response);
+        return Ok(with_allow(response, ALLOW_WORKSPACE));
     }
-    Ok(method_not_allowed_response(method.as_str()))
+    Ok(method_not_allowed_response(
+        method.as_str(),
+        ALLOW_WORKSPACE,
+    ))
 }
 
 async fn my_workspaces_not_allowed(
@@ -193,8 +254,14 @@ async fn my_workspaces_not_allowed(
 ) -> HandlerResult {
     // `UserWorkSpacesEndpoint` keeps the default `[IsAuthenticated]`:
     // any login survives.
-    let _user_id = actor_user_id(extension)?;
-    Ok(method_not_allowed_response(method.as_str()))
+    let _user_id = match actor_or_401(extension, ALLOW_ME_WORKSPACES) {
+        Ok(id) => id,
+        Err(response) => return Ok(response),
+    };
+    Ok(method_not_allowed_response(
+        method.as_str(),
+        ALLOW_ME_WORKSPACES,
+    ))
 }
 
 async fn themes_not_allowed(
@@ -205,12 +272,15 @@ async fn themes_not_allowed(
 ) -> HandlerResult {
     // `WorkspaceThemeViewSet.permission_classes =
     // [WorkSpaceAdminPermission]`, active Admin/Member, every method.
-    let user_id = actor_user_id(extension)?;
+    let user_id = match actor_or_401(extension, ALLOW_THEMES) {
+        Ok(id) => id,
+        Err(response) => return Ok(response),
+    };
     let pool = pool_of(&state)?;
     if let Err(response) = check_class_admin(&pool, &slug, &user_id).await {
-        return Ok(response);
+        return Ok(with_allow(response, ALLOW_THEMES));
     }
-    Ok(method_not_allowed_response(method.as_str()))
+    Ok(method_not_allowed_response(method.as_str(), ALLOW_THEMES))
 }
 
 async fn theme_not_allowed(
@@ -220,12 +290,15 @@ async fn theme_not_allowed(
     method: axum::http::Method,
 ) -> HandlerResult {
     // Same admin class; the pk is unread (no lookup before the 405).
-    let user_id = actor_user_id(extension)?;
+    let user_id = match actor_or_401(extension, ALLOW_THEME) {
+        Ok(id) => id,
+        Err(response) => return Ok(response),
+    };
     let pool = pool_of(&state)?;
     if let Err(response) = check_class_admin(&pool, &slug, &user_id).await {
-        return Ok(response);
+        return Ok(with_allow(response, ALLOW_THEME));
     }
-    Ok(method_not_allowed_response(method.as_str()))
+    Ok(method_not_allowed_response(method.as_str(), ALLOW_THEME))
 }
 
 async fn export_not_allowed(
@@ -238,16 +311,21 @@ async fn export_not_allowed(
     // [WorkspaceEntityPermission]` with the actual method: safe
     // methods need any active membership, writes need Admin/Member.
     // No user lookup before the 405.
-    let user_id = actor_user_id(extension)?;
+    let user_id = match actor_or_401(extension, ALLOW_EXPORT) {
+        Ok(id) => id,
+        Err(response) => return Ok(response),
+    };
     let pool = pool_of(&state)?;
     if let Err(response) = check_class_entity(&pool, &slug, &user_id, method.as_str()).await {
-        return Ok(response);
+        return Ok(with_allow(response, ALLOW_EXPORT));
     }
-    Ok(method_not_allowed_response(method.as_str()))
+    Ok(method_not_allowed_response(method.as_str(), ALLOW_EXPORT))
 }
 
 /// Owned methods per route; anything else replays the view's prelude
-/// and 405s for survivors (OPTIONS proxies).
+/// and 405s for survivors. HEAD runs the GET handler wherever GET is
+/// owned (Django's `View.setup` binds `head = get`); only the
+/// POST-only export route 405s HEAD. OPTIONS proxies everywhere.
 pub fn routes() -> Router<AppState> {
     use axum::routing::{get, post};
     Router::new()
@@ -258,7 +336,7 @@ pub fn routes() -> Router<AppState> {
                 .put(slug_check_not_allowed)
                 .patch(slug_check_not_allowed)
                 .delete(slug_check_not_allowed)
-                .head(slug_check_not_allowed)
+                .head(slug_check)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -268,7 +346,7 @@ pub fn routes() -> Router<AppState> {
                 .put(workspaces_not_allowed)
                 .patch(workspaces_not_allowed)
                 .delete(workspaces_not_allowed)
-                .head(workspaces_not_allowed)
+                .head(list_workspaces)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -278,7 +356,7 @@ pub fn routes() -> Router<AppState> {
                 .patch(partial_update_workspace)
                 .delete(destroy_workspace)
                 .post(workspace_not_allowed)
-                .head(workspace_not_allowed)
+                .head(retrieve_workspace)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -288,7 +366,7 @@ pub fn routes() -> Router<AppState> {
                 .put(my_workspaces_not_allowed)
                 .patch(my_workspaces_not_allowed)
                 .delete(my_workspaces_not_allowed)
-                .head(my_workspaces_not_allowed)
+                .head(my_workspaces)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -298,7 +376,7 @@ pub fn routes() -> Router<AppState> {
                 .put(themes_not_allowed)
                 .patch(themes_not_allowed)
                 .delete(themes_not_allowed)
-                .head(themes_not_allowed)
+                .head(list_themes)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -308,7 +386,7 @@ pub fn routes() -> Router<AppState> {
                 .delete(destroy_theme)
                 .post(theme_not_allowed)
                 .put(theme_not_allowed)
-                .head(theme_not_allowed)
+                .head(retrieve_theme)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -5641,8 +5719,12 @@ mod tests {
 
     #[tokio::test]
     async fn method_not_allowed_names_the_method() {
-        let response = method_not_allowed_response("GET");
+        let response = method_not_allowed_response("GET", ALLOW_EXPORT);
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            response.headers()[header::ALLOW],
+            HeaderValue::from_static(ALLOW_EXPORT)
+        );
         let body = response_text(response).await;
         assert_eq!(body, "{\"detail\":\"Method \\\"GET\\\" not allowed.\"}");
         // Glyph-proof guard: the DRF key is lowercase-d (byte 100, not
