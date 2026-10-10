@@ -66,6 +66,12 @@ import type {
   SchedulerProjectInstallOption,
   SchedulerProjectRow,
   SchedulerScheduleValues,
+  RunnersEditPodForm,
+  RunnersPodTile,
+  RunnersRail,
+  RunnersRowActions,
+  RunnersTab,
+  RunnersTableRow,
   ServedShellMarkers,
   WorkspaceOnboardingView,
 } from "./parity-driver";
@@ -4153,6 +4159,196 @@ export class WebNewDriver implements ParityDriver {
   async servedShellMarkers(_path: string): Promise<ServedShellMarkers> {
     return todo("servedShellMarkers");
   }
+  // --- NEWFRONT-178 (runners overview + pods). Throwing stubs per the
+  // --- shared driver contract; the runners area fills these in when it
+  // --- lands in apps/web_new.
+
+  async runnersOpenOverview(
+    _workspaceSlug: string,
+    _projectId?: string,
+    _subpath?: "runs" | "approvals"
+  ): Promise<void> {
+    return todo("runnersOpenOverview");
+  }
+
+  async runnersCurrentUrl(): Promise<string> {
+    return todo("runnersCurrentUrl");
+  }
+
+  async runnersTabs(): Promise<RunnersTab[]> {
+    return todo("runnersTabs");
+  }
+
+  async runnersOpenTab(_label: string): Promise<void> {
+    return todo("runnersOpenTab");
+  }
+
+  async runnersTableRows(): Promise<RunnersTableRow[]> {
+    return todo("runnersTableRows");
+  }
+
+  async runnersEmptyVisible(): Promise<boolean> {
+    return todo("runnersEmptyVisible");
+  }
+
+  async runnersRowActions(_runnerName: string): Promise<RunnersRowActions> {
+    return todo("runnersRowActions");
+  }
+
+  async runnersOpenDetails(_runnerName: string): Promise<void> {
+    return todo("runnersOpenDetails");
+  }
+
+  async runnersDeleteRunner(_runnerName: string, _options?: { expectFailure?: boolean }): Promise<void> {
+    return todo("runnersDeleteRunner");
+  }
+
+  async runnersRevokeRunner(_runnerName: string, _options?: { expectFailure?: boolean }): Promise<void> {
+    return todo("runnersRevokeRunner");
+  }
+
+  async runnersModalCopy(): Promise<{ title: string; body: string } | null> {
+    return todo("runnersModalCopy");
+  }
+
+  async runnersCancelModal(): Promise<void> {
+    return todo("runnersCancelModal");
+  }
+
+  async runnersStallMutations(_delayMs: number): Promise<void> {
+    return todo("runnersStallMutations");
+  }
+
+  async runnersFailNextMutation(): Promise<void> {
+    return todo("runnersFailNextMutation");
+  }
+
+  async runnersReleaseMutationShaping(): Promise<void> {
+    return todo("runnersReleaseMutationShaping");
+  }
+
+  async runnersRail(): Promise<RunnersRail> {
+    return todo("runnersRail");
+  }
+
+  async runnersPodTiles(): Promise<RunnersPodTile[]> {
+    return todo("runnersPodTiles");
+  }
+
+  async runnersSelectPod(_podName: string): Promise<void> {
+    return todo("runnersSelectPod");
+  }
+
+  async runnersFilterText(): Promise<string | null> {
+    return todo("runnersFilterText");
+  }
+
+  async runnersClearPodFilter(): Promise<void> {
+    return todo("runnersClearPodFilter");
+  }
+
+  async runnersOpenCreatePod(): Promise<void> {
+    return todo("runnersOpenCreatePod");
+  }
+
+  async runnersPodFormErrors(): Promise<string[]> {
+    return todo("runnersPodFormErrors");
+  }
+
+  async runnersCreatePod(
+    _input: { projectName: string; name: string; description?: string },
+    _options?: { expectFailure?: boolean }
+  ): Promise<void> {
+    return todo("runnersCreatePod");
+  }
+
+  async runnersPodFilterIsClientSide(_podName: string): Promise<boolean> {
+    return todo("runnersPodFilterIsClientSide");
+  }
+
+  async runnersSubmitPodForm(): Promise<void> {
+    return todo("runnersSubmitPodForm");
+  }
+
+  async runnersPodCancelEnabled(): Promise<boolean> {
+    return todo("runnersPodCancelEnabled");
+  }
+
+  async runnersCreatePodForm(): Promise<{ project: string; name: string; description: string }> {
+    return todo("runnersCreatePodForm");
+  }
+
+  async runnersPodModalOpen(): Promise<boolean> {
+    return todo("runnersPodModalOpen");
+  }
+
+  async runnersPodsError(): Promise<string | null> {
+    return todo("runnersPodsError");
+  }
+
+  async runnersCreatePodSubmitting(): Promise<boolean> {
+    return todo("runnersCreatePodSubmitting");
+  }
+
+  async runnersOpenEditPod(_podName: string): Promise<void> {
+    return todo("runnersOpenEditPod");
+  }
+
+  async runnersEditPodForm(): Promise<RunnersEditPodForm> {
+    return todo("runnersEditPodForm");
+  }
+
+  async runnersSavePodEdit(_input: { name?: string; description?: string; makeDefault?: boolean }): Promise<void> {
+    return todo("runnersSavePodEdit");
+  }
+
+  async runnersUnchangedEditSkipsSave(): Promise<boolean> {
+    return todo("runnersUnchangedEditSkipsSave");
+  }
+
+  async runnersSavePodEditCapturing(_input: {
+    name?: string;
+    description?: string;
+    makeDefault?: boolean;
+  }): Promise<Record<string, unknown>[]> {
+    return todo("runnersSavePodEditCapturing");
+  }
+
+  async runnersDeletePod(_podName: string, _options?: { expectFailure?: boolean }): Promise<void> {
+    return todo("runnersDeletePod");
+  }
+
+  async runnersLastToast(): Promise<string | null> {
+    return todo("runnersLastToast");
+  }
+
+  async runnersPageTitle(): Promise<string> {
+    return todo("runnersPageTitle");
+  }
+
+  async runnersSectionHeadings(): Promise<string[]> {
+    return todo("runnersSectionHeadings");
+  }
+
+  async runnersBreadcrumbLeaf(): Promise<string | null> {
+    return todo("runnersBreadcrumbLeaf");
+  }
+
+  async runnersDeniedVisible(): Promise<boolean> {
+    return todo("runnersDeniedVisible");
+  }
+
+  async runnersChromePresent(): Promise<boolean> {
+    return todo("runnersChromePresent");
+  }
+
+  async runnersFailPodsLoad(): Promise<void> {
+    return todo("runnersFailPodsLoad");
+  }
+
+  async runnersReleasePodsFailure(): Promise<void> {
+    return todo("runnersReleasePodsFailure");
+  }
 
   // --- Desktop-only chat + agent runtime (NEWFRONT-182). Throwing stubs
   // --- per the shared driver contract; the runners area fills these in.
@@ -6948,5 +7144,17 @@ export class WebNewDriver implements ParityDriver {
 
   async archivesDetailReactionControlEnabled(): Promise<boolean> {
     return todo("archivesDetailReactionControlEnabled");
+  }
+
+  async runnersWaitPodDeleteWorking(): Promise<void> {
+    return todo("runnersWaitPodDeleteWorking");
+  }
+
+  async runnersWaitRunnerDeleteWorking(): Promise<void> {
+    return todo("runnersWaitRunnerDeleteWorking");
+  }
+
+  async runnersWaitRunnerRevokeWorking(): Promise<void> {
+    return todo("runnersWaitRunnerRevokeWorking");
   }
 }
