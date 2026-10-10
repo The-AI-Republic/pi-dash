@@ -6,21 +6,72 @@
 //! mechanical. Subcommand names are the Django command names verbatim so
 //! runbooks transfer unchanged.
 //!
+//! * [`boot`] — the boot + storage commands (PIDASHCONV-806).
 //! * [`users`] — the users + membership commands (PIDASHCONV-807).
 //! * [`repair`] — the data-repair commands (PIDASHCONV-808).
 //! * [`prompting`] — the prompting reseed + revalidate commands
 //!   (PIDASHCONV-810).
 
+pub mod boot;
 pub mod prompting;
 pub mod repair;
 pub mod users;
 
 use clap::Subcommand;
+use pidash_services::ops::storage;
+use std::time::Duration;
 
-/// Management commands, grouped by owning issue.
+/// An ops failure: the one-line stderr message for paths where Python
+/// raises out of `handle` (traceback, exit 1). The exit code matches
+/// Python; the text is a single line instead of a traceback.
+#[derive(Debug)]
+pub struct OpsFailure(pub String);
+
+impl std::fmt::Display for OpsFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for OpsFailure {}
+
 #[derive(Debug, Subcommand)]
 #[command(rename_all = "snake_case")]
 pub enum OpsCommand {
+    // --- boot (PIDASHCONV-806) ---
+    // No `about`: Django sets no help text on `wait_for_db`
+    // (`db/management/commands/wait_for_db.py` has no `help` attribute),
+    // so `--help` shows the command name only. A doc comment here would
+    // wrongly become clap's `about`.
+    #[command(name = "wait_for_db")]
+    WaitForDb,
+    /// Wait for database migrations to complete before starting Celery worker/beat.
+    #[command(
+        name = "wait_for_migrations",
+        about = "Wait for database migrations to complete before starting Celery worker/beat"
+    )]
+    WaitForMigrations,
+    /// Clear Cache before starting the server to remove stale values.
+    #[command(
+        name = "clear_cache",
+        about = "Clear Cache before starting the server to remove stale values"
+    )]
+    ClearCache(boot::ClearCacheArgs),
+    /// Create the default bucket for the instance.
+    #[command(
+        name = "create_bucket",
+        about = "Create the default bucket for the instance"
+    )]
+    CreateBucket,
+    /// Create the default bucket for the instance.
+    ///
+    /// (The stale copy of create_bucket's help — ported as is from
+    /// `update_bucket.py:16`.)
+    #[command(
+        name = "update_bucket",
+        about = "Create the default bucket for the instance"
+    )]
+    UpdateBucket,
     // --- users (PIDASHCONV-807) ---
     /// Make the user with the given email active.
     ActivateUser(users::ActivateUserArgs),
@@ -69,20 +120,99 @@ pub enum OpsCommand {
     RevalidateSectionOverrides(prompting::RevalidateArgs),
 }
 
+/// Print one stdout line (Django's `self.stdout.write` appends `\n`).
+fn emit(line: &str) {
+    println!("{line}");
+}
+
+async fn run_create_bucket() -> Result<(), OpsFailure> {
+    let env = storage::S3Env::from_env();
+    let mut out = emit;
+    // Setup failures land in the outer `except Exception` arm (stdout,
+    // exit 0); only the symbolic-code `ValueError` escapes.
+    let target = match storage::resolve_create_target(&env) {
+        Ok(target) => target,
+        // The client-build `ValueError` precedes the `Checking bucket...`
+        // print (`create_bucket.py:20-30`), so it stands alone ...
+        Err(error @ storage::S3SetupError::InvalidEndpoint(_)) => {
+            out(&format!("An error occurred: {error}"));
+            return Ok(());
+        }
+        // ... while the `None`-bucket `TypeError` arises at the
+        // `head_bucket` call, after `Checking bucket...` prints (:30-32).
+        Err(error @ storage::S3SetupError::BucketNone) => {
+            out(storage::CHECKING_BUCKET);
+            out(&format!("An error occurred: {error}"));
+            return Ok(());
+        }
+    };
+    let ops = storage::ReqwestS3::new(&target);
+    storage::run_create_bucket(&ops, &target.bucket, &mut out)
+        .await
+        .map_err(|error| OpsFailure(error.to_string()))
+}
+
+async fn run_update_bucket() -> Result<(), OpsFailure> {
+    let env = storage::S3Env::from_env();
+    let mut out = emit;
+    let target = match storage::resolve_update_target(&env) {
+        Ok(storage::UpdateSetup::Ready(target)) => target,
+        Ok(storage::UpdateSetup::MissingBucket) => {
+            out(storage::PLEASE_SET_BUCKET);
+            return Ok(());
+        }
+        // `get_s3_client()` at `update_bucket.py:138` is outside any
+        // `try`: the client-build `ValueError` escapes `handle`
+        // (traceback, exit 1).
+        Err(error) => return Err(OpsFailure(error.to_string())),
+    };
+    let ops = storage::ReqwestS3::new(&target);
+    storage::run_update_bucket(
+        &ops,
+        &target.bucket,
+        &|path, content| std::fs::write(path, content),
+        &mut out,
+    )
+    .await
+    .map_err(|error| OpsFailure(error.to_string()))
+}
+
+/// Production poll sleeps, matching the Python `time.sleep` calls.
+pub const WAIT_FOR_DB_SLEEP: Duration = Duration::from_secs(1);
+pub const WAIT_FOR_MIGRATIONS_SLEEP: Duration = Duration::from_secs(10);
+
+/// Render a boot-group failure exactly (one stderr line, exit 1):
+/// the shared `Mode::Ops` dispatch belongs to the sibling groups, so the
+/// boot group exits from inside its arms (like the repair group does).
+fn boot_exit(error: OpsFailure) -> Box<dyn std::error::Error> {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    eprintln!("{error}");
+    std::process::exit(1);
+}
+
 /// Run one `ops` subcommand.
 ///
-/// The two groups keep their own failure conventions: repair runners print
-/// Django's exact bytes and exit 1 from inside the group runner, while
-/// prompting runners return `Err` (a boot/DB failure `main` renders as a
-/// CLI boot error, exit 1 — there is no Django-oracle shape for failures,
-/// only for the documented matrices). Success prints Django's lines to
-/// stdout and returns `Ok` (exit 0). Users runners need exit codes
-/// and injected stdio, so they dispatch through [`run_users`], which
-/// exits from inside on failure (the repair precedent) and returns
-/// `Ok` on success.
+/// The four groups keep their own failure conventions: boot, users and
+/// repair runners print Django's exact bytes and exit 1 from inside the
+/// group runner, while prompting runners return `Err` (a boot/DB failure
+/// `main` renders as a CLI boot error, exit 1 — there is no Django-oracle
+/// shape for failures, only for the documented matrices). Users runners
+/// need exit codes and injected stdio, so they dispatch through
+/// [`run_users`], which exits from inside on failure (the repair
+/// precedent) and returns `Ok` on success. Success prints Django's lines
+/// to stdout and returns `Ok` (exit 0).
 pub async fn run(command: OpsCommand) -> Result<(), Box<dyn std::error::Error>> {
     use pidash_services::ops::prompting::TemplateKind;
     match command {
+        // --- boot (PIDASHCONV-806) ---
+        OpsCommand::WaitForDb => boot::run_wait_for_db().await.map_err(boot_exit),
+        OpsCommand::WaitForMigrations => boot::run_wait_for_migrations().await.map_err(boot_exit),
+        OpsCommand::ClearCache(args) => boot::run_clear_cache(args.key.as_deref())
+            .await
+            .map_err(boot_exit),
+        OpsCommand::CreateBucket => run_create_bucket().await.map_err(boot_exit),
+        OpsCommand::UpdateBucket => run_update_bucket().await.map_err(boot_exit),
         // --- users (PIDASHCONV-807) ---
         users_command @ (OpsCommand::ActivateUser(_)
         | OpsCommand::ResetPassword(_)
@@ -189,5 +319,72 @@ async fn run_users(command: OpsCommand) -> Result<(), Box<dyn std::error::Error>
         Ok(0) => Ok(()),
         Ok(code) => std::process::exit(code),
         Err(error) => error.exit(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Cli, Mode};
+    use clap::Parser;
+
+    fn parse_ops(argv: &[&str]) -> OpsCommand {
+        let mut full = vec!["pidash-api", "ops"];
+        full.extend(argv.iter());
+        match Cli::try_parse_from(full)
+            .unwrap_or_else(|error| panic!("parses {argv:?}: {error}"))
+            .mode
+        {
+            Mode::Ops { command } => command,
+            _ => panic!("wrong mode for {argv:?}"),
+        }
+    }
+
+    /// Command names are underscored Django names, not kebab-case.
+    #[test]
+    fn command_names_match_django() {
+        for (argv, check) in [
+            ("wait_for_db", "WaitForDb"),
+            ("wait_for_migrations", "WaitForMigrations"),
+            ("clear_cache", "ClearCache"),
+            ("create_bucket", "CreateBucket"),
+            ("update_bucket", "UpdateBucket"),
+        ] {
+            let command = parse_ops(&[argv]);
+            assert!(
+                format!("{command:?}").starts_with(check),
+                "{argv} parses to {check}"
+            );
+        }
+        assert!(
+            Cli::try_parse_from(["pidash-api", "ops", "wait-for-db"]).is_err(),
+            "kebab-case is not a Django command name"
+        );
+    }
+
+    /// `--key` takes an optional value (`nargs="?"`): absent and bare
+    /// both yield the full-clear path, like argparse's `None` const.
+    #[test]
+    fn clear_cache_key_arg_shapes() {
+        assert!(matches!(
+            parse_ops(&["clear_cache"]),
+            OpsCommand::ClearCache(boot::ClearCacheArgs { key: None })
+        ));
+        assert!(matches!(
+            parse_ops(&["clear_cache", "--key"]),
+            OpsCommand::ClearCache(boot::ClearCacheArgs { key: Some(_) })
+        ));
+        match parse_ops(&["clear_cache", "--key", "k"]) {
+            OpsCommand::ClearCache(args) => assert_eq!(args.key.as_deref(), Some("k")),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// Unknown options fail with exit code 2, like argparse.
+    #[test]
+    fn unknown_option_exits_2() {
+        let error = Cli::try_parse_from(["pidash-api", "ops", "clear_cache", "--bogus"])
+            .expect_err("rejects");
+        assert_eq!(error.exit_code(), 2);
     }
 }

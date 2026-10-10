@@ -8,6 +8,13 @@ name: rust-api-contract-tests-ops
 # No servers or workers: nothing consumes the broker `celery` queue
 # while the sync_* tests drain their own marker messages.
 
+# PIDASHCONV-806: ops-boot-storage job (commands A: boot + storage).
+# F37-01/F37-02 replay against scratch Postgres + Redis + LocalStack S3.
+# No Django is needed: the suite drives the binary directly, seeds
+# django_migrations over SQL, and (for the 403/denied/drop branches) an
+# in-test SigV4-verifying stub. Only the LocalStack happy paths need the
+# S3 container in that job.
+
 on:
   push:
     branches: [rust-dev]
@@ -18,6 +25,13 @@ on:
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-ops.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   ops-repair:
@@ -133,4 +147,85 @@ jobs:
         # The API install puts pytest-django in this interpreter; the
         # parent never imports Django (manage.py runs as a subprocess
         # with this same environment).
-        run: pytest -p no:django ops/ -v
+        # ops/test_boot_storage.py (PIDASHCONV-806) runs in the
+        # ops-boot-storage job below: it needs the LocalStack S3
+        # backend + AWS_* env that this job does not provide.
+        run: pytest -p no:django ops/ -v --ignore=ops/test_boot_storage.py
+
+  ops-boot-storage:
+    name: ops boot + storage vs binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:15.7-alpine
+        env:
+          POSTGRES_USER: pi_dash
+          POSTGRES_PASSWORD: pi_dash
+          POSTGRES_DB: pi_dash
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
+      # Dedicated database number: the clear_cache path runs a real
+      # FLUSHDB here, like Django (same convention as the ops cargo test).
+      REDIS_URL: redis://localhost:6379/6
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_S3_ENDPOINT_URL: http://localhost:4566
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.x"
+          cache: pip
+          cache-dependency-path: rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install contract-test dependencies
+        working-directory: rust-api/contract-tests
+        run: pip install -r requirements.txt
+
+      - name: Start S3 (LocalStack)
+        run: |
+          docker run -d --name contract-s3 -p 4566:4566 \
+            -e SERVICES=s3 \
+            localstack/localstack:4.5.0
+          for i in $(seq 1 45); do
+            curl -sf http://localhost:4566/_localstack/health && break
+            sleep 2
+          done
+
+      - name: Build pidash-api binary
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Run ops contract suite
+        working-directory: rust-api/contract-tests
+        env:
+          PIDASH_API_BIN: ${{ github.workspace }}/rust-api/target/debug/pidash-api
+        run: python -m pytest ops/test_boot_storage.py -v

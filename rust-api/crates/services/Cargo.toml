@@ -11,7 +11,7 @@ pidash-auth = { path = "../auth" }
 # (no lock churn). D-09 workspace seed uses NaiveDate through the same
 # feature set; the D-09 versions port additionally needs serde for the
 # typed row builders.
-chrono = { version = "0.4.45", default-features = false, features = ["std", "serde"] }
+chrono = { version = "0.4.45", default-features = false, features = ["std", "serde", "clock"] }
 serde = { version = "1", features = ["derive"] }
 # D-18 work-item shapes: to_representation builds wire-ordered maps, so Map
 # must preserve insertion order (same locked serde_json 1.x + indexmap already
@@ -49,6 +49,26 @@ sha2 = "0.11"
 # D-36 scheduler serializers: ZoneInfo-membership check for binding tzid
 # validation (same locked chrono-tz 0.10.x as pidash-api, no lock churn).
 chrono-tz = "0.10"
+# D-37 ops commands (PIDASHCONV-806): wait-loop probes + migration-plan
+# check run SQL directly (same locked sqlx 0.8.x as pidash-db — subset of
+# its features, so no lock churn).
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
+# D-37 clear_cache: DEL + FLUSHDB against REDIS_URL (same locked redis 1.x
+# and the same feature set as pidash-db, no lock churn).
+redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots"] }
+# D-37 bucket commands: async S3 client (same locked reqwest 0.12.x as
+# pidash-api, minus `stream` which the ops client does not need).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+# D-37 wait loops: sleep/timeout only (the runtime comes from the binary;
+# macros/rt stay dev-only for the async unit tests below).
+tokio = { version = "1", features = ["time"] }
+# D-37 SigV4: reuse the shared hashing helper; the storage crate itself
+# stays read-only (its fixed-shape sign_* helpers cannot sign the
+# query-bearing list/policy requests, so ops signs those itself).
+pidash-storage = { path = "../storage" }
+# D-37 PutObject/PutBucketPolicy: botocore auto-sends Content-MD5 on these
+# (same locked md-5 0.10.x already in the tree, no lock churn).
+md-5 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
