@@ -56,6 +56,26 @@ Drops the scratch volume and rebuilds through `parity-up.sh`. The script
 prints its target first; if the names ever stop matching this stack, stop
 and ask a human instead of proceeding.
 
+## Oracle build: dev or production
+
+By default the oracle is the old app's dev server (`oracle`). It compiles
+pages on demand, so it is the heaviest service in the stack: several hundred
+MB of memory and most of the stack's CPU while a suite runs.
+
+```sh
+PARITY_ORACLE_MODE=prod apps/web_new/e2e/parity/stack/parity-up.sh
+```
+
+serves the same code as a production build instead (`oracle-prod`: built by
+`Dockerfile.oracle-prod`, static files behind nginx). It uses a few MB and
+almost no CPU, and Docker reuses its layers until the old app's own sources
+change, so only the first bring-up pays for the build.
+
+The two builds are not identical to drive. The dev server runs React in
+StrictMode and without minification; a few recorded old-app bugs exist only
+there. Scenarios were made green against the dev oracle, so treat `prod` as
+opt-in until the suite has been confirmed against it.
+
 ## Teardown
 
 ```sh

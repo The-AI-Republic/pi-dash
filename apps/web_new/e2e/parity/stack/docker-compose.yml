@@ -169,6 +169,20 @@ services:
     depends_on:
       - api
 
+  # The old app as a production build (opt-in: PARITY_ORACLE_MODE=prod).
+  # Same code as `oracle`, built by Dockerfile.oracle-prod and served as
+  # static files by nginx on :3000. It needs a fraction of the dev server's
+  # CPU and memory, and its image layers are reused until the old app's own
+  # sources change. Behind a profile so the default stack is unchanged.
+  oracle-prod:
+    build:
+      context: ../../../../..
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle-prod
+    image: parity19-oracle-prod:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-prod
+    mem_limit: 256m
+    profiles: ["oracle-prod"]
+
   # Background task worker (NEWFRONT-115). The API queues mention
   # extraction, mention links and notifications as celery tasks; without a
   # consumer those rows never materialize, so mention/notification oracle
@@ -225,12 +239,14 @@ services:
     image: caddy:2-alpine
     container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-proxy
     mem_limit: 128m
+    # No depends_on for the frontend: parity-up.sh starts whichever oracle
+    # service is selected (oracle, or oracle-prod), and the proxy resolves
+    # its upstream per request.
     depends_on:
       - api
-      - oracle
       - minio
     # Forwarded so the Caddyfile's {$ORACLE_UPSTREAM} override (native
-    # frontend) reaches the server; unset keeps the stock oracle:3000.
+    # frontend, or oracle-prod) reaches the server; unset keeps oracle:3000.
     environment:
       ORACLE_UPSTREAM: ${ORACLE_UPSTREAM:-oracle:3000}
     volumes:
