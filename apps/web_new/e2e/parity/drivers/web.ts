@@ -29585,12 +29585,27 @@ export class WebDriver implements ParityDriver {
     await this.modulesMemberOptions().first().waitFor({ timeout: WebDriver.OPEN_MS });
   }
 
+  // Innermost option label: Headless wraps the option content in an
+  // outer span.truncate (avatar plus label), so the first match reads
+  // "PYou" instead of "You"; the last match is the label itself. The
+  // evaluates below inline this (they cannot close over statics).
+  private static modulesEscapeRegExp(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  /** Options whose inner label reads exactly `label`. */
+  private modulesMemberOption(label: string): Locator {
+    const exact = new RegExp(`^${WebDriver.modulesEscapeRegExp(label)}$`);
+    return this.modulesMemberOptions().filter({ has: this.page.locator("span.truncate", { hasText: exact }) });
+  }
+
   async modulesDialogLead(): Promise<string> {
     await this.modulesOpenLeadPicker();
     const labels = await this.page.evaluate(() => {
       const picked: string[] = [];
       document.querySelectorAll('[role="option"][aria-selected="true"]').forEach((option) => {
-        const text = option.querySelector("span.truncate")?.textContent?.trim() ?? option.textContent?.trim() ?? "";
+        const spans = option.querySelectorAll("span.truncate");
+        const text = spans[spans.length - 1]?.textContent?.trim() ?? option.textContent?.trim() ?? "";
         if (text !== "") picked.push(text);
       });
       return picked;
@@ -29602,9 +29617,10 @@ export class WebDriver implements ParityDriver {
   async modulesDialogLeadOptions(): Promise<string[]> {
     await this.modulesOpenLeadPicker();
     const names = await this.modulesMemberOptions().evaluateAll((options) =>
-      options.map(
-        (option) => option.querySelector("span.truncate")?.textContent?.trim() ?? option.textContent?.trim() ?? ""
-      )
+      options.map((option) => {
+        const spans = option.querySelectorAll("span.truncate");
+        return spans[spans.length - 1]?.textContent?.trim() ?? option.textContent?.trim() ?? "";
+      })
     );
     await this.page.keyboard.press("Escape");
     return names.filter((name) => name.length > 0);
@@ -29612,10 +29628,7 @@ export class WebDriver implements ParityDriver {
 
   async modulesDialogPickLead(label: string): Promise<void> {
     await this.modulesOpenLeadPicker();
-    await this.modulesMemberOptions()
-      .filter({ has: this.page.locator("span.truncate", { hasText: label }) })
-      .first()
-      .click({ timeout: WebDriver.OPEN_MS });
+    await this.modulesMemberOption(label).first().click({ timeout: WebDriver.OPEN_MS });
     // Single-select closes on pick; the portal detaches with it.
     await this.modulesMemberOptions()
       .first()
@@ -29633,7 +29646,8 @@ export class WebDriver implements ParityDriver {
     const labels = await this.page.evaluate(() => {
       const picked: string[] = [];
       document.querySelectorAll('[role="option"][aria-selected="true"]').forEach((option) => {
-        const text = option.querySelector("span.truncate")?.textContent?.trim() ?? option.textContent?.trim() ?? "";
+        const spans = option.querySelectorAll("span.truncate");
+        const text = spans[spans.length - 1]?.textContent?.trim() ?? option.textContent?.trim() ?? "";
         if (text !== "") picked.push(text);
       });
       return picked;
@@ -29645,10 +29659,7 @@ export class WebDriver implements ParityDriver {
   async modulesDialogPickMembers(labels: string[]): Promise<void> {
     await this.modulesOpenMembersPicker();
     for (const label of labels) {
-      await this.modulesMemberOptions()
-        .filter({ has: this.page.locator("span.truncate", { hasText: label }) })
-        .first()
-        .click({ timeout: WebDriver.OPEN_MS });
+      await this.modulesMemberOption(label).first().click({ timeout: WebDriver.OPEN_MS });
     }
     // Multiple-select stays open; Escape applies and dismisses.
     await this.page.keyboard.press("Escape");
