@@ -144,17 +144,15 @@ impl EdgeFlags {
         let mut flags = Self::all_off();
         for prefix in Prefix::ALL {
             let name = format!("{FLAG_ENV_PREFIX}{}", prefix.env_suffix());
-            let on = std::env::var(&name)
-                .map(|v| {
-                    matches!(
-                        v.trim().to_ascii_lowercase().as_str(),
-                        "1" | "true" | "yes" | "on"
-                    )
-                })
-                .unwrap_or(false);
-            flags.set(prefix, on);
+            flags.set(prefix, env_is_truthy(&name));
         }
         flags
+    }
+
+    /// All flags on. Only the shadow router uses this: the shadow dispatch
+    /// answers "what would Rust serve if this prefix were flipped".
+    pub fn all_on() -> Self {
+        Self { flags: [true; 11] }
     }
 
     fn index(prefix: Prefix) -> usize {
@@ -175,11 +173,29 @@ impl EdgeFlags {
     }
 }
 
+/// The shared truthy rule for `PIDASH_RUST_*` and the shadow flags:
+/// `1/true/yes/on` (case-insensitive) is on, everything else (including
+/// absent) is off.
+pub(crate) fn env_is_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 #[derive(Debug)]
 struct EdgeState {
     upstream: String,
     client: reqwest::Client,
     flags: RwLock<EdgeFlags>,
+    /// True for handles derived by [`EdgeHandle::shadow_side`]: the proxy
+    /// refuses to run under these (a marker instead of a second Django
+    /// hit), which is how the shadow dispatch reports "no Rust handler".
+    shadow_side: bool,
 }
 
 /// Shared cutover state: Django upstream, proxy client, live flags.
@@ -207,8 +223,30 @@ impl EdgeHandle {
                 upstream: upstream.into().trim_end_matches('/').to_owned(),
                 client,
                 flags: RwLock::new(flags),
+                shadow_side: false,
             }),
         })
+    }
+
+    /// Derive a shadow-side handle sharing this upstream and client, with
+    /// all flags on. Gated handlers serve their Rust response under it; the
+    /// proxy itself refuses to run under it (see [`Self::is_shadow_side`]).
+    pub fn shadow_side(&self) -> Self {
+        Self {
+            inner: Arc::new(EdgeState {
+                upstream: self.inner.upstream.clone(),
+                client: self.inner.client.clone(),
+                flags: RwLock::new(EdgeFlags::all_on()),
+                shadow_side: true,
+            }),
+        }
+    }
+
+    /// True for [`Self::shadow_side`] derivations: proxying under one would
+    /// be a second Django hit for a request Django already answered, so
+    /// [`proxy_request`] answers a shadow marker instead.
+    pub fn is_shadow_side(&self) -> bool {
+        self.inner.shadow_side
     }
 
     /// All flags off, pointing at [`DEFAULT_UPSTREAM`].
@@ -273,6 +311,19 @@ pub async fn proxy(State(state): State<AppState>, req: Request) -> Response {
 }
 
 async fn proxy_request(state: &AppState, req: Request) -> Response {
+    // A shadow dispatch that reaches the proxy (an unowned method on an
+    // otherwise owned path) means "no Rust handler for this method": mark
+    // it, never hit Django a second time.
+    if state.edge().is_shadow_side() {
+        return crate::edge_shadow::no_handler_response(
+            crate::edge_shadow::NoHandlerReason::Proxied,
+        );
+    }
+    // Shadow eligibility is decided before proxying; `None` (including
+    // "shadow disabled") keeps the code path below exactly today's.
+    let shadow = crate::edge_shadow::precheck(state, &req);
+    let shadow_headers = shadow.as_ref().map(|_| req.headers().clone());
+    let shadow_version = shadow.as_ref().map(|_| req.version());
     let edge = state.edge();
     let method = req.method().clone();
     let path_and_query = req
@@ -311,26 +362,61 @@ async fn proxy_request(state: &AppState, req: Request) -> Response {
     }
     outgoing = outgoing.headers(forwarded);
 
-    match axum::body::to_bytes(req.into_body(), usize::MAX).await {
-        Ok(bytes) => {
-            outgoing = outgoing.body(bytes);
-        }
+    let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+        Ok(bytes) => bytes,
         Err(_) => return bad_gateway(),
-    }
+    };
+    // The shadow re-dispatch replays the same body Django just received.
+    let shadow_body = shadow.as_ref().map(|_| body_bytes.clone());
+    outgoing = outgoing.body(body_bytes);
 
     let upstream = match outgoing.send().await {
         Ok(response) => response,
         Err(_) => return bad_gateway(),
     };
 
-    let mut response = Response::builder().status(upstream.status());
-    for (name, value) in upstream.headers() {
+    if let (Some(plan), Some(headers), Some(version), Some(body)) =
+        (shadow, shadow_headers, shadow_version, shadow_body)
+    {
+        return crate::edge_shadow::respond_with_shadow(
+            plan,
+            upstream,
+            crate::edge_shadow::ShadowRequestParts {
+                method,
+                path_and_query,
+                version,
+                headers,
+                body,
+            },
+        )
+        .await;
+    }
+
+    let status = upstream.status();
+    let headers = upstream.headers().clone();
+    forward_upstream_response(
+        status,
+        &headers,
+        axum::body::Body::from_stream(upstream.bytes_stream()),
+    )
+}
+
+/// Build the client response from an upstream status, headers, and body.
+/// The plain and shadow-teed proxy paths share this funnel, so the client
+/// can never observe which path served it.
+pub(crate) fn forward_upstream_response(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: axum::body::Body,
+) -> Response {
+    let mut response = Response::builder().status(status);
+    for (name, value) in headers {
         if is_hop_by_hop(name) {
             continue;
         }
         response = response.header(name, value);
     }
-    match response.body(axum::body::Body::from_stream(upstream.bytes_stream())) {
+    match response.body(body) {
         Ok(response) => response,
         Err(_) => bad_gateway(),
     }

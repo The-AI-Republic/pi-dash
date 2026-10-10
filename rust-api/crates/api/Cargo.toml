@@ -97,7 +97,12 @@ rand = "0.9"
 rand08 = { package = "rand", version = "0.8" }
 tokio-rustls = "0.26.5"
 webpki-roots = "1.0.9"
-tower = { version = "0.5" }
+tower = { version = "0.5", features = ["util"] }
+# Shadow dispatch (`edge_shadow`) re-dispatches through the shadow router
+# with `oneshot` (`util`, already enabled for dev) and tees the upstream
+# body through a `Stream` adapter (`futures-core`; both already in the
+# lockfile via axum/reqwest, so no new downloads).
+futures-core = "0.3"
 tracing = "0.1"
 # GitHub App JWT (`build_app_jwt`, RS256): same 9.x line the auth and jobs
 # crates build on, so the lockfile gains no new downloads.
@@ -127,3 +132,6 @@ markup5ever_rcdom = "0.39.0"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# Shadow integration tests assert the mismatch log line through a captured
+# subscriber. Already in the lockfile via the binary, so no new downloads.
+tracing-subscriber = "0.3"

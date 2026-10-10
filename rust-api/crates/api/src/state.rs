@@ -7,6 +7,7 @@ use pidash_db::redis::RedisHandle;
 use pidash_db::Pools;
 
 use crate::edge::{EdgeHandle, DEFAULT_UPSTREAM};
+use crate::edge_shadow::{ShadowConfig, ShadowGate};
 
 /// Data every handler can read. Extended by later issues (session keys
 /// under F-05); handlers take it by extractor, never globals.
@@ -22,6 +23,8 @@ pub struct AppState {
     edge: EdgeHandle,
     pools: Option<Arc<Pools>>,
     redis: Option<RedisHandle>,
+    shadow_gate: Option<Arc<ShadowGate>>,
+    shadow_config: Option<ShadowConfig>,
 }
 
 impl AppState {
@@ -60,6 +63,48 @@ impl AppState {
             edge,
             pools: None,
             redis: None,
+            shadow_gate: None,
+            shadow_config: None,
+        }
+    }
+
+    /// Attach the shadow gate (PIDASHCONV-822). Installed once by the
+    /// router builder, which also builds the gate's shadow app.
+    pub fn with_shadow_gate(mut self, gate: Arc<ShadowGate>) -> Self {
+        self.shadow_gate = Some(gate);
+        self
+    }
+
+    /// The installed shadow gate, if the router builder installed one.
+    pub fn shadow_gate(&self) -> Option<&Arc<ShadowGate>> {
+        self.shadow_gate.as_ref()
+    }
+
+    /// Override the shadow config the router builder installs the gate
+    /// with (tests enable shadow deterministically this way instead of
+    /// through process env). `None` reads [`ShadowConfig::from_env`].
+    pub fn with_shadow_config(mut self, config: ShadowConfig) -> Self {
+        self.shadow_config = Some(config);
+        self
+    }
+
+    /// The shadow config override, if any.
+    pub fn shadow_config(&self) -> Option<&ShadowConfig> {
+        self.shadow_config.as_ref()
+    }
+
+    /// Clone this state with a different edge handle. The shadow state
+    /// drops the gate and the config override: shadow dispatch never
+    /// spawns nested shadow work.
+    pub fn with_edge_replaced(&self, edge: EdgeHandle) -> Self {
+        Self {
+            version: self.version.clone(),
+            settings: self.settings.clone(),
+            edge,
+            pools: self.pools.clone(),
+            redis: self.redis.clone(),
+            shadow_gate: None,
+            shadow_config: None,
         }
     }
 
