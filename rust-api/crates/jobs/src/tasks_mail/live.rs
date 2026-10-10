@@ -206,25 +206,37 @@ const MAIL_RECEIVER_SQL: &str = "SELECT email FROM users WHERE id = $1";
 /// fields, with the `avatar_url` property's inputs in one round trip: the
 /// `avatar` text, the `avatar_asset_id` FK, and the asset row's dispatch
 /// inputs (`entity_type`, `project_id`, `issue_id`, workspace slug).
+/// `users` has no `deleted_at` column (stock `UserManager`); the asset and
+/// workspace joins are scoped to live rows like the FK descriptors they
+/// replace (a soft-deleted asset/workspace raises `DoesNotExist` in
+/// Python — the generic `except`, i.e. [`MailDbError::Db`]).
 const MAIL_ACTOR_SQL: &str = "SELECT u.first_name, u.last_name, u.avatar, u.avatar_asset_id, \
      a.id AS asset_id, a.entity_type, a.project_id, a.issue_id, w.slug AS workspace_slug \
-     FROM users u LEFT JOIN file_assets a ON a.id = u.avatar_asset_id \
-     LEFT JOIN workspaces w ON w.id = a.workspace_id WHERE u.id = $1";
+     FROM users u LEFT JOIN file_assets a ON a.id = u.avatar_asset_id AND a.deleted_at IS NULL \
+     LEFT JOIN workspaces w ON w.id = a.workspace_id AND w.deleted_at IS NULL WHERE u.id = $1";
 
-/// `Issue.objects.get(pk=issue_id)` (`:184`): the issue columns; the
-/// project/workspace joins below mirror the lazy `issue.project` /
-/// `issue.project.workspace` fetches (a missing join row is a generic
-/// `except`, never the silent `DoesNotExist` path).
-const MAIL_ISSUE_SQL: &str = "SELECT id, name, sequence_id, project_id FROM issues WHERE id = $1";
+/// `Issue.objects.get(pk=issue_id)` (`:184`): the issue columns,
+/// scoped to live rows (`SoftDeletionManager` — a soft-deleted issue is
+/// `DoesNotExist`, the silent path); the project/workspace joins below
+/// mirror the lazy `issue.project` / `issue.project.workspace` fetches (a
+/// missing join row is a generic `except`, never the silent
+/// `DoesNotExist` path).
+const MAIL_ISSUE_SQL: &str =
+    "SELECT id, name, sequence_id, project_id FROM issues WHERE id = $1 AND deleted_at IS NULL";
 
-/// `issue.project` + `issue.project.workspace` (`:236-259`).
+/// `issue.project` + `issue.project.workspace` (`:236-259`), scoped to
+/// live rows like the descriptors (soft-deleted on either side is the
+/// generic `except`).
 const MAIL_PROJECT_SQL: &str = "SELECT p.id, p.identifier, p.name, w.slug \
-     FROM projects p JOIN workspaces w ON w.id = p.workspace_id WHERE p.id = $1";
+     FROM projects p JOIN workspaces w ON w.id = p.workspace_id \
+     WHERE p.id = $1 AND p.deleted_at IS NULL AND w.deleted_at IS NULL";
 
 /// `EmailNotificationLog.objects.filter(pk__in=email_notification_ids)
 /// .update(sent_at=timezone.now())` (`:287`): a no-op for an empty id list,
-/// exactly like the ORM call.
-const MAIL_SENT_SQL: &str = "UPDATE email_notification_logs SET sent_at = now() WHERE id = ANY($1)";
+/// exactly like the ORM call — and soft-deleted rows stay unmarked, like
+/// the manager-scoped queryset.
+const MAIL_SENT_SQL: &str =
+    "UPDATE email_notification_logs SET sent_at = now() WHERE id = ANY($1) AND deleted_at IS NULL";
 
 /// Per-mention `User.objects.get(pk=user_id).display_name` (`:136`).
 const MAIL_DISPLAY_NAME_SQL: &str = "SELECT display_name FROM users WHERE id = $1";
@@ -1108,6 +1120,31 @@ mod tests {
             MAIL_DISPLAY_NAME_SQL,
         ] {
             Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, sql).expect("parses");
+        }
+    }
+
+    #[test]
+    fn mail_statements_scope_soft_deleted_rows() {
+        // The default managers scope every soft-deletable read
+        // (`SoftDeletionManager`); `users` has no `deleted_at` column, so
+        // only its two statements stay unscoped (the `pg_notify` pin
+        // precedent in `queue.rs`).
+        for sql in [
+            MAIL_ACTOR_SQL,
+            MAIL_ISSUE_SQL,
+            MAIL_PROJECT_SQL,
+            MAIL_SENT_SQL,
+        ] {
+            assert!(
+                sql.contains("deleted_at IS NULL"),
+                "unscoped soft-deletable read: {sql}"
+            );
+        }
+        for sql in [MAIL_RECEIVER_SQL, MAIL_DISPLAY_NAME_SQL] {
+            assert!(
+                !sql.contains("deleted_at"),
+                "users has no deleted_at column: {sql}"
+            );
         }
     }
 

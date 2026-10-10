@@ -210,6 +210,61 @@ def test_rust_send_executes_locally(smtp_sink, db_conn):
     assert _log_count(db_conn) == logs_before, "id-less send touched log rows"
 
 
+def test_rust_send_skips_soft_deleted_issue(smtp_sink, db_conn):
+    """A direct send to a soft-deleted issue stays silent (no mail).
+
+    Django reads the issue through the soft-deleting default manager, so
+    ``Issue.objects.get`` raises ``DoesNotExist`` and the task returns
+    silently after releasing the lock. The Rust read must scope the same
+    way: the job settles, the broker stays flat, and the sink stays
+    empty.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"maildead{tag}")
+    receiver = seed_helpers.user(db_conn, f"contract-rust-dead-{tag}")
+    issue_id = str(chain["issue"]["id"])
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET deleted_at = now() WHERE id = %s",
+            (issue_id,),
+        )
+    _seed_base_api(issue_id)
+    smtp_sink.clear()
+    _publish_and_observe_local(
+        SEND,
+        _send_kwargs(receiver["id"], issue_id),
+    )
+    rust_queue.wait_for_queue_drain(what="deleted-issue send settled")
+    assert smtp_sink.snapshot() == [], "send mailed a soft-deleted issue"
+
+
+def test_rust_stack_ignores_soft_deleted_logs(smtp_sink, db_conn):
+    """The stack never fans out (or marks) soft-deleted logs.
+
+    Django's ``:49`` select runs on the soft-deleting default manager, so
+    deleted logs are invisible to the fan-out and stay unmarked by the
+    ``:84`` update. The Rust statements must scope the same way: the run
+    settles, the broker stays flat, both logs stay unprocessed, and no
+    mail is sent for them.
+    """
+    seeded = _seed_stack(db_conn, uuid.uuid4().hex[:8])
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE email_notification_logs SET deleted_at = now() "
+            "WHERE id = ANY(%s)",
+            ([str(log_id) for log_id in seeded["ids"]],),
+        )
+    _seed_base_api(seeded["issue_id"])
+    smtp_sink.clear()
+    _publish_and_observe_local(STACK, {})
+    rust_queue.wait_for_queue_drain(what="deleted-log stack settled")
+    assert smtp_sink.snapshot() == [], "stack fanned out soft-deleted logs"
+    for log_id in seeded["ids"]:
+        assert _processed_at(db_conn, log_id) is None, (
+            f"stack marked processed_at on soft-deleted {log_id}"
+        )
+
+
 # Every mail task name that is still Python-owned: published, forwarded,
 # settled, broker +1, no local rows. `notifications` (PIDASHCONV-834) and
 # `send`/`stack_email_notification` (PIDASHCONV-865) execute locally and
