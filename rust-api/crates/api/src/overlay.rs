@@ -85,7 +85,7 @@ impl RouteGroup {
 
 /// The private crate's contribution: group replacements plus additive
 /// routes. Empty by default (pure OSS build).
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Overlay {
     replace: HashMap<RouteGroup, Router<AppState>>,
     extra: Vec<Router<AppState>>,
@@ -343,13 +343,38 @@ async fn healthz(
 /// the OSS handler — the cloud conf placing its paths ahead of the OSS
 /// include — without ever merging duplicate paths (which axum rejects).
 pub fn build_router_with_overlay(state: AppState, overlay: Overlay) -> Router {
-    let mut oss = Router::new().route("/healthz", get(healthz));
+    let mut oss = Router::new().route("/healthz", get(healthz)).route(
+        crate::edge_shadow::METRICS_PATH,
+        get(crate::edge_shadow::metrics),
+    );
     for group in RouteGroup::ALL {
         oss = oss.merge(match overlay.replaced(group) {
             Some(replacement) => replacement,
             None => oss_group_routes(group),
         });
     }
+    // Shadow gate (PIDASHCONV-822): a second app over the same groups and
+    // extras under a flags-on shadow state, installed into the real state
+    // before it is shared with the handlers. Pure router construction, no
+    // I/O; when shadow is disabled the gate only counts nothing.
+    let shadow_config = state
+        .shadow_config()
+        .cloned()
+        .unwrap_or_else(crate::edge_shadow::ShadowConfig::from_env);
+    let shadow_state = state.with_edge_replaced(state.edge().shadow_side());
+    let mut shadow_groups = Router::new();
+    for group in RouteGroup::ALL {
+        shadow_groups = shadow_groups.merge(match overlay.replaced(group) {
+            Some(replacement) => replacement,
+            None => oss_group_routes(group),
+        });
+    }
+    let shadow_app =
+        crate::edge_shadow::build_shadow_app(&shadow_state, shadow_groups, overlay.extra.clone());
+    let state = state.with_shadow_gate(std::sync::Arc::new(crate::edge_shadow::ShadowGate::new(
+        shadow_config,
+        shadow_app,
+    )));
     let oss = oss.fallback(edge::proxy).with_state(state.clone());
     let mut app: Router<AppState> = Router::new();
     for extra in overlay.extra {

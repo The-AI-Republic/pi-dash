@@ -38,6 +38,7 @@ pub mod assistant;
 pub mod auth_oauth;
 pub mod auth_session;
 pub mod edge;
+pub mod edge_shadow;
 pub mod license;
 pub mod r#loop;
 pub mod middleware;
@@ -65,6 +66,7 @@ pub mod v1_work_items;
 pub mod web;
 
 pub use edge::{EdgeFlags, EdgeHandle, Prefix, DEFAULT_UPSTREAM};
+pub use edge_shadow::{ShadowConfig, METRICS_PATH as SHADOW_METRICS_PATH};
 pub use middleware::{
     stack, ApiTokenLogRecord, BodyLimitLayer, CorsConfig, CorsLayer, GzipLayer, LogSink,
     LoggerUserId, LoggingConfig, MemorySessionStore, PgSessionStore, RequestLogRecord,

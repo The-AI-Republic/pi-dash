@@ -118,6 +118,60 @@ unset PIDASH_RUST_WEB               # + restart: traffic returns to Django
 curl localhost:8080/                # Django's bytes again
 ```
 
+## Shadow reads (PIDASHCONV-822)
+
+Stage-8 validation: with `PIDASH_RUST_SHADOW=1` (default off), a `GET` or
+`HEAD` on a prefix whose flag is OFF still returns Django's response to the
+client byte-identically, and additionally computes the Rust handler's
+response for the same request in the background and compares the two. The
+client never waits on the shadow call. Code:
+`crates/api/src/edge.rs` (proxy hook) and `crates/api/src/edge_shadow.rs`.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `PIDASH_RUST_SHADOW` | off | `1/true/yes/on` enables shadow reads |
+| `PIDASH_RUST_SHADOW_MAX_INFLIGHT` | `8` | concurrent shadow cap; over it, skip and count |
+| `PIDASH_RUST_SHADOW_SAMPLE` | `1.0` | sampling rate, clamped to `0.0`–`1.0` |
+
+Eligibility: safe reads only. Writes (`POST`/`PUT`/`PATCH`/`DELETE`)
+never shadow, `X-Api-Key` requests never shadow (both backends stamp
+`last_used` on every one, so a re-dispatch would double-write), and the
+denylist in `edge_shadow.rs` (`DENYLIST`) excludes `GET`s with side
+effects: the CSRF-token mint, OAuth initiates/callbacks (all four
+providers, app + space), and the presigned-URL `GET`s. Shadow work runs
+after the response is sent with a 10 s budget per phase and the
+concurrency cap above; event streams, content-encoded bodies, and bodies over 8 MiB skip.
+
+Comparison: status, content-type, body. Byte-identical bodies match;
+otherwise JSON bodies are normalized over the fixed volatile allowlist
+and compared semantically — request ids (`request_id`, `requestId`) and
+presigned-URL query parameters (`X-Amz-Date`, `X-Amz-Expires`,
+`X-Amz-Signature`, `Expires`, `Signature`, `sig`). Everything else must
+match byte for byte. Extend the allowlist only with cited evidence.
+
+On mismatch the proxy logs one structured `shadow mismatch` line (route
+template, method, both statuses, a body excerpt capped at 2 KB with
+tokens/cookies/authorization redacted, never the full body) and counts it.
+Counters live on the internal endpoint (always Rust-served, like
+`/healthz` — restrict it by network in deployments):
+
+```sh
+curl localhost:8080/internal/shadow-metrics | jq .
+# {"enabled": true,
+#  "totals": {"compared": N, "matched": N, "mismatched": N,
+#             "skipped": N, "errored": N},
+#  "routes": {"/": {"compared": N, ...}, ...},
+#  "recent_mismatches": [{"route": ..., "method": ..., "django_status": ...,
+#                         "rust_status": ..., "diff": ...}]}
+```
+
+Route templates collapse integer/UUID segments to `{id}` and are capped
+at 4096 entries (`_other` overflow). Known limits: the shadow dispatch
+shares the process (pools, throttles) and skips outer middleware except a
+read-only session layer, so throttle-quota and host-absolute responses
+can false-mismatch under load; `X-Api-Key` coverage needs a read-only
+shadow auth mode (not built).
+
 ## Config and settings (F-03)
 
 `crates/db/src/config/` ports `pi_dash.config`:
