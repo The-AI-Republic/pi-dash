@@ -3649,6 +3649,99 @@ export interface ParityDriver {
   notificationsToggleCardArchive(index: number): Promise<void>;
   /** Fail the next per-card read/archive write once (failure shaping). */
   notificationsFailNextCardWrite(): Promise<void>;
+  // --- Archived cycles (NEWFRONT-224, ARCH-014–019). Appended; existing
+  // --- methods above are untouched per the shared driver contract. Covers
+  // --- the archives cycles tab (plain list, address-driven peek, search,
+  // --- filters, empty states) plus the live-cycle archive dialog and the
+  // --- archived-row restore entry. Reads are user-visible; the suite never
+  // --- asserts store internals.
+  /**
+   * Open the tab through the live screen: fresh archived loads skeleton
+   * forever (bug NEWFRONT-231), so this visits live cycles first — which
+   * sets the cycle fetched flag — then navigates client-side via the
+   * sidebar project menu and the Cycles tab. Ends with the list settled.
+   */
+  archivesCyclesOpenTabViaLive(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Open the tab without settling (fresh loads never settle: NEWFRONT-231). */
+  archivesCyclesOpenTabRaw(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Whether the list skeleton loader currently shows. */
+  archivesCyclesSkeletonVisible(): Promise<boolean>;
+  /** Open the project's live cycles screen; ends with the list settled. */
+  archivesCyclesOpenLive(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Reload the current page without settling (fresh archived loads never settle). */
+  archivesCyclesReload(): Promise<void>;
+  /** Cycle names currently rendered as rows, in display order. */
+  archivesCyclesVisibleNames(): Promise<string[]>;
+  /** Expand one live-screen group disclosure (Upcoming/Completed); waits for it to open. */
+  archivesCyclesLiveGroupOpen(section: string): Promise<void>;
+  /** List group headings currently rendered (empty on the archived tab). */
+  archivesCyclesGroupHeadings(): Promise<string[]>;
+  /** Open the side peek for the named row; waits for the peek to show it. */
+  archivesCyclesOpenPeek(name: string): Promise<void>;
+  /** Open the tab at a shared peek link without settling (fresh loads never settle). */
+  archivesCyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void>;
+  /** Peek panel heading, or null when no peek is open. */
+  archivesCyclesPeekName(): Promise<string | null>;
+  /** The peekCycle address param, or null when absent. */
+  archivesCyclesPeekParam(): Promise<string | null>;
+  /** Close the open peek via its dismiss control; waits for it to clear. */
+  archivesCyclesClosePeek(): Promise<void>;
+  /** Whether the header search box is currently expanded. */
+  archivesCyclesSearchExpanded(): Promise<boolean>;
+  /** Expand the search box via the magnifier; waits for focus. */
+  archivesCyclesSearchOpen(): Promise<void>;
+  /** Whether the search input currently holds focus. */
+  archivesCyclesSearchFocused(): Promise<boolean>;
+  /** Replace the search box text (the list filters live). */
+  archivesCyclesSearchFill(text: string): Promise<void>;
+  /** Current search box text. */
+  archivesCyclesSearchText(): Promise<string>;
+  /** Press Escape while the search box is focused. */
+  archivesCyclesSearchEscape(): Promise<void>;
+  /** Click the search box clear control; waits for it to collapse. */
+  archivesCyclesSearchClear(): Promise<void>;
+  /** Click a neutral header area (outside-click behavior). */
+  archivesCyclesClickAway(): Promise<void>;
+  /** Open the filters menu; waits for its panel. */
+  archivesCyclesFiltersOpen(): Promise<void>;
+  /** Dismiss the filters menu. */
+  archivesCyclesFiltersClose(): Promise<void>;
+  /** Filter dimension headings in the open panel, in display order. */
+  archivesCyclesFilterSections(): Promise<string[]>;
+  /** Filter option labels in the open panel, in display order. */
+  archivesCyclesFilterOptionNames(): Promise<string[]>;
+  /** Pick one filter option within its dimension; waits for the chip row. */
+  archivesCyclesFilterPick(section: string, optionName: string): Promise<void>;
+  /** Applied-filter chip texts in display order (empty when no row shows). */
+  archivesCyclesFilterChipTexts(): Promise<string[]>;
+  /** Remove the chip carrying `chipText`; waits for the row to update. */
+  archivesCyclesFilterRemoveChip(chipText: string): Promise<void>;
+  /** Click the clear-all control; waits for the chip row to clear. */
+  archivesCyclesFiltersClearAll(): Promise<void>;
+  /** Whether the filters menu button carries its active-filters marker (mounted while any filter applies). */
+  archivesCyclesFiltersActive(): Promise<boolean>;
+  /** Zero-archived empty-state heading, or null when not shown. */
+  archivesCyclesEmptyHeading(): Promise<string | null>;
+  /** No-match hint paragraph, or null when the list is not in no-match. */
+  archivesCyclesNoMatchHint(): Promise<string | null>;
+  /**
+   * Navigate via the live screen with the archived list fetch held back,
+   * reporting whether the skeleton loader showed while waiting. Ends
+   * settled (fresh loads never settle: NEWFRONT-231).
+   */
+  archivesCyclesSkeletonShownOnSlowFetchViaLive(workspaceSlug: string, projectId: string): Promise<boolean>;
+  /** Open the named row's quick-action menu; waits for its entries. */
+  archivesCyclesOpenRowMenu(name: string): Promise<void>;
+  /** Entries of the open row menu with their disabled state and hint. */
+  archivesCyclesMenuEntries(): Promise<{ title: string; disabled: boolean; description: string | null }[]>;
+  /** Pick one entry of the open row menu by title. */
+  archivesCyclesMenuPick(title: string): Promise<void>;
+  /** Open archive dialog heading plus body, or null when no dialog shows. */
+  archivesCyclesArchiveDialogText(): Promise<{ heading: string; body: string } | null>;
+  /** Confirm the archive dialog; waits for the archive request to settle. */
+  archivesCyclesArchiveDialogConfirm(): Promise<void>;
+  /** Cancel the archive dialog; waits for it to close. */
+  archivesCyclesArchiveDialogCancel(): Promise<void>;
 
   // ---------------------------------------------------------------------------
   // Notifications detail, pagination, refresh, mark-all-read (NEWFRONT-199,

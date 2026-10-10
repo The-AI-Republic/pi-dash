@@ -5779,6 +5779,125 @@ export class WebNewDriver implements ParityDriver {
   async notificationsFailNextCardWrite(): Promise<void> {
     return todo("notificationsFailNextCardWrite");
   }
+  // --- Archived cycles (NEWFRONT-224, ARCH-014–019). Oracle-stage stubs;
+  // --- the new-app implementation lands with the area.
+  async archivesCyclesOpenTabViaLive(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("archivesCyclesOpenTabViaLive");
+  }
+  async archivesCyclesOpenTabRaw(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("archivesCyclesOpenTabRaw");
+  }
+  async archivesCyclesSkeletonVisible(): Promise<boolean> {
+    return todo("archivesCyclesSkeletonVisible");
+  }
+  async archivesCyclesOpenLive(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("archivesCyclesOpenLive");
+  }
+  async archivesCyclesReload(): Promise<void> {
+    return todo("archivesCyclesReload");
+  }
+  async archivesCyclesVisibleNames(): Promise<string[]> {
+    return todo("archivesCyclesVisibleNames");
+  }
+  async archivesCyclesLiveGroupOpen(_section: string): Promise<void> {
+    return todo("archivesCyclesLiveGroupOpen");
+  }
+  async archivesCyclesGroupHeadings(): Promise<string[]> {
+    return todo("archivesCyclesGroupHeadings");
+  }
+  async archivesCyclesOpenPeek(_name: string): Promise<void> {
+    return todo("archivesCyclesOpenPeek");
+  }
+  async archivesCyclesOpenPeekLink(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
+    return todo("archivesCyclesOpenPeekLink");
+  }
+  async archivesCyclesPeekName(): Promise<string | null> {
+    return todo("archivesCyclesPeekName");
+  }
+  async archivesCyclesPeekParam(): Promise<string | null> {
+    return todo("archivesCyclesPeekParam");
+  }
+  async archivesCyclesClosePeek(): Promise<void> {
+    return todo("archivesCyclesClosePeek");
+  }
+  async archivesCyclesSearchExpanded(): Promise<boolean> {
+    return todo("archivesCyclesSearchExpanded");
+  }
+  async archivesCyclesSearchOpen(): Promise<void> {
+    return todo("archivesCyclesSearchOpen");
+  }
+  async archivesCyclesSearchFocused(): Promise<boolean> {
+    return todo("archivesCyclesSearchFocused");
+  }
+  async archivesCyclesSearchFill(_text: string): Promise<void> {
+    return todo("archivesCyclesSearchFill");
+  }
+  async archivesCyclesSearchText(): Promise<string> {
+    return todo("archivesCyclesSearchText");
+  }
+  async archivesCyclesSearchEscape(): Promise<void> {
+    return todo("archivesCyclesSearchEscape");
+  }
+  async archivesCyclesSearchClear(): Promise<void> {
+    return todo("archivesCyclesSearchClear");
+  }
+  async archivesCyclesClickAway(): Promise<void> {
+    return todo("archivesCyclesClickAway");
+  }
+  async archivesCyclesFiltersOpen(): Promise<void> {
+    return todo("archivesCyclesFiltersOpen");
+  }
+  async archivesCyclesFiltersClose(): Promise<void> {
+    return todo("archivesCyclesFiltersClose");
+  }
+  async archivesCyclesFilterSections(): Promise<string[]> {
+    return todo("archivesCyclesFilterSections");
+  }
+  async archivesCyclesFilterOptionNames(): Promise<string[]> {
+    return todo("archivesCyclesFilterOptionNames");
+  }
+  async archivesCyclesFilterPick(_section: string, _optionName: string): Promise<void> {
+    return todo("archivesCyclesFilterPick");
+  }
+  async archivesCyclesFilterChipTexts(): Promise<string[]> {
+    return todo("archivesCyclesFilterChipTexts");
+  }
+  async archivesCyclesFilterRemoveChip(_chipText: string): Promise<void> {
+    return todo("archivesCyclesFilterRemoveChip");
+  }
+  async archivesCyclesFiltersClearAll(): Promise<void> {
+    return todo("archivesCyclesFiltersClearAll");
+  }
+  async archivesCyclesFiltersActive(): Promise<boolean> {
+    return todo("archivesCyclesFiltersActive");
+  }
+  async archivesCyclesEmptyHeading(): Promise<string | null> {
+    return todo("archivesCyclesEmptyHeading");
+  }
+  async archivesCyclesNoMatchHint(): Promise<string | null> {
+    return todo("archivesCyclesNoMatchHint");
+  }
+  async archivesCyclesSkeletonShownOnSlowFetchViaLive(_workspaceSlug: string, _projectId: string): Promise<boolean> {
+    return todo("archivesCyclesSkeletonShownOnSlowFetchViaLive");
+  }
+  async archivesCyclesOpenRowMenu(_name: string): Promise<void> {
+    return todo("archivesCyclesOpenRowMenu");
+  }
+  async archivesCyclesMenuEntries(): Promise<{ title: string; disabled: boolean; description: string | null }[]> {
+    return todo("archivesCyclesMenuEntries");
+  }
+  async archivesCyclesMenuPick(_title: string): Promise<void> {
+    return todo("archivesCyclesMenuPick");
+  }
+  async archivesCyclesArchiveDialogText(): Promise<{ heading: string; body: string } | null> {
+    return todo("archivesCyclesArchiveDialogText");
+  }
+  async archivesCyclesArchiveDialogConfirm(): Promise<void> {
+    return todo("archivesCyclesArchiveDialogConfirm");
+  }
+  async archivesCyclesArchiveDialogCancel(): Promise<void> {
+    return todo("archivesCyclesArchiveDialogCancel");
+  }
 
   // --- Notifications detail, pagination, refresh, mark-all-read
   // --- (NEWFRONT-199, NTF-007..014). Stubs; the new app implements them.

@@ -19965,6 +19965,443 @@ export class WebDriver implements ParityDriver {
       { times: 1 }
     );
   }
+  // --- Archived cycles (NEWFRONT-224, ARCH-014–019). Appended; existing
+  // --- methods above are untouched per the shared driver contract.
+
+  /** Row links carry the cycle id and render the name in a title span (tab links do not). */
+  private archivesCyclesRowLinks(): Locator {
+    return this.page.locator('a[href*="/cycles/"]:has(span.truncate)');
+  }
+
+  private archivesCyclesRowLink(name: string): Locator {
+    return this.archivesCyclesRowLinks().filter({ hasText: name }).first();
+  }
+
+  /** The list row hosting `name`: the link's grandparent row element. */
+  private archivesCyclesRowRoot(name: string): Locator {
+    return this.archivesCyclesRowLink(name).locator("xpath=../..");
+  }
+
+  private archivesCyclesPeekPanel(): Locator {
+    return this.page.locator("div.fixed.right-0").first();
+  }
+
+  private archivesCyclesSearchInput(): Locator {
+    // Exact placeholder: a global "Search commands..." box also matches
+    // loosely. :visible, not .first(): the header mounts a zero-size
+    // collapsed input alongside the expanded one, and DOM order between
+    // them varies run to run — .first() latches the hidden twin half
+    // the time. A collapsed box is always empty, so "no visible input"
+    // reads as "" (see searchText) and collapsed-focus reads as false.
+    return this.page.locator('input[placeholder="Search"]:visible');
+  }
+
+  private archivesCyclesFiltersButton(): Locator {
+    return this.page.locator("button:visible", { hasText: /^Filters$/ }).first();
+  }
+
+  private archivesCyclesFiltersPanel(): Locator {
+    // The headless popover wrapper is zero-size; the popper content div
+    // is the visible panel.
+    return this.page.locator("div.my-1.rounded-sm.border-subtle").first();
+  }
+
+  private archivesCyclesChipRow(): Locator {
+    return this.page.locator("div.border-b.border-subtle.px-5.py-3").first();
+  }
+
+  private archivesCyclesDialog(): Locator {
+    return this.page.getByRole("dialog").first();
+  }
+
+  private async archivesCyclesWaitSettled(): Promise<void> {
+    // 60s, not OPEN_MS: the waypoint screens compile cold per worker and
+    // fetch under shared-stack load; 30s flakes while a sibling suite runs.
+    await this.archivesCyclesRowLinks()
+      .or(this.page.getByRole("heading", { name: "No archived cycles yet" }))
+      .or(this.page.locator("h5", { hasText: "No matching cycles" }))
+      .or(this.page.locator("button", { hasText: /^(Upcoming|Completed) cycle/ }))
+      .first()
+      .waitFor({ timeout: 60_000 });
+  }
+
+  /** Client-side hop from a live screen to the archived cycles tab (keeps the SPA store). */
+  private async archivesCyclesHopToArchivedTab(projectId: string): Promise<void> {
+    // The sidebar project row's quick-actions menu holds the Archives
+    // entry; page.goto would hard-reload and drop the fetched flag.
+    const row = this.page.locator(`div.group\\/project-item:has(a[href*="${projectId}"])`).first();
+    await row.hover({ timeout: WebDriver.OPEN_MS });
+    await row.getByRole("button", { name: "Toggle quick actions menu" }).click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem", { name: "Archives" }).click({ timeout: WebDriver.OPEN_MS });
+    // Poll the address: client-side hops often commit before an
+    // event-based wait can attach, which would hang until timeout.
+    await expect
+      .poll(() => this.page.url(), { timeout: WebDriver.OPEN_MS })
+      .toContain(`/projects/${projectId}/archives/issues`);
+    await this.page.locator('main a[href$="/archives/cycles/"]').first().click({ timeout: WebDriver.OPEN_MS });
+    await expect
+      .poll(() => this.page.url(), { timeout: WebDriver.OPEN_MS })
+      .toContain(`/projects/${projectId}/archives/cycles`);
+  }
+
+  async archivesCyclesOpenTabViaLive(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.archivesCyclesOpenLive(workspaceSlug, projectId);
+    await this.archivesCyclesHopToArchivedTab(projectId);
+    await this.archivesCyclesWaitSettled();
+  }
+
+  async archivesCyclesOpenTabRaw(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async archivesCyclesSkeletonVisible(): Promise<boolean> {
+    return this.isShown(this.page.locator("div.animate-pulse", { has: this.page.locator("span.bg-layer-1") }).first());
+  }
+
+  async archivesCyclesOpenLive(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.archivesCyclesWaitSettled();
+  }
+
+  async archivesCyclesReload(): Promise<void> {
+    await this.page.reload();
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async archivesCyclesVisibleNames(): Promise<string[]> {
+    const links = this.archivesCyclesRowLinks();
+    const total = await links.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = await links
+        .nth(i)
+        .locator("span.truncate")
+        .first()
+        .innerText()
+        .catch(() => "");
+      const name = text.trim();
+      if (name !== "") names.push(name);
+    }
+    return names;
+  }
+
+  async archivesCyclesLiveGroupOpen(section: string): Promise<void> {
+    const button = this.page.locator("main").locator("button", { hasText: section }).first();
+    await button.click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(async () => button.getAttribute("aria-expanded"), { timeout: WebDriver.OPEN_MS }).toBe("true");
+  }
+
+  async archivesCyclesGroupHeadings(): Promise<string[]> {
+    const buttons = this.page.locator("button", { hasText: /^(Upcoming|Completed) cycle/ });
+    const total = await buttons.count();
+    const headings: string[] = [];
+    for (let i = 0; i < total; i++) {
+      if (!(await buttons.nth(i).isVisible())) continue;
+      headings.push((await buttons.nth(i).innerText()).trim());
+    }
+    return headings;
+  }
+
+  async archivesCyclesOpenPeek(name: string): Promise<void> {
+    await this.archivesCyclesRowLink(name).click();
+    await this.page.locator("div.fixed.right-0 h4", { hasText: name }).waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async archivesCyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/cycles?peekCycle=${cycleId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async archivesCyclesPeekName(): Promise<string | null> {
+    const heading = this.archivesCyclesPeekPanel().locator("h4").first();
+    if ((await heading.count()) === 0 || !(await heading.isVisible())) return null;
+    return (await heading.innerText()).trim();
+  }
+
+  async archivesCyclesPeekParam(): Promise<string | null> {
+    return new URL(this.page.url()).searchParams.get("peekCycle");
+  }
+
+  async archivesCyclesClosePeek(): Promise<void> {
+    await this.archivesCyclesPeekPanel().getByRole("button").first().click();
+    await this.archivesCyclesPeekPanel().locator("h4").first().waitFor({ state: "detached" });
+  }
+
+  async archivesCyclesSearchExpanded(): Promise<boolean> {
+    return (
+      (await this.page.locator("div.w-64", { has: this.page.getByPlaceholder("Search", { exact: true }) }).count()) > 0
+    );
+  }
+
+  async archivesCyclesSearchOpen(): Promise<void> {
+    // The magnifier only renders while the box is collapsed; the click
+    // auto-waits for it to mount on slow loads. The toggle itself is
+    // instant — past "slow toggle" timeouts were the hidden-twin input
+    // (see searchInput), not a late mount.
+    await this.page.locator("button.-mr-5").first().click();
+    await this.archivesCyclesSearchInput().waitFor({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.archivesCyclesSearchFocused(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  async archivesCyclesSearchFocused(): Promise<boolean> {
+    if ((await this.archivesCyclesSearchInput().count()) === 0) return false;
+    return this.archivesCyclesSearchInput().evaluate((el) => document.activeElement === el);
+  }
+
+  async archivesCyclesSearchFill(text: string): Promise<void> {
+    await this.archivesCyclesSearchInput().fill(text);
+  }
+
+  async archivesCyclesSearchText(): Promise<string> {
+    if ((await this.archivesCyclesSearchInput().count()) === 0) return "";
+    return this.archivesCyclesSearchInput().inputValue();
+  }
+
+  async archivesCyclesSearchEscape(): Promise<void> {
+    await this.archivesCyclesSearchInput().press("Escape");
+  }
+
+  async archivesCyclesSearchClear(): Promise<void> {
+    await this.page.locator("div.w-64").first().getByRole("button").click();
+    await expect.poll(() => this.archivesCyclesSearchExpanded(), { timeout: WebDriver.OPEN_MS }).toBe(false);
+  }
+
+  async archivesCyclesClickAway(): Promise<void> {
+    // The Filters button is a neutral outside target: the outside-click
+    // detector watches the search input only, so opening the menu
+    // collapses an empty box and leaves a filled one alone.
+    await this.archivesCyclesFiltersButton().click();
+    await this.archivesCyclesFiltersClose();
+  }
+
+  async archivesCyclesFiltersOpen(): Promise<void> {
+    await this.archivesCyclesFiltersButton().click();
+    await this.archivesCyclesFiltersPanel().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async archivesCyclesFiltersClose(): Promise<void> {
+    if ((await this.archivesCyclesFiltersPanel().count()) === 0) return;
+    await this.page.keyboard.press("Escape");
+    await this.archivesCyclesFiltersPanel().waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async archivesCyclesFilterSections(): Promise<string[]> {
+    const panel = this.archivesCyclesFiltersPanel();
+    const headers = panel.locator("div.py-2 > div:first-child > div:first-child");
+    const total = await headers.count();
+    const sections: string[] = [];
+    for (let i = 0; i < total; i++) {
+      // Headers render "Start date" plus an applied count suffix.
+      const raw = (await headers.nth(i).innerText()).trim();
+      sections.push(raw.replace(/\s*\(\d+\)\s*$/, ""));
+    }
+    return sections;
+  }
+
+  async archivesCyclesFilterOptionNames(): Promise<string[]> {
+    const panel = this.archivesCyclesFiltersPanel();
+    const options = panel.getByRole("button");
+    const total = await options.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (await options.nth(i).innerText()).trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
+  async archivesCyclesFilterPick(section: string, optionName: string): Promise<void> {
+    const panel = this.archivesCyclesFiltersPanel();
+    const block = panel.locator("div.py-2", { hasText: section });
+    await block.getByRole("button", { name: optionName }).click();
+  }
+
+  async archivesCyclesFilterChipTexts(): Promise<string[]> {
+    const row = this.archivesCyclesChipRow();
+    if ((await row.count()) === 0 || !(await row.isVisible())) return [];
+    // Direct Tag children only; the clear-all control is a button, not a Tag.
+    const chips = row.locator(":scope > div > div");
+    const total = await chips.count();
+    const texts: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (await chips.nth(i).innerText()).trim().replace(/\s+/g, " ");
+      if (text !== "") texts.push(text);
+    }
+    return texts;
+  }
+
+  async archivesCyclesFilterRemoveChip(chipText: string): Promise<void> {
+    const row = this.archivesCyclesChipRow();
+    // Match by rendered text in JS, not by locator hasText: the chip's raw
+    // DOM text interleaves the label, the value, and icon-button content
+    // (plus a capitalize transform), so no text selector spans it — while
+    // innerText renders exactly what chipTexts() returned.
+    const chips = row.locator(":scope > div > div");
+    const total = await chips.count();
+    for (let i = 0; i < total; i++) {
+      const text = (await chips.nth(i).innerText()).trim().replace(/\s+/g, " ");
+      if (text === chipText) {
+        // The trailing button clears the whole dimension.
+        await chips.nth(i).getByRole("button").last().click();
+        return;
+      }
+    }
+    throw new Error(`[parity] archived-cycles chip not found: ${chipText}`);
+  }
+
+  async archivesCyclesFiltersClearAll(): Promise<void> {
+    await this.archivesCyclesChipRow()
+      .getByRole("button", { name: /clear all/i })
+      .click();
+  }
+
+  async archivesCyclesFiltersActive(): Promise<boolean> {
+    // The marker mounts in the desktop menu variant, which stays hidden
+    // behind its container query at tested widths (1280–2560): match the
+    // Filters buttons in the main area regardless of visibility. Absent
+    // entirely while no filter applies, so count is the whole signal.
+    const dot = this.page
+      .locator("main")
+      .locator("button", { hasText: /^Filters$/ })
+      .locator("span.bg-accent-primary");
+    return (await dot.count()) > 0;
+  }
+
+  async archivesCyclesEmptyHeading(): Promise<string | null> {
+    const heading = this.page.getByRole("heading", { name: "No archived cycles yet" });
+    if ((await heading.count()) === 0 || !(await heading.isVisible())) return null;
+    return (await heading.first().innerText()).trim();
+  }
+
+  async archivesCyclesNoMatchHint(): Promise<string | null> {
+    const title = this.page.locator("h5", { hasText: "No matching cycles" }).first();
+    if ((await title.count()) === 0 || !(await title.isVisible())) return null;
+    const hint = title.locator("xpath=following-sibling::p[1]");
+    if ((await hint.count()) === 0) return null;
+    return (await hint.innerText()).trim();
+  }
+
+  async archivesCyclesSkeletonShownOnSlowFetchViaLive(workspaceSlug: string, projectId: string): Promise<boolean> {
+    await this.page.route(
+      (url) => url.pathname.endsWith("/archived-cycles/"),
+      async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        await route.continue();
+      }
+    );
+    try {
+      await this.archivesCyclesOpenLive(workspaceSlug, projectId);
+      await this.archivesCyclesHopToArchivedTab(projectId);
+      const seen = await expect
+        .poll(() => this.archivesCyclesSkeletonVisible(), { timeout: 15_000 })
+        .toBe(true)
+        .then(
+          () => true,
+          () => false
+        );
+      await this.page.unrouteAll({ behavior: "wait" }).catch(() => null);
+      await this.archivesCyclesWaitSettled();
+      return seen;
+    } finally {
+      await this.page.unrouteAll({ behavior: "wait" }).catch(() => null);
+    }
+  }
+
+  async archivesCyclesOpenRowMenu(name: string): Promise<void> {
+    await this.archivesCyclesRowRoot(name).locator('div[data-main-menu="true"]:visible > button').click();
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async archivesCyclesMenuEntries(): Promise<{ title: string; disabled: boolean; description: string | null }[]> {
+    const items = this.page.getByRole("menuitem");
+    const total = await items.count();
+    const entries: { title: string; disabled: boolean; description: string | null }[] = [];
+    for (let i = 0; i < total; i++) {
+      const item = items.nth(i);
+      if ((await item.locator("h5").count()) === 0) continue;
+      const title = ((await item.locator("h5").first().innerText()) as string).trim();
+      if (title === "") continue;
+      // NB: count() first — innerText on a missing <p> waits out the full
+      // action timeout (~30s per enabled entry) before it can fall back.
+      const descriptionRaw =
+        (await item.locator("p").count()) === 0
+          ? ""
+          : await item
+              .locator("p")
+              .first()
+              .innerText()
+              .catch(() => "");
+      const ariaDisabled = await item.getAttribute("aria-disabled");
+      const headlessState = await item.getAttribute("data-headlessui-state");
+      entries.push({
+        title,
+        disabled: ariaDisabled === "true" || (headlessState ?? "").includes("disabled"),
+        description: descriptionRaw.trim() === "" ? null : descriptionRaw.trim(),
+      });
+    }
+    return entries;
+  }
+
+  async archivesCyclesMenuPick(title: string): Promise<void> {
+    await this.page
+      .getByRole("menuitem")
+      .filter({ has: this.page.locator("h5", { hasText: title }) })
+      .first()
+      .click();
+  }
+
+  async archivesCyclesArchiveDialogText(): Promise<{ heading: string; body: string } | null> {
+    const dialog = this.archivesCyclesDialog();
+    // The dialog mounts asynchronously after the menu pick: wait for its
+    // CONTENT, not visibility. Probed: the panel mounts with full content
+    // (h3 present <1s after the pick) but keeps a zero-height box for
+    // 30s+ while the box is saturated, so isVisible() lies the whole
+    // time. textContent (not innerText) reads layout-free. Genuine
+    // absence (post-cancel) costs the budget once per suite.
+    try {
+      await expect
+        .poll(
+          async () => {
+            if ((await dialog.count()) === 0) return false;
+            return (await dialog.locator("h3").count()) > 0;
+          },
+          { timeout: WebDriver.OPEN_MS }
+        )
+        .toBe(true);
+    } catch {
+      return null;
+    }
+    const heading = (
+      ((await dialog
+        .locator("h3")
+        .first()
+        .textContent()
+        .catch(() => "")) ?? "") as string
+    ).trim();
+    if (heading === "") return null;
+    const body = (
+      ((await dialog
+        .locator("p")
+        .first()
+        .textContent()
+        .catch(() => "")) ?? "") as string
+    ).trim();
+    return { heading, body };
+  }
+
+  async archivesCyclesArchiveDialogConfirm(): Promise<void> {
+    const dialog = this.archivesCyclesDialog();
+    await dialog.getByRole("button", { name: /^(Archive|Archiving)$/ }).click();
+    await this.page.waitForResponse(/\/cycles\/[^/]+\/archive\/$/, { timeout: WebDriver.OPEN_MS }).catch(() => null);
+  }
+
+  async archivesCyclesArchiveDialogCancel(): Promise<void> {
+    const dialog = this.archivesCyclesDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await dialog.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
 
   // --- Notifications detail, pagination, refresh, mark-all-read
   // --- (NEWFRONT-199, NTF-007..014). Appended; existing methods above are
