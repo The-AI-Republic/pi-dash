@@ -11837,6 +11837,25 @@ export async function archivesModuleArchivedAt(
   return typeof match["archived_at"] === "string" ? match["archived_at"] : null;
 }
 
+// --- Live cycles list markers (NEWFRONT-249, CYC-002). Appended; existing
+// --- helpers above are untouched per the shared harness contract.
+/** Mark a cycle as the caller's favorite (row-marker fixture setup). */
+export async function serverAddCycleFavorite(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/user-favorite-cycles/`,
+    sessionCookie,
+    { cycle: cycleId }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle favorite add failed with HTTP ${res.status}.`);
+}
+
 /**
  * Archived-issues list read without throwing (NEWFRONT-223, ARCH-008
  * guest branch): status plus the rows when the read succeeds. Guests

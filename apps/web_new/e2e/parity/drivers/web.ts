@@ -44,6 +44,7 @@ import type {
   GanttZoom,
   KanbanCard,
   KanbanColumn,
+  CyclesRowFacts,
   LayoutsLayoutKey,
   DocumentShellFacts,
   NotFoundFacts,
@@ -25062,5 +25063,362 @@ export class WebDriver implements ParityDriver {
     const dialog = await this.runnersWaitForConfirm("Revoke runner?");
     const revoke = dialog.getByRole("button", { name: "Revoke", exact: true });
     await expect.poll(() => revoke.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  // --- Live cycles list, rows, detail nav, peek, search, filters
+  // --- (NEWFRONT-249, CYC-001–008). Appended; existing methods above are
+  // --- untouched per the shared driver contract. Selectors were observed
+  // --- on the running old app; the row link, peek panel, search input,
+  // --- filters panel, and chip patterns mirror the archived-cycles driver
+  // --- (same shared components), while group disclosures, hero reads, and
+  // --- the live search toggle follow the live list structure.
+
+  /** Row links carry the cycle id and render the name in a title span. */
+  private cyclesRowLinks(): Locator {
+    return this.page.locator('a[href*="/cycles/"]:has(span.truncate)');
+  }
+
+  private cyclesRowLink(name: string): Locator {
+    return this.cyclesRowLinks().filter({ hasText: name }).first();
+  }
+
+  /** The list row hosting `name`: the link's grandparent row element. */
+  private cyclesRowRoot(name: string): Locator {
+    return this.cyclesRowLink(name).locator("xpath=../..");
+  }
+
+  private cyclesPeekPanel(): Locator {
+    return this.page.locator("div.fixed.right-0").first();
+  }
+
+  private cyclesSearchInput(): Locator {
+    return this.page.locator('input[placeholder="Search"]:visible');
+  }
+
+  private cyclesFiltersButton(): Locator {
+    return this.page.locator("button:visible", { hasText: /^Filters$/ }).first();
+  }
+
+  private cyclesFiltersPanel(): Locator {
+    return this.page.locator("div.my-1.rounded-sm.border-subtle").first();
+  }
+
+  private cyclesChipRow(): Locator {
+    return this.page.locator("div.flex.flex-wrap.items-stretch.gap-2").first();
+  }
+
+  private async cyclesWaitSettled(): Promise<void> {
+    await this.cyclesRowLinks()
+      .or(this.page.locator("h5", { hasText: "No matching cycles" }))
+      .or(this.page.locator("button", { hasText: /^(Active|Upcoming|Completed) cycle/ }))
+      .first()
+      .waitFor({ timeout: 60_000 });
+  }
+
+  async cyclesOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.cyclesWaitSettled();
+  }
+
+  async cyclesVisibleNames(): Promise<string[]> {
+    const links = this.cyclesRowLinks();
+    const total = await links.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = await links
+        .nth(i)
+        .locator("span.truncate")
+        .first()
+        .innerText()
+        .catch(() => "");
+      const name = text.trim();
+      if (name !== "") names.push(name);
+    }
+    return names;
+  }
+
+  async cyclesGroupHeadings(): Promise<string[]> {
+    const buttons = this.page.locator("button", { hasText: /^(Active|Upcoming|Completed) cycle/ });
+    const total = await buttons.count();
+    const headings: string[] = [];
+    for (let i = 0; i < total; i++) {
+      if (!(await buttons.nth(i).isVisible())) continue;
+      headings.push((await buttons.nth(i).innerText()).trim());
+    }
+    return headings;
+  }
+
+  async cyclesGroupCounts(): Promise<{ upcoming: number; completed: number }> {
+    const headings = await this.cyclesGroupHeadings();
+    const countFor = (prefix: string): number => {
+      const heading = headings.find((entry) => entry.startsWith(prefix));
+      if (heading === undefined) return 0;
+      const match = /(\d+)\s*$/.exec(heading);
+      return match === null ? 0 : Number(match[1]);
+    };
+    return { upcoming: countFor("Upcoming"), completed: countFor("Completed") };
+  }
+
+  async cyclesGroupToggle(section: string): Promise<void> {
+    await this.page.locator("button", { hasText: new RegExp(`^${section}`) }).first().click();
+  }
+
+  async cyclesGroupExpanded(section: string): Promise<boolean> {
+    const button = this.page.locator("button", { hasText: new RegExp(`^${section}`) }).first();
+    return (await button.getAttribute("aria-expanded")) === "true";
+  }
+
+  async cyclesHeroName(): Promise<string | null> {
+    const activeButton = this.page.locator("button", { hasText: /^Active cycle/ }).first();
+    if ((await activeButton.count()) === 0) return null;
+    const rows = activeButton.locator("xpath=..").locator('a[href*="/cycles/"]:has(span.truncate)');
+    if ((await rows.count()) === 0) return null;
+    const name = (
+      await rows
+        .first()
+        .locator("span.truncate")
+        .first()
+        .innerText()
+        .catch(() => "")
+    ).trim();
+    return name === "" ? null : name;
+  }
+
+  async cyclesRowHref(name: string): Promise<string | null> {
+    return this.cyclesRowLink(name).getAttribute("href");
+  }
+
+  async cyclesClickRow(name: string): Promise<void> {
+    await this.cyclesRowLink(name).click();
+    await expect.poll(() => this.page.url(), { timeout: WebDriver.OPEN_MS }).toMatch(/\/cycles\/[^/]+\/?(\?|#|$)/);
+    await this.page
+      .locator("div.absolute.right-0 h4")
+      .or(this.page.getByText("Cycle does not exist"))
+      .first()
+      .waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesOpenDetail(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page
+      .locator("div.absolute.right-0 h4")
+      .or(this.page.getByText("Cycle does not exist"))
+      .first()
+      .waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesDetailName(): Promise<string | null> {
+    const heading = this.page.locator("div.absolute.right-0 h4").first();
+    if ((await heading.count()) === 0 || !(await heading.isVisible())) return null;
+    return (await heading.innerText()).trim();
+  }
+
+  async cyclesDetailIssueNames(): Promise<string[]> {
+    const texts = await this.page.getByRole("main").locator("p").allTextContents();
+    return texts.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  }
+
+  async cyclesRowFacts(name: string): Promise<CyclesRowFacts> {
+    return this.cyclesRowRoot(name).evaluate((el) => {
+      const clean = (node: Element | null): string => (node?.textContent ?? "").replace(/\s+/g, " ").trim();
+      const percentEl = el.querySelector("span.text-9");
+      const progress = percentEl ? clean(percentEl) || null : "done";
+      let dateText: string | null = null;
+      const month = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/;
+      for (const node of el.querySelectorAll("span, div, button")) {
+        const value = clean(node);
+        if (value === "" || value.length > 60) continue;
+        if (month.test(value) && /\d/.test(value)) {
+          dateText = value;
+          break;
+        }
+      }
+      let workItemCount: string | null = null;
+      for (const node of el.querySelectorAll("span")) {
+        const value = clean(node);
+        if (!/^\d+$/.test(value)) continue;
+        if (node.parentElement?.querySelector("svg")) {
+          workItemCount = value;
+          break;
+        }
+      }
+      const hasCreatorAvatar = el.querySelector("div.grid.place-items-center.overflow-hidden") !== null;
+      const star = el.querySelector("svg.lucide-star");
+      const hasFavorite = star !== null;
+      const favoriteSelected = hasFavorite && (star.getAttribute("class") ?? "").includes("fill-");
+      return { progress, dateText, workItemCount, hasCreatorAvatar, hasFavorite, favoriteSelected };
+    });
+  }
+
+  async cyclesOpenPeek(name: string): Promise<void> {
+    const root = this.cyclesRowRoot(name);
+    await root.hover({ timeout: WebDriver.OPEN_MS });
+    await root.locator("button:has(svg.lucide-eye)").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.locator("div.fixed.right-0 h4", { hasText: name }).waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles?peekCycle=${cycleId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.locator("div.fixed.right-0 h4").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesPeekName(): Promise<string | null> {
+    const heading = this.cyclesPeekPanel().locator("h4").first();
+    if ((await heading.count()) === 0 || !(await heading.isVisible())) return null;
+    return (await heading.innerText()).trim();
+  }
+
+  async cyclesPeekParam(): Promise<string | null> {
+    return new URL(this.page.url()).searchParams.get("peekCycle");
+  }
+
+  async cyclesClosePeek(): Promise<void> {
+    await this.cyclesPeekPanel().getByRole("button").first().click();
+    await this.cyclesPeekPanel().locator("h4").first().waitFor({ state: "detached" });
+  }
+
+  async cyclesReload(): Promise<void> {
+    await this.page.reload();
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.cyclesWaitSettled();
+  }
+
+  async cyclesGoBack(): Promise<void> {
+    await this.page.goBack();
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.cyclesWaitSettled();
+  }
+
+  async cyclesSearchExpanded(): Promise<boolean> {
+    return (
+      (await this.page.locator("div.w-64", { has: this.page.getByPlaceholder("Search", { exact: true }) }).count()) > 0
+    );
+  }
+
+  async cyclesSearchOpen(): Promise<void> {
+    // The live box mounts only once open, so the toggle's focus call lands
+    // on no input and the box opens unfocused (the archived box stays
+    // mounted and does take focus). Specs assert expansion only; typing
+    // focuses implicitly through fill. Retries the toggle: under shared
+    // load a click can land during a list re-render and never open the box.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (await this.cyclesSearchExpanded()) break;
+      await this.page.getByTestId("cycles-search-toggle").click({ timeout: WebDriver.OPEN_MS });
+      try {
+        await this.cyclesSearchInput().waitFor({ timeout: 10_000 });
+        break;
+      } catch {
+        // Lost click; the loop clicks again while still collapsed.
+      }
+    }
+    await expect.poll(() => this.cyclesSearchExpanded(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  async cyclesSearchFill(text: string): Promise<void> {
+    await this.cyclesSearchInput().fill(text);
+  }
+
+  async cyclesSearchText(): Promise<string> {
+    if ((await this.cyclesSearchInput().count()) === 0) return "";
+    return this.cyclesSearchInput().inputValue();
+  }
+
+  async cyclesSearchEscape(): Promise<void> {
+    await this.cyclesSearchInput().press("Escape");
+  }
+
+  async cyclesSearchClear(): Promise<void> {
+    await this.page.locator("div.w-64").first().getByRole("button").click();
+    await expect.poll(() => this.cyclesSearchExpanded(), { timeout: WebDriver.OPEN_MS }).toBe(false);
+  }
+
+  async cyclesClickAway(): Promise<void> {
+    await this.cyclesFiltersButton().click();
+    await this.cyclesFiltersClose();
+  }
+
+  async cyclesFiltersOpen(): Promise<void> {
+    await this.cyclesFiltersButton().click();
+    await this.cyclesFiltersPanel().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesFiltersClose(): Promise<void> {
+    if ((await this.cyclesFiltersPanel().count()) === 0) return;
+    await this.page.keyboard.press("Escape");
+    await this.cyclesFiltersPanel().waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesFilterSections(): Promise<string[]> {
+    const panel = this.cyclesFiltersPanel();
+    const headers = panel.locator("div.py-2 > div:first-child > div:first-child");
+    const total = await headers.count();
+    const sections: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const raw = (await headers.nth(i).innerText()).trim();
+      sections.push(raw.replace(/\s*\(\d+\)\s*$/, ""));
+    }
+    return sections;
+  }
+
+  async cyclesFilterOptionNames(): Promise<string[]> {
+    const panel = this.cyclesFiltersPanel();
+    const options = panel.getByRole("button");
+    const total = await options.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (await options.nth(i).innerText()).trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
+  async cyclesFilterPick(section: string, optionName: string): Promise<void> {
+    const panel = this.cyclesFiltersPanel();
+    const block = panel.locator("div.py-2", { hasText: section });
+    await block.getByRole("button", { name: optionName }).click();
+  }
+
+  async cyclesFilterChipTexts(): Promise<string[]> {
+    const row = this.cyclesChipRow();
+    if ((await row.count()) === 0 || !(await row.isVisible())) return [];
+    const chips = row.locator(":scope > div");
+    const total = await chips.count();
+    const texts: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (await chips.nth(i).innerText()).trim().replace(/\s+/g, " ");
+      if (text !== "") texts.push(text);
+    }
+    return texts;
+  }
+
+  async cyclesFilterRemoveChip(chipText: string): Promise<void> {
+    const row = this.cyclesChipRow();
+    const chips = row.locator(":scope > div");
+    const total = await chips.count();
+    for (let i = 0; i < total; i++) {
+      const text = (await chips.nth(i).innerText()).trim().replace(/\s+/g, " ");
+      if (text === chipText) {
+        await chips.nth(i).getByRole("button").last().click();
+        return;
+      }
+    }
+    throw new Error(`[parity] live-cycles chip not found: ${chipText}`);
+  }
+
+  async cyclesFiltersClearAll(): Promise<void> {
+    await this.cyclesChipRow()
+      .getByRole("button", { name: /clear all/i })
+      .click();
+  }
+
+  async cyclesFiltersActive(): Promise<boolean> {
+    const dot = this.page
+      .locator("main")
+      .locator("button", { hasText: /^Filters$/ })
+      .locator("span.bg-accent-primary");
+    return (await dot.count()) > 0;
   }
 }
