@@ -29766,19 +29766,34 @@ export class WebDriver implements ParityDriver {
   }
 
   async modulesFailNextCreate(): Promise<void> {
+    // Closure-armed, not times:1: the list GETs share this path, and a
+    // pass-through read would consume a times budget meant for the write.
+    let armed = true;
     await this.page.route(
       (url) => url.pathname.endsWith("/modules/") && url.pathname.includes("/projects/"),
-      (route) => (route.request().method() === "POST" ? route.abort() : route.continue()),
-      { times: 1 }
+      (route) => {
+        if (armed && route.request().method() === "POST") {
+          armed = false;
+          return route.abort();
+        }
+        return route.continue();
+      }
     );
   }
 
   async modulesFailNextUpdate(): Promise<void> {
+    // Closure-armed: detail GETs share this path (see above).
+    let armed = true;
     await this.page.route(
       (url) => /\/modules\/[0-9a-fA-F-]{36}\/$/.test(url.pathname),
-      (route) =>
-        route.request().method() === "PATCH" || route.request().method() === "PUT" ? route.abort() : route.continue(),
-      { times: 1 }
+      (route) => {
+        const write = route.request().method() === "PATCH" || route.request().method() === "PUT";
+        if (armed && write) {
+          armed = false;
+          return route.abort();
+        }
+        return route.continue();
+      }
     );
   }
 
@@ -29889,10 +29904,17 @@ export class WebDriver implements ParityDriver {
   }
 
   async modulesFailNextDelete(): Promise<void> {
+    // Closure-armed: detail GETs share this path (see above).
+    let armed = true;
     await this.page.route(
       (url) => /\/modules\/[0-9a-fA-F-]{36}\/$/.test(url.pathname),
-      (route) => (route.request().method() === "DELETE" ? route.abort() : route.continue()),
-      { times: 1 }
+      (route) => {
+        if (armed && route.request().method() === "DELETE") {
+          armed = false;
+          return route.abort();
+        }
+        return route.continue();
+      }
     );
   }
 
