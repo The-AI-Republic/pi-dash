@@ -11294,3 +11294,23 @@ export async function archivesArchivedCycles(
     return { id: rec["id"], name: rec["name"] };
   });
 }
+
+// --- Archived work-items list oracles (NEWFRONT-222, ARCH-001..007).
+// --- Appended; existing helpers above are untouched per the shared
+// --- contract.
+/** View flags gating the archives tab strip, as the server reports them. */
+export async function serverArchivesProjectFlags(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ cycleView: boolean; moduleView: boolean }> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project flags read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as Record<string, unknown>;
+  if (typeof record["cycle_view"] !== "boolean" || typeof record["module_view"] !== "boolean")
+    throw new Error("[parity] project carried no boolean cycle_view/module_view.");
+  return { cycleView: record["cycle_view"], moduleView: record["module_view"] };
+}

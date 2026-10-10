@@ -8,6 +8,8 @@
 import type { Page } from "@playwright/test";
 import type {
   ArchivesArchiveDialog,
+  ArchivesFilterExpression,
+  ArchivesListQuery,
   ArchivesMenuEntry,
   ArchivesModuleChip,
   ArchivesModulesEmptyKind,
@@ -5986,5 +5988,84 @@ export class WebNewDriver implements ParityDriver {
   }
   async archivesFailNextModuleWrite(): Promise<void> {
     return todo("archivesFailNextModuleWrite");
+  }
+
+  // Archived work-items list, filters, display, peek (NEWFRONT-222,
+  // ARCH-001..007). Oracle stage: web_new has no archives screens yet.
+  async archivesOpenIssuesList(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("archivesOpenIssuesList");
+  }
+  async archivesOpenTab(_tab: "issues" | "cycles" | "modules"): Promise<void> {
+    return todo("archivesOpenTab");
+  }
+  async archivesTabNames(): Promise<string[]> {
+    return todo("archivesTabNames");
+  }
+  async archivesActiveTab(): Promise<string> {
+    return todo("archivesActiveTab");
+  }
+  async archivesBackPresent(): Promise<boolean> {
+    return todo("archivesBackPresent");
+  }
+  async archivesClickBack(): Promise<void> {
+    return todo("archivesClickBack");
+  }
+  async archivesCountBadge(): Promise<string | null> {
+    return todo("archivesCountBadge");
+  }
+  async archivesCountBadgeTooltip(): Promise<string | null> {
+    return todo("archivesCountBadgeTooltip");
+  }
+  async archivesPageTitle(): Promise<string> {
+    return todo("archivesPageTitle");
+  }
+  async archivesVisibleIssueNames(): Promise<string[]> {
+    return todo("archivesVisibleIssueNames");
+  }
+  async archivesGroupHeadings(): Promise<string[]> {
+    return todo("archivesGroupHeadings");
+  }
+  async archivesOpenRowMenu(_name: string): Promise<void> {
+    return todo("archivesOpenRowMenu");
+  }
+  async archivesRowMenuEntries(): Promise<string[]> {
+    return todo("archivesRowMenuEntries");
+  }
+  async archivesCloseMenus(): Promise<void> {
+    return todo("archivesCloseMenus");
+  }
+  async archivesInlineEditorOpens(_name: string): Promise<boolean> {
+    return todo("archivesInlineEditorOpens");
+  }
+  async archivesWaitForListQuery(): Promise<ArchivesListQuery> {
+    return todo("archivesWaitForListQuery");
+  }
+  async archivesRowText(_name: string): Promise<string> {
+    return todo("archivesRowText");
+  }
+  async archivesPeekTitle(): Promise<string | null> {
+    return todo("archivesPeekTitle");
+  }
+  async archivesPeekTitleLocked(): Promise<boolean> {
+    return todo("archivesPeekTitleLocked");
+  }
+  async archivesPeekDescriptionText(): Promise<string> {
+    return todo("archivesPeekDescriptionText");
+  }
+  async archivesPeekDescriptionEditable(): Promise<boolean> {
+    return todo("archivesPeekDescriptionEditable");
+  }
+  async archivesPeekActivityEditable(): Promise<boolean> {
+    return todo("archivesPeekActivityEditable");
+  }
+  async archivesPeekQueryParams(): Promise<{ issue: string | null; project: string | null; nesting: string | null }> {
+    return todo("archivesPeekQueryParams");
+  }
+  async archivesSeedStoredExpression(
+    _workspaceSlug: string,
+    _projectId: string,
+    _expression: ArchivesFilterExpression
+  ): Promise<void> {
+    return todo("archivesSeedStoredExpression");
   }
 }
