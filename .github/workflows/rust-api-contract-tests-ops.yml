@@ -98,6 +98,7 @@ jobs:
       EMAIL_FROM: Pi Dash Contract <contract@example.com>
       BASE_URL: http://localhost:8000
       DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
+      ORACLE_DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash_oracle
       CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
       AMQP_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
       CONTRACT_TASK_TIMEOUT: "60"
@@ -134,8 +135,36 @@ jobs:
         working-directory: rust-api/contract-tests
         run: pip install -r requirements.txt
 
+      - name: Create oracle database
+        # PIDASHCONV-818: the prompting suite (810) runs the Django oracle
+        # and the Rust binary against two independent scratch DBs, so the
+        # oracle DB is created here and migrated below, mirroring DATABASE_URL.
+        # psycopg comes from the contract-test deps installed above.
+        run: |
+          python - <<'EOF'
+          import os
+          from urllib.parse import urlsplit
+
+          import psycopg
+
+          oracle = os.environ["ORACLE_DATABASE_URL"]
+          dbname = urlsplit(oracle).path.lstrip("/")
+          conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+          with conn.cursor() as cur:
+              cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (dbname,))
+              if cur.fetchone() is None:
+                  cur.execute(f'CREATE DATABASE "{dbname}"')
+          conn.close()
+          EOF
+
       - name: Migrate contract database
         working-directory: apps/api
+        run: python manage.py migrate --no-input
+
+      - name: Migrate oracle database
+        working-directory: apps/api
+        env:
+          DATABASE_URL: ${{ env.ORACLE_DATABASE_URL }}
         run: python manage.py migrate --no-input
 
       - name: Build Rust binary
