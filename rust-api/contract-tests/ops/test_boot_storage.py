@@ -907,7 +907,10 @@ def test_create_bucket_setup_errors():
 
     proc = run_ops(
         "create_bucket",
-        env_extra={"AWS_S3_ENDPOINT_URL": "http://127.0.0.1:9"},
+        env_extra={
+            "AWS_S3_ENDPOINT_URL": "http://127.0.0.1:9",
+            "AWS_S3_BUCKET_NAME": "nocreds-bkt",
+        },
         env_del=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
     )
     assert proc.returncode == 0
@@ -1145,7 +1148,10 @@ def test_update_bucket_no_credentials_exits_1(tmp_path):
     is caught there), so the run ends after `Checking bucket...`."""
     proc = run_ops(
         "update_bucket",
-        env_extra={"AWS_S3_ENDPOINT_URL": "http://127.0.0.1:9"},
+        env_extra={
+            "AWS_S3_ENDPOINT_URL": "http://127.0.0.1:9",
+            "AWS_S3_BUCKET_NAME": "updnocreds-bkt",
+        },
         env_del=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
         cwd=tmp_path,
     )
