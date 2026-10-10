@@ -11741,62 +11741,8 @@ export async function serverArchivedCycleDetail(
 
 // --- Archives cross-cutting (NEWFRONT-226, ARCH-026–032). Appended; the
 // --- helpers above are untouched per the shared contract.
-/** Archive a cycle through the API (fixtures for the archives tabs). */
-export async function archivesArchiveCycle(
-  workspaceSlug: string,
-  projectId: string,
-  cycleId: string,
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<string> {
-  const res = await mutateJSON(
-    "POST",
-    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/archive/`,
-    sessionCookie
-  );
-  if (!res.ok) throw new Error(`[parity] cycle archive failed with HTTP ${res.status}.`);
-  const rec = (await res.json()) as Record<string, unknown>;
-  if (typeof rec["archived_at"] !== "string") throw new Error("[parity] cycle archive carried no archived_at.");
-  return rec["archived_at"];
-}
-
-/** Archive a module through the API (fixtures for the archives tabs). */
-export async function archivesArchiveModule(
-  workspaceSlug: string,
-  projectId: string,
-  moduleId: string,
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<string> {
-  const res = await mutateJSON(
-    "POST",
-    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/archive/`,
-    sessionCookie
-  );
-  if (!res.ok) throw new Error(`[parity] module archive failed with HTTP ${res.status}.`);
-  const rec = (await res.json()) as Record<string, unknown>;
-  if (typeof rec["archived_at"] !== "string") throw new Error("[parity] module archive carried no archived_at.");
-  return rec["archived_at"];
-}
-
-/** PATCH a module (fixtures set status completed/cancelled before archiving). */
-export async function archivesPatchModule(
-  workspaceSlug: string,
-  projectId: string,
-  moduleId: string,
-  data: Record<string, unknown>,
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<void> {
-  const res = await mutateJSON(
-    "PATCH",
-    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/`,
-    sessionCookie,
-    data
-  );
-  if (!res.ok) throw new Error(`[parity] module patch failed with HTTP ${res.status}.`);
-}
-
+// Fixture archiving reuses the sibling helpers archivesArchiveCycle,
+// archivesArchiveModule, and archivesPatchModule (same endpoints).
 /**
  * archived_at of one project (null when live). Reads the projects/details
  * collection: the single-project read 404s once archived.

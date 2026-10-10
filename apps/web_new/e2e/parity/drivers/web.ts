@@ -23178,6 +23178,7 @@ export class WebDriver implements ParityDriver {
     const main = this.page.getByRole("main").last();
     if (await this.isShown(main.getByRole("button", { name: /export|import|print/i }))) return true;
     return this.isShown(main.getByRole("menuitem", { name: /export|import|print/i }));
+  }
   // --- Archives cross-cutting (NEWFRONT-226, ARCH-026–032). Appended; the
   // --- methods above are untouched per the shared driver contract.
   private archivesTraffic: ArchivesTrafficCounts = {
@@ -23289,25 +23290,9 @@ export class WebDriver implements ParityDriver {
     }
   }
 
-  async archivesTabNames(): Promise<string[]> {
-    const links = this.archivesContent().locator(
-      'a[href*="/archives/issues"], a[href*="/archives/cycles"], a[href*="/archives/modules"]'
-    );
-    const total = await links.count();
-    const out: string[] = [];
-    for (let i = 0; i < total; i++) {
-      const href = (await links.nth(i).getAttribute("href")) ?? "";
-      if (!/\/(issues|cycles|modules)\/?$/.test(href)) continue;
-      const text = ((await links.nth(i).innerText()) ?? "").trim();
-      // The breadcrumb "Archives" link points at the issues tab; only the
-      // strip labels (Work items/Cycles/Modules) count as tabs.
-      if (text === "" || text === "Archives" || out.includes(text)) continue;
-      out.push(text);
-    }
-    return out;
-  }
-
-  async archivesActiveTab(): Promise<ArchivesTab> {
+  // Tab labels reuse the sibling archivesTabNames (identical contract);
+  // the key form below stays distinct because its contract differs.
+  async archivesActiveTabKey(): Promise<ArchivesTab> {
     const after = this.page.url().split("/archives/")[1];
     if (after === undefined) throw new Error(`[parity] no archives tab is active (${this.page.url()}).`);
     if (after.startsWith("cycles")) return "cycles";
@@ -23340,7 +23325,7 @@ export class WebDriver implements ParityDriver {
       }
       // The project header menu shares the row triggers' shape; its
       // entries (Archives, Leave, Publish) are never row entries.
-      const opened = await this.archivesRowMenuEntries();
+      const opened = await this.archivesRowMenuEntryTitles();
       if (opened.some((entry) => /^(Archives|Leave project|Publish)/i.test(entry))) {
         await this.page.keyboard.press("Escape").catch(() => undefined);
         continue;
@@ -23350,7 +23335,9 @@ export class WebDriver implements ParityDriver {
     throw new Error("[parity] no archives row menu trigger opened a menu.");
   }
 
-  async archivesRowMenuEntries(): Promise<string[]> {
+  async archivesRowMenuEntryTitles(): Promise<string[]> {
+    // First-line titles: sibling archivesRowMenuEntries reads h5-or-full
+    // text, which appends trailing note paragraphs this matrix excludes.
     const items = this.page.getByRole("menuitem");
     const total = await items.count();
     const out: string[] = [];
@@ -23674,7 +23661,7 @@ export class WebDriver implements ParityDriver {
   async archivesTabClick(tab: ArchivesTab): Promise<void> {
     const label = tab === "issues" ? "Work items" : tab === "cycles" ? "Cycles" : "Modules";
     await this.archivesContent().getByRole("link", { name: label }).first().click({ timeout: WebDriver.WAIT_MS });
-    await expect.poll(() => this.archivesActiveTab(), { timeout: WebDriver.WAIT_MS }).toBe(tab);
+    await expect.poll(() => this.archivesActiveTabKey(), { timeout: WebDriver.WAIT_MS }).toBe(tab);
   }
   // --- Notifications cross-cutting (NEWFRONT-202, NTF-026..031).
   // --- Appended; existing methods above are untouched per the shared

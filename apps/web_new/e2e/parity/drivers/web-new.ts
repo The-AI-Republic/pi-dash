@@ -6703,17 +6703,14 @@ export class WebNewDriver implements ParityDriver {
   async archivesTabOpen(_workspaceSlug: string, _projectId: string, _tab: ArchivesTab): Promise<void> {
     return todo("archivesTabOpen");
   }
-  async archivesTabNames(): Promise<string[]> {
-    return todo("archivesTabNames");
-  }
-  async archivesActiveTab(): Promise<ArchivesTab> {
-    return todo("archivesActiveTab");
+  async archivesActiveTabKey(): Promise<ArchivesTab> {
+    return todo("archivesActiveTabKey");
   }
   async archivesRowMenuOpenFirst(_name: string): Promise<void> {
     return todo("archivesRowMenuOpenFirst");
   }
-  async archivesRowMenuEntries(): Promise<string[]> {
-    return todo("archivesRowMenuEntries");
+  async archivesRowMenuEntryTitles(): Promise<string[]> {
+    return todo("archivesRowMenuEntryTitles");
   }
   async archivesRowMenuClick(_entry: string): Promise<void> {
     return todo("archivesRowMenuClick");

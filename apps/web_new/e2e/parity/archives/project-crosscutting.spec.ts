@@ -352,11 +352,11 @@ test(
       await driver.archivesPrimeAndEnter(seed.workspaceSlug, projectId, liveName);
 
       await test.step("issues tab: filter, restore menu, copy link, peek", async () => {
-        expect(await driver.archivesActiveTab()).toBe("issues");
+        expect(await driver.archivesActiveTabKey()).toBe("issues");
         expect(await driver.archivesFilterControlVisible()).toBe(true);
         await expect.poll(() => driver.archivesRowPresent(issueName)).toBe(true);
         await driver.archivesRowMenuOpenFirst(issueName);
-        const entries = await driver.archivesRowMenuEntries();
+        const entries = await driver.archivesRowMenuEntryTitles();
         expect(entries).toContain("Restore");
         expect(entries).toContain("Copy link");
         expect(entries).toContain("Open in new tab");
@@ -380,7 +380,7 @@ test(
         await driver.archivesTabClick("cycles");
         await expect.poll(() => driver.archivesRowPresent(cycleName)).toBe(true);
         await driver.archivesRowMenuOpenFirst(cycleName);
-        const entries = await driver.archivesRowMenuEntries();
+        const entries = await driver.archivesRowMenuEntryTitles();
         expect(entries).toContain("Restore");
         expect(entries).not.toContain("Archive");
         await driver.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
@@ -402,7 +402,7 @@ test(
         await driver.archivesTabClick("modules");
         await expect.poll(() => driver.archivesRowPresent(moduleName)).toBe(true);
         await driver.archivesRowMenuOpenFirst(moduleName);
-        const entries = await driver.archivesRowMenuEntries();
+        const entries = await driver.archivesRowMenuEntryTitles();
         expect(entries).toContain("Restore");
         expect(entries).not.toContain("Archive");
         await driver.archivesPeekOpenFirst(moduleName);
@@ -565,7 +565,7 @@ test(
         await driver.archivesTabOpen(seed.workspaceSlug, projectId, "issues");
         expect(await driver.currentUrlPath()).toContain("/archives/issues");
         await driver.reloadPage();
-        await expect.poll(() => driver.archivesActiveTab()).toBe("issues");
+        await expect.poll(() => driver.archivesActiveTabKey()).toBe("issues");
         expect(await driver.currentUrlPath()).toContain("/archives/issues");
         await expect.poll(() => driver.archivesRowPresent(issueName)).toBe(true);
       });
@@ -576,7 +576,7 @@ test(
           expect(await driver.currentUrlPath()).toContain(`/archives/${tab}`);
           expect(await driver.archivesTabNames()).toEqual(["Work items", "Cycles", "Modules"]);
           await driver.reloadPage();
-          await expect.poll(() => driver.archivesActiveTab()).toBe(tab);
+          await expect.poll(() => driver.archivesActiveTabKey()).toBe(tab);
           expect(await driver.currentUrlPath()).toContain(`/archives/${tab}`);
         });
       }
@@ -813,7 +813,7 @@ test(
         }
         expect(await driver.archiveDialogBodyText()).toBeNull();
         expect(await driver.archivesPeekVisible()).toBe(false);
-        expect(await driver.archivesRowMenuEntries()).toEqual([]);
+        expect(await driver.archivesRowMenuEntryTitles()).toEqual([]);
         expect((await driver.archivesTrafficCounts()).writes).toBe(0);
       });
 

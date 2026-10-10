@@ -4395,14 +4395,12 @@ export interface ParityDriver {
   archivesItemFailNextWrite(): Promise<void>;
   /** Open one archives tab; settles when content, empty, or loader shows. */
   archivesTabOpen(workspaceSlug: string, projectId: string, tab: ArchivesTab): Promise<void>;
-  /** Visible tab-strip labels. */
-  archivesTabNames(): Promise<string[]>;
-  /** Active tab key, read from the address. */
-  archivesActiveTab(): Promise<ArchivesTab>;
+  /** Active tab key, read from the address (labels live on archivesActiveTab). */
+  archivesActiveTabKey(): Promise<ArchivesTab>;
   /** Open the action menu of the row showing `name` on the current tab. */
   archivesRowMenuOpenFirst(name: string): Promise<void>;
-  /** Visible entries of the open row menu. */
-  archivesRowMenuEntries(): Promise<string[]>;
+  /** First-line titles of the open row menu (see web.ts for the sibling split). */
+  archivesRowMenuEntryTitles(): Promise<string[]>;
   /** Click the open row menu entry whose label contains `entry`. */
   archivesRowMenuClick(entry: string): Promise<void>;
   /** Select the row showing `name` to open its peek panel. */
