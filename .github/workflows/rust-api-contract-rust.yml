@@ -15,7 +15,9 @@
 # on rows Django creates only inside a task, so they get a solo worker for
 # the Django run (stopped at the reset; the Rust run stays workerless). The
 # task-oracle files inside mixed suites (TASK_ORACLE_IGNORES.txt) are excluded
-# from both runs with the same --ignore selection.
+# from both runs with the same --ignore selection. Django is served with
+# runserver except for the suites in ASGI_SUITES.txt, whose SSE/event
+# streams are async iterators runserver can never flush (uvicorn instead).
 name: rust-api contract tests — Rust matrix
 
 on:
@@ -146,6 +148,11 @@ jobs:
       # worker-plane oracle job.
       ASSISTANT_CRYPTO_BACKEND: fernet
       ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # SSRF guard for BYOK base_url (cloud parity): the assistant suite
+      # pins blocked-URL rejections at save, and both backends implement
+      # the same gate off this variable (Django ssrf.py, Rust
+      # assistant/common.rs). Off in OSS by default; the suite needs it on.
+      ASSISTANT_BLOCK_PRIVATE_URLS: "True"
       # Object-store credentials for offline SigV4 presigning. Both bucket
       # names are set: Django's S3Storage reads AWS_S3_BUCKET_NAME
       # (presigned POSTs 500 without it), while minio-style clients use
@@ -206,11 +213,28 @@ jobs:
         working-directory: apps/api
         run: python manage.py migrate --noinput
 
+      # runserver cannot serve async-iterator SSE/event streams (the
+      # client hangs waiting for headers), so ASGI_SUITES.txt suites get
+      # uvicorn for both Django starts. Same app, same responses; only the
+      # server flavor differs.
+      - name: Select Django server flavor
+        run: |
+          if grep -qx "${{ matrix.suite }}" rust-api/contract-tests/ASGI_SUITES.txt; then
+            echo "DJANGO_SERVER=uvicorn" >> "$GITHUB_ENV"
+          else
+            echo "DJANGO_SERVER=runserver" >> "$GITHUB_ENV"
+          fi
+
       - name: Start live Django server
         working-directory: apps/api
         run: |
-          nohup python manage.py runserver 127.0.0.1:8000 --noreload \
-            > /tmp/django-contract.log 2>&1 &
+          if [ "$DJANGO_SERVER" = "uvicorn" ]; then
+            nohup python -m uvicorn pi_dash.asgi:application \
+              --host 127.0.0.1 --port 8000 > /tmp/django-contract.log 2>&1 &
+          else
+            nohup python manage.py runserver 127.0.0.1:8000 --noreload \
+              > /tmp/django-contract.log 2>&1 &
+          fi
           echo $! > /tmp/django-contract.pid
           # TCP probe: Django returns 404 on / with DEBUG on, so don't use -f.
           for i in $(seq 1 60); do
@@ -300,8 +324,13 @@ jobs:
         if: env.DJANGO_EXIT == '0'
         working-directory: apps/api
         run: |
-          nohup python manage.py runserver 127.0.0.1:8000 --noreload \
-            >> /tmp/django-contract.log 2>&1 &
+          if [ "$DJANGO_SERVER" = "uvicorn" ]; then
+            nohup python -m uvicorn pi_dash.asgi:application \
+              --host 127.0.0.1 --port 8000 >> /tmp/django-contract.log 2>&1 &
+          else
+            nohup python manage.py runserver 127.0.0.1:8000 --noreload \
+              >> /tmp/django-contract.log 2>&1 &
+          fi
           for i in $(seq 1 60); do
             (echo > /dev/tcp/127.0.0.1/8000) >/dev/null 2>&1 && break
             sleep 2
