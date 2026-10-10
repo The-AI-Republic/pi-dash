@@ -2740,6 +2740,7 @@ dependencies = [
  "pidash-jobs",
  "pidash-services",
  "pidash-types",
+ "reqwest",
  "serde_json",
  "sqlx",
  "tokio",

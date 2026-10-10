@@ -9,10 +9,12 @@
 //! * [`boot`] — the boot + storage commands (PIDASHCONV-806).
 //! * [`users`] — the users + membership commands (PIDASHCONV-807).
 //! * [`repair`] — the data-repair commands (PIDASHCONV-808).
+//! * [`instance`] — the instance lifecycle commands (PIDASHCONV-809).
 //! * [`prompting`] — the prompting reseed + revalidate commands
 //!   (PIDASHCONV-810).
 
 pub mod boot;
+pub mod instance;
 pub mod prompting;
 pub mod repair;
 pub mod users;
@@ -35,6 +37,46 @@ impl std::fmt::Display for OpsFailure {
 
 impl std::error::Error for OpsFailure {}
 
+/// Instance-group failure shape (PIDASHCONV-809): Django `CommandError`
+/// renders as `CommandError: {msg}` on stderr with exit 1 (verified
+/// against the 4.2 oracle); anything else that fails (database, broker,
+/// SMTP setup) renders as `Error: {msg}` with exit 1 — tracebacks are
+/// not portable, so only the exit code is asserted on those paths.
+/// (Named `InstanceFailure`, not `OpsFailure`: PIDASHCONV-806 owns the
+/// `OpsFailure` struct for the boot/storage runners above.)
+#[derive(Debug)]
+pub enum InstanceFailure {
+    Command(String),
+    Fatal(String),
+}
+
+impl std::fmt::Display for InstanceFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Command(message) => write!(f, "CommandError: {message}"),
+            Self::Fatal(message) => write!(f, "Error: {message}"),
+        }
+    }
+}
+
+impl From<pidash_jobs::license::commands::CommandError> for InstanceFailure {
+    fn from(error: pidash_jobs::license::commands::CommandError) -> Self {
+        Self::Command(error.to_string())
+    }
+}
+
+/// Connect the primary pool from `DATABASE_URL`, like `serve` (missing
+/// or unreachable database is a boot error, never per-command output).
+pub async fn connect_primary() -> Result<sqlx::PgPool, InstanceFailure> {
+    let db = pidash_db::DbConfig::from_env()
+        .map_err(|error| InstanceFailure::Fatal(error.to_string()))?;
+    let pools = pidash_db::Pools::connect(&db, None)
+        .await
+        .map_err(|error| InstanceFailure::Fatal(error.to_string()))?;
+    Ok(pools.primary().clone())
+}
+
+/// Management commands, grouped by owning issue.
 #[derive(Debug, Subcommand)]
 #[command(rename_all = "snake_case")]
 pub enum OpsCommand {
@@ -99,6 +141,10 @@ pub enum OpsCommand {
     /// Updates the slug of a soft-deleted workspace by appending the epoch timestamp.
     #[command(name = "update_deleted_workspace_slug")]
     UpdateDeletedWorkspaceSlug(repair::SlugArgs),
+    // --- instance (PIDASHCONV-809) ---
+    /// Instance lifecycle: configure, register, pods, mail, dry-run.
+    #[command(subcommand)]
+    Instance(instance::InstanceCommand),
     // --- prompting (PIDASHCONV-810) ---
     /// Refresh the global default PromptTemplate from the ordered fragments
     /// in apps/api/pi_dash/prompting/fragments/. Does not touch
@@ -193,15 +239,17 @@ fn boot_exit(error: OpsFailure) -> Box<dyn std::error::Error> {
 
 /// Run one `ops` subcommand.
 ///
-/// The four groups keep their own failure conventions: boot, users and
+/// The groups keep their own failure conventions: boot, users and
 /// repair runners print Django's exact bytes and exit 1 from inside the
-/// group runner, while prompting runners return `Err` (a boot/DB failure
-/// `main` renders as a CLI boot error, exit 1 — there is no Django-oracle
-/// shape for failures, only for the documented matrices). Users runners
-/// need exit codes and injected stdio, so they dispatch through
-/// [`run_users`], which exits from inside on failure (the repair
-/// precedent) and returns `Ok` on success. Success prints Django's lines
-/// to stdout and returns `Ok` (exit 0).
+/// group runner; instance failures render as `CommandError: …` /
+/// `Error: …` on stderr with exit 1 from inside the arm; prompting
+/// runners return `Err` (a boot/DB failure `main` renders as a CLI boot
+/// error, exit 1 — there is no Django-oracle shape for failures, only
+/// for the documented matrices). Users runners need exit codes and
+/// injected stdio, so they dispatch through [`run_users`], which exits
+/// from inside on failure (the repair precedent) and returns `Ok` on
+/// success. Success prints Django's lines to stdout and returns `Ok`
+/// (exit 0).
 pub async fn run(command: OpsCommand) -> Result<(), Box<dyn std::error::Error>> {
     use pidash_services::ops::prompting::TemplateKind;
     match command {
@@ -238,6 +286,14 @@ pub async fn run(command: OpsCommand) -> Result<(), Box<dyn std::error::Error>> 
         }
         OpsCommand::UpdateDeletedWorkspaceSlug(args) => {
             repair::run_slug(args).await;
+            Ok(())
+        }
+        // --- instance (PIDASHCONV-809) ---
+        OpsCommand::Instance(cmd) => {
+            instance::run(cmd).await.unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(1);
+            });
             Ok(())
         }
         // --- prompting (PIDASHCONV-810) ---

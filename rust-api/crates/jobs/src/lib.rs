@@ -42,6 +42,12 @@ pub mod integrations;
 /// Iterative compact-JSON encoder (PIDASHCONV-626): stack-safe
 /// `serde_json::to_vec` for the ~9900-deep payloads ports may enqueue.
 pub mod json_compact;
+/// License / instance-console job units (D-01, PIDASHCONV-119):
+/// `instance_traces` plus the `configure_instance` / `register_instance`
+/// command logic. Wired here (PIDASHCONV-809) so the ops `instance`
+/// group can execute it; the module was merged unwired with wiring
+/// deferred, and no consumer existed until now.
+pub mod license;
 /// Loop turn dispatch: thread rotation + turn creation + run enqueue
 /// (D-03, PIDASHCONV-157): same explicit-path form as [`loop_scan`].
 #[path = "loop/dispatch.rs"]
