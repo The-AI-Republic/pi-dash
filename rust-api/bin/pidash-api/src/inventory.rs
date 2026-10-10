@@ -1856,7 +1856,7 @@ mod tests {
             3,
             "github_sync group drifted"
         );
-        assert_eq!(expected_rust.len(), 28, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 29, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()

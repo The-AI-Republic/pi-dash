@@ -21,7 +21,7 @@ Counts (2026-10-10, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 502 OWNED, 26 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 85 tasks — 28 OWNED, 34 proxied by design, 23 MISSING;
+- Jobs: 85 tasks — 29 OWNED, 34 proxied by design, 22 MISSING;
   beat 26/26 OWNED.
 
 ## Routes
