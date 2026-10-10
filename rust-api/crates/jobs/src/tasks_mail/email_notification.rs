@@ -795,16 +795,18 @@ pub trait StackOutbox: Send + Sync {
 /// FROM email_notification_logs WHERE processed_at IS NULL ORDER BY
 /// receiver_id` — the `:49` ORM chain as SQL (`email_notification_logs`
 /// per `db/models/notification.py:121-148`; `ORDER BY "receiver"` is the
-/// `receiver_id` column). Only the consumed columns are selected: the
-/// row's other columns are never read downstream, so they are
-/// unobservable.
-pub const STACK_SELECT_SQL: &str = "SELECT id, receiver_id, triggered_by_id, entity_identifier, data FROM email_notification_logs WHERE processed_at IS NULL ORDER BY receiver_id";
+/// `receiver_id` column), scoped to live rows (`SoftDeletionManager` —
+/// soft-deleted logs never fan out). Only the consumed columns are
+/// selected: the row's other columns are never read downstream, so they
+/// are unobservable.
+pub const STACK_SELECT_SQL: &str = "SELECT id, receiver_id, triggered_by_id, entity_identifier, data FROM email_notification_logs WHERE processed_at IS NULL AND deleted_at IS NULL ORDER BY receiver_id";
 
 /// `UPDATE email_notification_logs SET processed_at = now() WHERE id =
 /// ANY($1)` — the `:84` update as SQL (a no-op for an empty id list,
-/// exactly like the ORM call).
+/// exactly like the ORM call; soft-deleted rows stay unmarked, like the
+/// manager-scoped queryset).
 pub const STACK_MARK_PROCESSED_SQL: &str =
-    "UPDATE email_notification_logs SET processed_at = now() WHERE id = ANY($1)";
+    "UPDATE email_notification_logs SET processed_at = now() WHERE id = ANY($1) AND deleted_at IS NULL";
 
 /// Live [`StackStore`] over the primary pool. Reads go to the primary:
 /// a background task has no request context to opt into the replica,
@@ -2117,6 +2119,19 @@ mod tests {
 
         fn del(&self, key: &str) {
             self.dels.borrow_mut().push(key.to_owned());
+        }
+    }
+
+    #[test]
+    fn stack_statements_scope_soft_deleted_rows() {
+        // `:49`/`:84` run on the soft-deleting default manager: deleted
+        // logs never fan out and stay unmarked (the `pg_notify` pin
+        // precedent in `queue.rs`).
+        for sql in [STACK_SELECT_SQL, STACK_MARK_PROCESSED_SQL] {
+            assert!(
+                sql.contains("deleted_at IS NULL"),
+                "unscoped soft-deletable statement: {sql}"
+            );
         }
     }
 
