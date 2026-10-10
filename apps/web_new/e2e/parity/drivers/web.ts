@@ -83,6 +83,9 @@ import type {
   RunnersTab,
   RunnersTableRow,
   ServedShellMarkers,
+  CyclesHeroProgressGroup,
+  CyclesHeroTrafficCounts,
+  CyclesHeroUpsell,
   WorkspaceOnboardingView,
 } from "./parity-driver";
 
@@ -25062,5 +25065,744 @@ export class WebDriver implements ParityDriver {
     const dialog = await this.runnersWaitForConfirm("Revoke runner?");
     const revoke = dialog.getByRole("button", { name: "Revoke", exact: true });
     await expect.poll(() => revoke.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  // --- Active-cycle hero and cycles cross-cutting (NEWFRONT-254,
+  // --- CYC-040..045, CYC-047..048). Appended; existing methods above are
+  // --- untouched per the shared driver contract.
+  private cyclesHeroTraffic: CyclesHeroTrafficCounts = { cycleReads: 0, archivedReads: 0, writes: 0 };
+
+  private cyclesHeroContent(): Locator {
+    // The cycles screens nest two <main> landmarks (app shell plus page);
+    // route and card reads scope to the inner one so shell chrome (nav
+    // links, switchers) never leaks into row or heading reads.
+    return this.page.locator("main").last();
+  }
+
+  private cyclesHeroDetailLink(name: string): Locator {
+    // A cycle row's detail link carries the cycle id; the index and
+    // archive links (`/cycles/`, `/archives/cycles`) never match.
+    return this.cyclesHeroContent().locator(`a[href*="/cycles/"]`, { hasText: name }).first();
+  }
+
+  private cyclesHeroRow(name: string): Locator {
+    return this.cyclesHeroContent().locator("div.group", { hasText: name }).first();
+  }
+
+  private cyclesHeroCardsGrid(): Locator {
+    return this.cyclesHeroContent().locator("div.grid.grid-cols-1.gap-3").first();
+  }
+
+  private cyclesHeroProgressCard(): Locator {
+    return this.cyclesHeroCardsGrid().locator("div.flex.min-h-\\[17rem\\]", { hasText: "Progress" }).first();
+  }
+
+  private cyclesHeroBurndownCard(): Locator {
+    return this.cyclesHeroCardsGrid().locator("div.flex.min-h-\\[17rem\\]", { hasText: "Work item burndown" }).first();
+  }
+
+  private cyclesHeroBreakdownCard(): Locator {
+    return this.cyclesHeroCardsGrid()
+      .locator("div.flex.min-h-\\[17rem\\]", { has: this.page.locator("div[role='tablist']") })
+      .first();
+  }
+
+  async cyclesHeroOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // First paint compiles the route on the dev oracle; allow it longer.
+    await this.cyclesHeroContent().locator("button", { hasText: "Active cycle" }).first().waitFor({ timeout: 120_000 });
+    // The hero group heading mounts before the cards fill in, and each
+    // card renders a loader (no heading) until its read resolves — settled
+    // means both content cards carry headings, or the empty view instead.
+    await expect
+      .poll(
+        async () =>
+          (await this.cyclesHeroCardsGrid().locator("h3").count()) >= 2 || (await this.cyclesHeroEmptyCopy()) !== null,
+        { timeout: WebDriver.OPEN_MS }
+      )
+      .toBe(true);
+  }
+
+  async cyclesHeroOpenDetail(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async cyclesHeroOpenPeekRaw(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles?peekCycle=${cycleId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async cyclesHeroReload(): Promise<void> {
+    await this.page.reload();
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async cyclesHeroDelayDetailReads(ms: number): Promise<void> {
+    // The list read is delayed too: the detail header's cycle switcher
+    // populates the store from it, which would render sidebar content
+    // before the delayed detail read resolves and shrink the skeleton
+    // window to nothing.
+    let remaining = 24;
+    await this.page.route(
+      (url) => /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/cycles\/($|\?|[^/]+\/)/.test(url.pathname),
+      async (route) => {
+        if (route.request().method() === "GET" && remaining > 0) {
+          remaining -= 1;
+          await new Promise((resolve) => setTimeout(resolve, ms));
+        }
+        await route.continue();
+      }
+    );
+  }
+
+  async cyclesHeroHideCycleFromListReads(cycleId: string): Promise<void> {
+    // The live peek only skeletons on a store miss, but the list fetch
+    // fills the store before the peek can mount. Filtering one cycle out
+    // of the list read reproduces the miss (as a create-then-peek race
+    // does) so the skeleton-to-content transition is observable.
+    await this.page.route(
+      (url) => /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/cycles\/$/.test(url.pathname),
+      async (route) => {
+        const response = await route.fetch();
+        const payload: unknown = await response.json().catch(() => null);
+        const rows: unknown[] = Array.isArray(payload)
+          ? payload
+          : ((payload as { results?: unknown[] } | null)?.results ?? []);
+        const kept = rows.filter((row) => (row as Record<string, unknown>)["id"] !== cycleId);
+        const body = Array.isArray(payload) ? kept : { ...(payload as Record<string, unknown>), results: kept };
+        await route.fulfill({ response, json: body });
+      }
+    );
+  }
+
+  async cyclesHeroBeginTrafficSpy(): Promise<void> {
+    this.cyclesHeroTraffic = { cycleReads: 0, archivedReads: 0, writes: 0 };
+    await this.page.route("**/api/**", async (route) => {
+      const req = route.request();
+      const url = req.url();
+      const method = req.method();
+      if (method === "GET") {
+        if (/\/archived-cycles\/(\?|$)/.test(url)) this.cyclesHeroTraffic.archivedReads += 1;
+        else if (/\/projects\/[^/]+\/cycles\/(\?|$)/.test(url)) this.cyclesHeroTraffic.cycleReads += 1;
+        else if (/\/cycles\/[^/]+\/(\?|$|progress\/|analytics|cycle-issues\/)/.test(url))
+          this.cyclesHeroTraffic.cycleReads += 1;
+      } else if (
+        (method === "POST" || method === "PATCH" || method === "DELETE") &&
+        /\/cycles\/(\?|$|[^/]+\/|date-check\/)/.test(url)
+      ) {
+        this.cyclesHeroTraffic.writes += 1;
+      }
+      await route.continue();
+    });
+  }
+
+  async cyclesHeroTrafficCounts(): Promise<CyclesHeroTrafficCounts> {
+    return { ...this.cyclesHeroTraffic };
+  }
+
+  async cyclesHeroFocusWindow(): Promise<void> {
+    await this.page.evaluate(() => {
+      window.dispatchEvent(new Event("focus"));
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+  }
+
+  async cyclesHeroCloseMenus(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+  }
+
+  private cyclesHeroDetailSidebar(): Locator {
+    return this.cyclesHeroContent().locator("div.absolute.right-0").first();
+  }
+
+  private cyclesHeroPeekPanel(): Locator {
+    return this.page.locator("div.fixed.right-0").first();
+  }
+
+  private cyclesHeroHeroPanel(): Locator {
+    // The disclosure panel under the Active-cycle group button: the hero
+    // row plus the cards grid, or the no-active-cycle empty view.
+    const group = this.cyclesHeroContent()
+      .locator("div.flex.flex-shrink-0.flex-col", {
+        has: this.page.locator("button", { hasText: "Active cycle" }),
+      })
+      .first();
+    return group.locator('div[id^="headlessui-disclosure-panel"]').first();
+  }
+
+  private async cyclesHeroExpandGroup(label: string): Promise<void> {
+    const button = this.cyclesHeroContent().locator("button", { hasText: label }).first();
+    await button.waitFor({ timeout: WebDriver.OPEN_MS });
+    if ((await button.getAttribute("aria-expanded").catch(() => "true")) === "false") {
+      await button.click({ timeout: WebDriver.OPEN_MS });
+      await expect.poll(() => button.getAttribute("aria-expanded"), { timeout: WebDriver.OPEN_MS }).toBe("true");
+    }
+  }
+
+  private async cyclesHeroMenuButton(row: Locator): Promise<Locator | null> {
+    // Each row carries two quick-action menus (inline touch plus hover
+    // desktop); the visible one's innermost button opens it.
+    const buttons = row.locator("div[data-main-menu] button");
+    const total = await buttons.count();
+    for (let i = total - 1; i >= 0; i--) {
+      const candidate = buttons.nth(i);
+      if (await candidate.isVisible().catch(() => false)) return candidate;
+    }
+    return null;
+  }
+
+  private async cyclesHeroTextLines(locator: Locator): Promise<string[]> {
+    const text = await locator.innerText().catch(() => "");
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
+  }
+
+  async cyclesHeroSidebarSkeletonVisible(): Promise<boolean> {
+    // The full-sidebar skeleton only (px-5): the chart section below the
+    // header carries its own loader that outlives the header paint.
+    return this.isShown(this.cyclesHeroDetailSidebar().locator("div[role='status'].px-5"));
+  }
+
+  async cyclesHeroSidebarName(): Promise<string | null> {
+    const heading = this.cyclesHeroDetailSidebar().locator("h4").first();
+    if ((await heading.count()) === 0 || !(await heading.isVisible().catch(() => false))) return null;
+    return ((await heading.innerText().catch(() => "")) as string).trim() || null;
+  }
+
+  async cyclesHeroPeekSkeletonVisible(): Promise<boolean> {
+    // The full-sidebar skeleton only (px-5): the chart section below the
+    // header carries its own loader that outlives the header paint.
+    return this.isShown(this.cyclesHeroPeekPanel().locator("div[role='status'].px-5"));
+  }
+
+  async cyclesHeroPeekName(): Promise<string | null> {
+    const heading = this.cyclesHeroPeekPanel().locator("h4").first();
+    if ((await heading.count()) === 0 || !(await heading.isVisible().catch(() => false))) return null;
+    return ((await heading.innerText().catch(() => "")) as string).trim() || null;
+  }
+
+  async cyclesHeroGroupHeading(): Promise<string | null> {
+    const button = this.cyclesHeroContent().locator("button", { hasText: "Active cycle" }).first();
+    if ((await button.count()) === 0) return null;
+    return ((await button.innerText().catch(() => "")) as string).trim() || null;
+  }
+
+  async cyclesHeroActiveName(): Promise<string | null> {
+    const link = this.cyclesHeroHeroPanel().locator('a[href*="/cycles/"]').first();
+    if ((await link.count()) === 0) return null;
+    const name = link.locator("span.truncate").first();
+    if ((await name.count()) === 0) return null;
+    return ((await name.innerText().catch(() => "")) as string).trim() || null;
+  }
+
+  async cyclesHeroEmptyCopy(): Promise<{ title: string; description: string } | null> {
+    if ((await this.cyclesHeroCardsGrid().count()) > 0) return null;
+    const panel = this.cyclesHeroHeroPanel();
+    if ((await panel.count()) === 0) return null;
+    const title = panel.locator("h1, h2, h3, h4, h5").first();
+    const description = panel.locator("p").first();
+    if ((await title.count()) === 0 || (await description.count()) === 0) return null;
+    return {
+      title: ((await title.innerText().catch(() => "")) as string).trim(),
+      description: ((await description.innerText().catch(() => "")) as string).trim(),
+    };
+  }
+
+  async cyclesHeroProgressGroups(): Promise<{ closed: string | null; groups: CyclesHeroProgressGroup[] }> {
+    const card = this.cyclesHeroProgressCard();
+    const closedLoc = card.locator("span", { hasText: /closed/ }).first();
+    const closed =
+      (await closedLoc.count()) > 0 ? ((await closedLoc.innerText().catch(() => "")) as string).trim() || null : null;
+    const rows = card.locator("div.cursor-pointer");
+    const total = await rows.count();
+    const groups: CyclesHeroProgressGroup[] = [];
+    for (let i = 0; i < total; i++) {
+      const row = rows.nth(i);
+      if (!(await row.isVisible().catch(() => false))) continue;
+      const name = row.locator("span.capitalize").first();
+      const text = ((await row.innerText().catch(() => "")) as string).trim();
+      groups.push({ name: ((await name.innerText().catch(() => "")) as string).trim(), text });
+    }
+    return { closed, groups };
+  }
+
+  async cyclesHeroProgressEmptyVisible(): Promise<boolean> {
+    return this.isShown(this.cyclesHeroProgressCard().locator("div.text-center h3"));
+  }
+
+  async cyclesHeroBurndown(): Promise<{ heading: string | null; pending: string | null; chart: boolean }> {
+    const card = this.cyclesHeroBurndownCard();
+    const headingLoc = card.locator("h3").first();
+    const heading =
+      (await headingLoc.count()) > 0 ? ((await headingLoc.innerText().catch(() => "")) as string).trim() || null : null;
+    const pendingLoc = card.locator("span", { hasText: /Pending/ }).first();
+    const pending =
+      (await pendingLoc.count()) > 0 ? ((await pendingLoc.innerText().catch(() => "")) as string).trim() || null : null;
+    return { heading, pending, chart: await this.isShown(card.locator("div.recharts-wrapper")) };
+  }
+
+  async cyclesHeroBurndownEmptyVisible(): Promise<boolean> {
+    return this.isShown(this.cyclesHeroBurndownCard().locator("div.text-center h3"));
+  }
+
+  async cyclesHeroBreakdownTabs(): Promise<string[]> {
+    const tabs = this.cyclesHeroBreakdownCard().locator("div[role='tablist'] button[role='tab']");
+    const total = await tabs.count();
+    const labels: string[] = [];
+    for (let i = 0; i < total; i++)
+      labels.push(
+        (
+          (await tabs
+            .nth(i)
+            .innerText()
+            .catch(() => "")) as string
+        ).trim()
+      );
+    return labels.filter((label) => label !== "");
+  }
+
+  async cyclesHeroBreakdownSelectTab(label: string): Promise<void> {
+    const tab = this.cyclesHeroBreakdownCard()
+      .locator("div[role='tablist'] button[role='tab']", { hasText: label })
+      .first();
+    await tab.click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => tab.getAttribute("aria-selected"), { timeout: WebDriver.OPEN_MS }).toBe("true");
+  }
+
+  private cyclesHeroActiveBreakdownPanel(): Locator {
+    // Headless hides unselected panels; exactly one stays visible.
+    return this.cyclesHeroBreakdownCard().locator("div[role='tabpanel'][data-headlessui-state='selected']").first();
+  }
+
+  async cyclesHeroBreakdownEntries(): Promise<string[]> {
+    return this.cyclesHeroTextLines(this.cyclesHeroActiveBreakdownPanel());
+  }
+
+  async cyclesHeroBreakdownEmptyVisible(): Promise<boolean> {
+    return this.isShown(this.cyclesHeroActiveBreakdownPanel().locator("div.text-center h3"));
+  }
+
+  async cyclesHeroClickProgressGroup(group: string): Promise<void> {
+    await this.cyclesHeroTapProgressGroup(group);
+    await this.page.waitForURL(/\/cycles\/[^/]+\/?$/, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroTapProgressGroup(group: string): Promise<void> {
+    const row = this.cyclesHeroProgressCard().locator("div.cursor-pointer", { hasText: group }).first();
+    await row.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroClickBreakdownEntry(index: number): Promise<void> {
+    const row = this.cyclesHeroActiveBreakdownPanel().locator("div.cursor-pointer").nth(index);
+    await row.click({ timeout: WebDriver.OPEN_MS });
+    await this.page.waitForURL(/\/cycles\/[^/]+\/?$/, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroOpenWorkspaceActives(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/active-cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.cyclesHeroContent().locator("h2").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroUpsell(): Promise<CyclesHeroUpsell> {
+    const content = this.cyclesHeroContent();
+    const headingLoc = content.locator("h2").first();
+    const heading =
+      (await headingLoc.count()) > 0 ? ((await headingLoc.innerText().catch(() => "")) as string).trim() || null : null;
+    const upgrade = content.locator("a", { hasText: "Upgrade" }).first();
+    return {
+      heading,
+      benefits: await content.locator("h3").count(),
+      upgradeHref: await this.readAttr(upgrade, "href"),
+      upgradeTarget: await this.readAttr(upgrade, "target"),
+    };
+  }
+
+  async cyclesHeroUpsellBadgeVisible(): Promise<boolean> {
+    // The header upgrade marker is a lone exact "Pro" badge beside the
+    // breadcrumb; page copy never carries that exact token.
+    const header = this.page.locator("header").first();
+    const scoped = header.getByText("Pro", { exact: true });
+    if (
+      (await scoped.count()) > 0 &&
+      (await scoped
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return true;
+    const loose = this.page.getByText("Pro", { exact: true });
+    return (
+      (await loose.count()) > 0 &&
+      (await loose
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
+  }
+
+  async cyclesHeroActiveRowOffset(): Promise<string | null> {
+    const chip = this.cyclesHeroHeroPanel()
+      .locator("span", { hasText: /^UTC [+-]/ })
+      .first();
+    if ((await chip.count()) === 0 || !(await chip.isVisible().catch(() => false))) return null;
+    return ((await chip.innerText().catch(() => "")) as string).trim() || null;
+  }
+
+  async cyclesHeroHoverActiveRowDates(): Promise<void> {
+    const row = this.cyclesHeroContent()
+      .locator("div.group", { hasText: await this.cyclesHeroActiveName() })
+      .first();
+    await row.locator("div.text-11.font-medium").first().hover({ timeout: WebDriver.OPEN_MS, force: true });
+  }
+
+  async cyclesHeroSidebarOffset(): Promise<string | null> {
+    const chip = this.cyclesHeroDetailSidebar()
+      .locator("span", { hasText: /^UTC [+-]/ })
+      .first();
+    if ((await chip.count()) === 0 || !(await chip.isVisible().catch(() => false))) return null;
+    return ((await chip.innerText().catch(() => "")) as string).trim() || null;
+  }
+
+  async cyclesHeroHoverSidebarDates(): Promise<void> {
+    const control = this.cyclesHeroDetailSidebar().locator("button[id^='headlessui-combobox-button']").first();
+    await control.hover({ timeout: WebDriver.OPEN_MS, force: true });
+  }
+
+  async cyclesHeroTooltipText(): Promise<string | null> {
+    const popup = this.page.locator("div.z-50.max-w-xs").first();
+    try {
+      await popup.waitFor({ state: "visible", timeout: 10_000 });
+    } catch {
+      return null;
+    }
+    return ((await popup.innerText().catch(() => "")) as string).trim() || null;
+  }
+
+  async cyclesHeroOpenCreate(): Promise<void> {
+    // The button carries both the mobile ("Add") and the desktop
+    // ("Add cycle") labels, one display:none: match the desktop label div.
+    const button = this.cyclesHeroContent()
+      .locator("button", { has: this.page.locator("div", { hasText: "Add cycle" }) })
+      .first();
+    await button.click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByPlaceholder("Title").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroFillCreateName(name: string): Promise<void> {
+    await this.page.getByPlaceholder("Title").first().fill(name, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroSubmitCreate(): Promise<void> {
+    const submit = this.page
+      .locator("button")
+      .filter({ hasText: /^Create cycle$/ })
+      .first();
+    await submit.click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByPlaceholder("Title").first().waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroCreateOpen(): Promise<boolean> {
+    return this.isShown(this.page.getByPlaceholder("Title").first());
+  }
+
+  async cyclesHeroVisibleNames(): Promise<string[]> {
+    // Detail links carry the cycle id and a truncate name span; the
+    // burn-down card links and index links carry no name span.
+    const links = this.cyclesHeroContent().locator('a[href*="/cycles/"]', { has: this.page.locator("span.truncate") });
+    const total = await links.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const link = links.nth(i);
+      if (!(await link.isVisible().catch(() => false))) continue;
+      const name = (
+        (await link
+          .locator("span.truncate")
+          .first()
+          .innerText()
+          .catch(() => "")) as string
+      ).trim();
+      if (name !== "") names.push(name);
+    }
+    return names;
+  }
+
+  private async cyclesHeroEnsureRow(name: string): Promise<Locator> {
+    // Completed rows hide in a collapsed group until it is expanded.
+    let row = this.cyclesHeroRow(name);
+    if ((await row.count()) === 0) {
+      await this.cyclesHeroExpandGroup("Completed cycle");
+      row = this.cyclesHeroRow(name);
+    }
+    await row.waitFor({ timeout: WebDriver.OPEN_MS });
+    return row;
+  }
+
+  async cyclesHeroTransferBanner(name: string): Promise<string | null> {
+    const row = await this.cyclesHeroEnsureRow(name);
+    const banner = row.locator("div.cursor-pointer", { hasText: /Transfer/ }).first();
+    if ((await banner.count()) === 0 || !(await banner.isVisible().catch(() => false))) return null;
+    return ((await banner.innerText().catch(() => "")) as string).trim() || null;
+  }
+
+  async cyclesHeroOpenTransfer(name: string): Promise<void> {
+    const row = await this.cyclesHeroEnsureRow(name);
+    await row
+      .locator("div.cursor-pointer", { hasText: /Transfer/ })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByPlaceholder("Search for a cycle...").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroTransferSearch(text: string): Promise<void> {
+    await this.page.getByPlaceholder("Search for a cycle...").first().fill(text, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroTransferOptions(): Promise<string[]> {
+    // Target options pair the cycle name with a capitalized status pill;
+    // no other list button on the page carries that pill.
+    const options = this.page.locator("button:has(span.capitalize)");
+    const total = await options.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const option = options.nth(i);
+      if (!(await option.isVisible().catch(() => false))) continue;
+      const name = option.locator("span.truncate").first();
+      if ((await name.count()) === 0) continue;
+      const text = ((await name.innerText().catch(() => "")) as string).trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
+  async cyclesHeroTransferPick(name: string): Promise<void> {
+    const option = this.page.locator("button:has(span.capitalize)", { hasText: name }).first();
+    await option.click({ timeout: WebDriver.OPEN_MS });
+    await this.page
+      .getByPlaceholder("Search for a cycle...")
+      .first()
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroCreateButtonState(): Promise<"absent" | "disabled" | "enabled"> {
+    // The button carries both the mobile ("Add") and the desktop
+    // ("Add cycle") labels, one display:none: match the desktop label div.
+    const button = this.cyclesHeroContent()
+      .locator("button", { has: this.page.locator("div", { hasText: "Add cycle" }) })
+      .first();
+    if ((await button.count()) === 0) return "absent";
+    if (!(await button.isVisible().catch(() => false))) return "absent";
+    return (await button.isDisabled().catch(() => false)) ? "disabled" : "enabled";
+  }
+
+  private cyclesHeroOpenMenu(): Locator {
+    // Every row renders two menu copies (inline touch plus hover
+    // desktop); only the opened one carries visible items, so scope to
+    // it instead of the first menu in the DOM (usually a hidden copy).
+    return this.page.locator("div[role='menu']:has(button:visible)");
+  }
+
+  async cyclesHeroOpenRowMenu(name: string): Promise<void> {
+    const row = await this.cyclesHeroEnsureRow(name);
+    // Rows at the viewport edge open their fixed-position menu
+    // off-screen (it never turns visible); centering the row first
+    // keeps the menu on screen.
+    await row.evaluate((el) => el.scrollIntoView({ block: "center" }));
+    await row.hover({ timeout: WebDriver.OPEN_MS });
+    const button = await this.cyclesHeroMenuButton(row);
+    if (button === null) throw new Error("[parity] no visible row menu button.");
+    await button.click({ timeout: WebDriver.OPEN_MS });
+    await this.cyclesHeroOpenMenu().locator("button").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroRowMenuEntries(): Promise<string[]> {
+    return this.cyclesHeroTextLines(this.cyclesHeroOpenMenu().first());
+  }
+
+  async cyclesHeroRowMenuClick(entry: string): Promise<void> {
+    const item = this.cyclesHeroOpenMenu().locator("div, button", { hasText: entry }).first();
+    await item.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroGrantClipboard(): Promise<void> {
+    // Headless clipboard.writeText rejects without an explicit grant,
+    // and the app only toasts on copy success (no catch path).
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  }
+
+  async cyclesHeroReadClipboard(): Promise<string> {
+    return await this.page.evaluate(async () => await navigator.clipboard.readText());
+  }
+
+  async cyclesHeroDismissSidebar(): Promise<void> {
+    // On touch layouts the sidebar is an absolute drawer that loads
+    // open over the content; double-clicking its resize handle
+    // collapses it. The handle toggles, so only act when the drawer is
+    // open — and never on desktop (no absolute class there).
+    const sidebar = this.page.locator("#main-sidebar");
+    if ((await sidebar.count()) === 0) return;
+    const classes = (await sidebar.first().getAttribute("class")) ?? "";
+    if (!classes.includes("absolute") || !classes.includes("translate-x-0")) return;
+    await this.page.getByRole("separator", { name: "Resize sidebar" }).first().dblclick({ timeout: WebDriver.OPEN_MS });
+    await this.page
+      .locator("#main-sidebar[class*='translate-x-[-100%]']")
+      .first()
+      .waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroSidebarDateDisabled(): Promise<boolean> {
+    const control = this.cyclesHeroDetailSidebar().locator("button[id^='headlessui-combobox-button']").first();
+    if ((await control.count()) === 0) return true;
+    return (await control.getAttribute("disabled").catch(() => null)) !== null;
+  }
+
+  async cyclesHeroFavoriteVisible(name: string): Promise<boolean> {
+    const row = await this.cyclesHeroEnsureRow(name);
+    return this.isShown(row.locator("button.grid.h-4.w-4"));
+  }
+
+  private async cyclesHeroSearchToggle(): Promise<Locator | null> {
+    // Closed search is a ghost icon button sharing the header actions
+    // container with the Add-cycle button; the container (and both
+    // controls) only renders for members, so guests resolve to null here
+    // instead of matching an unrelated icon button like the back chevron.
+    const box = this.cyclesHeroContent().locator('input[placeholder="Search"]').first();
+    if ((await box.count()) > 0 && (await box.isVisible().catch(() => false))) return null;
+    const add = this.cyclesHeroContent()
+      .locator("button", { has: this.page.locator("div", { hasText: "Add cycle" }) })
+      .first();
+    if ((await add.count()) === 0 || !(await add.isVisible().catch(() => false))) return null;
+    const container = add.locator("xpath=..");
+    const buttons = container.locator("button");
+    const total = await buttons.count();
+    for (let i = 0; i < total; i++) {
+      const candidate = buttons.nth(i);
+      const text = ((await candidate.innerText().catch(() => "")) as string).trim();
+      if (text === "" && (await candidate.isVisible().catch(() => false))) return candidate;
+    }
+    return null;
+  }
+
+  async cyclesHeroSearchVisible(): Promise<boolean> {
+    const box = this.cyclesHeroContent().locator('input[placeholder="Search"]').first();
+    if ((await box.count()) > 0 && (await box.isVisible().catch(() => false))) return true;
+    return (await this.cyclesHeroSearchToggle()) !== null;
+  }
+
+  async cyclesHeroFilterVisible(): Promise<boolean> {
+    return this.isShown(this.cyclesHeroContent().locator("button", { hasText: "Filters" }));
+  }
+
+  async cyclesHeroSearchOpen(): Promise<void> {
+    const box = this.cyclesHeroContent().locator('input[placeholder="Search"]').first();
+    if ((await box.count()) > 0 && (await box.isVisible().catch(() => false))) return;
+    const toggle = await this.cyclesHeroSearchToggle();
+    if (toggle === null) throw new Error("[parity] no search toggle in the list header.");
+    await toggle.click({ timeout: WebDriver.OPEN_MS });
+    // Content-scoped: a page-wide match can resolve to another hidden
+    // "Search" input (command palette) instead of the cycles one.
+    await this.cyclesHeroContent()
+      .locator('input[placeholder="Search"]')
+      .first()
+      .waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroSearchType(text: string): Promise<void> {
+    await this.cyclesHeroContent()
+      .locator('input[placeholder="Search"]')
+      .first()
+      .fill(text, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroSearchText(): Promise<string> {
+    return this.cyclesHeroContent()
+      .locator('input[placeholder="Search"]')
+      .first()
+      .inputValue({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroFilterMenuTexts(): Promise<string[]> {
+    const button = this.cyclesHeroContent().locator("button", { hasText: "Filters" }).first();
+    await button.click({ timeout: WebDriver.OPEN_MS });
+    // The filters popup is a Popover panel, not a role=menu (row menus
+    // render static hidden menu divs, so role=menu never matches here).
+    // The panel div itself is 0x0 (popper sizes the inner child), so wait
+    // on the inner box that carries the visible options.
+    const panel = this.page.locator("div[id^='headlessui-popover-panel'] > div").first();
+    await panel.waitFor({ timeout: WebDriver.OPEN_MS });
+    return this.cyclesHeroTextLines(panel);
+  }
+
+  async cyclesHeroOpenPeek(name: string): Promise<void> {
+    const row = await this.cyclesHeroEnsureRow(name);
+    await row.hover({ timeout: WebDriver.OPEN_MS });
+    await row.locator("button", { hasText: "More details" }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.cyclesHeroPeekPanel().locator("h4").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroInlineActionsVisible(name: string): Promise<boolean> {
+    const row = await this.cyclesHeroEnsureRow(name);
+    return this.isShown(row.locator("div.block.md\\:hidden div[data-main-menu]"));
+  }
+
+  async cyclesHeroHoverActionsVisible(name: string): Promise<boolean> {
+    const row = await this.cyclesHeroEnsureRow(name);
+    return this.isShown(row.locator("div.hidden.md\\:block div[data-main-menu]"));
+  }
+
+  async cyclesHeroLayoutMenuVisible(): Promise<boolean> {
+    return this.isShown(this.cyclesHeroContent().locator("div.flex.justify-center.sm\\:hidden"));
+  }
+
+  async cyclesHeroLayoutOptions(): Promise<string[]> {
+    const menu = this.cyclesHeroContent().locator("div.flex.justify-center.sm\\:hidden").first();
+    await menu.click({ timeout: WebDriver.OPEN_MS });
+    // Scope to the opened menu: every CustomMenu (rows included)
+    // renders a static hidden menu div, so .first() never matches here.
+    const popup = this.cyclesHeroOpenMenu().first();
+    await popup.locator("button").first().waitFor({ timeout: WebDriver.OPEN_MS });
+    return this.cyclesHeroTextLines(popup);
+  }
+
+  async cyclesHeroPickLayout(option: string): Promise<void> {
+    const item = this.cyclesHeroOpenMenu().locator("div, button", { hasText: option }).first();
+    await item.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroDetailLayoutMenuVisible(): Promise<boolean> {
+    return this.isShown(this.cyclesHeroContent().locator("div.flex.justify-evenly.md\\:hidden", { hasText: "Layout" }));
+  }
+
+  async cyclesHeroDetailLayoutOptions(): Promise<string[]> {
+    // Click the Layout button itself: the toolbar div also carries the
+    // Display control, and a center click lands on the wrong one.
+    const buttons = this.cyclesHeroContent().locator("button", { hasText: "Layout" });
+    const total = await buttons.count();
+    let clicked = false;
+    for (let i = 0; i < total; i++) {
+      if (
+        await buttons
+          .nth(i)
+          .isVisible()
+          .catch(() => false)
+      ) {
+        await buttons.nth(i).click({ timeout: WebDriver.OPEN_MS });
+        clicked = true;
+        break;
+      }
+    }
+    if (!clicked) throw new Error("[parity] no visible detail Layout button.");
+    const popup = this.cyclesHeroOpenMenu().first();
+    await popup.locator("button").first().waitFor({ timeout: WebDriver.OPEN_MS });
+    return this.cyclesHeroTextLines(popup);
+  }
+
+  async cyclesHeroDetailPickLayout(option: string): Promise<void> {
+    const item = this.cyclesHeroOpenMenu().locator("div, button", { hasText: option }).first();
+    await item.click({ timeout: WebDriver.OPEN_MS });
   }
 }

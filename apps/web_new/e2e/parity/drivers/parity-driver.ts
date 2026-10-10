@@ -4675,6 +4675,161 @@ export interface ParityDriver {
   runnersWaitRunnerDeleteWorking(): Promise<void>;
   /** Wait until the revoke-runner confirm shows its in-flight state. */
   runnersWaitRunnerRevokeWorking(): Promise<void>;
+
+  // Active-cycle hero and cycles cross-cutting (NEWFRONT-254,
+  // CYC-040..045, CYC-047..048). Observed on apps/web: the cycles list
+  // leads with an active-cycle disclosure (three cards over the cycle
+  // covering today, or an explanatory empty view), the sidebar and the
+  // quick-look panel share one skeleton-then-content sidebar, the
+  // workspace actives page is an OSS upsell, date controls carry the
+  // project UTC offset with user-timezone hover equivalents, creation
+  // and transfers refresh counts without reload while the archived list
+  // never refetches on focus, guests see no mutation affordance, and
+  // narrow screens move row menus inline with a layout switcher.
+  // Appended; existing entries above are untouched per the shared
+  // contract.
+  // ---------------------------------------------------------------------------
+
+  /** Open the project's live cycles list; waits until hero/rows/empty settle. */
+  cyclesHeroOpenList(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Open a cycle's detail page; returns after first paint (no settle wait). */
+  cyclesHeroOpenDetail(workspaceSlug: string, projectId: string, cycleId: string): Promise<void>;
+  /** Open the list with `?peekCycle=` set; returns after first paint. */
+  cyclesHeroOpenPeekRaw(workspaceSlug: string, projectId: string, cycleId: string): Promise<void>;
+  /** Reload the current page; returns after first paint. */
+  cyclesHeroReload(): Promise<void>;
+  /** Delay the next cycle list/detail/progress reads by ms (skeleton shaping). */
+  cyclesHeroDelayDetailReads(ms: number): Promise<void>;
+  /** Strip `cycleId` from list reads so the peek mounts on a store miss. */
+  cyclesHeroHideCycleFromListReads(cycleId: string): Promise<void>;
+  /** Whether the detail sidebar currently shows its loading skeleton. */
+  cyclesHeroSidebarSkeletonVisible(): Promise<boolean>;
+  /** Detail sidebar cycle name, or null while the skeleton shows. */
+  cyclesHeroSidebarName(): Promise<string | null>;
+  /** Whether the quick-look panel currently shows its loading skeleton. */
+  cyclesHeroPeekSkeletonVisible(): Promise<boolean>;
+  /** Quick-look panel cycle name, or null while the skeleton shows. */
+  cyclesHeroPeekName(): Promise<string | null>;
+  /** Active-cycle group heading text, or null when the group is absent. */
+  cyclesHeroGroupHeading(): Promise<string | null>;
+  /** Name of the cycle row inside the hero, or null when none renders. */
+  cyclesHeroActiveName(): Promise<string | null>;
+  /** Hero empty-view copy, or null when the hero shows cards. */
+  cyclesHeroEmptyCopy(): Promise<{ title: string; description: string } | null>;
+  /** Progress card: closed-counts line plus per-state rows. */
+  cyclesHeroProgressGroups(): Promise<{ closed: string | null; groups: CyclesHeroProgressGroup[] }>;
+  /** Whether the progress card shows its per-card empty view. */
+  cyclesHeroProgressEmptyVisible(): Promise<boolean>;
+  /** Burn-down card heading, pending line, and whether the chart renders. */
+  cyclesHeroBurndown(): Promise<{ heading: string | null; pending: string | null; chart: boolean }>;
+  /** Whether the burn-down card shows its per-card empty view. */
+  cyclesHeroBurndownEmptyVisible(): Promise<boolean>;
+  /** Breakdown card tab labels in display order. */
+  cyclesHeroBreakdownTabs(): Promise<string[]>;
+  /** Select a breakdown card tab by label. */
+  cyclesHeroBreakdownSelectTab(label: string): Promise<void>;
+  /** Entry texts of the active breakdown tab panel. */
+  cyclesHeroBreakdownEntries(): Promise<string[]>;
+  /** Whether the active breakdown panel shows its per-card empty view. */
+  cyclesHeroBreakdownEmptyVisible(): Promise<boolean>;
+  /** Click the named progress group; waits for the detail navigation. */
+  cyclesHeroClickProgressGroup(group: string): Promise<void>;
+  /** Click the named progress group without waiting for navigation. */
+  cyclesHeroTapProgressGroup(group: string): Promise<void>;
+  /** Click the indexed breakdown entry; waits for the detail navigation. */
+  cyclesHeroClickBreakdownEntry(index: number): Promise<void>;
+  /** Open the workspace-level active-cycles page; waits until it settles. */
+  cyclesHeroOpenWorkspaceActives(workspaceSlug: string): Promise<void>;
+  /** Upsell banner heading, benefit-card count, and upgrade-link facts. */
+  cyclesHeroUpsell(): Promise<CyclesHeroUpsell>;
+  /** Whether the page header carries the upgrade marker. */
+  cyclesHeroUpsellBadgeVisible(): Promise<boolean>;
+  /** Offset chip text on the active row, or null when no chip shows. */
+  cyclesHeroActiveRowOffset(): Promise<string | null>;
+  /** Hover the active row's date span (reveals the timezone tip). */
+  cyclesHeroHoverActiveRowDates(): Promise<void>;
+  /** Offset chip text in the detail sidebar, or null when no chip shows. */
+  cyclesHeroSidebarOffset(): Promise<string | null>;
+  /** Hover the sidebar's date control (reveals the timezone tip). */
+  cyclesHeroHoverSidebarDates(): Promise<void>;
+  /** Visible tooltip text after a hover, or null when none shows. */
+  cyclesHeroTooltipText(): Promise<string | null>;
+  /** Start counting cycle reads, archived reads, and cycle writes. */
+  cyclesHeroBeginTrafficSpy(): Promise<void>;
+  /** Traffic counters since the spy began. */
+  cyclesHeroTrafficCounts(): Promise<CyclesHeroTrafficCounts>;
+  /** Open the cycle-create dialog from the list header. */
+  cyclesHeroOpenCreate(): Promise<void>;
+  /** Fill the create dialog's title field. */
+  cyclesHeroFillCreateName(name: string): Promise<void>;
+  /** Submit the create dialog; waits until it closes. */
+  cyclesHeroSubmitCreate(): Promise<void>;
+  /** Whether the create dialog is currently open. */
+  cyclesHeroCreateOpen(): Promise<boolean>;
+  /** Cycle row names in display order on the current list. */
+  cyclesHeroVisibleNames(): Promise<string[]>;
+  /** Transfer banner text on the named row, or null when none shows. */
+  cyclesHeroTransferBanner(name: string): Promise<string | null>;
+  /** Open the transfer dialog from the named row's banner. */
+  cyclesHeroOpenTransfer(name: string): Promise<void>;
+  /** Type into the transfer dialog's search box. */
+  cyclesHeroTransferSearch(text: string): Promise<void>;
+  /** Transfer dialog option names in display order. */
+  cyclesHeroTransferOptions(): Promise<string[]>;
+  /** Pick the named transfer target; waits until the dialog closes. */
+  cyclesHeroTransferPick(name: string): Promise<void>;
+  /** Dispatch a window focus event (focus-refetch probe). */
+  cyclesHeroFocusWindow(): Promise<void>;
+  /** Header create control state for the signed-in role. */
+  cyclesHeroCreateButtonState(): Promise<"absent" | "disabled" | "enabled">;
+  /** Open the row menu of the named cycle. */
+  cyclesHeroOpenRowMenu(name: string): Promise<void>;
+  /** Entries of the open row menu in display order. */
+  cyclesHeroRowMenuEntries(): Promise<string[]>;
+  /** Dismiss any open row menus. */
+  cyclesHeroCloseMenus(): Promise<void>;
+  /** Whether the sidebar date control refuses edits (read-only roles). */
+  cyclesHeroSidebarDateDisabled(): Promise<boolean>;
+  /** Whether the named row offers the favorites marker. */
+  cyclesHeroFavoriteVisible(name: string): Promise<boolean>;
+  /** Whether the list search control renders. */
+  cyclesHeroSearchVisible(): Promise<boolean>;
+  /** Whether the list filter control renders. */
+  cyclesHeroFilterVisible(): Promise<boolean>;
+  /** Whether the named row's inline (touch) quick actions show. */
+  cyclesHeroInlineActionsVisible(name: string): Promise<boolean>;
+  /** Whether the named row's hover (desktop) menu control shows. */
+  cyclesHeroHoverActionsVisible(name: string): Promise<boolean>;
+  /** Whether the mobile layout switcher renders on the list. */
+  cyclesHeroLayoutMenuVisible(): Promise<boolean>;
+  /** Layout options in the open mobile switcher. */
+  cyclesHeroLayoutOptions(): Promise<string[]>;
+  /** Pick a layout in the open mobile switcher. */
+  cyclesHeroPickLayout(option: string): Promise<void>;
+  /** Whether the mobile layout switcher renders on the detail page. */
+  cyclesHeroDetailLayoutMenuVisible(): Promise<boolean>;
+  /** Open the list search box. */
+  cyclesHeroSearchOpen(): Promise<void>;
+  /** Type into the open list search box. */
+  cyclesHeroSearchType(text: string): Promise<void>;
+  /** Current list search-box text. */
+  cyclesHeroSearchText(): Promise<string>;
+  /** Open the list filter menu and read its visible option texts. */
+  cyclesHeroFilterMenuTexts(): Promise<string[]>;
+  /** Open the named row's quick-look panel through its details action. */
+  cyclesHeroOpenPeek(name: string): Promise<void>;
+  /** Click the open row menu entry whose label contains `entry`. */
+  cyclesHeroRowMenuClick(entry: string): Promise<void>;
+  /** Grant clipboard read/write so copy-link confirmations fire headless. */
+  cyclesHeroGrantClipboard(): Promise<void>;
+  /** Current clipboard text (copy-link proof). */
+  cyclesHeroReadClipboard(): Promise<string>;
+  /** Collapse the mobile sidebar drawer when it covers the content. */
+  cyclesHeroDismissSidebar(): Promise<void>;
+  /** Layout options in the open detail mobile switcher. */
+  cyclesHeroDetailLayoutOptions(): Promise<string[]>;
+  /** Pick a layout in the open detail mobile switcher. */
+  cyclesHeroDetailPickLayout(option: string): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -5343,5 +5498,35 @@ export interface ArchivesTrafficCounts {
   /** GETs to an archived single-item/cycle/module read. */
   detailReads: number;
   /** POST/DELETE archive and restore writes. */
+  writes: number;
+}
+
+/** One per-state row of the hero progress card (NEWFRONT-254, CYC-041). */
+export interface CyclesHeroProgressGroup {
+  /** State-group label as rendered (e.g. completed, started). */
+  name: string;
+  /** Full row text (label plus its work-item count). */
+  text: string;
+}
+
+/** The workspace active-cycles upsell (NEWFRONT-254, CYC-043). */
+export interface CyclesHeroUpsell {
+  /** Banner heading, or null when the banner is absent. */
+  heading: string | null;
+  /** Rendered benefit cards. */
+  benefits: number;
+  /** Upgrade link target, or null when no upgrade link renders. */
+  upgradeHref: string | null;
+  /** Upgrade link target attribute (blank for a new tab), or null. */
+  upgradeTarget: string | null;
+}
+
+/** Traffic counters since the hero spy began (NEWFRONT-254, CYC-045). */
+export interface CyclesHeroTrafficCounts {
+  /** GETs to live cycle reads (list, detail, progress, analytics). */
+  cycleReads: number;
+  /** GETs to the archived-cycles list. */
+  archivedReads: number;
+  /** Cycle mutating writes (create, update, delete, transfer). */
   writes: number;
 }
