@@ -1421,7 +1421,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.license.bgtasks.tracer.instance_traces",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.apply_agent_run_terminal_effects",
@@ -1810,6 +1810,7 @@ mod tests {
             pool.clone(),
             pidash_jobs::integrations::github_sync::LiveTransports::from_env(),
         );
+        pidash_jobs::license::tasks::register(&mut registry, pool.clone());
 
         // The const union, independent of the table.
         let mut expected_rust = std::collections::BTreeSet::new();
@@ -1827,6 +1828,7 @@ mod tests {
         ]);
         expected_rust.extend(pidash_jobs::integrations::git_sync::TASK_NAMES);
         expected_rust.extend(pidash_jobs::integrations::github_sync::TASK_NAMES);
+        expected_rust.insert(pidash_jobs::license::tasks::TASK_NAME);
         // Count pins: a const that grows must update the table too.
         assert_eq!(
             tasks_cleanup::cleanup::TASKS.len(),
@@ -1848,7 +1850,7 @@ mod tests {
             3,
             "github_sync group drifted"
         );
-        assert_eq!(expected_rust.len(), 26, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 27, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()
