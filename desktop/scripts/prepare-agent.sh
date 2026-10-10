@@ -8,7 +8,21 @@ set -euo pipefail
 desktop_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 oss_dir="$(cd -- "$desktop_dir/.." && pwd)"
 engine_tag="${CODEX_BUNDLE_VERSION:-rust-v0.153.4}"
-runner_profile="${PIDASH_RUNNER_PROFILE:-dev}"
+# dev-prep.sh runs this for both beforeDevCommand and beforeBuildCommand, and
+# whatever lands in src-tauri/bin/ is sealed into the bundle as the daemon the
+# app spawns, so the default profile follows the build being served. The Tauri
+# CLI always exports TAURI_ENV_PLATFORM to its hooks, and TAURI_ENV_DEBUG=true
+# only for `tauri dev` / `tauri build --debug` (2.10 leaves it unset for a
+# release build rather than setting it to false). Run by hand, default to dev.
+default_profile=dev
+if [[ -n "${TAURI_ENV_PLATFORM:-}" && "${TAURI_ENV_DEBUG:-}" != true ]]; then
+  default_profile=release
+fi
+runner_profile="${PIDASH_RUNNER_PROFILE:-$default_profile}"
+if [[ "$default_profile" == release && "$runner_profile" == dev ]]; then
+  echo "[prepare-agent] WARNING: PIDASH_RUNNER_PROFILE=dev in a release build — the bundle will ship an unoptimized debug runner." >&2
+fi
+echo "[prepare-agent] Building the bundled runner with cargo profile: $runner_profile"
 target="$(rustc -vV | sed -n 's/^host: //p')"
 suffix=""
 case "$target" in
