@@ -25,6 +25,8 @@ import type {
   ArchivesModuleChip,
   ArchivesModulesEmptyKind,
   ArchivesPeekReadOnly,
+  ArchivesTab,
+  ArchivesTrafficCounts,
   AssistantApiCounts,
   AssistantBubble,
   AssistantLandingGreeting,
@@ -23176,6 +23178,490 @@ export class WebDriver implements ParityDriver {
     const main = this.page.getByRole("main").last();
     if (await this.isShown(main.getByRole("button", { name: /export|import|print/i }))) return true;
     return this.isShown(main.getByRole("menuitem", { name: /export|import|print/i }));
+  }
+  // --- Archives cross-cutting (NEWFRONT-226, ARCH-026–032). Appended; the
+  // --- methods above are untouched per the shared driver contract.
+  private archivesTraffic: ArchivesTrafficCounts = {
+    issuesReads: 0,
+    cyclesReads: 0,
+    modulesReads: 0,
+    detailReads: 0,
+    writes: 0,
+  };
+
+  private archivesProjectDialogConfirm(): Locator {
+    return this.page.locator('[role="dialog"]').last().getByRole("button").last();
+  }
+
+  /**
+   * The archives content landmark. The app nests `main` elements (shell
+   * plus content); the innermost one carrying tab-strip hrefs is ours.
+   * The href filter keeps sidebar links (same labels, live targets) out.
+   */
+  private archivesContent(): Locator {
+    return this.page
+      .locator("main:not(:has(main))")
+      .filter({ has: this.page.locator('a[href*="/archives/"]') })
+      .first();
+  }
+
+  async archivesProjectConfirmLabel(): Promise<string> {
+    const confirm = this.archivesProjectDialogConfirm();
+    await confirm.waitFor({ timeout: WebDriver.OPEN_MS });
+    return ((await confirm.innerText()) ?? "").trim();
+  }
+
+  async archivesProjectConfirmBusy(): Promise<boolean> {
+    const confirm = this.archivesProjectDialogConfirm();
+    if (!(await this.isShown(confirm))) return false;
+    const label = ((await confirm.innerText()) ?? "").trim();
+    return /archiving|restoring/i.test(label) || !(await confirm.isEnabled());
+  }
+
+  private static archivesProjectWrite(url: string, method: string): boolean {
+    return (method === "POST" || method === "DELETE") && /\/projects\/[^/]+\/archive\/$/.test(url);
+  }
+
+  async archivesProjectDelayNextWrite(ms: number): Promise<void> {
+    let armed = true;
+    await this.page.route("**/projects/*/archive/", async (route) => {
+      const req = route.request();
+      if (armed && WebDriver.archivesProjectWrite(req.url(), req.method())) {
+        armed = false;
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      await route.continue();
+    });
+  }
+
+  async archivesProjectFailNextWrite(): Promise<void> {
+    let armed = true;
+    await this.page.route("**/projects/*/archive/", async (route) => {
+      const req = route.request();
+      if (armed && WebDriver.archivesProjectWrite(req.url(), req.method())) {
+        armed = false;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity project archive failure" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+  }
+
+  async archivesItemFailNextWrite(): Promise<void> {
+    let armed = true;
+    await this.page.route("**/archive/", async (route) => {
+      const req = route.request();
+      const method = req.method();
+      const isItemWrite =
+        (method === "POST" || method === "DELETE") && /\/(issues|cycles|modules)\/[^/]+\/archive\/$/.test(req.url());
+      if (armed && isItemWrite) {
+        armed = false;
+        await route.abort();
+        return;
+      }
+      await route.continue();
+    });
+  }
+
+  private async archivesTabOpenOnce(path: string, label: string): Promise<void> {
+    await this.page.goto(path);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.awaitAppBoot(path);
+    // Scoped to the strip: the sidebar carries same-label live links.
+    await this.archivesContent().getByRole("link", { name: label }).first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async archivesTabOpen(workspaceSlug: string, projectId: string, tab: ArchivesTab): Promise<void> {
+    const path = `/${workspaceSlug}/projects/${projectId}/archives/${tab}`;
+    const label = tab === "issues" ? "Work items" : tab === "cycles" ? "Cycles" : "Modules";
+    try {
+      await this.archivesTabOpenOnce(path, label);
+    } catch (error) {
+      // Cold dev-server compiles can outlast the shared boot check's own
+      // attempts; one more open usually lands on the warmed compile. Any
+      // other failure, or a second boot failure, still throws.
+      if (!/never booted/.test(String(error))) throw error;
+      await this.page.waitForTimeout(15_000);
+      await this.archivesTabOpenOnce(path, label);
+    }
+  }
+
+  // Tab labels reuse the sibling archivesTabNames (identical contract);
+  // the key form below stays distinct because its contract differs.
+  async archivesActiveTabKey(): Promise<ArchivesTab> {
+    const after = this.page.url().split("/archives/")[1];
+    if (after === undefined) throw new Error(`[parity] no archives tab is active (${this.page.url()}).`);
+    if (after.startsWith("cycles")) return "cycles";
+    if (after.startsWith("modules")) return "modules";
+    return "issues";
+  }
+
+  async archivesRowMenuOpenFirst(name: string): Promise<void> {
+    const main = this.archivesContent();
+    // Row triggers reveal on hover; settle the row, then hover it.
+    const row = main.getByText(name).first();
+    await row.waitFor({ timeout: WebDriver.OPEN_MS });
+    await row.scrollIntoViewIfNeeded().catch(() => undefined);
+    await row.hover({ timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+    const triggers = main.locator("button:has(svg.lucide-ellipsis), button:has(svg.lucide-more-horizontal)");
+    const total = await triggers.count();
+    for (let i = 0; i < total; i++) {
+      const trigger = triggers.nth(i);
+      try {
+        if (!(await this.isShown(trigger))) continue;
+        await trigger.click({ timeout: 5_000 });
+      } catch {
+        continue;
+      }
+      try {
+        await this.page.getByRole("menuitem").first().waitFor({ timeout: 5_000 });
+      } catch {
+        await this.page.keyboard.press("Escape").catch(() => undefined);
+        continue;
+      }
+      // The project header menu shares the row triggers' shape; its
+      // entries (Archives, Leave, Publish) are never row entries.
+      const opened = await this.archivesRowMenuEntryTitles();
+      if (opened.some((entry) => /^(Archives|Leave project|Publish)/i.test(entry))) {
+        await this.page.keyboard.press("Escape").catch(() => undefined);
+        continue;
+      }
+      return;
+    }
+    throw new Error("[parity] no archives row menu trigger opened a menu.");
+  }
+
+  async archivesRowMenuEntryTitles(): Promise<string[]> {
+    // First-line titles: sibling archivesRowMenuEntries reads h5-or-full
+    // text, which appends trailing note paragraphs this matrix excludes.
+    const items = this.page.getByRole("menuitem");
+    const total = await items.count();
+    const out: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = ((await items.nth(i).innerText()) ?? "").trim().split("\n")[0]?.trim() ?? "";
+      if (text !== "") out.push(text);
+    }
+    return out;
+  }
+
+  async archivesRowMenuClick(entry: string): Promise<void> {
+    const item = this.page.getByRole("menuitem").filter({ hasText: entry }).first();
+    await item.waitFor({ timeout: WebDriver.WAIT_MS });
+    await item.click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  private archivesPeekParam(): string | null {
+    const url = this.page.url();
+    if (url.includes("peekIssueId=")) return "peekIssueId";
+    if (url.includes("peekCycle=")) return "peekCycle";
+    if (url.includes("peekModule=")) return "peekModule";
+    return null;
+  }
+
+  async archivesPeekOpenFirst(name: string): Promise<void> {
+    const row = this.archivesContent().getByText(name).first();
+    await row.waitFor({ timeout: WebDriver.OPEN_MS });
+    await row.scrollIntoViewIfNeeded().catch(() => undefined);
+    await row.click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      if (this.archivesPeekParam() !== null) return;
+      await this.page.waitForTimeout(500);
+    }
+    // Module rows open the peek from an info control rather than the title.
+    await row.focus().catch(() => undefined);
+    await this.page.keyboard.press("Enter").catch(() => undefined);
+    const retry = Date.now() + 10_000;
+    while (Date.now() < retry) {
+      if (this.archivesPeekParam() !== null) return;
+      await this.page.waitForTimeout(500);
+    }
+    throw new Error(`[parity] selecting the archives row for ${name} opened no peek (${this.page.url()}).`);
+  }
+
+  private archivesCycleModulePeekPanel() {
+    // Cycle/module peeks dock at z-[9]; the sidebar resize handles share
+    // the right-0 edge at z-[20], so the z-level is the discriminator.
+    return this.page.locator("div.right-0.z-\\[9\\]").first();
+  }
+
+  private archivesIssuePeekCloseButton() {
+    return this.page.locator("#full-screen-portal").locator("button:has(svg.lucide-move-right)").first();
+  }
+
+  private archivesIssuePeekDockedPanel() {
+    return this.page.locator("div.absolute.top-0.right-0.bottom-0").first();
+  }
+
+  async archivesPeekVisible(): Promise<boolean> {
+    if (this.archivesPeekParam() === null) return false;
+    // The issue peek mounts in the portal, but its body sometimes docks
+    // in a separate absolutely-positioned panel while the portal holds
+    // only the text-less close shell; any of the three proves the peek.
+    // The open call returns on the URL param, so poll for the mount.
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      if (this.archivesPeekParam() === null) return false;
+      if (await this.isShown(this.archivesIssuePeekCloseButton())) return true;
+      if (await this.isShown(this.page.locator("#full-screen-portal").getByText(/.+/).first())) return true;
+      if (await this.isShown(this.archivesIssuePeekDockedPanel())) return true;
+      if (await this.isShown(this.archivesCycleModulePeekPanel())) return true;
+      if (Date.now() >= deadline) return false;
+      await this.page.waitForTimeout(400);
+    }
+  }
+
+  async archivesPeekClose(): Promise<void> {
+    const param = this.archivesPeekParam();
+    if (param === null) return;
+    if (param === "peekIssueId") {
+      const close = this.archivesIssuePeekCloseButton();
+      if ((await close.count()) > 0) {
+        await close.click({ timeout: WebDriver.WAIT_MS });
+      } else {
+        await this.page.keyboard.press("Escape");
+      }
+    } else {
+      // The panel header holds a single text-less chevron close button.
+      const panel = this.archivesCycleModulePeekPanel();
+      await panel.waitFor({ timeout: WebDriver.WAIT_MS });
+      await panel.locator("button").first().click({ timeout: WebDriver.WAIT_MS });
+    }
+    await expect.poll(() => this.archivesPeekParam(), { timeout: WebDriver.WAIT_MS }).toBeNull();
+  }
+
+  async archivesDetailBannerText(): Promise<string | null> {
+    // Page-wide: the detail page carries no tab strip, so the content
+    // helper does not resolve there; the banner text is distinctive.
+    const banner = this.page.getByText(/has been archived/i).first();
+    if (!(await this.isShown(banner))) return null;
+    return ((await banner.textContent()) ?? "").trim() || null;
+  }
+
+  async archivesSkeletonVisible(): Promise<boolean> {
+    if ((await this.archivesContent().count()) > 0) {
+      return this.isShown(this.archivesContent().locator(".animate-pulse").first());
+    }
+    // Detail page: no tab strip, fall back to a page-wide read.
+    return this.isShown(this.page.locator(".animate-pulse").first());
+  }
+
+  async archivesArmSkeletonObserver(): Promise<void> {
+    // The detail loader flashes for a fraction of a second (it mounts in
+    // the gap between the store write and the fetch settle), so live
+    // polling can straddle it; a mutation observer records the mount. An
+    // init script survives the full navigation the detail open performs;
+    // it resets the flag on every later navigation, so arm right before.
+    await this.page.addInitScript(() => {
+      const win = window as unknown as Record<string, unknown>;
+      win["__paritySkeletonSeen"] = false;
+      const marksSkeleton = (node: Node | null): boolean => {
+        if (node === null || node.nodeType !== 1) return false;
+        const el = node as Element;
+        if (el.classList.contains("animate-pulse")) return true;
+        return el.querySelector(".animate-pulse") !== null;
+      };
+      // Inspect the records, not the live DOM: the mount and unmount can
+      // land in one batch, in which case a live query would miss the flash.
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          if (record.type === "attributes" && marksSkeleton(record.target)) {
+            win["__paritySkeletonSeen"] = true;
+            return;
+          }
+          for (const added of Array.from(record.addedNodes)) {
+            if (marksSkeleton(added)) {
+              win["__paritySkeletonSeen"] = true;
+              return;
+            }
+          }
+        }
+      });
+      observer.observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+    });
+  }
+
+  async archivesSkeletonWasSeen(): Promise<boolean> {
+    return this.page
+      .evaluate(() => (window as unknown as Record<string, unknown>)["__paritySkeletonSeen"] === true)
+      .catch(() => false);
+  }
+
+  async archivesDelayNextListReads(ms: number): Promise<void> {
+    let remaining = 12;
+    await this.page.route(
+      (url) => /archived-(issues|cycles|modules)|archive\/$/.test(url.pathname),
+      async (route) => {
+        if (route.request().method() === "GET" && remaining > 0) {
+          remaining -= 1;
+          await new Promise((resolve) => setTimeout(resolve, ms));
+        }
+        await route.continue();
+      }
+    );
+  }
+
+  async archivesBeginTrafficSpy(): Promise<void> {
+    this.archivesTraffic = { issuesReads: 0, cyclesReads: 0, modulesReads: 0, detailReads: 0, writes: 0 };
+    await this.page.route("**/api/**", async (route) => {
+      const req = route.request();
+      const url = req.url();
+      const method = req.method();
+      if (method === "GET") {
+        if (/\/archived-issues\/(\?|$)/.test(url)) this.archivesTraffic.issuesReads += 1;
+        else if (/\/archived-cycles\/(\?|$)/.test(url)) this.archivesTraffic.cyclesReads += 1;
+        else if (/\/archived-modules\/(\?|$)/.test(url)) this.archivesTraffic.modulesReads += 1;
+        else if (
+          /\/(issues|cycles|modules)\/[^/]+\/archive\/(\?|$)/.test(url) ||
+          /\/archived-(cycles|modules)\/[^/]+\/(\?|$)/.test(url)
+        ) {
+          this.archivesTraffic.detailReads += 1;
+        }
+      } else if ((method === "POST" || method === "DELETE") && /\/archive\/(\?|$)/.test(url)) {
+        this.archivesTraffic.writes += 1;
+      }
+      await route.continue();
+    });
+  }
+
+  async archivesTrafficCounts(): Promise<ArchivesTrafficCounts> {
+    return { ...this.archivesTraffic };
+  }
+
+  async archivesFilterControlVisible(): Promise<boolean> {
+    if (await this.isShown(this.page.getByPlaceholder("Search"))) return true;
+    // The collapsed search keeps its toggle beside the filter menu.
+    const toggle = this.page.getByPlaceholder("Search").locator("xpath=./ancestor::div[1]/preceding-sibling::button");
+    if ((await toggle.count()) > 0 && (await this.isShown(toggle.first()))) return true;
+    return this.isShown(this.page.getByRole("button", { name: /filters?/i }).first());
+  }
+
+  private archivesSearchBox() {
+    // Scoped to the archives content: the command palette ("Search
+    // commands...") and the sidebar carry their own search inputs.
+    return this.archivesContent().getByPlaceholder("Search", { exact: true });
+  }
+
+  async archivesSearchType(text: string): Promise<void> {
+    const box = this.archivesSearchBox();
+    if (!(await this.isShown(box))) {
+      const toggle = box.locator("xpath=./ancestor::div[1]/preceding-sibling::button").first();
+      await toggle.waitFor({ timeout: WebDriver.WAIT_MS });
+      await toggle.click({ timeout: WebDriver.WAIT_MS });
+    }
+    await box.waitFor({ timeout: WebDriver.WAIT_MS });
+    await box.fill(text);
+  }
+
+  async archivesSearchText(): Promise<string> {
+    return (
+      (await this.archivesSearchBox()
+        .inputValue()
+        .catch(() => "")) ?? ""
+    );
+  }
+
+  async archivesRowDraggable(name: string): Promise<boolean> {
+    // Scoped to the named row's own subtree: the sidebar project list is
+    // reorderable, so a content-wide draggable scan would false-positive.
+    const row = this.archivesContent().getByText(name).first();
+    if ((await row.count()) === 0) return false;
+    return row.evaluate((node) => {
+      const el = node as HTMLElement;
+      if (el.closest('[draggable="true"]') !== null) return true;
+      return el.querySelector('[draggable="true"]') !== null;
+    });
+  }
+
+  async archivesDragReorders(source: string, target: string): Promise<boolean> {
+    // Behavioral drag probe: compares the rows' vertical order before and
+    // after a real drag-and-drop. Archived issue rows carry a vestigial
+    // draggable attribute (the shared list-row component), but the drop
+    // behavior is gated off, so the order must not flip.
+    const content = this.archivesContent();
+    const src = content.getByText(source).first();
+    const dst = content.getByText(target).first();
+    await src.waitFor({ timeout: WebDriver.OPEN_MS });
+    await dst.waitFor({ timeout: WebDriver.OPEN_MS });
+    const yOf = async (row: Locator): Promise<number> => (await row.boundingBox().catch(() => null))?.y ?? -1;
+    const srcBefore = await yOf(src);
+    const dstBefore = await yOf(dst);
+    await src.scrollIntoViewIfNeeded().catch(() => undefined);
+    await src.dragTo(dst, { timeout: WebDriver.WAIT_MS });
+    await this.page.waitForTimeout(2000);
+    const srcAfter = await yOf(src);
+    const dstAfter = await yOf(dst);
+    if (srcBefore < 0 || dstBefore < 0 || srcAfter < 0 || dstAfter < 0) return false;
+    return srcBefore < dstBefore !== srcAfter < dstAfter;
+  }
+
+  async archivesExportControlVisible(): Promise<boolean> {
+    return this.isShown(
+      this.archivesContent()
+        .getByRole("button", { name: /export|download/i })
+        .first()
+    );
+  }
+
+  async archivesPressKey(key: string): Promise<void> {
+    await this.page.locator("body").press(key, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesRowPresent(name: string): Promise<boolean> {
+    return this.isShown(this.archivesContent().getByText(name).first());
+  }
+
+  async archivesPageTextPresent(text: string): Promise<boolean> {
+    return this.isShown(this.page.getByText(text).first());
+  }
+
+  async archivesPrimeAndEnter(workspaceSlug: string, projectId: string, liveCycleName: string): Promise<void> {
+    const livePath = `/${workspaceSlug}/projects/${projectId}/cycles/`;
+    try {
+      await this.page.goto(livePath);
+      await this.page.waitForLoadState("domcontentloaded");
+      await this.awaitAppBoot(livePath);
+    } catch (error) {
+      // Same cold-compile patience as the tab open: one more attempt on
+      // the warmed server before a boot failure throws for real.
+      if (!/never booted/.test(String(error))) throw error;
+      await this.page.waitForTimeout(15_000);
+      await this.page.goto(livePath);
+      await this.page.waitForLoadState("domcontentloaded");
+      await this.awaitAppBoot(livePath);
+    }
+    // The live row rendering proves the live fetch completed, which is
+    // what arms the archived selectors (NEWFRONT-239).
+    await expect.poll(() => this.archivesPageTextPresent(liveCycleName), { timeout: WebDriver.OPEN_MS }).toBe(true);
+    // Enter the archives without reloading: the sidebar project menu pushes
+    // client-side, so the primed store survives. Twenty menus share the
+    // trigger label, so scope to this project's sidebar row.
+    const row = this.page.locator(`div.group\\/project-item:has(a[href*="${projectId}"])`).first();
+    await row.waitFor({ timeout: WebDriver.OPEN_MS });
+    await row.hover({ timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+    const trigger = row.getByRole("button", { name: "Toggle quick actions menu" }).first();
+    await trigger.waitFor({ timeout: WebDriver.WAIT_MS });
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    const entry = this.page.getByRole("menuitem", { name: "Archives" }).first();
+    await entry.waitFor({ timeout: WebDriver.WAIT_MS });
+    await entry.click({ timeout: WebDriver.WAIT_MS });
+    await expect
+      .poll(() => this.page.url(), { timeout: WebDriver.WAIT_MS })
+      .toContain(`/projects/${projectId}/archives/issues`);
+    await this.archivesContent()
+      .getByRole("link", { name: "Work items" })
+      .first()
+      .waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async archivesTabClick(tab: ArchivesTab): Promise<void> {
+    const label = tab === "issues" ? "Work items" : tab === "cycles" ? "Cycles" : "Modules";
+    await this.archivesContent().getByRole("link", { name: label }).first().click({ timeout: WebDriver.WAIT_MS });
+    await expect.poll(() => this.archivesActiveTabKey(), { timeout: WebDriver.WAIT_MS }).toBe(tab);
   }
   // --- Notifications cross-cutting (NEWFRONT-202, NTF-026..031).
   // --- Appended; existing methods above are untouched per the shared

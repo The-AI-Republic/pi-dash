@@ -4380,6 +4380,75 @@ export interface ParityDriver {
   notificationsArmNotificationRequestSpy(): Promise<void>;
   /** Number of Notification.requestPermission calls observed since arming. */
   notificationsNotificationRequestCount(): Promise<number>;
+
+  // --- Archives cross-cutting (NEWFRONT-226, ARCH-026–032). Appended;
+  // --- the methods above are untouched per the shared driver contract.
+  /** Confirm-button label in the open project archive/restore dialog. */
+  archivesProjectConfirmLabel(): Promise<string>;
+  /** Whether the dialog confirm currently shows progress (busy). */
+  archivesProjectConfirmBusy(): Promise<boolean>;
+  /** Delay the next project archive/restore write by ms (progress shaping). */
+  archivesProjectDelayNextWrite(ms: number): Promise<void>;
+  /** Fail the next project archive/restore write once (failure shaping). */
+  archivesProjectFailNextWrite(): Promise<void>;
+  /** Fail the next issue/cycle/module archive/restore write once. */
+  archivesItemFailNextWrite(): Promise<void>;
+  /** Open one archives tab; settles when content, empty, or loader shows. */
+  archivesTabOpen(workspaceSlug: string, projectId: string, tab: ArchivesTab): Promise<void>;
+  /** Active tab key, read from the address (labels live on archivesActiveTab). */
+  archivesActiveTabKey(): Promise<ArchivesTab>;
+  /** Open the action menu of the row showing `name` on the current tab. */
+  archivesRowMenuOpenFirst(name: string): Promise<void>;
+  /** First-line titles of the open row menu (see web.ts for the sibling split). */
+  archivesRowMenuEntryTitles(): Promise<string[]>;
+  /** Click the open row menu entry whose label contains `entry`. */
+  archivesRowMenuClick(entry: string): Promise<void>;
+  /** Select the row showing `name` to open its peek panel. */
+  archivesPeekOpenFirst(name: string): Promise<void>;
+  /** Whether a peek panel currently shows. */
+  archivesPeekVisible(): Promise<boolean>;
+  /** Close the open peek panel. */
+  archivesPeekClose(): Promise<void>;
+  /** Archived-detail banner text, or null when no banner shows. */
+  archivesDetailBannerText(): Promise<string | null>;
+  /** Whether a loading skeleton shows in the archives content. */
+  archivesSkeletonVisible(): Promise<boolean>;
+  /** Delay the next archived-list/detail reads by ms (skeleton shaping). */
+  archivesDelayNextListReads(ms: number): Promise<void>;
+  /** Start counting archived list reads and archive writes. */
+  archivesBeginTrafficSpy(): Promise<void>;
+  /** Traffic counters since the spy began. */
+  archivesTrafficCounts(): Promise<ArchivesTrafficCounts>;
+  /** Whether a filter or search control renders on the current tab. */
+  archivesFilterControlVisible(): Promise<boolean>;
+  /** Type into the tab's search box (cycles/modules tabs). */
+  archivesSearchType(text: string): Promise<void>;
+  /** Current search-box text. */
+  archivesSearchText(): Promise<string>;
+  /** Whether the first row is draggable. */
+  archivesRowDraggable(name: string): Promise<boolean>;
+  /** Drag the `source` row onto the `target` row; whether their vertical order flips. */
+  archivesDragReorders(source: string, target: string): Promise<boolean>;
+  /** Start recording whether any skeleton mounts from now on. */
+  archivesArmSkeletonObserver(): Promise<void>;
+  /** Whether a skeleton mounted since the observer armed. */
+  archivesSkeletonWasSeen(): Promise<boolean>;
+  /** Whether an export/download control renders on the current tab. */
+  archivesExportControlVisible(): Promise<boolean>;
+  /** Press a key with the archives content focused (absence probe). */
+  archivesPressKey(key: string): Promise<void>;
+  /** Whether a row showing `name` renders in the archives content. */
+  archivesRowPresent(name: string): Promise<boolean>;
+  /** Whether `text` shows anywhere on the page (live-page settle reads). */
+  archivesPageTextPresent(text: string): Promise<boolean>;
+  /**
+   * Prime the session on the live cycles page, then enter the archives
+   * through the project header menu without reloading (cold entry to the
+   * cycles/modules tabs never settles — NEWFRONT-239).
+   */
+  archivesPrimeAndEnter(workspaceSlug: string, projectId: string, liveCycleName: string): Promise<void>;
+  /** Click the tab-strip link for `tab` (client-side) and settle on it. */
+  archivesTabClick(tab: ArchivesTab): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -4978,4 +5047,21 @@ export interface ArchivesFilterExpression {
   and?: Array<Record<string, string | Array<string>>>;
   /** Conditions combined with OR; each holds one property operator to values. */
   or?: Array<Record<string, string | Array<string>>>;
+}
+
+/** Archives tab keys (NEWFRONT-226, ARCH-029). */
+export type ArchivesTab = "issues" | "cycles" | "modules";
+
+/** Traffic counters since the archives spy began (NEWFRONT-226, ARCH-032). */
+export interface ArchivesTrafficCounts {
+  /** GETs to the archived-issues list. */
+  issuesReads: number;
+  /** GETs to the archived-cycles list. */
+  cyclesReads: number;
+  /** GETs to the archived-modules list. */
+  modulesReads: number;
+  /** GETs to an archived single-item/cycle/module read. */
+  detailReads: number;
+  /** POST/DELETE archive and restore writes. */
+  writes: number;
 }
