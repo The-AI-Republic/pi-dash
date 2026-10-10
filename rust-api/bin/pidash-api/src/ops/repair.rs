@@ -58,25 +58,24 @@ pub struct SlugArgs {
 }
 
 /// Print a prompt (no newline, flushed) and read one `input()` line:
-/// the trailing newline stripped, EOF reading as the empty string.
+/// the trailing newline stripped (a lone `\r` too, as universal newlines
+/// would), EOF reading as the empty string.
 fn read_input(prompt: &str) -> String {
     print!("{prompt}");
-    std::io::stdout()
-        .flush()
-        .expect("stdout flushes for prompts");
+    if let Err(error) = std::io::stdout().flush() {
+        fail(error);
+    }
     let mut line = String::new();
-    let read = std::io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .expect("stdin reads for prompts");
-    if read == 0 {
-        return String::new();
+    match std::io::stdin().lock().read_line(&mut line) {
+        Ok(0) => return String::new(),
+        Ok(_) => {}
+        Err(error) => fail(error),
     }
     if line.ends_with('\n') {
         line.pop();
-        if line.ends_with('\r') {
-            line.pop();
-        }
+    }
+    if line.ends_with('\r') {
+        line.pop();
     }
     line
 }
@@ -84,8 +83,7 @@ fn read_input(prompt: &str) -> String {
 /// Django's `CommandError` rendering: `CommandError: {message}` on stderr,
 /// exit 1. Diverges only where Django would traceback (see module docs).
 fn fail(message: impl Display) -> ! {
-    eprint!("CommandError: {message}");
-    eprintln!();
+    eprintln!("CommandError: {message}");
     std::process::exit(1);
 }
 
@@ -177,7 +175,9 @@ async fn run_sync(kind: pidash_services::ops::repair::SyncKind) {
         .unwrap_or_else(|e| fail(e));
     let wire = CeleryTaskMessage::new(message.task, vec![], message.kwargs);
     publisher.publish(&wire).await.unwrap_or_else(|e| fail(e));
-    publisher.close().await.unwrap_or_else(|e| fail(e));
+    // The message has landed; Django never reports connection teardown
+    // (interpreter shutdown swallows it), so neither do we.
+    let _ = publisher.close().await;
     println!("{}", kind.done_line());
 }
 

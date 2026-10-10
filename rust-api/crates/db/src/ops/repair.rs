@@ -8,7 +8,7 @@
 //! `01a93e17216faea7bfc156b0f864cbbe420d1c52`):
 //! batch SQL, the advisory-lock key, the renumber rule, and the
 //! version-sync payload shape. Decision logic (which branch, which
-//! message) lives in [`pidash_services::ops::repair`]; prompts, printing,
+//! message) lives in `pidash_services::ops::repair`; prompts, printing,
 //! exit codes and the Celery publish live in the binary's `ops::repair`.
 //! Execution uses runtime `sqlx::query` (no `query!` macros): there is no
 //! build-time database, per the merged precedent.
@@ -459,6 +459,9 @@ pub async fn apply_copy_batch(
     descriptions: &[NewDescription],
     links: &[(Uuid, Uuid)],
 ) -> Result<Vec<Uuid>, RepairError> {
+    if descriptions.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut tx = pool.begin().await?;
     let insert_sql = descriptions_insert_sql(descriptions.len());
     let mut query = sqlx::query(&insert_sql);

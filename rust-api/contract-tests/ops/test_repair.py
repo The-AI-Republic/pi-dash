@@ -713,6 +713,44 @@ def drain_marker(marker: str, timeout: float = 30.0) -> list[tuple]:
     return collect_matching(_matches, timeout=timeout)
 
 
+def discard_stale_constant_markers(values: set[str]) -> None:
+    """Ack queued sync messages carrying constant batch_size markers.
+
+    The passthrough cases publish fixed values, so an aborted run's
+    leftovers would otherwise satisfy a later run's strict drain. These
+    exact values are only ever published by that test; anything else is
+    requeued untouched.
+    """
+    from kombu import Connection
+
+    with Connection(config.required(config.CELERY_BROKER_URL)) as conn:
+        queue = conn.SimpleQueue("celery")
+        try:
+            while True:
+                try:
+                    message = queue.get(block=False)
+                except Exception:
+                    break
+                try:
+                    payload = message.payload
+                    if (
+                        isinstance(payload, list)
+                        and len(payload) > 1
+                        and isinstance(payload[1], dict)
+                        and payload[1].get("batch_size") in values
+                    ):
+                        message.ack()
+                    else:
+                        message.requeue()
+                except Exception:
+                    try:
+                        message.requeue()
+                    except Exception:
+                        pass
+        finally:
+            queue.close()
+
+
 @pytest.mark.parametrize(
     ("command", "task", "done"),
     [
@@ -781,6 +819,7 @@ def test_sync_countdown_keeps_py_int(
 
 @pytest.mark.parametrize("batch_size", ["", "007", "  padded  "])
 def test_sync_batch_size_passes_through_verbatim(batch_size: str) -> None:
+    discard_stale_constant_markers({"", "007", "  padded  "})
     for run in (run_django, run_rust):
         proc = run("sync_issue_version", stdin_text=f"{batch_size}\n5\n")
         assert proc.returncode == 0, proc.stderr
