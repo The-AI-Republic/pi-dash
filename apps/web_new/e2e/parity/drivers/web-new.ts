@@ -115,6 +115,14 @@ import type {
   PagesListRowDetail,
   PagesListTab,
   PagesRowTab,
+  ModulesListCardControl,
+  ModulesListCardLead,
+  ModulesListCardSegments,
+  ModulesListEmptyKind,
+  ModulesListLayout,
+  ModulesListRowProgress,
+  ModulesListSkeletonResult,
+  ModulesListZeroStateCopy,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -10090,5 +10098,188 @@ export class WebNewDriver implements ParityDriver {
 
   async estimatesArchivedRowButtonCount(_name: string): Promise<number> {
     return todo("estimatesArchivedRowButtonCount");
+  }
+
+  // --- Modules list states, layouts, rows and cards (NEWFRONT-307,
+  // --- MOD-008..012, MOD-020). Throwing stubs until the area lands.
+
+  async modulesListOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("modulesListOpenList");
+  }
+
+  async modulesListVisibleNames(): Promise<string[]> {
+    return todo("modulesListVisibleNames");
+  }
+
+  async modulesListBoardCardNames(): Promise<string[]> {
+    return todo("modulesListBoardCardNames");
+  }
+
+  async modulesListTimelineNames(): Promise<string[]> {
+    return todo("modulesListTimelineNames");
+  }
+
+  async modulesListEmptyKind(): Promise<ModulesListEmptyKind> {
+    return todo("modulesListEmptyKind");
+  }
+
+  async modulesListNoMatchHeading(): Promise<string | null> {
+    return todo("modulesListNoMatchHeading");
+  }
+
+  async modulesListNoMatchHint(): Promise<string | null> {
+    return todo("modulesListNoMatchHint");
+  }
+
+  async modulesListSkeletonVisible(): Promise<boolean> {
+    return todo("modulesListSkeletonVisible");
+  }
+
+  async modulesListSkeletonShownOnSlowFetch(
+    _workspaceSlug: string,
+    _projectId: string,
+    _layout: ModulesListLayout
+  ): Promise<ModulesListSkeletonResult> {
+    return todo("modulesListSkeletonShownOnSlowFetch");
+  }
+
+  async modulesListZeroStateVisible(): Promise<boolean> {
+    return todo("modulesListZeroStateVisible");
+  }
+
+  async modulesListZeroStateArtVisible(): Promise<boolean> {
+    return todo("modulesListZeroStateArtVisible");
+  }
+
+  async modulesListZeroStateCopy(): Promise<ModulesListZeroStateCopy> {
+    return todo("modulesListZeroStateCopy");
+  }
+
+  async modulesListZeroStateCreateDisabled(): Promise<boolean> {
+    return todo("modulesListZeroStateCreateDisabled");
+  }
+
+  async modulesListZeroStateCreateOpen(): Promise<void> {
+    return todo("modulesListZeroStateCreateOpen");
+  }
+
+  async modulesListCreateDialogVisible(): Promise<boolean> {
+    return todo("modulesListCreateDialogVisible");
+  }
+
+  async modulesListNoMatchShowViaSearch(_text: string): Promise<void> {
+    return todo("modulesListNoMatchShowViaSearch");
+  }
+
+  async modulesListNoMatchClearSearch(): Promise<void> {
+    return todo("modulesListNoMatchClearSearch");
+  }
+
+  async modulesListLayoutOptionCount(): Promise<number> {
+    return todo("modulesListLayoutOptionCount");
+  }
+
+  async modulesListActiveLayout(): Promise<ModulesListLayout> {
+    return todo("modulesListActiveLayout");
+  }
+
+  async modulesListSwitcherVisible(): Promise<boolean> {
+    return todo("modulesListSwitcherVisible");
+  }
+
+  async modulesListSwitchLayout(_layout: ModulesListLayout): Promise<void> {
+    return todo("modulesListSwitchLayout");
+  }
+
+  async modulesListReload(): Promise<void> {
+    return todo("modulesListReload");
+  }
+
+  async modulesListCompactMenuVisible(): Promise<boolean> {
+    return todo("modulesListCompactMenuVisible");
+  }
+
+  async modulesListCompactMenuOptions(): Promise<string[]> {
+    return todo("modulesListCompactMenuOptions");
+  }
+
+  async modulesListCompactSwitchLayout(_layout: "list" | "board"): Promise<void> {
+    return todo("modulesListCompactSwitchLayout");
+  }
+
+  async modulesListRowProgress(_name: string): Promise<ModulesListRowProgress> {
+    return todo("modulesListRowProgress");
+  }
+
+  async modulesListRowDetailHref(_name: string): Promise<string> {
+    return todo("modulesListRowDetailHref");
+  }
+
+  async modulesListRowOpenPeek(_name: string): Promise<void> {
+    return todo("modulesListRowOpenPeek");
+  }
+
+  async modulesListPeekName(): Promise<string | null> {
+    return todo("modulesListPeekName");
+  }
+
+  async modulesListPeekClose(): Promise<void> {
+    return todo("modulesListPeekClose");
+  }
+
+  async modulesListRowMenuVisible(_name: string): Promise<boolean> {
+    return todo("modulesListRowMenuVisible");
+  }
+
+  async modulesListArchivedRowClickOpensPeek(_name: string): Promise<void> {
+    return todo("modulesListArchivedRowClickOpensPeek");
+  }
+
+  async modulesListCardNameTruncated(_name: string): Promise<boolean> {
+    return todo("modulesListCardNameTruncated");
+  }
+
+  async modulesListCardNameTooltip(_name: string): Promise<string | null> {
+    return todo("modulesListCardNameTooltip");
+  }
+
+  async modulesListCardStatusText(_name: string): Promise<string> {
+    return todo("modulesListCardStatusText");
+  }
+
+  async modulesListCardOpenPeek(_name: string): Promise<void> {
+    return todo("modulesListCardOpenPeek");
+  }
+
+  async modulesListCardIssueCount(_name: string): Promise<string> {
+    return todo("modulesListCardIssueCount");
+  }
+
+  async modulesListCardLeadKind(_name: string): Promise<ModulesListCardLead> {
+    return todo("modulesListCardLeadKind");
+  }
+
+  async modulesListCardProgressSegments(_name: string): Promise<ModulesListCardSegments> {
+    return todo("modulesListCardProgressSegments");
+  }
+
+  async modulesListCardDatesVisible(_name: string): Promise<boolean> {
+    return todo("modulesListCardDatesVisible");
+  }
+
+  async modulesListCardFavoriteVisible(_name: string): Promise<boolean> {
+    return todo("modulesListCardFavoriteVisible");
+  }
+
+  async modulesListCardQuickMenuVisible(_name: string): Promise<boolean> {
+    return todo("modulesListCardQuickMenuVisible");
+  }
+
+  async modulesListCardClickBody(_name: string): Promise<void> {
+    return todo("modulesListCardClickBody");
+  }
+
+  async modulesListCardClickControl(_name: string, _control: ModulesListCardControl): Promise<void> {
+    return todo("modulesListCardClickControl");
   }
 }

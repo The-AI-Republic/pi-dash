@@ -6402,6 +6402,113 @@ export interface ParityDriver {
   estimatesArchivedOpenLinkNewPage(): Promise<string>;
   /** Buttons rendered on the archived row `name` (read-only rows carry none). */
   estimatesArchivedRowButtonCount(name: string): Promise<number>;
+
+  // --- Modules list states, layouts, rows and cards (NEWFRONT-307,
+  // --- MOD-008..012, MOD-020). Appended; existing methods above are
+  // --- untouched per the shared driver contract.
+
+  /** Open the live modules list; ends settled (rows, zero state, or no-match). */
+  modulesListOpenList(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Row names in the list layout (empty in other layouts). */
+  modulesListVisibleNames(): Promise<string[]>;
+  /** Card names in the board layout (empty in other layouts). */
+  modulesListBoardCardNames(): Promise<string[]>;
+  /** Module names in the timeline layout (empty in other layouts). */
+  modulesListTimelineNames(): Promise<string[]>;
+  /** Which list-area state renders once settled. */
+  modulesListEmptyKind(): Promise<ModulesListEmptyKind>;
+  /** No-match heading text, or null when the no-match view is absent. */
+  modulesListNoMatchHeading(): Promise<string | null>;
+  /** No-match hint text, or null when the no-match view is absent. */
+  modulesListNoMatchHint(): Promise<string | null>;
+  /** Whether a list loading skeleton currently shows. */
+  modulesListSkeletonVisible(): Promise<boolean>;
+  /**
+   * Hold the list fetch on `layout`, reporting whether the skeleton
+   * showed, matched that layout, and showed exclusively (no rows and no
+   * empty state alongside). Releases the hold and ends settled.
+   */
+  modulesListSkeletonShownOnSlowFetch(
+    workspaceSlug: string,
+    projectId: string,
+    layout: ModulesListLayout
+  ): Promise<ModulesListSkeletonResult>;
+  /** Whether the zero-modules onboarding view renders. */
+  modulesListZeroStateVisible(): Promise<boolean>;
+  /** Whether the zero-state artwork renders. */
+  modulesListZeroStateArtVisible(): Promise<boolean>;
+  /** Zero-state title and explanation text. */
+  modulesListZeroStateCopy(): Promise<ModulesListZeroStateCopy>;
+  /** Whether the zero-state creation action is disabled. */
+  modulesListZeroStateCreateDisabled(): Promise<boolean>;
+  /** Activate the zero-state creation action; ends with the create dialog open. */
+  modulesListZeroStateCreateOpen(): Promise<void>;
+  /** Whether the module create dialog is open. */
+  modulesListCreateDialogVisible(): Promise<boolean>;
+  /** Fill the list search with text that matches nothing; ends with no-match shown. */
+  modulesListNoMatchShowViaSearch(text: string): Promise<void>;
+  /** Clear the list search; ends settled with rows. */
+  modulesListNoMatchClearSearch(): Promise<void>;
+  /** Number of options the desktop layout switcher offers. */
+  modulesListLayoutOptionCount(): Promise<number>;
+  /** Which layout the switcher marks active. */
+  modulesListActiveLayout(): Promise<ModulesListLayout>;
+  /** Whether the desktop layout switcher renders (hidden on small screens). */
+  modulesListSwitcherVisible(): Promise<boolean>;
+  /** Switch layout through the desktop switcher; ends settled in that layout. */
+  modulesListSwitchLayout(layout: ModulesListLayout): Promise<void>;
+  /** Reload the list; ends settled. */
+  modulesListReload(): Promise<void>;
+  /** Whether the small-screen layout menu trigger renders. */
+  modulesListCompactMenuVisible(): Promise<boolean>;
+  /** Option labels of the small-screen layout menu. */
+  modulesListCompactMenuOptions(): Promise<string[]>;
+  /** Switch layout through the small-screen menu; ends settled in that layout. */
+  modulesListCompactSwitchLayout(layout: "list" | "board"): Promise<void>;
+  /** Row progress marker: full-completion check, finished-but-short alert, or percent. */
+  modulesListRowProgress(name: string): Promise<ModulesListRowProgress>;
+  /** Detail href of a list row. */
+  modulesListRowDetailHref(name: string): Promise<string>;
+  /** Open the peek panel through a row's info control; ends with the peek open. */
+  modulesListRowOpenPeek(name: string): Promise<void>;
+  /** Peek panel module name, or null when no peek panel is open. */
+  modulesListPeekName(): Promise<string | null>;
+  /** Close the peek panel; ends with it closed. */
+  modulesListPeekClose(): Promise<void>;
+  /** Whether a row's quick menu trigger renders (small screens only). */
+  modulesListRowMenuVisible(name: string): Promise<boolean>;
+  /**
+   * Click an archived row on the archived-modules tab; ends with its
+   * peek panel open on the same tab (no navigation to detail).
+   */
+  modulesListArchivedRowClickOpensPeek(name: string): Promise<void>;
+  /** Whether a board card's name truncates. */
+  modulesListCardNameTruncated(name: string): Promise<boolean>;
+  /** Tooltip text of a board card's name, or null when no tooltip shows. */
+  modulesListCardNameTooltip(name: string): Promise<string | null>;
+  /** Status pill text of a board card. */
+  modulesListCardStatusText(name: string): Promise<string>;
+  /** Open the peek panel through a card's info control; ends with the peek open. */
+  modulesListCardOpenPeek(name: string): Promise<void>;
+  /** Work-item count line of a board card. */
+  modulesListCardIssueCount(name: string): Promise<string>;
+  /** Whether a board card shows a lead avatar or the no-lead marker. */
+  modulesListCardLeadKind(name: string): Promise<ModulesListCardLead>;
+  /** Non-zero progress segments of a board card (widths and colors). */
+  modulesListCardProgressSegments(name: string): Promise<ModulesListCardSegments>;
+  /** Whether a board card's date-range control renders. */
+  modulesListCardDatesVisible(name: string): Promise<boolean>;
+  /** Whether a board card's favorite control renders. */
+  modulesListCardFavoriteVisible(name: string): Promise<boolean>;
+  /** Whether a board card's quick menu trigger renders. */
+  modulesListCardQuickMenuVisible(name: string): Promise<boolean>;
+  /** Click a card's body; ends on the module detail page. */
+  modulesListCardClickBody(name: string): Promise<void>;
+  /**
+   * Click one card control; ends with the list path unchanged and any
+   * opened popover dismissed.
+   */
+  modulesListCardClickControl(name: string, control: ModulesListCardControl): Promise<void>;
 }
 
 /** Pages list tabs as the row-actions scenarios address them (NEWFRONT-313). */
@@ -7654,3 +7761,44 @@ export interface PagesListRowDetail {
   /** Whether the overflow menu trigger renders. */
   menuOffered: boolean;
 }
+
+/** List-area states the live modules list settles into (NEWFRONT-307, MOD-008..010). */
+export type ModulesListEmptyKind = "rows" | "zero" | "nomatch";
+
+/** Modules list layouts (NEWFRONT-307, MOD-011). */
+export type ModulesListLayout = "list" | "board" | "timeline";
+
+/** Slow-fetch skeleton observation (NEWFRONT-307, MOD-008). */
+export interface ModulesListSkeletonResult {
+  /** The skeleton showed while the list fetch was held. */
+  shown: boolean;
+  /** The shown skeleton matched the requested layout. */
+  layoutMatched: boolean;
+  /** No rows and no empty state showed alongside the skeleton. */
+  exclusive: boolean;
+}
+
+/** Row progress marker (NEWFRONT-307, MOD-012). */
+export type ModulesListRowProgress = { kind: "check" } | { kind: "alert" } | { kind: "percent"; percent: number };
+
+/** Board card lead slot (NEWFRONT-307, MOD-020). */
+export type ModulesListCardLead = "avatar" | "none";
+
+/** Zero-state title and explanation (NEWFRONT-307, MOD-009). */
+export interface ModulesListZeroStateCopy {
+  /** Onboarding title. */
+  title: string;
+  /** Onboarding explanation. */
+  description: string;
+}
+
+/** Non-zero progress segments of a board card (NEWFRONT-307, MOD-020). */
+export interface ModulesListCardSegments {
+  /** Segment widths in percent, in render order. */
+  widths: number[];
+  /** Segment background colors, in render order. */
+  colors: string[];
+}
+
+/** Clickable card controls that must not navigate (NEWFRONT-307, MOD-020). */
+export type ModulesListCardControl = "status" | "dates" | "favorite" | "menu";

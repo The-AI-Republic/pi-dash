@@ -124,6 +124,14 @@ import type {
   PagesListRowDetail,
   PagesListTab,
   PagesRowTab,
+  ModulesListCardControl,
+  ModulesListCardLead,
+  ModulesListCardSegments,
+  ModulesListEmptyKind,
+  ModulesListLayout,
+  ModulesListRowProgress,
+  ModulesListSkeletonResult,
+  ModulesListZeroStateCopy,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -30974,6 +30982,111 @@ export class WebDriver implements ParityDriver {
       .first();
   }
 
+  // Modules list states, layouts, rows and cards (NEWFRONT-307, MOD-008..012,
+  // MOD-020). Observed on the running old app: list rows are detail links
+  // with a text-13 truncate title, board cards are detail links with a
+  // text-14 truncate title, timeline rows are detail links with an h6
+  // title, the skeleton root carries h-full animate-pulse with a
+  // layout-specific body, the zero state is the onboarding view with the
+  // first-module action, the no-match view is a bare h3 plus hint, the
+  // desktop switcher is a 3-button segmented control, the small-screen
+  // header carries a Layout menu with list and board only, and the peek
+  // panel is address-driven (?peekModule=) beside an h4-titled sidebar.
+  // Appended; existing methods above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  private modulesListMain(): Locator {
+    // The shell nests a workspace main inside the app main; the list
+    // content always lives in the last one in document order.
+    return this.page.getByRole("main").last();
+  }
+
+  /** Names of module detail links whose title matches `titleSelector`. */
+  private async modulesListNamesByTitle(titleSelector: string): Promise<string[]> {
+    return this.page.evaluate((selector: string) => {
+      const mains = document.querySelectorAll("main");
+      const main = mains[mains.length - 1] ?? null;
+      const names: string[] = [];
+      main?.querySelectorAll('a[href*="/modules/"]').forEach((anchor) => {
+        if (!/\/modules\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(anchor.getAttribute("href") ?? "")) return;
+        const title = anchor.querySelector(selector)?.textContent?.trim() ?? "";
+        if (title !== "") names.push(title);
+      });
+      return names;
+    }, titleSelector);
+  }
+
+  /** List rows: detail links with a text-13 truncate title. */
+  private modulesListRowLinks(): Locator {
+    return this.modulesListMain().locator('a[href*="/modules/"]:has(span.truncate.text-13)');
+  }
+
+  /** Board cards: detail links with a text-14 truncate title. */
+  private modulesListBoardCardLinks(): Locator {
+    return this.modulesListMain().locator('a[href*="/modules/"]:has(span.truncate.text-14)');
+  }
+
+  /** Timeline rows: detail links with an h6 title. */
+  private modulesListTimelineLinks(): Locator {
+    return this.modulesListMain().locator('a[href*="/modules/"]:has(h6)');
+  }
+
+  /** The loading skeleton root (layout-specific body inside). */
+  private modulesListSkeletonRoot(): Locator {
+    return this.modulesListMain().locator("div.h-full.animate-pulse").first();
+  }
+
+  /** Empty-state container (renders only for the zero and no-match views). */
+  private modulesListEmptyRoot(): Locator {
+    return this.modulesListMain().locator("div.max-w-\\[25rem\\]").first();
+  }
+
+  /** Zero-state creation action (absent outside the zero state). */
+  private modulesListZeroCreateButton(): Locator {
+    return this.modulesListEmptyRoot().getByRole("button", { name: "Set your first module" });
+  }
+
+  /** No-match heading (absent outside the no-match view). */
+  private modulesListNoMatchTitle(): Locator {
+    return this.modulesListEmptyRoot().locator("h3").first();
+  }
+
+  /** Header search area, scoped off the always-mounted search box. */
+  private modulesListSearchArea(): Locator {
+    // The sidebar project search shares the placeholder, so scope to the
+    // list main; the filters popover carries a second box only while open,
+    // and these scenarios never open it.
+    return this.modulesListMain().locator('div.flex.items-center:has(input[placeholder="Search"])').first();
+  }
+
+  private modulesListSearchInput(): Locator {
+    return this.modulesListSearchArea().locator('input[placeholder="Search"]');
+  }
+
+  /** Collapsed search toggle: the area's direct button (the box holds its own close). */
+  private modulesListSearchToggle(): Locator {
+    return this.modulesListSearchArea().locator(":scope > button");
+  }
+
+  /** Desktop layout switcher (icon buttons; hidden on small screens). */
+  private modulesListSwitcher(): Locator {
+    return this.modulesListMain().locator("div.bg-layer-3.p-1").first();
+  }
+
+  /** Small-screen Layout menu trigger (renders below md). */
+  private modulesListCompactMenuTrigger(): Locator {
+    return this.modulesListMain().getByRole("button", { name: "Layout" }).first();
+  }
+
+  private modulesListCreateDialogRoot(): Locator {
+    // The toast viewport also carries role="dialog": scope to the dialog
+    // hosting the module title field, never the toast twin.
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.locator('input[name="name"]') })
+      .first();
+  }
+
   private async modulesAwaitDialog(): Promise<void> {
     // Wait for dialog CONTENT: the root keeps a zero-size box for a while
     // under load, so a visibility wait on the root lies.
@@ -33528,6 +33641,370 @@ export class WebDriver implements ParityDriver {
     });
   }
 
+  private async modulesListWaitSettled(): Promise<void> {
+    // 60s, not OPEN_MS: the list compiles cold per worker and fetches
+    // under shared-stack load; 30s flakes while a sibling suite runs.
+    await this.modulesListRowLinks()
+      .or(this.modulesListBoardCardLinks())
+      .or(this.modulesListTimelineLinks())
+      .or(this.modulesListZeroCreateButton())
+      .or(this.modulesListNoMatchTitle())
+      .first()
+      .waitFor({ timeout: 60_000 });
+  }
+
+  async modulesListOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    // Skip the reload when the list is already showing: specs enter
+    // through openAuthenticated, so each screen below loads exactly once.
+    const current = new URL(this.page.url()).pathname.replace(/\/$/, "");
+    if (!current.endsWith(`/projects/${projectId}/modules`)) {
+      await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules`);
+      await this.page.waitForLoadState("domcontentloaded");
+    }
+    await this.modulesListWaitSettled();
+  }
+
+  async modulesListVisibleNames(): Promise<string[]> {
+    return this.modulesListNamesByTitle("span.truncate.text-13");
+  }
+
+  async modulesListBoardCardNames(): Promise<string[]> {
+    return this.modulesListNamesByTitle("span.truncate.text-14");
+  }
+
+  async modulesListTimelineNames(): Promise<string[]> {
+    return this.modulesListNamesByTitle("h6");
+  }
+
+  async modulesListEmptyKind(): Promise<ModulesListEmptyKind> {
+    await this.modulesListWaitSettled();
+    const rows =
+      (await this.modulesListVisibleNames()).length +
+      (await this.modulesListBoardCardNames()).length +
+      (await this.modulesListTimelineNames()).length;
+    if (rows > 0) return "rows";
+    if (await this.isShown(this.modulesListZeroCreateButton())) return "zero";
+    if (await this.isShown(this.modulesListNoMatchTitle())) return "nomatch";
+    throw new Error("[parity] modules list settled with neither rows nor a known empty state.");
+  }
+
+  async modulesListNoMatchHeading(): Promise<string | null> {
+    const title = this.modulesListNoMatchTitle();
+    if ((await title.count()) === 0 || !(await title.isVisible())) return null;
+    return (await title.innerText()).trim();
+  }
+
+  async modulesListNoMatchHint(): Promise<string | null> {
+    const title = this.modulesListNoMatchTitle();
+    if ((await title.count()) === 0 || !(await title.isVisible())) return null;
+    const hint = title.locator("xpath=following-sibling::p[1]");
+    if ((await hint.count()) === 0) return null;
+    return (await hint.innerText()).trim();
+  }
+
+  async modulesListSkeletonVisible(): Promise<boolean> {
+    return this.isShown(this.modulesListSkeletonRoot());
+  }
+
+  /** Which layout the visible skeleton body matches (structural probe). */
+  private async modulesListSkeletonLayout(): Promise<ModulesListLayout | null> {
+    return this.page.evaluate((): ModulesListLayout | null => {
+      const mains = document.querySelectorAll("main");
+      const main = mains[mains.length - 1] ?? null;
+      const root = main?.querySelector("div.h-full.animate-pulse") ?? null;
+      if (!root) return null;
+      if (root.querySelector('[class*="25.5rem"]')) return "timeline";
+      if (root.querySelector("div.h-44")) return "board";
+      if (root.querySelector("span.rounded-full")) return "list";
+      return null;
+    });
+  }
+
+  /** No rows and no empty state alongside the visible skeleton. */
+  private async modulesListSkeletonExclusive(): Promise<boolean> {
+    const rows =
+      (await this.modulesListVisibleNames()).length +
+      (await this.modulesListBoardCardNames()).length +
+      (await this.modulesListTimelineNames()).length;
+    if (rows > 0) return false;
+    if (await this.isShown(this.modulesListZeroCreateButton())) return false;
+    return !(await this.isShown(this.modulesListNoMatchTitle()));
+  }
+
+  async modulesListSkeletonShownOnSlowFetch(
+    workspaceSlug: string,
+    projectId: string,
+    layout: ModulesListLayout
+  ): Promise<ModulesListSkeletonResult> {
+    // Two rounds: the dev oracle stalls whole renders (or fails a chunk
+    // import) under shared-box load, and a stalled first pass must not
+    // fail the transition assertion.
+    for (let round = 1; round <= 2; round++) {
+      await this.modulesListOpenList(workspaceSlug, projectId);
+      if ((await this.modulesListActiveLayout()) !== layout) {
+        await this.modulesListSwitchLayout(layout);
+      }
+      // Hold the entry fetches (StrictMode fires two), then let every
+      // later request through: unrouting mid-hold makes the sleeping
+      // handler's continue() throw "already handled", so the route stays
+      // armed until the list settles instead.
+      let holdsLeft = 2;
+      await this.page.route(
+        (url) => url.pathname.endsWith(`/projects/${projectId}/modules/`),
+        async (route) => {
+          if (holdsLeft > 0) {
+            holdsLeft -= 1;
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+          }
+          // Swallow "already handled": the catch-path unroute may land
+          // mid-hold, and the request is then already released.
+          await route.continue().catch(() => null);
+        }
+      );
+      try {
+        await this.page.reload({ waitUntil: "domcontentloaded" });
+        // 60s: a cold route compiles for 10s+ before the fetch starts.
+        const seen = await expect
+          .poll(() => this.modulesListSkeletonVisible(), { timeout: 60_000 })
+          .toBe(true)
+          .then(
+            () => true,
+            () => false
+          );
+        let layoutMatched = false;
+        let exclusive = false;
+        if (seen) {
+          layoutMatched = (await this.modulesListSkeletonLayout()) === layout;
+          exclusive = await this.modulesListSkeletonExclusive();
+        }
+        await this.modulesListWaitSettled();
+        await this.page.unrouteAll({ behavior: "wait" }).catch(() => null);
+        return { shown: seen, layoutMatched, exclusive };
+      } catch (error) {
+        await this.page.unrouteAll({ behavior: "wait" }).catch(() => null);
+        if (round === 2) throw error;
+      }
+    }
+    throw new Error("[parity] skeleton slow-fetch never settled.");
+  }
+
+  async modulesListZeroStateVisible(): Promise<boolean> {
+    return this.isShown(this.modulesListZeroCreateButton());
+  }
+
+  async modulesListZeroStateArtVisible(): Promise<boolean> {
+    const root = this.modulesListEmptyRoot();
+    if ((await root.count()) === 0 || !(await root.first().isVisible())) return false;
+    return this.isShown(root.locator("svg"));
+  }
+
+  async modulesListZeroStateCopy(): Promise<ModulesListZeroStateCopy> {
+    const root = this.modulesListEmptyRoot();
+    const title = await root.locator("h3").first().innerText({ timeout: WebDriver.WAIT_MS });
+    const description = await root.locator("p").first().innerText({ timeout: WebDriver.WAIT_MS });
+    return { title: title.trim(), description: description.trim() };
+  }
+
+  async modulesListZeroStateCreateDisabled(): Promise<boolean> {
+    return this.modulesListZeroCreateButton().first().isDisabled();
+  }
+
+  async modulesListZeroStateCreateOpen(): Promise<void> {
+    await this.modulesListZeroCreateButton().first().click({ timeout: WebDriver.OPEN_MS });
+    // Wait for dialog CONTENT: the dialog root keeps a zero-size box for
+    // a while under load, so a visibility wait on the root lies.
+    await this.modulesListCreateDialogRoot().locator('input[name="name"]').waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesListCreateDialogVisible(): Promise<boolean> {
+    return this.isShown(this.modulesListCreateDialogRoot().locator('input[name="name"]'));
+  }
+
+  async modulesListNoMatchShowViaSearch(text: string): Promise<void> {
+    // Collapsed, the toggle is the search area's direct button; opening
+    // swaps it for the expanding box. The toggle's own focus call is a
+    // no-op (the input mounts only after the state flip), so focus
+    // explicitly with a click.
+    if ((await this.modulesListSearchToggle().count()) > 0) {
+      await this.modulesListSearchToggle().first().click({ timeout: WebDriver.OPEN_MS });
+    }
+    await this.modulesListSearchInput().waitFor({ timeout: WebDriver.OPEN_MS });
+    await this.modulesListSearchInput().click({ timeout: WebDriver.OPEN_MS });
+    await this.modulesListSearchInput().fill(text, { timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.modulesListNoMatchHeading(), { timeout: WebDriver.WAIT_MS }).not.toBe(null);
+  }
+
+  async modulesListNoMatchClearSearch(): Promise<void> {
+    await this.modulesListSearchInput().fill("", { timeout: WebDriver.OPEN_MS });
+    await expect
+      .poll(
+        async () =>
+          (await this.modulesListVisibleNames()).length +
+          (await this.modulesListBoardCardNames()).length +
+          (await this.modulesListTimelineNames()).length,
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .toBeGreaterThan(0);
+  }
+
+  async modulesListLayoutOptionCount(): Promise<number> {
+    return this.modulesListSwitcher().locator("button").count();
+  }
+
+  async modulesListActiveLayout(): Promise<ModulesListLayout> {
+    const buttons = this.modulesListSwitcher().locator("button");
+    const total = await buttons.count();
+    if (total !== 3) throw new Error(`[parity] layout switcher offers ${total} options, expected 3.`);
+    for (let i = 0; i < total; i++) {
+      const cls = (await buttons.nth(i).getAttribute("class")) ?? "";
+      if (cls.includes("bg-layer-transparent-active")) {
+        if (i === 0) return "list";
+        if (i === 1) return "board";
+        return "timeline";
+      }
+    }
+    throw new Error("[parity] layout switcher marks no option active.");
+  }
+
+  async modulesListSwitcherVisible(): Promise<boolean> {
+    return this.isShown(this.modulesListSwitcher());
+  }
+
+  async modulesListSwitchLayout(layout: ModulesListLayout): Promise<void> {
+    const index = { list: 0, board: 1, timeline: 2 }[layout];
+    await this.modulesListSwitcher().locator("button").nth(index).click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.modulesListActiveLayout(), { timeout: WebDriver.WAIT_MS }).toBe(layout);
+    await this.modulesListWaitSettled();
+  }
+
+  async modulesListReload(): Promise<void> {
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    await this.modulesListWaitSettled();
+  }
+
+  async modulesListCompactMenuVisible(): Promise<boolean> {
+    return this.isShown(this.modulesListCompactMenuTrigger());
+  }
+
+  async modulesListCompactMenuOptions(): Promise<string[]> {
+    await this.modulesListCompactMenuTrigger().click({ timeout: WebDriver.OPEN_MS });
+    const items = this.page.locator('[role="menuitem"]:visible');
+    await items.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    const total = await items.count();
+    const labels: string[] = [];
+    for (let i = 0; i < total; i++) {
+      labels.push((await items.nth(i).locator("div.text-tertiary").first().innerText()).trim());
+    }
+    await this.page.keyboard.press("Escape");
+    await items
+      .first()
+      .waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS })
+      .catch(() => undefined);
+    return labels;
+  }
+
+  async modulesListCompactSwitchLayout(layout: "list" | "board"): Promise<void> {
+    const label = layout === "list" ? "List layout" : "Gallery layout";
+    await this.modulesListCompactMenuTrigger().click({ timeout: WebDriver.OPEN_MS });
+    const item = this.page.locator('[role="menuitem"]:visible', { hasText: label });
+    await item.waitFor({ timeout: WebDriver.OPEN_MS });
+    await item.locator("button").click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.modulesListActiveLayout(), { timeout: WebDriver.WAIT_MS }).toBe(layout);
+    await this.modulesListWaitSettled();
+  }
+
+  /** Exact-text matcher for row and card titles (names may carry regex chars). */
+  private static modulesListExactText(name: string): RegExp {
+    return new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
+  }
+
+  /** List row link for a module name; throws when absent. */
+  private modulesListRowLink(name: string): Locator {
+    return this.modulesListRowLinks().filter({
+      has: this.page.locator("span.truncate.text-13", { hasText: WebDriver.modulesListExactText(name) }),
+    });
+  }
+
+  /** Board card link for a module name; throws when absent. */
+  private modulesListBoardCardLink(name: string): Locator {
+    return this.modulesListBoardCardLinks().filter({
+      has: this.page.locator("span.truncate.text-14", { hasText: WebDriver.modulesListExactText(name) }),
+    });
+  }
+
+  async modulesListRowProgress(name: string): Promise<ModulesListRowProgress> {
+    const found = await this.page.evaluate((rowName: string) => {
+      const mains = document.querySelectorAll("main");
+      const main = mains[mains.length - 1] ?? null;
+      const anchors = [...(main?.querySelectorAll('a[href*="/modules/"]') ?? [])];
+      for (const anchor of anchors) {
+        if (!/\/modules\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(anchor.getAttribute("href") ?? "")) continue;
+        const titleEl = anchor.querySelector("span.truncate.text-13");
+        if ((titleEl?.textContent?.trim() ?? "") !== rowName) continue;
+        // The ring's overlay (first div inside the indicator) carries the
+        // marker: a check svg, an alert span, or a percent span. The ring
+        // svg itself is the overlay's sibling, never inside it.
+        const overlay = anchor.querySelector("div.relative > div");
+        if (!overlay) return { found: false as const };
+        if (overlay.querySelector("svg")) return { found: true as const, kind: "check" as const };
+        const text = overlay.textContent?.trim() ?? "";
+        if (text === "!") return { found: true as const, kind: "alert" as const };
+        const percent = /^(-?\d+)%$/.exec(text);
+        if (percent?.[1] !== undefined)
+          return { found: true as const, kind: "percent" as const, percent: Number(percent[1]) };
+        return { found: false as const };
+      }
+      return { found: false as const };
+    }, name);
+    if (!found.found) throw new Error(`[parity] list row never rendered ${JSON.stringify(name)}.`);
+    if (found.kind === "check") return { kind: "check" };
+    if (found.kind === "alert") return { kind: "alert" };
+    return { kind: "percent", percent: found.percent };
+  }
+
+  async modulesListRowDetailHref(name: string): Promise<string> {
+    const href = await this.modulesListRowLink(name).first().getAttribute("href", { timeout: WebDriver.WAIT_MS });
+    if (!href) throw new Error(`[parity] list row never rendered ${JSON.stringify(name)}.`);
+    return href;
+  }
+
+  async modulesListRowOpenPeek(name: string): Promise<void> {
+    const link = this.modulesListRowLink(name);
+    // The info control reveals on hover (desktop); hover the row first.
+    // The row link holds exactly one button (the info control).
+    await link.first().hover({ timeout: WebDriver.WAIT_MS });
+    const detailWait = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          /\/modules\/[0-9a-fA-F-]{36}\/$/.test(new URL(response.url()).pathname),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await link.first().locator("button").first().click({ timeout: WebDriver.WAIT_MS });
+    if (!(await detailWait)) {
+      throw new Error(`[parity] opening ${JSON.stringify(name)} fired no module detail read.`);
+    }
+    await expect.poll(() => this.modulesListPeekName(), { timeout: WebDriver.WAIT_MS }).toBe(name);
+  }
+
+  async modulesListPeekName(): Promise<string | null> {
+    if (!new URL(this.page.url()).searchParams.has("peekModule")) return null;
+    const heading = this.modulesListMain().locator("h4.text-18, h3.text-18").first();
+    if ((await heading.count()) === 0) return null;
+    return (await heading.innerText()).trim();
+  }
+
+  async modulesListPeekClose(): Promise<void> {
+    await this.modulesListMain().locator("div.sticky.top-0 button").first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForFunction(() => !new URL(location.href).searchParams.has("peekModule"), null, {
+      timeout: WebDriver.WAIT_MS,
+    });
+  }
+
   async estimatesPickStarter(title: string): Promise<void> {
     const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     await this.estimatesDialog()
@@ -35598,5 +36075,220 @@ export class WebDriver implements ParityDriver {
     const box = this.estimatesRowBox(section, name);
     if ((await box.count()) === 0) return 0;
     return box.getByRole("button").count();
+  }
+
+  async modulesListRowMenuVisible(name: string): Promise<boolean> {
+    // The quick-action element sits OUTSIDE the row link (next sibling):
+    // reach it through the row's title container.
+    const link = this.modulesListRowLink(name);
+    if ((await link.count()) === 0) return false;
+    const container = link.first().locator("xpath=parent::div");
+    return this.isShown(container.locator("div.block.md\\:hidden button"));
+  }
+
+  async modulesListArchivedRowClickOpensPeek(name: string): Promise<void> {
+    const point = await this.page.evaluate((rowName: string) => {
+      const mains = document.querySelectorAll("main");
+      const main = mains[mains.length - 1] ?? null;
+      const anchors = [...(main?.querySelectorAll('a[href*="/modules/"]') ?? [])];
+      for (const anchor of anchors) {
+        if (!/\/modules\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(anchor.getAttribute("href") ?? "")) continue;
+        if ((anchor.querySelector("span.truncate")?.textContent?.trim() ?? "") !== rowName) continue;
+        anchor.scrollIntoView({ block: "center" });
+        const box = anchor.getBoundingClientRect();
+        return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      }
+      return null;
+    }, name);
+    if (point === null) throw new Error(`[parity] archived row never rendered ${JSON.stringify(name)}.`);
+    const before = new URL(this.page.url()).pathname;
+    // Either detail read satisfies the wait: the archived tab fetches
+    // through the archived read, while a live twin (should one ever run
+    // here) fetches the live one.
+    const detailWait = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          /\/(archived-)?modules\/[0-9a-fA-F-]{36}\/$/.test(new URL(response.url()).pathname),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.page.mouse.click(point.x, point.y);
+    if (!(await detailWait)) {
+      throw new Error(`[parity] clicking archived ${JSON.stringify(name)} fired no module detail read.`);
+    }
+    await this.page.waitForFunction(() => new URL(location.href).searchParams.has("peekModule"), null, {
+      timeout: WebDriver.WAIT_MS,
+    });
+    await expect.poll(() => this.modulesListPeekName(), { timeout: WebDriver.WAIT_MS }).toBe(name);
+    const after = new URL(this.page.url()).pathname;
+    if (after !== before) throw new Error(`[parity] archived row navigated to ${after} instead of peeking.`);
+  }
+
+  /** Card overlay (favorite + quick menu) sitting outside the card link. */
+  private modulesListCardOverlay(name: string): Locator {
+    return this.modulesListBoardCardLink(name)
+      .first()
+      .locator("xpath=parent::div")
+      .locator(":scope > div.absolute")
+      .first();
+  }
+
+  async modulesListCardNameTruncated(name: string): Promise<boolean> {
+    const title = this.modulesListBoardCardLink(name).first().locator("span.truncate.text-14").first();
+    return title.evaluate((el) => el.scrollWidth > el.clientWidth);
+  }
+
+  async modulesListCardNameTooltip(name: string): Promise<string | null> {
+    const title = this.modulesListBoardCardLink(name).first().locator("span.truncate.text-14").first();
+    await title.hover({ timeout: WebDriver.WAIT_MS });
+    // The tooltip renders through a portal with a small open delay; the
+    // card's own title is a span, so a p carrying the name is the popup.
+    const popup = this.page.locator("p.text-caption-sm-regular", { hasText: name }).first();
+    const seen = await popup.waitFor({ timeout: 5_000 }).then(
+      () => true,
+      () => false
+    );
+    if (!seen) return null;
+    return (await popup.innerText()).trim();
+  }
+
+  async modulesListCardStatusText(name: string): Promise<string> {
+    // The pill is the card's only button-carried span with an inline
+    // status tint (the avatar fallback span carries no button).
+    const pill = this.modulesListBoardCardLink(name)
+      .first()
+      .locator("button:has(span[style*='background-color'])")
+      .first();
+    return (await pill.innerText({ timeout: WebDriver.WAIT_MS })).trim();
+  }
+
+  async modulesListCardOpenPeek(name: string): Promise<void> {
+    const link = this.modulesListBoardCardLink(name).first();
+    const detailWait = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          /\/modules\/[0-9a-fA-F-]{36}\/$/.test(new URL(response.url()).pathname),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await link.locator("button:has(svg.lucide-info)").first().click({ timeout: WebDriver.WAIT_MS });
+    if (!(await detailWait)) {
+      throw new Error(`[parity] opening ${JSON.stringify(name)} fired no module detail read.`);
+    }
+    await expect.poll(() => this.modulesListPeekName(), { timeout: WebDriver.WAIT_MS }).toBe(name);
+  }
+
+  async modulesListCardIssueCount(name: string): Promise<string> {
+    // The count line is the card's only text-11 span naming work items
+    // (the date control shows dates or start/end placeholders instead).
+    const line = this.modulesListBoardCardLink(name)
+      .first()
+      .locator("span.text-11", { hasText: /work item/i })
+      .first();
+    return (await line.innerText({ timeout: WebDriver.WAIT_MS })).trim();
+  }
+
+  async modulesListCardLeadKind(name: string): Promise<ModulesListCardLead> {
+    const link = this.modulesListBoardCardLink(name).first();
+    if ((await link.locator("svg.lucide-square-user").count()) > 0) return "none";
+    if ((await link.locator("span.cursor-default").count()) > 0) return "avatar";
+    throw new Error(`[parity] card lead slot never rendered for ${JSON.stringify(name)}.`);
+  }
+
+  async modulesListCardProgressSegments(name: string): Promise<ModulesListCardSegments> {
+    const link = this.modulesListBoardCardLink(name).first();
+    // Zero-value groups render no node, so every width-and-color div is a
+    // live segment (the pill and avatar tints sit on spans, never divs).
+    const bars = link.locator("div[style*='width'][style*='background-color']");
+    const total = await bars.count();
+    const widths: number[] = [];
+    const colors: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const style = (await bars.nth(i).getAttribute("style")) ?? "";
+      widths.push(Number(/width:\s*([\d.]+)%/.exec(style)?.[1] ?? "0"));
+      colors.push((/background-color:\s*([^;]+)/.exec(style)?.[1] ?? "").trim());
+    }
+    return { widths, colors };
+  }
+
+  async modulesListCardDatesVisible(name: string): Promise<boolean> {
+    // The date control is the card body's combobox row (its behavior
+    // belongs to MOD-013; presence is enough here).
+    const link = this.modulesListBoardCardLink(name).first();
+    return this.isShown(link.locator("div.py-0\\.5"));
+  }
+
+  async modulesListCardFavoriteVisible(name: string): Promise<boolean> {
+    return this.isShown(this.modulesListCardOverlay(name).locator("button:has(svg.lucide-star)"));
+  }
+
+  async modulesListCardQuickMenuVisible(name: string): Promise<boolean> {
+    const overlay = this.modulesListCardOverlay(name);
+    const buttons = overlay.locator("button");
+    const total = await buttons.count();
+    for (let i = 0; i < total; i++) {
+      if ((await buttons.nth(i).locator("svg.lucide-star").count()) === 0) {
+        return buttons.nth(i).isVisible();
+      }
+    }
+    return false;
+  }
+
+  async modulesListCardClickBody(name: string): Promise<void> {
+    const link = this.modulesListBoardCardLink(name).first();
+    // The count line sits inside the card link with no handler of its own.
+    const body = link.locator("span.text-11", { hasText: /work item/i }).first();
+    await body.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await body.click({ timeout: WebDriver.WAIT_MS });
+    // 60s: the detail route compiles cold on first visit.
+    await this.page.waitForFunction(
+      () =>
+        /\/modules\/[0-9a-fA-F-]{36}\/?$/.test(new URL(location.href).pathname) &&
+        !new URL(location.href).searchParams.has("peekModule"),
+      null,
+      { timeout: 60_000 }
+    );
+  }
+
+  async modulesListCardClickControl(name: string, control: ModulesListCardControl): Promise<void> {
+    const link = this.modulesListBoardCardLink(name).first();
+    const before = this.page.url();
+    if (control === "status") {
+      await link.locator("button:has(span[style*='background-color'])").first().click({ timeout: WebDriver.WAIT_MS });
+    } else if (control === "dates") {
+      await link.locator("div.py-0\\.5 button").first().click({ timeout: WebDriver.WAIT_MS });
+    } else if (control === "favorite") {
+      const overlay = this.modulesListCardOverlay(name);
+      await overlay.locator("button:has(svg.lucide-star)").first().click({ timeout: WebDriver.WAIT_MS });
+    } else {
+      const overlay = this.modulesListCardOverlay(name);
+      const buttons = overlay.locator("button");
+      const total = await buttons.count();
+      let clicked = false;
+      for (let i = 0; i < total; i++) {
+        if ((await buttons.nth(i).locator("svg.lucide-star").count()) === 0) {
+          await buttons.nth(i).click({ timeout: WebDriver.WAIT_MS });
+          clicked = true;
+          break;
+        }
+      }
+      if (!clicked) throw new Error(`[parity] card quick menu never rendered for ${JSON.stringify(name)}.`);
+    }
+    // Controls stop propagation: the address must not move. Settle past
+    // popover paint before comparing, then dismiss whatever opened.
+    await this.page.waitForTimeout(500);
+    const after = this.page.url();
+    if (after !== before) throw new Error(`[parity] card control ${control} navigated to ${after}.`);
+    await this.page.keyboard.press("Escape");
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForTimeout(300);
   }
 }

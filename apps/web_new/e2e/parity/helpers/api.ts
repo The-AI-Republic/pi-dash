@@ -15355,3 +15355,42 @@ export async function serverCreateArchivedEstimate(
     }),
   };
 }
+
+/** Module work-item counters as the modules list read reports them (NEWFRONT-307, MOD-012/020). */
+export interface ModulesListProgress {
+  completed: number;
+  cancelled: number;
+  total: number;
+}
+
+/**
+ * One module's counters from the project modules read. Specs poll this
+ * until issue adds and state moves land server-side before entering the
+ * UI (the list never refreshes on its own).
+ */
+export async function modulesListProgress(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ModulesListProgress> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] modules read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  for (const row of rows) {
+    const rec = row as Record<string, unknown>;
+    if (rec["id"] !== moduleId) continue;
+    const completed = rec["completed_issues"];
+    const cancelled = rec["cancelled_issues"];
+    const total = rec["total_issues"];
+    if (typeof completed !== "number" || typeof cancelled !== "number" || typeof total !== "number") {
+      throw new Error("[parity] module row carried no numeric counters.");
+    }
+    return { completed, cancelled, total };
+  }
+  throw new Error("[parity] module missing from its project list read.");
+}
