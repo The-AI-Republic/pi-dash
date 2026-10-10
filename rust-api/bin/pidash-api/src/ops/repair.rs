@@ -133,9 +133,10 @@ pub async fn run_fix(args: FixArgs) {
         .unwrap_or_else(|message| fail(message));
     let pools = connect_primary().await;
     let pool = pools.primary();
-    let candidates = db::find_project_rows(pool, &parsed.project_identifier, &parsed.workspace_slug)
-        .await
-        .unwrap_or_else(|e| fail(e));
+    let candidates =
+        db::find_project_rows(pool, &parsed.project_identifier, &parsed.workspace_slug)
+            .await
+            .unwrap_or_else(|e| fail(e));
     let project_id =
         decisions::resolve_project_id(&candidates).unwrap_or_else(|message| fail(message));
     let issues = db::fetch_duplicate_issues(pool, &project_id, parsed.sequence)
@@ -143,7 +144,10 @@ pub async fn run_fix(args: FixArgs) {
         .unwrap_or_else(|e| fail(e));
     decisions::check_duplicate_count(issues.len()).unwrap_or_else(|message| fail(message));
     // Continues the prompt line, as Django's `stdout.write` does.
-    println!("{}", decisions::fix_found_line(issues.len(), &args.issue_identifier));
+    println!(
+        "{}",
+        decisions::fix_found_line(issues.len(), &args.issue_identifier)
+    );
     let tx = db::begin_fix_tx(pool, &project_id)
         .await
         .unwrap_or_else(|e| fail(e));
@@ -200,12 +204,15 @@ pub async fn run_slug(args: SlugArgs) {
         .unwrap_or_else(|e| fail(e));
     match decisions::decide_slug(workspace.as_ref(), &args.slug, args.dry_run) {
         decisions::SlugDecision::Print(line) => println!("{line}"),
-        decisions::SlugDecision::Write { workspace_id, name, new_slug, success_line } => {
-            match db::apply_slug_update(pool, &workspace_id, &new_slug).await {
-                Ok(()) => println!("{success_line}"),
-                Err(error) => println!("{}", decisions::slug_save_error_line(&name, &error)),
-            }
-        }
+        decisions::SlugDecision::Write {
+            workspace_id,
+            name,
+            new_slug,
+            success_line,
+        } => match db::apply_slug_update(pool, &workspace_id, &new_slug).await {
+            Ok(()) => println!("{success_line}"),
+            Err(error) => println!("{}", decisions::slug_save_error_line(&name, &error)),
+        },
     }
 }
 
