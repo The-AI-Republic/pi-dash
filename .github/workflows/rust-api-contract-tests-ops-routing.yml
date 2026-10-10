@@ -1,0 +1,47 @@
+name: rust-api-contract-tests-ops-routing
+
+# PIDASHCONV-812: ops replica-routing contract suite.
+# Runs rust-api/contract-tests/ops/test_routing.py (F37-11 replay against
+# the real Python defs via AST; no servers, no database, no Django
+# import), so it needs no services and no built binary. The Rust half of
+# the same contract (crates/api/src/ops/routing.rs unit tests) runs in
+# the workspace-wide cargo test job (rust-api.yml).
+
+on:
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-ops-routing.yml"
+  pull_request:
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-ops-routing.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ops-routing:
+    name: ops routing decision table vs Python defs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install contract-test dependencies
+        working-directory: rust-api/contract-tests
+        run: pip install -r requirements.txt
+
+      - name: Run ops routing contract suite
+        working-directory: rust-api/contract-tests
+        run: python -m pytest ops/test_routing.py -v
