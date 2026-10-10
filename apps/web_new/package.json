@@ -16,6 +16,7 @@
     "check:deps": "node checks/check-deps.mjs",
     "check:similarity": "node checks/check-similarity.mjs",
     "check:no-tauri": "node checks/check-no-tauri.mjs",
+    "check:oracle-build": "node checks/check-oracle-build.mjs",
     "check": "pnpm lint && pnpm check:boundaries && pnpm check:headers && pnpm check:deps && pnpm check:similarity",
     "test": "vitest run",
     "test:e2e": "playwright test",
