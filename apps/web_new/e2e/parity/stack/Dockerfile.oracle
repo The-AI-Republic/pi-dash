@@ -3,6 +3,26 @@
 # Serves apps/web for oracle runs: installs the workspace, builds the
 # workspace packages the dev server resolves, then runs the dev server.
 # Self-contained from a clean checkout; layer caching keeps rebuilds fast.
+#
+# Build context is the repo root, but only the old app's own inputs are
+# copied in, in two phases (NEWFRONT-134). Phase 1 copies the manifests
+# (the root workspace files plus the package.json of apps/web and the
+# packages it resolves) and runs a frozen install; phase 2 copies the old
+# app's sources (the same member list as Dockerfile.oracle-prod). The new
+# app, the new packages (kit, api-client), apps/api and the e2e specs are
+# left out on purpose, so edits outside the old app reuse every layer and
+# never recreate the oracle container. Source edits to the old app redo
+# only the tsdown build, not the install.
+#
+# The frozen install is load-bearing for reproducibility, not just speed:
+# the same tree must always install the same bytes, so that even a cache
+# miss (evicted builder cache on a busy host) recomputes the identical
+# image instead of drifting with the registry and recreating the oracle
+# container. If the install step fails with an outdated-lockfile error,
+# run pnpm install on the host first — the checkout's manifests disagree.
+#
+# If the dev server ever fails to resolve a workspace package, the missing
+# input belongs in the COPY list below — never go back to COPY . .
 FROM node:22-alpine
 
 ENV PNPM_HOME="/pnpm"
@@ -12,9 +32,45 @@ RUN apk add --no-cache libc6-compat && corepack enable
 
 WORKDIR /app
 
-COPY . .
+# Phase 1: manifests for the frozen install — the root workspace files
+# plus the package.json of apps/web and every workspace package it
+# resolves (the same member set as phase 2). Members outside the old
+# app's graph need no line here: the frozen check tolerates lockfile
+# entries with no directory, and the oracle never resolves them. A
+# package added to the old app's graph needs both a manifest line here
+# and a source line in phase 2.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json .npmrc ./
+COPY apps/web/package.json apps/web/package.json
+COPY packages/constants/package.json packages/constants/package.json
+COPY packages/editor/package.json packages/editor/package.json
+COPY packages/hooks/package.json packages/hooks/package.json
+COPY packages/i18n/package.json packages/i18n/package.json
+COPY packages/propel/package.json packages/propel/package.json
+COPY packages/services/package.json packages/services/package.json
+COPY packages/shared-state/package.json packages/shared-state/package.json
+COPY packages/tailwind-config/package.json packages/tailwind-config/package.json
+COPY packages/types/package.json packages/types/package.json
+COPY packages/typescript-config/package.json packages/typescript-config/package.json
+COPY packages/ui/package.json packages/ui/package.json
+COPY packages/utils/package.json packages/utils/package.json
+RUN pnpm install --frozen-lockfile
 
-RUN pnpm install
+# Phase 2: the old app's sources. Only these invalidate the tsdown build.
+COPY pi-symbol-light.svg pi-symbol-dark.svg ./
+COPY packages/constants packages/constants
+COPY packages/editor packages/editor
+COPY packages/hooks packages/hooks
+COPY packages/i18n packages/i18n
+COPY packages/propel packages/propel
+COPY packages/services packages/services
+COPY packages/shared-state packages/shared-state
+COPY packages/tailwind-config packages/tailwind-config
+COPY packages/types packages/types
+COPY packages/typescript-config packages/typescript-config
+COPY packages/ui packages/ui
+COPY packages/utils packages/utils
+COPY apps/web apps/web
+
 # Build the runtime JS of every workspace package the web dev server resolves.
 # NOTE: this deliberately bypasses each package's own `build` script and skips
 # `.d.ts` generation (`--no-dts`): the `web^...` dependency closure currently
