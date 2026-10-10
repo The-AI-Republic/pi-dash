@@ -245,6 +245,12 @@ async fn worker(concurrency: u32) -> MainResult {
         pidash_jobs::tasks_webhooks::PROCESS_LOGS_TASK,
         pidash_jobs::tasks_webhooks::process_logs_handler(pools.clone(), mongo),
     );
+    // License instance_traces (PIDASHCONV-839; kept in sync with
+    // `mirror_registry_matches_tasks_table` in inventory.rs). The
+    // beat entry fires it every 6 hours and the D-01 handler exists, so
+    // the Rust worker owns it — otherwise the task is lost at
+    // switchover (parity gap W-license).
+    pidash_jobs::license::tasks::register(&mut registry, pools.primary().clone());
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()
