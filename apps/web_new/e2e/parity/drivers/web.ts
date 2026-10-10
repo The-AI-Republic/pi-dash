@@ -22856,6 +22856,66 @@ export class WebDriver implements ParityDriver {
     return names;
   }
 
+  // --- Archived work-item mutations (NEWFRONT-223, ARCH-008..013). ---
+  // Observed on the running old app (selectors proven there, never copied
+  // from its sources): the archived list renders the same row anchors as
+  // the live list; the archive dialog names the item in its heading with
+  // a restorable warning in the body; the archived detail carries the
+  // identifier-plus-sequence breadcrumb, a warning banner with a back
+  // control, and a header menu whose restore/delete entries navigate.
+
+  async archivesOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/issues`);
+    await this.page.waitForLoadState("domcontentloaded");
+    if (new URL(this.page.url()).pathname === "/")
+      throw new Error("[parity] archives list bounced to sign-in; the session did not survive.");
+    // Settle like the live list open: rows or the empty state, whichever
+    // paints first, with a reload when the route module stalls.
+    const deadline = Date.now() + WebDriver.DETAIL_MS;
+    let loops = 0;
+    for (;;) {
+      const text = await this.page
+        .getByRole("main")
+        .innerText({ timeout: 5000 })
+        .catch(() => "");
+      if (text.trim().length > 50) return;
+      if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
+        throw new Error("[parity] session lost while opening the archives list.");
+      }
+      loops++;
+      if (Date.now() > deadline) return;
+      if (loops % 15 === 0) await this.page.reload().catch(() => {});
+      else await this.page.waitForTimeout(2000);
+    }
+  }
+
+  async archivesVisibleIssueNames(): Promise<string[]> {
+    // Archived rows are block divs (the title is each block's first
+    // paragraph; the row anchor only wraps the identifier plus state).
+    // Settle on rows, the empty state, or the header display control —
+    // guests render the header with neither rows nor empty state.
+    const blocks = this.page.locator('div[class*="group/list-block"]');
+    const empty = this.page.getByText("No archived work items yet").first();
+    const display = this.page.getByText("Display", { exact: false }).first();
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await blocks.count()) > 0) break;
+      if ((await empty.count()) > 0) break;
+      if ((await display.count()) > 0 && (await display.isVisible().catch(() => false))) break;
+      if (Date.now() >= deadline) break;
+      await this.page.waitForTimeout(300);
+    }
+    const count = await blocks.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const title = blocks.nth(i).locator("p").first();
+      if ((await title.count()) === 0) continue;
+      const text = ((await title.innerText().catch(() => "")) ?? "").trim();
+      if (text.length > 0) names.push(text);
+    }
+    return names;
+  }
+
   async wsViewsDefaultNames(): Promise<string[]> {
     const rows = this.wsViewsListMain()
       .getByRole("link")
@@ -24088,5 +24148,204 @@ export class WebDriver implements ParityDriver {
     if ((await notice.count()) === 0) return null;
     const text = (((await notice.textContent().catch(() => "")) ?? "") as string).trim();
     return text === "" ? null : text;
+  }
+
+  private archivesMutationFailureRoute:
+    | {
+        matches: (url: URL) => boolean;
+        handler: (route: Parameters<Parameters<Page["route"]>[1]>[0]) => Promise<void>;
+      }
+    | undefined;
+
+  async archivesFailNextMutation(method: "POST" | "DELETE", urlPart: string): Promise<void> {
+    // One-shot 500 in the failNextIssuePatch shape: only the next request
+    // with this method whose path contains urlPart fails; reads and other
+    // writes pass through, and the handler removes itself after answering
+    // so a retried mutation goes to the real server. A URL predicate (not
+    // a glob) routes the request, matching the established pattern.
+    await this.archivesClearMutationFailure();
+    const matches = (url: URL): boolean => url.pathname.includes(urlPart);
+    const handler = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() !== method) {
+        await route.continue();
+        return;
+      }
+      try {
+        await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+      } finally {
+        await this.archivesClearMutationFailure();
+      }
+    };
+    this.archivesMutationFailureRoute = { matches, handler };
+    await this.page.route(matches, handler);
+  }
+
+  async archivesClearMutationFailure(): Promise<void> {
+    const current = this.archivesMutationFailureRoute;
+    this.archivesMutationFailureRoute = undefined;
+    if (current) await this.page.unroute(current.matches, current.handler).catch(() => {});
+  }
+
+  async archivesArchiveModalTitle(): Promise<string | null> {
+    const heading = this.page.getByRole("dialog").locator("h3").first();
+    if ((await heading.count()) === 0) return null;
+    return ((await heading.innerText()) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  async archivesArchiveModalBody(): Promise<string | null> {
+    const body = this.page.getByRole("dialog").locator("p").first();
+    if ((await body.count()) === 0) return null;
+    return ((await body.innerText()) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  async archivesArchiveModalCancel(): Promise<void> {
+    await this.page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.page.getByRole("dialog").count()) === 0) return;
+      if (Date.now() >= deadline) throw new Error("[parity] archive modal never closed after cancel.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async archivesDetailMenuChoose(item: string): Promise<void> {
+    // Same trigger hunt as the layouts detail menu (shared private
+    // opener), then pick by h5 title like the row-menu chooser: the
+    // accessible name covers title plus note, so exact matching cannot
+    // address a noted item.
+    await this.layoutsOpenDetailMenu();
+    const entries = this.page.getByRole("menuitem");
+    const count = await entries.count();
+    let clicked = false;
+    for (let i = 0; i < count; i++) {
+      const heading = entries.nth(i).locator("h5").first();
+      const title = (await heading.count()) > 0 ? await heading.innerText() : await entries.nth(i).innerText();
+      if ((title ?? "").trim().replace(/\s+/g, " ") === item) {
+        await entries.nth(i).click({ timeout: WebDriver.WAIT_MS });
+        clicked = true;
+        break;
+      }
+    }
+    if (!clicked) throw new Error(`[parity] detail menu has no item "${item}".`);
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await this.page.getByRole("menuitem").count()) === 0) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] detail menu never closed after "${item}".`);
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async archivesOpenDetailRaw(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    // Same navigation as the full archived-detail open, minus the feed
+    // wait: a missing item never renders the activity section.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/issues/${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async archivesDetailBreadcrumbText(): Promise<string> {
+    const texts = await this.breadcrumbItems().allTextContents();
+    return texts
+      .map((t) => t.trim().replace(/\s+/g, " "))
+      .filter((t) => t.length > 0)
+      .join(" / ");
+  }
+
+  async archivesDetailBannerText(): Promise<string | null> {
+    // The warning banner names archiving in its text; scope to the
+    // banner container so page text around it never leaks in.
+    const banner = this.page.getByText(/has been archived/i).first();
+    if ((await banner.count()) === 0) return null;
+    const box = banner.locator("xpath=ancestor::div[1]");
+    return ((await box.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  async archivesDetailBannerBack(): Promise<void> {
+    // The action sits in a sibling block of the banner text, so climb to
+    // the nearest div ancestor that holds a button instead of counting
+    // levels.
+    const banner = this.page.getByText(/has been archived/i).first();
+    await banner.waitFor({ timeout: WebDriver.WAIT_MS });
+    const box = banner.locator("xpath=ancestor::div[.//button][1]");
+    await box.getByRole("button").first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesDetailNotFoundVisible(): Promise<boolean> {
+    const missing = this.page.getByText("Work item does not exist").first();
+    return (await missing.count()) > 0 && (await missing.isVisible().catch(() => false));
+  }
+
+  async archivesDetailLoaderShownOnDelayedEntry(
+    workspaceSlug: string,
+    projectId: string,
+    issueId: string,
+    holdMs: number
+  ): Promise<{ loaderShown: boolean }> {
+    // Hold the detail record fetch while entering, watching for the
+    // loading indicator mid-flight; release and settle on the detail.
+    // A URL predicate (not a glob) routes the request, matching the
+    // established pattern.
+    const matches = (url: URL): boolean =>
+      url.pathname.includes("/api/workspaces/") && url.pathname.includes(`/projects/${projectId}/issues/${issueId}`);
+    let released = false;
+    const release = (): void => {
+      released = true;
+    };
+    const handler = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() !== "GET" || released) {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      await route.continue();
+    };
+    await this.page.route(matches, handler);
+    try {
+      await this.archivesOpenDetailRaw(workspaceSlug, projectId, issueId);
+      let loaderShown = false;
+      const deadline = Date.now() + holdMs + 15_000;
+      for (;;) {
+        const signals = await Promise.all([
+          this.page.locator('[role="status"]').count(),
+          this.page.locator(".animate-pulse").count(),
+        ]);
+        if ((signals[0] ?? 0) > 0 || (signals[1] ?? 0) > 0) {
+          loaderShown = true;
+          break;
+        }
+        if (Date.now() >= deadline) break;
+        await this.page.waitForTimeout(200);
+      }
+      release();
+      await this.activityHeading().waitFor({ timeout: WebDriver.WAIT_MS });
+      return { loaderShown };
+    } finally {
+      release();
+      await this.page.unroute(matches, handler).catch(() => {});
+    }
+  }
+
+  async archivesDetailComposerVisible(): Promise<boolean> {
+    return (await this.composer().count()) > 0;
+  }
+
+  async archivesDetailReactionControlEnabled(): Promise<boolean> {
+    // Same hunt as the issue-reaction trigger, plus its disabled state:
+    // on archived detail the trigger renders disabled, which is the
+    // locked-editing proof (absent also reads as not enabled).
+    return this.page.evaluate(() => {
+      const heading = Array.from(document.querySelectorAll("*")).find(
+        (el) => el.children.length === 0 && el.textContent?.trim() === "Activity"
+      );
+      if (!heading) return false;
+      const top = (heading as HTMLElement).getBoundingClientRect().top;
+      const triggers = Array.from(document.querySelectorAll('button[aria-haspopup="dialog"]'));
+      const found = triggers.find((el) => (el as HTMLElement).getBoundingClientRect().top < top);
+      if (!found) return false;
+      const button = found as HTMLButtonElement;
+      return !button.disabled && found.getAttribute("aria-disabled") !== "true";
+    });
   }
 }

@@ -11836,3 +11836,30 @@ export async function archivesModuleArchivedAt(
   if (match === undefined) throw new Error("[parity] module missing from the archived-modules collection.");
   return typeof match["archived_at"] === "string" ? match["archived_at"] : null;
 }
+
+/**
+ * Archived-issues list read without throwing (NEWFRONT-223, ARCH-008
+ * guest branch): status plus the rows when the read succeeds. Guests
+ * are refused at the endpoint, so the status is the assertion.
+ */
+export async function serverArchivedIssuesStatus(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; rows: { id: string; name: string }[] }> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/archived-issues/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) return { status: res.status, rows: [] };
+  const payload: unknown = await res.json();
+  const raw: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const rows = raw.map((row) => {
+    const record = row as { id?: unknown; name?: unknown };
+    if (typeof record.id !== "string" || typeof record.name !== "string") {
+      throw new Error("[parity] archived row carried no string id and name.");
+    }
+    return { id: record.id, name: record.name };
+  });
+  return { status: res.status, rows };
+}

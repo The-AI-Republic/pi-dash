@@ -6873,4 +6873,75 @@ export class WebNewDriver implements ParityDriver {
   async cyclesEditDetailReadOnlyNotice(): Promise<string | null> {
     return todo("cyclesEditDetailReadOnlyNotice");
   }
+
+  // --- Archived work-item mutations (NEWFRONT-223, ARCH-008..013). ---
+
+  async archivesOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("archivesOpenList");
+  }
+
+  async archivesVisibleIssueNames(): Promise<string[]> {
+    return todo("archivesVisibleIssueNames");
+  }
+
+  async archivesFailNextMutation(_method: "POST" | "DELETE", _urlPart: string): Promise<void> {
+    return todo("archivesFailNextMutation");
+  }
+
+  async archivesClearMutationFailure(): Promise<void> {
+    return todo("archivesClearMutationFailure");
+  }
+
+  async archivesArchiveModalTitle(): Promise<string | null> {
+    return todo("archivesArchiveModalTitle");
+  }
+
+  async archivesArchiveModalBody(): Promise<string | null> {
+    return todo("archivesArchiveModalBody");
+  }
+
+  async archivesArchiveModalCancel(): Promise<void> {
+    return todo("archivesArchiveModalCancel");
+  }
+
+  async archivesDetailMenuChoose(_item: string): Promise<void> {
+    return todo("archivesDetailMenuChoose");
+  }
+
+  async archivesOpenDetailRaw(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
+    return todo("archivesOpenDetailRaw");
+  }
+
+  async archivesDetailBreadcrumbText(): Promise<string> {
+    return todo("archivesDetailBreadcrumbText");
+  }
+
+  async archivesDetailBannerText(): Promise<string | null> {
+    return todo("archivesDetailBannerText");
+  }
+
+  async archivesDetailBannerBack(): Promise<void> {
+    return todo("archivesDetailBannerBack");
+  }
+
+  async archivesDetailNotFoundVisible(): Promise<boolean> {
+    return todo("archivesDetailNotFoundVisible");
+  }
+
+  async archivesDetailLoaderShownOnDelayedEntry(
+    _workspaceSlug: string,
+    _projectId: string,
+    _issueId: string,
+    _holdMs: number
+  ): Promise<{ loaderShown: boolean }> {
+    return todo("archivesDetailLoaderShownOnDelayedEntry");
+  }
+
+  async archivesDetailComposerVisible(): Promise<boolean> {
+    return todo("archivesDetailComposerVisible");
+  }
+
+  async archivesDetailReactionControlEnabled(): Promise<boolean> {
+    return todo("archivesDetailReactionControlEnabled");
+  }
 }
