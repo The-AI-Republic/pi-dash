@@ -10,6 +10,8 @@
 //! * [`drain`] — matcher drain: pod + runner dispatch SQL, assignment
 //!   plans and post-commit effects (`runner/services/matcher.py:89-303`;
 //!   PIDASHCONV-552).
+//! * [`live_drains`] — public drain executors over pool + Redis +
+//!   settings (PIDASHCONV-862; the jobs seam provider's entry).
 //! * [`session_service`] — hello apply, heartbeat reaper, live-state
 //!   upsert, presence marks, project-slug resolve, session-open
 //!   redeliver + resume ack
@@ -31,6 +33,12 @@
 //! lives here, the Redis + SQL effects land in the api/jobs crates
 //! that implement the seam.
 //!
+//! [`live_drains`] is the exception (PIDASHCONV-862): the public
+//! matcher-drain executors over an explicit pool + Redis client +
+//! settings, for the jobs `RunnerRunsSeams` provider the bin owns
+//! (which cannot take `&AppState`). The kernel SQL still comes from
+//! [`drain`], verbatim.
+//!
 //! Reused, never redefined: `AgentRunStatus`
 //! (`pidash_types::runner_runs`), `AgentExecutorKind`
 //! (`pidash_types::dispatch`), `effective_executor_for_issue`
@@ -50,6 +58,7 @@
 
 pub mod drain;
 pub mod guards;
+pub mod live_drains;
 pub mod pubsub;
 pub mod session_service;
 pub mod usage;
@@ -61,6 +70,7 @@ pub use drain::{
     DRAIN_POD_IDLE_RUNNERS_SQL, NEXT_FOR_RUNNER_RANK_POSITION, NEXT_QUEUED_RUN_FOR_POD_SQL,
     POD_COLUMNS, SELECT_RUNNER_IN_POD_SQL,
 };
+pub use live_drains::{drain_for_runner_by_id, drain_pod_by_id, DrainError, PoolPubsubStore};
 pub use pubsub::{
     close_runner_session, send_connection_revoke, send_runner_remove, send_runner_revoke,
     send_to_machine, send_to_runner, PubsubStore, SendOutcome, CLOSE_ACTIVE_SESSIONS_SQL,

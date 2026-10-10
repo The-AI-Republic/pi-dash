@@ -111,7 +111,7 @@ pub struct DispatchOutcome<T> {
 // Row mappers
 // ---------------------------------------------------------------------------
 
-fn map_ticker(row: &PgRow) -> Result<IssueAgentTicker, sqlx::Error> {
+pub(crate) fn map_ticker(row: &PgRow) -> Result<IssueAgentTicker, sqlx::Error> {
     Ok(IssueAgentTicker {
         id: row.try_get("id")?,
         created_at: row.try_get("created_at")?,
@@ -146,7 +146,7 @@ fn map_dispatch_state(
     })
 }
 
-fn map_policy(
+pub(crate) fn map_policy(
     row: &PgRow,
 ) -> Result<pidash_services::orchestration::clock::ProjectClockPolicy, sqlx::Error> {
     // The cadence columns are INT4; the policy widens them to i64
@@ -190,21 +190,21 @@ fn translate_clock_sql(sql: &str, params: &[&str]) -> String {
     out
 }
 
-fn lock_ticker_by_issue_sql() -> String {
+pub(crate) fn lock_ticker_by_issue_sql() -> String {
     translate_clock_sql(
         &pidash_services::orchestration::clock::lock_ticker_sql(),
         LOCK_TICKER_PARAMS,
     )
 }
 
-fn create_ticker_sql() -> String {
+pub(crate) fn create_ticker_sql() -> String {
     translate_clock_sql(
         &pidash_services::orchestration::clock::create_ticker_sql(),
         CREATE_TICKER_PARAMS,
     )
 }
 
-fn save_clock_sql() -> String {
+pub(crate) fn save_clock_sql() -> String {
     translate_clock_sql(SAVE_CLOCK_SQL, SAVE_CLOCK_PARAMS)
 }
 
@@ -688,7 +688,7 @@ where
 
 /// Emit the collected [`LogLine`]s via `tracing` (INFO → `info!`,
 /// WARNING → `warn!`), in Python order.
-fn emit_logs(logs: &[LogLine]) {
+pub(crate) fn emit_logs(logs: &[LogLine]) {
     for line in logs {
         if line.level == "WARNING" {
             tracing::warn!("{}", line.message);

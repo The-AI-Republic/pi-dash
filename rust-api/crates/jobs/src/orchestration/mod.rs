@@ -16,10 +16,17 @@
 //! (`rust-api/fixtures/orchestration/fx08_dispatch/`) alongside
 //! [`fire_tick_seam`].
 //!
+//! [`runner_seams`] holds the live D-12 executors over
+//! (`pool`, settings, `run_id`) for the jobs `RunnerRunsSeams`
+//! provider the bin owns (PIDASHCONV-862): the handoff + pause
+//! drivers with per-call [`StoreDeps`] inputs, and the
+//! disarm row-loading executor over the clock planner.
+//!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod creation_jobs;
 pub mod fire_tick_seam;
+pub mod runner_seams;
 
 pub use creation_jobs::{
     complete_project_move_handoff, create_and_dispatch_run, create_continuation_run,
@@ -31,4 +38,8 @@ pub use fire_tick_seam::{
     dispatch_run_ai_run_with_reason, maybe_apply_deferred_pause, preflight_eligibility_or_bounce,
     re_tick_ticker, run_ai_for_human, shim_is_ticking_state, shim_tick_interval_seconds,
     wait_ticker, DispatchJobsError, DispatchOutcome, FireTickShim, StateView,
+};
+pub use runner_seams::{
+    complete_project_move_handoff_live, disarm_on_terminal_signal, maybe_apply_deferred_pause_live,
+    CacheError, DisarmError, RunnerSeamCache,
 };
