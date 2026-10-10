@@ -25,6 +25,7 @@
     "check:coexistence": "node checks/coexistence-routes.mjs --check",
     "test:coexistence": "node --test checks/coexistence-routes.test.mjs",
     "test:size-initial": "node --test checks/size-initial.test.mjs",
+    "test:parity-report": "node --test e2e/parity/report/generate.test.mjs",
     "test:parity": "node e2e/parity/tools/run-parity.mjs all",
     "test:parity:oracle": "node e2e/parity/tools/run-parity.mjs oracle",
     "test:parity:new": "node e2e/parity/tools/run-parity.mjs new",
