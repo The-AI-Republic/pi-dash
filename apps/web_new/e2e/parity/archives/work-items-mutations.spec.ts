@@ -122,7 +122,7 @@ test(
       await driver.archivesOpenList(seed.workspaceSlug, projectId);
 
       await test.step("the archived list shows the item with a restore entry", async () => {
-        await expect.poll(() => driver.archivesVisibleIssueNames(), { timeout: 300_000 }).toContain(name);
+        await expect.poll(() => driver.archivesMutationVisibleIssueNames(), { timeout: 300_000 }).toContain(name);
         expect(await driver.layoutsRowMenuItems(name)).toContain("Restore");
         expect((await serverArchivedIssues(seed.workspaceSlug, projectId, session)).map((r) => r.id)).toContain(
           issue.id
@@ -137,14 +137,14 @@ test(
         } finally {
           await driver.archivesClearMutationFailure();
         }
-        expect(await driver.archivesVisibleIssueNames()).toContain(name);
+        expect(await driver.archivesMutationVisibleIssueNames()).toContain(name);
         expect((await serverIssue(seed.workspaceSlug, projectId, issue.id, session)).archived_at).not.toBeNull();
       });
 
       await test.step("restore removes it from archives and it reappears among live items", async () => {
         await driver.layoutsRowMenuChoose(name, "Restore");
         await expect.poll(() => driver.sawToast("Restore success"), { timeout: 60_000 }).toBe(true);
-        await expect.poll(() => driver.archivesVisibleIssueNames(), { timeout: 120_000 }).not.toContain(name);
+        await expect.poll(() => driver.archivesMutationVisibleIssueNames(), { timeout: 120_000 }).not.toContain(name);
         expect((await serverIssue(seed.workspaceSlug, projectId, issue.id, session)).archived_at).toBeNull();
         expect((await serverArchivedIssues(seed.workspaceSlug, projectId, session)).map((r) => r.id)).not.toContain(
           issue.id
@@ -194,7 +194,7 @@ test(
       await openPath(driver, `/${seed.workspaceSlug}/projects/${seed.projectId}/archives/issues`, guestSession);
       await driver.archivesOpenList(seed.workspaceSlug, seed.projectId);
       await expect.poll(() => driver.hasVisibleText("Display"), { timeout: 300_000 }).toBe(true);
-      expect(await driver.archivesVisibleIssueNames()).toEqual([]);
+      expect(await driver.archivesMutationVisibleIssueNames()).toEqual([]);
       expect(await driver.hasVisibleText("Restore")).toBe(false);
     } finally {
       await serverUnarchiveIssue(seed.workspaceSlug, seed.projectId, issue.id, session).catch(() => {});
@@ -218,7 +218,7 @@ test(
     try {
       await openPath(driver, `/${seed.workspaceSlug}/projects/${projectId}/archives/issues`, session);
       await driver.archivesOpenList(seed.workspaceSlug, projectId);
-      await expect.poll(() => driver.archivesVisibleIssueNames(), { timeout: 300_000 }).toContain(name);
+      await expect.poll(() => driver.archivesMutationVisibleIssueNames(), { timeout: 300_000 }).toContain(name);
 
       // Actual: even the project owner gets no Delete entry; the menu
       // itself proves it opened on the right row.
@@ -273,7 +273,7 @@ test(
         await expect.poll(() => driver.sawToast("deleted successfully"), { timeout: 60_000 }).toBe(true);
         await expect.poll(() => driver.currentUrlPath(), { timeout: 120_000 }).toMatch(/\/archives\/issues\/?$/);
         await driver.archivesOpenList(seed.workspaceSlug, projectId);
-        await expect.poll(() => driver.archivesVisibleIssueNames(), { timeout: 120_000 }).not.toContain(name);
+        await expect.poll(() => driver.archivesMutationVisibleIssueNames(), { timeout: 120_000 }).not.toContain(name);
         expect((await issueStatus(seed.workspaceSlug, projectId, issue.id, session)).status).toBe(404);
       });
     } finally {
@@ -305,7 +305,7 @@ test(
     try {
       await openPath(driver, `/${seed.workspaceSlug}/projects/${projectId}/archives/issues`, session);
       await driver.archivesOpenList(seed.workspaceSlug, projectId);
-      await expect.poll(() => driver.archivesVisibleIssueNames(), { timeout: 300_000 }).toContain(name);
+      await expect.poll(() => driver.archivesMutationVisibleIssueNames(), { timeout: 300_000 }).toContain(name);
 
       await test.step("open-in-new-tab lands on the broken undefined-identifier address", async () => {
         const url = await driver.layoutsRowMenuOpenNewTabUrl(name);
@@ -592,7 +592,7 @@ test(
         expect((await serverIssue(seed.workspaceSlug, projectId, doneIssue.id, session)).archived_at).not.toBeNull();
 
         await driver.archivesOpenList(seed.workspaceSlug, projectId);
-        await expect.poll(() => driver.archivesVisibleIssueNames(), { timeout: 300_000 }).toContain(doneName);
+        await expect.poll(() => driver.archivesMutationVisibleIssueNames(), { timeout: 300_000 }).toContain(doneName);
         expect((await serverArchivedIssues(seed.workspaceSlug, projectId, session)).map((r) => r.id)).toContain(
           doneIssue.id
         );

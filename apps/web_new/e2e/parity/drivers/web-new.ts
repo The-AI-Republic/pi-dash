@@ -6880,8 +6880,8 @@ export class WebNewDriver implements ParityDriver {
     return todo("archivesOpenList");
   }
 
-  async archivesVisibleIssueNames(): Promise<string[]> {
-    return todo("archivesVisibleIssueNames");
+  async archivesMutationVisibleIssueNames(): Promise<string[]> {
+    return todo("archivesMutationVisibleIssueNames");
   }
 
   async archivesFailNextMutation(_method: "POST" | "DELETE", _urlPart: string): Promise<void> {

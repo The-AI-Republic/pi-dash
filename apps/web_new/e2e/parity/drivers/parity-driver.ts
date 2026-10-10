@@ -4522,7 +4522,7 @@ export interface ParityDriver {
   /** Open the archived work-items list of a project; ends settled (rows or empty state). */
   archivesOpenList(workspaceSlug: string, projectId: string): Promise<void>;
   /** Names of the archived work items currently rendered, in display order. */
-  archivesVisibleIssueNames(): Promise<string[]>;
+  archivesMutationVisibleIssueNames(): Promise<string[]>;
   /**
    * Fail the next request matching `method` whose URL contains `urlPart`
    * once with a 500 (failure shaping for restore/delete/archive).

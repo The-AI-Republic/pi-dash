@@ -22889,7 +22889,7 @@ export class WebDriver implements ParityDriver {
     }
   }
 
-  async archivesVisibleIssueNames(): Promise<string[]> {
+  async archivesMutationVisibleIssueNames(): Promise<string[]> {
     // Archived rows are block divs (the title is each block's first
     // paragraph; the row anchor only wraps the identifier plus state).
     // Settle on rows, the empty state, or the header display control —
