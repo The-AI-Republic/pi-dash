@@ -24229,6 +24229,369 @@ export class WebDriver implements ParityDriver {
       }
     | undefined;
 
+  // Workspace drafts oracle (NEWFRONT-32, DRAFT-001–027). Observed on the
+  // running old app: the shell wraps the drafts content in an outer main
+  // landmark, so screen reads target the inner main (the one holding the
+  // drafts header and list). The drafts header is a plain block (no header
+  // landmark): breadcrumb, server-total count chip only when drafts exist,
+  // and the "Draft a work item" action for joined admins/members. Each
+  // draft renders one `div[id^="issue-"]` block with the project marker
+  // button first, the title in a `p`, then the inline pickers in fixed
+  // order (state, priority, labels, start, due, assignees, at most one
+  // conditional: modules, cycle, or estimate). Every picker trigger nests
+  // an inner button (the labels trigger is a lone combobox button); the
+  // priority trigger is icon-only with a `text-priority-*` tone class.
+  // Each block owns two quick-action (ellipsis) instances (compact plus
+  // roomy placement) opening the same entries, plus two always-rendered
+  // right-click menus that stay invisible until opened. Loading renders
+  // placeholder rows with pulsing markers; further pages load through a
+  // "Load More" footer control.
+
+  /** The drafts content landmark (the inner main; the outer one holds shell chrome). */
+  private draftsMain(): Locator {
+    return this.page.getByRole("main").last();
+  }
+
+  /** The drafts header block: breadcrumb, count chip, creation control. */
+  private draftsHeaderBlock(): Locator {
+    return this.draftsMain().locator(":scope > *").first();
+  }
+
+  /** Draft block holding exactly the named title (a "(copy)" sibling must not match). */
+  private draftRow(name: string): Locator {
+    return this.page
+      .locator('div[id^="issue-"]')
+      .filter({ has: this.page.getByText(name, { exact: true }) })
+      .first();
+  }
+
+  /** The row's inline-picker wrappers in fixed order (state, priority, labels, start, due, assignees, conditional?). */
+  private draftPickers(name: string): Locator {
+    return this.draftRow(name).locator("div.h-5");
+  }
+
+  /** The clickable trigger of the row's picker at `index` (the inner button when nested). */
+  private draftPickerTrigger(name: string, index: number): Locator {
+    return this.draftPickers(name).nth(index).locator("button").last();
+  }
+
+  private async draftPickerText(name: string, index: number): Promise<string> {
+    const trigger = this.draftPickerTrigger(name, index);
+    await trigger.waitFor({ timeout: WebDriver.WAIT_MS });
+    return WebDriver.cleanText(await trigger.innerText().catch(() => ""));
+  }
+
+  private async draftOpenRowPicker(name: string, index: number): Promise<void> {
+    const row = this.draftRow(name);
+    await row.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await this.draftPickerTrigger(name, index).click({ timeout: WebDriver.WAIT_MS });
+    await this.pickerListbox().waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    await this.pickerOptions().first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  private async draftOpenRowDatePicker(name: string, index: number): Promise<void> {
+    const row = this.draftRow(name);
+    await row.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await this.draftPickerTrigger(name, index).click({ timeout: WebDriver.WAIT_MS });
+    await this.calendar().waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+  }
+
+  /** Click the row's visible quick-action (ellipsis) trigger. */
+  private async draftOpenQuickMenu(name: string): Promise<void> {
+    const row = this.draftRow(name);
+    await row.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await row.hover({ timeout: WebDriver.WAIT_MS });
+    const triggers = row
+      .getByRole("button")
+      .filter({ has: this.page.locator("svg.lucide-ellipsis") })
+      .first();
+    await triggers.waitFor({ timeout: WebDriver.WAIT_MS });
+    // Two instances exist (compact plus roomy); exactly one is visible.
+    const total = await row
+      .getByRole("button")
+      .filter({ has: this.page.locator("svg.lucide-ellipsis") })
+      .count();
+    for (let i = 0; i < total; i++) {
+      const trigger = row
+        .getByRole("button")
+        .filter({ has: this.page.locator("svg.lucide-ellipsis") })
+        .nth(i);
+      if (await trigger.isVisible()) {
+        await trigger.click({ timeout: WebDriver.WAIT_MS });
+        return;
+      }
+    }
+    throw new Error(`[parity] no visible quick-action trigger for draft ${JSON.stringify(name)}.`);
+  }
+
+  /** The row's open quick-action menu (closed instances render no menu node). */
+  private draftOpenQuickMenuScope(name: string): Locator {
+    return this.draftRow(name).locator('div[data-main-menu]:has([role="menu"])').first().locator('[role="menu"]');
+  }
+
+  /** Picker index of the scenario's conditional (modules, cycle, or estimate), or null when none renders. */
+  private async draftConditionalIndex(name: string): Promise<number | null> {
+    return (await this.draftPickers(name).count()) > 6 ? 6 : null;
+  }
+
+  async draftsPageTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async draftsHeaderText(): Promise<string> {
+    const header = this.draftsHeaderBlock();
+    if ((await header.count()) === 0) return "";
+    return WebDriver.cleanText(await header.innerText().catch(() => ""));
+  }
+
+  async draftsCountChip(): Promise<string | null> {
+    // The chip is the header's only standalone number (breadcrumb and
+    // action carry no digits); absent entirely when no drafts exist.
+    const text = await this.draftsHeaderText();
+    const match = /(?:^|\s)(\d+)(?:\s|$)/.exec(text);
+    return match?.[1] ?? null;
+  }
+
+  async draftsHeaderCreateState(): Promise<"enabled" | "disabled" | "absent"> {
+    const action = this.page.getByRole("button", { name: "Draft a work item", exact: true });
+    if ((await action.count()) === 0) return "absent";
+    return (await action.first().isDisabled()) ? "disabled" : "enabled";
+  }
+
+  async draftsMainText(): Promise<string> {
+    const main = this.draftsMain();
+    if ((await main.count()) === 0) return "";
+    return WebDriver.cleanText(await main.innerText().catch(() => ""));
+  }
+
+  async draftRowNames(): Promise<string[]> {
+    const rows = this.page.locator('div[id^="issue-"]');
+    const total = await rows.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const title = rows.nth(i).locator("p").first();
+      if ((await title.count()) === 0) continue;
+      const text = WebDriver.cleanText(await title.innerText().catch(() => ""));
+      if (text.length > 0) names.push(text);
+    }
+    return names;
+  }
+
+  async draftRowProjectMarker(name: string): Promise<string> {
+    // The project marker is the row's first button (identifier text);
+    // triggers for the inline pickers all sort after the title.
+    const marker = this.draftRow(name).getByRole("button").first();
+    await marker.waitFor({ timeout: WebDriver.WAIT_MS });
+    return WebDriver.cleanText(await marker.innerText().catch(() => ""));
+  }
+
+  async draftRowTypeMarkPresent(name: string): Promise<boolean> {
+    // The type mark renders beside the project marker inside the marker
+    // button's own parent; a lone marker button means no mark.
+    const marker = this.draftRow(name).getByRole("button").first();
+    await marker.waitFor({ timeout: WebDriver.WAIT_MS });
+    return marker.evaluate((btn) => (btn.parentElement?.childElementCount ?? 1) > 1);
+  }
+
+  async draftRowMenuEntries(name: string): Promise<string[]> {
+    await this.draftOpenQuickMenu(name);
+    const menu = this.draftOpenQuickMenuScope(name);
+    await menu.getByRole("button").first().waitFor({ timeout: WebDriver.OPEN_MS });
+    const texts = await menu.getByRole("button").allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    return texts.map((t) => WebDriver.cleanText(t)).filter((t) => t.length > 0);
+  }
+
+  async draftContextMenuEntries(name: string): Promise<string[]> {
+    // The right-click menus always render their items (invisible until
+    // opened), so scope to the open overlay: it alone takes pointer events.
+    const row = this.draftRow(name);
+    await row.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await row.click({ button: "right", timeout: WebDriver.WAIT_MS });
+    const open = this.page.locator("div.pointer-events-auto:has([data-context-menu])").first();
+    await open.waitFor({ timeout: WebDriver.OPEN_MS });
+    const texts = await open.locator("[data-context-menu]").getByRole("button").allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    return texts.map((t) => WebDriver.cleanText(t)).filter((t) => t.length > 0);
+  }
+
+  async draftRowMenuClick(name: string, entry: string): Promise<void> {
+    await this.draftOpenQuickMenu(name);
+    const menu = this.draftOpenQuickMenuScope(name);
+    await menu.getByRole("button", { name: entry, exact: true }).first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async draftRowQuickActionVisible(name: string): Promise<boolean> {
+    const row = this.draftRow(name);
+    await row.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await row.hover({ timeout: WebDriver.WAIT_MS });
+    const trigger = row.getByRole("button").filter({ has: this.page.locator("svg.lucide-ellipsis") });
+    const total = await trigger.count();
+    for (let i = 0; i < total; i++) {
+      if (await trigger.nth(i).isVisible()) return true;
+    }
+    return false;
+  }
+
+  async editDraftByName(name: string): Promise<void> {
+    await this.draftRowMenuClick(name, "edit");
+    await this.page.getByPlaceholder("Title").first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  /** Scope of the open delete-draft confirmation (the dialog node itself never takes a box). */
+  private draftDeleteDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: "Delete draft" }) })
+      .first();
+  }
+
+  /** The delete-draft confirmation heading (the visible open marker). */
+  private draftDeleteHeading(): Locator {
+    return this.page.getByRole("heading", { name: "Delete draft" }).first();
+  }
+
+  async cancelDraftDelete(name: string): Promise<void> {
+    await this.draftRowMenuClick(name, "delete");
+    await this.draftDeleteHeading().waitFor({ timeout: WebDriver.OPEN_MS });
+    const dialog = this.draftDeleteDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await this.draftDeleteHeading()
+      .waitFor({ state: "detached", timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async confirmDraftDelete(): Promise<void> {
+    await this.draftDeleteHeading().waitFor({ timeout: WebDriver.OPEN_MS });
+    const dialog = this.draftDeleteDialog();
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await this.draftDeleteHeading()
+      .waitFor({ state: "detached", timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async draftStateText(name: string): Promise<string> {
+    return this.draftPickerText(name, 0);
+  }
+
+  async draftOpenStatePicker(name: string): Promise<void> {
+    await this.draftOpenRowPicker(name, 0);
+  }
+
+  async draftPriorityText(name: string): Promise<string> {
+    // The priority trigger is icon-only; the icon's tone class names the value.
+    const trigger = this.draftPickerTrigger(name, 1);
+    await trigger.waitFor({ timeout: WebDriver.WAIT_MS });
+    const cls =
+      (await trigger
+        .locator("svg")
+        .first()
+        .getAttribute("class")
+        .catch(() => null)) ?? "";
+    const value = /text-priority-(\w+)/.exec(cls)?.[1] ?? "";
+    switch (value) {
+      case "urgent":
+        return "Urgent";
+      case "high":
+        return "High";
+      case "medium":
+        return "Medium";
+      case "low":
+        return "Low";
+      case "none":
+        return "None";
+      default:
+        return "";
+    }
+  }
+
+  async draftOpenPriorityPicker(name: string): Promise<void> {
+    await this.draftOpenRowPicker(name, 1);
+  }
+
+  async draftLabelsText(name: string): Promise<string> {
+    return this.draftPickerText(name, 2);
+  }
+
+  async draftOpenLabelsPicker(name: string): Promise<void> {
+    await this.draftOpenRowPicker(name, 2);
+  }
+
+  async draftAssigneesText(name: string): Promise<string> {
+    return this.draftPickerText(name, 5);
+  }
+
+  async draftOpenAssigneesPicker(name: string): Promise<void> {
+    await this.draftOpenRowPicker(name, 5);
+  }
+
+  async draftDatesText(name: string): Promise<string> {
+    const start = await this.draftPickerText(name, 3);
+    const due = await this.draftPickerText(name, 4);
+    return WebDriver.cleanText(`${start} ${due}`);
+  }
+
+  async draftOpenStartDatePicker(name: string): Promise<void> {
+    await this.draftOpenRowDatePicker(name, 3);
+  }
+
+  async draftOpenDueDatePicker(name: string): Promise<void> {
+    await this.draftOpenRowDatePicker(name, 4);
+  }
+
+  async draftPickerOptionSelected(text: string): Promise<boolean> {
+    return (await this.pickerListbox().getByRole("option", { name: text, selected: true }).count()) > 0;
+  }
+
+  async draftEstimateText(name: string): Promise<string> {
+    return (await this.draftConditionalIndex(name)) === null ? "" : this.draftPickerText(name, 6);
+  }
+
+  async draftOpenEstimatePicker(name: string): Promise<void> {
+    if ((await this.draftConditionalIndex(name)) === null)
+      throw new Error(`[parity] no estimate control on draft ${JSON.stringify(name)}.`);
+    await this.draftOpenRowPicker(name, 6);
+  }
+
+  async draftEstimatePickerVisible(name: string): Promise<boolean> {
+    return (await this.draftConditionalIndex(name)) !== null;
+  }
+
+  async draftCycleText(name: string): Promise<string> {
+    return (await this.draftConditionalIndex(name)) === null ? "" : this.draftPickerText(name, 6);
+  }
+
+  async draftOpenCyclePicker(name: string): Promise<void> {
+    if ((await this.draftConditionalIndex(name)) === null)
+      throw new Error(`[parity] no cycle control on draft ${JSON.stringify(name)}.`);
+    await this.draftOpenRowPicker(name, 6);
+  }
+
+  async draftCyclePickerVisible(name: string): Promise<boolean> {
+    return (await this.draftConditionalIndex(name)) !== null;
+  }
+
+  async draftModuleText(name: string): Promise<string> {
+    return (await this.draftConditionalIndex(name)) === null ? "" : this.draftPickerText(name, 6);
+  }
+
+  async draftOpenModulePicker(name: string): Promise<void> {
+    if ((await this.draftConditionalIndex(name)) === null)
+      throw new Error(`[parity] no modules control on draft ${JSON.stringify(name)}.`);
+    await this.draftOpenRowPicker(name, 6);
+  }
+
+  async draftModulePickerVisible(name: string): Promise<boolean> {
+    return (await this.draftConditionalIndex(name)) !== null;
+  }
+
+  private draftPatchFailureRoute:
+    | {
+        matches: (url: URL) => boolean;
+        handler: (route: Parameters<Parameters<Page["route"]>[1]>[0]) => Promise<void>;
+      }
+    | undefined;
+
   async archivesFailNextMutation(method: "POST" | "DELETE", urlPart: string): Promise<void> {
     // One-shot 500 in the failNextIssuePatch shape: only the next request
     // with this method whose path contains urlPart fails; reads and other
@@ -25062,5 +25425,164 @@ export class WebDriver implements ParityDriver {
     const dialog = await this.runnersWaitForConfirm("Revoke runner?");
     const revoke = dialog.getByRole("button", { name: "Revoke", exact: true });
     await expect.poll(() => revoke.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  async draftFailNextPatch(status: number, delayMs: number): Promise<void> {
+    // Only the next drafts PATCH fails, once: reads and other writes pass
+    // through, and the handler removes itself before answering so a
+    // retried save goes to the real server. The delay keeps the
+    // optimistic value on screen long enough to poll for it. A URL
+    // predicate (not a glob) routes the request: the glob form proved
+    // flaky against the dev proxy's request URLs.
+    const matches = (url: URL): boolean =>
+      url.pathname.includes("/api/workspaces/") && url.pathname.includes("/draft-issues/");
+    const handler = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() !== "PATCH") {
+        await route.continue();
+        return;
+      }
+      // Answer first, unroute after: removing the handler from inside
+      // itself finalizes the route and a later fulfill throws
+      // "already handled".
+      try {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await route.fulfill({ status, contentType: "application/json", body: "{}" });
+      } finally {
+        await this.draftClearPatchFailure();
+      }
+    };
+    this.draftPatchFailureRoute = { matches, handler };
+    await this.page.route(matches, handler);
+  }
+
+  async draftClearPatchFailure(): Promise<void> {
+    const current = this.draftPatchFailureRoute;
+    this.draftPatchFailureRoute = undefined;
+    if (current) await this.page.unroute(current.matches, current.handler).catch(() => {});
+  }
+
+  async draftsEntryRequests(workspaceSlug: string): Promise<string[]> {
+    const seen = new Set<string>();
+    const listener = (request: { url(): string; method(): string }): void => {
+      const url = request.url();
+      if (!url.includes("/draft-issues")) return;
+      try {
+        seen.add(`${request.method()} ${new URL(url).pathname}`);
+      } catch {
+        // Unparseable URLs cannot be endpoint calls; ignore them.
+      }
+    };
+    this.page.on("request", listener);
+    try {
+      await this.page.goto(`/${workspaceSlug}/drafts`, { timeout: 60_000 });
+      await this.page.waitForLoadState("domcontentloaded");
+      await expect
+        .poll(
+          async () =>
+            (await this.page.locator('div[id^="issue-"]').count()) > 0 ||
+            (await this.pageTextContains("Half-written work items")) ||
+            (await this.pageTextContains("No project")),
+          { timeout: WebDriver.WAIT_MS }
+        )
+        .toBe(true);
+      // Drain late follow-up requests.
+      await this.page.waitForTimeout(1_000);
+    } finally {
+      this.page.off("request", listener);
+    }
+    return [...seen].sort();
+  }
+
+  async draftRowsDraggableCount(): Promise<number> {
+    return this.page.locator('div[id^="issue-"][draggable="true"]').count();
+  }
+
+  async draftsPressKey(key: string): Promise<void> {
+    await this.page.keyboard.press(key);
+  }
+
+  async draftPublishError(): Promise<string | null> {
+    // Failure notices surface as toasts; the shared toast read scopes to
+    // the notifications region so modal dialogs never pollute it.
+    return this.toastText();
+  }
+
+  async draftsEmptyCreateState(): Promise<"enabled" | "disabled" | "absent"> {
+    const action = this.page.getByRole("button", { name: "Create draft work item", exact: true });
+    if ((await action.count()) === 0) return "absent";
+    return (await action.first().isDisabled()) ? "disabled" : "enabled";
+  }
+
+  async draftsNoProjectCreateState(): Promise<"enabled" | "disabled" | "absent"> {
+    const action = this.page.getByRole("button", { name: "Start your first project", exact: true });
+    if ((await action.count()) === 0) return "absent";
+    return (await action.first().isDisabled()) ? "disabled" : "enabled";
+  }
+
+  async draftsDelayList(ms: number): Promise<void> {
+    // Hold the drafts-list answers so the skeleton stays up long enough
+    // to observe; writes pass through untouched. A URL predicate (not a
+    // glob) routes the request: the glob form proved flaky against the
+    // dev proxy's request URLs.
+    const matches = (url: URL): boolean =>
+      url.pathname.includes("/api/workspaces/") && url.pathname.includes("/draft-issues/");
+    const hold = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue();
+    };
+    await this.page.route(matches, hold);
+  }
+
+  async draftsSkeletonVisible(): Promise<boolean> {
+    // The loader renders fourteen placeholder rows with several pulsing
+    // markers each; a threshold keeps stray pulses from false-positiving.
+    const main = this.draftsMain();
+    if ((await main.count()) === 0) return false;
+    return (await main.locator(".animate-pulse").count()) >= 20;
+  }
+
+  async draftsLoadMoreVisible(): Promise<boolean> {
+    return (await this.draftsMain().getByText("Load More", { exact: false }).count()) > 0;
+  }
+
+  async draftsLoadMore(): Promise<void> {
+    const before = await this.draftBlockCount();
+    await this.page.getByText("Load More", { exact: false }).first().click({ timeout: WebDriver.WAIT_MS });
+    await expect.poll(() => this.draftBlockCount(), { timeout: WebDriver.WAIT_MS }).toBeGreaterThan(before);
+  }
+
+  async draftsListFetchCountOnRefocus(): Promise<number> {
+    // Count drafts-list reads across a blur/focus cycle: the screen
+    // fetches on mount only, never on refocus.
+    let calls = 0;
+    const matches = (url: URL): boolean =>
+      url.pathname.includes("/api/workspaces/") && url.pathname.includes("/draft-issues/");
+    const counter = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() === "GET") calls += 1;
+      await route.continue();
+    };
+    await this.page.route(matches, counter);
+    try {
+      await this.page.evaluate(() => {
+        window.dispatchEvent(new Event("blur"));
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("focus"));
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await this.page.waitForTimeout(3000);
+      return calls;
+    } finally {
+      await this.page.unroute(matches, counter).catch(() => undefined);
+    }
+  }
+
+  async draftsMainCheckboxCount(): Promise<number> {
+    const main = this.draftsMain();
+    if ((await main.count()) === 0) return 0;
+    return main.getByRole("checkbox").count();
   }
 }

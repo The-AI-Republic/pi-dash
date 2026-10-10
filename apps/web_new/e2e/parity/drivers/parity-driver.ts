@@ -460,6 +460,113 @@ export interface ParityDriver {
   moveDraftToProject(name: string): Promise<void>;
   /** Confirm the move-to-project modal ("Add to project"). */
   confirmMoveToProject(): Promise<void>;
+  // Workspace drafts oracle (NEWFRONT-32, DRAFT-001–027). The old app
+  // nests the drafts content inside the shell's outer main landmark, so
+  // the screen-scoped reads below target the inner main (the one holding
+  // the drafts header and list), never the sidebar chrome. Row pickers
+  // sit in fixed order (state, priority, labels, start, due, assignees,
+  // then at most one conditional: modules, cycle, or estimate); the
+  // conditional methods assume the scenario enabled exactly one.
+  /** Tab title on the drafts screen. */
+  draftsPageTitle(): Promise<string>;
+  /** Header-area text (breadcrumb, count, actions) on the drafts screen. */
+  draftsHeaderText(): Promise<string>;
+  /** Count-chip text next to the drafts title, or null when no chip shows. */
+  draftsCountChip(): Promise<string | null>;
+  /** Header create control: enabled, disabled, or absent for this viewer. */
+  draftsHeaderCreateState(): Promise<"enabled" | "disabled" | "absent">;
+  /** Inner text of the drafts content area (header plus list, no shell chrome). */
+  draftsMainText(): Promise<string>;
+  /** Draft titles in render order (top row first). */
+  draftRowNames(): Promise<string[]>;
+  /** Project identifier rendered in the named draft's row. */
+  draftRowProjectMarker(name: string): Promise<string>;
+  /** Whether the named draft's row carries a work-type mark beside the project marker. */
+  draftRowTypeMarkPresent(name: string): Promise<boolean>;
+  /** Entry texts of the named draft's quick-action row menu, in display order. */
+  draftRowMenuEntries(name: string): Promise<string[]>;
+  /** Entry texts of the named draft's right-click menu, in display order. */
+  draftContextMenuEntries(name: string): Promise<string[]>;
+  /** Click an entry of the named draft's quick-action row menu ("edit", "make_a_copy", "move_to_project", "delete" on the oracle; the new app maps these keys to its translated labels). */
+  draftRowMenuClick(name: string, entry: string): Promise<void>;
+  /** Whether the named draft's row exposes a quick-action (ellipsis) trigger. */
+  draftRowQuickActionVisible(name: string): Promise<boolean>;
+  /** Open the named draft for editing through its row-menu edit entry. */
+  editDraftByName(name: string): Promise<void>;
+  /** Open the named draft's delete confirmation, then cancel it. */
+  cancelDraftDelete(name: string): Promise<void>;
+  /** Confirm the open delete-draft dialog. */
+  confirmDraftDelete(): Promise<void>;
+  /** Workflow-state text rendered in the named draft's row. */
+  draftStateText(name: string): Promise<string>;
+  /** Open the state picker of the named draft's row. */
+  draftOpenStatePicker(name: string): Promise<void>;
+  /** Priority name rendered in the named draft's row (mapped from its icon: the trigger is icon-only). */
+  draftPriorityText(name: string): Promise<string>;
+  /** Open the priority picker of the named draft's row. */
+  draftOpenPriorityPicker(name: string): Promise<void>;
+  /** Labels text rendered in the named draft's row. */
+  draftLabelsText(name: string): Promise<string>;
+  /** Open the labels picker of the named draft's row. */
+  draftOpenLabelsPicker(name: string): Promise<void>;
+  /** Assignees text rendered in the named draft's row. */
+  draftAssigneesText(name: string): Promise<string>;
+  /** Open the assignees picker of the named draft's row. */
+  draftOpenAssigneesPicker(name: string): Promise<void>;
+  /** Dates text rendered in the named draft's row. */
+  draftDatesText(name: string): Promise<string>;
+  /** Open the start-date picker of the named draft's row. */
+  draftOpenStartDatePicker(name: string): Promise<void>;
+  /** Open the due-date picker of the named draft's row. */
+  draftOpenDueDatePicker(name: string): Promise<void>;
+  /** Whether the open row picker marks the named option as selected. */
+  draftPickerOptionSelected(text: string): Promise<boolean>;
+  /** Estimate text rendered in the named draft's row ("" when unset). */
+  draftEstimateText(name: string): Promise<string>;
+  /** Open the estimate picker of the named draft's row. */
+  draftOpenEstimatePicker(name: string): Promise<void>;
+  /** Whether the named draft's row renders an estimate control. */
+  draftEstimatePickerVisible(name: string): Promise<boolean>;
+  /** Cycle text rendered in the named draft's row ("" when unset). */
+  draftCycleText(name: string): Promise<string>;
+  /** Open the cycle picker of the named draft's row. */
+  draftOpenCyclePicker(name: string): Promise<void>;
+  /** Whether the named draft's row renders a cycle control. */
+  draftCyclePickerVisible(name: string): Promise<boolean>;
+  /** Modules text rendered in the named draft's row ("" when unset). */
+  draftModuleText(name: string): Promise<string>;
+  /** Open the modules picker of the named draft's row. */
+  draftOpenModulePicker(name: string): Promise<void>;
+  /** Whether the named draft's row renders a modules control. */
+  draftModulePickerVisible(name: string): Promise<boolean>;
+  /** Fail the next drafts PATCH with `status` after `delayMs`, once (rollback probe); the route removes itself. */
+  draftFailNextPatch(status: number, delayMs: number): Promise<void>;
+  /** Remove a pending drafts-PATCH failure route (rollback-probe cleanup). */
+  draftClearPatchFailure(): Promise<void>;
+  /** "METHOD path" entries for draft-scoped API calls fired by entering the drafts screen (assumes a signed-in session). */
+  draftsEntryRequests(workspaceSlug: string): Promise<string[]>;
+  /** Count of draft rows marked draggable. */
+  draftRowsDraggableCount(): Promise<number>;
+  /** Press a key on the drafts screen (shortcut-absence probe). */
+  draftsPressKey(key: string): Promise<void>;
+  /** Failure notice text after a publish attempt, or null when none shows. */
+  draftPublishError(): Promise<string | null>;
+  /** Drafts empty-state create action: enabled, disabled, or absent. */
+  draftsEmptyCreateState(): Promise<"enabled" | "disabled" | "absent">;
+  /** No-project fallback create action: enabled, disabled, or absent. */
+  draftsNoProjectCreateState(): Promise<"enabled" | "disabled" | "absent">;
+  /** Hold the drafts-list answers for `ms` so the skeleton stays observable. */
+  draftsDelayList(ms: number): Promise<void>;
+  /** Whether loading placeholder rows are currently rendered. */
+  draftsSkeletonVisible(): Promise<boolean>;
+  /** Whether the list footer offers loading more drafts. */
+  draftsLoadMoreVisible(): Promise<boolean>;
+  /** Load the next drafts page through the list footer control. */
+  draftsLoadMore(): Promise<void>;
+  /** Drafts-list API calls fired by a blur/focus cycle (refetch-on-focus probe). */
+  draftsListFetchCountOnRefocus(): Promise<number>;
+  /** Checkbox count inside the main landmark (bulk-select absence probe). */
+  draftsMainCheckboxCount(): Promise<number>;
   /** Project currently selected in the open issue modal. */
   modalProjectName(): Promise<string>;
   /** Select the named project in the open issue modal's picker. */
