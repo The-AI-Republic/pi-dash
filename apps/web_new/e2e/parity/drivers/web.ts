@@ -24089,4 +24089,403 @@ export class WebDriver implements ParityDriver {
     const text = (((await notice.textContent().catch(() => "")) ?? "") as string).trim();
     return text === "" ? null : text;
   }
+
+  // --- Cycles empty states, gone-away, create, validation (NEWFRONT-250,
+  // --- CYC-009..016). Appended; existing methods above are untouched per
+  // --- the shared driver contract.
+
+  /** Live row links carry the cycle id and render the name in a title span. */
+  private cyclesEmptyRowLinks(): Locator {
+    return this.page.locator('a[href*="/cycles/"]:has(span.truncate)');
+  }
+
+  /** Header-right controls hosting the search box (scoped off the Add button). */
+  private cyclesEmptyHeaderControls(): Locator {
+    return this.page.getByRole("button", { name: "Add cycle" }).first().locator("xpath=ancestor::div[1]");
+  }
+
+  private cyclesEmptySearchInput(): Locator {
+    // Scoped to the header controls: the sidebar project search shares
+    // the same placeholder, and the header mounts a zero-size collapsed
+    // twin while closed — page-global matching latches the wrong box.
+    return this.cyclesEmptyHeaderControls().locator('input[placeholder="Search"]');
+  }
+
+  private cyclesEmptyFiltersButton(): Locator {
+    return this.page.locator("button:visible", { hasText: /^Filters$/ }).first();
+  }
+
+  private cyclesEmptyFiltersPanel(): Locator {
+    return this.page.locator("div.my-1.rounded-sm.border-subtle").first();
+  }
+
+  private cyclesEmptyChipRow(): Locator {
+    // The live list renders its applied filters as a wrapping chip bar
+    // (not the archived tab's bordered row): scope by the clear-all chip
+    // it always carries while any filter applies.
+    return this.page.locator('div.flex.flex-wrap.items-stretch:has(button:has-text("Clear all"))').first();
+  }
+
+  private cyclesEmptyNoMatchTitle(): Locator {
+    return this.page.locator("h5", { hasText: "No matching cycles" }).first();
+  }
+
+  private cyclesCreateDialogRoot(): Locator {
+    // The toast viewport also carries role="dialog": scope to the dialog
+    // hosting the cycle title field, never the toast twin.
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.locator('input[name="name"]') })
+      .first();
+  }
+
+  private async cyclesEmptyWaitSettled(): Promise<void> {
+    // 60s, not OPEN_MS: the list compiles cold per worker and fetches
+    // under shared-stack load; 30s flakes while a sibling suite runs.
+    await this.cyclesEmptyRowLinks()
+      .or(this.page.locator("h5", { hasText: "No matching cycles" }))
+      .or(this.page.locator("button", { hasText: /^(Upcoming|Completed) cycle/ }))
+      .or(this.page.getByRole("button", { name: "Set your first cycle" }))
+      .or(this.page.getByRole("button", { name: "Manage features" }))
+      .first()
+      .waitFor({ timeout: 60_000 });
+  }
+
+  async cyclesEmptyOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.cyclesEmptyWaitSettled();
+  }
+
+  async cyclesEmptyVisibleNames(): Promise<string[]> {
+    const links = this.cyclesEmptyRowLinks();
+    const total = await links.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      if (!(await links.nth(i).isVisible())) continue;
+      const text = await links
+        .nth(i)
+        .locator("span.truncate")
+        .first()
+        .innerText()
+        .catch(() => "");
+      const name = text.trim();
+      if (name !== "") names.push(name);
+    }
+    return names;
+  }
+
+  async cyclesEmptySkeletonVisible(): Promise<boolean> {
+    return this.isShown(this.page.locator("div.animate-pulse", { has: this.page.locator("span.bg-layer-1") }).first());
+  }
+
+  async cyclesEmptyNoMatchHeading(): Promise<string | null> {
+    const title = this.cyclesEmptyNoMatchTitle();
+    if ((await title.count()) === 0 || !(await title.isVisible())) return null;
+    return (await title.innerText()).trim();
+  }
+
+  async cyclesEmptyNoMatchHint(): Promise<string | null> {
+    const title = this.cyclesEmptyNoMatchTitle();
+    if ((await title.count()) === 0 || !(await title.isVisible())) return null;
+    const hint = title.locator("xpath=following-sibling::p[1]");
+    if ((await hint.count()) === 0) return null;
+    return (await hint.innerText()).trim();
+  }
+
+  async cyclesEmptySearchOpen(): Promise<void> {
+    // Collapsed, the toggle is the header controls' lone direct button
+    // (an unnamed magnifier); opening swaps it for the expanding box.
+    // The toggle's own focus call is a no-op (the input mounts only
+    // after the state flip), so focus explicitly with a click.
+    await this.cyclesEmptyHeaderControls()
+      .locator("div.flex.items-center.gap-2 > button")
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.cyclesEmptySearchInput().waitFor({ timeout: WebDriver.OPEN_MS });
+    await this.cyclesEmptySearchInput().click({ timeout: WebDriver.OPEN_MS });
+    await expect
+      .poll(() => this.cyclesEmptySearchInput().evaluate((el) => document.activeElement === el), {
+        timeout: WebDriver.OPEN_MS,
+      })
+      .toBe(true);
+  }
+
+  async cyclesEmptySearchFill(text: string): Promise<void> {
+    await this.cyclesEmptySearchInput().fill(text);
+  }
+
+  async cyclesEmptySearchClear(): Promise<void> {
+    await this.cyclesEmptyHeaderControls()
+      .locator("div.w-64")
+      .first()
+      .getByRole("button")
+      .click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.cyclesEmptyRowLinks().count(), { timeout: WebDriver.OPEN_MS }).toBeGreaterThan(0);
+  }
+
+  async cyclesEmptyFiltersOpen(): Promise<void> {
+    await this.cyclesEmptyFiltersButton().click({ timeout: WebDriver.OPEN_MS });
+    await this.cyclesEmptyFiltersPanel().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesEmptyFiltersClose(): Promise<void> {
+    if ((await this.cyclesEmptyFiltersPanel().count()) === 0) return;
+    await this.page.keyboard.press("Escape");
+    await this.cyclesEmptyFiltersPanel().waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesEmptyFilterSections(): Promise<string[]> {
+    const panel = this.cyclesEmptyFiltersPanel();
+    const headers = panel.locator("div.py-2 > div:first-child > div:first-child");
+    const total = await headers.count();
+    const sections: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const raw = (await headers.nth(i).innerText()).trim();
+      sections.push(raw.replace(/\s*\(\d+\)\s*$/, ""));
+    }
+    return sections;
+  }
+
+  async cyclesEmptyFilterOptionNames(): Promise<string[]> {
+    const panel = this.cyclesEmptyFiltersPanel();
+    const options = panel.getByRole("button");
+    const total = await options.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (await options.nth(i).innerText()).trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
+  async cyclesEmptyFilterPick(section: string, optionName: string): Promise<void> {
+    const panel = this.cyclesEmptyFiltersPanel();
+    const block = panel.locator("div.py-2", { hasText: section });
+    await block.getByRole("button", { name: optionName }).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesEmptyFiltersClearAll(): Promise<void> {
+    await this.cyclesEmptyChipRow()
+      .getByRole("button", { name: /clear all/i })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.cyclesEmptyRowLinks().count(), { timeout: WebDriver.OPEN_MS }).toBeGreaterThan(0);
+  }
+
+  async cyclesEmptySkeletonShownOnSlowFetch(workspaceSlug: string, projectId: string): Promise<boolean> {
+    // Two rounds like openListSettled: the dev oracle stalls whole
+    // renders (or fails a chunk import) under shared-box load, and a
+    // stalled first pass must not fail the transition assertion.
+    for (let round = 1; round <= 2; round++) {
+      // Hold the entry fetches (StrictMode fires two), then let every
+      // later request through: unrouting mid-hold makes the sleeping
+      // handler's continue() throw "already handled", so the route stays
+      // armed until the list settles instead.
+      let holdsLeft = 2;
+      await this.page.route(
+        (url) => url.pathname.endsWith(`/projects/${projectId}/cycles/`),
+        async (route) => {
+          if (holdsLeft > 0) {
+            holdsLeft -= 1;
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+          }
+          // Swallow "already handled": the catch-path unroute may land
+          // mid-hold, and the request is then already released.
+          await route.continue().catch(() => null);
+        }
+      );
+      try {
+        await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles`);
+        await this.page.waitForLoadState("domcontentloaded");
+        // 60s: a cold route compiles for 10s+ before the fetch starts.
+        const seen = await expect
+          .poll(() => this.cyclesEmptySkeletonVisible(), { timeout: 60_000 })
+          .toBe(true)
+          .then(
+            () => true,
+            () => false
+          );
+        await this.cyclesEmptyWaitSettled();
+        await this.page.unrouteAll({ behavior: "wait" }).catch(() => null);
+        return seen;
+      } catch (error) {
+        await this.page.unrouteAll({ behavior: "wait" }).catch(() => null);
+        if (round === 2) throw error;
+      }
+    }
+    throw new Error("[parity] skeleton slow-fetch never settled.");
+  }
+
+  async cyclesEmptyFeatureOffVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Manage features" }).first());
+  }
+
+  async cyclesEmptyFeatureOffActionDisabled(): Promise<boolean> {
+    return this.page.getByRole("button", { name: "Manage features" }).first().isDisabled();
+  }
+
+  async cyclesEmptyFeatureOffActionOpen(): Promise<void> {
+    const button = this.page.getByRole("button", { name: "Manage features" }).first();
+    await button.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesEmptyZeroStateVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Set your first cycle" }).first());
+  }
+
+  async cyclesEmptyZeroStateCreateDisabled(): Promise<boolean> {
+    return this.page.getByRole("button", { name: "Set your first cycle" }).first().isDisabled();
+  }
+
+  async cyclesEmptyZeroStateCreateOpen(): Promise<void> {
+    await this.page.getByRole("button", { name: "Set your first cycle" }).first().click({ timeout: WebDriver.OPEN_MS });
+    // Wait for dialog CONTENT: the dialog root keeps a zero-size box for
+    // a while under load, so a visibility wait on the root lies.
+    await this.cyclesCreateDialogRoot().locator('input[name="name"]').waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesEmptyOpenDetail(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page
+      .getByRole("button", { name: "View other cycles" })
+      .or(this.page.locator("h4", { hasText: /.+/ }))
+      .first()
+      .waitFor({ timeout: 60_000 });
+  }
+
+  async cyclesEmptyGoneAwayVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "View other cycles" }).first());
+  }
+
+  async cyclesEmptyGoneAwayBack(): Promise<void> {
+    await this.page.getByRole("button", { name: "View other cycles" }).first().click({ timeout: WebDriver.OPEN_MS });
+    // The list path ends at /cycles: the detail address also contains
+    // "/cycles", so a contains-match would pass without navigating.
+    await expect.poll(() => this.page.url(), { timeout: WebDriver.OPEN_MS }).toMatch(/\/cycles\/?$/);
+  }
+
+  async cyclesCreateOpenFromHeader(): Promise<void> {
+    await this.page.getByRole("button", { name: "Add cycle" }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.cyclesCreateDialogRoot().locator('input[name="name"]').waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesCreateDialogOpen(): Promise<boolean> {
+    // Attachment, not visibility: closed dialogs unmount (probed), while
+    // an open dialog keeps a zero-size box under load, so isVisible lies.
+    return (await this.cyclesCreateDialogRoot().locator('input[name="name"]').count()) > 0;
+  }
+
+  async cyclesCreateDialogCancel(): Promise<void> {
+    await this.cyclesCreateDialogRoot().getByRole("button", { name: "Cancel" }).click({ timeout: WebDriver.OPEN_MS });
+    await this.cyclesCreateDialogRoot().waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesCreateFillTitle(title: string): Promise<void> {
+    await this.cyclesCreateDialogRoot().locator('input[name="name"]').fill(title);
+  }
+
+  async cyclesCreateFillDescription(text: string): Promise<void> {
+    await this.cyclesCreateDialogRoot().locator('textarea[name="description"]').fill(text);
+  }
+
+  async cyclesCreateTitleError(): Promise<string | null> {
+    const dialog = this.cyclesCreateDialogRoot();
+    const error = dialog.locator("span.text-danger-primary").first();
+    if ((await error.count()) === 0) return null;
+    const text = (await error.innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async cyclesCreatePickDateRange(startISO: string, endISO: string): Promise<void> {
+    const dialog = this.cyclesCreateDialogRoot();
+    // .first(): the combobox nests a visual twin button with the same
+    // label; the outer one opens the calendar.
+    await dialog
+      .getByRole("button", { name: /start date/i })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.cyclesCreatePickDay(startISO);
+    await this.cyclesCreatePickDay(endISO);
+    await this.page.keyboard.press("Escape");
+  }
+
+  /** Day-picker accessible name for a date ("Wednesday, October 7th, 2026"). */
+  private static cyclesCreateDayLabel(date: Date): string {
+    const weekday = date.toLocaleString("en-US", { weekday: "long" });
+    const month = date.toLocaleString("en-US", { month: "long" });
+    const day = date.getDate();
+    const tens = day % 100;
+    const suffix =
+      tens >= 11 && tens <= 13 ? "th" : day % 10 === 1 ? "st" : day % 10 === 2 ? "nd" : day % 10 === 3 ? "rd" : "th";
+    return `${weekday}, ${month} ${day}${suffix}, ${date.getFullYear()}`;
+  }
+
+  /** Click one day cell in the open day-picker calendar for an ISO date. */
+  private async cyclesCreatePickDay(iso: string): Promise<void> {
+    const target = new Date(`${iso}T12:00:00`);
+    const calendar = this.page.locator("div.rdp-root").first();
+    await calendar.waitFor({ timeout: WebDriver.OPEN_MS });
+    await calendar
+      .locator('select[aria-label="Choose the Month"]')
+      .selectOption({ label: target.toLocaleString("en-US", { month: "long" }) });
+    await calendar
+      .locator('select[aria-label="Choose the Year"]')
+      .selectOption({ label: String(target.getFullYear()) });
+    // Exact accessible name: outside-month twins share the day number but
+    // never the full date label.
+    await calendar
+      .getByRole("button", { name: WebDriver.cyclesCreateDayLabel(target), exact: true })
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesCreatePastDayDisabled(): Promise<boolean> {
+    const dialog = this.cyclesCreateDialogRoot();
+    await dialog
+      .getByRole("button", { name: /start date/i })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    const calendar = this.page.locator("div.rdp-root").first();
+    await calendar.waitFor({ timeout: WebDriver.OPEN_MS });
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    await calendar
+      .locator('select[aria-label="Choose the Month"]')
+      .selectOption({ label: yesterday.toLocaleString("en-US", { month: "long" }) });
+    await calendar
+      .locator('select[aria-label="Choose the Year"]')
+      .selectOption({ label: String(yesterday.getFullYear()) });
+    const cell = calendar.getByRole("button", { name: WebDriver.cyclesCreateDayLabel(yesterday), exact: true });
+    await cell.waitFor({ timeout: WebDriver.OPEN_MS });
+    const disabled = await cell.isDisabled();
+    await this.page.keyboard.press("Escape");
+    return disabled;
+  }
+
+  async cyclesCreatePickProject(projectName: string): Promise<void> {
+    const dialog = this.cyclesCreateDialogRoot();
+    // The project pill is the dialog's first dropdown button (ahead of the
+    // date buttons); it renders the current project name.
+    await dialog.locator("div.h-7").first().getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option", { name: projectName }).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesCreateSubmit(): Promise<void> {
+    await this.cyclesCreateDialogRoot()
+      .getByRole("button", { name: "Create cycle" })
+      .click({ timeout: WebDriver.OPEN_MS });
+    // Settle on whichever outcome the submit takes: the dialog closing
+    // (saved), a toast (saved or date-check refused), or an inline title
+    // error (client-side validation refused). 60s: the date-check write
+    // behind the submit has taken 30s+ under shared-box load.
+    await expect
+      .poll(
+        async () =>
+          !(await this.cyclesCreateDialogOpen()) ||
+          (await this.rulesLastToast()) !== null ||
+          (await this.cyclesCreateTitleError()) !== null,
+        { timeout: 60_000 }
+      )
+      .toBe(true);
+  }
 }

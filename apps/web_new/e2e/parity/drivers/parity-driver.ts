@@ -4510,6 +4510,88 @@ export interface ParityDriver {
   cyclesEditFailNextDeleteWrite(): Promise<void>;
   /** Read-only notice on a finished cycle's detail, or null when absent. */
   cyclesEditDetailReadOnlyNotice(): Promise<string | null>;
+
+  // --- Cycles empty states, gone-away, create, validation (NEWFRONT-250,
+  // --- CYC-009..016). Observed on apps/web: the live cycles list with its
+  // --- cause-specific no-match view, the feature-off and first-run empty
+  // --- views, the list skeleton, the detail gone-away view, and the
+  // --- create dialog with client-side validation plus the date-overlap
+  // --- check. Appended; existing entries above are untouched per the
+  // --- shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Open the project's live cycles list; ends with the list settled. */
+  cyclesEmptyOpenList(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Names of the currently visible live cycle rows, in render order. */
+  cyclesEmptyVisibleNames(): Promise<string[]>;
+  /** Whether the list skeleton loader currently shows. */
+  cyclesEmptySkeletonVisible(): Promise<boolean>;
+  /** No-match empty-view heading, or null when the list is not in no-match. */
+  cyclesEmptyNoMatchHeading(): Promise<string | null>;
+  /** No-match hint paragraph, or null when the list is not in no-match. */
+  cyclesEmptyNoMatchHint(): Promise<string | null>;
+  /** Open the live-list search box; ends with its input focused. */
+  cyclesEmptySearchOpen(): Promise<void>;
+  /** Fill the live-list search box with text (filters live). */
+  cyclesEmptySearchFill(text: string): Promise<void>;
+  /** Clear the live-list search box; ends with rows or an empty view. */
+  cyclesEmptySearchClear(): Promise<void>;
+  /** Open the live-list filters menu; ends with its sections mounted. */
+  cyclesEmptyFiltersOpen(): Promise<void>;
+  /** Close the live-list filters menu. */
+  cyclesEmptyFiltersClose(): Promise<void>;
+  /** Section names of the open filters menu. */
+  cyclesEmptyFilterSections(): Promise<string[]>;
+  /** Option names across the open filters menu. */
+  cyclesEmptyFilterOptionNames(): Promise<string[]>;
+  /** Pick one option of one filter section (applies live). */
+  cyclesEmptyFilterPick(section: string, optionName: string): Promise<void>;
+  /** Clear every applied filter via the clear-all action. */
+  cyclesEmptyFiltersClearAll(): Promise<void>;
+  /**
+   * Enter the live list while its fetch is held back, reporting whether
+   * the skeleton showed mid-flight. Releases the hold and ends settled
+   * (rows or an empty view).
+   */
+  cyclesEmptySkeletonShownOnSlowFetch(workspaceSlug: string, projectId: string): Promise<boolean>;
+  /** Whether the cycles-feature-off empty view renders. */
+  cyclesEmptyFeatureOffVisible(): Promise<boolean>;
+  /** Whether the feature-off view's management shortcut is disabled. */
+  cyclesEmptyFeatureOffActionDisabled(): Promise<boolean>;
+  /** Activate the feature-off view's management shortcut. */
+  cyclesEmptyFeatureOffActionOpen(): Promise<void>;
+  /** Whether the first-run (zero cycles) empty view renders. */
+  cyclesEmptyZeroStateVisible(): Promise<boolean>;
+  /** Whether the zero-state creation shortcut is disabled. */
+  cyclesEmptyZeroStateCreateDisabled(): Promise<boolean>;
+  /** Activate the zero-state creation shortcut. */
+  cyclesEmptyZeroStateCreateOpen(): Promise<void>;
+  /** Open one cycle's detail route directly; ends with content or gone-away. */
+  cyclesEmptyOpenDetail(workspaceSlug: string, projectId: string, cycleId: string): Promise<void>;
+  /** Whether the detail gone-away view renders. */
+  cyclesEmptyGoneAwayVisible(): Promise<boolean>;
+  /** Activate the gone-away view's back-to-list action. */
+  cyclesEmptyGoneAwayBack(): Promise<void>;
+  /** Open the create dialog from the list header add action. */
+  cyclesCreateOpenFromHeader(): Promise<void>;
+  /** Whether the cycle create dialog is open. */
+  cyclesCreateDialogOpen(): Promise<boolean>;
+  /** Close the create dialog via its cancel action. */
+  cyclesCreateDialogCancel(): Promise<void>;
+  /** Fill the dialog title field (replaces any text). */
+  cyclesCreateFillTitle(title: string): Promise<void>;
+  /** Fill the dialog description field (replaces any text). */
+  cyclesCreateFillDescription(text: string): Promise<void>;
+  /** Inline title error text, or null when no title error shows. */
+  cyclesCreateTitleError(): Promise<string | null>;
+  /** Pick a start/end date range in the dialog date picker. */
+  cyclesCreatePickDateRange(startISO: string, endISO: string): Promise<void>;
+  /** Whether yesterday's day cell is disabled in the dialog start picker. */
+  cyclesCreatePastDayDisabled(): Promise<boolean>;
+  /** Target another project via the dialog project picker. */
+  cyclesCreatePickProject(projectName: string): Promise<void>;
+  /** Submit the dialog; ends with it closed or showing an error. */
+  cyclesCreateSubmit(): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
