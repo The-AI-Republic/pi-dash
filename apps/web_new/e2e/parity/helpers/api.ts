@@ -12682,6 +12682,8 @@ export async function serverUnpinIssuePod(
   apiBase: string = apiBaseFromEnv()
 ): Promise<void> {
   await patchIssue(workspaceSlug, projectId, issueId, sessionCookie, { assigned_pod_id: null }, apiBase);
+}
+
 // ---------------------------------------------------------------------------
 // Intake-create oracle helpers (NEWFRONT-257, rows INT-013–017/033).
 //
