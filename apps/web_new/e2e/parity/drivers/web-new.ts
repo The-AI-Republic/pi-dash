@@ -6977,6 +6977,7 @@ export class WebNewDriver implements ParityDriver {
   }
   async archivesTabClick(_tab: ArchivesTab): Promise<void> {
     return todo("archivesTabClick");
+  }
 
   // --- Live cycles list (NEWFRONT-249, CYC-001–008). Appended; the stubs
   // --- above are untouched per the shared driver contract.

@@ -11835,6 +11835,7 @@ export async function archivesModuleArchivedAt(
     | undefined;
   if (match === undefined) throw new Error("[parity] module missing from the archived-modules collection.");
   return typeof match["archived_at"] === "string" ? match["archived_at"] : null;
+}
 
 // --- Live cycles list markers (NEWFRONT-249, CYC-002). Appended; existing
 // --- helpers above are untouched per the shared harness contract.
