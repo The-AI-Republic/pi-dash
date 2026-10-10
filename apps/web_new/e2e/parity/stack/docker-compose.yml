@@ -188,6 +188,11 @@ services:
   # consumer those rows never materialize, so mention/notification oracle
   # scenarios cannot observe the fan-out. Same image and environment as the
   # API, default queue only — no beat, no extra surface.
+  # Migrate runs in the api only (NEWFRONT-152): on a fresh volume a
+  # worker-side migrate raced api's and the loser died with DuplicateTable.
+  # The worker waits read-only (migrate --check writes nothing) until the
+  # schema is current, then starts celery; api-healthy ordering below is the
+  # belt to those braces (api binds its port only after migrate succeeds).
   worker:
     build:
       context: ../../../../../apps/api
@@ -202,7 +207,7 @@ services:
       [
         "bash",
         "-c",
-        "python manage.py migrate --no-input > /dev/null 2>&1; exec celery -A pi_dash worker --loglevel=warning --concurrency=1",
+        "echo waiting for api migrations; until python manage.py migrate --check > /dev/null 2>&1; do sleep 2; done; exec celery -A pi_dash worker --loglevel=warning --concurrency=1",
       ]
     depends_on:
       pg:
@@ -212,7 +217,7 @@ services:
       mq:
         condition: service_started
       api:
-        condition: service_started
+        condition: service_healthy
     environment:
       DJANGO_SETTINGS_MODULE: pi_dash.settings.local
       SECRET_KEY: parity19-fixed-local-secret-not-used-outside-scratch
