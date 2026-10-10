@@ -13332,3 +13332,46 @@ export async function serverEnsureProjectMember(
   });
   if (!res.ok) throw new Error(`[parity] project member ensure failed with HTTP ${res.status}.`);
 }
+
+// --- Estimates screen shell (NEWFRONT-321, EST-001-003, EST-026-028).
+// --- Appended; existing helpers above are untouched per the shared
+// --- harness contract.
+/** One estimate system as the project list reports it. */
+export interface ParityServerEstimateSystem {
+  id: string;
+  name: string;
+  lastUsed: boolean;
+  points: ParityServerEstimatePoint[];
+}
+
+/** All estimate systems on a project, in API order. */
+export async function serverEstimatesList(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerEstimateSystem[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/estimates/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] estimates read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    if (typeof rec["id"] !== "string" || typeof rec["name"] !== "string")
+      throw new Error("[parity] estimate row carried no string id/name.");
+    const points = Array.isArray(rec["points"]) ? rec["points"] : [];
+    return {
+      id: rec["id"],
+      name: rec["name"],
+      lastUsed: rec["last_used"] === true,
+      points: points.map((point) => {
+        const record = point as Record<string, unknown>;
+        if (typeof record["id"] !== "string" || typeof record["value"] !== "string")
+          throw new Error("[parity] estimate point carried no string id/value.");
+        return { id: record["id"], value: record["value"] };
+      }),
+    };
+  });
+}

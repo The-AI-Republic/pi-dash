@@ -8192,4 +8192,78 @@ export class WebNewDriver implements ParityDriver {
   async pagesPaneProfileRoundtrip(): Promise<void> {
     return todo("pagesPaneProfileRoundtrip");
   }
+
+  // --- Estimates screen shell (NEWFRONT-321, EST-001-003, EST-026-028).
+  // --- Stubs; the new app implements them when the area is built.
+  async estimatesOpenSettings(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("estimatesOpenSettings");
+  }
+
+  async estimatesNotAuthorized(): Promise<boolean> {
+    return todo("estimatesNotAuthorized");
+  }
+
+  async estimatesHeadingVisible(): Promise<boolean> {
+    return todo("estimatesHeadingVisible");
+  }
+
+  async estimatesBreadcrumbText(): Promise<string> {
+    return todo("estimatesBreadcrumbText");
+  }
+
+  async estimatesSkeletonVisible(): Promise<boolean> {
+    return todo("estimatesSkeletonVisible");
+  }
+
+  async estimatesDelayListFetch(_ms: number): Promise<void> {
+    return todo("estimatesDelayListFetch");
+  }
+
+  async estimatesEmptyVisible(): Promise<boolean> {
+    return todo("estimatesEmptyVisible");
+  }
+
+  async estimatesEmptyTitle(): Promise<string> {
+    return todo("estimatesEmptyTitle");
+  }
+
+  async estimatesEmptyAddClick(): Promise<void> {
+    return todo("estimatesEmptyAddClick");
+  }
+
+  async estimatesCreateDialogOpen(): Promise<boolean> {
+    return todo("estimatesCreateDialogOpen");
+  }
+
+  async estimatesScreenText(): Promise<string> {
+    return todo("estimatesScreenText");
+  }
+
+  async estimatesListedNames(): Promise<string[]> {
+    return todo("estimatesListedNames");
+  }
+
+  async estimatesTabTitle(): Promise<string> {
+    return todo("estimatesTabTitle");
+  }
+
+  async estimatesExportImportVisible(): Promise<boolean> {
+    return todo("estimatesExportImportVisible");
+  }
+
+  async estimatesFilterSearchVisible(): Promise<boolean> {
+    return todo("estimatesFilterSearchVisible");
+  }
+
+  async estimatesBulkVisible(): Promise<boolean> {
+    return todo("estimatesBulkVisible");
+  }
+
+  async estimatesOpenSystemGuess(_workspaceSlug: string, _projectId: string, _estimateId: string): Promise<void> {
+    return todo("estimatesOpenSystemGuess");
+  }
+
+  async estimatesNotFoundVisible(): Promise<boolean> {
+    return todo("estimatesNotFoundVisible");
+  }
 }

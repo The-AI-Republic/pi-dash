@@ -28481,4 +28481,202 @@ export class WebDriver implements ParityDriver {
       throw new Error("[parity] the profile roundtrip reloaded the page; the detail view remounted cold.");
     }
   }
+
+  // --- Estimates screen shell (NEWFRONT-321, EST-001-003, EST-026-028).
+  // --- Appended; the methods above are untouched per the shared driver
+  // --- contract. This child owns estimatesOpenSettings-style navigation;
+  // --- sibling EST children reuse it.
+  private estimatesMain(): Locator {
+    return this.page.getByRole("main").last();
+  }
+
+  async estimatesOpenSettings(workspaceSlug: string, projectId: string): Promise<void> {
+    // Two rounds: the oracle dev server stalls whole renders under
+    // shared-stack load, and a stalled first open must not fail the
+    // caller. Settles on either the screen heading (admins) or the
+    // denial view (non-admins); callers assert which one they got.
+    for (let round = 0; round < 2; round++) {
+      await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/estimates`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await Promise.race([
+        this.page
+          .getByRole("heading", { name: "Estimates", exact: true })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByRole("heading", { name: /not authorized/i })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (settled) return;
+    }
+    throw new Error("[parity] estimates settings settled on neither the screen nor the denial view.");
+  }
+
+  async estimatesNotAuthorized(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0;
+  }
+
+  async estimatesHeadingVisible(): Promise<boolean> {
+    return this.page.getByRole("heading", { name: "Estimates", exact: true }).first().isVisible();
+  }
+
+  async estimatesBreadcrumbText(): Promise<string> {
+    // The settings header row carries the single breadcrumb item (icon plus
+    // label); the label truncates, which no other header text does.
+    const crumb = this.estimatesMain().locator("div.h-11 div.truncate").first();
+    if ((await crumb.count()) === 0) return "";
+    return ((await crumb.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async estimatesSkeletonVisible(): Promise<boolean> {
+    const bones = this.estimatesMain().locator('[role="status"].animate-pulse > div');
+    if ((await bones.count()) < 4) return false;
+    return bones.first().isVisible();
+  }
+
+  async estimatesDelayListFetch(ms: number): Promise<void> {
+    // Hold the project-estimates list GETs so the skeleton stays up long
+    // enough to observe; writes pass through untouched. Every matching GET
+    // is delayed (no once-flag): the dev oracle double-mounts, so a second
+    // undelayed fetch would collapse the skeleton window. Context-scoped;
+    // the test's end drops the route.
+    const hold = async (route: Route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    };
+    await this.page.route("**/api/workspaces/*/projects/*/estimates/", hold);
+  }
+
+  async estimatesEmptyVisible(): Promise<boolean> {
+    return this.estimatesMain()
+      .getByRole("button", { name: /add estimate/i })
+      .first()
+      .isVisible();
+  }
+
+  async estimatesEmptyTitle(): Promise<string> {
+    const empty = this.estimatesMain().getByText("No estimates yet", { exact: true });
+    if ((await empty.count()) === 0) return "";
+    return (
+      (await empty
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async estimatesEmptyAddClick(): Promise<void> {
+    await this.estimatesMain()
+      .getByRole("button", { name: /add estimate/i })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async estimatesCreateDialogOpen(): Promise<boolean> {
+    // Presence only: the dialog's contents belong to the creation child.
+    // Presence (not visibility): the dialog root sizes to zero — its
+    // visible children are fixed-position out-of-flow — while a closed
+    // dialog unmounts entirely, so presence alone means open.
+    return (await this.page.getByRole("dialog").count()) > 0;
+  }
+
+  async estimatesScreenText(): Promise<string> {
+    return (
+      (await this.estimatesMain()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async estimatesListedNames(): Promise<string[]> {
+    // System rows render as boxed control items whose title is the h4; the
+    // page headings are h3 and the enable box carries its own fixed title.
+    const heads = this.estimatesMain().locator("h4");
+    const total = await heads.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await heads
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "" && !/enable estimates/i.test(text)) names.push(text);
+    }
+    return names;
+  }
+
+  async estimatesTabTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async estimatesExportImportVisible(): Promise<boolean> {
+    const main = this.estimatesMain();
+    if (await this.isShown(main.getByRole("button", { name: /export|import|download/i }))) return true;
+    return this.isShown(main.getByRole("menuitem", { name: /export|import|download/i }));
+  }
+
+  async estimatesFilterSearchVisible(): Promise<boolean> {
+    const main = this.estimatesMain();
+    if (await this.isShown(main.getByRole("searchbox"))) return true;
+    if (await this.isShown(main.getByRole("button", { name: /filter|search/i }))) return true;
+    if (await this.isShown(main.locator('input[type="search"]'))) return true;
+    return this.isShown(main.locator('input[placeholder*="earch" i]'));
+  }
+
+  async estimatesBulkVisible(): Promise<boolean> {
+    const main = this.estimatesMain();
+    if (await this.isShown(main.getByRole("checkbox"))) return true;
+    return this.isShown(main.getByRole("button", { name: /bulk|select all/i }));
+  }
+
+  async estimatesOpenSystemGuess(workspaceSlug: string, projectId: string, estimateId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/estimates/${estimateId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on whatever the app renders for the guessed address (the
+    // not-found surface when no per-system route exists); callers assert
+    // that no single system was isolated.
+    const settled = await Promise.race([
+      this.page
+        .getByRole("heading", { name: /something went wrong/i })
+        .first()
+        .waitFor({ timeout: 60_000 })
+        .then(
+          () => true,
+          () => false
+        ),
+      this.page
+        .getByRole("heading", { name: "Estimates", exact: true })
+        .first()
+        .waitFor({ timeout: 60_000 })
+        .then(
+          () => true,
+          () => false
+        ),
+    ]);
+    if (!settled) throw new Error("[parity] system-guess address settled on neither not-found nor the screen.");
+  }
+
+  async estimatesNotFoundVisible(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: /something went wrong/i }).count()) > 0;
+  }
 }
