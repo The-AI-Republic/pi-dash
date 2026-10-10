@@ -17,6 +17,8 @@
 //! [`build_app`] is the application seam: tests and later issues wrap it
 //! with extra routes or layers without touching `main`.
 
+mod ops;
+
 use clap::{Parser, Subcommand};
 use pidash_api::{with_routes, AppState, EdgeHandle};
 use pidash_db::config::Settings;
@@ -43,6 +45,11 @@ enum Mode {
         /// Jobs to run side by side.
         #[arg(long, default_value_t = 4)]
         concurrency: u32,
+    },
+    /// Run a Django management-command port (D-37 ops).
+    Ops {
+        #[command(subcommand)]
+        command: ops::OpsCommand,
     },
 }
 
@@ -286,6 +293,10 @@ fn main() -> MainResult {
     match cli.mode {
         Mode::Serve { bind } => runtime.block_on(serve(&bind)),
         Mode::Worker { concurrency } => runtime.block_on(worker(concurrency)),
+        Mode::Ops { command } => {
+            runtime.block_on(ops::run(command));
+            Ok(())
+        }
     }
 }
 
@@ -371,7 +382,7 @@ mod tests {
             Cli::try_parse_from(["pidash-api", "worker", "--concurrency", "2"]).expect("worker");
         match worker.mode {
             Mode::Worker { concurrency } => assert_eq!(concurrency, 2),
-            Mode::Serve { .. } => panic!("wrong mode"),
+            Mode::Serve { .. } | Mode::Ops { .. } => panic!("wrong mode"),
         }
     }
 

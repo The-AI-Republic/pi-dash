@@ -10,6 +10,7 @@
 //! - [`pool`]: primary + replica sqlx pools with Django-equivalent routing.
 //! - [`context`]: explicit per-request audit/tenant context.
 //! - [`dispatch`]: AgentRun read shapes + status/trigger enums (D-11).
+//! - [`ops`]: D-37 management-command SQL (per-command `ops/<group>` modules).
 //! - [`app_analytics`]: analytic-view / exporter-history / importer columns (D-35).
 //! - [`app_assets`]: file-asset columns + helpers (D-31).
 //! - [`app_pages`]: page / page-log / page-label / project-page / page-version columns (D-30).
@@ -52,6 +53,7 @@ pub mod issue_filters;
 pub mod license;
 pub mod r#loop;
 pub mod migrations;
+pub mod ops;
 pub mod orchestration;
 pub mod pool;
 pub mod prompting;

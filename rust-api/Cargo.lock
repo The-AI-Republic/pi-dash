@@ -2732,6 +2732,7 @@ name = "pidash-api-bin"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "clap",
  "pidash-api",
  "pidash-auth",
@@ -2744,6 +2745,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
