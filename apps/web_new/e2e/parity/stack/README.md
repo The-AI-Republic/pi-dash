@@ -16,7 +16,7 @@ run's database.
 | `worker` | same image as `api` (celery worker, default queue)                        | none published | Consumes background tasks: mention links, notifications                                     |
 | `oracle` | built from the repo (`apps/web/Dockerfile.dev`)                           | internal :3000 | Old app with same-origin API calls                                                          |
 | `proxy`  | caddy:2-alpine (`stack/Caddyfile`)                                        | 13000          | One origin: frontend plus `/auth`, `/api`, `/static` to Django, `/parity19-assets` to minio |
-| `minio`  | minio/minio (bucket `parity19-assets`, created at boot)                   | 19019          | Object storage backing presigned asset uploads                                              |
+| `minio`  | bitnamilegacy/minio, pinned tag+digest (bucket `parity19-assets`, created at boot) | 19019          | Object storage backing presigned asset uploads                                              |
 | `live`   | built from `apps/live` (opt-in profile `full`)                            | 13001          | Realtime server for realtime rows                                                           |
 
 All ports move through `PARITY_PG_PORT`, `PARITY_REDIS_PORT`,
