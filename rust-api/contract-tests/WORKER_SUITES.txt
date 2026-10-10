@@ -1,0 +1,16 @@
+# Suites whose Django run needs a live Celery worker (PIDASHCONV-821).
+#
+# The matrix boots no worker by default: consumed .delay() side effects break
+# HTTP suites that do not expect them (see the app-project workflow). The
+# suites listed here are the exception: they assert on rows that Django
+# creates only inside a task, so without a consumer their Django run fails.
+# The workflow starts `celery -A pi_dash worker` (solo, redis broker) for
+# these suites before the Django run and stops it at the reset: the Rust
+# run stays workerless (Rust handlers that need it insert synchronously —
+# e.g. intake's QUIRK-create-sync-v1 — and Rust publishes to AMQP, which a
+# Django worker on redis would never see).
+#
+#   app_intake: intake-issue CREATE publishes issue_description_version_task;
+#     the versions tests assert the rows exist (proven locally: 44/44 with a
+#     solo worker, versions tests fail without one).
+app_intake
