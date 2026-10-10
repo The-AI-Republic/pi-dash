@@ -4510,6 +4510,34 @@ export interface ParityDriver {
   cyclesEditFailNextDeleteWrite(): Promise<void>;
   /** Read-only notice on a finished cycle's detail, or null when absent. */
   cyclesEditDetailReadOnlyNotice(): Promise<string | null>;
+
+  // --- Cycles archive/menu/transfer acceptance (NEWFRONT-252, CYC-025-031
+  // --- plus CYC-046). The shared archived/transfer/palette surfaces reuse
+  // --- the settled archivesCycles*, cycleTransfer* and palette* methods;
+  // --- only genuinely new reads live here under cycles* names.
+
+  /** Favorite-marker state of the live-list row `name`: starred, unstarred, or absent (no marker renders). */
+  cyclesRowFavoriteState(name: string): Promise<"starred" | "unstarred" | "absent">;
+  /** Click the favorite marker on the live-list row `name`. */
+  cyclesRowFavoriteToggle(name: string): Promise<void>;
+  /** Hold favorite POST/DELETE writes for `delayMs` so progress toasts stay observable. */
+  cyclesDelayFavoriteWrites(delayMs: number): Promise<void>;
+  /** Remove favorite-write delays installed by cyclesDelayFavoriteWrites. */
+  cyclesClearFavoriteDelays(): Promise<void>;
+  /** Whether the row `name` currently shows its action-menu trigger. */
+  cyclesRowMenuTriggerVisible(name: string): Promise<boolean>;
+  /** Hover the live-list row `name` (reveals hover-only controls). */
+  cyclesRowHover(name: string): Promise<void>;
+  /** Open the row menu for `name`, pick the new-tab entry, and resolve with the opened page's URL. */
+  cyclesRowMenuOpenNewTab(name: string): Promise<string>;
+  /** Fill the open transfer dialog's cycle search box. */
+  cyclesTransferSearchFill(text: string): Promise<void>;
+  /** The open transfer dialog's zero-state text, or null when target options render. */
+  cyclesTransferEmptyText(): Promise<string | null>;
+  /** The archived-cycles zero-state supporting text, or null when rows render. */
+  cyclesArchivedEmptyDetail(): Promise<string | null>;
+  /** Grant clipboard read/write so a later copy action lands (call before copying). */
+  cyclesGrantClipboardAccess(): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */

@@ -24089,4 +24089,121 @@ export class WebDriver implements ParityDriver {
     const text = (((await notice.textContent().catch(() => "")) ?? "") as string).trim();
     return text === "" ? null : text;
   }
+
+  // --- Cycles archive/menu/transfer acceptance (NEWFRONT-252, CYC-025-031
+  // --- plus CYC-046). Appended; sibling methods above are untouched.
+
+  /** The cycles-list row hosting `name`, located from its detail link. */
+  private cyclesRowRoot(name: string): Locator {
+    // Sidebar favorite entries link at cycle addresses too and would steal
+    // first() once a fixture is favorited, so sidebar subtrees are excluded
+    // by ancestor (CSS cannot express that; hence XPath).
+    const link = this.page
+      .locator(
+        'xpath=//a[contains(@href, "/cycles/")][.//span[contains(concat(" ", normalize-space(@class), " "), " truncate ")]][not(ancestor::*[@role="complementary" or self::aside])]'
+      )
+      .filter({ hasText: name })
+      .first();
+    return link.locator("xpath=../..");
+  }
+
+  /** The favorite star button inside the row `name` (renders for editors on live cycles). */
+  private cyclesFavoriteButton(name: string): Locator {
+    return this.cyclesRowRoot(name)
+      .locator("button")
+      .filter({ has: this.page.locator('svg[class*="star" i]') });
+  }
+
+  async cyclesRowFavoriteState(name: string): Promise<"starred" | "unstarred" | "absent"> {
+    const button = this.cyclesFavoriteButton(name).first();
+    if (!(await this.isShown(button))) return "absent";
+    // A marked row fills the star icon; an unmarked one leaves it hollow.
+    const iconClass = (await button.locator("svg").first().getAttribute("class")) ?? "";
+    return iconClass.includes("fill-") ? "starred" : "unstarred";
+  }
+
+  async cyclesRowFavoriteToggle(name: string): Promise<void> {
+    await this.cyclesFavoriteButton(name).first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  private cyclesFavoriteDelayMs = 0;
+  private cyclesFavoriteRouteArmed = false;
+
+  async cyclesDelayFavoriteWrites(delayMs: number): Promise<void> {
+    this.cyclesFavoriteDelayMs = delayMs;
+    if (this.cyclesFavoriteRouteArmed) return;
+    this.cyclesFavoriteRouteArmed = true;
+    await this.page.route(
+      (url) => url.pathname.includes("/user-favorite-cycles/"),
+      async (route) => {
+        const wait = this.cyclesFavoriteDelayMs;
+        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+        await route.continue();
+      }
+    );
+  }
+
+  async cyclesClearFavoriteDelays(): Promise<void> {
+    this.cyclesFavoriteDelayMs = 0;
+  }
+
+  async cyclesRowMenuTriggerVisible(name: string): Promise<boolean> {
+    // Any visible twin counts: the row mounts hidden menu twins alongside
+    // the live trigger, so first() alone would read the wrong one.
+    const triggers = this.cyclesRowRoot(name).locator('div[data-main-menu="true"] > button');
+    const total = await triggers.count();
+    for (let i = 0; i < total; i++) {
+      if (await triggers.nth(i).isVisible()) return true;
+    }
+    return false;
+  }
+
+  async cyclesRowHover(name: string): Promise<void> {
+    await this.cyclesRowRoot(name).hover({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesRowMenuOpenNewTab(name: string): Promise<string> {
+    await this.cyclesRowRoot(name).locator('div[data-main-menu="true"]:visible > button').click();
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebDriver.OPEN_MS });
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: WebDriver.OPEN_MS }),
+      this.page
+        .getByRole("menuitem")
+        .filter({ has: this.page.locator("h5", { hasText: "Open in new tab" }) })
+        .first()
+        .click(),
+    ]);
+    await popup.waitForLoadState("domcontentloaded").catch(() => undefined);
+    return popup.url();
+  }
+
+  async cyclesTransferSearchFill(text: string): Promise<void> {
+    const dialog = this.page.getByRole("dialog");
+    const scope = (await dialog.count()) > 0 ? dialog : this.page;
+    await scope.getByPlaceholder("Search for a cycle...").fill(text);
+  }
+
+  async cyclesTransferEmptyText(): Promise<string | null> {
+    const dialog = this.page.getByRole("dialog").first();
+    if ((await dialog.count()) === 0) return null;
+    if ((await this.cycleTransferOptionNames()).length > 0) return null;
+    const text = ((await dialog.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+    return text === "" ? null : text;
+  }
+
+  async cyclesArchivedEmptyDetail(): Promise<string | null> {
+    const heading = this.page.getByRole("heading", { name: "No archived cycles yet" }).first();
+    if (!(await this.isShown(heading))) return null;
+    // The supporting line sits beside the heading inside the empty card;
+    // read the card and drop the heading line itself.
+    const card = heading.locator("xpath=ancestor::div[3]");
+    const text = ((await card.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+    const head = ((await heading.innerText().catch(() => "")) ?? "").trim();
+    const detail = text.replace(head, "").trim();
+    return detail === "" ? null : detail;
+  }
+
+  async cyclesGrantClipboardAccess(): Promise<void> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  }
 }
