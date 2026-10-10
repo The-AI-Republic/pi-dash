@@ -116,6 +116,7 @@ pub struct LiveCreationStore<'c, C, H, E, P> {
     dispatches: Vec<Uuid>,
     deferred: Vec<DeferredConsume>,
     terminal_effects: Vec<Uuid>,
+    rollback: bool,
 }
 
 impl<'c, C, H, E, P> LiveCreationStore<'c, C, H, E, P> {
@@ -133,6 +134,7 @@ impl<'c, C, H, E, P> LiveCreationStore<'c, C, H, E, P> {
             dispatches: Vec::new(),
             deferred: Vec::new(),
             terminal_effects: Vec::new(),
+            rollback: false,
         }
     }
 
@@ -196,6 +198,18 @@ impl<'c, C, H, E, P> LiveCreationStore<'c, C, H, E, P> {
     pub(crate) fn dispatch_managed_runner_enabled(&self) -> bool {
         pidash_services::dispatch::managed_runner_is_enabled(&self.managed)
     }
+
+    /// Record an entries driver's rollback request
+    /// (`transaction.set_rollback(True)`): the executing driver rolls
+    /// the transaction back and drains nothing.
+    pub(crate) fn dispatch_request_rollback(&mut self) {
+        self.rollback = true;
+    }
+
+    /// Whether an entries driver requested a rollback.
+    pub(crate) fn dispatch_rollback_requested(&self) -> bool {
+        self.rollback
+    }
 }
 
 /// Every failure the jobs drivers report.
@@ -234,7 +248,7 @@ fn map_executor(value: String) -> Result<AgentExecutorKind, sqlx::Error> {
 /// unparsed: Django's `TextChoices` are choices-only (no DB check),
 /// so the stored value may sit outside `AgentRunTrigger`
 /// (migration 0029) and every read path must tolerate it.
-fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
+pub(crate) fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
     let status: String = row.try_get("status")?;
     let trigger: String = row.try_get("trigger")?;
     let executor_kind: String = row.try_get("executor_kind")?;
@@ -1120,7 +1134,7 @@ async fn bundle_done_payload(
     Ok(row.and_then(|row| row.0))
 }
 
-async fn bundle_overrides(
+pub(crate) async fn bundle_overrides(
     tx: &mut Transaction<'_>,
     workspace_id: Uuid,
     user_id: Option<Uuid>,
