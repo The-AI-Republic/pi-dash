@@ -1357,7 +1357,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.notification_task.notifications",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.page_transaction_task.page_transaction",
@@ -1832,6 +1832,7 @@ mod tests {
         pidash_jobs::loop_scan::register_scanner(&mut registry, pool.clone());
         pidash_jobs::loop_fire::register_fire(&mut registry, pool.clone());
         pidash_jobs::tasks_ticker::scan::register_scanners(&mut registry, pool.clone());
+        pidash_jobs::tasks_mail::register_notifications_task(&mut registry, pool.clone());
 
         // The const union, independent of the table.
         let mut expected_rust = std::collections::BTreeSet::new();
@@ -1857,6 +1858,7 @@ mod tests {
             pidash_jobs::tasks_ticker::scan::SCAN_DUE_TICKERS_TASK,
             pidash_jobs::tasks_ticker::scan::SCAN_DUE_BINDINGS_TASK,
         ]);
+        expected_rust.insert(pidash_jobs::tasks_mail::NOTIFICATIONS_TASK);
         // Count pins: a const that grows must update the table too.
         assert_eq!(
             tasks_cleanup::cleanup::TASKS.len(),
@@ -1883,7 +1885,7 @@ mod tests {
             2,
             "loop_scan group drifted"
         );
-        assert_eq!(expected_rust.len(), 33, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 34, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()
@@ -1910,6 +1912,11 @@ mod tests {
         // seams (PIDASHCONV-861), so they stay Python-owned.
         assert!(!registry.owns(pidash_jobs::tasks_ticker::scan::FIRE_TICK_TASK));
         assert!(!registry.owns(pidash_jobs::tasks_ticker::scan::FIRE_SCHEDULER_BINDING_TASK));
+        // Deliberately unregistered: `send/stack_email_notification`
+        // have no live mail seams (PIDASHCONV-865), so they stay
+        // Python-owned.
+        assert!(!registry.owns(pidash_jobs::tasks_mail::SEND_EMAIL_NOTIFICATION_TASK));
+        assert!(!registry.owns(pidash_jobs::tasks_mail::STACK_EMAIL_NOTIFICATION_TASK));
     }
 
     /// The schedule serializer: spot-check set shapes (full content is

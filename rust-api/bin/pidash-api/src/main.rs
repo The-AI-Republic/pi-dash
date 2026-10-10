@@ -282,6 +282,16 @@ async fn worker(concurrency: u32) -> MainResult {
     // neither exists (only test fakes) — never register them here
     // until the seams land (PIDASHCONV-861).
     pidash_jobs::tasks_ticker::scan::register_scanners(&mut registry, pools.primary().clone());
+    // D-07 notifications (PIDASHCONV-834; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`). The
+    // pool-only handler exists, so the Rust worker owns it —
+    // otherwise the task is lost at switchover (parity gap W-mail).
+    // `send/stack_email_notification` stay Python-owned:
+    // `register_email_notification_tasks` needs pre-built handlers
+    // and no live `RedisMail`/`MailDb`/`Renderer`/`Mailer` or
+    // Rust-queue `StackOutbox` seam exists (only test fakes) — never
+    // register them here until the seams land (PIDASHCONV-865).
+    pidash_jobs::tasks_mail::register_notifications_task(&mut registry, pools.primary().clone());
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()
