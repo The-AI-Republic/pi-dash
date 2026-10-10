@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Contract tests: ops commands A — boot + storage (D-37 oracle, F37-01/F37-02).
+"""D-37 ops CLI-parity suites (PIDASHCONV-806..810).
 
-Drives the built ``pidash-api ops <command>`` binary directly (no Django):
+Suite A — boot + storage (D-37 oracle, F37-01/F37-02) — drives the built
+``pidash-api ops <command>`` binary directly (no Django):
 ``wait_for_db`` / ``wait_for_migrations`` against a scratch ``DATABASE_URL``,
 ``clear_cache`` against ``REDIS_URL``, and ``create_bucket`` /
 ``update_bucket`` against S3. ``stdout``/``stderr``/exit codes are asserted

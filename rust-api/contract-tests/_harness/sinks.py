@@ -1,4 +1,5 @@
 """Local stub sinks: capture outbound side effects without touching Django."""
+
 from __future__ import annotations
 
 import json
@@ -68,6 +69,73 @@ class StubSink:
     @property
     def requests(self) -> list[dict]:
         return list(RecordingHandler.requests)
+
+
+class FixedResponseStub:
+    """HTTP stub answering every request with one fixed response.
+
+    Unlike :class:`StubSink` (always 200 ``{"ok": true}``), the status,
+    content type and body are caller-chosen (first use: PIDASHCONV-809,
+    stubbing the GitHub releases endpoint). `requests` records
+    ``{method, path, headers, body}`` per hit.
+    """
+
+    def __init__(
+        self,
+        *,
+        status: int = 200,
+        body: bytes = b"",
+        content_type: str = "application/json",
+    ):
+        outer = self
+        self.status = status
+        self.body = body
+        self.content_type = content_type
+        self.requests: list[dict] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def _answer(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                outer.requests.append(
+                    {
+                        "method": self.command,
+                        "path": self.path,
+                        "headers": dict(self.headers),
+                        "body": raw,
+                    }
+                )
+                self.send_response(outer.status)
+                self.send_header("Content-Type", outer.content_type)
+                self.send_header("Content-Length", str(len(outer.body)))
+                self.end_headers()
+                self.wfile.write(outer.body)
+
+            do_GET = _answer
+            do_POST = _answer
+            do_PUT = _answer
+            do_PATCH = _answer
+            do_DELETE = _answer
+
+            def log_message(self, *args: object) -> None:  # keep test output clean
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address
+        return f"http://{host}:{port}"
+
+    def __enter__(self) -> "FixedResponseStub":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._server.shutdown()
+        self._thread.join(timeout=5)
+        self._server.server_close()
 
 
 # -- SMTP + webhook sinks (PIDASHCONV-81). Kept alongside StubSink above

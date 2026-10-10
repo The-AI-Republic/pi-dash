@@ -157,7 +157,17 @@ async fn register_instance(machine_signature: &str) -> Result<(), InstanceFailur
     let store = license_commands::PgInstanceStore::new(pool);
     let package = read_package_json();
     let latest = probe_latest_release().await;
-    let report = license_commands::register_instance(
+    // Python prints the version lines as it resolves them, so they
+    // survive a later failure; D-01 buffers them in the report, which
+    // `Err` drops. Precompute the same lines from the same inputs for
+    // the error path (the success path prints the report as-is).
+    let mut early = Vec::new();
+    let app_version = std::env::var("APP_VERSION").ok();
+    license_commands::resolve_current_version(app_version.as_deref(), &package, &mut early);
+    if matches!(latest, license_commands::LatestProbe::Failed) {
+        early.push("Error checking for latest version".to_string());
+    }
+    let report = match license_commands::register_instance(
         &ProcessEnv,
         &store,
         Some(machine_signature),
@@ -165,7 +175,16 @@ async fn register_instance(machine_signature: &str) -> Result<(), InstanceFailur
         latest,
         chrono::Utc::now(),
     )
-    .await?;
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            for line in &early {
+                println!("{line}");
+            }
+            return Err(error.into());
+        }
+    };
     for line in &report.stdout {
         println!("{line}");
     }
