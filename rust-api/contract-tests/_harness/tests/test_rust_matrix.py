@@ -100,3 +100,9 @@ def test_worker_suites_subset_of_matrix():
     suites = rust_matrix.http_suites()
     for suite in rust_matrix.worker_suites():
         assert suite in suites
+
+
+def test_asgi_suites_subset_of_matrix():
+    suites = rust_matrix.http_suites()
+    for suite in rust_matrix.asgi_suites():
+        assert suite in suites

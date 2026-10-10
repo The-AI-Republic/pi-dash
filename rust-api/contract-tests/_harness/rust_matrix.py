@@ -33,6 +33,7 @@ CT = Path(__file__).resolve().parent.parent
 HTTP_SUITES_TXT = CT / "HTTP_SUITES.txt"
 IGNORES_TXT = CT / "TASK_ORACLE_IGNORES.txt"
 WORKER_SUITES_TXT = CT / "WORKER_SUITES.txt"
+ASGI_SUITES_TXT = CT / "ASGI_SUITES.txt"
 KNOWN_FAILURES_MD = CT / "KNOWN_RUST_FAILURES.md"
 
 # Suite directories that never drive HTTP, hence never join the Rust matrix.
@@ -71,6 +72,10 @@ def http_suites() -> list[str]:
 
 def worker_suites() -> list[str]:
     return read_list(WORKER_SUITES_TXT)
+
+
+def asgi_suites() -> list[str]:
+    return read_list(ASGI_SUITES_TXT)
 
 
 def on_disk_suite_dirs() -> set[str]:
@@ -140,6 +145,9 @@ def cmd_check() -> int:
     for suite in worker_suites():
         if suite not in listed:
             errors.append(f"{WORKER_SUITES_TXT.name}: `{suite}` is not a listed suite")
+    for suite in asgi_suites():
+        if suite not in listed:
+            errors.append(f"{ASGI_SUITES_TXT.name}: `{suite}` is not a listed suite")
     try:
         known = known_failures()
     except ValueError as exc:
@@ -158,6 +166,7 @@ def cmd_check() -> int:
         f"{len(TASK_ONLY_DIRS)} task-only dirs, "
         f"{len(read_list(IGNORES_TXT))} ignored files, "
         f"{len(worker_suites())} worker suites, "
+        f"{len(asgi_suites())} asgi suites, "
         f"{len(known)} known failures"
     )
     return 0

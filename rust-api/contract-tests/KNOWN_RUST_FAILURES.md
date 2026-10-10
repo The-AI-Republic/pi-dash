@@ -24,4 +24,7 @@ Rules:
 
 ## Suites
 
+- `auth_magic`: PIDASHCONV-854 — every magic-link endpoint 500s with an empty body (Django 39/39)
+- `auth_session`: PIDASHCONV-855 — all 11 password set/change/reset tests time out vs Rust (Django 79/79 in 33s)
+- `orchestration`: PIDASHCONV-856 — signal-dispatch/reentrancy divergence: rooms don't retime, ticker doesn't arm/disarm, moves not counted queued
 - `prompting`: PIDASHCONV-842 — Rust anon throttle 429s GET /auth/get-csrf-token/ after ~30 hits (Django unlimited)
