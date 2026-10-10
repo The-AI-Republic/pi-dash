@@ -144,7 +144,6 @@ OWNED_UNCOVERED = {
     ('/api/users/me/tour-completed/', 'PATCH'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.user.base.view
     ('/api/users/me/workspaces/invitations/', 'POST'): "owned; no corpus session yet — batch 5 (app_workspace session)",  # app :: pi_dash.app.views.workspace.invite.UserWorkspaceInvitationsViewSet
     ('/api/users/me/workspaces/join-requests/', 'POST'): "owned; no corpus session yet — batch 5 (app_workspace session)",  # app :: pi_dash.app.views.workspace.join_request.UserWorkspaceJoinRequestViewSet
-    ('/api/users/me/workspaces/{}/projects/invitations/', 'POST'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.invite.UserProjectInvitationsViewset
     ('/api/v1/assets/user-assets/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.asset.view
     ('/api/v1/assets/user-assets/server/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.asset.view
     ('/api/v1/assets/user-assets/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.asset.view
@@ -225,9 +224,6 @@ OWNED_UNCOVERED = {
     ('/api/v1/workspaces/{}/projects/{}/issues/{}/links/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
     ('/api/v1/workspaces/{}/projects/{}/issues/{}/links/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
     ('/api/v1/workspaces/{}/projects/{}/issues/{}/links/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/labels/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/labels/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/labels/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
     ('/api/v1/workspaces/{}/projects/{}/members/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.member.view
     ('/api/v1/workspaces/{}/projects/{}/members/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.member.view
     ('/api/v1/workspaces/{}/projects/{}/members/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.member.view
@@ -237,7 +233,6 @@ OWNED_UNCOVERED = {
     ('/api/v1/workspaces/{}/projects/{}/modules/{}/archive/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.module.view
     ('/api/v1/workspaces/{}/projects/{}/modules/{}/module-issues/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.module.view
     ('/api/v1/workspaces/{}/projects/{}/modules/{}/module-issues/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.module.view
-    ('/api/v1/workspaces/{}/projects/{}/pages/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.page.view
     ('/api/v1/workspaces/{}/projects/{}/pages/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.page.view
     ('/api/v1/workspaces/{}/projects/{}/pages/{}/archive/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.page.view
     ('/api/v1/workspaces/{}/projects/{}/pages/{}/archive/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.page.view
@@ -247,30 +242,12 @@ OWNED_UNCOVERED = {
     ('/api/v1/workspaces/{}/projects/{}/states/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.state.view
     ('/api/v1/workspaces/{}/projects/{}/states/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.state.view
     ('/api/v1/workspaces/{}/projects/{}/states/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.state.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
     ('/api/v1/workspaces/{}/projects/{}/work-items/{}/attachments/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
     ('/api/v1/workspaces/{}/projects/{}/work-items/{}/attachments/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
     ('/api/v1/workspaces/{}/projects/{}/work-items/{}/attachments/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
     ('/api/v1/workspaces/{}/projects/{}/work-items/{}/code-reviews/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.git_code_review.view
     ('/api/v1/workspaces/{}/projects/{}/work-items/{}/code-reviews/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.git_code_review.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/comments/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/comments/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/comments/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/github/pull-requests/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.github_pr.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/github/pull-requests/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.github_pr.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/links/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/links/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/links/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/move/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/re-tick/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
     ('/api/v1/workspaces/{}/projects/{}/work-items/{}/relations/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/relations/relate/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/relations/unrelate/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/run-ai/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/wait/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
-    ('/api/v1/workspaces/{}/projects/{}/work-items/{}/workpad/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
     ('/api/v1/workspaces/{}/stickies/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.sticky.StickyViewSet
     ('/api/v1/workspaces/{}/stickies/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.sticky.StickyViewSet
     ('/api/v1/workspaces/{}/stickies/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.sticky.StickyViewSet
@@ -313,29 +290,11 @@ OWNED_UNCOVERED = {
     ('/api/workspaces/{}/members/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_workspace session)",  # app :: pi_dash.app.views.workspace.member.WorkSpaceMemberViewSet
     ('/api/workspaces/{}/members/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_workspace session)",  # app :: pi_dash.app.views.workspace.member.WorkSpaceMemberViewSet
     ('/api/workspaces/{}/project-identifiers/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.base.view
-    ('/api/workspaces/{}/projects/', 'POST'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.base.ProjectViewSet
-    ('/api/workspaces/{}/projects/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.base.ProjectViewSet
-    ('/api/workspaces/{}/projects/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.base.ProjectViewSet
-    ('/api/workspaces/{}/projects/{}/', 'PUT'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.base.ProjectViewSet
     ('/api/workspaces/{}/projects/{}/ai-assistant/', 'POST'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.external.base.view
     ('/api/workspaces/{}/projects/{}/archive/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.base.view
-    ('/api/workspaces/{}/projects/{}/archive/', 'POST'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.base.view
     ('/api/workspaces/{}/projects/{}/bulk-archive-issues/', 'POST'): "owned; no corpus session yet — batch 5 (app_issues follow-up: labels/relations/links/move)",  # app :: pi_dash.app.views.issue.archive.view
     ('/api/workspaces/{}/projects/{}/bulk-create-labels/', 'POST'): "owned; no corpus session yet — batch 5 (app_issues follow-up: labels/relations/links/move)",  # app :: pi_dash.app.views.issue.label.view
     ('/api/workspaces/{}/projects/{}/bulk-delete-issues/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_issues follow-up: labels/relations/links/move)",  # app :: pi_dash.app.views.issue.base.view
-    ('/api/workspaces/{}/projects/{}/cycles/', 'POST'): "owned; no corpus session yet — batch 2 (app_cycles session)",  # app :: pi_dash.app.views.cycle.base.CycleViewSet
-    ('/api/workspaces/{}/projects/{}/cycles/date-check/', 'POST'): "owned; no corpus session yet — batch 2 (app_cycles session)",  # app :: pi_dash.app.views.cycle.base.view
-    ('/api/workspaces/{}/projects/{}/cycles/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_cycles session)",  # app :: pi_dash.app.views.cycle.base.CycleViewSet
-    ('/api/workspaces/{}/projects/{}/cycles/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (app_cycles session)",  # app :: pi_dash.app.views.cycle.base.CycleViewSet
-    ('/api/workspaces/{}/projects/{}/cycles/{}/archive/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_cycles session)",  # app :: pi_dash.app.views.cycle.archive.view
-    ('/api/workspaces/{}/projects/{}/cycles/{}/archive/', 'POST'): "owned; no corpus session yet — batch 2 (app_cycles session)",  # app :: pi_dash.app.views.cycle.archive.view
-    ('/api/workspaces/{}/projects/{}/cycles/{}/cycle-issues/', 'POST'): "owned; no corpus session yet — batch 2 (app_cycles session)",  # app :: pi_dash.app.views.cycle.issue.CycleIssueViewSet
-    ('/api/workspaces/{}/projects/{}/cycles/{}/cycle-issues/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_cycles session)",  # app :: pi_dash.app.views.cycle.issue.CycleIssueViewSet
-    ('/api/workspaces/{}/projects/{}/cycles/{}/transfer-issues/', 'POST'): "owned; no corpus session yet — batch 2 (app_cycles session)",  # app :: pi_dash.app.views.cycle.base.view
-    ('/api/workspaces/{}/projects/{}/cycles/{}/user-properties/', 'PATCH'): "owned; no corpus session yet — batch 2 (app_cycles session)",  # app :: pi_dash.app.views.cycle.base.view
-    ('/api/workspaces/{}/projects/{}/estimates/', 'POST'): "owned; no corpus session yet — batch 5 (app_project estimate session)",  # app :: pi_dash.app.views.estimate.base.BulkEstimatePointEndpoint
-    ('/api/workspaces/{}/projects/{}/estimates/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_project estimate session)",  # app :: pi_dash.app.views.estimate.base.BulkEstimatePointEndpoint
-    ('/api/workspaces/{}/projects/{}/estimates/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_project estimate session)",  # app :: pi_dash.app.views.estimate.base.BulkEstimatePointEndpoint
     ('/api/workspaces/{}/projects/{}/estimates/{}/estimate-points/', 'POST'): "owned; no corpus session yet — batch 5 (app_project estimate session)",  # app :: pi_dash.app.views.estimate.base.EstimatePointEndpoint
     ('/api/workspaces/{}/projects/{}/estimates/{}/estimate-points/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_project estimate session)",  # app :: pi_dash.app.views.estimate.base.EstimatePointEndpoint
     ('/api/workspaces/{}/projects/{}/estimates/{}/estimate-points/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_project estimate session)",  # app :: pi_dash.app.views.estimate.base.EstimatePointEndpoint
@@ -356,8 +315,6 @@ OWNED_UNCOVERED = {
     ('/api/workspaces/{}/projects/{}/intakes/', 'POST'): "owned; no corpus session yet — batch 5 (app_intake session)",  # app :: pi_dash.app.views.intake.base.IntakeViewSet
     ('/api/workspaces/{}/projects/{}/intakes/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_intake session)",  # app :: pi_dash.app.views.intake.base.IntakeViewSet
     ('/api/workspaces/{}/projects/{}/intakes/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_intake session)",  # app :: pi_dash.app.views.intake.base.IntakeViewSet
-    ('/api/workspaces/{}/projects/{}/invitations/', 'POST'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.invite.ProjectInvitationsViewset
-    ('/api/workspaces/{}/projects/{}/invitations/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.invite.ProjectInvitationsViewset
     ('/api/workspaces/{}/projects/{}/issue-dates/', 'POST'): "owned; no corpus session yet — batch 5 (app_issues follow-up: labels/relations/links/move)",  # app :: pi_dash.app.views.issue.base.view
     ('/api/workspaces/{}/projects/{}/issue-labels/', 'POST'): "owned; no corpus session yet — batch 5 (app_issues follow-up: labels/relations/links/move)",  # app :: pi_dash.app.views.issue.label.LabelViewSet
     ('/api/workspaces/{}/projects/{}/issue-labels/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_issues follow-up: labels/relations/links/move)",  # app :: pi_dash.app.views.issue.label.LabelViewSet
@@ -377,26 +334,8 @@ OWNED_UNCOVERED = {
     ('/api/workspaces/{}/projects/{}/issues/{}/issue-relation/', 'POST'): "owned; no corpus session yet — batch 5 (app_issues follow-up: labels/relations/links/move)",  # app :: pi_dash.app.views.issue.relation.IssueRelationViewSet
     ('/api/workspaces/{}/projects/{}/issues/{}/issue-subscribers/', 'POST'): "owned; no corpus session yet — batch 5 (app_issues follow-up: labels/relations/links/move)",  # app :: pi_dash.app.views.issue.subscriber.IssueSubscriberViewSet
     ('/api/workspaces/{}/projects/{}/issues/{}/issue-subscribers/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_issues follow-up: labels/relations/links/move)",  # app :: pi_dash.app.views.issue.subscriber.IssueSubscriberViewSet
-    ('/api/workspaces/{}/projects/{}/issues/{}/modules/', 'POST'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.issue.ModuleIssueViewSet
     ('/api/workspaces/{}/projects/{}/issues/{}/remove-relation/', 'POST'): "owned; no corpus session yet — batch 5 (app_issues follow-up: labels/relations/links/move)",  # app :: pi_dash.app.views.issue.relation.IssueRelationViewSet
     ('/api/workspaces/{}/projects/{}/join/{}/', 'POST'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.invite.view
-    ('/api/workspaces/{}/projects/{}/members/', 'POST'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.member.ProjectMemberViewSet
-    ('/api/workspaces/{}/projects/{}/members/leave/', 'POST'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.member.ProjectMemberViewSet
-    ('/api/workspaces/{}/projects/{}/members/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.member.ProjectMemberViewSet
-    ('/api/workspaces/{}/projects/{}/members/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.member.ProjectMemberViewSet
-    ('/api/workspaces/{}/projects/{}/modules/', 'POST'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.base.ModuleViewSet
-    ('/api/workspaces/{}/projects/{}/modules/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.base.ModuleViewSet
-    ('/api/workspaces/{}/projects/{}/modules/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.base.ModuleViewSet
-    ('/api/workspaces/{}/projects/{}/modules/{}/', 'PUT'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.base.ModuleViewSet
-    ('/api/workspaces/{}/projects/{}/modules/{}/archive/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.archive.view
-    ('/api/workspaces/{}/projects/{}/modules/{}/archive/', 'POST'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.archive.view
-    ('/api/workspaces/{}/projects/{}/modules/{}/issues/', 'POST'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.issue.ModuleIssueViewSet
-    ('/api/workspaces/{}/projects/{}/modules/{}/issues/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.issue.ModuleIssueViewSet
-    ('/api/workspaces/{}/projects/{}/modules/{}/module-links/', 'POST'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.base.ModuleLinkViewSet
-    ('/api/workspaces/{}/projects/{}/modules/{}/module-links/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.base.ModuleLinkViewSet
-    ('/api/workspaces/{}/projects/{}/modules/{}/module-links/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.base.ModuleLinkViewSet
-    ('/api/workspaces/{}/projects/{}/modules/{}/module-links/{}/', 'PUT'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.base.ModuleLinkViewSet
-    ('/api/workspaces/{}/projects/{}/modules/{}/user-properties/', 'PATCH'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.base.view
     ('/api/workspaces/{}/projects/{}/pages/', 'POST'): "owned; no corpus session yet — batch 5 (app_pages session)",  # app :: pi_dash.app.views.page.base.PageViewSet
     ('/api/workspaces/{}/projects/{}/pages/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_pages session)",  # app :: pi_dash.app.views.page.base.PageViewSet
     ('/api/workspaces/{}/projects/{}/pages/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_pages session)",  # app :: pi_dash.app.views.page.base.PageViewSet
@@ -411,21 +350,15 @@ OWNED_UNCOVERED = {
     ('/api/workspaces/{}/projects/{}/project-deploy-boards/', 'POST'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.base.DeployBoardViewSet
     ('/api/workspaces/{}/projects/{}/project-deploy-boards/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.base.DeployBoardViewSet
     ('/api/workspaces/{}/projects/{}/project-deploy-boards/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.base.DeployBoardViewSet
-    ('/api/workspaces/{}/projects/{}/project-views/', 'POST'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.project.base.view
     ('/api/workspaces/{}/projects/{}/repository/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_integrations session)",  # app :: pi_dash.app.views.integration.git.view
     ('/api/workspaces/{}/projects/{}/repository/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_integrations session)",  # app :: pi_dash.app.views.integration.git.view
     ('/api/workspaces/{}/projects/{}/repository/bind/', 'POST'): "owned; no corpus session yet — batch 5 (app_integrations session)",  # app :: pi_dash.app.views.integration.git.view
     ('/api/workspaces/{}/projects/{}/scheduler-bindings/', 'POST'): "owned; no corpus session yet — batch 5 (app_scheduler session)",  # app :: pi_dash.app.views.scheduler.views.view
     ('/api/workspaces/{}/projects/{}/scheduler-bindings/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_scheduler session)",  # app :: pi_dash.app.views.scheduler.views.view
     ('/api/workspaces/{}/projects/{}/scheduler-bindings/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_scheduler session)",  # app :: pi_dash.app.views.scheduler.views.view
-    ('/api/workspaces/{}/projects/{}/states/', 'POST'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.state.base.StateViewSet
     ('/api/workspaces/{}/projects/{}/states/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.state.base.StateViewSet
     ('/api/workspaces/{}/projects/{}/states/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.state.base.StateViewSet
     ('/api/workspaces/{}/projects/{}/states/{}/mark-default/', 'POST'): "owned; no corpus session yet — batch 2 (app_project session)",  # app :: pi_dash.app.views.state.base.StateViewSet
-    ('/api/workspaces/{}/projects/{}/user-favorite-cycles/', 'POST'): "owned; no corpus session yet — batch 2 (app_cycles session)",  # app :: pi_dash.app.views.cycle.base.CycleFavoriteViewSet
-    ('/api/workspaces/{}/projects/{}/user-favorite-cycles/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_cycles session)",  # app :: pi_dash.app.views.cycle.base.CycleFavoriteViewSet
-    ('/api/workspaces/{}/projects/{}/user-favorite-modules/', 'POST'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.base.ModuleFavoriteViewSet
-    ('/api/workspaces/{}/projects/{}/user-favorite-modules/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (app_modules session)",  # app :: pi_dash.app.views.module.base.ModuleFavoriteViewSet
     ('/api/workspaces/{}/projects/{}/user-favorite-views/', 'POST'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.IssueViewFavoriteViewSet
     ('/api/workspaces/{}/projects/{}/user-favorite-views/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.IssueViewFavoriteViewSet
     ('/api/workspaces/{}/projects/{}/user-properties/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_issues follow-up: labels/relations/links/move)",  # app :: pi_dash.app.views.issue.base.view

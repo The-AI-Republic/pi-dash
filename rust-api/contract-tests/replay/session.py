@@ -51,6 +51,30 @@ class Request:
     # Django), but the author's expectation pins Django so a corpus bug
     # (bad seed, wrong payload) fails fast instead of locking in a 500.
     expect_status: int | None = None
+    # Known job content divergences for THIS request only:
+    # [(task, fix_issue, dj_match, rs_match)]. Both sides must emit the
+    # task on this request and the normalised payloads must exactly
+    # equal the pinned bytes (placeholders via {captures}, world/static
+    # ctx); anything else — task missing on either side, or any byte
+    # deviation — fails loudly (fix landed -> remove the pin; Django
+    # changed -> investigate). Per-request because a task's content
+    # legitimately varies per request (create emits no before-image,
+    # PATCH does), so a session-wide exact pin would misfire.
+    known_job_shapes: list = field(default_factory=list)
+    # Known response-header divergences for THIS request only:
+    # [(header, fix_issue, dj_value, rs_value)]. Each side's header
+    # must exactly equal its pinned value (a template over the gap
+    # ctx; None means the header must be ABSENT); any deviation fails
+    # loudly (fix landed -> remove the pin; Django changed ->
+    # investigate). Pinned headers skip the standard header checks.
+    known_headers: list = field(default_factory=list)
+    # Known absent jobs for THIS request only: {task: fix_issue}. The
+    # conditional counterpart to Session.known_absent_jobs (which
+    # applies to every request and so only fits unconditional emits):
+    # Django must emit the task on this request and Rust must not;
+    # either side changing fails loudly. Pinned tasks are excluded
+    # from the job multiset compare.
+    known_absent_jobs: dict = field(default_factory=dict)
 
     def route_template(self) -> str:
         if self.route:
@@ -90,6 +114,39 @@ class Session:
     # Rust copy, so the function may use random ids and now() freely.
     # None means the base world seed is enough.
     seed: object = None
+    # Static template context: {placeholder: value}, identical on both
+    # backends (for fixed ids the session seed wrote that requests
+    # address, e.g. a move-target project id).
+    static_context: dict = field(default_factory=dict)
+    # Known job divergences: {task_name: fix_issue_id}. The task must be
+    # emitted by Django and NOT by Rust on every request; either side
+    # changing fails loudly (fix landed -> remove the pin; Django
+    # changed -> investigate). Pinned tasks are excluded from the job
+    # multiset compare. For unconditional emits only (middleware); a
+    # conditional pin needs a presence mode this map does not have yet.
+    known_absent_jobs: dict = field(default_factory=dict)
+    # Job payload row references: {task_name_or_"*": [(pointer, table)]}.
+    # Values at these pointers are backend-local row ids (never exposed
+    # in a response, so uncapturable). Each side's value must EXIST as
+    # that table's id in its own database (checked live); existing rows
+    # compare as {row:<table>}, missing rows fail loudly. Pointers are
+    # multi-segment over dicts/lists and descend through nested JSON
+    # strings (kwargs/current_instance/created_x/0/pk).
+    payload_row_refs: dict = field(default_factory=dict)
+    # Database cell row references: [(table, column, ref_table, pointer)].
+    # Same existence-checked blanking for DB cells: scalar FK-like
+    # generated values (pointer "") or values nested in a JSONB column
+    # (pointer "a/b/0"). Each side's value must exist as ref_table's id.
+    db_cell_refs: list = field(default_factory=list)
+    # Known DB divergences: [(table, fix_issue, match_dict)]. Django-only
+    # rows in `table` that exactly equal a rendered match_dict are
+    # excused; anything else (unmatched django-only rows, any rust-only
+    # rows) still fails. Every declaration must match at least one row
+    # during the session, or the run fails telling the author to remove
+    # it (the fix landed). match_dict holds the full normalised row
+    # (placeholders via {captures}, world/static ctx, "<replay-volatile>"
+    # for stamped/generated cells) so the pin is exact, not a shape.
+    known_extra_rows: list = field(default_factory=list)
 
     def __post_init__(self):
         if not self.requests:

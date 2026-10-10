@@ -261,6 +261,17 @@ class Runner:
 
         report = SessionReport(session=sess.name)
         captures: dict[str, tuple] = {}
+        config = self.config
+
+        def _row_exists(side: str, table: str, value) -> bool:
+            db_url = config.django_db if side == "django" else config.rust_db
+            try:
+                with psycopg.connect(db_url, autocommit=True) as conn, conn.cursor() as cur:
+                    cur.execute(f'SELECT 1 FROM "{table}" WHERE id = %s', (str(value),))
+                    return cur.fetchone() is not None
+            except Exception:
+                return False
+
         ctx = compare.CompareContext(
             timestamp_columns=dict(sess.timestamp_columns),
             generated_columns=dict(sess.generated_columns),
@@ -268,6 +279,9 @@ class Runner:
             django_webhook_base=self.config.django_webhook_base,
             rust_webhook_base=self.config.rust_webhook_base,
             payload_time_paths=dict(sess.payload_time_paths),
+            payload_row_refs=dict(sess.payload_row_refs),
+            db_cell_refs=list(sess.db_cell_refs),
+            row_exists=_row_exists,
         )
         # Restore sanity: both copies compare equal before request 1, or
         # the restore/clone itself is broken (never a product divergence).
@@ -281,20 +295,82 @@ class Runner:
                 f"not a product divergence). Tables: {tables}"
             )
 
+        gap_tracker: dict[int, int] = {}
         for index, req in enumerate(sess.requests):
-            result = self._run_request(sess, req, index, captures, creds, ctx)
+            result = self._run_request(sess, req, index, captures, creds, ctx, gap_tracker)
             report.requests.append(result)
+        for decl_index, (table, issue, _match) in enumerate(sess.known_extra_rows or []):
+            if not gap_tracker.get(decl_index):
+                raise Divergence(
+                    f"session {sess.name}: known-divergence pin for {table} "
+                    f"({issue}) never matched — the fix landed or the shape "
+                    "changed; remove or update the pin"
+                )
         return report
 
-    def _run_request(self, sess, req, index, captures, creds, ctx) -> RequestResult:
+    def _gap_ctx(self, sess, captures) -> dict:
+        """Render context for pin match dicts: world/static raw, captures {name}."""
+        from .corpus import world as world_seed
+
+        gap_ctx = world_seed.template_context(self.world)
+        gap_ctx.update(sess.static_context or {})
+        for name in captures:
+            gap_ctx[name] = "{%s}" % name
+        return gap_ctx
+
+    def _apply_db_gap_pins(self, db_diffs, sess, captures, gap_tracker):
+        """Excuse declared django-only rows; return the remaining diffs."""
+        if not sess.known_extra_rows:
+            return db_diffs
+        # Gap match dicts are written against NORMALISED rows: captures
+        # already substituted ({name}), world/static values raw.
+        gap_ctx = self._gap_ctx(sess, captures)
+        remaining = []
+        for table, only_dj, only_rs in db_diffs:
+            decls = [
+                (i, match)
+                for i, (t, _issue, match) in enumerate(sess.known_extra_rows)
+                if t == table
+            ]
+            if not decls:
+                remaining.append((table, only_dj, only_rs))
+                continue
+            if only_rs:
+                remaining.append((table, only_dj, only_rs))
+                continue
+            unmatched = []
+            for row in only_dj:
+                hit = None
+                for decl_index, match in decls:
+                    try:
+                        rendered = session_model.render_template(dict(match), gap_ctx)
+                    except KeyError:
+                        continue
+                    if row == rendered:
+                        hit = decl_index
+                        break
+                if hit is None:
+                    unmatched.append(row)
+                else:
+                    gap_tracker[hit] = gap_tracker.get(hit, 0) + 1
+            if unmatched:
+                remaining.append((table, unmatched, []))
+        return remaining
+
+    def _run_request(self, sess, req, index, captures, creds, ctx, gap_tracker) -> RequestResult:
         ctx.captures = dict(captures)
         from .corpus import world as world_seed
 
         base_ctx = world_seed.template_context(self.world)
-        dj_ctx = dict(base_ctx)
-        dj_ctx.update({name: pair[0] for name, pair in captures.items()})
-        rs_ctx = dict(base_ctx)
-        rs_ctx.update({name: pair[1] for name, pair in captures.items()})
+        base_ctx.update(sess.static_context or {})
+
+        def _side_ctx(index: int) -> dict:
+            side_ctx = dict(base_ctx)
+            side_ctx.update({name: pair[index] for name, pair in captures.items()})
+            return side_ctx
+
+        dj_ctx = _side_ctx(0)
+        rs_ctx = _side_ctx(1)
         dj_path = session_model.render_template(req.path, dj_ctx)
         rs_path = session_model.render_template(req.path, rs_ctx)
         dj_json = session_model.render_template(req.json, dj_ctx)
@@ -338,7 +414,9 @@ class Runner:
 
         label = f"session {sess.name} request {index} {req.method} {req.route_template()}"
         ctx.capture_pointers = dict(req.capture or {})
-        error = compare.compare_response(dj_resp, rs_resp, ctx)
+        error = compare.compare_response(
+            dj_resp, rs_resp, ctx, req.known_headers, self._gap_ctx(sess, captures)
+        )
         if error is not None:
             raise Divergence(f"{label}: {error}")
 
@@ -354,6 +432,7 @@ class Runner:
             captures[name] = (dj_cap[name], rs_cap[name])
         ctx.captures = dict(captures)
         ctx.capture_pointers = {}
+        dj_ctx = _side_ctx(0)
 
         dj_after = compare.snapshot_full(self.config.django_db)
         rs_after = compare.snapshot_full(self.config.rust_db)
@@ -362,6 +441,7 @@ class Runner:
         dj_norm_after = compare.normalise_snapshot(dj_after, "django", ctx)
         rs_norm_after = compare.normalise_snapshot(rs_after, "rust", ctx)
         db_diffs = compare.compare_db(dj_norm_after, rs_norm_after)
+        db_diffs = self._apply_db_gap_pins(db_diffs, sess, captures, gap_tracker)
         if db_diffs:
             detail = []
             for table, only_dj, only_rs in db_diffs[:5]:
@@ -378,7 +458,15 @@ class Runner:
             compare.normalise_celery_message(headers, payload, "rust", ctx)
             for headers, payload in rs_msgs
         ]
-        error = compare.compare_jobs(dj_jobs, rs_jobs)
+        absent = dict(sess.known_absent_jobs or {})
+        absent.update(req.known_absent_jobs or {})
+        error = compare.compare_jobs(
+            dj_jobs,
+            rs_jobs,
+            absent,
+            req.known_job_shapes,
+            self._gap_ctx(sess, captures),
+        )
         if error is not None:
             raise Divergence(f"{label}: {error}")
 

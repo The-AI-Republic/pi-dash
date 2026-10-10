@@ -151,6 +151,14 @@ JOB_ETA_TOLERANCE_SECONDS = 120.0
 # Placeholder host seeded into webhook rows; rewritten per backend.
 WEBHOOK_PLACEHOLDER_HOST = "replay-webhook-sink.invalid"
 
+# --- process_logs payload topology ---
+# The API-token audit payload embeds the request's Host header, which
+# legitimately differs per backend by port in the replay topology
+# (127.0.0.1:18223 vs :18225). Blank only the host:port *values* inside
+# this task's payloads; every other field still compares.
+PROCESS_LOGS_TASK = "pi_dash.bgtasks.logger_task.process_logs"
+TOPOLOGY_HOST_RE = re.compile(r"127\.0\.0\.1:\d+")
+
 
 def placeholder_for(value):
     """Type-preserving placeholder: None/bool pass through, else blank."""

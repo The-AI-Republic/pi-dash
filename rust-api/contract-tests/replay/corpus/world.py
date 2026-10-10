@@ -92,6 +92,14 @@ def seed_world(conninfo: str) -> dict:
             conn, other_ws["id"], "replayx", name="Replay Other Project",
             identifier=OTHER_PROJECT_IDENTIFIER, created_by_id=users["outsider"]["id"],
         )
+        # RPJ is the workspace default: project create marks the new
+        # project default when none exists, and default projects cannot
+        # be deleted — sessions create and delete projects freely.
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE projects SET is_default = true WHERE id = %s",
+                (project["id"],),
+            )
         world["projects"] = {"main": project, "other": other_project}
         for key, role in (("admin", ADMIN), ("member", MEMBER), ("guest", GUEST)):
             db_helpers.add_project_member(conn, ws["id"], project["id"], users[key]["id"], role)
@@ -145,6 +153,8 @@ def template_context(world: dict) -> dict:
     return {
         "ws": world["workspaces"]["ws"]["slug"],
         "other_ws": world["workspaces"]["other"]["slug"],
+        "ws_id": str(world["workspaces"]["ws"]["id"]),
+        "other_ws_id": str(world["workspaces"]["other"]["id"]),
         "project": str(world["projects"]["main"]["id"]),
         "other_project": str(world["projects"]["other"]["id"]),
         "state_backlog": str(world["states"]["backlog"]["id"]),

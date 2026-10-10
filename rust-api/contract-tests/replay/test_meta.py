@@ -115,7 +115,39 @@ def test_corpus_manifests_valid():
             )
         if sess.seed is not None:
             assert callable(sess.seed), f"{sess.name}: seed is not callable"
-        available = set(WORLD_KEYS)
+        for task, issue in (sess.known_absent_jobs or {}).items():
+            assert "." in task, f"{sess.name}: bad pinned task {task!r}"
+            assert re.fullmatch(r"PIDASHCONV-\d+", issue), (
+                f"{sess.name}: pinned {task} must name its fix issue"
+            )
+        for entry in sess.db_cell_refs or []:
+            assert (
+                isinstance(entry, (list, tuple))
+                and len(entry) == 4
+                and re.fullmatch(r"[a-z_]+", entry[0])
+                and re.fullmatch(r"[a-z_]+", entry[1])
+                and re.fullmatch(r"[a-z_]+", entry[2])
+                and isinstance(entry[3], str)
+            ), f"{sess.name}: bad db cell ref {entry!r}"
+        for entry in sess.known_extra_rows or []:
+            assert (
+                isinstance(entry, (list, tuple))
+                and len(entry) == 3
+                and re.fullmatch(r"[a-z_]+", entry[0])
+                and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                and isinstance(entry[2], dict)
+                and entry[2]
+            ), f"{sess.name}: bad known extra row {entry!r}"
+        for task, refs in (sess.payload_row_refs or {}).items():
+            assert isinstance(refs, (list, tuple)), f"{sess.name}: bad row refs for {task}"
+            for ref in refs:
+                assert (
+                    isinstance(ref, (list, tuple))
+                    and len(ref) == 2
+                    and (ref[0].startswith("args/") or ref[0].startswith("kwargs/"))
+                    and re.fullmatch(r"[a-z_]+", ref[1])
+                ), f"{sess.name}: bad row ref {ref!r} for {task}"
+        available = set(WORLD_KEYS) | set(sess.static_context or {})
         for index, req in enumerate(sess.requests):
             label = f"{sess.name} request {index} {req.method} {req.path}"
             assert req.method in HTTP_METHODS, f"{label}: bad method"
@@ -147,6 +179,33 @@ def test_corpus_manifests_valid():
                 available.add(name)
             if req.expect_status is not None:
                 assert 100 <= req.expect_status <= 599, f"{label}: bad expect_status"
+            for entry in req.known_job_shapes or []:
+                assert (
+                    isinstance(entry, (list, tuple))
+                    and len(entry) == 4
+                    and "." in entry[0]
+                    and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                    and isinstance(entry[2], dict)
+                    and entry[2]
+                    and isinstance(entry[3], dict)
+                    and entry[3]
+                    and entry[2] != entry[3]
+                ), f"{label}: bad known job shape {entry!r}"
+            for task, issue in (req.known_absent_jobs or {}).items():
+                assert "." in task, f"{label}: bad pinned task {task!r}"
+                assert re.fullmatch(r"PIDASHCONV-\d+", issue), (
+                    f"{label}: pinned {task} must name its fix issue"
+                )
+            for entry in req.known_headers or []:
+                assert (
+                    isinstance(entry, (list, tuple))
+                    and len(entry) == 4
+                    and re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*", entry[0])
+                    and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                    and (entry[2] is None or isinstance(entry[2], str))
+                    and (entry[3] is None or isinstance(entry[3], str))
+                    and entry[2] != entry[3]
+                ), f"{label}: bad known header {entry!r}"
             assert not (req.json is not None and req.raw_body is not None), (
                 f"{label}: json and raw_body are exclusive"
             )

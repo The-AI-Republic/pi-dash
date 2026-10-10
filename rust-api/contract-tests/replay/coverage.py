@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -263,6 +264,62 @@ def cmd_write(args) -> int:
     return 0
 
 
+def cmd_prune(args) -> int:
+    """Delete stale reason entries (covered or vanished pairs).
+
+    Batch workflow: land a session, run ``prune``, review the diff,
+    re-run ``check``. Entries must stay single-line
+    (``('shape', 'METHOD'): "reason",``) so pruning is exact; anything
+    else fails loudly instead of being half-edited.
+    """
+    import ast
+
+    django = parity.dump_django_fresh(args.api_dir, args.settings)
+    rust_routes = parity.load_rust_routes(args.binary)
+    _failures, report = check_coverage(django, rust_routes)
+    stale = set()
+    for problem in report["problems"]:
+        match = re.match(
+            r"stale reason: (\w+) (\S+) (is covered|in \w+ is not)",
+            problem,
+        )
+        if match:
+            stale.add((match.group(2), match.group(1)))
+    if not stale:
+        print("nothing to prune")
+        return 0
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "corpus", "reasons.py"
+    )
+    with open(path, encoding="utf-8") as handle:
+        lines = handle.readlines()
+    kept, removed = [], 0
+    for line in lines:
+        stripped = line.strip()
+        key = None
+        if stripped.startswith("('"):
+            try:
+                key = ast.literal_eval(stripped.split(":", 1)[0].strip().rstrip(","))
+            except (SyntaxError, ValueError):
+                key = None
+        if isinstance(key, tuple) and key in stale:
+            removed += 1
+            continue
+        kept.append(line)
+    if removed != len(stale):
+        missing = stale - {
+            ast.literal_eval(line.strip().split(":", 1)[0].strip().rstrip(","))
+            for line in lines
+            if line.strip().startswith("('")
+        }
+        print(f"refusing: {len(stale) - removed} stale keys have no single-line entry: {sorted(missing)[:5]}")
+        return 1
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.writelines(kept)
+    print(f"pruned {removed} entries from corpus/reasons.py")
+    return 0
+
+
 def cmd_seed_reasons(args) -> int:
     """Print exact reason entries for uncovered pairs (authoring aid).
 
@@ -304,6 +361,7 @@ def main(argv=None) -> int:
         ("check", "fail on any write pair without coverage or reason"),
         ("write", "regenerate COVERAGE.md"),
         ("seed-reasons", "print reason entries for uncovered pairs"),
+        ("prune", "delete stale reason entries (covered or vanished)"),
     ):
         cmd = sub.add_parser(name, help=help_text)
         cmd.add_argument("--binary", default="pidash-api")
@@ -317,6 +375,8 @@ def main(argv=None) -> int:
         return cmd_write(args)
     if args.command == "seed-reasons":
         return cmd_seed_reasons(args)
+    if args.command == "prune":
+        return cmd_prune(args)
     raise AssertionError(f"unreachable command {args.command}")  # pragma: no cover
 
 

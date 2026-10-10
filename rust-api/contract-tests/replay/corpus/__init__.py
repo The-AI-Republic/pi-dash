@@ -4,10 +4,14 @@
 
 """Request corpus: realistic multi-step write sessions per domain."""
 
-from . import app_issues
+from . import app_cycles, app_issues, app_modules, app_project, v1_work_items
 
 ALL_SESSIONS = [
+    *app_cycles.SESSIONS,
     *app_issues.SESSIONS,
+    *app_modules.SESSIONS,
+    *app_project.SESSIONS,
+    *v1_work_items.SESSIONS,
 ]
 
 BY_NAME = {s.name: s for s in ALL_SESSIONS}

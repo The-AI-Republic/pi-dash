@@ -45,6 +45,13 @@ class CompareContext:
     request_start: datetime | None = None
     # Job payload timestamp pointers: {task_or_"*": [pointer, ...]}.
     payload_time_paths: dict = field(default_factory=dict)
+    # Job payload row references: {task_or_"*": [(pointer, table), ...]}.
+    payload_row_refs: dict = field(default_factory=dict)
+    # DB cell row references: [(table, column, ref_table, pointer), ...].
+    db_cell_refs: list = field(default_factory=list)
+    # Existence check for row refs: fn(side, table, value) -> bool.
+    # None leaves ref values untouched (they fail loudly in comparison).
+    row_exists: object = None
 
 
 # ---------------------------------------------------------------------------
@@ -98,11 +105,57 @@ def _blank_webhook_base(value: str, base: str) -> str:
     return value
 
 
+def _blank_db_cell_ref(cell, pointer: str, ref_table: str, side: str, ctx: CompareContext):
+    """Existence-checked blanking for one DB cell (scalar or JSONB path)."""
+    import copy
+
+    if ctx.row_exists is None:
+        return cell
+    if not pointer:
+        try:
+            exists = ctx.row_exists(side, ref_table, cell)
+        except Exception:
+            exists = False
+        return "{row:%s}" % ref_table if exists else cell
+    if not isinstance(cell, dict):
+        return cell
+    cell = copy.deepcopy(cell)
+    node = cell
+    parts = pointer.split("/")
+    try:
+        for part in parts[:-1]:
+            node = node[int(part)] if isinstance(node, list) else node[part]
+        last = parts[-1]
+        if isinstance(node, list):
+            value = node[int(last)]
+        elif isinstance(node, dict) and last in node:
+            value = node[last]
+        else:
+            return cell
+    except (KeyError, IndexError, ValueError, TypeError):
+        return cell
+    try:
+        exists = ctx.row_exists(side, ref_table, value)
+    except Exception:
+        exists = False
+    if not exists:
+        return cell
+    if isinstance(node, list):
+        node[int(last)] = "{row:%s}" % ref_table
+    else:
+        node[last] = "{row:%s}" % ref_table
+    return cell
+
+
 def normalise_snapshot(snap: dict, side: str, ctx: CompareContext) -> dict:
     """Normalise one backend's full snapshot for cross-backend equality."""
     flat = effects.bind_captures(ctx.captures, side)
     base = ctx.django_webhook_base if side == "django" else ctx.rust_webhook_base
     skip = set(effects.SKIP_TABLES) | set(ctx.skip_tables)
+    cell_refs: dict[tuple[str, str], list] = {}
+    for entry in ctx.db_cell_refs:
+        table, column, ref_table, pointer = entry
+        cell_refs.setdefault((table, column), []).append((ref_table, pointer))
     out = {}
     for table, rows in snap.items():
         if table in skip:
@@ -126,6 +179,8 @@ def normalise_snapshot(snap: dict, side: str, ctx: CompareContext) -> dict:
                         cell = _blank_webhook_base(cell, base)
                     if cell in flat:
                         cell = flat[cell]
+                for ref_table, pointer in cell_refs.get((table, col), ()):
+                    cell = _blank_db_cell_ref(cell, pointer, ref_table, side, ctx)
                 new[col] = cell
             normed.append(new)
         normed.sort(key=lambda r: json.dumps(r, sort_keys=True, default=str))
@@ -200,6 +255,17 @@ def _parse_set_cookie(headers) -> list[tuple[str, str]]:
     return sorted(out)
 
 
+def _pointer_value(body, pointer: str):
+    """Value at an a/b/0/c pointer, or None when missing."""
+    node = body
+    try:
+        for part in pointer.split("/"):
+            node = node[int(part)] if isinstance(node, list) else node[part]
+    except (KeyError, IndexError, ValueError, TypeError):
+        return None
+    return node
+
+
 def _blank_capture_pointers(body, pointers: dict):
     """Replace values at declared capture pointers with {name} (copy)."""
     import copy
@@ -223,6 +289,36 @@ def _blank_capture_pointers(body, pointers: dict):
         except (KeyError, IndexError, ValueError, TypeError):
             continue
     return body
+
+
+def _sub_capture_values(body, pointers: dict):
+    """Substitute every occurrence of this response's captured values.
+
+    A created id usually appears several times in its own response (the
+    row plus its FK back-references); the declared pointers name the
+    canonical occurrence, and every other occurrence of the same value
+    is backend-local too.
+    """
+    flat = {}
+    for name, pointer in pointers.items():
+        if pointer.startswith("@"):
+            continue
+        value = _pointer_value(body, pointer)
+        if isinstance(value, str) and value:
+            flat[value] = "{%s}" % name
+    if not flat:
+        return body
+
+    def walk(node):
+        if isinstance(node, str):
+            return flat.get(node, node)
+        if isinstance(node, dict):
+            return {k: walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        return node
+
+    return walk(body)
 
 
 def first_diffs(left, right, limit: int = 12, path: str = "$") -> list[str]:
@@ -254,8 +350,21 @@ def first_diffs(left, right, limit: int = 12, path: str = "$") -> list[str]:
     return out
 
 
-def compare_response(dj_resp, rs_resp, ctx: CompareContext) -> str | None:
-    """Compare status, content-type, location/cookies, and body."""
+def compare_response(
+    dj_resp,
+    rs_resp,
+    ctx: CompareContext,
+    known_headers: list | None = None,
+    gap_ctx: dict | None = None,
+) -> str | None:
+    """Compare status, content-type, location/cookies, and body.
+
+    ``known_headers`` ([(header, fix_issue, dj_value, rs_value)]) pins
+    exact per-side header values (None = must be absent); pinned
+    headers skip the standard checks below.
+    """
+    from .session import render_template
+
     if dj_resp.status_code != rs_resp.status_code:
         return (
             f"status differs: django={dj_resp.status_code} "
@@ -263,29 +372,57 @@ def compare_response(dj_resp, rs_resp, ctx: CompareContext) -> str | None:
             f"django body: {dj_resp.text[:2000]}\n"
             f"rust body: {rs_resp.text[:2000]}"
         )
+    pinned: set[str] = set()
+    for header, issue, dj_want, rs_want in known_headers or []:
+        name = header.lower()
+        pinned.add(name)
+        try:
+            dj_want = (
+                render_template(dj_want, gap_ctx or {}) if dj_want is not None else None
+            )
+            rs_want = (
+                render_template(rs_want, gap_ctx or {}) if rs_want is not None else None
+            )
+        except KeyError as exc:
+            return f"known-header pin {header} ({issue}): unrenderable match: {exc}"
+        dj_have = dj_resp.headers.get(header)
+        rs_have = rs_resp.headers.get(header)
+        if dj_have != dj_want:
+            return (
+                f"known-header pin {header} ({issue}): Django header changed — "
+                f"got {dj_have!r}, want {dj_want!r}"
+            )
+        if rs_have != rs_want:
+            return (
+                f"known-header pin {header} ({issue}): Rust header changed — "
+                "fix landed or behavior changed; remove or update the pin. "
+                f"got {rs_have!r}, want {rs_want!r}"
+            )
     # Content-Type compares only when a representation exists: Django
     # sends no content-type on empty 204s while axum's JSON responder
     # keeps the header, and representation metadata on an empty body is
     # unobservable to clients (the contract suites pin status + empty
     # body for 204s, never the header).
-    if dj_resp.content or rs_resp.content:
+    if "content-type" not in pinned and (dj_resp.content or rs_resp.content):
         dj_ct = dj_resp.headers.get("content-type", "")
         rs_ct = rs_resp.headers.get("content-type", "")
         if dj_ct != rs_ct:
             return f"content-type differs: django={dj_ct!r} rust={rs_ct!r}"
-    dj_loc = dj_resp.headers.get("location")
-    rs_loc = rs_resp.headers.get("location")
-    if (dj_loc is None) != (rs_loc is None) or (
-        dj_loc is not None and dj_loc != rs_loc
-    ):
-        dj_flat = effects.bind_captures(ctx.captures, "django")
-        rs_flat = effects.bind_captures(ctx.captures, "rust")
-        if dj_flat.get(dj_loc, dj_loc) != rs_flat.get(rs_loc, rs_loc):
-            return f"location differs: django={dj_loc!r} rust={rs_loc!r}"
-    dj_cookies = _parse_set_cookie(dj_resp.headers)
-    rs_cookies = _parse_set_cookie(rs_resp.headers)
-    if dj_cookies != rs_cookies:
-        return f"set-cookie differs: django={dj_cookies!r} rust={rs_cookies!r}"
+    if "location" not in pinned:
+        dj_loc = dj_resp.headers.get("location")
+        rs_loc = rs_resp.headers.get("location")
+        if (dj_loc is None) != (rs_loc is None) or (
+            dj_loc is not None and dj_loc != rs_loc
+        ):
+            dj_flat = effects.bind_captures(ctx.captures, "django")
+            rs_flat = effects.bind_captures(ctx.captures, "rust")
+            if dj_flat.get(dj_loc, dj_loc) != rs_flat.get(rs_loc, rs_loc):
+                return f"location differs: django={dj_loc!r} rust={rs_loc!r}"
+    if "set-cookie" not in pinned:
+        dj_cookies = _parse_set_cookie(dj_resp.headers)
+        rs_cookies = _parse_set_cookie(rs_resp.headers)
+        if dj_cookies != rs_cookies:
+            return f"set-cookie differs: django={dj_cookies!r} rust={rs_cookies!r}"
     if dj_resp.content == rs_resp.content:
         return None
     try:
@@ -302,6 +439,8 @@ def compare_response(dj_resp, rs_resp, ctx: CompareContext) -> str | None:
             f"django: {dj_resp.content[:2000]!r}\n"
             f"rust: {rs_resp.content[:2000]!r}"
         )
+    dj_json = _sub_capture_values(dj_json, ctx.capture_pointers)
+    rs_json = _sub_capture_values(rs_json, ctx.capture_pointers)
     dj_json = _blank_capture_pointers(dj_json, ctx.capture_pointers)
     rs_json = _blank_capture_pointers(rs_json, ctx.capture_pointers)
     dj_norm = effects.normalise_json_body(
@@ -475,6 +614,94 @@ def _blank_time_paths(payload, paths: list[str], request_start: datetime | None)
     return payload
 
 
+def _blank_row_refs(args, kwargs, task: str, side: str, ctx: CompareContext):
+    """Replace existence-checked row ids with {row:<table>} placeholders.
+
+    Pointers are multi-segment (``kwargs/a/0/b``) over dicts and lists
+    and descend transparently through nested JSON strings (webhook
+    payloads doubly-encode rows): each traversed string is re-serialized
+    with the same canonical form :func:`_sub_payload` produced
+    (sort_keys, compact separators), so untouched bytes round-trip
+    exactly. A pointer that does not resolve is skipped: refs are
+    session-level and a task's shape varies per request.
+    """
+    refs = list(ctx.payload_row_refs.get("*", ())) + list(
+        ctx.payload_row_refs.get(task or "", ())
+    )
+    if not refs or ctx.row_exists is None:
+        return args, kwargs
+    import copy
+
+    _MISSING = object()
+
+    def _child(node, part):
+        try:
+            if isinstance(node, list):
+                return node[int(part)]
+            if isinstance(node, dict):
+                return node.get(part, _MISSING)
+        except (IndexError, ValueError, TypeError):
+            pass
+        return _MISSING
+
+    def _set_child(node, part, value):
+        if isinstance(node, list):
+            node[int(part)] = value
+        else:
+            node[part] = value
+
+    args, kwargs = copy.deepcopy(args), copy.deepcopy(kwargs)
+    for pointer, table in refs:
+        if pointer.startswith("args/"):
+            root, rest = args, pointer[5:]
+        elif pointer.startswith("kwargs/"):
+            root, rest = kwargs, pointer[7:]
+        else:
+            continue
+        parts = rest.split("/")
+        node = root
+        stack: list[tuple] = []
+        resolved = True
+        for part in parts[:-1]:
+            child = _child(node, part)
+            if child is _MISSING:
+                resolved = False
+                break
+            if isinstance(child, str):
+                try:
+                    parsed = json.loads(child)
+                except ValueError:
+                    resolved = False
+                    break
+                if not isinstance(parsed, (dict, list)):
+                    resolved = False
+                    break
+                stack.append((node, part, parsed))
+                node = parsed
+            else:
+                node = child
+        if not resolved:
+            continue
+        value = _child(node, parts[-1])
+        if value is _MISSING:
+            continue
+        try:
+            exists = ctx.row_exists(side, table, value)
+        except Exception:
+            exists = False
+        if not exists:
+            continue
+        _set_child(node, parts[-1], "{row:%s}" % table)
+        while stack:
+            parent, part, parsed = stack.pop()
+            _set_child(
+                parent,
+                part,
+                json.dumps(parsed, sort_keys=True, separators=(",", ":")),
+            )
+    return args, kwargs
+
+
 def normalise_celery_message(
     headers: dict, payload, side: str, ctx: CompareContext, queue: str = "celery"
 ) -> dict:
@@ -492,10 +719,14 @@ def normalise_celery_message(
     kwargs = _blank_time_paths(
         kwargs, [p[7:] for p in paths if p.startswith("kwargs/")], ctx.request_start
     )
+    args, kwargs = _sub_payload(args, flat), _sub_payload(kwargs, flat)
+    if task == effects.PROCESS_LOGS_TASK:
+        args, kwargs = _blank_topology_hosts(args), _blank_topology_hosts(kwargs)
+    args, kwargs = _blank_row_refs(args, kwargs, task, side, ctx)
     return {
         "task": task,
-        "args": _sub_payload(args, flat),
-        "kwargs": _sub_payload(kwargs, flat),
+        "args": args,
+        "kwargs": kwargs,
         "eta": eta_class(headers.get("eta"), ctx.request_start),
         "retries": headers.get("retries", 0),
         "queue": queue,
@@ -517,18 +748,97 @@ def normalise_queue_row(row: dict, ctx: CompareContext) -> dict:
     kwargs = _blank_time_paths(
         kwargs, [p[7:] for p in paths if p.startswith("kwargs/")], ctx.request_start
     )
+    args, kwargs = _sub_payload(args, flat), _sub_payload(kwargs, flat)
+    if task == effects.PROCESS_LOGS_TASK:
+        args, kwargs = _blank_topology_hosts(args), _blank_topology_hosts(kwargs)
+    args, kwargs = _blank_row_refs(args, kwargs, task, "rust", ctx)
     return {
         "task": task,
-        "args": _sub_payload(args, flat),
-        "kwargs": _sub_payload(kwargs, flat),
+        "args": args,
+        "kwargs": kwargs,
         "eta": eta_class(row.get("visible_at"), ctx.request_start),
         "retries": row.get("attempts", 0),
         "queue": row.get("queue", "celery"),
     }
 
 
-def compare_jobs(dj_jobs: list[dict], rs_jobs: list[dict]) -> str | None:
-    """Compare normalised job multisets (order-insensitive, ETA-tolerant)."""
+def _blank_topology_hosts(node):
+    """Blank 127.0.0.1:port values (process_logs Host header only)."""
+    if isinstance(node, str):
+        return effects.TOPOLOGY_HOST_RE.sub("<replay-host>", node)
+    if isinstance(node, dict):
+        return {k: _blank_topology_hosts(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_blank_topology_hosts(v) for v in node]
+    return node
+
+
+def compare_jobs(
+    dj_jobs: list[dict],
+    rs_jobs: list[dict],
+    known_absent: dict | None = None,
+    known_shapes: list | None = None,
+    gap_ctx: dict | None = None,
+) -> str | None:
+    """Compare normalised job multisets (order-insensitive, ETA-tolerant).
+
+    ``known_absent`` ({task: fix_issue}) pins known divergences: each
+    pinned task must be Django-present and Rust-absent, and is excluded
+    from the multiset compare. ``known_shapes`` ([(task, fix_issue,
+    dj_match, rs_match)]) pins exact normalised bytes per side for a
+    task whose content diverges on this request: both sides must emit
+    it and match byte for byte, else the pin fails loudly (fix landed
+    or behavior changed — remove or update the pin).
+    """
+    from .session import render_template
+
+    known_absent = known_absent or {}
+    for task, issue in known_absent.items():
+        dj_have = [j for j in dj_jobs if j["task"] == task]
+        rs_have = [j for j in rs_jobs if j["task"] == task]
+        if rs_have:
+            return (
+                f"known-divergence pin {task} ({issue}) is stale: Rust now "
+                "emits it — remove the pin and compare fully"
+            )
+        if not dj_have:
+            return (
+                f"known-divergence pin {task} ({issue}): Django stopped "
+                "emitting it — behavior changed, investigate"
+            )
+    dj_jobs = [j for j in dj_jobs if j["task"] not in known_absent]
+    rs_jobs = [j for j in rs_jobs if j["task"] not in known_absent]
+    for task, issue, dj_match, rs_match in known_shapes or []:
+        dj_have = [j for j in dj_jobs if j["task"] == task]
+        rs_have = [j for j in rs_jobs if j["task"] == task]
+        if not dj_have or not rs_have:
+            return (
+                f"known-shape pin {task} ({issue}) never engaged "
+                f"(django={len(dj_have)}, rust={len(rs_have)}) — the task "
+                "stopped being emitted on this request or the pin is "
+                "misplaced; remove or fix it"
+            )
+        try:
+            dj_want = render_template(dj_match, gap_ctx or {})
+            rs_want = render_template(rs_match, gap_ctx or {})
+        except KeyError as exc:
+            return f"known-shape pin {task} ({issue}): unrenderable match: {exc}"
+        for job in dj_have:
+            if job != dj_want:
+                return (
+                    f"known-shape pin {task} ({issue}): Django bytes changed — "
+                    f"got {job!r:.400}"
+                )
+        for job in rs_have:
+            if job != rs_want:
+                return (
+                    f"known-shape pin {task} ({issue}): Rust bytes changed — "
+                    "fix landed or behavior changed; remove or update the pin. "
+                    f"got {job!r:.400}"
+                )
+    pinned_tasks = {task for task, _i, _d, _r in (known_shapes or [])}
+    dj_jobs = [j for j in dj_jobs if j["task"] not in pinned_tasks]
+    rs_jobs = [j for j in rs_jobs if j["task"] not in pinned_tasks]
     remaining = list(rs_jobs)
     unmatched = []
     for job in dj_jobs:
