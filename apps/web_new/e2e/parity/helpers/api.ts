@@ -13057,3 +13057,62 @@ export async function serverIntakeXProjectFlags(
     guestViewAll: rec["guest_view_all_features"] === true,
   };
 }
+
+// --- Desktop bare sign-in, deep links, onboarding seam (NEWFRONT-208,
+// --- DESK-011–015, DESK-027). Appended; existing helpers above are untouched
+// --- per the shared driver contract.
+
+/** Edge origin serving the oracle (browser-facing paths go through it). */
+function deskSigninOracleBase(): string {
+  const raw = (process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000").trim().replace(/\/+$/, "");
+  if (raw === "") throw new Error("[parity] PARITY_ORACLE_URL is empty.");
+  return raw;
+}
+
+/**
+ * Raw answer of the desktop code-exchange route. By default this probes the
+ * browser-facing address the native shell navigates its webview to
+ * (`/api/auth/desktop-exchange/` through the edge proxy); `viaEdge: false`
+ * probes the API service directly (`/auth/desktop-exchange/`).
+ */
+export async function serverDeskSigninDesktopExchangeStatus(input: {
+  method?: "GET" | "POST";
+  query?: string;
+  sessionCookie?: string;
+  viaEdge?: boolean;
+}): Promise<{ status: number; body: string }> {
+  const query = input.query ?? "code=parity-code&state=parity-state";
+  const url =
+    input.viaEdge === false
+      ? `${apiBaseFromEnv()}/auth/desktop-exchange/?${query}`
+      : `${deskSigninOracleBase()}/api/auth/desktop-exchange/?${query}`;
+  const headers: Record<string, string> = {};
+  if (input.sessionCookie !== undefined && input.sessionCookie !== "") headers["cookie"] = input.sessionCookie;
+  const init: RequestInit = { method: input.method ?? "GET", headers, redirect: "manual" };
+  if (init.method === "POST") {
+    headers["content-type"] = "application/x-www-form-urlencoded";
+    init.body = new URLSearchParams({ code: "parity-code", state: "parity-state" });
+  }
+  const res = await fetch(url, init);
+  return { status: res.status, body: (await res.text()).slice(0, 2000) };
+}
+
+/**
+ * True when the session behind `sessionCookie` carries the desktop client
+ * marker (`pidash_client == "desktop"` in the decoded session). The marker
+ * is set only by the desktop sign-in flow; browser sessions never carry it.
+ */
+export async function serverDeskSigninSessionHasDesktopMarker(sessionCookie: string): Promise<boolean> {
+  const key = /(?:^|;\s*)session-id=([^;]+)/.exec(sessionCookie)?.[1] ?? "";
+  if (key === "") throw new Error("[parity] session cookie carries no session-id.");
+  const out = await desktopRuntimeShell(
+    `import json\n` +
+      `from pi_dash.db.models.session import Session\n` +
+      `row = Session.objects.filter(session_key=${JSON.stringify(key)}).first()\n` +
+      `data = row.get_decoded() if row is not None else {}\n` +
+      `print("PARITY_DESK_SIGNIN:" + json.dumps({"desktop": data.get("pidash_client") == "desktop"}))\n`
+  );
+  const line = /^PARITY_DESK_SIGNIN:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (line === "") throw new Error("[parity] desktop-marker probe produced no row.");
+  return (JSON.parse(line) as { desktop?: unknown }).desktop === true;
+}

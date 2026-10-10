@@ -5034,6 +5034,18 @@ export interface ParityDriver {
   /** Whether the sync loader skeleton is currently showing. */
   pagesLiveSyncLoaderVisible(): Promise<boolean>;
 
+  // --- Desktop bare sign-in, deep links, onboarding seam (NEWFRONT-208,
+  // --- DESK-011–015, DESK-027). Appended; existing methods above are
+  // --- untouched per the shared driver contract.
+  /** True when the entry shows the marketing frame around the sign-in card. */
+  deskSigninMarketingFrameVisible(): Promise<boolean>;
+  /** Progress reading ("current/total") of the onboarding header, or null. */
+  deskSigninOnboardingProgress(): Promise<string | null>;
+  /** External footer links of the open product-updates dialog. */
+  deskSigninUpdateDialogLinks(): Promise<DeskSigninUpdateLink[]>;
+  /** Click an updates-dialog footer link; resolves with the popup URL or null. */
+  deskSigninOpenUpdateDialogLink(label: string): Promise<string | null>;
+
   // --- Intake cross-cutting (NEWFRONT-260, INT-018/030/031/032/034).
   // --- Appended; existing methods above are untouched per the shared driver
   // --- contract. Minimal intake navigation of our own (sibling list blocks
@@ -5208,6 +5220,18 @@ export interface PagesLiveSocketClose {
   code: number;
   /** Close reason (empty when the drop carried no close frame). */
   reason: string;
+}
+
+/** One external footer link of the product-updates dialog (NEWFRONT-208). */
+export interface DeskSigninUpdateLink {
+  /** Visible label. */
+  label: string;
+  /** Lower-cased tag name of the rendered element. */
+  tag: string;
+  /** Resolved destination address. */
+  href: string;
+  /** Link target attribute, or null when absent. */
+  target: string | null;
 }
 
 /** One catalog table row: the user-visible definition facts. */
