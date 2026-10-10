@@ -29703,8 +29703,15 @@ export class WebDriver implements ParityDriver {
       const controls = [...dialog.querySelectorAll("div.flex.flex-wrap.items-center.gap-2 > *")];
       const controlTab = (index: number): number | null => {
         // The status control carries its tab index on a wrapper, the
-        // others on their trigger buttons: first tabindex wins.
-        return asInt(controls[index]?.querySelector("[tabindex]")?.getAttribute("tabindex"));
+        // others on their trigger buttons. Inner tabindex="-1"
+        // scaffolding never takes sequential focus, so it is skipped:
+        // first non-negative tabindex wins, else null.
+        const tagged = [...(controls[index]?.querySelectorAll("[tabindex]") ?? [])];
+        for (const element of tagged) {
+          const value = asInt(element.getAttribute("tabindex"));
+          if (value !== null && value >= 0) return value;
+        }
+        return null;
       };
       const cancel = [...dialog.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Cancel");
       const submit = [...dialog.querySelectorAll('button[type="submit"]')][0];
