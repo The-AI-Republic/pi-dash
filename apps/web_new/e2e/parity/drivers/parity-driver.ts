@@ -4675,6 +4675,89 @@ export interface ParityDriver {
   runnersWaitRunnerDeleteWorking(): Promise<void>;
   /** Wait until the revoke-runner confirm shows its in-flight state. */
   runnersWaitRunnerRevokeWorking(): Promise<void>;
+
+  // --- Intake detail (NEWFRONT-258, INT-019/024/026-029). Observed on the
+  // --- running old app: the detail pane shows an inline title field, an
+  // --- autosaving rich-text description, a reaction row, an attachments
+  // --- section, and a properties panel whose state row is always disabled;
+  // --- the header carries prev/next chevrons, arrow-key navigation with
+  // --- wrap, and copy/open-work-item actions that move between a button
+  // --- pair (resolved items) and an overflow menu (open items).
+
+  /** Title text currently shown in the detail title field. */
+  intakeDetailTitle(): Promise<string>;
+  /** Whether the detail title field accepts edits. */
+  intakeDetailTitleEditable(): Promise<boolean>;
+  /** Replace the detail title; resolves once the save round-trip settles. */
+  intakeDetailSetTitle(title: string): Promise<void>;
+  /** Focus the detail title field without changing its text. */
+  intakeDetailFocusTitle(): Promise<void>;
+  /** Plain text currently shown in the detail description editor. */
+  intakeDetailDescriptionText(): Promise<string>;
+  /** Whether the detail description editor accepts edits. */
+  intakeDetailDescriptionEditable(): Promise<boolean>;
+  /** Replace the detail description; resolves once the autosave settles. */
+  intakeDetailSetDescription(text: string): Promise<void>;
+  /** Focus the detail description editor without changing its text. */
+  intakeDetailFocusDescription(): Promise<void>;
+  /** Reaction chips currently shown on the detail, each as the user reads it. */
+  intakeDetailReactions(): Promise<string[]>;
+  /** Add `emoji` to the detail through the reaction picker. */
+  intakeDetailAddReaction(emoji: string): Promise<void>;
+  /** Attachment file names currently listed on the detail. */
+  intakeDetailAttachmentNames(): Promise<string[]>;
+  /** Whether the named properties-panel row is currently disabled. */
+  intakeDetailPropertyDisabled(label: IntakeDetailProperty): Promise<boolean>;
+  /** Priority label currently shown in the properties panel. */
+  intakeDetailPriorityText(): Promise<string>;
+  /** Set the priority through the properties panel; resolves on save. */
+  intakeDetailSetPriority(priority: string): Promise<void>;
+  /** Assignee names currently shown in the properties panel. */
+  intakeDetailAssigneeTexts(): Promise<string[]>;
+  /** Add the named member as an assignee through the properties panel. */
+  intakeDetailAddAssignee(displayName: string): Promise<void>;
+  /** Due-date text currently shown in the properties panel. */
+  intakeDetailDueDateText(): Promise<string>;
+  /** Pick a due date `daysFromNow` days out through the properties panel. */
+  intakeDetailSetDueDate(daysFromNow: number): Promise<void>;
+  /** Label names currently shown in the properties panel. */
+  intakeDetailLabelTexts(): Promise<string[]>;
+  /** Attach the named project label through the properties panel. */
+  intakeDetailAddLabel(labelName: string): Promise<void>;
+  /** Copy the work-item link via whichever control the state offers. */
+  intakeDetailCopyLink(): Promise<void>;
+  /** Whether the header offers an open-work-item action. */
+  intakeDetailOpenWorkItemVisible(): Promise<boolean>;
+  /** Follow the header open-work-item action; resolves on navigation. */
+  intakeDetailOpenWorkItem(): Promise<void>;
+  /** The `inboxIssueId` URL param, or null when the URL carries none. */
+  intakeDetailCurrentInboxIssueId(): Promise<string | null>;
+  /** Full current URL including query params, as the address bar shows it. */
+  intakeDetailCurrentUrl(): Promise<string>;
+  /** Press the up/down arrow key with the detail focused. */
+  intakeDetailPressArrow(direction: "up" | "down"): Promise<void>;
+  /** Click the header prev/next chevron; resolves once the detail swaps. */
+  intakeDetailClickChevron(direction: "prev" | "next"): Promise<void>;
+  /** Open the intake URL `path` raw (no feed wait; stale ids redirect). */
+  intakeDetailOpenRaw(path: string): Promise<void>;
+  /** Whether the request list pane currently renders. */
+  intakeDetailListVisible(): Promise<boolean>;
+  /** Select the list row showing `name`; resolves once the detail swaps. */
+  intakeDetailSelectListItem(name: string): Promise<void>;
+  /** Whether the description-versions control currently renders. */
+  intakeDetailVersionsVisible(): Promise<boolean>;
+  /** Open the description-versions list. */
+  intakeDetailOpenVersions(): Promise<void>;
+  /** Version entries currently listed, each as the user reads it. */
+  intakeDetailVersionTexts(): Promise<string[]>;
+  /** Open version `index` (0 = latest) in the version viewer. */
+  intakeDetailOpenVersion(index: number): Promise<void>;
+  /** Plain text of the open version viewer, or null when closed. */
+  intakeDetailVersionModalText(): Promise<string | null>;
+  /** Restore the open version into the editor; resolves once applied. */
+  intakeDetailRestoreVersion(): Promise<void>;
+  /** Close the version viewer without restoring. */
+  intakeDetailCloseVersionModal(): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -5331,6 +5414,9 @@ export interface ArchivesFilterExpression {
 
 /** Archives tab keys (NEWFRONT-226, ARCH-029). */
 export type ArchivesTab = "issues" | "cycles" | "modules";
+
+/** Intake detail properties-panel row keys (NEWFRONT-258, INT-019). */
+export type IntakeDetailProperty = "State" | "Assignees" | "Priority" | "Due date" | "Labels";
 
 /** Traffic counters since the archives spy began (NEWFRONT-226, ARCH-032). */
 export interface ArchivesTrafficCounts {

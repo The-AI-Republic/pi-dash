@@ -83,6 +83,7 @@ import type {
   RunnersTab,
   RunnersTableRow,
   ServedShellMarkers,
+  IntakeDetailProperty,
   WorkspaceOnboardingView,
 } from "./parity-driver";
 
@@ -25062,5 +25063,398 @@ export class WebDriver implements ParityDriver {
     const dialog = await this.runnersWaitForConfirm("Revoke runner?");
     const revoke = dialog.getByRole("button", { name: "Revoke", exact: true });
     await expect.poll(() => revoke.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  // --- Intake detail (NEWFRONT-258, INT-019/024/026-029). Observed on the
+  // --- running old app: the title is a textarea while editable and a
+  // --- static block once read-only; the description editor is the page's
+  // --- contenteditable outside the "Add comment" group; title and
+  // --- description autosave past a debounce and report through a
+  // --- Saving/Saved indicator; property rows pair a label span with one
+  // --- trigger button (labels omit their add control when disabled);
+  // --- resolved items swap the overflow menu for Copy/Open buttons.
+
+  /** The detail description editor (the feed composer is group-scoped out). */
+  private intakeDetailEditor(): Locator {
+    return this.page.locator('//*[@contenteditable and not(ancestor::*[@role="group"])]').first();
+  }
+
+  /** The reaction picker trigger in the detail (composer pickers excluded). */
+  private intakeDetailReactionTrigger(): Locator {
+    return this.page.locator('//button[@aria-haspopup="dialog" and not(ancestor::*[@role="group"])]').first();
+  }
+
+  /** The desktop header row, anchored on the prev chevron both states share. */
+  private intakeDetailHeaderRow(): Locator {
+    return this.page.getByRole("button", { name: "Previous work item" }).locator("xpath=ancestor::div[3]");
+  }
+
+  /** The overflow trigger: the header's only unlabeled icon-only button. */
+  private intakeDetailOverflowTrigger(): Locator {
+    return this.intakeDetailHeaderRow().locator("button:not([aria-label])").filter({ hasNotText: /\S/ });
+  }
+
+  /** One properties-panel row, pairing a label span with its trigger. */
+  private intakeDetailPropertyRow(label: IntakeDetailProperty): Locator {
+    return this.page
+      .locator("span", { hasText: new RegExp(`^${label}$`) })
+      .first()
+      .locator("xpath=ancestor::div[2]");
+  }
+
+  /** The attachments section (dropzone plus the uploaded list). */
+  private intakeDetailAttachments(): Locator {
+    return this.page.getByText("Attachments", { exact: true }).locator("xpath=ancestor::div[2]");
+  }
+
+  /** The open popup listbox (headless UI mounts it last). */
+  private intakeDetailListbox(): Locator {
+    return this.page.getByRole("listbox").last();
+  }
+
+  /** The description-version viewer dialog (toasts share the dialog role). */
+  private intakeDetailVersionDialog(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Edited by" });
+  }
+
+  /** Wait for the header save indicator to report a settled save. */
+  private async intakeDetailWaitSaved(): Promise<void> {
+    await this.page.getByText("Saved", { exact: true }).first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  /** Wait for the detail title area to show a value (either rendering). */
+  private async intakeDetailTitleSettled(): Promise<void> {
+    await this.page
+      .locator("#title-input")
+      .or(this.page.locator("div.text-20"))
+      .first()
+      .waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async intakeDetailTitle(): Promise<string> {
+    await this.intakeDetailTitleSettled();
+    const field = this.page.locator("#title-input");
+    if ((await field.count()) > 0) return ((await field.first().inputValue()) ?? "").trim();
+    return ((await this.page.locator("div.text-20").first().innerText()) ?? "").trim();
+  }
+
+  async intakeDetailTitleEditable(): Promise<boolean> {
+    await this.intakeDetailTitleSettled();
+    const field = this.page.locator("#title-input");
+    if ((await field.count()) === 0) return false;
+    return field.first().isEnabled();
+  }
+
+  async intakeDetailSetTitle(title: string): Promise<void> {
+    const field = this.page.locator("#title-input");
+    await field.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    await field.first().fill(title, { timeout: WebDriver.OPEN_MS });
+    // The title autosaves past a debounce; let the save cycle start,
+    // then wait for the indicator to report it settled.
+    await this.page.waitForTimeout(2_200);
+    await this.intakeDetailWaitSaved();
+  }
+
+  async intakeDetailFocusTitle(): Promise<void> {
+    await this.page.locator("#title-input").first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async intakeDetailDescriptionText(): Promise<string> {
+    const editor = this.intakeDetailEditor();
+    await editor.waitFor({ timeout: WebDriver.OPEN_MS });
+    return ((await editor.innerText()) ?? "").trim();
+  }
+
+  async intakeDetailDescriptionEditable(): Promise<boolean> {
+    const editor = this.intakeDetailEditor();
+    await editor.waitFor({ timeout: WebDriver.OPEN_MS });
+    return (await editor.getAttribute("contenteditable")) === "true";
+  }
+
+  async intakeDetailSetDescription(text: string): Promise<void> {
+    const editor = this.intakeDetailEditor();
+    await editor.waitFor({ timeout: WebDriver.OPEN_MS });
+    await editor.click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+    await editor.pressSequentially(text, { delay: 5, timeout: WebDriver.OPEN_MS });
+    await this.page.waitForTimeout(2_200);
+    await this.intakeDetailWaitSaved();
+  }
+
+  async intakeDetailFocusDescription(): Promise<void> {
+    await this.intakeDetailEditor().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async intakeDetailReactions(): Promise<string[]> {
+    const trigger = this.intakeDetailReactionTrigger();
+    await trigger.waitFor({ timeout: WebDriver.OPEN_MS });
+    // Reaction chips nest inside the picker trigger as buttons carrying
+    // the emoji plus its count; the add control itself has no text.
+    const texts = await trigger.locator("button").allInnerTexts();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async intakeDetailAddReaction(emoji: string): Promise<void> {
+    const trigger = this.intakeDetailReactionTrigger();
+    await trigger.waitFor({ timeout: WebDriver.OPEN_MS });
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
+    const picker = this.page.getByRole("dialog").filter({ hasText: emoji });
+    await picker.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    await picker.first().getByText(emoji, { exact: true }).first().click({ timeout: WebDriver.OPEN_MS });
+    await trigger.locator("button", { hasText: emoji }).first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async intakeDetailAttachmentNames(): Promise<string[]> {
+    const scope = this.intakeDetailAttachments();
+    await scope.waitFor({ timeout: WebDriver.OPEN_MS });
+    // Each uploaded row links to its file; the first text line is the
+    // file stem (the dropzone itself links nowhere, so links are rows).
+    const links = scope.locator("a");
+    const names: string[] = [];
+    for (let i = 0; i < (await links.count()); i++) {
+      const first = ((await links.nth(i).innerText()) ?? "")
+        .split("\n")
+        .map((line) => line.trim())
+        .find((line) => line.length > 0);
+      if (first !== undefined) names.push(first);
+    }
+    return names;
+  }
+
+  async intakeDetailPropertyDisabled(label: IntakeDetailProperty): Promise<boolean> {
+    const row = this.intakeDetailPropertyRow(label);
+    // Labels omit their add control when disabled instead of disabling it.
+    if (label === "Labels") {
+      await row.waitFor({ timeout: WebDriver.OPEN_MS });
+      return (await row.getByRole("button", { name: "Add labels" }).count()) === 0;
+    }
+    const trigger = row.getByRole("button").first();
+    await trigger.waitFor({ timeout: WebDriver.OPEN_MS });
+    return trigger.isDisabled();
+  }
+
+  async intakeDetailPriorityText(): Promise<string> {
+    const trigger = this.intakeDetailPropertyRow("Priority").getByRole("button").first();
+    await trigger.waitFor({ timeout: WebDriver.OPEN_MS });
+    return ((await trigger.innerText()) ?? "").trim();
+  }
+
+  async intakeDetailSetPriority(priority: string): Promise<void> {
+    const trigger = this.intakeDetailPropertyRow("Priority").getByRole("button").first();
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
+    const popup = this.intakeDetailListbox();
+    await popup.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    await popup.getByRole("option", { name: priority }).first().click({ timeout: WebDriver.OPEN_MS });
+    // Single-select popups unmount on pick; the PATCH lands after.
+    await popup.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+    await this.page.waitForTimeout(1_000);
+  }
+
+  async intakeDetailAssigneeTexts(): Promise<string[]> {
+    const trigger = this.intakeDetailPropertyRow("Assignees").getByRole("button").first();
+    await trigger.waitFor({ timeout: WebDriver.OPEN_MS });
+    const text = ((await trigger.innerText()) ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    return text;
+  }
+
+  async intakeDetailAddAssignee(displayName: string): Promise<void> {
+    const trigger = this.intakeDetailPropertyRow("Assignees").getByRole("button").first();
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
+    const popup = this.intakeDetailListbox();
+    await popup.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    await popup.getByRole("option", { name: displayName }).first().click({ timeout: WebDriver.OPEN_MS });
+    // Multi-select popups stay open; dismiss and let the PATCH land.
+    await this.page.keyboard.press("Escape");
+    await popup.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+    await this.page.waitForTimeout(1_000);
+  }
+
+  async intakeDetailDueDateText(): Promise<string> {
+    const trigger = this.intakeDetailPropertyRow("Due date").getByRole("button").first();
+    await trigger.waitFor({ timeout: WebDriver.OPEN_MS });
+    return ((await trigger.innerText()) ?? "").trim();
+  }
+
+  async intakeDetailSetDueDate(daysFromNow: number): Promise<void> {
+    const trigger = this.intakeDetailPropertyRow("Due date").getByRole("button").first();
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
+    const now = new Date();
+    const target = new Date(now);
+    target.setDate(target.getDate() + daysFromNow);
+    if (target.getFullYear() !== now.getFullYear() || target.getMonth() !== now.getMonth()) {
+      // One rollover at most for the day ranges scenarios use.
+      await this.page.getByRole("button", { name: "Go to the Next Month" }).click({ timeout: WebDriver.OPEN_MS });
+    }
+    // Day buttons carry full-date accessible names ("Sunday, October
+    // 18th, 2026"); rebuild the label for the target day.
+    const weekday = new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(target);
+    const month = new Intl.DateTimeFormat("en-US", { month: "long" }).format(target);
+    const day = target.getDate();
+    const ordinal =
+      day % 10 === 1 && day !== 11
+        ? "st"
+        : day % 10 === 2 && day !== 12
+          ? "nd"
+          : day % 10 === 3 && day !== 13
+            ? "rd"
+            : "th";
+    await this.page
+      .getByRole("button", { name: `${weekday}, ${month} ${day}${ordinal}, ${target.getFullYear()}` })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.waitForTimeout(1_000);
+  }
+
+  async intakeDetailLabelTexts(): Promise<string[]> {
+    const row = this.intakeDetailPropertyRow("Labels");
+    await row.waitFor({ timeout: WebDriver.OPEN_MS });
+    // Chips render their names; drop the row label and the add trigger.
+    const text = ((await row.innerText()) ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && line !== "Labels" && line !== "Add labels");
+    return text;
+  }
+
+  async intakeDetailAddLabel(labelName: string): Promise<void> {
+    const row = this.intakeDetailPropertyRow("Labels");
+    await row.getByRole("button", { name: "Add labels" }).click({ timeout: WebDriver.OPEN_MS });
+    const popup = this.intakeDetailListbox();
+    await popup.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    await popup.getByRole("option", { name: labelName }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press("Escape");
+    await popup.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+    await this.page.waitForTimeout(1_000);
+  }
+
+  async intakeDetailCopyLink(): Promise<void> {
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the click.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    // Resolved items offer a direct button; open items hide copy in the
+    // overflow menu. Only the desktop header is visible, so at most one
+    // direct button ever matches.
+    const direct = this.page.getByRole("button", { name: "Copy work item link" });
+    if ((await direct.count()) > 0) {
+      await direct.first().click({ timeout: WebDriver.OPEN_MS });
+      return;
+    }
+    await this.intakeDetailOverflowTrigger().click({ timeout: WebDriver.OPEN_MS });
+    await this.page
+      .locator('[role="menuitem"]:visible', { hasText: "Copy work item link" })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async intakeDetailOpenWorkItemVisible(): Promise<boolean> {
+    return (await this.page.getByRole("button", { name: "Open work item" }).count()) > 0;
+  }
+
+  async intakeDetailOpenWorkItem(): Promise<void> {
+    await this.page.getByRole("button", { name: "Open work item" }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.waitForURL("**/browse/**", { timeout: WebDriver.OPEN_MS });
+  }
+
+  async intakeDetailCurrentInboxIssueId(): Promise<string | null> {
+    return new URL(this.page.url()).searchParams.get("inboxIssueId");
+  }
+
+  async intakeDetailCurrentUrl(): Promise<string> {
+    return this.page.url();
+  }
+
+  async intakeDetailPressArrow(direction: "up" | "down"): Promise<void> {
+    await this.page.keyboard.press(direction === "up" ? "ArrowUp" : "ArrowDown", { delay: 50 });
+    await this.page.waitForTimeout(800);
+  }
+
+  async intakeDetailClickChevron(direction: "prev" | "next"): Promise<void> {
+    const before = this.page.url();
+    await this.page
+      .getByRole("button", { name: direction === "prev" ? "Previous work item" : "Next work item" })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    // The detail swaps client-side; a single-item list wraps onto
+    // itself with no URL change, so a missed swap is not a failure.
+    await this.page
+      .waitForFunction((prev: string) => window.location.href !== prev, before, { timeout: 8_000 })
+      .catch(() => undefined);
+    await this.intakeDetailTitleSettled();
+  }
+
+  async intakeDetailOpenRaw(path: string): Promise<void> {
+    // Same navigation as the full open, minus the feed wait: stale or
+    // forbidden ids redirect to the list instead of rendering a feed.
+    await this.page.goto(path);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async intakeDetailListVisible(): Promise<boolean> {
+    // List rows link to their item with the tab param; the tab strip
+    // itself uses buttons, so links mark a rendered list.
+    return (await this.page.locator('a[href*="currentTab="]').count()) > 0;
+  }
+
+  async intakeDetailSelectListItem(name: string): Promise<void> {
+    const before = this.page.url();
+    await this.page.getByRole("link", { name }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page
+      .waitForFunction((prev: string) => window.location.href !== prev, before, { timeout: 8_000 })
+      .catch(() => undefined);
+    await this.intakeDetailTitleSettled();
+  }
+
+  async intakeDetailVersionsVisible(): Promise<boolean> {
+    return (await this.page.getByRole("button", { name: /Last edited by/ }).count()) > 0;
+  }
+
+  async intakeDetailOpenVersions(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: /Last edited by/ })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.locator('[role="menuitem"]:visible').first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async intakeDetailVersionTexts(): Promise<string[]> {
+    const texts = await this.page.locator('[role="menuitem"]:visible').allInnerTexts();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async intakeDetailOpenVersion(index: number): Promise<void> {
+    await this.page.locator('[role="menuitem"]:visible').nth(index).click({ timeout: WebDriver.OPEN_MS });
+    // The dialog wrapper itself resolves hidden (zero box with visible
+    // overflow), so settle on its Restore button instead of the dialog.
+    await this.intakeDetailVersionDialog()
+      .getByRole("button", { name: "Restore" })
+      .first()
+      .waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async intakeDetailVersionModalText(): Promise<string | null> {
+    const dialog = this.intakeDetailVersionDialog();
+    if ((await dialog.count()) === 0) return null;
+    return ((await dialog.first().innerText()) ?? "").trim();
+  }
+
+  async intakeDetailRestoreVersion(): Promise<void> {
+    const dialog = this.intakeDetailVersionDialog();
+    await dialog.getByRole("button", { name: "Restore" }).click({ timeout: WebDriver.OPEN_MS });
+    await dialog
+      .getByRole("button", { name: "Restore" })
+      .first()
+      .waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
+    await this.intakeDetailWaitSaved();
+  }
+
+  async intakeDetailCloseVersionModal(): Promise<void> {
+    const dialog = this.intakeDetailVersionDialog();
+    await dialog.getByRole("button", { name: "Cancel" }).click({ timeout: WebDriver.OPEN_MS });
+    await dialog
+      .getByRole("button", { name: "Restore" })
+      .first()
+      .waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
   }
 }

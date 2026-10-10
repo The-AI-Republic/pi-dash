@@ -73,6 +73,7 @@ import type {
   RunnersTab,
   RunnersTableRow,
   ServedShellMarkers,
+  IntakeDetailProperty,
   WorkspaceOnboardingView,
 } from "./parity-driver";
 
@@ -7068,6 +7069,119 @@ export class WebNewDriver implements ParityDriver {
 
   async cyclesEditDetailReadOnlyNotice(): Promise<string | null> {
     return todo("cyclesEditDetailReadOnlyNotice");
+  // --- Intake detail (NEWFRONT-258, INT-019/024/026-029). Stubs: the area
+  // --- has not landed in apps/web_new, so every action throws.
+
+  async intakeDetailTitle(): Promise<string> {
+    return todo("intakeDetailTitle");
+  }
+  async intakeDetailTitleEditable(): Promise<boolean> {
+    return todo("intakeDetailTitleEditable");
+  }
+  async intakeDetailSetTitle(_title: string): Promise<void> {
+    return todo("intakeDetailSetTitle");
+  }
+  async intakeDetailFocusTitle(): Promise<void> {
+    return todo("intakeDetailFocusTitle");
+  }
+  async intakeDetailDescriptionText(): Promise<string> {
+    return todo("intakeDetailDescriptionText");
+  }
+  async intakeDetailDescriptionEditable(): Promise<boolean> {
+    return todo("intakeDetailDescriptionEditable");
+  }
+  async intakeDetailSetDescription(_text: string): Promise<void> {
+    return todo("intakeDetailSetDescription");
+  }
+  async intakeDetailFocusDescription(): Promise<void> {
+    return todo("intakeDetailFocusDescription");
+  }
+  async intakeDetailReactions(): Promise<string[]> {
+    return todo("intakeDetailReactions");
+  }
+  async intakeDetailAddReaction(_emoji: string): Promise<void> {
+    return todo("intakeDetailAddReaction");
+  }
+  async intakeDetailAttachmentNames(): Promise<string[]> {
+    return todo("intakeDetailAttachmentNames");
+  }
+  async intakeDetailPropertyDisabled(_label: IntakeDetailProperty): Promise<boolean> {
+    return todo("intakeDetailPropertyDisabled");
+  }
+  async intakeDetailPriorityText(): Promise<string> {
+    return todo("intakeDetailPriorityText");
+  }
+  async intakeDetailSetPriority(_priority: string): Promise<void> {
+    return todo("intakeDetailSetPriority");
+  }
+  async intakeDetailAssigneeTexts(): Promise<string[]> {
+    return todo("intakeDetailAssigneeTexts");
+  }
+  async intakeDetailAddAssignee(_displayName: string): Promise<void> {
+    return todo("intakeDetailAddAssignee");
+  }
+  async intakeDetailDueDateText(): Promise<string> {
+    return todo("intakeDetailDueDateText");
+  }
+  async intakeDetailSetDueDate(_daysFromNow: number): Promise<void> {
+    return todo("intakeDetailSetDueDate");
+  }
+  async intakeDetailLabelTexts(): Promise<string[]> {
+    return todo("intakeDetailLabelTexts");
+  }
+  async intakeDetailAddLabel(_labelName: string): Promise<void> {
+    return todo("intakeDetailAddLabel");
+  }
+  async intakeDetailCopyLink(): Promise<void> {
+    return todo("intakeDetailCopyLink");
+  }
+  async intakeDetailOpenWorkItemVisible(): Promise<boolean> {
+    return todo("intakeDetailOpenWorkItemVisible");
+  }
+  async intakeDetailOpenWorkItem(): Promise<void> {
+    return todo("intakeDetailOpenWorkItem");
+  }
+  async intakeDetailCurrentInboxIssueId(): Promise<string | null> {
+    return todo("intakeDetailCurrentInboxIssueId");
+  }
+  async intakeDetailCurrentUrl(): Promise<string> {
+    return todo("intakeDetailCurrentUrl");
+  }
+  async intakeDetailPressArrow(_direction: "up" | "down"): Promise<void> {
+    return todo("intakeDetailPressArrow");
+  }
+  async intakeDetailClickChevron(_direction: "prev" | "next"): Promise<void> {
+    return todo("intakeDetailClickChevron");
+  }
+  async intakeDetailOpenRaw(_path: string): Promise<void> {
+    return todo("intakeDetailOpenRaw");
+  }
+  async intakeDetailListVisible(): Promise<boolean> {
+    return todo("intakeDetailListVisible");
+  }
+  async intakeDetailSelectListItem(_name: string): Promise<void> {
+    return todo("intakeDetailSelectListItem");
+  }
+  async intakeDetailVersionsVisible(): Promise<boolean> {
+    return todo("intakeDetailVersionsVisible");
+  }
+  async intakeDetailOpenVersions(): Promise<void> {
+    return todo("intakeDetailOpenVersions");
+  }
+  async intakeDetailVersionTexts(): Promise<string[]> {
+    return todo("intakeDetailVersionTexts");
+  }
+  async intakeDetailOpenVersion(_index: number): Promise<void> {
+    return todo("intakeDetailOpenVersion");
+  }
+  async intakeDetailVersionModalText(): Promise<string | null> {
+    return todo("intakeDetailVersionModalText");
+  }
+  async intakeDetailRestoreVersion(): Promise<void> {
+    return todo("intakeDetailRestoreVersion");
+  }
+  async intakeDetailCloseVersionModal(): Promise<void> {
+    return todo("intakeDetailCloseVersionModal");
   }
 
   // --- Archived work-item mutations (NEWFRONT-223, ARCH-008..013). ---
