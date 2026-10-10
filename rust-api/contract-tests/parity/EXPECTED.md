@@ -21,7 +21,7 @@ Counts (2026-10-10, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 508 OWNED, 20 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 85 tasks — 28 OWNED, 35 proxied by design, 22 MISSING;
+- Jobs: 85 tasks — 30 OWNED, 35 proxied by design, 20 MISSING;
   beat 26/26 OWNED.
 
 ## Routes
@@ -216,15 +216,6 @@ Fix: PIDASHCONV-837.
 
 ```expected-jobs
 W-automation :: pi_dash.bgtasks.issue_automation_task.archive_and_close_old_issues :: must-wire (lost without python worker)
-```
-
-### W-loop (2 rows)
-
-Fix: PIDASHCONV-838.
-
-```expected-jobs
-W-loop :: pi_dash.bgtasks.loop.fire_loop_target :: must-wire (lost without python worker)
-W-loop :: pi_dash.bgtasks.loop.scan_due_targets :: must-wire (lost without python worker)
 ```
 
 ### W-runner (7 rows)

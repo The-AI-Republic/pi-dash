@@ -258,6 +258,14 @@ async fn worker(concurrency: u32) -> MainResult {
     // needs a live `TurnSeam` and none exists (only test fakes) — never
     // register it here until the seam lands.
     pidash_jobs::assistant::register_sweep_handler(&mut registry, pools.primary().clone());
+    // Loop scan + fire (PIDASHCONV-838; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`). The
+    // beat entry fires the scanner every minute and the scanner fans
+    // out one fire job per eligible due target, so the Rust worker
+    // owns both — otherwise the loop is lost at switchover (parity
+    // gap W-loop).
+    pidash_jobs::loop_scan::register_scanner(&mut registry, pools.primary().clone());
+    pidash_jobs::loop_fire::register_fire(&mut registry, pools.primary().clone());
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()
