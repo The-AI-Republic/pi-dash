@@ -5,10 +5,10 @@ name: rust-api-contract-tests-tasks-mail-rust
 # Django worker (and beat) stay STOPPED and the Rust worker
 # (`pidash-api worker`) serves rust_job_queue instead. The replay suite
 # (tasks_mail/test_rust_replay.py) seeds rust_job_queue rows with the
-# exact Celery v2 payloads and asserts observable AMQP forwarding
-# for all 11 Python-owned D-07 task names (no tasks_mail handler
-# is registered in the binary, so every job forwards over AMQP) with
-# the Django worker stopped.
+# exact Celery v2 payloads: `notifications` (PIDASHCONV-834) and
+# `stack`/`send_email_notification` (PIDASHCONV-865) execute locally
+# (settle + flat broker + SMTP sink receipts), while the 8 remaining
+# Python-owned D-07 task names assert observable AMQP forwarding.
 
 on:
   push:
