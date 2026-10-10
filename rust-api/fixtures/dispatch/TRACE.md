@@ -73,6 +73,23 @@ D-06 assistant fixtures. `runner/models.py` is READ-ONLY for this domain
   (`execute`, `_usage_report`); `celery.py:156-186` (3 owned beat entries);
   `settings/common.py:531-590` (interval/limit defaults).
 
+## FX-DISP-08 model runtime (PIDASHCONV-866)
+
+- `fx-disp-08-model-runtime.golden.json` — the pydantic-ai 1.107.0 runtime
+  contract for `cloud_agent/runtime.py:18-76` (`execute`): the 15 real
+  function-tool JSON schemas (via `Agent` tool defs over
+  `tools.build_tools`, Django local settings, no DB rows), the 2 MCP
+  schemas (via FastMCP `list_tools` on replica wrappers AST-asserted
+  against `github_mcp.py:12-56`), the `final_result` output schema
+  (wire-captured), the genai-prices usage-extractor table (43 provider
+  URL patterns in snapshot order + `chat`/`default` mappings), and a
+  17-case stub-driven validation/coercion battery (exact retry-message
+  renderings). Generator: `/tmp/probe866/gen_runtime.py` (not committed;
+  see `_meta.method`). Wire tool order is registration order (probed):
+  `sorted(granted function names)` (build_tools sorts) + MCP tools in
+  `build_github_toolset` source order + `final_result` last. Output-tool
+  parameters carry `additionalProperties:false` LAST; function tools FIRST.
+
 ## Ported quirks (translate as-is)
 
 - `_cloud_admission_error` pseudo-key is not an `AgentRun` column (`creation.py:84-85`).

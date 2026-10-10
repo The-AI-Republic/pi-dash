@@ -1,0 +1,3917 @@
+{
+  "_meta": {
+    "method": "Executed with pi-dash/.venv (pydantic-ai/pydantic-core/fastmcp/genai-prices versions below), Django local settings for real tool imports; no DB rows touched. Schemas via real Agent tool defs; MCP via FastMCP replica wrappers AST-asserted against github_mcp.py; validation/coercion via stub-driven Agent.run battery.",
+    "generated_at": "2026-10-10T21:50:17.810714+00:00",
+    "pydantic_ai": "1.107.0",
+    "pydantic_core": "2.46.5",
+    "fastmcp": "3.4.4",
+    "genai_prices": "0.1.9",
+    "ported_from": "647d86045ab1ff8879ca6902f0c61193d687a1b5"
+  },
+  "agent": {
+    "max_tool_retries": 2,
+    "max_output_retries": 2,
+    "tool_timeout": 20,
+    "end_strategy": "early",
+    "tool_choice_openai": "required",
+    "tool_choice_anthropic": {
+      "type": "any"
+    }
+  },
+  "function_schemas": {
+    "github_get_file": {
+      "description": "Read a UTF-8 repository file from the verified GitHub binding.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "ref": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    "github_get_linked_pull_request": {
+      "description": "Read summary, diff, files, checks, reviews, or comments for the linked GitHub PR.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "aspect": {
+            "default": "summary",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "pidash_add_current_issue_comment": {
+      "description": "Add one Markdown comment to the current issue.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "body"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_create_project_issue": {
+      "description": "Create one backlog/default-state issue in the scheduler's project.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_get_current_issue": {
+      "description": "Read the issue bound to this run.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "pidash_get_project_issue": {
+      "description": "Get one issue by UUID, limited to this run's project.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "issue_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "issue_id"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_list_current_issue_comments": {
+      "description": "List the newest 50 comments on the issue bound to this run.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "pidash_list_issue_relations": {
+      "description": "List an issue's relations grouped by type from its side (blocked_by, blocking,\nrelates_to, ...), each with identifier, name and state. Defaults to the current issue.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "issue": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "pidash_list_linked_code_reviews": {
+      "description": "List code reviews linked to the current issue.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "pidash_list_project_states": {
+      "description": "List valid workflow states for the bound project.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "pidash_relate_issues": {
+      "description": "Record `issue <relation_type> each related issue` (identifiers like PROJ-12 or UUIDs).\nrelation_type is read from `issue`'s side: blocked_by, blocking, relates_to, duplicate,\nstart_before, start_after, finish_before, finish_after, implemented_by, implements.\nIdempotent: existing pairs come back under `unchanged`, pairs with a different relation\nunder `conflicts` (left as is). `issue` must be in this run's project.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "issue": {
+            "type": "string"
+          },
+          "relation_type": {
+            "type": "string"
+          },
+          "related_issues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "issue",
+          "relation_type",
+          "related_issues"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_search_project_issues": {
+      "description": "Search issue titles and descriptions in the bound project (max 50).",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_transition_current_issue": {
+      "description": "Move the current issue to a state in the same project.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "state_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state_id"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_unrelate_issues": {
+      "description": "Remove the `relation_type` relation between `issue` and each related issue. Pairs\nwithout it come back under `not_related`. `issue` must be in this run's project.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "issue": {
+            "type": "string"
+          },
+          "relation_type": {
+            "type": "string"
+          },
+          "related_issues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "issue",
+          "relation_type",
+          "related_issues"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_update_current_issue_workpad": {
+      "description": "Replace the current issue's durable Markdown workpad.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "body"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "mcp_schemas": {
+    "github_get_file": {
+      "description": "Read a bounded UTF-8 file from the run's verified project repository.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "ref": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    "github_get_linked_pull_request": {
+      "description": "Read one bounded aspect of the GitHub PR already linked to the run's issue.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "aspect": {
+            "default": "summary",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "output_schema": {
+    "name": "final_result",
+    "description": "The final response which ends this conversation",
+    "parameters": {
+      "properties": {
+        "outcome": {
+          "enum": [
+            "completed",
+            "blocked",
+            "noop"
+          ],
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 30000,
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        }
+      },
+      "required": [
+        "outcome",
+        "summary"
+      ],
+      "type": "object",
+      "additionalProperties": false
+    }
+  },
+  "wire_tool_order": [
+    "github_get_file",
+    "github_get_linked_pull_request",
+    "pidash_add_current_issue_comment",
+    "pidash_create_project_issue",
+    "pidash_get_current_issue",
+    "pidash_get_project_issue",
+    "pidash_list_current_issue_comments",
+    "pidash_list_issue_relations",
+    "pidash_list_linked_code_reviews",
+    "pidash_list_project_states",
+    "pidash_relate_issues",
+    "pidash_search_project_issues",
+    "pidash_transition_current_issue",
+    "pidash_unrelate_issues",
+    "pidash_update_current_issue_workpad",
+    "final_result"
+  ],
+  "usage_providers": [
+    {
+      "id": "anthropic",
+      "api_pattern": "https://api\\.anthropic\\.com",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "input_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "cache_creation_input_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cache_read_input_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cache_creation_input_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cache_creation",
+            "ephemeral_5m_input_tokens"
+          ],
+          "dest": "cache_write_5m_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cache_creation",
+            "ephemeral_1h_input_tokens"
+          ],
+          "dest": "cache_write_1h_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cache_read_input_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "server_tool_use",
+            "web_search_requests"
+          ],
+          "dest": "web_searches",
+          "required": false
+        },
+        {
+          "path": [
+            "output_tokens_details",
+            "thinking_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "output_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "arcee",
+      "api_pattern": "https://api\\.arcee\\.ai(?:/|$)",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "avian",
+      "api_pattern": "https://api\\.avian\\.io",
+      "chat": null,
+      "default": null
+    },
+    {
+      "id": "aws",
+      "api_pattern": "https://bedrock-runtime\\.[a-z0-9-]+\\.amazonaws\\.com(/|$)",
+      "chat": null,
+      "default": [
+        {
+          "path": [
+            "inputTokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "cacheReadInputTokens"
+          ],
+          "dest": "input_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cacheWriteInputTokens"
+          ],
+          "dest": "input_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cacheReadInputTokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cacheWriteInputTokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "outputTokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "azure",
+      "api_pattern": "(https?://)?([^.]*\\.)?(?:openai\\.azure\\.com|azure-api\\.net|cognitiveservices\\.azure\\.com|services\\.ai\\.azure\\.com)",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    },
+    {
+      "id": "baseten",
+      "api_pattern": "https://inference\\.baseten\\.co(?:/|$)",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    },
+    {
+      "id": "cerebras",
+      "api_pattern": "https://api\\.cerebras\\.ai",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    },
+    {
+      "id": "cloudflare",
+      "api_pattern": "https://api\\.cloudflare\\.com/client/v4/accounts/[^/]+/ai(?:/|$)",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "cohere",
+      "api_pattern": "https://api\\.cohere\\.(?:ai|com)",
+      "chat": null,
+      "default": [
+        {
+          "path": [
+            "input_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "output_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "cursor",
+      "api_pattern": "https://api\\.cursor\\.com",
+      "chat": null,
+      "default": null
+    },
+    {
+      "id": "deepseek",
+      "api_pattern": "https://api\\.deepseek\\.com",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    },
+    {
+      "id": "doubleword",
+      "api_pattern": "https://api\\.doubleword\\.ai",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    },
+    {
+      "id": "fireworks",
+      "api_pattern": "https://api\\.fireworks\\.ai",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    },
+    {
+      "id": "github-copilot",
+      "api_pattern": "https://api\\.githubcopilot\\.com",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    },
+    {
+      "id": "google",
+      "api_pattern": "https://(.*\\.)?googleapis\\.com",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "promptTokenCount"
+          ],
+          "dest": "input_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cachedContentTokenCount"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cacheTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "TEXT"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "cache_text_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cacheTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "AUDIO"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "cache_audio_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cacheTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "IMAGE"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "cache_image_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cacheTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "DOCUMENT"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "cache_image_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cacheTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "VIDEO"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "cache_video_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "promptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "TEXT"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_text_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "promptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "AUDIO"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "promptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "IMAGE"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_image_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "promptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "DOCUMENT"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_image_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "promptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "VIDEO"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_video_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "candidatesTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "TEXT"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "output_text_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "candidatesTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "AUDIO"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "candidatesTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "IMAGE"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "output_image_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "candidatesTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "DOCUMENT"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "output_image_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "candidatesTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "VIDEO"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "output_video_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "candidatesTokenCount"
+          ],
+          "dest": "output_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "thoughtsTokenCount"
+          ],
+          "dest": "output_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "thoughtsTokenCount"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "toolUsePromptTokenCount"
+          ],
+          "dest": "input_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "toolUsePromptTokenCount"
+          ],
+          "dest": "input_tool_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "toolUsePromptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "TEXT"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_text_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "toolUsePromptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "TEXT"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_text_tool_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "toolUsePromptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "AUDIO"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "toolUsePromptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "AUDIO"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_audio_tool_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "toolUsePromptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "IMAGE"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_image_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "toolUsePromptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "IMAGE"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_image_tool_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "toolUsePromptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "DOCUMENT"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_image_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "toolUsePromptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "DOCUMENT"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_image_tool_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "toolUsePromptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "VIDEO"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_video_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "toolUsePromptTokensDetails",
+            {
+              "array_match": {
+                "type": "array-match",
+                "field": "modality",
+                "match": {
+                  "equals": "VIDEO"
+                }
+              }
+            },
+            "tokenCount"
+          ],
+          "dest": "input_video_tool_tokens",
+          "required": false
+        }
+      ]
+    },
+    {
+      "id": "groq",
+      "api_pattern": "https://api\\.groq\\.com",
+      "chat": null,
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        }
+      ]
+    },
+    {
+      "id": "huggingface_cerebras",
+      "api_pattern": "https://router\\.huggingface\\.co/cerebras",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "huggingface_fireworks-ai",
+      "api_pattern": "https://router\\.huggingface\\.co/fireworks-ai",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "huggingface_groq",
+      "api_pattern": "https://router\\.huggingface\\.co/groq",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "huggingface_hyperbolic",
+      "api_pattern": "https://router\\.huggingface\\.co/hyperbolic",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "huggingface_nebius",
+      "api_pattern": "https://router\\.huggingface\\.co/nebius",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "huggingface_novita",
+      "api_pattern": "https://router\\.huggingface\\.co/novita",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "huggingface_nscale",
+      "api_pattern": "https://router\\.huggingface\\.co/nscale",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "huggingface_ovhcloud",
+      "api_pattern": "https://router\\.huggingface\\.co/ovhcloud",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "huggingface_publicai",
+      "api_pattern": "https://router\\.huggingface\\.co/publicai",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "huggingface_sambanova",
+      "api_pattern": "https://router\\.huggingface\\.co/sambanova",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "huggingface_together",
+      "api_pattern": "https://router\\.huggingface\\.co/together",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "minimax",
+      "api_pattern": "https://api\\.minimax(i)?\\.(?:com|io)",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "input_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "cache_creation_input_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cache_read_input_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cache_creation_input_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "cache_read_input_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "output_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "mistral",
+      "api_pattern": "https://api\\.mistral\\.ai",
+      "chat": null,
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "modal",
+      "api_pattern": "https://[^/]+\\.modal\\.(?:run|direct)(?:/|$)",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    },
+    {
+      "id": "moonshotai",
+      "api_pattern": "https://api\\.moonshot\\.",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    },
+    {
+      "id": "novita",
+      "api_pattern": "https://api\\.novita\\.ai",
+      "chat": null,
+      "default": null
+    },
+    {
+      "id": "openai",
+      "api_pattern": "https://api\\.openai\\.com",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    },
+    {
+      "id": "openrouter",
+      "api_pattern": "https://(api\\.)?openrouter\\.ai",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    },
+    {
+      "id": "ovhcloud",
+      "api_pattern": "https://oai\\.endpoints\\.kepler\\.ai\\.cloud\\.ovh\\.net",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "perplexity",
+      "api_pattern": "https://api\\.perplexity\\.ai",
+      "chat": null,
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "reasoning_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "citation_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "citation_tokens"
+          ],
+          "dest": "output_citation_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "num_search_queries"
+          ],
+          "dest": "web_searches",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "quicksilverpro",
+      "api_pattern": "https://api\\.quicksilverpro\\.io",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
+          "dest": "cache_write_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "input_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    },
+    {
+      "id": "together",
+      "api_pattern": "https://api\\.together\\.xyz",
+      "chat": null,
+      "default": null
+    },
+    {
+      "id": "typesafe",
+      "api_pattern": "https://api\\.typesafe\\.ai",
+      "chat": null,
+      "default": [
+        {
+          "path": [
+            "input_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "output_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "voyageai",
+      "api_pattern": "https://api\\.voyageai\\.com",
+      "chat": null,
+      "default": null
+    },
+    {
+      "id": "x-ai",
+      "api_pattern": "https://api\\.x\\.ai",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
+          "dest": "output_audio_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "cached_prompt_text_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "reasoning_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "zai",
+      "api_pattern": "https://api\\.z\\.ai",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    },
+    {
+      "id": "zhipuai",
+      "api_pattern": "https://open\\.bigmodel\\.cn",
+      "chat": [
+        {
+          "path": [
+            "prompt_tokens"
+          ],
+          "dest": "input_tokens",
+          "required": true
+        },
+        {
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
+          "dest": "cache_read_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
+          "dest": "output_reasoning_tokens",
+          "required": false
+        },
+        {
+          "path": [
+            "completion_tokens"
+          ],
+          "dest": "output_tokens",
+          "required": true
+        }
+      ],
+      "default": null
+    }
+  ],
+  "battery": [
+    {
+      "label": "coerce limit str->int",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {
+        "pidash_search_project_issues": {
+          "query": "q",
+          "limit": 5
+        }
+      },
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "{\"ok\":true}"
+      }
+    },
+    {
+      "label": "coerce limit float->int",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {
+        "pidash_search_project_issues": {
+          "query": "q",
+          "limit": 5
+        }
+      },
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "{\"ok\":true}"
+      }
+    },
+    {
+      "label": "coerce limit bool->int",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {
+        "pidash_search_project_issues": {
+          "query": "q",
+          "limit": 1
+        }
+      },
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "{\"ok\":true}"
+      }
+    },
+    {
+      "label": "reject int for str",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "1 validation error:\n```json\n[\n  {\n    \"type\": \"string_type\",\n    \"loc\": [\n      \"query\"\n    ],\n    \"msg\": \"Input should be a valid string\",\n    \"input\": 5\n  }\n]\n```\n\nFix the errors and try again."
+      }
+    },
+    {
+      "label": "reject extra arg",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "1 validation error:\n```json\n[\n  {\n    \"type\": \"extra_forbidden\",\n    \"loc\": [\n      \"extra\"\n    ],\n    \"msg\": \"Extra inputs are not permitted\",\n    \"input\": 1\n  }\n]\n```\n\nFix the errors and try again."
+      }
+    },
+    {
+      "label": "reject missing required",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "1 validation error:\n```json\n[\n  {\n    \"type\": \"missing\",\n    \"loc\": [\n      \"query\"\n    ],\n    \"msg\": \"Field required\",\n    \"input\": {}\n  }\n]\n```\n\nFix the errors and try again."
+      }
+    },
+    {
+      "label": "reject null for str",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "1 validation error:\n```json\n[\n  {\n    \"type\": \"string_type\",\n    \"loc\": [\n      \"query\"\n    ],\n    \"msg\": \"Input should be a valid string\",\n    \"input\": null\n  }\n]\n```\n\nFix the errors and try again."
+      }
+    },
+    {
+      "label": "reject malformed args json",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "1 validation error:\n```json\n[\n  {\n    \"type\": \"json_invalid\",\n    \"loc\": [],\n    \"msg\": \"Invalid JSON: key must be a string at line 1 column 2\",\n    \"input\": \"{oops\"\n  }\n]\n```\n\nFix the errors and try again."
+      }
+    },
+    {
+      "label": "coerce list[str] items",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "1 validation error:\n```json\n[\n  {\n    \"type\": \"string_type\",\n    \"loc\": [\n      \"related_issues\",\n      1\n    ],\n    \"msg\": \"Input should be a valid string\",\n    \"input\": 3\n  }\n]\n```\n\nFix the errors and try again."
+      }
+    },
+    {
+      "label": "reject non-list for list[str]",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "1 validation error:\n```json\n[\n  {\n    \"type\": \"list_type\",\n    \"loc\": [\n      \"related_issues\"\n    ],\n    \"msg\": \"Input should be a valid array\",\n    \"input\": \"P-2\"\n  }\n]\n```\n\nFix the errors and try again."
+      }
+    },
+    {
+      "label": "unknown tool",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "Unknown tool name: 'nope_tool'. Available tools: 'final_result', 'pidash_search_project_issues'\n\nFix the errors and try again."
+      }
+    },
+    {
+      "label": "output missing summary",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "1 validation error:\n```json\n[\n  {\n    \"type\": \"missing\",\n    \"loc\": [\n      \"summary\"\n    ],\n    \"msg\": \"Field required\",\n    \"input\": {\n      \"outcome\": \"completed\"\n    }\n  }\n]\n```\n\nFix the errors and try again."
+      }
+    },
+    {
+      "label": "output bad outcome literal",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "1 validation error:\n```json\n[\n  {\n    \"type\": \"literal_error\",\n    \"loc\": [\n      \"outcome\"\n    ],\n    \"msg\": \"Input should be 'completed', 'blocked' or 'noop'\",\n    \"input\": \"nope\"\n  }\n]\n```\n\nFix the errors and try again."
+      }
+    },
+    {
+      "label": "output summary too long",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "1 validation error:\n```json\n[\n  {\n    \"type\": \"string_too_long\",\n    \"loc\": [\n      \"summary\"\n    ],\n    \"msg\": \"String should have at most 30000 characters\",\n    \"input\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n  }\n]\n```\n\nFix the errors and try again."
+      }
+    },
+    {
+      "label": "output evidence too many",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "1 validation error:\n```json\n[\n  {\n    \"type\": \"too_long\",\n    \"loc\": [\n      \"evidence\"\n    ],\n    \"msg\": \"List should have at most 10 items after validation, not 11\",\n    \"input\": [\n      \"e\",\n      \"e\",\n      \"e\",\n      \"e\",\n      \"e\",\n      \"e\",\n      \"e\",\n      \"e\",\n      \"e\",\n      \"e\",\n      \"e\"\n    ]\n  }\n]\n```\n\nFix the errors and try again."
+      }
+    },
+    {
+      "label": "output evidence item too long",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "1 validation error:\n```json\n[\n  {\n    \"type\": \"string_too_long\",\n    \"loc\": [\n      \"evidence\",\n      0\n    ],\n    \"msg\": \"String should have at most 1000 characters\",\n    \"input\": \"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\"\n  }\n]\n```\n\nFix the errors and try again."
+      }
+    },
+    {
+      "label": "output args not object",
+      "outcome": {
+        "status": "ok",
+        "output": {
+          "outcome": "completed",
+          "summary": "s",
+          "evidence": [],
+          "limitations": []
+        }
+      },
+      "recorded": {},
+      "retry_message": {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "1 validation error:\n```json\n[\n  {\n    \"type\": \"model_type\",\n    \"loc\": [],\n    \"msg\": \"Input should be an object\",\n    \"input\": \"str\"\n  }\n]\n```\n\nFix the errors and try again."
+      }
+    }
+  ]
+}
