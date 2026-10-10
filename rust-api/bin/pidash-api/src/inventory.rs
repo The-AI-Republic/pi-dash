@@ -1133,7 +1133,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "assistant.sweep_stale_turns",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "celery.accumulate",
@@ -1811,6 +1811,7 @@ mod tests {
             pidash_jobs::integrations::github_sync::LiveTransports::from_env(),
         );
         pidash_jobs::license::tasks::register(&mut registry, pool.clone());
+        pidash_jobs::assistant::register_sweep_handler(&mut registry, pool.clone());
 
         // The const union, independent of the table.
         let mut expected_rust = std::collections::BTreeSet::new();
@@ -1829,6 +1830,7 @@ mod tests {
         expected_rust.extend(pidash_jobs::integrations::git_sync::TASK_NAMES);
         expected_rust.extend(pidash_jobs::integrations::github_sync::TASK_NAMES);
         expected_rust.insert(pidash_jobs::license::tasks::TASK_NAME);
+        expected_rust.extend([pidash_jobs::assistant::SWEEP_TASK]);
         // Count pins: a const that grows must update the table too.
         assert_eq!(
             tasks_cleanup::cleanup::TASKS.len(),
@@ -1850,7 +1852,7 @@ mod tests {
             3,
             "github_sync group drifted"
         );
-        assert_eq!(expected_rust.len(), 27, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 28, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()
@@ -1870,6 +1872,9 @@ mod tests {
         // Deliberately unregistered: restore (BUG-DEL-2) is not a Django
         // task at all, so it is not in the table either.
         assert!(!registry.owns(tasks_cleanup::RESTORE_TASK_NAME));
+        // Deliberately unregistered: `assistant.run_turn` has no live
+        // `TurnSeam` (PIDASHCONV-831), so it stays Python-owned.
+        assert!(!registry.owns(pidash_jobs::assistant::RUN_TURN_TASK));
     }
 
     /// The schedule serializer: spot-check set shapes (full content is

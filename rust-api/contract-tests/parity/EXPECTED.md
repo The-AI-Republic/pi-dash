@@ -21,7 +21,7 @@ Counts (2026-10-10, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 502 OWNED, 26 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 85 tasks — 27 OWNED, 34 proxied by design, 24 MISSING;
+- Jobs: 85 tasks — 28 OWNED, 34 proxied by design, 23 MISSING;
   beat 26/26 OWNED.
 
 ## Routes
@@ -151,13 +151,14 @@ worker runs them: `copy_s3_objects_of_description_and_assets`,
 their domain gates); recorded here and in the V-01 PR, for the V-05
 ported-bug register to catalog.
 
-### W-assistant (2 rows)
+### W-assistant (1 row; sweep resolved by PIDASHCONV-831)
 
-Fix: PIDASHCONV-831.
+Fix: PIDASHCONV-857. The sweep row is gone (wired by PIDASHCONV-831:
+`register_sweep_handler` in `worker()`, live store). `run_turn` needs a
+live `TurnSeam` and none exists — that is PIDASHCONV-857, not wiring.
 
 ```expected-jobs
 W-assistant :: assistant.run_turn :: must-wire (lost without python worker)
-W-assistant :: assistant.sweep_stale_turns :: must-wire (lost without python worker)
 ```
 
 ### W-cloud-agent (3 rows)

@@ -251,6 +251,13 @@ async fn worker(concurrency: u32) -> MainResult {
     // the Rust worker owns it — otherwise the task is lost at
     // switchover (parity gap W-license).
     pidash_jobs::license::tasks::register(&mut registry, pools.primary().clone());
+    // D-06 stale-turn sweep (PIDASHCONV-831; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`). The live
+    // store fails RUNNING turns older than 390s, like the beat in Django.
+    // `assistant.run_turn` stays Python-owned: `register_turn_handler`
+    // needs a live `TurnSeam` and none exists (only test fakes) — never
+    // register it here until the seam lands.
+    pidash_jobs::assistant::register_sweep_handler(&mut registry, pools.primary().clone());
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()
