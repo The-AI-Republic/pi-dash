@@ -286,17 +286,31 @@ jobs:
       - name: Stop Django and worker for reset
         if: env.DJANGO_EXIT == '0'
         run: |
-          kill "$(cat /tmp/django-contract.pid)"
-          for i in $(seq 1 30); do
-            kill -0 "$(cat /tmp/django-contract.pid)" 2>/dev/null || break
-            sleep 1
-          done
-          if [ "${WORKER_STARTED:-0}" = "1" ]; then
-            kill "$(cat /tmp/django-worker.pid)"
+          stop_pid() {
+            # $1 = pid file, $2 = label. SIGTERM + grace, then SIGKILL.
+            # uvicorn can hang in "Waiting for background tasks" after
+            # SIGTERM (lingering SSE/WebSocket tasks from streaming
+            # suites): without the KILL fallback the survivor keeps its
+            # port and its DB backends, and the reset DROP fails with
+            # ObjectInUse (runner, CI run 38066491265).
+            [ -f "$1" ] || return 0
+            pid="$(cat "$1")"
+            kill "$pid" 2>/dev/null || return 0
             for i in $(seq 1 30); do
-              kill -0 "$(cat /tmp/django-worker.pid)" 2>/dev/null || break
+              kill -0 "$pid" 2>/dev/null || return 0
               sleep 1
             done
+            kill -9 "$pid" 2>/dev/null || return 0
+            for i in $(seq 1 10); do
+              kill -0 "$pid" 2>/dev/null || return 0
+              sleep 1
+            done
+            echo "$2 pid $pid survived SIGKILL"
+            return 1
+          }
+          stop_pid /tmp/django-contract.pid "Django server"
+          if [ "${WORKER_STARTED:-0}" = "1" ]; then
+            stop_pid /tmp/django-worker.pid "Django worker"
           fi
 
       - name: Reset database and Redis between backends
@@ -306,6 +320,13 @@ jobs:
           import psycopg
           with psycopg.connect("postgresql://postgres:postgres@localhost:5432/postgres",
                                 autocommit=True) as conn:
+              # A backend can briefly outlive its client (SIGTERM races):
+              # evict every pidash_contract backend first so the DROP
+              # cannot fail with ObjectInUse.
+              conn.execute(
+                  "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                  "WHERE datname = 'pidash_contract' AND pid <> pg_backend_pid()"
+              )
               conn.execute("DROP DATABASE pidash_contract")
               conn.execute("CREATE DATABASE pidash_contract")
           EOF
