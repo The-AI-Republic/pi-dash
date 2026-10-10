@@ -632,3 +632,152 @@ def test_rust_workspace_seed_before_after(db_conn, broker_url):
         == expected_project_pages
     )
 
+
+
+def test_rust_dummy_data_before_after(db_conn, broker_url):
+    """PIDASHCONV-816: dummy-data task inserts full NOT NULL columns.
+
+    The Rust executor historically inserted minimal column lists
+    (project name/slug/identifier/workspace/audit only), crashing on
+    ``projects.description`` NOT NULL. The fix ports every field the
+    Python ``bulk_create``/``create`` calls persist (explicit values
+    plus Django field defaults); this replay proves the worker path
+    completes and every touched table carries the Python column
+    shapes. Faker-dependent distinct counts (labels, modules) assert
+    ranges: Python's seeded Faker yields 40 distinct label names, the
+    Rust ``fake_*`` approximations are behaviourally equivalent but
+    not sequence-identical.
+    """
+    tag = uuid.uuid4().hex[:8]
+    owner = seed_helpers.user(db_conn, f"rust-replay-dummy-owner-{tag}")
+    workspace = seed_helpers.workspace(
+        db_conn,
+        f"rustreplaydummy{tag}",
+        owner["id"],
+        name=f"Dummy Rust Replay {tag}",
+    )
+    seed_helpers.workspace_member(db_conn, workspace["id"], owner["id"], role=5)
+
+    job_id = rust_queue.publish(
+        f"{M}.dummy_data_task.create_dummy_data",
+        args=[workspace["slug"], owner["email"], [], 6, 1, 5, 2, 2],
+    )
+
+    # Row counts fire mid-job (issues land before intakes and links),
+    # so wait for the ack itself: success deletes the row, a spent
+    # retry budget parks it as `failed` with the error text.
+    def _job_settled():
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, last_error FROM rust_job_queue WHERE celery_id = %s",
+                (job_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return True
+        if row[0] == "failed":
+            raise AssertionError(f"rust dummy job failed: {row[1]}")
+        return None
+
+    wait_for(_job_settled, what="rust dummy job acked")
+
+    assert (
+        _seed_count(
+            db_conn,
+            "projects",
+            "WHERE workspace_id = %s::uuid AND deleted_at IS NULL",
+            (str(workspace["id"]),),
+        )
+        == 1
+    )
+    project = _seed_one(
+        db_conn,
+        "projects",
+        "WHERE workspace_id = %s::uuid AND deleted_at IS NULL",
+        (str(workspace["id"]),),
+    )
+
+    # Project carries the Django field defaults (the task passes only
+    # workspace/name/identifier/created_by/intake_view; `save()` nulls
+    # the audit user, inherits the workspace timezone, and defaults
+    # the first project).
+    assert project["description"] == ""
+    assert project["network"] == 2
+    assert project["identifier"] == project["identifier"].strip().upper()
+    assert project["identifier"] != ""
+    assert project["project_lead_id"] is None
+    assert project["default_state_id"] is None
+    assert project["cover_image"] is None
+    assert project["logo_props"] == {}
+    assert project["estimate_id"] is None
+    assert project["is_default"] is True
+    assert project["intake_view"] is True
+    assert project["default_agent_executor"] == "local_runner"
+    assert project["timezone"] == workspace["timezone"]
+    assert project["created_by_id"] is None
+    assert project["updated_by_id"] is None
+
+    pid = str(project["id"])
+    # Five states with the Backlog default; labels attempt 50 rows
+    # with conflicts ignored.
+    assert _seed_count(db_conn, "states", "WHERE project_id = %s::uuid", (pid,)) == 5
+    assert (
+        _seed_count(
+            db_conn, "states", "WHERE project_id = %s::uuid AND \"default\"", (pid,)
+        )
+        == 1
+    )
+    label_count = _seed_count(
+        db_conn, "labels", "WHERE project_id = %s::uuid", (pid,)
+    )
+    assert 1 <= label_count <= 50
+    # Creator member plus the save-hook property row.
+    assert (
+        _seed_count(
+            db_conn, "project_members", "WHERE project_id = %s::uuid", (pid,)
+        )
+        == 1
+    )
+    assert (
+        _seed_count(
+            db_conn, "project_user_properties", "WHERE project_id = %s::uuid", (pid,)
+        )
+        == 1
+    )
+    # Cycles keep the `<=` off-by-one (1 -> 2 rows); modules keep
+    # `range(module_count)` up to name conflicts.
+    assert _seed_count(db_conn, "cycles", "WHERE project_id = %s::uuid", (pid,)) == 2
+    module_count = _seed_count(
+        db_conn, "modules", "WHERE project_id = %s::uuid", (pid,)
+    )
+    assert 1 <= module_count <= 5
+    assert _seed_count(db_conn, "pages", "WHERE workspace_id = %s::uuid", (str(workspace["id"]),)) == 2
+    assert (
+        _seed_count(db_conn, "project_pages", "WHERE project_id = %s::uuid", (pid,))
+        == 2
+    )
+    # create_issues runs twice (6 + 2 intakes): sequences and
+    # activities follow every issue.
+    assert (
+        _seed_count(db_conn, "issue_sequences", "WHERE project_id = %s::uuid", (pid,))
+        == 8
+    )
+    assert (
+        _seed_count(db_conn, "issue_activities", "WHERE project_id = %s::uuid", (pid,))
+        == 8
+    )
+    assert (
+        _seed_count(db_conn, "intakes", "WHERE project_id = %s::uuid", (pid,)) == 1
+    )
+    assert (
+        _seed_count(db_conn, "intake_issues", "WHERE project_id = %s::uuid", (pid,))
+        == 2
+    )
+
+    # Intake issues are ordinary issues linked through intake_issues.
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            'SELECT MAX(sequence_id) AS top FROM "issues" WHERE project_id = %s::uuid',
+            (pid,),
+        )
+        assert cur.fetchone()["top"] == 8

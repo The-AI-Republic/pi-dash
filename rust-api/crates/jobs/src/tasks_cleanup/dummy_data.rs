@@ -197,6 +197,19 @@ fn db_error(error: sqlx::Error) -> String {
     error.to_string()
 }
 
+/// `get_default_agent_executor` (`core/agent_execution.py:26`):
+/// `DEFAULT_AGENT_EXECUTOR` when it names a known executor,
+/// `local_runner` otherwise.
+fn default_agent_executor() -> String {
+    let candidate =
+        std::env::var("DEFAULT_AGENT_EXECUTOR").unwrap_or_else(|_| "local_runner".to_owned());
+    if ["local_runner", "cloud_agent", "managed_runner"].contains(&candidate.as_str()) {
+        candidate
+    } else {
+        "local_runner".to_owned()
+    }
+}
+
 /// Postgres executor for the dummy-data task.
 pub struct PgDummyData {
     pool: sqlx::PgPool,
@@ -313,8 +326,11 @@ impl PgDummyData {
         }
     }
 
-    /// `create_project` (`:44-60`): the creator row carries only
-    /// project/member/role — no workspace, no sort order.
+    /// `create_project` (`:44-60`): the creator call passes only
+    /// project/member/role — `save()` derives the workspace, fills
+    /// the model defaults, and nulls the audit user (no request
+    /// user in a task); it also inherits the workspace timezone
+    /// and defaults the first project.
     async fn create_project(
         &self,
         _ctx: &RequestContext,
@@ -334,34 +350,114 @@ impl PgDummyData {
             )
         })?;
         let keep = randint(rng, lo, hi) as usize;
-        let identifier: String = name.chars().take(keep).collect::<String>().to_uppercase();
+        let identifier: String = name
+            .chars()
+            .take(keep)
+            .collect::<String>()
+            .trim()
+            .to_uppercase();
+        // `Project.save()` on create: the timezone inherits the
+        // workspace's (the task never passes one), and the first
+        // live project in the workspace becomes the default (the
+        // demote-others update then matches zero rows).
+        let timezone: String =
+            sqlx::query_scalar(r#"SELECT timezone FROM workspaces WHERE id = $1::uuid"#)
+                .bind(workspace_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(db_error)?;
+        let has_default: bool = sqlx::query_scalar(
+            r#"SELECT EXISTS(SELECT 1 FROM projects
+                WHERE workspace_id = $1::uuid AND is_default AND deleted_at IS NULL)"#,
+        )
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(db_error)?;
         let now = chrono::Utc::now();
         let project_id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             r#"INSERT INTO projects
-                (id, workspace_id, name, identifier, created_by_id, intake_view, created_at, updated_at)
-                VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid, TRUE, $6, $7)"#,
+                (id, workspace_id, name, identifier, created_by_id, intake_view, created_at, updated_at,
+                 description, network, cycle_view, module_view, issue_views_view, page_view,
+                 archive_in, close_in, logo_props, is_time_tracking_enabled, is_issue_type_enabled,
+                 is_default, guest_view_all_features, timezone, members_can_edit_states,
+                 repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks,
+                 agent_review_default_interval_seconds, agent_test_default_interval_seconds,
+                 agent_ticking_enabled, default_agent_executor)
+                VALUES ($1::uuid, $2::uuid, $3, $4, NULL, TRUE, $5, $5,
+                 '', 2, FALSE, FALSE, FALSE, TRUE,
+                 0, 0, '{}', FALSE, FALSE,
+                 $6, FALSE, $7, TRUE,
+                 '', 'main', 10800, 10,
+                 10800, 10800,
+                 TRUE, $8)"#,
         )
         .bind(&project_id)
         .bind(workspace_id)
         .bind(&full_name)
         .bind(&identifier)
+        .bind(now)
+        .bind(!has_default)
+        .bind(&timezone)
+        .bind(default_agent_executor())
+        .execute(&self.pool)
+        .await
+        .map_err(db_error)?;
+        // `ProjectMember.objects.create` runs the `save()` hook: the
+        // property row persists BEFORE the member row, and `save()`
+        // nulls the audit user on both.
+        let member_props = pidash_db::ops::users::project_member_props_json();
+        let member_prefs = pidash_db::ops::users::project_preferences_json();
+        let min_sort: Option<f64> = sqlx::query_scalar(
+            r#"SELECT MIN(sort_order) FROM project_user_properties
+                WHERE workspace_id = $1::uuid AND user_id = $2::uuid AND deleted_at IS NULL"#,
+        )
+        .bind(workspace_id)
         .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_error)?
+        .flatten();
+        sqlx::query(
+            r#"INSERT INTO project_user_properties
+                (id, created_at, updated_at, workspace_id, project_id, user_id,
+                 filters, display_filters, display_properties, rich_filters, preferences, sort_order)
+                VALUES ($1::uuid, $2, $2, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8, '{}', $9, $10)"#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
         .bind(now)
-        .bind(now)
+        .bind(workspace_id)
+        .bind(&project_id)
+        .bind(user_id)
+        .bind(sqlx::types::Json(
+            pidash_db::ops::users::property_filters_json(),
+        ))
+        .bind(sqlx::types::Json(
+            pidash_db::ops::users::property_display_filters_json(),
+        ))
+        .bind(sqlx::types::Json(
+            pidash_db::ops::users::property_display_properties_json(),
+        ))
+        .bind(sqlx::types::Json(&member_prefs))
+        .bind(min_sort.map(|min| min - 10000.0).unwrap_or(65535.0))
         .execute(&self.pool)
         .await
         .map_err(db_error)?;
         sqlx::query(
-            r#"INSERT INTO project_members (id, project_id, member_id, role, created_at, updated_at)
-                VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6)"#,
+            r#"INSERT INTO project_members
+                (id, project_id, workspace_id, member_id, role, created_at, updated_at,
+                 view_props, default_props, preferences, sort_order, is_active)
+                VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $6, $7, $7, $8, 65535, TRUE)"#,
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(&project_id)
+        .bind(workspace_id)
         .bind(user_id)
         .bind(plan::PROJECT_MEMBER_ROLE)
         .bind(now)
-        .bind(now)
+        .bind(sqlx::types::Json(&member_props))
+        .bind(sqlx::types::Json(&member_prefs))
         .execute(&self.pool)
         .await
         .map_err(db_error)?;
@@ -385,12 +481,15 @@ impl PgDummyData {
                 .await
                 .map_err(db_error)?;
         let now = chrono::Utc::now();
+        let member_props = pidash_db::ops::users::project_member_props_json();
+        let member_prefs = pidash_db::ops::users::project_preferences_json();
         for member_id in &user_ids {
             let sort_order = f64::from(randint(rng, 0, 65535));
             sqlx::query(
                 r#"INSERT INTO project_members
-                    (id, project_id, workspace_id, member_id, role, sort_order, created_at, updated_at)
-                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8)
+                    (id, project_id, workspace_id, member_id, role, sort_order, created_at, updated_at,
+                     view_props, default_props, preferences, is_active)
+                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $7, $8, $8, $9, TRUE)
                     ON CONFLICT DO NOTHING"#,
             )
             .bind(uuid::Uuid::new_v4().to_string())
@@ -400,7 +499,8 @@ impl PgDummyData {
             .bind(plan::PROJECT_MEMBER_ROLE)
             .bind(sort_order)
             .bind(now)
-            .bind(now)
+            .bind(sqlx::types::Json(&member_props))
+            .bind(sqlx::types::Json(&member_prefs))
             .execute(&self.pool)
             .await
             .map_err(db_error)?;
@@ -420,8 +520,9 @@ impl PgDummyData {
         for state in plan::DEFAULT_STATES {
             sqlx::query(
                 r#"INSERT INTO states
-                    (id, name, color, project_id, sequence, workspace_id, "group", "default", created_by_id, created_at, updated_at)
-                    VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6::uuid, $7, $8, $9::uuid, $10, $11)"#,
+                    (id, name, color, project_id, sequence, workspace_id, "group", "default", created_by_id, created_at, updated_at,
+                     description, slug, is_triage)
+                    VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6::uuid, $7, $8, $9::uuid, $10, $10, '', '', FALSE)"#,
             )
             .bind(uuid::Uuid::new_v4().to_string())
             .bind(state.name)
@@ -432,7 +533,6 @@ impl PgDummyData {
             .bind(state.group)
             .bind(state.default)
             .bind(user_id)
-            .bind(now)
             .bind(now)
             .execute(&self.pool)
             .await
@@ -456,8 +556,9 @@ impl PgDummyData {
             let sort_order = f64::from(randint(rng, 0, 65535));
             sqlx::query(
                 r#"INSERT INTO labels
-                    (id, name, color, project_id, workspace_id, created_by_id, sort_order, created_at, updated_at)
-                    VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6::uuid, $7, $8, $9)
+                    (id, name, color, project_id, workspace_id, created_by_id, sort_order, created_at, updated_at,
+                     description)
+                    VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6::uuid, $7, $8, $8, '')
                     ON CONFLICT DO NOTHING"#,
             )
             .bind(uuid::Uuid::new_v4().to_string())
@@ -467,7 +568,6 @@ impl PgDummyData {
             .bind(workspace_id)
             .bind(user_id)
             .bind(sort_order)
-            .bind(now)
             .bind(now)
             .execute(&self.pool)
             .await
@@ -516,8 +616,10 @@ impl PgDummyData {
         for (name, start, end, sort_order) in &rows {
             sqlx::query(
                 r#"INSERT INTO cycles
-                    (id, name, owned_by_id, sort_order, start_date, end_date, project_id, workspace_id, created_at, updated_at)
-                    VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7::uuid, $8::uuid, $9, $10)
+                    (id, name, owned_by_id, sort_order, start_date, end_date, project_id, workspace_id, created_at, updated_at,
+                     description, view_props, progress_snapshot, logo_props, timezone, version)
+                    VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7::uuid, $8::uuid, $9, $9,
+                     '', '{}', '{}', '{}', 'UTC', 1)
                     ON CONFLICT DO NOTHING"#,
             )
             .bind(uuid::Uuid::new_v4().to_string())
@@ -528,7 +630,6 @@ impl PgDummyData {
             .bind(end.map(midnight))
             .bind(project_id)
             .bind(workspace_id)
-            .bind(now)
             .bind(now)
             .execute(&self.pool)
             .await
@@ -558,8 +659,10 @@ impl PgDummyData {
             let end = start.map(|day| fake_date_between(&mut fake, day, year_end(today)));
             sqlx::query(
                 r#"INSERT INTO modules
-                    (id, name, sort_order, start_date, target_date, project_id, workspace_id, created_at, updated_at)
-                    VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, $7::uuid, $8, $9)
+                    (id, name, sort_order, start_date, target_date, project_id, workspace_id, created_at, updated_at,
+                     description, status, view_props, logo_props)
+                    VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, $7::uuid, $8, $8,
+                     '', 'planned', '{}', '{}')
                     ON CONFLICT DO NOTHING"#,
             )
             .bind(uuid::Uuid::new_v4().to_string())
@@ -569,7 +672,6 @@ impl PgDummyData {
             .bind(end)
             .bind(project_id)
             .bind(workspace_id)
-            .bind(now)
             .bind(now)
             .execute(&self.pool)
             .await
@@ -596,8 +698,10 @@ impl PgDummyData {
             let page_id = uuid::Uuid::new_v4().to_string();
             sqlx::query(
                 r#"INSERT INTO pages
-                    (id, name, workspace_id, owned_by_id, access, color, description_html, is_locked, created_at, updated_at)
-                    VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5, $6, $7, FALSE, $8, $9)
+                    (id, name, workspace_id, owned_by_id, access, color, description_html, is_locked, created_at, updated_at,
+                     description_json, view_props, logo_props, is_global, sort_order)
+                    VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5, $6, $7, FALSE, $8, $8,
+                     '{}', '{"full_width": false}', '{}', FALSE, 65535)
                     ON CONFLICT DO NOTHING"#,
             )
             .bind(&page_id)
@@ -607,7 +711,6 @@ impl PgDummyData {
             .bind(randint(rng, 0, 1) as i16)
             .bind(fake_hex_color(&mut fake))
             .bind(format!("<p>{text}</p>"))
-            .bind(now)
             .bind(now)
             .execute(&self.pool)
             .await
@@ -749,8 +852,10 @@ impl PgDummyData {
             sqlx::query(
                 r#"INSERT INTO issues
                     (id, state_id, project_id, workspace_id, name, description_html, description_stripped,
-                     sequence_id, sort_order, start_date, target_date, priority, created_by_id, created_at, updated_at)
-                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13::uuid, $14, $15)
+                     sequence_id, sort_order, start_date, target_date, priority, created_by_id, created_at, updated_at,
+                     description_json, is_draft, git_work_branch, workpad, complexity_score)
+                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13::uuid, $14, $14,
+                     '{}', FALSE, '', '', 0)
                     ON CONFLICT DO NOTHING"#,
             )
             .bind(&issue_id)
@@ -767,13 +872,12 @@ impl PgDummyData {
             .bind(plan::PRIORITIES[randint(rng, 0, 4) as usize])
             .bind(&creator_ids[randint(rng, 0, (creator_ids.len() - 1) as u32) as usize])
             .bind(now)
-            .bind(now)
             .execute(&self.pool)
             .await
             .map_err(db_error)?;
             sqlx::query(
-                r#"INSERT INTO issue_sequences (id, issue_id, sequence, project_id, workspace_id, created_at, updated_at)
-                    VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6, $7)"#,
+                r#"INSERT INTO issue_sequences (id, issue_id, sequence, project_id, workspace_id, created_at, updated_at, deleted)
+                    VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6, $6, FALSE)"#,
             )
             .bind(uuid::Uuid::new_v4().to_string())
             .bind(&issue_id)
@@ -781,14 +885,14 @@ impl PgDummyData {
             .bind(project_id)
             .bind(workspace_id)
             .bind(now)
-            .bind(now)
             .execute(&self.pool)
             .await
             .map_err(db_error)?;
             sqlx::query(
                 r#"INSERT INTO issue_activities
-                    (id, issue_id, actor_id, project_id, workspace_id, comment, verb, created_by_id, created_at, updated_at)
-                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8::uuid, $9, $10)"#,
+                    (id, issue_id, actor_id, project_id, workspace_id, comment, verb, created_by_id, created_at, updated_at,
+                     attachments)
+                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8::uuid, $9, $9, '{}')"#,
             )
             .bind(uuid::Uuid::new_v4().to_string())
             .bind(&issue_id)
@@ -798,7 +902,6 @@ impl PgDummyData {
             .bind(plan::ISSUE_ACTIVITY_COMMENT)
             .bind(plan::ISSUE_ACTIVITY_VERB)
             .bind(user_id)
-            .bind(now)
             .bind(now)
             .execute(&self.pool)
             .await
@@ -849,14 +952,14 @@ impl PgDummyData {
                 let intake_id = uuid::Uuid::new_v4().to_string();
                 let now = chrono::Utc::now();
                 sqlx::query(
-                    r#"INSERT INTO intakes (id, name, project_id, workspace_id, is_default, created_at, updated_at)
-                        VALUES ($1::uuid, $2, $3::uuid, $4::uuid, TRUE, $5, $6)"#,
+                    r#"INSERT INTO intakes (id, name, project_id, workspace_id, is_default, created_at, updated_at,
+                         description, view_props, logo_props)
+                        VALUES ($1::uuid, $2, $3::uuid, $4::uuid, TRUE, $5, $5, '', '{}', '{}')"#,
                 )
                 .bind(&intake_id)
                 .bind(plan::INTAKE_NAME)
                 .bind(project_id)
                 .bind(workspace_id)
-                .bind(now)
                 .bind(now)
                 .execute(&self.pool)
                 .await
@@ -874,8 +977,9 @@ impl PgDummyData {
             };
             sqlx::query(
                 r#"INSERT INTO intake_issues
-                    (id, issue_id, intake_id, status, snoozed_till, source, workspace_id, project_id, created_at, updated_at)
-                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::uuid, $8::uuid, $9, $10)"#,
+                    (id, issue_id, intake_id, status, snoozed_till, source, workspace_id, project_id, created_at, updated_at,
+                     extra)
+                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::uuid, $8::uuid, $9, $9, '{}')"#,
             )
             .bind(uuid::Uuid::new_v4().to_string())
             .bind(issue_id)
@@ -885,7 +989,6 @@ impl PgDummyData {
             .bind(plan::SOURCE_IN_APP)
             .bind(workspace_id)
             .bind(project_id)
-            .bind(now)
             .bind(now)
             .execute(&self.pool)
             .await
@@ -1122,6 +1225,21 @@ mod tests {
             TASK_NAME,
             "pi_dash.bgtasks.dummy_data_task.create_dummy_data"
         );
+    }
+
+    #[test]
+    fn default_executor_follows_validated_env() {
+        let saved = std::env::var("DEFAULT_AGENT_EXECUTOR").ok();
+        std::env::remove_var("DEFAULT_AGENT_EXECUTOR");
+        assert_eq!(default_agent_executor(), "local_runner");
+        std::env::set_var("DEFAULT_AGENT_EXECUTOR", "cloud_agent");
+        assert_eq!(default_agent_executor(), "cloud_agent");
+        std::env::set_var("DEFAULT_AGENT_EXECUTOR", "bogus");
+        assert_eq!(default_agent_executor(), "local_runner");
+        match saved {
+            Some(value) => std::env::set_var("DEFAULT_AGENT_EXECUTOR", value),
+            None => std::env::remove_var("DEFAULT_AGENT_EXECUTOR"),
+        }
     }
 
     #[test]
