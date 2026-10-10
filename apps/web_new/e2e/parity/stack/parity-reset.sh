@@ -27,6 +27,11 @@ STACK_DIR="$(cd "$(dirname "$0")" && pwd)"
 export COMPOSE_FILE
 COMPOSE_FILE="$STACK_DIR/docker-compose.yml"
 
+if [ "$#" -gt 1 ]; then
+  echo "[parity] refusing: too many arguments (usage: parity-reset.sh [project])" >&2
+  exit 1
+fi
+
 if [ -n "${1:-}" ]; then
   # Explicit argument: argv survives sudo, exported env does not.
   export PARITY_PROJECT

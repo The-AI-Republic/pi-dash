@@ -19,6 +19,11 @@ STACK_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib/parity-project.sh
 . "$STACK_DIR/lib/parity-project.sh"
 
+if [ "$#" -gt 1 ]; then
+  echo "[parity] refusing: too many arguments (usage: parity-down.sh [project])" >&2
+  exit 1
+fi
+
 if [ -n "${1:-}" ]; then
   # Explicit argument: argv survives sudo, exported env does not.
   export PARITY_PROJECT

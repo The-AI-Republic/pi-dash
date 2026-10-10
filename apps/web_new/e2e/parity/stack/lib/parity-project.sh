@@ -65,7 +65,8 @@ parity_resolve_project() {
   printf 'parity19\n'
 }
 
-# Assert the target project owns no foreign-named containers. Returns 0 when
+# Assert the target project owns no foreign-named containers, running or
+# stopped (`down -v` removes both, so `ps` must list both). Returns 0 when
 # the project is empty (nothing to destroy) or every container name starts
 # with the expected prefix. Refuses otherwise, and refuses when the project
 # cannot even be listed (fail closed: an unreachable daemon must never read
@@ -75,7 +76,7 @@ parity_assert_project() {
   local project="${1:?usage: parity_assert_project <project>}"
   local prefix="${PARITY_CONTAINER_PREFIX:-$project}"
   local names
-  if ! names="$(docker compose -p "$project" ps --format '{{.Name}}' 2>/dev/null)"; then
+  if ! names="$(docker compose -p "$project" ps --all --format '{{.Name}}' 2>/dev/null)"; then
     echo "[parity] refusing: cannot list containers for project '$project' (is the Docker daemon reachable?)" >&2
     return 1
   fi

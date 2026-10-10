@@ -170,6 +170,15 @@ else
   fail "assert passes on default project with default prefix"
 fi
 
+stub_reset
+printf 'parity19s2-pg\n' > "$STUB_PS_FILE"
+PARITY_CONTAINER_PREFIX=parity19s2 parity_assert_project parity19s2 >/dev/null 2>&1 || true
+if grep -q "compose -p parity19s2 ps --all" "$STUB_LOG"; then
+  pass "assert lists stopped containers too (ps --all)"
+else
+  fail "assert lists stopped containers too (ps --all) (log: $(cat "$STUB_LOG"))"
+fi
+
 # --- parity-down.sh end to end (stub docker) --------------------------------
 run_down() {
   # run_down <ps-file-content> <env...> -- [args...]
@@ -253,6 +262,66 @@ else
   else
     pass "down.sh refuses name-skewed project, no down issued"
   fi
+fi
+
+# Extra arguments are refused: a destructive script must not guess.
+if run_down '' PARITY_PROJECT=parity19s2 PARITY_CONTAINER_PREFIX=parity19s2 -- parity19s2 --dry-run; then
+  fail "down.sh refuses extra arguments"
+else
+  if grep -q " down " "$STUB_LOG"; then
+    fail "down.sh refuses extra arguments but still called down"
+  else
+    pass "down.sh refuses extra arguments, no down issued"
+  fi
+fi
+
+# reset.sh refuses extra arguments before touching anything (bounded: a
+# refusal returns at once instead of running the bring-up).
+stub_reset
+if timeout 20 env -i PATH="$STUB_BIN:/usr/bin:/bin" STUB_LOG="$STUB_LOG" STUB_PS_FILE="$STUB_PS_FILE" \
+    "$STACK_DIR/parity-reset.sh" parity19s2 --dry-run >/dev/null 2>&1; then
+  fail "reset.sh refuses extra arguments"
+else
+  if grep -q " down " "$STUB_LOG"; then
+    fail "reset.sh refuses extra arguments but still called down"
+  else
+    pass "reset.sh refuses extra arguments, no down issued"
+  fi
+fi
+
+# --- parity-reaper.sh watch (stub docker) ------------------------------------
+dead_pid_for_reaper() {
+  : & _dead=$!
+  wait "$_dead" 2>/dev/null || true
+  printf '%s' "$_dead"
+}
+
+# A guard refusal must never be overridden by the reaper fallback.
+stub_reset
+printf 'parity19s2-pg\nparity19-api\n' > "$STUB_PS_FILE"
+REAPER_DEAD_PID="$(dead_pid_for_reaper)"
+env -i PATH="$STUB_BIN:/usr/bin:/bin" STUB_LOG="$STUB_LOG" STUB_PS_FILE="$STUB_PS_FILE" \
+  PARITY_PROJECT=parity19s2 PARITY_CONTAINER_PREFIX=parity19s2 TMPDIR="$STUB_BIN" \
+  "$STACK_DIR/parity-reaper.sh" watch "$REAPER_DEAD_PID" >/dev/null 2>&1 || true
+if grep -q " down " "$STUB_LOG"; then
+  fail "reaper watch still reaps after a guard refusal"
+else
+  pass "reaper watch does not override a guard refusal"
+fi
+
+# The fallback still reaps when the checkout (and parity-down.sh) is gone.
+stub_reset
+FAKE_STACK="$STUB_BIN/nostack"
+mkdir -p "$FAKE_STACK"
+cp "$STACK_DIR/parity-reaper.sh" "$FAKE_STACK/"
+REAPER_DEAD_PID="$(dead_pid_for_reaper)"
+env -i PATH="$STUB_BIN:/usr/bin:/bin" STUB_LOG="$STUB_LOG" STUB_PS_FILE="$STUB_PS_FILE" \
+  PARITY_PROJECT=parity19gone TMPDIR="$STUB_BIN" \
+  "$FAKE_STACK/parity-reaper.sh" watch "$REAPER_DEAD_PID" >/dev/null 2>&1 || true
+if grep -q "compose -p parity19gone down -v" "$STUB_LOG"; then
+  pass "reaper watch falls back when parity-down.sh is gone"
+else
+  fail "reaper watch falls back when parity-down.sh is gone (log: $(cat "$STUB_LOG"))"
 fi
 
 # --- real sudo (skipped when unavailable) -----------------------------------

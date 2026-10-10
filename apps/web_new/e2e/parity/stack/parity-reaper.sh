@@ -85,9 +85,14 @@ case "${1:-}" in
     done
     # Explicit project argument: argv survives sudo and env loss, exported
     # PARITY_PROJECT does not (NEWFRONT-174). The fallback keeps -p for the
-    # same reason when the checkout (and parity-down.sh) is already gone.
-    "$STACK_DIR/parity-down.sh" "$PARITY_PROJECT" > /dev/null 2>&1 \
-      || docker compose -p "$PARITY_PROJECT" down -v --remove-orphans > /dev/null 2>&1
+    # same reason when the checkout (and parity-down.sh) is already gone —
+    # and only then: a guard refusal (exit 1 with the script present) must
+    # never be overridden by an unguarded down -v.
+    "$STACK_DIR/parity-down.sh" "$PARITY_PROJECT" > /dev/null 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ ! -x "$STACK_DIR/parity-down.sh" ]; then
+      docker compose -p "$PARITY_PROJECT" down -v --remove-orphans > /dev/null 2>&1 || true
+    fi
     rm -f "${TMPDIR:-/tmp}/parity-reaper.$PARITY_PROJECT.$AGENT.pid"
     ;;
   *)
