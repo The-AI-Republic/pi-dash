@@ -85,7 +85,8 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
-use pidash_auth::permissions::membership::{check_project_role, ProjectRoleFacts};
+use pidash_auth::permissions::membership::check_project_role;
+pub use pidash_auth::permissions::membership::ProjectRoleFacts;
 use pidash_db::app_project::models::state::StateGroup;
 use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::orchestration::querysets::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};

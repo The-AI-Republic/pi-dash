@@ -275,13 +275,36 @@ async fn worker(concurrency: u32) -> MainResult {
     // D-10 ticker + scheduler scans (PIDASHCONV-833; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). One
     // shared call wires both beat scans; each fan-out enqueues into
-    // the Rust queue and forwards wire-identically while the fires
-    // stay Python-owned. `fire_tick` / `fire_scheduler_binding` stay
-    // Python-owned: `register_fire_tick` needs a live `FireTickSeam`
-    // and `register_fire_binding` a live `SchedulerDispatch`, and
-    // neither exists (only test fakes) — never register them here
-    // until the seams land (PIDASHCONV-861).
+    // the Rust queue.
     pidash_jobs::tasks_ticker::scan::register_scanners(&mut registry, pools.primary().clone());
+    // D-10 ticker + scheduler fires (PIDASHCONV-861; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`). Live
+    // seams: the tick seam prefetches creator presence per fire and
+    // runs the jobs continuation driver; the scheduler dispatch runs
+    // the jobs scheduler driver over a live EntriesSeam. Both need
+    // dispatch settings + the boot-loaded state map.
+    let dispatch_settings = Settings::from_env()?;
+    let fire_tick_states =
+        pidash_jobs::orchestration::LiveFireTickSeam::load_states(pools.primary()).await?;
+    pidash_jobs::tasks_ticker::fire_tick::register_fire_tick(
+        &mut registry,
+        pools.primary().clone(),
+        std::sync::Arc::new(pidash_jobs::orchestration::LiveFireTickSeam::new(
+            pools.primary().clone(),
+            dispatch_settings.cloud_agent.clone(),
+            dispatch_settings.managed_runner.clone(),
+            fire_tick_states,
+        )),
+    );
+    pidash_jobs::tasks_ticker::fire_binding::register_fire_binding(
+        &mut registry,
+        pools.primary().clone(),
+        pidash_jobs::orchestration::live_scheduler_dispatch(
+            pools.primary().clone(),
+            dispatch_settings.cloud_agent,
+            dispatch_settings.managed_runner,
+        ),
+    );
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()

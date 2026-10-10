@@ -701,7 +701,7 @@ pub(crate) fn emit_logs(logs: &[LogLine]) {
 /// Drain post-commit dispatch plus the deferred admission consumes —
 /// the same collaborators as the L6 `drain` (a private helper this
 /// module cannot name), over the same ordering.
-async fn drain_dispatch<C: AdmissionCache>(
+pub(crate) async fn drain_dispatch<C: AdmissionCache>(
     pool: &PgPool,
     cloud: &pidash_db::config::CloudAgentSettings,
     cache: &C,

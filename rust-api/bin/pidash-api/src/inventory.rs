@@ -1205,7 +1205,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.agent_ticker.fire_tick",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.agent_ticker.scan_due_tickers",
@@ -1381,7 +1381,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.scheduler.fire_scheduler_binding",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.scheduler.scan_due_bindings",
@@ -1832,6 +1832,30 @@ mod tests {
         pidash_jobs::loop_scan::register_scanner(&mut registry, pool.clone());
         pidash_jobs::loop_fire::register_fire(&mut registry, pool.clone());
         pidash_jobs::tasks_ticker::scan::register_scanners(&mut registry, pool.clone());
+        // Real registrations (the same calls `worker()` makes): the
+        // live tick seam over test-default settings with an empty
+        // state map, and the live scheduler dispatch. Construction
+        // does no I/O, so the lazy pool suffices.
+        let dispatch_settings = pidash_db::config::Settings::test_defaults();
+        pidash_jobs::tasks_ticker::fire_tick::register_fire_tick(
+            &mut registry,
+            pool.clone(),
+            std::sync::Arc::new(pidash_jobs::orchestration::LiveFireTickSeam::new(
+                pool.clone(),
+                dispatch_settings.cloud_agent.clone(),
+                dispatch_settings.managed_runner.clone(),
+                std::collections::HashMap::new(),
+            )),
+        );
+        pidash_jobs::tasks_ticker::fire_binding::register_fire_binding(
+            &mut registry,
+            pool.clone(),
+            pidash_jobs::orchestration::live_scheduler_dispatch(
+                pool.clone(),
+                dispatch_settings.cloud_agent,
+                dispatch_settings.managed_runner,
+            ),
+        );
 
         // The const union, independent of the table.
         let mut expected_rust = std::collections::BTreeSet::new();
@@ -1856,6 +1880,8 @@ mod tests {
         expected_rust.extend([
             pidash_jobs::tasks_ticker::scan::SCAN_DUE_TICKERS_TASK,
             pidash_jobs::tasks_ticker::scan::SCAN_DUE_BINDINGS_TASK,
+            pidash_jobs::tasks_ticker::scan::FIRE_TICK_TASK,
+            pidash_jobs::tasks_ticker::scan::FIRE_SCHEDULER_BINDING_TASK,
         ]);
         // Count pins: a const that grows must update the table too.
         assert_eq!(
@@ -1883,7 +1909,7 @@ mod tests {
             2,
             "loop_scan group drifted"
         );
-        assert_eq!(expected_rust.len(), 33, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 35, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()
@@ -1907,10 +1933,6 @@ mod tests {
         // `TurnSeam` (hybrid worker per PIDASHCONV-857), so it stays
         // Python-owned.
         assert!(!registry.owns(pidash_jobs::assistant::RUN_TURN_TASK));
-        // Deliberately unregistered: the fire tasks have no live
-        // seams (PIDASHCONV-861), so they stay Python-owned.
-        assert!(!registry.owns(pidash_jobs::tasks_ticker::scan::FIRE_TICK_TASK));
-        assert!(!registry.owns(pidash_jobs::tasks_ticker::scan::FIRE_SCHEDULER_BINDING_TASK));
     }
 
     /// The schedule serializer: spot-check set shapes (full content is
