@@ -7156,5 +7156,75 @@ export class WebNewDriver implements ParityDriver {
 
   async runnersWaitRunnerRevokeWorking(): Promise<void> {
     return todo("runnersWaitRunnerRevokeWorking");
+  async intakeCreateDialogOpen(): Promise<boolean> {
+    return todo("intakeCreateDialogOpen");
+  }
+
+  async intakeCreateTitleValue(): Promise<string> {
+    return todo("intakeCreateTitleValue");
+  }
+
+  async intakeCreateTitleHint(): Promise<string> {
+    return todo("intakeCreateTitleHint");
+  }
+
+  async intakeCreateSubmitDisabled(): Promise<boolean> {
+    return todo("intakeCreateSubmitDisabled");
+  }
+
+  async intakeCreateFillDescription(_text: string): Promise<void> {
+    return todo("intakeCreateFillDescription");
+  }
+
+  async intakeCreateDescriptionText(): Promise<string> {
+    return todo("intakeCreateDescriptionText");
+  }
+
+  async intakeCreatePriorityValue(): Promise<string> {
+    return todo("intakeCreatePriorityValue");
+  }
+
+  async intakeCreateSetPriority(_label: string): Promise<void> {
+    return todo("intakeCreateSetPriority");
+  }
+
+  async intakeCreateMoreOn(): Promise<boolean> {
+    return todo("intakeCreateMoreOn");
+  }
+
+  async intakeCreateToggleMore(): Promise<void> {
+    return todo("intakeCreateToggleMore");
+  }
+
+  async intakeCreateDiscard(): Promise<void> {
+    return todo("intakeCreateDiscard");
+  }
+
+  async intakeCreatePressEscape(): Promise<void> {
+    return todo("intakeCreatePressEscape");
+  }
+
+  async intakeCreateSubmitStayingOpen(): Promise<void> {
+    return todo("intakeCreateSubmitStayingOpen");
+  }
+
+  async intakeCreateStallNextUpload(): Promise<void> {
+    return todo("intakeCreateStallNextUpload");
+  }
+
+  async intakeCreateReleaseUpload(): Promise<void> {
+    return todo("intakeCreateReleaseUpload");
+  }
+
+  async intakeCreateInsertImage(_file: { name: string; mime: string; bytes: Buffer }): Promise<void> {
+    return todo("intakeCreateInsertImage");
+  }
+
+  async intakeCreateEditorImageCount(): Promise<number> {
+    return todo("intakeCreateEditorImageCount");
+  }
+
+  async intakeCreateMockFileHop(): Promise<void> {
+    return todo("intakeCreateMockFileHop");
   }
 }
