@@ -132,6 +132,8 @@ jobs:
       # SECRET_KEY so forged sessions validate on both backends.
       SECRET_KEY: "contract-tests-fixed-secret"
       CONTRACT_SECRET_KEY: "contract-tests-fixed-secret"
+      # _harness/client.py session forging reads this name (assistant suite).
+      CONTRACT_DJANGO_SECRET_KEY: "contract-tests-fixed-secret"
       # Inert dummies (same as the app-integrations workflow): with them set
       # the suite exercises the configured paths instead of the fallbacks.
       # No test calls a real provider.
@@ -226,7 +228,7 @@ jobs:
         run: |
           if grep -qx "${{ matrix.suite }}" ../../rust-api/contract-tests/WORKER_SUITES.txt; then
             nohup python -m celery -A pi_dash worker --pool=solo --concurrency=1 \
-              --loglevel=warning > /tmp/django-worker.log 2>&1 &
+              --loglevel=info > /tmp/django-worker.log 2>&1 &
             echo $! > /tmp/django-worker.pid
             echo "WORKER_STARTED=1" >> "$GITHUB_ENV"
             for i in $(seq 1 60); do

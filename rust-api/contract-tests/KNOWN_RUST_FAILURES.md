@@ -24,4 +24,4 @@ Rules:
 
 ## Suites
 
-(none — the list is empty)
+- `prompting`: PIDASHCONV-842 — Rust anon throttle 429s GET /auth/get-csrf-token/ after ~30 hits (Django unlimited)
