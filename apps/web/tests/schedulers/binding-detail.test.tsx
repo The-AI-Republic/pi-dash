@@ -109,7 +109,6 @@ function makeBinding(overrides: Partial<ISchedulerBinding> = {}): ISchedulerBind
     exdates: [],
     extra_context: "Focus on the API.",
     enabled: true,
-    outcome_mode: "create_issue",
     pod: null,
     pod_name: null,
     next_run_at: "2026-09-27T09:00:00Z",
@@ -120,7 +119,7 @@ function makeBinding(overrides: Partial<ISchedulerBinding> = {}): ISchedulerBind
     actor: "user-1",
     created_at: "2026-09-01T00:00:00Z",
     updated_at: "2026-09-01T00:00:00Z",
-    resolved_prompt: "Audit the project.\n\nFocus on the API.\n\nCreate issues.",
+    resolved_prompt: "Audit the project.\n\nFocus on the API.",
     run_count: 2,
     scheduler_source: "builtin",
     scheduler_is_enabled: true,
@@ -185,6 +184,7 @@ describe("SchedulerBindingDetail", () => {
     expect(screen.getByText("Nightly Audit")).toBeTruthy();
     expect(screen.getByText("nightly-audit")).toBeTruthy();
     expect(screen.getByText("(default pod)")).toBeTruthy();
+    expect(screen.queryByText("Outcome mode")).toBeNull();
     expect(screen.getByText("Focus on the API.")).toBeTruthy();
     expect(screen.getByText("Installed by")).toBeTruthy();
     expect(screen.getByText("Ada")).toBeTruthy();

@@ -11,9 +11,9 @@ parse your final turn message. A scheduled run ends when the agent process
 exits; its lasting record is whatever you created on Pi Dash during the run.
 Before your final turn ends, confirm:
 
-- Every distinct finding was acted on per the work mode in your task: filed as
-  a Pi Dash issue, opened as a pull request, or both — never left only in your
-  own scratch notes, which are discarded when the process exits.
+- Every distinct finding was acted on the way your task says (for example
+  filed as a Pi Dash issue or opened as a pull request) — never left only in
+  your own scratch notes, which are discarded when the process exits.
 - You de-duplicated against existing open issues (by file + root cause, not by
   exact title) before filing anything new, so a recurring schedule does not
   pile up duplicates each tick.
