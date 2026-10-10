@@ -13,3 +13,31 @@ members = [
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# PIDASHCONV-855: plain-debug PBKDF2-SHA256 costs ~8s per 1.2M-iteration
+# op (pure-Rust sha2 + an unoptimized PBKDF2 loop), so every password
+# set/change/reset times out against the 10s contract client in the
+# debug-built V-02 matrix. Optimizing just the tiny password-hash
+# closure (~0.3s/op at 600k, C-like speed) fixes it with identical
+# output bytes and seconds of extra compile time. The loop itself is
+# monomorphized into pidash-auth, so the crate needs the override too.
+[profile.dev.package.pidash-auth]
+opt-level = 2
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
+[profile.dev.package.digest]
+opt-level = 3
+[profile.dev.package.block-buffer]
+opt-level = 3
+[profile.dev.package.crypto-common]
+opt-level = 3
+[profile.dev.package.subtle]
+opt-level = 3
+[profile.dev.package.cfg-if]
+opt-level = 3
+[profile.dev.package.cpufeatures]
+opt-level = 3
