@@ -19,7 +19,7 @@ id, and filed as a fix issue first.
 
 Counts (2026-10-10, `pi_dash.settings.test`):
 
-- Routes: 528 Django rows — 255 OWNED, 273 MISSING (all listed below),
+- Routes: 528 Django rows — 261 OWNED, 267 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
 - Jobs: 85 tasks — 26 OWNED, 34 proxied by design, 25 MISSING;
   beat 26/26 OWNED.
@@ -30,9 +30,10 @@ Counts (2026-10-10, `pi_dash.settings.test`):
 
 Fix: PIDASHCONV-826. Axum auto-serves HEAD wherever GET is routed;
 Django has no HEAD arm, so HEAD 405s there. Every row below is a GET
-route whose only gap is `HEAD:serves-but-django-405`. Two further HEAD
-gaps live on the magic-generate routes under G1+G4 (shared with G4:
-whichever fix lands first re-lists those two lines).
+route whose only gap is `HEAD:serves-but-django-405`. The two further
+HEAD gaps that lived on the magic-generate routes (formerly shared
+with G4 under G1+G4) were resolved by PIDASHCONV-829: HEAD now proxies
+to Django through axum's `get` handling, like the other arms.
 
 ```expected-routes
 G1 :: /api/assets/v2/static/{asset_id}/ :: HEAD:serves-but-django-405
@@ -284,16 +285,11 @@ G1 :: /auth/spaces/google/ :: HEAD:serves-but-django-405
 G1 :: /auth/spaces/google/callback/ :: HEAD:serves-but-django-405
 ```
 
-### G1+G4 — magic-generate routes: HEAD (G1) + the rest (G4) (2 rows)
+### G1+G4 — magic-generate routes (resolved by PIDASHCONV-829)
 
-Fixes: PIDASHCONV-826 (HEAD) + PIDASHCONV-829 (the rest). DRF
-POST-only routes: OPTIONS needs a proxy arm (Django answers 200
-metadata), the other methods need proxy arms for DRF's 405 body shape.
-
-```expected-routes
-G1+G4 :: /auth/magic-generate/ :: GET:drf-405body-vs-axum-405;PUT:drf-405body-vs-axum-405;PATCH:drf-405body-vs-axum-405;DELETE:drf-405body-vs-axum-405;HEAD:drf-405body-vs-axum-405;OPTIONS:allows-but-405
-G1+G4 :: /auth/spaces/magic-generate/ :: GET:drf-405body-vs-axum-405;PUT:drf-405body-vs-axum-405;PATCH:drf-405body-vs-axum-405;DELETE:drf-405body-vs-axum-405;HEAD:drf-405body-vs-axum-405;OPTIONS:allows-but-405
-```
+Both rows are gone: the proxy arms (including HEAD via axum's `get`
+handling) make the generate routes match Django on every method, so
+PIDASHCONV-826 has nothing left to do here.
 
 ### G2 — license instance-admin session/auth endpoints unported (7 rows)
 
@@ -322,18 +318,11 @@ G3 :: /api/v1/workspaces/{slug}/stickies.{format}/? :: no-rust-route
 G3 :: /api/v1/workspaces/{slug}/{format} :: no-rust-route
 ```
 
-### G4 — magic-link sign-in/up routes missing proxy arms (4 rows)
+### G4 — magic-link sign-in/up routes missing proxy arms (resolved by PIDASHCONV-829)
 
-Fix: PIDASHCONV-829. Plain Django Views, POST-only in Rust: OPTIONS
-(Django 200) has no proxy arm. (The two generate routes are under
-G1+G4 above.)
-
-```expected-routes
-G4 :: /auth/magic-sign-in/ :: OPTIONS:allows-but-405;cbv-405:GET,PUT,PATCH,DELETE,HEAD
-G4 :: /auth/magic-sign-up/ :: OPTIONS:allows-but-405;cbv-405:GET,PUT,PATCH,DELETE,HEAD
-G4 :: /auth/spaces/magic-sign-in/ :: OPTIONS:allows-but-405;cbv-405:GET,PUT,PATCH,DELETE,HEAD
-G4 :: /auth/spaces/magic-sign-up/ :: OPTIONS:allows-but-405;cbv-405:GET,PUT,PATCH,DELETE,HEAD
-```
+All four rows are gone: the proxy arms make the sign-in/up routes
+match Django on every method (OPTIONS 200 `Allow`, `Allow`-bearing
+405s). The two generate routes were under G1+G4 above.
 
 ### G5 — DRF format suffixes on detail routes (2 rows)
 
