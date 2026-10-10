@@ -205,6 +205,118 @@ Every domain port serializes and paginates through these kernels:
 
 Ported bugs live in the module docs and the PR body, not here.
 
+## Ops image + runbook (D-37)
+
+The Rust container layer (PIDASHCONV-813): `rust-api/Dockerfile.api`,
+`rust-api/bin/docker-entrypoint-*.sh`, and this runbook. It translates
+`apps/api/Dockerfile.api` and `apps/api/bin/docker-entrypoint-*.sh`
+(F37-12); the replay suite is `contract-tests/ops/test_image.py`.
+
+### Image build / push
+
+Build from the repo root (the context needs both `rust-api/` and
+`apps/api/` — the binary embeds templates and fragments from `apps/api`
+at compile time):
+
+```sh
+docker build -f rust-api/Dockerfile.api -t airepublic/pi-dash-backend:rust .
+docker push airepublic/pi-dash-backend:rust
+```
+
+Multi-stage: `rust:bookworm` compiles `pidash-api --release`, then the
+binary + entrypoints + data ship on `debian:bookworm-slim` (no toolchain,
+no Python). Same contract as the Python image: `WORKDIR /code`,
+`EXPOSE 8000`, `CMD ["./bin/docker-entrypoint-api.sh"]`. There is no
+`.dockerignore` (quarantine: only `rust-api/` plus the workflow change),
+so local builds send the whole checkout as context.
+
+### Boot order
+
+One image, seven entrypoints (role = container `command`, as in the
+Python fleet). Every `python manage.py <cmd>` became
+`pidash-api ops <cmd>` (`ops instance <cmd>` for the nested group);
+`gunicorn`/`celery` exec lines became `serve` / `worker`:
+
+| Entrypoint | Boot steps |
+|---|---|
+| `docker-entrypoint-api.sh` | wait_for_db → wait_for_migrations → machine signature → register-instance → configure-instance → create_bucket → clear_cache → `serve --bind 0.0.0.0:${PORT:-8000}` |
+| `docker-entrypoint-api-local.sh` | same boot + `DJANGO_SETTINGS_MODULE` default → `serve --bind 0.0.0.0:8000` |
+| `docker-entrypoint-worker.sh` | waits → min(nproc,8) concurrency → `worker --concurrency` |
+| `docker-entrypoint-worker-local.sh` | waits → `worker` |
+| `docker-entrypoint-beat.sh` | waits → `worker` (no `exec`, like Python) |
+| `docker-entrypoint-beat-local.sh` | waits → `worker` |
+| `docker-entrypoint-migrator.sh` | wait_for_db → `python manage.py migrate $1` (stays Django) |
+
+Deltas from the Python boot (each documented at the script line):
+collectstatic dropped (API-only container; the Django upstream serves
+static); migrate stays `python` (schema owner until switchover) and the
+migrator stays pinned to the Python image until the deployments
+follow-up; GUNICORN_WORKERS and max-requests have no `serve` equivalent
+(scale with replicas); watchmedo / uvicorn --reload dropped in -local
+scripts (`cargo watch` outside the image); beat roles run the full worker
+(no scheduler-only mode — the scheduler lock keeps worker + beat from
+double-scheduling); the migrator's `wait_for_db $1` drops `$1` (Django
+ignores it, clap rejects it).
+
+### Environment
+
+Every variable the image sets or the scripts and boot path consume:
+
+| Variable | Default | Consumed by | Notes |
+|---|---|---|---|
+| `PORT` | `8000` | api entrypoint | `--bind 0.0.0.0:${PORT:-8000}`; serve alone defaults to 8080 |
+| `CELERY_WORKER_CONCURRENCY` | min(nproc, 8) | worker entrypoint | job budget; Rust multiplexes over a shared 10-conn pool |
+| `DJANGO_SETTINGS_MODULE` | `pi_dash.settings.local` | api-local entrypoint | no Rust effect; kept for shape parity |
+| `MACHINE_SIGNATURE` | (set by api entrypoints) | register-instance | sha256 of hostname, mac, cpu, mem, disk |
+| `DATABASE_URL` | (required) | serve, worker, ops | TCP postgres URL; replica: see below |
+| `DATABASE_READ_REPLICA_URL` | (unset) | settings key only | read by Settings; pool wiring not yet connected |
+| `SECRET_KEY` | (ephemeral if unset) | serve, ops | session validation plus Fernet; keep stable across restarts |
+| `REDIS_URL` | (unset) | serve (degraded), clear_cache | throttle and signal cache; clear_cache full-clears |
+| `AMQP_URL` | (unset) | worker, register-instance | broker URL; worker requeues Python-owned jobs without it |
+| `AWS_REGION` | `AWS_DEFAULT_REGION`, then `us-east-1` | create and update bucket | region chain; set-wins even when empty |
+| `AWS_DEFAULT_REGION` | (unset) | create and update bucket | second in the region chain |
+| `AWS_ACCESS_KEY_ID` | (unset) | create and update bucket | S3 credentials |
+| `AWS_SECRET_ACCESS_KEY` | (unset) | create and update bucket | S3 credentials |
+| `AWS_S3_ENDPOINT_URL` | (unset) | create and update bucket | S3-compatible endpoint (MinIO, LocalStack) |
+| `AWS_S3_BUCKET_NAME` | (unset) | create and update bucket | default bucket |
+| `SEED_DIR` | (unset) | worker seed path, 811 loader | unset: worker reads ./seeds, loader serves embedded data |
+| `PIDASH_RELEASES_URL` | GitHub releases API | register-instance | override for the latest-release probe (tests) |
+| `INSTANCE_CHANGELOG_URL` | (Dockerfile default) | settings | preserved from the Python image |
+| `PYTHONDONTWRITEBYTECODE` | `1` | (none) | preserved key; no interpreter in this image |
+| `PYTHONUNBUFFERED` | `1` | (none) | preserved key; no interpreter in this image |
+| `PIP_DISABLE_PIP_VERSION_CHECK` | `1` | (none) | preserved key; no interpreter in this image |
+
+Cutover flags (`PIDASH_DJANGO_UPSTREAM`, `PIDASH_RUST_*`) live in
+[Cutover edge](#cutover-edge-f-02); Django-side deploy vars
+(`RABBITMQ_*`, `CELERY_BROKER_URL`, `GUNICORN_WORKERS`) stay in
+`deployments/` (quarantine — see follow-ups).
+
+### Replica wiring (F37-11)
+
+Django: `ENABLE_READ_REPLICA=1` enables the replica `DATABASES` entry
+from `DATABASE_READ_REPLICA_URL` (else the `POSTGRES_READ_REPLICA_*`
+parts) plus the `ReadReplicaRouter` and routing middleware; the F37-11
+decision table routes GET/HEAD/OPTIONS with a truthy `use_read_replica`
+view attribute to the replica and everything else to primary
+(`rust-api/fixtures/ops/routing/decision_table.golden.json`, ported to
+`crates/api/src/ops/routing.rs` by PIDASHCONV-812). Rust: the decision
+mirror and the `DATABASE_READ_REPLICA_URL` settings key exist, but every
+`Pools::connect` still passes `None` for the replica pool, so all reads
+stay on primary until a follow-up wires the pool — no replica env needs
+setting on this image today.
+
+### Follow-ups (out of scope, quarantine)
+
+- `deployments/{aio,cli,kubernetes,swarm}/`: point roles at this image
+  (migrator stays on the Python image until migrate is ported).
+- `requirements/*.txt`: drop the 3 unused deps plus croniter
+  (post-switchover).
+- Worker seed join: `services::tasks_cleanup::workspace_seed` joins
+  `dir/filename` without Python's `data/` segment; align it to
+  `SEED_DIR/data` and move the image seeds to `./seeds/data/`.
+- Replica pool wiring: connect `DATABASE_READ_REPLICA_URL` in
+  serve/worker instead of `None`.
+
 ## Reference
 
 - PIDASHCONV-1: the rulebook (rules, stages, issue types, where things live).
