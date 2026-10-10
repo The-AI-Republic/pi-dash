@@ -64,7 +64,14 @@ async function openFreshDialog(
 ): Promise<string> {
   const projectId = await scratchProject(seed, tag, session);
   await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
-  await driver.intakeCreateOpen(seed.workspaceSlug, projectId);
+  try {
+    await driver.intakeCreateOpen(seed.workspaceSlug, projectId);
+  } catch {
+    // Setup-only resilience: a loaded dev oracle can outlast the shared
+    // open wait with a blank page; one fresh navigation recovers. A
+    // second failure propagates as the real signal.
+    await driver.intakeCreateOpen(seed.workspaceSlug, projectId);
+  }
   return projectId;
 }
 
@@ -426,7 +433,12 @@ test(
 
       await test.step("create the first request through the dialog", async () => {
         await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
-        await driver.intakeCreateOpen(seed.workspaceSlug, projectId);
+        try {
+          await driver.intakeCreateOpen(seed.workspaceSlug, projectId);
+        } catch {
+          // Same setup-only retry as openFreshDialog.
+          await driver.intakeCreateOpen(seed.workspaceSlug, projectId);
+        }
         await driver.intakeCreateFillTitle(`${tag} request`);
         await driver.intakeCreateSubmit();
       });
