@@ -73,6 +73,9 @@ import type {
   RunnersTab,
   RunnersTableRow,
   ServedShellMarkers,
+  CyclesHeroProgressGroup,
+  CyclesHeroTrafficCounts,
+  CyclesHeroUpsell,
   WorkspaceOnboardingView,
 } from "./parity-driver";
 
@@ -7156,5 +7159,219 @@ export class WebNewDriver implements ParityDriver {
 
   async runnersWaitRunnerRevokeWorking(): Promise<void> {
     return todo("runnersWaitRunnerRevokeWorking");
+  }
+
+  // --- Active-cycle hero and cycles cross-cutting (NEWFRONT-254,
+  // --- CYC-040..045, CYC-047..048). Appended; existing stubs above are
+  // --- untouched per the shared driver contract.
+  async cyclesHeroOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("cyclesHeroOpenList");
+  }
+  async cyclesHeroOpenDetail(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
+    return todo("cyclesHeroOpenDetail");
+  }
+  async cyclesHeroOpenPeekRaw(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
+    return todo("cyclesHeroOpenPeekRaw");
+  }
+  async cyclesHeroReload(): Promise<void> {
+    return todo("cyclesHeroReload");
+  }
+  async cyclesHeroDelayDetailReads(_ms: number): Promise<void> {
+    return todo("cyclesHeroDelayDetailReads");
+  }
+  async cyclesHeroHideCycleFromListReads(_cycleId: string): Promise<void> {
+    return todo("cyclesHeroHideCycleFromListReads");
+  }
+  async cyclesHeroSidebarSkeletonVisible(): Promise<boolean> {
+    return todo("cyclesHeroSidebarSkeletonVisible");
+  }
+  async cyclesHeroSidebarName(): Promise<string | null> {
+    return todo("cyclesHeroSidebarName");
+  }
+  async cyclesHeroPeekSkeletonVisible(): Promise<boolean> {
+    return todo("cyclesHeroPeekSkeletonVisible");
+  }
+  async cyclesHeroPeekName(): Promise<string | null> {
+    return todo("cyclesHeroPeekName");
+  }
+  async cyclesHeroGroupHeading(): Promise<string | null> {
+    return todo("cyclesHeroGroupHeading");
+  }
+  async cyclesHeroActiveName(): Promise<string | null> {
+    return todo("cyclesHeroActiveName");
+  }
+  async cyclesHeroEmptyCopy(): Promise<{ title: string; description: string } | null> {
+    return todo("cyclesHeroEmptyCopy");
+  }
+  async cyclesHeroProgressGroups(): Promise<{ closed: string | null; groups: CyclesHeroProgressGroup[] }> {
+    return todo("cyclesHeroProgressGroups");
+  }
+  async cyclesHeroProgressEmptyVisible(): Promise<boolean> {
+    return todo("cyclesHeroProgressEmptyVisible");
+  }
+  async cyclesHeroBurndown(): Promise<{ heading: string | null; pending: string | null; chart: boolean }> {
+    return todo("cyclesHeroBurndown");
+  }
+  async cyclesHeroBurndownEmptyVisible(): Promise<boolean> {
+    return todo("cyclesHeroBurndownEmptyVisible");
+  }
+  async cyclesHeroBreakdownTabs(): Promise<string[]> {
+    return todo("cyclesHeroBreakdownTabs");
+  }
+  async cyclesHeroBreakdownSelectTab(_label: string): Promise<void> {
+    return todo("cyclesHeroBreakdownSelectTab");
+  }
+  async cyclesHeroBreakdownEntries(): Promise<string[]> {
+    return todo("cyclesHeroBreakdownEntries");
+  }
+  async cyclesHeroBreakdownEmptyVisible(): Promise<boolean> {
+    return todo("cyclesHeroBreakdownEmptyVisible");
+  }
+  async cyclesHeroClickProgressGroup(_group: string): Promise<void> {
+    return todo("cyclesHeroClickProgressGroup");
+  }
+  async cyclesHeroTapProgressGroup(_group: string): Promise<void> {
+    return todo("cyclesHeroTapProgressGroup");
+  }
+  async cyclesHeroClickBreakdownEntry(_index: number): Promise<void> {
+    return todo("cyclesHeroClickBreakdownEntry");
+  }
+  async cyclesHeroOpenWorkspaceActives(_workspaceSlug: string): Promise<void> {
+    return todo("cyclesHeroOpenWorkspaceActives");
+  }
+  async cyclesHeroUpsell(): Promise<CyclesHeroUpsell> {
+    return todo("cyclesHeroUpsell");
+  }
+  async cyclesHeroUpsellBadgeVisible(): Promise<boolean> {
+    return todo("cyclesHeroUpsellBadgeVisible");
+  }
+  async cyclesHeroActiveRowOffset(): Promise<string | null> {
+    return todo("cyclesHeroActiveRowOffset");
+  }
+  async cyclesHeroHoverActiveRowDates(): Promise<void> {
+    return todo("cyclesHeroHoverActiveRowDates");
+  }
+  async cyclesHeroSidebarOffset(): Promise<string | null> {
+    return todo("cyclesHeroSidebarOffset");
+  }
+  async cyclesHeroHoverSidebarDates(): Promise<void> {
+    return todo("cyclesHeroHoverSidebarDates");
+  }
+  async cyclesHeroTooltipText(): Promise<string | null> {
+    return todo("cyclesHeroTooltipText");
+  }
+  async cyclesHeroBeginTrafficSpy(): Promise<void> {
+    return todo("cyclesHeroBeginTrafficSpy");
+  }
+  async cyclesHeroTrafficCounts(): Promise<CyclesHeroTrafficCounts> {
+    return todo("cyclesHeroTrafficCounts");
+  }
+  async cyclesHeroOpenCreate(): Promise<void> {
+    return todo("cyclesHeroOpenCreate");
+  }
+  async cyclesHeroFillCreateName(_name: string): Promise<void> {
+    return todo("cyclesHeroFillCreateName");
+  }
+  async cyclesHeroSubmitCreate(): Promise<void> {
+    return todo("cyclesHeroSubmitCreate");
+  }
+  async cyclesHeroCreateOpen(): Promise<boolean> {
+    return todo("cyclesHeroCreateOpen");
+  }
+  async cyclesHeroVisibleNames(): Promise<string[]> {
+    return todo("cyclesHeroVisibleNames");
+  }
+  async cyclesHeroTransferBanner(_name: string): Promise<string | null> {
+    return todo("cyclesHeroTransferBanner");
+  }
+  async cyclesHeroOpenTransfer(_name: string): Promise<void> {
+    return todo("cyclesHeroOpenTransfer");
+  }
+  async cyclesHeroTransferSearch(_text: string): Promise<void> {
+    return todo("cyclesHeroTransferSearch");
+  }
+  async cyclesHeroTransferOptions(): Promise<string[]> {
+    return todo("cyclesHeroTransferOptions");
+  }
+  async cyclesHeroTransferPick(_name: string): Promise<void> {
+    return todo("cyclesHeroTransferPick");
+  }
+  async cyclesHeroFocusWindow(): Promise<void> {
+    return todo("cyclesHeroFocusWindow");
+  }
+  async cyclesHeroCreateButtonState(): Promise<"absent" | "disabled" | "enabled"> {
+    return todo("cyclesHeroCreateButtonState");
+  }
+  async cyclesHeroOpenRowMenu(_name: string): Promise<void> {
+    return todo("cyclesHeroOpenRowMenu");
+  }
+  async cyclesHeroRowMenuEntries(): Promise<string[]> {
+    return todo("cyclesHeroRowMenuEntries");
+  }
+  async cyclesHeroCloseMenus(): Promise<void> {
+    return todo("cyclesHeroCloseMenus");
+  }
+  async cyclesHeroSidebarDateDisabled(): Promise<boolean> {
+    return todo("cyclesHeroSidebarDateDisabled");
+  }
+  async cyclesHeroFavoriteVisible(_name: string): Promise<boolean> {
+    return todo("cyclesHeroFavoriteVisible");
+  }
+  async cyclesHeroSearchVisible(): Promise<boolean> {
+    return todo("cyclesHeroSearchVisible");
+  }
+  async cyclesHeroFilterVisible(): Promise<boolean> {
+    return todo("cyclesHeroFilterVisible");
+  }
+  async cyclesHeroInlineActionsVisible(_name: string): Promise<boolean> {
+    return todo("cyclesHeroInlineActionsVisible");
+  }
+  async cyclesHeroHoverActionsVisible(_name: string): Promise<boolean> {
+    return todo("cyclesHeroHoverActionsVisible");
+  }
+  async cyclesHeroLayoutMenuVisible(): Promise<boolean> {
+    return todo("cyclesHeroLayoutMenuVisible");
+  }
+  async cyclesHeroLayoutOptions(): Promise<string[]> {
+    return todo("cyclesHeroLayoutOptions");
+  }
+  async cyclesHeroPickLayout(_option: string): Promise<void> {
+    return todo("cyclesHeroPickLayout");
+  }
+  async cyclesHeroDetailLayoutMenuVisible(): Promise<boolean> {
+    return todo("cyclesHeroDetailLayoutMenuVisible");
+  }
+  async cyclesHeroSearchOpen(): Promise<void> {
+    return todo("cyclesHeroSearchOpen");
+  }
+  async cyclesHeroSearchType(_text: string): Promise<void> {
+    return todo("cyclesHeroSearchType");
+  }
+  async cyclesHeroSearchText(): Promise<string> {
+    return todo("cyclesHeroSearchText");
+  }
+  async cyclesHeroFilterMenuTexts(): Promise<string[]> {
+    return todo("cyclesHeroFilterMenuTexts");
+  }
+  async cyclesHeroOpenPeek(_name: string): Promise<void> {
+    return todo("cyclesHeroOpenPeek");
+  }
+  async cyclesHeroRowMenuClick(_entry: string): Promise<void> {
+    return todo("cyclesHeroRowMenuClick");
+  }
+  async cyclesHeroGrantClipboard(): Promise<void> {
+    return todo("cyclesHeroGrantClipboard");
+  }
+  async cyclesHeroReadClipboard(): Promise<string> {
+    return todo("cyclesHeroReadClipboard");
+  }
+  async cyclesHeroDismissSidebar(): Promise<void> {
+    return todo("cyclesHeroDismissSidebar");
+  }
+  async cyclesHeroDetailLayoutOptions(): Promise<string[]> {
+    return todo("cyclesHeroDetailLayoutOptions");
+  }
+  async cyclesHeroDetailPickLayout(_option: string): Promise<void> {
+    return todo("cyclesHeroDetailPickLayout");
   }
 }
