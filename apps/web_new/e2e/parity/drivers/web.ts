@@ -23177,4 +23177,143 @@ export class WebDriver implements ParityDriver {
     if (await this.isShown(main.getByRole("button", { name: /export|import|print/i }))) return true;
     return this.isShown(main.getByRole("menuitem", { name: /export|import|print/i }));
   }
+  // --- Notifications cross-cutting (NEWFRONT-202, NTF-026..031).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+
+  async notificationsCurrentUrl(): Promise<string> {
+    return this.page.url();
+  }
+
+  async notificationsFailListFetches(status: number): Promise<void> {
+    await this.page.route("**/api/workspaces/*/users/notifications**", async (route) => {
+      const request = route.request();
+      // Only the list GET fails: the app requests the bare path (no
+      // trailing slash) with query params, while per-item reads/writes,
+      // the unread counts, and mark-all-read carry on past it with an
+      // extra segment, so they pass through.
+      if (request.method() === "GET" && /\/users\/notifications\/?(\?|$)/.test(request.url())) {
+        await route.fulfill({ status, body: JSON.stringify({ detail: "parity list failure" }) });
+      } else {
+        await route.continue();
+      }
+    });
+  }
+
+  async notificationsClearListFetchFailure(): Promise<void> {
+    await this.page.unroute("**/api/workspaces/*/users/notifications**");
+  }
+
+  async notificationsRetryControlVisible(): Promise<boolean> {
+    const pane = this.page.getByTestId("notifications-list-pane").first();
+    if ((await pane.count()) === 0) return false;
+    for (const role of ["button", "link"] as const) {
+      const retry = pane.getByRole(role, { name: /retry|try again/i });
+      if (
+        (await retry.count()) > 0 &&
+        (await retry
+          .first()
+          .isVisible()
+          .catch(() => false))
+      )
+        return true;
+    }
+    return false;
+  }
+
+  async notificationsPressKey(key: string): Promise<void> {
+    await this.page.keyboard.press(key);
+  }
+
+  async notificationsDragCard(fromIndex: number, toIndex: number): Promise<void> {
+    const cards = this.page.getByTestId("notification-card");
+    const source = cards.nth(fromIndex);
+    await source.scrollIntoViewIfNeeded().catch(() => undefined);
+    await source.dragTo(cards.nth(toIndex));
+  }
+
+  async notificationsExportImportVisible(): Promise<boolean> {
+    const pane = this.page.getByTestId("notifications-list-pane").first();
+    if ((await pane.count()) === 0) return false;
+    for (const role of ["button", "link", "menuitem"] as const) {
+      const found = pane.getByRole(role, { name: /export|import|download/i });
+      if (
+        (await found.count()) > 0 &&
+        (await found
+          .first()
+          .isVisible()
+          .catch(() => false))
+      )
+        return true;
+    }
+    return false;
+  }
+
+  async notificationsEntryRequestPaths(workspaceSlug: string): Promise<string[]> {
+    const seen = new Set<string>();
+    const listener = (request: { url(): string }): void => {
+      const url = request.url();
+      if (!url.includes("/users/notifications") && !url.includes("/notification-preferences")) return;
+      try {
+        seen.add(new URL(url).pathname);
+      } catch {
+        // Unparseable URLs cannot be endpoint calls; ignore them.
+      }
+    };
+    this.page.on("request", listener);
+    try {
+      await this.page.goto(`/${workspaceSlug}/notifications/`, { timeout: 60_000 });
+      await this.page.waitForLoadState("domcontentloaded");
+      await this.notificationsTabLocator("all")
+        .first()
+        .waitFor({ timeout: WebDriver.WAIT_MS })
+        .catch(() => undefined);
+      await this.notificationsWaitForListSettled();
+      // Drain late follow-up requests (the unread fetch trails the list).
+      await this.page.waitForTimeout(1_000);
+    } finally {
+      this.page.off("request", listener);
+    }
+    return [...seen].sort();
+  }
+
+  async notificationsArmNotificationRequestSpy(): Promise<void> {
+    // The spy reinstalls on every navigation (fresh window each time)
+    // and accumulates in session storage, so requests from any page
+    // after arming are counted exactly once. The original still runs:
+    // this observes the permission flow without altering it.
+    await this.page.addInitScript(() => {
+      const holder = window as unknown as { Notification?: unknown };
+      const target = holder.Notification as
+        | { requestPermission?: (...args: unknown[]) => Promise<string>; __paritySpied?: boolean }
+        | undefined;
+      if (!target || typeof target.requestPermission !== "function" || target.__paritySpied) return;
+      const original = target.requestPermission.bind(target);
+      target.__paritySpied = true;
+      target.requestPermission = (...args: unknown[]) => {
+        try {
+          const raw = window.sessionStorage.getItem("__parityNotificationRequests") ?? "0";
+          window.sessionStorage.setItem("__parityNotificationRequests", String(Number(raw) + 1));
+        } catch {
+          // Storage unavailable; the counter stays put.
+        }
+        return original(...args);
+      };
+    });
+    await this.page
+      .evaluate(() => {
+        window.sessionStorage.setItem("__parityNotificationRequests", "0");
+      })
+      .catch(() => undefined);
+  }
+
+  async notificationsNotificationRequestCount(): Promise<number> {
+    return this.page.evaluate(() => {
+      try {
+        return Number(window.sessionStorage.getItem("__parityNotificationRequests") ?? "0");
+      } catch {
+        return 0;
+      }
+    });
+  }
 }

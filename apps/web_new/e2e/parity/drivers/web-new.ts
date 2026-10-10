@@ -6641,4 +6641,43 @@ export class WebNewDriver implements ParityDriver {
   async viewsDetailTabTitle(): Promise<string> {
     return todo("viewsDetailTabTitle");
   }
+  async notificationsCurrentUrl(): Promise<string> {
+    return todo("notificationsCurrentUrl");
+  }
+
+  async notificationsFailListFetches(_status: number): Promise<void> {
+    return todo("notificationsFailListFetches");
+  }
+
+  async notificationsClearListFetchFailure(): Promise<void> {
+    return todo("notificationsClearListFetchFailure");
+  }
+
+  async notificationsRetryControlVisible(): Promise<boolean> {
+    return todo("notificationsRetryControlVisible");
+  }
+
+  async notificationsPressKey(_key: string): Promise<void> {
+    return todo("notificationsPressKey");
+  }
+
+  async notificationsDragCard(_fromIndex: number, _toIndex: number): Promise<void> {
+    return todo("notificationsDragCard");
+  }
+
+  async notificationsExportImportVisible(): Promise<boolean> {
+    return todo("notificationsExportImportVisible");
+  }
+
+  async notificationsEntryRequestPaths(_workspaceSlug: string): Promise<string[]> {
+    return todo("notificationsEntryRequestPaths");
+  }
+
+  async notificationsArmNotificationRequestSpy(): Promise<void> {
+    return todo("notificationsArmNotificationRequestSpy");
+  }
+
+  async notificationsNotificationRequestCount(): Promise<number> {
+    return todo("notificationsNotificationRequestCount");
+  }
 }

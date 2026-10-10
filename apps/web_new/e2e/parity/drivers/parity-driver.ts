@@ -4352,6 +4352,34 @@ export interface ParityDriver {
   viewsListDragRow(from: string, to: string): Promise<void>;
   /** Whether any export/import/print control shows on a views page. */
   viewsPageExportImportVisible(): Promise<boolean>;
+  // --- Notifications cross-cutting: roles, links, realtime, absent,
+  // --- errors (NEWFRONT-202, NTF-026..031). Appended; existing methods
+  // --- above are untouched per the shared driver contract.
+
+  /** Full inbox address (path plus any query/hash), as the address bar shows it. */
+  notificationsCurrentUrl(): Promise<string>;
+  /** Fail inbox list GETs with `status` (item writes and unread counts pass through). */
+  notificationsFailListFetches(status: number): Promise<void>;
+  /** Remove the list-fetch failure route. */
+  notificationsClearListFetchFailure(): Promise<void>;
+  /** Whether any retry control shows inside the inbox list pane. */
+  notificationsRetryControlVisible(): Promise<boolean>;
+  /** Press one keyboard key with the inbox focused. */
+  notificationsPressKey(key: string): Promise<void>;
+  /** Drag the card at `fromIndex` onto the card at `toIndex`. */
+  notificationsDragCard(fromIndex: number, toIndex: number): Promise<void>;
+  /** Whether any export/import/download control shows inside the inbox list pane. */
+  notificationsExportImportVisible(): Promise<boolean>;
+  /**
+   * Enter the inbox fresh, recording every notification-API request path
+   * (list, unread, per-item, preferences) the entry fires. Paths are URL
+   * paths without query strings, deduplicated.
+   */
+  notificationsEntryRequestPaths(workspaceSlug: string): Promise<string[]>;
+  /** Arm a counter for Notification.requestPermission calls from this point on. */
+  notificationsArmNotificationRequestSpy(): Promise<void>;
+  /** Number of Notification.requestPermission calls observed since arming. */
+  notificationsNotificationRequestCount(): Promise<number>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
