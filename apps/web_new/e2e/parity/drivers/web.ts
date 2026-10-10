@@ -27759,8 +27759,8 @@ export class WebDriver implements ParityDriver {
   // --- content) and to the canvas scroll column (live-editor reads never
   // --- leak the snapshot overlay's editor). The two icon-only controls
   // --- without accessible names (the sticky-toolbar pane toggle, the
-  // --- hover preview card) carry data-testid hooks; everything else uses
-  // --- roles, labels, links, and rendered text.
+  // --- hover preview card) prefer data-testid hooks with structural
+  // --- fallbacks; everything else uses roles, labels, links, and text.
   private pagesPaneDetailSeen = 0;
   private pagesPaneDetailMode: "pass" | "stall" | "fail" = "pass";
   private pagesPaneDetailGates: Array<() => void> = [];
@@ -27924,14 +27924,21 @@ export class WebDriver implements ParityDriver {
     return margin === "0px";
   }
 
+  /** The sticky-toolbar pane toggle: test hook first, icon identity fallback. */
+  private async pagesPaneToolbarToggle(): Promise<Locator> {
+    const hooked = this.page.locator('[data-testid="pages-pane-toggle"]');
+    if ((await hooked.count()) > 0) return hooked;
+    return this.page.locator("#page-toolbar-container button:has(svg.lucide-panel-right)");
+  }
+
   async pagesPaneOpenViaToolbar(): Promise<void> {
     // The read-only/sticky-off variant carries an accessible name; the
-    // sticky-toolbar variant is icon-only and carries the test hook.
+    // sticky-toolbar variant is icon-only (test hook, icon fallback).
     const labeled = this.page.getByRole("button", { name: "Open navigation pane" });
     if ((await labeled.count()) > 0) {
       await labeled.first().click({ timeout: WebDriver.OPEN_MS });
     } else {
-      await this.page.locator('[data-testid="pages-pane-toggle"]').click({ timeout: WebDriver.OPEN_MS });
+      await (await this.pagesPaneToolbarToggle()).first().click({ timeout: WebDriver.OPEN_MS });
     }
     await expect.poll(() => this.pagesPaneIsOpen(), { timeout: WebDriver.WAIT_MS }).toBe(true);
   }
@@ -27995,13 +28002,22 @@ export class WebDriver implements ParityDriver {
     await this.pagesPanePreviewButton().hover({ timeout: WebDriver.OPEN_MS });
   }
 
+  /** The hover preview card: test hook first, structural fallback. */
+  private async pagesPanePreviewCard(): Promise<Locator> {
+    const hooked = this.page.locator('[data-testid="pages-pane-preview-card"]');
+    if ((await hooked.count()) > 0) return hooked;
+    // The card is the group container's unlabelled child (the labelled
+    // child is the bars button itself).
+    return this.pagesPanePreviewButton().locator("xpath=..").locator(':scope > div:not([role="button"])');
+  }
+
   async pagesPanePreviewCardVisible(): Promise<boolean> {
-    const card = this.page.locator('[data-testid="pages-pane-preview-card"]');
+    const card = await this.pagesPanePreviewCard();
     return (await card.count()) > 0 && (await card.first().isVisible());
   }
 
   async pagesPanePreviewCardHeadings(): Promise<string[]> {
-    const card = this.page.locator('[data-testid="pages-pane-preview-card"]');
+    const card = await this.pagesPanePreviewCard();
     if ((await card.count()) === 0) return [];
     const names = await card.first().getByRole("button").allInnerTexts();
     return names.map((name) => name.trim()).filter((name) => name !== "");
