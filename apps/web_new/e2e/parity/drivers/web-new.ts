@@ -6781,4 +6781,96 @@ export class WebNewDriver implements ParityDriver {
   async archivesTabClick(_tab: ArchivesTab): Promise<void> {
     return todo("archivesTabClick");
   }
+
+  async cyclesEditOpenUpdateDialog(_name: string): Promise<void> {
+    return todo("cyclesEditOpenUpdateDialog");
+  }
+
+  async cyclesEditOpenListRaw(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("cyclesEditOpenListRaw");
+  }
+
+  async cyclesEditDialogHeading(): Promise<string | null> {
+    return todo("cyclesEditDialogHeading");
+  }
+
+  async cyclesEditFillName(_text: string): Promise<void> {
+    return todo("cyclesEditFillName");
+  }
+
+  async cyclesEditFillDescription(_text: string): Promise<void> {
+    return todo("cyclesEditFillDescription");
+  }
+
+  async cyclesEditRangeOpen(): Promise<void> {
+    return todo("cyclesEditRangeOpen");
+  }
+
+  async cyclesEditSubmitUpdate(): Promise<void> {
+    return todo("cyclesEditSubmitUpdate");
+  }
+
+  async cyclesEditSubmitCountingDateChecks(): Promise<{ dateChecks: number }> {
+    return todo("cyclesEditSubmitCountingDateChecks");
+  }
+
+  async cyclesEditStoredCycleTab(): Promise<string | null> {
+    return todo("cyclesEditStoredCycleTab");
+  }
+
+  async cyclesEditClearStoredCycleTab(): Promise<void> {
+    return todo("cyclesEditClearStoredCycleTab");
+  }
+
+  async cyclesEditHeroCycleName(): Promise<string | null> {
+    return todo("cyclesEditHeroCycleName");
+  }
+
+  async cyclesEditPressEscape(): Promise<void> {
+    return todo("cyclesEditPressEscape");
+  }
+
+  async cyclesEditTitleFocused(): Promise<boolean> {
+    return todo("cyclesEditTitleFocused");
+  }
+
+  async cyclesEditFocusTrail(_steps: number): Promise<string[]> {
+    return todo("cyclesEditFocusTrail");
+  }
+
+  async cyclesEditCreateButtonVisible(): Promise<boolean> {
+    return todo("cyclesEditCreateButtonVisible");
+  }
+
+  async cyclesEditEmptyCreateState(): Promise<{ visible: boolean; disabled: boolean }> {
+    return todo("cyclesEditEmptyCreateState");
+  }
+
+  async cyclesEditOpenPeek(_name: string): Promise<void> {
+    return todo("cyclesEditOpenPeek");
+  }
+
+  async cyclesEditOpenDetailMenu(): Promise<void> {
+    return todo("cyclesEditOpenDetailMenu");
+  }
+
+  async cyclesEditDeleteDialogText(): Promise<{ heading: string; body: string } | null> {
+    return todo("cyclesEditDeleteDialogText");
+  }
+
+  async cyclesEditDeleteConfirm(): Promise<void> {
+    return todo("cyclesEditDeleteConfirm");
+  }
+
+  async cyclesEditDeleteCancel(): Promise<void> {
+    return todo("cyclesEditDeleteCancel");
+  }
+
+  async cyclesEditFailNextDeleteWrite(): Promise<void> {
+    return todo("cyclesEditFailNextDeleteWrite");
+  }
+
+  async cyclesEditDetailReadOnlyNotice(): Promise<string | null> {
+    return todo("cyclesEditDetailReadOnlyNotice");
+  }
 }

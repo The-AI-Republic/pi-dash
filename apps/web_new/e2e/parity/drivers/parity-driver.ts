@@ -4449,6 +4449,67 @@ export interface ParityDriver {
   archivesPrimeAndEnter(workspaceSlug: string, projectId: string, liveCycleName: string): Promise<void>;
   /** Click the tab-strip link for `tab` (client-side) and settle on it. */
   archivesTabClick(tab: ArchivesTab): Promise<void>;
+
+  // --- Cycles edit/delete/archive oracles (NEWFRONT-251, CYC-017–024). ---
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. Covers the live cycles list's create/update
+  // --- dialog (edit reuse, Escape, keyboard order), the stored list tab,
+  // --- the active-cycle hero refresh, creation gating, the delete
+  // --- confirm dialog, the finished-cycle read-only surface, and the
+  // --- archive confirm dialog. Reads are user-visible; the suite never
+  // --- asserts store internals.
+  /** Open the live row's Edit dialog; waits for the Update heading. */
+  cyclesEditOpenUpdateDialog(name: string): Promise<void>;
+  /** Open the live cycles list without settling (empty views never settle the shared wait). */
+  cyclesEditOpenListRaw(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Create/update dialog heading, or null when no dialog is open. */
+  cyclesEditDialogHeading(): Promise<string | null>;
+  /** Fill the open dialog's title field. */
+  cyclesEditFillName(text: string): Promise<void>;
+  /** Fill the open dialog's description field. */
+  cyclesEditFillDescription(text: string): Promise<void>;
+  /** Open the range calendar from the update dialog's dates trigger. */
+  cyclesEditRangeOpen(): Promise<void>;
+  /** Submit the update dialog; resolves once it closes. */
+  cyclesEditSubmitUpdate(): Promise<void>;
+  /**
+   * Submit the update dialog while counting overlap-check POSTs; resolves
+   * once the dialog closes. Proves the unchanged-dates skip (CYC-017).
+   */
+  cyclesEditSubmitCountingDateChecks(): Promise<{ dateChecks: number }>;
+  /** Parsed `cycle_tab` list-tab value from storage, or null when unset. */
+  cyclesEditStoredCycleTab(): Promise<string | null>;
+  /** Clear the stored `cycle_tab` value. */
+  cyclesEditClearStoredCycleTab(): Promise<void>;
+  /** Cycle name shown in the Active-cycle hero panel, or null when the empty view shows. */
+  cyclesEditHeroCycleName(): Promise<string | null>;
+  /** Press Escape with the create/update dialog open. */
+  cyclesEditPressEscape(): Promise<void>;
+  /** Whether the dialog's title field currently holds keyboard focus. */
+  cyclesEditTitleFocused(): Promise<boolean>;
+  /**
+   * Focus trail through the open dialog: the focused control's label now,
+   * then after each of `steps` Tab presses.
+   */
+  cyclesEditFocusTrail(steps: number): Promise<string[]>;
+  /** Whether the list header's create button is present. */
+  cyclesEditCreateButtonVisible(): Promise<boolean>;
+  /** First-run empty view's creation shortcut: presence plus disabled state. */
+  cyclesEditEmptyCreateState(): Promise<{ visible: boolean; disabled: boolean }>;
+  /** Open the live row's quick-look panel through its row control. */
+  cyclesEditOpenPeek(name: string): Promise<void>;
+  /** Open the quick-actions menu on the cycle detail page. */
+  cyclesEditOpenDetailMenu(): Promise<void>;
+  /** Delete-confirm dialog heading plus body, or null when none shows. */
+  cyclesEditDeleteDialogText(): Promise<{ heading: string; body: string } | null>;
+  /** Confirm the delete dialog; resolves once the write lands (callers read the toast immediately). */
+  cyclesEditDeleteConfirm(): Promise<void>;
+  /** Cancel the delete dialog; resolves once it closes. */
+  cyclesEditDeleteCancel(): Promise<void>;
+  /** Fail the next cycle DELETE once with the server's permission refusal. */
+  cyclesEditFailNextDeleteWrite(): Promise<void>;
+  /** Read-only notice on a finished cycle's detail, or null when absent. */
+  cyclesEditDetailReadOnlyNotice(): Promise<string | null>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
