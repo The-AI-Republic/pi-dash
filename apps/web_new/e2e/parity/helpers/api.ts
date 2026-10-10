@@ -11836,3 +11836,149 @@ export async function archivesModuleArchivedAt(
   if (match === undefined) throw new Error("[parity] module missing from the archived-modules collection.");
   return typeof match["archived_at"] === "string" ? match["archived_at"] : null;
 }
+
+// --- NEWFRONT-253 (cycles detail/sidebar, CYC-032-039): per-cycle view
+// --- preferences, date overlap checks, progress analytics, and the full
+// --- cycle record. Appended; existing helpers above are untouched.
+
+/** Per-cycle view preferences as the server stores them per user. */
+export interface ParityCycleUserProperties {
+  /** Stored layout key (list/kanban/calendar/spreadsheet/gantt), if any. */
+  layout: string | null;
+  /** Stored rich filter expression (work-item filters), if any. */
+  richFilters: unknown;
+  /** Legacy flat filters map. */
+  filters: Record<string, unknown>;
+}
+
+/** Read one cycle's per-user view preferences (layout + filters). */
+export async function serverCycleUserProperties(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityCycleUserProperties> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/user-properties/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle user-properties read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const display = rec["display_filters"] as Record<string, unknown> | undefined;
+  return {
+    layout: typeof display?.["layout"] === "string" ? (display["layout"] as string) : null,
+    richFilters: rec["rich_filters"] ?? null,
+    filters: (rec["filters"] as Record<string, unknown> | undefined) ?? {},
+  };
+}
+
+/** Ask the server whether a date range overlaps another cycle (overlap guard). */
+export async function serverCycleDateCheck(
+  workspaceSlug: string,
+  projectId: string,
+  startDate: string,
+  endDate: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/date-check/`,
+    sessionCookie,
+    { start_date: startDate, end_date: endDate, cycle_id: cycleId }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle date-check failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  return rec["status"] === true;
+}
+
+/** One analytics distribution row (assignee or label share). */
+export interface ParityCycleDistributionRow {
+  title: string;
+  completed: number;
+  total: number;
+}
+
+/** Cycle progress analytics as the server computes them. */
+export interface ParityCycleAnalytics {
+  assignees: ParityCycleDistributionRow[];
+  labels: ParityCycleDistributionRow[];
+  /** Dated entries in the completion chart (0 when the chart has no data). */
+  completionDays: number;
+}
+
+/** Read one cycle's progress analytics (the sidebar's numbers). */
+export async function serverCycleAnalytics(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  measure: "issues" | "points",
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityCycleAnalytics> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/analytics/?type=${measure}`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle analytics read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const rows = (
+    key: string,
+    titleKey: string,
+    completedKey: string,
+    totalKey: string
+  ): ParityCycleDistributionRow[] => {
+    const raw = rec[key];
+    if (!Array.isArray(raw)) return [];
+    return raw.flatMap((row) => {
+      const entry = row as Record<string, unknown>;
+      return typeof entry[titleKey] === "string" &&
+        typeof entry[completedKey] === "number" &&
+        typeof entry[totalKey] === "number"
+        ? [{ title: entry[titleKey] as string, completed: entry[completedKey], total: entry[totalKey] }]
+        : [];
+    });
+  };
+  const chart = rec["completion_chart"] as Record<string, unknown> | undefined;
+  return {
+    assignees: rows("assignees", "display_name", "completed_issues", "total_issues"),
+    labels: rows("labels", "label_name", "completed_issues", "total_issues"),
+    completionDays: chart === undefined ? 0 : Object.keys(chart).length,
+  };
+}
+
+/** Full cycle record fields the detail sidebar renders. */
+export interface ParityCycleDetailFull {
+  name: string;
+  description: string;
+  ownedById: string;
+  startDate: string | null;
+  endDate: string | null;
+}
+
+/** Read one cycle's full record (description, lead, dates). */
+export async function serverCycleDetailFull(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityCycleDetailFull> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["name"] !== "string" || typeof rec["owned_by_id"] !== "string")
+    throw new Error("[parity] cycle record carried no string name/owned_by_id.");
+  return {
+    name: rec["name"],
+    description: typeof rec["description"] === "string" ? rec["description"] : "",
+    ownedById: rec["owned_by_id"],
+    startDate: typeof rec["start_date"] === "string" ? rec["start_date"] : null,
+    endDate: typeof rec["end_date"] === "string" ? rec["end_date"] : null,
+  };
+}

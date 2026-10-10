@@ -17,6 +17,7 @@ import type {
   ArchivesTab,
   ArchivesTrafficCounts,
   AddRunnerFormState,
+  CyclesProgressStatRow,
   AddRunnerRemotePhase,
   AssistantApiCounts,
   AssistantBubble,
@@ -6872,5 +6873,122 @@ export class WebNewDriver implements ParityDriver {
 
   async cyclesEditDetailReadOnlyNotice(): Promise<string | null> {
     return todo("cyclesEditDetailReadOnlyNotice");
+  }
+
+  // --- NEWFRONT-253 (cycles detail/sidebar, CYC-032-039). Stage 0
+  // --- oracle convention: todo() stubs until the area lands in web_new.
+  async cyclesDetailSidebarName(): Promise<string | null> {
+    return todo("cyclesDetailSidebarName");
+  }
+  async cyclesToggleSidebarViaHeader(): Promise<void> {
+    return todo("cyclesToggleSidebarViaHeader");
+  }
+  async cyclesCloseSidebarViaPanel(): Promise<void> {
+    return todo("cyclesCloseSidebarViaPanel");
+  }
+  async cyclesSidebarCollapsedStored(): Promise<boolean> {
+    return todo("cyclesSidebarCollapsedStored");
+  }
+  async cyclesHeaderBadgeText(): Promise<string | null> {
+    return todo("cyclesHeaderBadgeText");
+  }
+  async cyclesHeaderAddVisible(): Promise<boolean> {
+    return todo("cyclesHeaderAddVisible");
+  }
+  async cyclesHeaderAnalyticsVisible(): Promise<boolean> {
+    return todo("cyclesHeaderAnalyticsVisible");
+  }
+  async cyclesOpenAnalytics(): Promise<void> {
+    return todo("cyclesOpenAnalytics");
+  }
+  async cyclesAnalyticsDialogVisible(): Promise<boolean> {
+    return todo("cyclesAnalyticsDialogVisible");
+  }
+  async cyclesDismissAnalytics(): Promise<void> {
+    return todo("cyclesDismissAnalytics");
+  }
+  async cyclesSwitcherOpen(_currentName: string): Promise<void> {
+    return todo("cyclesSwitcherOpen");
+  }
+  async cyclesSwitcherOptions(): Promise<string[]> {
+    return todo("cyclesSwitcherOptions");
+  }
+  async cyclesSwitcherPick(_name: string): Promise<void> {
+    return todo("cyclesSwitcherPick");
+  }
+  async cyclesClickCyclesCrumb(): Promise<void> {
+    return todo("cyclesClickCyclesCrumb");
+  }
+  async cyclesClickProjectCrumb(_projectName: string): Promise<void> {
+    return todo("cyclesClickProjectCrumb");
+  }
+  async cyclesMobileBackVisible(): Promise<boolean> {
+    return todo("cyclesMobileBackVisible");
+  }
+  async cyclesMobileBack(): Promise<void> {
+    return todo("cyclesMobileBack");
+  }
+  async cyclesSidebarDateText(): Promise<string> {
+    return todo("cyclesSidebarDateText");
+  }
+  async cyclesSidebarDateDisabled(): Promise<boolean> {
+    return todo("cyclesSidebarDateDisabled");
+  }
+  async cyclesSidebarOpenDatePicker(): Promise<void> {
+    return todo("cyclesSidebarOpenDatePicker");
+  }
+  async cyclesPickDateDay(_label: string): Promise<void> {
+    return todo("cyclesPickDateDay");
+  }
+  async cyclesDismissDatePicker(): Promise<void> {
+    return todo("cyclesDismissDatePicker");
+  }
+  async cyclesSidebarDescription(): Promise<string | null> {
+    return todo("cyclesSidebarDescription");
+  }
+  async cyclesSidebarLead(): Promise<{ name: string; avatar: string }> {
+    return todo("cyclesSidebarLead");
+  }
+  async cyclesProgressWorkItemsText(): Promise<string> {
+    return todo("cyclesProgressWorkItemsText");
+  }
+  async cyclesProgressPointsText(): Promise<string | null> {
+    return todo("cyclesProgressPointsText");
+  }
+  async cyclesProgressChartVisible(): Promise<boolean> {
+    return todo("cyclesProgressChartVisible");
+  }
+  async cyclesProgressMeasureValue(): Promise<string | null> {
+    return todo("cyclesProgressMeasureValue");
+  }
+  async cyclesProgressMeasureOptions(): Promise<string[]> {
+    return todo("cyclesProgressMeasureOptions");
+  }
+  async cyclesProgressPickMeasure(_label: string): Promise<void> {
+    return todo("cyclesProgressPickMeasure");
+  }
+  async cyclesProgressStatsTab(_tab: "States" | "Assignees" | "Labels"): Promise<void> {
+    return todo("cyclesProgressStatsTab");
+  }
+  async cyclesProgressStatsRows(): Promise<CyclesProgressStatRow[]> {
+    return todo("cyclesProgressStatsRows");
+  }
+  async cyclesProgressEmptyText(): Promise<string | null> {
+    return todo("cyclesProgressEmptyText");
+  }
+  async cyclesProgressEntryClick(_title: string): Promise<void> {
+    return todo("cyclesProgressEntryClick");
+  }
+  async cyclesMobileOpenAnalytics(): Promise<void> {
+    return todo("cyclesMobileOpenAnalytics");
+  }
+  async cyclesSwitchLayout(_layout: LayoutsLayoutKey): Promise<void> {
+    return todo("cyclesSwitchLayout");
+  }
+  async cyclesMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
+    return todo("cyclesMobileOfferedLayouts");
+  }
+  async cyclesMobileSwitchTo(_layout: LayoutsLayoutKey): Promise<void> {
+    return todo("cyclesMobileSwitchTo");
   }
 }
