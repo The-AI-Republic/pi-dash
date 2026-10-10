@@ -4510,6 +4510,64 @@ export interface ParityDriver {
   cyclesEditFailNextDeleteWrite(): Promise<void>;
   /** Read-only notice on a finished cycle's detail, or null when absent. */
   cyclesEditDetailReadOnlyNotice(): Promise<string | null>;
+
+  // Archived work-item mutations (NEWFRONT-223, ARCH-008..013). Row-menu
+  // restore/delete/copy/open reuse the layouts row-menu reads where they
+  // match; the methods below cover only gaps: archived-list navigation,
+  // mutation failure shaping, the archive dialog's text, and the archived
+  // detail screen (breadcrumb, banner, loader, not-found, locked editing).
+  // Appended; existing entries above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Open the archived work-items list of a project; ends settled (rows or empty state). */
+  archivesOpenList(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Names of the archived work items currently rendered, in display order. */
+  archivesMutationVisibleIssueNames(): Promise<string[]>;
+  /**
+   * Fail the next request matching `method` whose URL contains `urlPart`
+   * once with a 500 (failure shaping for restore/delete/archive).
+   */
+  archivesFailNextMutation(method: "POST" | "DELETE", urlPart: string): Promise<void>;
+  /** Remove any armed archives mutation failure. */
+  archivesClearMutationFailure(): Promise<void>;
+  /** Heading text of the open archive dialog, or null when no dialog shows. */
+  archivesArchiveModalTitle(): Promise<string | null>;
+  /** Body text of the open archive dialog, or null when no dialog shows. */
+  archivesArchiveModalBody(): Promise<string | null>;
+  /** Dismiss the open archive dialog through its cancel control. */
+  archivesArchiveModalCancel(): Promise<void>;
+  /** Pick one entry of the archived detail header menu (reads reuse layoutsDetailMenuItems). */
+  archivesDetailMenuChoose(item: string): Promise<void>;
+  /** Open an archived detail address without waiting for the body (raw navigation for loader/not-found). */
+  archivesOpenDetailRaw(workspaceSlug: string, projectId: string, issueId: string): Promise<void>;
+  /** Breadcrumb trail text on the archived detail screen. */
+  archivesDetailBreadcrumbText(): Promise<string>;
+  /** Archive banner text on the archived detail screen, or null when absent. */
+  archivesMutationDetailBannerText(): Promise<string | null>;
+  /** Follow the archive banner's back control to the archived list. */
+  archivesDetailBannerBack(): Promise<void>;
+  /** Whether the detail address shows the not-found state. */
+  archivesDetailNotFoundVisible(): Promise<boolean>;
+  /**
+   * Enter the archived detail while gating its record read, reporting what
+   * the screen shows with the fetch provably outstanding (plus the
+   * intercepted read count). Releases the hold and settles on the detail.
+   */
+  archivesDetailPendingStateOnHeldFetch(
+    workspaceSlug: string,
+    projectId: string,
+    issueId: string
+  ): Promise<{
+    heldRequests: number;
+    bannerDuringHold: string | null;
+    breadcrumbDuringHold: string;
+    activityDuringHold: boolean;
+    settled: boolean;
+  }>;
+  /** Whether the archived detail renders the activity composer. */
+  archivesDetailComposerVisible(): Promise<boolean>;
+  /** Whether the archived detail's issue-level reaction control is enabled (false when absent or disabled). */
+  archivesDetailReactionControlEnabled(): Promise<boolean>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
