@@ -14,6 +14,8 @@ import type {
   ArchivesModuleChip,
   ArchivesModulesEmptyKind,
   ArchivesPeekReadOnly,
+  ArchivesTab,
+  ArchivesTrafficCounts,
   AddRunnerFormState,
   AddRunnerRemotePhase,
   AssistantApiCounts,
@@ -6679,5 +6681,107 @@ export class WebNewDriver implements ParityDriver {
 
   async notificationsNotificationRequestCount(): Promise<number> {
     return todo("notificationsNotificationRequestCount");
+  }
+
+  // --- Archives cross-cutting (NEWFRONT-226, ARCH-026–032). Appended; the
+  // --- stubs above are untouched per the shared driver contract.
+  async archivesProjectConfirmLabel(): Promise<string> {
+    return todo("archivesProjectConfirmLabel");
+  }
+  async archivesProjectConfirmBusy(): Promise<boolean> {
+    return todo("archivesProjectConfirmBusy");
+  }
+  async archivesProjectDelayNextWrite(_ms: number): Promise<void> {
+    return todo("archivesProjectDelayNextWrite");
+  }
+  async archivesProjectFailNextWrite(): Promise<void> {
+    return todo("archivesProjectFailNextWrite");
+  }
+  async archivesItemFailNextWrite(): Promise<void> {
+    return todo("archivesItemFailNextWrite");
+  }
+  async archivesTabOpen(_workspaceSlug: string, _projectId: string, _tab: ArchivesTab): Promise<void> {
+    return todo("archivesTabOpen");
+  }
+  async archivesTabNames(): Promise<string[]> {
+    return todo("archivesTabNames");
+  }
+  async archivesActiveTab(): Promise<ArchivesTab> {
+    return todo("archivesActiveTab");
+  }
+  async archivesRowMenuOpenFirst(_name: string): Promise<void> {
+    return todo("archivesRowMenuOpenFirst");
+  }
+  async archivesRowMenuEntries(): Promise<string[]> {
+    return todo("archivesRowMenuEntries");
+  }
+  async archivesRowMenuClick(_entry: string): Promise<void> {
+    return todo("archivesRowMenuClick");
+  }
+  async archivesPeekOpenFirst(_name: string): Promise<void> {
+    return todo("archivesPeekOpenFirst");
+  }
+  async archivesPeekVisible(): Promise<boolean> {
+    return todo("archivesPeekVisible");
+  }
+  async archivesPeekClose(): Promise<void> {
+    return todo("archivesPeekClose");
+  }
+  async archivesDetailBannerText(): Promise<string | null> {
+    return todo("archivesDetailBannerText");
+  }
+  async archivesSkeletonVisible(): Promise<boolean> {
+    return todo("archivesSkeletonVisible");
+  }
+  async archivesDelayNextListReads(_ms: number): Promise<void> {
+    return todo("archivesDelayNextListReads");
+  }
+  async archivesBeginTrafficSpy(): Promise<void> {
+    return todo("archivesBeginTrafficSpy");
+  }
+  async archivesTrafficCounts(): Promise<ArchivesTrafficCounts> {
+    return todo("archivesTrafficCounts");
+  }
+  async archivesFilterControlVisible(): Promise<boolean> {
+    return todo("archivesFilterControlVisible");
+  }
+  async archivesSearchType(_text: string): Promise<void> {
+    return todo("archivesSearchType");
+  }
+  async archivesSearchText(): Promise<string> {
+    return todo("archivesSearchText");
+  }
+  async archivesRowDraggable(_name: string): Promise<boolean> {
+    return todo("archivesRowDraggable");
+  }
+
+  async archivesDragReorders(_source: string, _target: string): Promise<boolean> {
+    return todo("archivesDragReorders");
+  }
+
+  async archivesArmSkeletonObserver(): Promise<void> {
+    return todo("archivesArmSkeletonObserver");
+  }
+
+  async archivesSkeletonWasSeen(): Promise<boolean> {
+    return todo("archivesSkeletonWasSeen");
+  }
+  async archivesExportControlVisible(): Promise<boolean> {
+    return todo("archivesExportControlVisible");
+  }
+  async archivesPressKey(_key: string): Promise<void> {
+    return todo("archivesPressKey");
+  }
+  async archivesRowPresent(_name: string): Promise<boolean> {
+    return todo("archivesRowPresent");
+  }
+  async archivesPageTextPresent(_text: string): Promise<boolean> {
+    return todo("archivesPageTextPresent");
+  }
+  async archivesPrimeAndEnter(_workspaceSlug: string, _projectId: string, _liveCycleName: string): Promise<void> {
+    return todo("archivesPrimeAndEnter");
+  }
+  async archivesTabClick(_tab: ArchivesTab): Promise<void> {
+    return todo("archivesTabClick");
   }
 }

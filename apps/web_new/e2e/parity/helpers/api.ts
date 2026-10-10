@@ -11738,3 +11738,155 @@ export async function serverArchivedCycleDetail(
     archivedAt: typeof record.archived_at === "string" ? record.archived_at : null,
   };
 }
+
+// --- Archives cross-cutting (NEWFRONT-226, ARCH-026–032). Appended; the
+// --- helpers above are untouched per the shared contract.
+/** Archive a cycle through the API (fixtures for the archives tabs). */
+export async function archivesArchiveCycle(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/archive/`,
+    sessionCookie
+  );
+  if (!res.ok) throw new Error(`[parity] cycle archive failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["archived_at"] !== "string") throw new Error("[parity] cycle archive carried no archived_at.");
+  return rec["archived_at"];
+}
+
+/** Archive a module through the API (fixtures for the archives tabs). */
+export async function archivesArchiveModule(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/archive/`,
+    sessionCookie
+  );
+  if (!res.ok) throw new Error(`[parity] module archive failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["archived_at"] !== "string") throw new Error("[parity] module archive carried no archived_at.");
+  return rec["archived_at"];
+}
+
+/** PATCH a module (fixtures set status completed/cancelled before archiving). */
+export async function archivesPatchModule(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  data: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/`,
+    sessionCookie,
+    data
+  );
+  if (!res.ok) throw new Error(`[parity] module patch failed with HTTP ${res.status}.`);
+}
+
+/**
+ * archived_at of one project (null when live). Reads the projects/details
+ * collection: the single-project read 404s once archived.
+ */
+export async function archivesProjectArchivedAt(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string | null> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/details/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] projects/details read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const match = rows.find((row) => (row as Record<string, unknown>)["id"] === projectId) as
+    | Record<string, unknown>
+    | undefined;
+  if (match === undefined) throw new Error("[parity] project missing from the details collection.");
+  return typeof match["archived_at"] === "string" ? match["archived_at"] : null;
+}
+
+/** archived_at of one archived cycle (single-cycle GET 404s once archived). */
+export async function archivesCycleArchivedAt(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string | null> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/archived-cycles/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] archived-cycles read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const match = rows.find((row) => (row as Record<string, unknown>)["id"] === cycleId) as
+    | Record<string, unknown>
+    | undefined;
+  if (match === undefined) throw new Error("[parity] cycle missing from the archived-cycles collection.");
+  return typeof match["archived_at"] === "string" ? match["archived_at"] : null;
+}
+
+/** HTTP status of one archived-list read (permission proofs for ARCH-028). */
+export async function archivesArchivedListStatus(
+  workspaceSlug: string,
+  projectId: string,
+  list: "issues" | "cycles" | "modules",
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/archived-${list}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  return res.status;
+}
+
+/** HTTP status of one archived-issue retrieve (permission proofs for ARCH-028). */
+export async function archivesArchivedIssueStatus(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetchShared(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/archive/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  return res.status;
+}
+
+/** archived_at of one archived module (single-module GET 404s once archived). */
+export async function archivesModuleArchivedAt(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string | null> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/archived-modules/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] archived-modules read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const match = rows.find((row) => (row as Record<string, unknown>)["id"] === moduleId) as
+    | Record<string, unknown>
+    | undefined;
+  if (match === undefined) throw new Error("[parity] module missing from the archived-modules collection.");
+  return typeof match["archived_at"] === "string" ? match["archived_at"] : null;
+}
