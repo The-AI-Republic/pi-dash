@@ -111,7 +111,7 @@ use std::collections::HashMap;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Datelike, LocalResult, NaiveDate, TimeZone, Utc};
@@ -1728,11 +1728,47 @@ async fn list_inner(
 }
 
 /// `retrieve` (`sticky.py:85-87`): `get_object` + serializer, 200.
+/// Hand the request back to Django unchanged (the `handlers_members`
+/// `proxy_through` shape): dotted detail segments are DRF format-suffix
+/// spellings, never pks.
+async fn proxy_through(
+    state: AppState,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(axum::body::Body::from(body))
+        .expect("rebuild proxy request");
+    *req.headers_mut() = headers;
+    crate::edge::proxy(State(state), req).await
+}
+
+/// True when the detail segment is a DRF format-suffix spelling
+/// (`{pk}.{format}`, `api/urls/sticky.py` router): Django's pk regex is
+/// `[^/.]+`, so a dotted segment never matches the detail route — Django
+/// serves the format variant instead. Detail handlers proxy such requests
+/// before auth for Django's exact bytes (PIDASHCONV-828); dotless input
+/// (even garbage) stays in Rust and 404s in [`parse_uuid_or_invalid`].
+fn is_format_suffix_pk(raw: &str) -> bool {
+    raw.contains('.')
+}
+
 async fn sticky_retrieve(
     State(state): State<AppState>,
     Path((slug, pk)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Response {
+    // Dotted segments are format-suffix spellings, never pks: proxy before
+    // auth for Django's exact bytes (`sticky.py` router `[^/.]+`).
+    if is_format_suffix_pk(&pk) {
+        return proxy_through(state, method, uri, headers, Bytes::new()).await;
+    }
     match detail_inner(&state, &headers, &slug, &pk, DetailAction::Retrieve, None).await {
         Ok(response) => response,
         Err(denial) => denial.into_response(),
@@ -1751,9 +1787,17 @@ enum DetailAction {
 async fn sticky_partial_update(
     State(state): State<AppState>,
     Path((slug, pk)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    // Dotted segments are format-suffix spellings, never pks: proxy before
+    // auth for Django's exact bytes (`sticky.py` router `[^/.]+`). The
+    // real body rides along — `partial_update()` reads `request.data`.
+    if is_format_suffix_pk(&pk) {
+        return proxy_through(state, method, uri, headers, body).await;
+    }
     match detail_inner(
         &state,
         &headers,
@@ -1773,8 +1817,15 @@ async fn sticky_partial_update(
 async fn sticky_destroy(
     State(state): State<AppState>,
     Path((slug, pk)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Response {
+    // Dotted segments are format-suffix spellings, never pks: proxy before
+    // auth for Django's exact bytes (`sticky.py` router `[^/.]+`).
+    if is_format_suffix_pk(&pk) {
+        return proxy_through(state, method, uri, headers, Bytes::new()).await;
+    }
     match detail_inner(&state, &headers, &slug, &pk, DetailAction::Destroy, None).await {
         Ok(response) => response,
         Err(denial) => denial.into_response(),
@@ -1934,6 +1985,46 @@ mod tests {
     }
 
     // -- routes (fx-h-sticky `routes`: DefaultRouter under workspaces/<slug>/) --
+
+    #[test]
+    fn format_suffix_pk_is_dotted_only() {
+        assert!(is_format_suffix_pk(
+            "8dbd5acc-b3ce-4259-91b2-570768a0b918.json"
+        ));
+        assert!(is_format_suffix_pk("x.x"));
+        assert!(!is_format_suffix_pk("8dbd5acc-b3ce-4259-91b2-570768a0b918"));
+        assert!(!is_format_suffix_pk("x"));
+        assert!(!is_format_suffix_pk(""));
+    }
+
+    #[tokio::test]
+    async fn dotted_sticky_pk_proxies_before_auth() {
+        use tower::ServiceExt;
+        // Port 1 is never bound, so a proxied request fail-closed 502s
+        // while a handled one answers from here (500, no pool): 502 on an
+        // anonymous dotted pk proves the proxy runs before auth
+        // (PIDASHCONV-828).
+        let app = crate::routes::with_routes(
+            AppState::with_edge(
+                "0.1.0",
+                crate::edge::EdgeHandle::for_tests("http://127.0.0.1:1"),
+            ),
+            routes(),
+        );
+        for (method, uri) in [
+            ("GET", "/api/v1/workspaces/acme/stickies/x.json/"),
+            ("PATCH", "/api/v1/workspaces/acme/stickies/x.json/"),
+            ("DELETE", "/api/v1/workspaces/acme/stickies/x.json/"),
+        ] {
+            let request = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .expect("request");
+            let status = app.clone().oneshot(request).await.expect("serve").status();
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{method} {uri}");
+        }
+    }
 
     #[test]
     fn collection_and_detail_paths_match_the_router() {
