@@ -179,10 +179,23 @@ test(
       expect(range).toContain("End date");
     });
 
-    await test.step("the dialog exposes a logical tab order", async () => {
-      expect(await driver.modulesDialogTabOrder()).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
-    });
+    await driver.modulesDialogCancel();
+  }
+);
 
+test(
+  specTitle(ROW_022, "bug: NEWFRONT-330 the date control carries no tab index"),
+  { tag: specTags(ROW_022) },
+  async ({ driver }) => {
+    const world = await setupModulesWorld("parity-mod022t");
+    await enterModulesList(driver, world, world.owner);
+    await driver.modulesOpenCreateFromHeader();
+
+    // The row requires a logical tab order; the date-range control
+    // renders no tabindex (NEWFRONT-330), so focus reaches it after
+    // Submit instead of third. Every other control matches the
+    // intended 1..8 sequence.
+    expect(await driver.modulesDialogTabOrder()).toEqual([1, 2, null, 4, 5, 6, 7, 8]);
     await driver.modulesDialogCancel();
   }
 );

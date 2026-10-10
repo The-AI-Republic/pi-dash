@@ -29692,21 +29692,22 @@ export class WebDriver implements ParityDriver {
     await this.page.keyboard.press("Escape");
   }
 
-  async modulesDialogTabOrder(): Promise<number[]> {
+  async modulesDialogTabOrder(): Promise<(number | null)[]> {
     return this.modulesDialogRoot().evaluate((dialog) => {
-      const at = (selector: string): number => {
-        const raw = dialog.querySelector(selector)?.getAttribute("tabindex");
-        return raw === null || raw === undefined ? -1 : Number.parseInt(raw, 10);
+      const asInt = (raw: string | null | undefined): number | null => {
+        if (raw === null || raw === undefined) return null;
+        const parsed = Number.parseInt(raw, 10);
+        return Number.isNaN(parsed) ? null : parsed;
       };
+      const at = (selector: string): number | null => asInt(dialog.querySelector(selector)?.getAttribute("tabindex"));
       const controls = [...dialog.querySelectorAll("div.flex.flex-wrap.items-center.gap-2 > *")];
-      const controlTab = (index: number): number => {
-        const raw = controls[index]?.querySelector("button")?.getAttribute("tabindex");
-        return raw === null || raw === undefined ? -1 : Number.parseInt(raw, 10);
+      const controlTab = (index: number): number | null => {
+        // The status control carries its tab index on a wrapper, the
+        // others on their trigger buttons: first tabindex wins.
+        return asInt(controls[index]?.querySelector("[tabindex]")?.getAttribute("tabindex"));
       };
       const cancel = [...dialog.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Cancel");
       const submit = [...dialog.querySelectorAll('button[type="submit"]')][0];
-      const cancelTab = cancel?.getAttribute("tabindex");
-      const submitTab = submit?.getAttribute("tabindex");
       return [
         at('input[name="name"]'),
         at('textarea[name="description"]'),
@@ -29714,8 +29715,8 @@ export class WebDriver implements ParityDriver {
         controlTab(1),
         controlTab(2),
         controlTab(3),
-        cancelTab === null || cancelTab === undefined ? -1 : Number.parseInt(cancelTab, 10),
-        submitTab === null || submitTab === undefined ? -1 : Number.parseInt(submitTab, 10),
+        asInt(cancel?.getAttribute("tabindex")),
+        asInt(submit?.getAttribute("tabindex")),
       ];
     });
   }

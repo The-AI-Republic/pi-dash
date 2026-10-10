@@ -8381,7 +8381,7 @@ export class WebNewDriver implements ParityDriver {
     return todo("modulesDialogPickDateRange");
   }
 
-  async modulesDialogTabOrder(): Promise<number[]> {
+  async modulesDialogTabOrder(): Promise<(number | null)[]> {
     return todo("modulesDialogTabOrder");
   }
 

@@ -5409,8 +5409,8 @@ export interface ParityDriver {
   modulesDialogDateRange(): Promise<string>;
   /** Pick a start/end range through the calendar; resolves once applied. */
   modulesDialogPickDateRange(startISO: string, endISO: string): Promise<void>;
-  /** Tab indices of title, description, dates, status, lead, members, cancel, submit. */
-  modulesDialogTabOrder(): Promise<number[]>;
+  /** Tab indices of title, description, dates, status, lead, members, cancel, submit (null when unset). */
+  modulesDialogTabOrder(): Promise<(number | null)[]>;
   /** Tab index of the project picker, or null when absent/unset. */
   modulesDialogProjectPickerTabIndex(): Promise<number | null>;
   /** Cancel the dialog; resolves once it unmounts. */
