@@ -117,6 +117,9 @@ import type {
   PagesGatingRequest,
   PagesGatingHeaderCluster,
   PagesGatingTitleFacts,
+  ModulesBreadcrumb,
+  ModulesChip,
+  ModulesGateFacts,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -26847,6 +26850,169 @@ export class WebDriver implements ParityDriver {
       .waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS })
       .catch(() => undefined);
   }
+  // ---------------------------------------------------------------------------
+  // Modules list frame and header controls (NEWFRONT-306, MOD-001..007).
+  // Appended; existing entries above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** The live modules top bar: crumbs on the left, search/sort/filter/add on the right. */
+  private modulesTopbar(): Locator {
+    return this.page.locator("div.px-page-x.flex.h-11").first();
+  }
+
+  async modulesRowNames(): Promise<string[]> {
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main");
+      const anchors = [...(main?.querySelectorAll('a[href*="/modules/"]') ?? [])];
+      return anchors
+        .filter((anchor) => /\/modules\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(anchor.getAttribute("href") ?? ""))
+        .map((anchor) => anchor.querySelector("span.truncate")?.textContent?.trim() ?? "")
+        .filter((name) => name.length > 0);
+    });
+  }
+
+  async modulesBreadcrumb(): Promise<ModulesBreadcrumb> {
+    return this.page.evaluate(() => {
+      const bar = document.querySelector("div.px-page-x.flex.h-11");
+      const links = [...(bar?.querySelectorAll("a") ?? [])].map((a) => (a.textContent ?? "").trim());
+      // The project crumb is the bar's first button carrying text (the
+      // back control ahead of it is icon-only).
+      const project =
+        [...(bar?.querySelectorAll("button") ?? [])].map((b) => (b.textContent ?? "").trim()).find((t) => t !== "") ??
+        "";
+      return { project, trail: links };
+    });
+  }
+
+  async modulesPageTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  /** The header Add button (absent for guests and other read-only roles). */
+  private modulesAddButton(): Locator {
+    return this.modulesTopbar().getByRole("button", { name: /Add/ });
+  }
+
+  async modulesAddLabel(): Promise<string | null> {
+    const btn = this.modulesAddButton();
+    if ((await btn.count()) === 0) return null;
+    return (await btn.first().innerText({ timeout: WebDriver.WAIT_MS })).trim();
+  }
+
+  async modulesClickAdd(): Promise<void> {
+    await this.modulesAddButton().first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesCreateDialogOpen(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: "Create module" }).count()) > 0;
+  }
+
+  /** The header search input renders before the filters popover's own search. */
+  private modulesSearchInput(): Locator {
+    return this.modulesTopbar().getByPlaceholder("Search").first();
+  }
+
+  async modulesSearchVisible(): Promise<boolean> {
+    // The explicit timeout fails fast when the input unmounts instead of
+    // hanging on Playwright's unbounded default action wait.
+    const box = await this.modulesSearchInput()
+      .boundingBox({ timeout: WebDriver.WAIT_MS })
+      .catch(() => null);
+    return (box?.width ?? 0) > 50;
+  }
+
+  async modulesOpenSearch(): Promise<void> {
+    if (await this.modulesSearchVisible()) return;
+    await this.modulesTopbar().locator("button.-mr-1").first().click({ timeout: WebDriver.WAIT_MS });
+    await expect.poll(() => this.modulesSearchVisible()).toBe(true);
+  }
+
+  async modulesTypeSearch(text: string): Promise<void> {
+    await this.modulesSearchInput().fill(text, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesSearchText(): Promise<string> {
+    return this.modulesSearchInput().inputValue({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesSearchFocused(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      const bar = document.querySelector("div.px-page-x.flex.h-11");
+      const input = bar?.querySelector('input[placeholder="Search"]');
+      return document.activeElement === input;
+    });
+  }
+
+  async modulesEscapeSearch(): Promise<void> {
+    await this.modulesSearchInput().press("Escape", { timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesClickOutsideSearch(): Promise<void> {
+    // The trailing Modules crumb link sits outside the search box, so
+    // clicking it trips the outside-click detector while staying on the
+    // list (same-page navigation between the trailing-slash variants
+    // preserves the search state). The project crumb button must not be
+    // used here: it navigates to the project's work-items page.
+    await this.modulesTopbar().getByRole("link", { name: "Modules" }).first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  /** The sort trigger is the top bar's only menu button. */
+  private modulesSortTrigger(): Locator {
+    return this.modulesTopbar().locator('[id^="headlessui-menu-button"]').first();
+  }
+
+  async modulesSortTriggerLabel(): Promise<string> {
+    return (await this.modulesSortTrigger().innerText({ timeout: WebDriver.WAIT_MS })).trim();
+  }
+
+  async modulesSetSortViaMenu(label: string): Promise<void> {
+    await this.modulesSortTrigger().click({ timeout: WebDriver.WAIT_MS });
+    // Closed menus render statically, so only the visible item is clickable.
+    const item = this.page.locator('[role="menuitem"]:visible', { hasText: label });
+    await item.waitFor({ timeout: WebDriver.WAIT_MS });
+    await item.locator("button").click({ timeout: WebDriver.WAIT_MS });
+    await item.waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async modulesSortMenuItems(): Promise<string[]> {
+    await this.modulesSortTrigger().click({ timeout: WebDriver.WAIT_MS });
+    const items = this.page.locator('[role="menuitem"]:visible');
+    await items.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const texts = await items.allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    return texts.map((text) => text.trim());
+  }
+
+  private modulesFiltersTrigger(): Locator {
+    return this.modulesTopbar().getByRole("button", { name: "Filters", exact: true }).first();
+  }
+
+  /**
+   * A filter group header by title prefix. The popover panel itself is a
+   * zero-size fixed shell, so the menu is found by its visible content.
+   */
+  private modulesFilterGroupHeader(title: string): Locator {
+    return this.page.locator("div.text-caption-sm-medium:visible", {
+      hasText: new RegExp(`^${WebDriver.modulesEscapeRegExp(title)}`),
+    });
+  }
+
+  /** The option block of one filter group (header plus its options). */
+  private modulesFilterGroup(title: string): Locator {
+    return this.modulesFilterGroupHeader(title).locator("xpath=ancestor::div[contains(@class,'py-2')][1]");
+  }
+
+  async modulesOpenFilters(): Promise<void> {
+    await this.modulesFiltersTrigger().click({ timeout: WebDriver.WAIT_MS });
+    await this.modulesFilterGroupHeader("Status").waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesCloseFilters(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.modulesFilterGroupHeader("Status")
+      .waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
 
   async modulesMenuChooseOpenTab(titlePart: string): Promise<{ url: string; title: string }> {
     const item = this.page
@@ -33613,5 +33779,196 @@ export class WebDriver implements ParityDriver {
   async pagesGatingGoBack(): Promise<void> {
     await this.page.goBack({ timeout: WebDriver.OPEN_MS });
     await this.pagesGatingSettleList();
+  }
+
+  async modulesFilterGroups(): Promise<string[]> {
+    const texts = await this.page.locator("div.text-caption-sm-medium:visible").allTextContents();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
+  }
+
+  async modulesFilterGroupOptions(group: string): Promise<string[]> {
+    // Options carry avatars that pollute the accessible name, so each
+    // label is read from its title element (the innermost truncate: the
+    // option row itself truncates too). The header chevron and the View
+    // all/less toggle carry none and drop out.
+    const options = this.modulesFilterGroup(group).locator("button");
+    const count = await options.count();
+    const labels: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const titles = options.nth(i).locator("div.truncate");
+      if ((await titles.count()) === 0) continue;
+      const text = ((await titles.last().innerText()).trim() ?? "").trim();
+      if (text !== "") labels.push(text);
+    }
+    return labels;
+  }
+
+  async modulesToggleFilterOption(group: string, label: string): Promise<void> {
+    if (group === "Favorites") {
+      // The favorites toggle is a bare option without a group header.
+      const option = this.page.locator("button:visible", {
+        has: this.page.locator("div.truncate", {
+          hasText: new RegExp(`^${WebDriver.modulesEscapeRegExp(label)}$`),
+        }),
+      });
+      await option.first().click({ timeout: WebDriver.WAIT_MS });
+      return;
+    }
+    const option = this.modulesFilterGroup(group).locator("button", {
+      has: this.page.locator("div.truncate", {
+        hasText: new RegExp(`^${WebDriver.modulesEscapeRegExp(label)}$`),
+      }),
+    });
+    await option.click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesExpandFilterGroup(group: string): Promise<void> {
+    await this.modulesFilterGroup(group)
+      .getByRole("button", { name: "View all" })
+      .click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesFilterGroupExpandable(group: string): Promise<boolean> {
+    return (await this.modulesFilterGroup(group).getByRole("button", { name: "View all" }).count()) > 0;
+  }
+
+  async modulesMenuSearch(text: string): Promise<void> {
+    // The menu search renders after the header's own search box.
+    const boxes = this.page.getByPlaceholder("Search");
+    await boxes.nth((await boxes.count()) - 1).fill(text, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesFiltersActive(): Promise<boolean> {
+    return (await this.modulesFiltersTrigger().locator("span.bg-accent-primary").count()) > 0;
+  }
+
+  async modulesOpenCustomDate(group: "Start date" | "Due date"): Promise<void> {
+    await this.modulesFilterGroup(group).locator("button", { hasText: "Custom" }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesCustomDateOpen(): Promise<boolean> {
+    return (await this.page.locator("button:visible", { hasText: /^Apply$/ }).count()) > 0;
+  }
+
+  async modulesApplyCustomDate(): Promise<void> {
+    await this.page
+      .locator("button:visible", { hasText: /^Apply$/ })
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  /** The applied-filters strip, found through its clear-all control. */
+  private modulesChipStrip(): Locator {
+    return this.page
+      .locator("button", { hasText: "Clear all" })
+      .locator("xpath=ancestor::div[contains(@class,'gap-2')][1]");
+  }
+
+  async modulesChips(): Promise<ModulesChip[]> {
+    const strip = this.modulesChipStrip();
+    if ((await strip.count()) === 0) return [];
+    return strip.evaluate((root) => {
+      const chips: { key: string; text: string }[] = [];
+      root.querySelectorAll("span.text-11.text-tertiary").forEach((keyEl) => {
+        const key = keyEl.textContent?.trim() ?? "";
+        if (key === "") return;
+        const text = keyEl.parentElement?.textContent?.trim() ?? "";
+        chips.push({ key, text });
+      });
+      return chips;
+    });
+  }
+
+  /** One dimension chip by its rendered key. */
+  private modulesChip(key: string): Locator {
+    return this.modulesChipStrip()
+      .locator("div.min-h-\\[36px\\], div.rounded-md.border-subtle", { hasText: key })
+      .first();
+  }
+
+  async modulesRemoveChipValue(key: string, value: string): Promise<void> {
+    const pill = this.modulesChip(key).locator("div.rounded-sm.bg-layer-1", { hasText: value });
+    await pill.locator("button").click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesRemoveChipDimension(key: string): Promise<void> {
+    await this.modulesChip(key).locator("button").last().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesClearFilters(): Promise<void> {
+    await this.modulesChipStrip()
+      .getByRole("button", { name: /Clear all/ })
+      .click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesChipsVisible(): Promise<boolean> {
+    return (await this.page.locator("button", { hasText: "Clear all" }).count()) > 0;
+  }
+
+  async modulesGateFacts(): Promise<ModulesGateFacts> {
+    // The app nests mains (sidebar shell plus content); the gate lives in
+    // the inner one.
+    const main = this.page.locator("main").last();
+    const button = main.getByRole("button", { name: /Manage features/ });
+    await button.waitFor({ timeout: WebDriver.WAIT_MS });
+    const facts = await main.evaluate((root) => {
+      const btn = [...root.querySelectorAll("button")].find((b) => /Manage features/.test(b.textContent ?? ""));
+      const gate = btn?.closest("div.flex.h-full") ?? root;
+      return {
+        explanation: ((gate as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+        hasArt: gate.querySelectorAll("img").length > 0,
+      };
+    });
+    return {
+      explanation: facts.explanation,
+      buttonLabel: ((await button.innerText()).trim() ?? "").trim() || null,
+      buttonDisabled: await button.isDisabled(),
+      hasArt: facts.hasArt,
+    };
+  }
+
+  async modulesGateToFeatures(): Promise<void> {
+    const main = this.page.locator("main").last();
+    await main.getByRole("button", { name: /Manage features/ }).click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForURL(/\/settings\/projects\//, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesTimelineRowNames(): Promise<string[]> {
+    return this.page.evaluate(() => {
+      const rows = [...document.querySelectorAll('[id^="draggable-"]')];
+      return rows
+        .map((row) => {
+          const link = row.querySelector('a[href*="/modules/"]');
+          const text = (link?.textContent ?? row.textContent ?? "").trim().replace(/\s+/g, " ");
+          return text.replace(/\s+\d+\s+days?$/, "").trim();
+        })
+        .filter((name) => name.length > 0);
+    });
+  }
+
+  async modulesDragTimelineRowToSelf(name: string): Promise<void> {
+    // A press, a short excursion, and a release back over the source row:
+    // the drag starts (tripping the manual-sort gate when it applies) but
+    // the source row can never accept its own drop, so nothing reorders.
+    const row = this.page.locator('[id^="draggable-"]', { hasText: name }).first();
+    const box = await row.boundingBox({ timeout: WebDriver.WAIT_MS });
+    if (box === null) throw new Error(`[parity] timeline row "${name}" has no bounding box.`);
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await this.page.mouse.move(x, y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(x, y + 40, { steps: 8 });
+    await this.page.mouse.move(x, y, { steps: 8 });
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(500);
+  }
+
+  async modulesManualSortWarningVisible(): Promise<boolean> {
+    return (
+      (await this.page
+        .locator("body", { hasText: "only enabled when sorted by manual" })
+        .locator("div:visible", { hasText: "only enabled when sorted by manual" })
+        .count()) > 0
+    );
   }
 }

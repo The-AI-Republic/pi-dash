@@ -108,6 +108,9 @@ import type {
   PagesGatingRequest,
   PagesGatingHeaderCluster,
   PagesGatingTitleFacts,
+  ModulesBreadcrumb,
+  ModulesChip,
+  ModulesGateFacts,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -9407,5 +9410,160 @@ export class WebNewDriver implements ParityDriver {
   }
   async pagesGatingGoBack(): Promise<void> {
     return todo("pagesGatingGoBack");
+  }
+
+  // Modules list frame and header controls (NEWFRONT-306, MOD-001..007). Stubs;
+  // the modules area lands on web_new later. Appended per the shared contract.
+
+  async modulesRowNames(): Promise<string[]> {
+    return todo("modulesRowNames");
+  }
+
+  async modulesBreadcrumb(): Promise<ModulesBreadcrumb> {
+    return todo("modulesBreadcrumb");
+  }
+
+  async modulesPageTitle(): Promise<string> {
+    return todo("modulesPageTitle");
+  }
+
+  async modulesAddLabel(): Promise<string | null> {
+    return todo("modulesAddLabel");
+  }
+
+  async modulesClickAdd(): Promise<void> {
+    return todo("modulesClickAdd");
+  }
+
+  async modulesCreateDialogOpen(): Promise<boolean> {
+    return todo("modulesCreateDialogOpen");
+  }
+
+  async modulesSearchVisible(): Promise<boolean> {
+    return todo("modulesSearchVisible");
+  }
+
+  async modulesOpenSearch(): Promise<void> {
+    return todo("modulesOpenSearch");
+  }
+
+  async modulesTypeSearch(_text: string): Promise<void> {
+    return todo("modulesTypeSearch");
+  }
+
+  async modulesSearchText(): Promise<string> {
+    return todo("modulesSearchText");
+  }
+
+  async modulesSearchFocused(): Promise<boolean> {
+    return todo("modulesSearchFocused");
+  }
+
+  async modulesEscapeSearch(): Promise<void> {
+    return todo("modulesEscapeSearch");
+  }
+
+  async modulesClickOutsideSearch(): Promise<void> {
+    return todo("modulesClickOutsideSearch");
+  }
+
+  async modulesSortTriggerLabel(): Promise<string> {
+    return todo("modulesSortTriggerLabel");
+  }
+
+  async modulesSetSortViaMenu(_label: string): Promise<void> {
+    return todo("modulesSetSortViaMenu");
+  }
+
+  async modulesSortMenuItems(): Promise<string[]> {
+    return todo("modulesSortMenuItems");
+  }
+
+  async modulesOpenFilters(): Promise<void> {
+    return todo("modulesOpenFilters");
+  }
+
+  async modulesCloseFilters(): Promise<void> {
+    return todo("modulesCloseFilters");
+  }
+
+  async modulesFilterGroups(): Promise<string[]> {
+    return todo("modulesFilterGroups");
+  }
+
+  async modulesFilterGroupOptions(_group: string): Promise<string[]> {
+    return todo("modulesFilterGroupOptions");
+  }
+
+  async modulesToggleFilterOption(_group: string, _label: string): Promise<void> {
+    return todo("modulesToggleFilterOption");
+  }
+
+  async modulesExpandFilterGroup(_group: string): Promise<void> {
+    return todo("modulesExpandFilterGroup");
+  }
+
+  async modulesFilterGroupExpandable(_group: string): Promise<boolean> {
+    return todo("modulesFilterGroupExpandable");
+  }
+
+  async modulesMenuSearch(_text: string): Promise<void> {
+    return todo("modulesMenuSearch");
+  }
+
+  async modulesFiltersActive(): Promise<boolean> {
+    return todo("modulesFiltersActive");
+  }
+
+  async modulesOpenCustomDate(_group: "Start date" | "Due date"): Promise<void> {
+    return todo("modulesOpenCustomDate");
+  }
+
+  async modulesCustomDateOpen(): Promise<boolean> {
+    return todo("modulesCustomDateOpen");
+  }
+
+  async modulesApplyCustomDate(): Promise<void> {
+    return todo("modulesApplyCustomDate");
+  }
+
+  async modulesChips(): Promise<ModulesChip[]> {
+    return todo("modulesChips");
+  }
+
+  async modulesRemoveChipValue(_key: string, _value: string): Promise<void> {
+    return todo("modulesRemoveChipValue");
+  }
+
+  async modulesRemoveChipDimension(_key: string): Promise<void> {
+    return todo("modulesRemoveChipDimension");
+  }
+
+  async modulesClearFilters(): Promise<void> {
+    return todo("modulesClearFilters");
+  }
+
+  async modulesChipsVisible(): Promise<boolean> {
+    return todo("modulesChipsVisible");
+  }
+
+  async modulesGateFacts(): Promise<ModulesGateFacts> {
+    return todo("modulesGateFacts");
+  }
+
+  async modulesGateToFeatures(): Promise<void> {
+    return todo("modulesGateToFeatures");
+  }
+
+  async modulesTimelineRowNames(): Promise<string[]> {
+    return todo("modulesTimelineRowNames");
+  }
+
+  async modulesDragTimelineRowToSelf(_name: string): Promise<void> {
+    return todo("modulesDragTimelineRowToSelf");
+  }
+
+  async modulesManualSortWarningVisible(): Promise<boolean> {
+    return todo("modulesManualSortWarningVisible");
   }
 }
