@@ -104,8 +104,11 @@ pub trait ToolExecutor: Send + Sync {
         call_id: &str,
     ) -> impl std::future::Future<Output = ToolOutcome> + Send;
     /// Run one MCP tool's sync twin (`mcp_add` body): the loop has
-    /// already jsonschema-validated `args` and threads `call_id`
-    /// for the audit ledger (`resolve_tool_call_id`).
+    /// already jsonschema-validated `args`. `call_id` is the MCP
+    /// call id, but the twin resolves the ledger id from `None`
+    /// (fresh v4): the contextvar `process_tool_call` sets never
+    /// reaches the twin across the in-process hop (`verify2.py`
+    /// `b_ctx`; function tools likewise never see it set).
     fn call_mcp(
         &self,
         name: &str,
