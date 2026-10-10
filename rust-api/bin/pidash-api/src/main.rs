@@ -25,6 +25,10 @@ use pidash_db::config::Settings;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+// D-37 ops management-command ports (PIDASHCONV-806 creates the family;
+// 806-810 each own their `ops/` group lines, per the maintainer note).
+mod ops;
+
 #[derive(Debug, Parser)]
 #[command(name = "pidash-api", about = "Pi Dash Rust backend")]
 struct Cli {
