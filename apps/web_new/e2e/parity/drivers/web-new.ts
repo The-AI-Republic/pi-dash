@@ -6068,4 +6068,458 @@ export class WebNewDriver implements ParityDriver {
   ): Promise<void> {
     return todo("archivesSeedStoredExpression");
   }
+
+  async viewsListNames(): Promise<string[]> {
+    return todo("viewsListNames");
+  }
+  async viewsListBreadcrumb(): Promise<string[]> {
+    return todo("viewsListBreadcrumb");
+  }
+  async viewsListTabTitle(): Promise<string> {
+    return todo("viewsListTabTitle");
+  }
+  async viewsHeaderAddVisible(): Promise<boolean> {
+    return todo("viewsHeaderAddVisible");
+  }
+  async viewsOpenCreateFromHeader(): Promise<void> {
+    return todo("viewsOpenCreateFromHeader");
+  }
+  async viewsListSkeletonVisible(): Promise<boolean> {
+    return todo("viewsListSkeletonVisible");
+  }
+  async viewsDelayListLoad(_ms: number): Promise<void> {
+    return todo("viewsDelayListLoad");
+  }
+  async viewsEmptyTitle(): Promise<string> {
+    return todo("viewsEmptyTitle");
+  }
+  async viewsEmptyCreateVisible(): Promise<boolean> {
+    return todo("viewsEmptyCreateVisible");
+  }
+  async viewsEmptyCreateEnabled(): Promise<boolean> {
+    return todo("viewsEmptyCreateEnabled");
+  }
+  async viewsEmptyCreateOpen(): Promise<void> {
+    return todo("viewsEmptyCreateOpen");
+  }
+  async viewsNoMatchTitle(): Promise<string> {
+    return todo("viewsNoMatchTitle");
+  }
+  async viewsRowHref(_name: string): Promise<string | null> {
+    return todo("viewsRowHref");
+  }
+  async viewsRowAccess(_name: string): Promise<string> {
+    return todo("viewsRowAccess");
+  }
+  async viewsRowOwnerAvatar(_name: string): Promise<boolean> {
+    return todo("viewsRowOwnerAvatar");
+  }
+  async viewsRowLiveVisible(_name: string): Promise<boolean> {
+    return todo("viewsRowLiveVisible");
+  }
+  async viewsRowStarVisible(_name: string): Promise<boolean> {
+    return todo("viewsRowStarVisible");
+  }
+  async viewsRowStarSelected(_name: string): Promise<boolean> {
+    return todo("viewsRowStarSelected");
+  }
+  async viewsToggleStar(_name: string): Promise<void> {
+    return todo("viewsToggleStar");
+  }
+  async viewsRowText(_name: string): Promise<string> {
+    return todo("viewsRowText");
+  }
+  async viewsSearchTriggerVisible(): Promise<boolean> {
+    return todo("viewsSearchTriggerVisible");
+  }
+  async viewsSearchOpen(): Promise<void> {
+    return todo("viewsSearchOpen");
+  }
+  async viewsSearchExpanded(): Promise<boolean> {
+    return todo("viewsSearchExpanded");
+  }
+  async viewsSearchType(_text: string): Promise<void> {
+    return todo("viewsSearchType");
+  }
+  async viewsSearchValue(): Promise<string> {
+    return todo("viewsSearchValue");
+  }
+  async viewsSearchFocused(): Promise<boolean> {
+    return todo("viewsSearchFocused");
+  }
+  async viewsSearchEscape(): Promise<void> {
+    return todo("viewsSearchEscape");
+  }
+  async viewsSearchClear(): Promise<void> {
+    return todo("viewsSearchClear");
+  }
+  async viewsSearchClickOutside(): Promise<void> {
+    return todo("viewsSearchClickOutside");
+  }
+  async viewsSortTriggerText(): Promise<string> {
+    return todo("viewsSortTriggerText");
+  }
+  async viewsSortOpen(): Promise<void> {
+    return todo("viewsSortOpen");
+  }
+  async viewsSortMenuTexts(): Promise<string[]> {
+    return todo("viewsSortMenuTexts");
+  }
+  async viewsSortMenuSelected(_text: string): Promise<boolean> {
+    return todo("viewsSortMenuSelected");
+  }
+  async viewsSortPick(_text: string): Promise<void> {
+    return todo("viewsSortPick");
+  }
+  async viewsFiltersOpen(): Promise<void> {
+    return todo("viewsFiltersOpen");
+  }
+  async viewsFiltersPanelText(): Promise<string> {
+    return todo("viewsFiltersPanelText");
+  }
+  async viewsFiltersToggleFavorites(): Promise<void> {
+    return todo("viewsFiltersToggleFavorites");
+  }
+  async viewsFiltersDateOptions(): Promise<string[]> {
+    return todo("viewsFiltersDateOptions");
+  }
+  async viewsFiltersPickDate(_text: string): Promise<void> {
+    return todo("viewsFiltersPickDate");
+  }
+  async viewsFiltersCreatorOptions(): Promise<string[]> {
+    return todo("viewsFiltersCreatorOptions");
+  }
+  async viewsFiltersPickCreator(_name: string): Promise<void> {
+    return todo("viewsFiltersPickCreator");
+  }
+  async viewsFiltersAccessPresent(): Promise<boolean> {
+    return todo("viewsFiltersAccessPresent");
+  }
+  async viewsFiltersSearchType(_text: string): Promise<void> {
+    return todo("viewsFiltersSearchType");
+  }
+  async viewsFiltersClose(): Promise<void> {
+    return todo("viewsFiltersClose");
+  }
+  async viewsChipsVisible(): Promise<boolean> {
+    return todo("viewsChipsVisible");
+  }
+  async viewsChipTexts(): Promise<string[]> {
+    return todo("viewsChipTexts");
+  }
+  async viewsChipRemoveValue(_dimension: string, _value: string): Promise<void> {
+    return todo("viewsChipRemoveValue");
+  }
+  async viewsChipRemoveDimension(_dimension: string): Promise<void> {
+    return todo("viewsChipRemoveDimension");
+  }
+  async viewsChipsClearAll(): Promise<void> {
+    return todo("viewsChipsClearAll");
+  }
+  async viewsGateTitle(): Promise<string> {
+    return todo("viewsGateTitle");
+  }
+  async viewsGateManageVisible(): Promise<boolean> {
+    return todo("viewsGateManageVisible");
+  }
+  async viewsGateManageEnabled(): Promise<boolean> {
+    return todo("viewsGateManageEnabled");
+  }
+  async viewsGateManageOpen(): Promise<void> {
+    return todo("viewsGateManageOpen");
+  }
+  async viewsDialogHeading(): Promise<string | null> {
+    return todo("viewsDialogHeading");
+  }
+  async viewsDialogFillTitle(_text: string): Promise<void> {
+    return todo("viewsDialogFillTitle");
+  }
+  async viewsDialogTitleValue(): Promise<string> {
+    return todo("viewsDialogTitleValue");
+  }
+  async viewsDialogTitleError(): Promise<string> {
+    return todo("viewsDialogTitleError");
+  }
+  async viewsDialogFillDescription(_text: string): Promise<void> {
+    return todo("viewsDialogFillDescription");
+  }
+  async viewsDialogDescriptionValue(): Promise<string> {
+    return todo("viewsDialogDescriptionValue");
+  }
+  async viewsDialogAccessPresent(): Promise<boolean> {
+    return todo("viewsDialogAccessPresent");
+  }
+  async viewsDialogIconOpen(): Promise<void> {
+    return todo("viewsDialogIconOpen");
+  }
+  async viewsDialogIconTabs(): Promise<string[]> {
+    return todo("viewsDialogIconTabs");
+  }
+  async viewsDialogPickFirstIcon(): Promise<void> {
+    return todo("viewsDialogPickFirstIcon");
+  }
+  async viewsDialogIconPreview(): Promise<string> {
+    return todo("viewsDialogIconPreview");
+  }
+  async viewsDialogDisplayOpen(): Promise<void> {
+    return todo("viewsDialogDisplayOpen");
+  }
+  async viewsDialogDisplayTexts(): Promise<string[]> {
+    return todo("viewsDialogDisplayTexts");
+  }
+  async viewsDialogFiltersExpanded(): Promise<boolean> {
+    return todo("viewsDialogFiltersExpanded");
+  }
+  async viewsDialogLayoutValue(): Promise<string> {
+    return todo("viewsDialogLayoutValue");
+  }
+  async viewsDialogPickLayout(_label: string): Promise<void> {
+    return todo("viewsDialogPickLayout");
+  }
+  async viewsDialogEscape(): Promise<void> {
+    return todo("viewsDialogEscape");
+  }
+  async viewsDialogCancel(): Promise<void> {
+    return todo("viewsDialogCancel");
+  }
+  async viewsDialogSubmit(): Promise<void> {
+    return todo("viewsDialogSubmit");
+  }
+  async viewsDialogSubmitAttempt(): Promise<void> {
+    return todo("viewsDialogSubmitAttempt");
+  }
+  async viewsDialogOpen(): Promise<boolean> {
+    return todo("viewsDialogOpen");
+  }
+  async viewsFailNextWrite(_status: number): Promise<void> {
+    return todo("viewsFailNextWrite");
+  }
+  async viewsRowMenuOpen(_name: string): Promise<void> {
+    return todo("viewsRowMenuOpen");
+  }
+  async viewsRowMenuItems(): Promise<string[]> {
+    return todo("viewsRowMenuItems");
+  }
+  async viewsRowMenuPick(_item: string): Promise<void> {
+    return todo("viewsRowMenuPick");
+  }
+  async viewsRowCopyLink(_name: string): Promise<string> {
+    return todo("viewsRowCopyLink");
+  }
+  async viewsRowMenuPublishPresent(): Promise<boolean> {
+    return todo("viewsRowMenuPublishPresent");
+  }
+  async viewsRowOpenNewTabHref(_name: string): Promise<string> {
+    return todo("viewsRowOpenNewTabHref");
+  }
+  async viewsDeleteTitle(): Promise<string> {
+    return todo("viewsDeleteTitle");
+  }
+  async viewsDeleteBody(): Promise<string> {
+    return todo("viewsDeleteBody");
+  }
+  async viewsDeleteConfirm(): Promise<void> {
+    return todo("viewsDeleteConfirm");
+  }
+  async viewsDeleteConfirmAttempt(): Promise<void> {
+    return todo("viewsDeleteConfirmAttempt");
+  }
+  async viewsDeleteCancel(): Promise<void> {
+    return todo("viewsDeleteCancel");
+  }
+  async viewsDetailBreadcrumb(): Promise<string[]> {
+    return todo("viewsDetailBreadcrumb");
+  }
+  async viewsDetailErrorTitle(): Promise<string> {
+    return todo("viewsDetailErrorTitle");
+  }
+  async viewsDetailErrorBack(): Promise<void> {
+    return todo("viewsDetailErrorBack");
+  }
+  async viewsDetailSwitcherOpen(_name: string): Promise<void> {
+    return todo("viewsDetailSwitcherOpen");
+  }
+  async viewsDetailSwitcherOptions(): Promise<string[]> {
+    return todo("viewsDetailSwitcherOptions");
+  }
+  async viewsDetailSwitcherSearchVisible(): Promise<boolean> {
+    return todo("viewsDetailSwitcherSearchVisible");
+  }
+  async viewsDetailSwitcherSearch(_text: string): Promise<void> {
+    return todo("viewsDetailSwitcherSearch");
+  }
+  async viewsDetailSwitcherPick(_name: string): Promise<void> {
+    return todo("viewsDetailSwitcherPick");
+  }
+  async viewsDetailLockVisible(): Promise<boolean> {
+    return todo("viewsDetailLockVisible");
+  }
+  async viewsDetailDisplayOptions(): Promise<string[]> {
+    return todo("viewsDetailDisplayOptions");
+  }
+  async viewsDetailFilterAdd(_property: string, _value: string): Promise<void> {
+    return todo("viewsDetailFilterAdd");
+  }
+  async viewsDetailUpdateView(): Promise<void> {
+    return todo("viewsDetailUpdateView");
+  }
+  async viewsDetailSaveAsVisible(): Promise<boolean> {
+    return todo("viewsDetailSaveAsVisible");
+  }
+  async viewsDetailSaveAsClick(): Promise<void> {
+    return todo("viewsDetailSaveAsClick");
+  }
+  async viewsDetailAddClick(): Promise<void> {
+    return todo("viewsDetailAddClick");
+  }
+  async viewsDetailShowsIssue(_name: string): Promise<boolean> {
+    return todo("viewsDetailShowsIssue");
+  }
+  async wsViewsListNames(): Promise<string[]> {
+    return todo("wsViewsListNames");
+  }
+  async wsViewsDefaultNames(): Promise<string[]> {
+    return todo("wsViewsDefaultNames");
+  }
+  async wsViewsListTabTitle(): Promise<string> {
+    return todo("wsViewsListTabTitle");
+  }
+  async wsViewsSearchFill(_text: string): Promise<void> {
+    return todo("wsViewsSearchFill");
+  }
+  async wsViewsRowDescription(_name: string): Promise<string> {
+    return todo("wsViewsRowDescription");
+  }
+  async wsViewsRowMenuOpen(_name: string): Promise<void> {
+    return todo("wsViewsRowMenuOpen");
+  }
+  async wsViewsRowMenuEntries(): Promise<string[]> {
+    return todo("wsViewsRowMenuEntries");
+  }
+  async wsViewsRowMenuPick(_entry: string): Promise<void> {
+    return todo("wsViewsRowMenuPick");
+  }
+  async wsViewsSkeletonVisible(): Promise<boolean> {
+    return todo("wsViewsSkeletonVisible");
+  }
+  async wsViewsSkeletonFlashed(_windowMs: number): Promise<boolean> {
+    return todo("wsViewsSkeletonFlashed");
+  }
+  async wsViewsDelayNextList(_ms: number): Promise<void> {
+    return todo("wsViewsDelayNextList");
+  }
+  async wsViewsFailNextWrite(_status: number): Promise<void> {
+    return todo("wsViewsFailNextWrite");
+  }
+  async wsViewsStripVisible(): Promise<boolean> {
+    return todo("wsViewsStripVisible");
+  }
+  async wsViewsListStarVisible(): Promise<boolean> {
+    return todo("wsViewsListStarVisible");
+  }
+  async wsViewsDefaultRowHasMenu(_name: string): Promise<boolean> {
+    return todo("wsViewsDefaultRowHasMenu");
+  }
+  async wsViewsRowOpen(_name: string): Promise<void> {
+    return todo("wsViewsRowOpen");
+  }
+  async wsViewsDialogDisplayOptions(): Promise<string[]> {
+    return todo("wsViewsDialogDisplayOptions");
+  }
+  async wsViewsDetailTabTitle(): Promise<string> {
+    return todo("wsViewsDetailTabTitle");
+  }
+  async wsViewsDetailCrumbs(): Promise<string[]> {
+    return todo("wsViewsDetailCrumbs");
+  }
+  async wsViewsDetailSwitcherOpen(_name: string): Promise<void> {
+    return todo("wsViewsDetailSwitcherOpen");
+  }
+  async wsViewsDetailSwitcherOptions(): Promise<string[]> {
+    return todo("wsViewsDetailSwitcherOptions");
+  }
+  async wsViewsDetailSwitcherSearchVisible(): Promise<boolean> {
+    return todo("wsViewsDetailSwitcherSearchVisible");
+  }
+  async wsViewsDetailSwitcherSearch(_text: string): Promise<void> {
+    return todo("wsViewsDetailSwitcherSearch");
+  }
+  async wsViewsDetailSwitcherPick(_name: string): Promise<void> {
+    return todo("wsViewsDetailSwitcherPick");
+  }
+  async wsViewsDetailLayoutVisible(): Promise<boolean> {
+    return todo("wsViewsDetailLayoutVisible");
+  }
+  async wsViewsDetailDisplayVisible(): Promise<boolean> {
+    return todo("wsViewsDetailDisplayVisible");
+  }
+  async wsViewsDetailFiltersToggleVisible(): Promise<boolean> {
+    return todo("wsViewsDetailFiltersToggleVisible");
+  }
+  async wsViewsDetailAddVisible(): Promise<boolean> {
+    return todo("wsViewsDetailAddVisible");
+  }
+  async wsViewsDetailAddClick(): Promise<void> {
+    return todo("wsViewsDetailAddClick");
+  }
+  async wsViewsDetailMenuOpen(): Promise<void> {
+    return todo("wsViewsDetailMenuOpen");
+  }
+  async wsViewsDetailMenuEntries(): Promise<string[]> {
+    return todo("wsViewsDetailMenuEntries");
+  }
+  async wsViewsDetailCopyLink(): Promise<string> {
+    return todo("wsViewsDetailCopyLink");
+  }
+  async wsViewsDetailOpenNewTabHref(): Promise<string> {
+    return todo("wsViewsDetailOpenNewTabHref");
+  }
+  async wsViewsDetailErrorTitle(): Promise<string> {
+    return todo("wsViewsDetailErrorTitle");
+  }
+  async wsViewsDetailErrorBack(): Promise<void> {
+    return todo("wsViewsDetailErrorBack");
+  }
+  async viewsSettingsNotAuthorized(): Promise<boolean> {
+    return todo("viewsSettingsNotAuthorized");
+  }
+  async viewsSettingsViewsToggleValue(): Promise<boolean> {
+    return todo("viewsSettingsViewsToggleValue");
+  }
+  async viewsSettingsViewsToggleFlip(): Promise<void> {
+    return todo("viewsSettingsViewsToggleFlip");
+  }
+  async viewsDialogTabOrder(): Promise<string[]> {
+    return todo("viewsDialogTabOrder");
+  }
+  async viewsListDragRow(_from: string, _to: string): Promise<void> {
+    return todo("viewsListDragRow");
+  }
+  async viewsPageExportImportVisible(): Promise<boolean> {
+    return todo("viewsPageExportImportVisible");
+  }
+  async viewsDetailLayoutActive(): Promise<number> {
+    return todo("viewsDetailLayoutActive");
+  }
+  async viewsDetailLayoutPick(_index: number): Promise<void> {
+    return todo("viewsDetailLayoutPick");
+  }
+  async viewsDetailLayoutVisible(): Promise<boolean> {
+    return todo("viewsDetailLayoutVisible");
+  }
+  async viewsDetailDisplayVisible(): Promise<boolean> {
+    return todo("viewsDetailDisplayVisible");
+  }
+  async viewsDetailFiltersToggleVisible(): Promise<boolean> {
+    return todo("viewsDetailFiltersToggleVisible");
+  }
+  async viewsDetailAddVisible(): Promise<boolean> {
+    return todo("viewsDetailAddVisible");
+  }
+  async viewsDetailEmptyTitle(): Promise<string> {
+    return todo("viewsDetailEmptyTitle");
+  }
+  async viewsDetailTabTitle(): Promise<string> {
+    return todo("viewsDetailTabTitle");
+  }
 }
