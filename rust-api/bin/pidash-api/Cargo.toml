@@ -19,6 +19,10 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# D-37 ops repair (PIDASHCONV-808): batch `now` + fresh row ids for the
+# copy loop (same locked chrono 0.4.x / uuid 1.x as pidash-db, no lock churn).
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
