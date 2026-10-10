@@ -812,6 +812,7 @@ fn check_csrf_request_token(
 /// else mints a fresh one.
 async fn get_csrf_token(
     State(state): State<AppState>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
     peer: PeerAddr,
 ) -> Response {
@@ -820,14 +821,19 @@ async fn get_csrf_token(
     };
     // DRF order: authentication (session user, if any), then throttles.
     // `AllowAny` passes regardless; the throttle only counts anonymous
-    // callers (`AnonRateThrottle.get_cache_key`).
-    let actor =
-        match crate::license::resolve_actor(&pool, state.settings().secret_key.as_bytes(), None)
-            .await
-        {
-            Ok(actor) => actor,
-            Err(_) => return server_error(),
-        };
+    // callers (`AnonRateThrottle.get_cache_key` returns `None` for an
+    // authenticated user, so the session must resolve first — passing
+    // no session here would bill every authed call to the anon bucket).
+    let actor = match crate::license::resolve_actor(
+        &pool,
+        state.settings().secret_key.as_bytes(),
+        extension,
+    )
+    .await
+    {
+        Ok(actor) => actor,
+        Err(_) => return server_error(),
+    };
     let peer_addr = peer.0;
     if let Err(wait) = throttle_gate(
         &state,
