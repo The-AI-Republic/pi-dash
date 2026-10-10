@@ -12251,5 +12251,5 @@ export async function serverUnpinIssuePod(
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<void> {
-  await patchIssue(workspaceSlug, projectId, issueId, sessionCookie, { assigned_pod: null }, apiBase);
+  await patchIssue(workspaceSlug, projectId, issueId, sessionCookie, { assigned_pod_id: null }, apiBase);
 }

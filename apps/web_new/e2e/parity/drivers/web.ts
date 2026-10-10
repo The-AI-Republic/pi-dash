@@ -24443,6 +24443,21 @@ export class WebDriver implements ParityDriver {
     await this.page.waitForURL((url) => new RegExp(`${suffix}/?$`).test(url.pathname), {
       timeout: WebDriver.WAIT_MS,
     });
+    // The strip transiently carries two active markers right after the URL
+    // flips (the old tab keeps aria-current for a beat on a loaded host),
+    // so settle on the clicked tab being the unique active one before
+    // resolving; samplers after this see the steady state.
+    await this.page.waitForFunction(
+      (want) => {
+        const links = [...document.querySelectorAll("main:not(:has(main)) a")].filter((a) =>
+          /^(Overview|Runs|Approvals)$/.test((a as HTMLElement).innerText.trim())
+        );
+        const active = links.filter((a) => a.getAttribute("aria-current") !== null);
+        return active.length === 1 && (active[0] as HTMLElement).innerText.trim() === want;
+      },
+      label,
+      { timeout: WebDriver.WAIT_MS }
+    );
   }
 
   private runnersTable(): Locator {
@@ -24499,13 +24514,25 @@ export class WebDriver implements ParityDriver {
     }
   }
 
+  /** Named row the caller expects present: wait for it, then resolve it. */
+  private async runnersWaitRow(runnerName: string): Promise<Locator> {
+    // The table fills a beat after the overview reports loaded (the load
+    // waiter resolves on the first runners fetch, which may be the rail's),
+    // so wait for a row carrying the name; the exact match still happens
+    // in runnersRow, since names share long prefixes.
+    const table = this.runnersTable();
+    await table.waitFor({ timeout: WebDriver.WAIT_MS });
+    await table.locator("tbody tr", { hasText: runnerName }).first().waitFor({ timeout: WebDriver.WAIT_MS });
+    return this.runnersRow(runnerName);
+  }
+
   private async runnersRowStatus(runnerName: string): Promise<string> {
     const rows = await this.runnersTableRows();
     return rows.find((row) => row.name === runnerName)?.status ?? "";
   }
 
   async runnersRowActions(runnerName: string): Promise<RunnersRowActions> {
-    const row = await this.runnersRow(runnerName);
+    const row = await this.runnersWaitRow(runnerName);
     return {
       hasDetails: (await row.getByRole("button", { name: "Details", exact: true }).count()) > 0,
       hasRevoke: (await row.getByRole("button", { name: "Revoke", exact: true }).count()) > 0,
@@ -24514,7 +24541,7 @@ export class WebDriver implements ParityDriver {
   }
 
   async runnersOpenDetails(runnerName: string): Promise<void> {
-    const row = await this.runnersRow(runnerName);
+    const row = await this.runnersWaitRow(runnerName);
     await row.getByRole("button", { name: "Details", exact: true }).click();
     await this.page.waitForURL(/\/detail\//, { timeout: WebDriver.WAIT_MS });
   }
@@ -24535,7 +24562,7 @@ export class WebDriver implements ParityDriver {
   }
 
   async runnersDeleteRunner(runnerName: string, options?: { expectFailure?: boolean }): Promise<void> {
-    const row = await this.runnersRow(runnerName);
+    const row = await this.runnersWaitRow(runnerName);
     await row.getByRole("button", { name: "Delete", exact: true }).click();
     const dialog = await this.runnersWaitForConfirm("Delete runner?");
     await dialog.getByRole("button", { name: "Delete", exact: true }).click();
@@ -24549,7 +24576,7 @@ export class WebDriver implements ParityDriver {
   }
 
   async runnersRevokeRunner(runnerName: string, options?: { expectFailure?: boolean }): Promise<void> {
-    const row = await this.runnersRow(runnerName);
+    const row = await this.runnersWaitRow(runnerName);
     await row.getByRole("button", { name: "Revoke", exact: true }).click();
     const dialog = await this.runnersWaitForConfirm("Revoke runner?");
     await dialog.getByRole("button", { name: "Revoke", exact: true }).click();
