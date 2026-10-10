@@ -115,3 +115,44 @@ def test_sticky_retrieve_other_owners_404(org):
 def test_sticky_guest_may_create(org):
     body = _create(org, role="guest", name="guest-note")
     assert body["owner"] == org.guest["id"]
+
+
+def _bare(org):
+    return _base(org).rstrip("/")
+
+
+# Django answers every sticky format-suffix URL with its generic 500: the
+# viewset actions declare explicit params, so the router's `format` kwarg
+# raises TypeError. Rust proxies these spellings, so the bug shines through
+# byte for byte (PIDASHCONV-828 G3/G5).
+SUFFIX_500 = {"error": "Something went wrong please try again later"}
+
+
+def test_sticky_list_format_suffix_json(org):
+    _create(org, name="suffixed")
+    for path in (_bare(org) + ".json", _bare(org) + ".json/"):
+        r = org.request("GET", path, "admin")
+        assert r.status_code == 500, r.text[:500]
+        assert r.json() == SUFFIX_500
+
+
+def test_sticky_detail_format_suffix_json(org):
+    created = _create(org, name="suffixed-detail")
+    # G5: the dotted spelling reaches Django (500), never the detail handler
+    # on a garbage pk (which would 404 here).
+    for path in (f"{_bare(org)}/{created['id']}.json", f"{_bare(org)}/{created['id']}.json/"):
+        r = org.request("GET", path, "admin")
+        assert r.status_code == 500, r.text[:500]
+        assert r.json() == SUFFIX_500
+
+
+def test_sticky_detail_format_suffix_patch(org):
+    created = _create(org, name="before")
+    # PATCH rides the proxy with its real body; Django still 500s on the
+    # `format` kwarg before touching anything, so the sticky is unchanged.
+    r = org.request("PATCH", f"{_bare(org)}/{created['id']}.json/", "admin",
+                    json={"name": "after"})
+    assert r.status_code == 500, r.text[:500]
+    assert r.json() == SUFFIX_500
+    r = org.request("GET", f"{_base(org)}{created['id']}/", "admin")
+    assert r.json()["name"] == "before"

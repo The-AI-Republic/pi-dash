@@ -2214,12 +2214,29 @@ fn parse_invite_pk(raw: &str) -> Result<uuid::Uuid, Denial> {
     raw.parse::<uuid::Uuid>().map_err(|_| Denial::BadDetail)
 }
 
+/// True when the detail segment is a DRF format-suffix spelling
+/// (`{pk}.{format}`, `api/urls/invite.py` router): Django's pk regex is
+/// `[^/.]+`, so a dotted segment never matches the detail route — Django
+/// serves the format variant instead. Detail handlers proxy such requests
+/// before auth for Django's exact bytes (PIDASHCONV-828); dotless input
+/// (even garbage) stays in Rust and 400s in [`parse_invite_pk`].
+fn is_format_suffix_pk(raw: &str) -> bool {
+    raw.contains('.')
+}
+
 /// `GET invitations/<pk>/` (`invite.py:75-78`).
 async fn inv_detail_get(
     State(state): State<AppState>,
     Path((slug, pk_raw)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Response {
+    // Dotted segments are format-suffix spellings, never pks: proxy before
+    // auth for Django's exact bytes (`invite.py` router `[^/.]+`).
+    if is_format_suffix_pk(&pk_raw) {
+        return proxy_through(state, method, uri, headers, Bytes::new()).await;
+    }
     into_result_response(inv_detail_get_inner(&state, &slug, &pk_raw, &headers).await)
 }
 
@@ -2255,6 +2272,12 @@ async fn inv_detail_patch(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    // Dotted segments are format-suffix spellings, never pks: proxy before
+    // auth for Django's exact bytes (`invite.py` router `[^/.]+`). The
+    // real body rides along — `partial_update()` reads `request.data`.
+    if is_format_suffix_pk(&pk_raw) {
+        return proxy_through(state, method, uri, headers, body).await;
+    }
     into_result_response(
         inv_detail_patch_inner(
             &state,
@@ -2353,8 +2376,15 @@ async fn inv_detail_patch_inner(
 async fn inv_detail_delete(
     State(state): State<AppState>,
     Path((slug, pk_raw)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Response {
+    // Dotted segments are format-suffix spellings, never pks: proxy before
+    // auth for Django's exact bytes (`invite.py` router `[^/.]+`).
+    if is_format_suffix_pk(&pk_raw) {
+        return proxy_through(state, method, uri, headers, Bytes::new()).await;
+    }
     into_result_response(inv_detail_delete_inner(&state, &slug, &pk_raw, &headers).await)
 }
 
@@ -2454,6 +2484,46 @@ mod tests {
         ));
         assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
         assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
+    }
+
+    #[test]
+    fn format_suffix_pk_is_dotted_only() {
+        assert!(is_format_suffix_pk(
+            "8dbd5acc-b3ce-4259-91b2-570768a0b918.json"
+        ));
+        assert!(is_format_suffix_pk("x.x"));
+        assert!(!is_format_suffix_pk("8dbd5acc-b3ce-4259-91b2-570768a0b918"));
+        assert!(!is_format_suffix_pk("x"));
+        assert!(!is_format_suffix_pk(""));
+    }
+
+    #[tokio::test]
+    async fn dotted_invite_pk_proxies_before_auth() {
+        use tower::ServiceExt;
+        // Port 1 is never bound, so a proxied request fail-closed 502s
+        // while a handled one answers from here (500, no pool): 502 on an
+        // anonymous dotted pk proves the proxy runs before auth
+        // (PIDASHCONV-828).
+        let app = crate::routes::with_routes(
+            AppState::with_edge(
+                "0.1.0",
+                crate::edge::EdgeHandle::for_tests("http://127.0.0.1:1"),
+            ),
+            routes(),
+        );
+        for (method, uri) in [
+            ("GET", "/api/v1/workspaces/acme/invitations/x.json/"),
+            ("PATCH", "/api/v1/workspaces/acme/invitations/x.json/"),
+            ("DELETE", "/api/v1/workspaces/acme/invitations/x.json/"),
+        ] {
+            let request = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .expect("request");
+            let status = app.clone().oneshot(request).await.expect("serve").status();
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{method} {uri}");
+        }
     }
 
     fn lite(id: &str) -> UserLite {
