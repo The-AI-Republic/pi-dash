@@ -115,8 +115,11 @@ jobs:
       CONTRACT_REDIS_URL: redis://localhost:6379/0
       # Django's own base URLs (the Rust step overrides these with :8080 so
       # each backend's redirects match the BASE_URL it is tested under).
+      # SPACE_BASE_URL must be configured: the auth_magic oracle documents
+      # that sign-in/up redirects 500 without it.
       WEB_URL: http://127.0.0.1:8000
       APP_BASE_URL: http://127.0.0.1:8000
+      SPACE_BASE_URL: http://127.0.0.1:8000
       DJANGO_BASE_URL: http://127.0.0.1:8000
       RUST_BASE_URL: http://127.0.0.1:8080
       EMAIL_HOST: localhost
@@ -303,6 +306,7 @@ jobs:
         env:
           WEB_URL: http://127.0.0.1:8080
           APP_BASE_URL: http://127.0.0.1:8080
+          SPACE_BASE_URL: http://127.0.0.1:8080
           AMQP_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
         run: |
           ./target/debug/pidash-api serve --bind 127.0.0.1:8080 > /tmp/rust-serve.log 2>&1 &
