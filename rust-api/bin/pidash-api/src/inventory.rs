@@ -1209,7 +1209,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.agent_ticker.scan_due_tickers",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.analytic_plot_export.analytic_export_task",
@@ -1385,7 +1385,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.scheduler.scan_due_bindings",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.storage_metadata_task.get_asset_object_metadata",
@@ -1831,6 +1831,7 @@ mod tests {
         pidash_jobs::assistant::register_sweep_handler(&mut registry, pool.clone());
         pidash_jobs::loop_scan::register_scanner(&mut registry, pool.clone());
         pidash_jobs::loop_fire::register_fire(&mut registry, pool.clone());
+        pidash_jobs::tasks_ticker::scan::register_scanners(&mut registry, pool.clone());
 
         // The const union, independent of the table.
         let mut expected_rust = std::collections::BTreeSet::new();
@@ -1852,6 +1853,10 @@ mod tests {
         expected_rust.extend([pidash_jobs::assistant::SWEEP_TASK]);
         expected_rust.extend(pidash_jobs::loop_scan::TASK_NAMES);
         expected_rust.insert(pidash_jobs::tasks_webhooks::ARCHIVE_AND_CLOSE_TASK);
+        expected_rust.extend([
+            pidash_jobs::tasks_ticker::scan::SCAN_DUE_TICKERS_TASK,
+            pidash_jobs::tasks_ticker::scan::SCAN_DUE_BINDINGS_TASK,
+        ]);
         // Count pins: a const that grows must update the table too.
         assert_eq!(
             tasks_cleanup::cleanup::TASKS.len(),
@@ -1878,7 +1883,7 @@ mod tests {
             2,
             "loop_scan group drifted"
         );
-        assert_eq!(expected_rust.len(), 31, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 33, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()
@@ -1901,6 +1906,10 @@ mod tests {
         // Deliberately unregistered: `assistant.run_turn` has no live
         // `TurnSeam` (PIDASHCONV-831), so it stays Python-owned.
         assert!(!registry.owns(pidash_jobs::assistant::RUN_TURN_TASK));
+        // Deliberately unregistered: the fire tasks have no live
+        // seams (PIDASHCONV-861), so they stay Python-owned.
+        assert!(!registry.owns(pidash_jobs::tasks_ticker::scan::FIRE_TICK_TASK));
+        assert!(!registry.owns(pidash_jobs::tasks_ticker::scan::FIRE_SCHEDULER_BINDING_TASK));
     }
 
     /// The schedule serializer: spot-check set shapes (full content is

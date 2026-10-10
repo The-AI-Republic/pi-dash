@@ -272,6 +272,16 @@ async fn worker(concurrency: u32) -> MainResult {
     // Rust worker owns it — otherwise the task is lost at switchover
     // (parity gap W-automation).
     pidash_jobs::tasks_webhooks::register_automation_handlers(&mut registry, pools.clone());
+    // D-10 ticker + scheduler scans (PIDASHCONV-833; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`). One
+    // shared call wires both beat scans; each fan-out enqueues into
+    // the Rust queue and forwards wire-identically while the fires
+    // stay Python-owned. `fire_tick` / `fire_scheduler_binding` stay
+    // Python-owned: `register_fire_tick` needs a live `FireTickSeam`
+    // and `register_fire_binding` a live `SchedulerDispatch`, and
+    // neither exists (only test fakes) — never register them here
+    // until the seams land (PIDASHCONV-861).
+    pidash_jobs::tasks_ticker::scan::register_scanners(&mut registry, pools.primary().clone());
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()

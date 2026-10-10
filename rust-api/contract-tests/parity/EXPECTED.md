@@ -21,7 +21,7 @@ Counts (2026-10-10, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 508 OWNED, 20 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 85 tasks — 31 OWNED, 35 proxied by design, 19 MISSING;
+- Jobs: 85 tasks — 33 OWNED, 35 proxied by design, 17 MISSING;
   beat 26/26 OWNED.
 
 ## Routes
@@ -169,16 +169,16 @@ W-cloud-agent :: cloud_agent.scan_queued_runs :: must-wire (lost without python 
 W-cloud-agent :: cloud_agent.sweep_stale_runs :: must-wire (lost without python worker)
 ```
 
-### W-ticker + W-scheduler (4 rows)
+### W-ticker + W-scheduler (2 rows; scans resolved by PIDASHCONV-833)
 
-Fix: PIDASHCONV-833 (one issue: the ticker and scheduler scan/fire
-register fns are wired together).
+Fix: PIDASHCONV-861. The scan rows are gone (wired by
+PIDASHCONV-833: `register_scanners` in `worker()`, pool-only). The
+fire rows need live execution seams and none exists — that is
+PIDASHCONV-861, not wiring.
 
 ```expected-jobs
 W-ticker :: pi_dash.bgtasks.agent_ticker.fire_tick :: must-wire (lost without python worker)
-W-ticker :: pi_dash.bgtasks.agent_ticker.scan_due_tickers :: must-wire (lost without python worker)
 W-scheduler :: pi_dash.bgtasks.scheduler.fire_scheduler_binding :: must-wire (lost without python worker)
-W-scheduler :: pi_dash.bgtasks.scheduler.scan_due_bindings :: must-wire (lost without python worker)
 ```
 
 ### W-mail (3 rows)
