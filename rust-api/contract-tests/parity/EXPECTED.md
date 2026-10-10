@@ -21,7 +21,7 @@ Counts (2026-10-10, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 514 OWNED, 14 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 85 tasks — 35 OWNED, 36 proxied by design, 14 MISSING;
+- Jobs: 85 tasks — 36 OWNED, 36 proxied by design, 13 MISSING;
   beat 26/26 OWNED.
 
 ## Routes
@@ -175,14 +175,15 @@ W-cloud-agent :: cloud_agent.scan_queued_runs :: must-wire (lost without python 
 W-cloud-agent :: cloud_agent.sweep_stale_runs :: must-wire (lost without python worker)
 ```
 
-### W-mail (3 rows)
+### W-mail (2 rows; notifications resolved by PIDASHCONV-834)
 
-Fix: PIDASHCONV-834.
+Fix: PIDASHCONV-865. The notifications row is gone (wired by PIDASHCONV-834:
+`register_notifications_task` in `worker()`, pool-only handler). Send/stack
+need live mail seams and none exist — that is PIDASHCONV-865, not wiring.
 
 ```expected-jobs
 W-mail :: pi_dash.bgtasks.email_notification_task.send_email_notification :: must-wire (lost without python worker)
 W-mail :: pi_dash.bgtasks.email_notification_task.stack_email_notification :: must-wire (lost without python worker)
-W-mail :: pi_dash.bgtasks.notification_task.notifications :: must-wire (lost without python worker)
 ```
 
 ### W-export (0 rows; reclassified to PROXIED)
