@@ -35,12 +35,14 @@ ENV INSTANCE_CHANGELOG_URL=https://airepublic.com/pages/691ef037bcfe416a902e48cb
 
 # Shell tools the entrypoints need (signature block, concurrency math):
 # bash (the scripts), hostname/ip/free (machine signature), CA certs
-# (Postgres/S3/GitHub TLS; sqlx uses rustls, so no libssl).
+# (Postgres/S3/GitHub TLS), libssl3 (the binary links OpenSSL via the
+# fernet crate: `ldd` shows libssl.so.3 + libcrypto.so.3).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
     hostname \
     iproute2 \
+    libssl3 \
     procps \
     && rm -rf /var/lib/apt/lists/*
 

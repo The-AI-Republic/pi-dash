@@ -568,6 +568,9 @@ def test_dockerfile_minimal_runtime():
     assert "cargo build --release --bin pidash-api" in text
     for tool in ("bash", "ca-certificates", "hostname", "iproute2", "procps"):
         assert tool in text, f"entrypoint tool missing from runtime: {tool}"
+    # The binary links libssl.so.3 (fernet -> openssl); without the
+    # runtime package it cannot start in the slim image.
+    assert "libssl3" in text
 
 
 # --------------------------------------------------------------------------
