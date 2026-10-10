@@ -6916,8 +6916,8 @@ export class WebNewDriver implements ParityDriver {
     return todo("archivesDetailBreadcrumbText");
   }
 
-  async archivesDetailBannerText(): Promise<string | null> {
-    return todo("archivesDetailBannerText");
+  async archivesMutationDetailBannerText(): Promise<string | null> {
+    return todo("archivesMutationDetailBannerText");
   }
 
   async archivesDetailBannerBack(): Promise<void> {

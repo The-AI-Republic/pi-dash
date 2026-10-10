@@ -24253,7 +24253,7 @@ export class WebDriver implements ParityDriver {
       .join(" / ");
   }
 
-  async archivesDetailBannerText(): Promise<string | null> {
+  async archivesMutationDetailBannerText(): Promise<string | null> {
     // The warning banner names archiving in its text; scope to the
     // banner container so page text around it never leaks in.
     const banner = this.page.getByText(/has been archived/i).first();
@@ -24327,7 +24327,7 @@ export class WebDriver implements ParityDriver {
       // The read is outstanding: dwell so any pending indicator would have
       // painted, then sample the screen.
       await this.page.waitForTimeout(3000);
-      const bannerDuringHold = await this.archivesDetailBannerText();
+      const bannerDuringHold = await this.archivesMutationDetailBannerText();
       const breadcrumbDuringHold = await this.archivesDetailBreadcrumbText();
       const activityDuringHold = (await this.activityHeading().count()) > 0;
       release();

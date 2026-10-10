@@ -355,7 +355,7 @@ test(
       });
 
       await test.step("the banner explains the archive and leads back to the archived list", async () => {
-        await expect.poll(() => driver.archivesDetailBannerText(), { timeout: 120_000 }).toContain("archived");
+        await expect.poll(() => driver.archivesMutationDetailBannerText(), { timeout: 120_000 }).toContain("archived");
         await driver.archivesDetailBannerBack();
         await expect.poll(() => driver.currentUrlPath(), { timeout: 120_000 }).toMatch(/\/archives\/issues\/?$/);
       });
@@ -405,7 +405,7 @@ test(
 
       // The released fetch settles on the full detail, and the hold never
       // mutated anything: the item is still archived on the server.
-      await expect.poll(() => driver.archivesDetailBannerText(), { timeout: 120_000 }).toContain("archived");
+      await expect.poll(() => driver.archivesMutationDetailBannerText(), { timeout: 120_000 }).toContain("archived");
       await expect.poll(() => driver.archivesDetailBreadcrumbText(), { timeout: 120_000 }).toContain(ref.seq);
       expect((await serverIssue(seed.workspaceSlug, projectId, issue.id, session)).archived_at).not.toBeNull();
     } finally {
@@ -434,7 +434,7 @@ test(
     await expect.poll(() => driver.hasVisibleText("Archives"), { timeout: 300_000 }).toBe(true);
     await driver.page.waitForTimeout(5000);
     expect(await driver.archivesDetailNotFoundVisible()).toBe(false);
-    expect(await driver.archivesDetailBannerText()).toBeNull();
+    expect(await driver.archivesMutationDetailBannerText()).toBeNull();
     expect(await driver.hasVisibleText("does not exist")).toBe(false);
     expect(await driver.currentUrlPath()).toContain(missingId);
   }

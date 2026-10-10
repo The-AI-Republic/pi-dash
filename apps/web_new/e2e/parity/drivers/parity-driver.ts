@@ -4543,7 +4543,7 @@ export interface ParityDriver {
   /** Breadcrumb trail text on the archived detail screen. */
   archivesDetailBreadcrumbText(): Promise<string>;
   /** Archive banner text on the archived detail screen, or null when absent. */
-  archivesDetailBannerText(): Promise<string | null>;
+  archivesMutationDetailBannerText(): Promise<string | null>;
   /** Follow the archive banner's back control to the archived list. */
   archivesDetailBannerBack(): Promise<void>;
   /** Whether the detail address shows the not-found state. */
