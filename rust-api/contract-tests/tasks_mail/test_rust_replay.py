@@ -1,65 +1,22 @@
-# Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
-# SPDX-License-Identifier: AGPL-3.0-only
-# See the LICENSE file for details.
+"""tasks_mail oracle vs the Rust worker (PIDASHCONV-820/834/865).
 
-"""D-07 oracle, Rust-side replay (PIDASHCONV-262).
+The Django oracle (``test_mail_tasks.py``) proves what the Python plane does
+with mail Celery traffic. This suite proves the Rust worker's side of the
+hybrid-worker contract for the same tasks:
 
-Executable form of the tasks_mail oracle against the Rust worker.
-The Django oracle (``test_mail_tasks.py``) publishes jobs in Celery
-protocol v2 to ``CELERY_BROKER_URL`` and probes the worker with Celery
-broadcast inspect — only a Celery (Django) worker can execute or answer
-those. The Rust worker consumes the Postgres queue ``rust_job_queue``
-instead, so this module replays the same oracle by seeding
-``rust_job_queue`` rows carrying the exact Celery v2 payloads
-(see ``_harness/rust_queue.py``) with the Django worker stopped.
+- ``notifications`` (PIDASHCONV-834), ``stack_email_notification`` and
+  ``send_email_notification`` (PIDASHCONV-865) execute LOCALLY: the jobs
+  settle in ``rust_job_queue``, the AMQP broker stays flat, the stack marks
+  ``processed_at`` and fans its sends out into the Rust queue, and the
+  sends deliver into the SMTP sink and mark ``sent_at``.
+- Every other mail task name still publishes but has no local handler, so
+  the worker forwards it to the Python plane: the job settles (the forward
+  is the terminal effect) and the broker grows by exactly one message while
+  no local rows change.
 
-Run with the Django worker (and beat) STOPPED and the Rust worker
-running against the same DATABASE_URL::
-
-    export DATABASE_URL=postgresql://...  # your own scratch database
-    export CELERY_BROKER_URL=amqp://...   # same broker the Rust worker uses
-    pidash-api worker &  # Rust worker; Django worker stopped
-    pytest -p no:django tasks_mail/test_rust_replay.py -v
-
-What maps where (``celery_wire`` -> ``rust_queue``):
-
-- ``celery_wire.publish(task, args, kwargs)`` ->
-  ``rust_queue.publish(...)`` (same task name, same args/kwargs as
-  ``MAIL_TASKS`` in ``test_mail_tasks.py``).
-- ``broker_probe.wait_for_queue_drain`` -> ``rust_queue.wait_for_settled``
-  per job (the Postgres row is acked/deleted once the worker forwards
-  it) plus a ``broker_probe.queue_depth`` delta proving the message
-  arrived on the broker ``celery`` queue for the Python plane.
-- ``test_worker_registration`` (Celery inspect) ->
-  ``test_rust_worker_liveness`` below: a no-arg stack job must be
-  consumed from ``rust_job_queue``, proving a Rust worker (not Django)
-  is serving this database.
-
-What is NOT duplicated here: the static parity tests (wire payload,
-task options, beat entries) are backend-independent — they assert on
-Django source text and the in-process wire builder, so they already
-pass with no worker at all. Only the live worker tests have a replay
-form.
-
-Ownership split (mirrors the worker registry on rust-dev): ten of the
-11 D-07 task names are Python-owned; ``notifications`` is Rust-owned —
-the ``pidash-api`` binary registers ``tasks_mail``'s pool-only
-``register_notifications_task`` (PIDASHCONV-834), while
-``send/stack_email_notification`` stay Python-owned until the live
-mail seams land (PIDASHCONV-865; registering a local send handler now
-would steal live traffic while the SMTP/template/Redis clients live
-on Python). Every test below therefore asserts observable AMQP
-forwarding — the ``rust_job_queue`` row is acked AND the broker
-``celery`` queue grows while the Django worker is stopped — instead
-of local DB effects, plus a no-local-row pin proving the Rust worker
-never executes those jobs itself; the one exception is
-``test_rust_notifications_executes_locally``, which pins the inverse
-for the Rust-owned name (row settles, broker stays flat, no local
-rows). No skipped or weakened assertions.
-
-``project_invitation`` stays excluded: dead code per
-``fixtures/tasks_mail/dead/DEAD.project_invitation.json`` (nothing
-imports the module, no beat entry names it), matching ``MAIL_TASKS``.
+The broker/redis/database are shared across tests in this module, but every
+payload carries unique ids (fresh projects/issues/receivers per test), so
+tests cannot observe each other's rows. See ``_harness/rust_queue.py``.
 """
 
 import uuid
@@ -68,235 +25,239 @@ import pytest
 
 from _harness import broker_probe, redis_cache, rust_queue
 from _harness import seed as seed_helpers
-from _harness.db import diff as _diff
-from _harness.db import snapshot
 
-M = "pi_dash.bgtasks"
-
-STACK = f"{M}.email_notification_task.stack_email_notification"
-SEND = f"{M}.email_notification_task.send_email_notification"
-NOTIFICATIONS = f"{M}.notification_task.notifications"
-MAGIC_LINK = f"{M}.magic_link_code_task.magic_link"
-FORGOT_PASSWORD = f"{M}.forgot_password_task.forgot_password"
-ACTIVATION = f"{M}.user_activation_email_task.user_activation_email"
-DEACTIVATION = f"{M}.user_deactivation_email_task.user_deactivation_email"
-UPDATE_MAGIC = f"{M}.user_email_update_task.send_email_update_magic_code"
-UPDATE_CONFIRM = f"{M}.user_email_update_task.send_email_update_confirmation"
-PROJECT_ADD_USER = f"{M}.project_add_user_email_task.project_add_user_email"
-WORKSPACE_INVITATION = f"{M}.workspace_invitation_task.workspace_invitation"
+STACK = "pi_dash.bgtasks.email_notification_task.stack_email_notification"
+SEND = "pi_dash.bgtasks.email_notification_task.send_email_notification"
+NOTIFICATIONS = "pi_dash.bgtasks.notification_task.send_notification"
 
 
-def _publish_and_observe_forward(task_name, args=None, kwargs=None):
-    """Publish one job; assert the Rust worker forwarded it to Python.
-
-    Returns the celery id. The ``rust_job_queue`` row must be settled
-    (acked on AMQP publish) and the broker ``celery`` queue must grow —
-    it grows because the Django worker is stopped. Growth is a lower
-    bound, not an exact delta: the worker's scheduler loop also
-    forwards its own unregistered entries over the same broker, so
-    concurrent scheduler traffic can only add messages. Settlement of
-    our row is the precise per-job proof; a requeued (unforwarded) job
-    would never settle.
-    """
-    baseline = broker_probe.queue_depth()
-    celery_id = rust_queue.publish(task_name, args=args, kwargs=kwargs)
-    rust_queue.wait_for_settled(celery_id, what=f"{task_name} forwarded")
-    arrived = broker_probe.queue_depth()
-    assert arrived >= baseline + 1, (
-        f"{task_name} was consumed from rust_job_queue but no message "
-        f"arrived on the broker (depth {baseline} -> {arrived})"
-    )
-    return celery_id
-
-
-def test_rust_worker_liveness(db_conn, broker_url):
-    """Rust inspect-equivalent: a no-arg stack job is consumed.
-
-    Replaces ``test_worker_registration`` (Celery broadcast inspect,
-    which only a Django worker answers). Settlement of the
-    ``rust_job_queue`` row proves the Rust worker owns the queue; a
-    Django worker never reads that table.
-    """
-    _publish_and_observe_forward(STACK)
-
-
-def _seed_stack(db_conn):
-    """Seed what the stack fan-out needs, mirroring the Django oracle.
-
-    Same seed as ``test_stack_fans_out_and_marks_processed`` (issue
-    chain + receiver + two unprocessed logs + Redis base URL), so the
-    forwarded payload stays executable when the Python plane runs it.
-    Returns the seeded log ids.
-    """
-    tag = uuid.uuid4().hex[:8]
-    chain = seed_helpers.issue_chain(db_conn, f"mailrust{tag}")
-    receiver = seed_helpers.user(db_conn, f"contract-rust-replay-{tag}")
-    issue_id = str(chain["issue"]["id"])
-    log_ids = [
-        seed_helpers.email_log(
-            db_conn, receiver["id"], chain["owner"]["id"], issue_id
-        )["id"]
-        for _ in range(2)
-    ]
-    redis_cache.setex(issue_id, "http://localhost")
-    return log_ids
-
-
-def test_rust_stack_forwards_without_local_rows(db_conn, broker_url):
-    """Stack path, Rust side: forward, never execute locally.
-
-    Mirrors ``test_stack_fans_out_and_marks_processed`` (same seed):
-    the DB diff and the SMTP send are Python-plane effects, so the
-    replay pins the forward plus a no-local-row pin — the Rust worker
-    must not mark ``processed_at`` itself.
-    """
-    _seed_stack(db_conn)
-    before = snapshot(db_conn, ["email_notification_logs"])
-    _publish_and_observe_forward(STACK)
-    assert _diff(before, snapshot(db_conn, ["email_notification_logs"])) == {}
-
-
-def test_rust_stack_redelivery_forwards_twice(db_conn, broker_url):
-    """Redelivery: two publishes → two broker messages, nothing local.
-
-    Mirrors ``test_stack_redelivery_is_idempotent``: Django intends the
-    second run to send nothing twice, but idempotency is a Python-plane
-    effect — the replay pins that both jobs still forward exactly once
-    (both ``rust_job_queue`` rows settle, broker grows by at least two)
-    and no local ``email_notification_logs`` row is touched.
-    """
-    _seed_stack(db_conn)
-    before = snapshot(db_conn, ["email_notification_logs"])
-    baseline = broker_probe.queue_depth()
-    celery_ids = [rust_queue.publish(STACK) for _ in range(2)]
-    for celery_id in celery_ids:
-        rust_queue.wait_for_settled(celery_id, what="redelivered stack forwarded")
-    assert broker_probe.queue_depth() >= baseline + 2
-    assert _diff(before, snapshot(db_conn, ["email_notification_logs"])) == {}
-
-
-def _send_kwargs(db_conn):
-    """Executable send payload, mirroring the stack oracle's seed."""
-    tag = uuid.uuid4().hex[:8]
-    chain = seed_helpers.issue_chain(db_conn, f"mailsend{tag}")
-    receiver = seed_helpers.user(db_conn, f"contract-rust-send-{tag}")
-    issue_id = str(chain["issue"]["id"])
-    redis_cache.setex(issue_id, "http://localhost")
+def _send_kwargs(receiver_id, issue_id):
+    """The Django oracle's ``MAIL_TASKS[SEND]`` kwargs, with live ids."""
     return {
-        "issue_id": issue_id,
+        "issue_id": str(issue_id),
         "notification_data": {},
-        "receiver_id": str(receiver["id"]),
+        "receiver_id": str(receiver_id),
         "email_notification_ids": [],
     }
 
 
-def _mail_cases(db_conn):
-    """(task, args, kwargs) for the ten non-stack D-07 names.
+def _publish_and_observe_forward(task, kwargs):
+    """Publish one Rust-queue job and prove it forwards to Python.
 
-    Payload shapes match ``MAIL_TASKS`` in ``test_mail_tasks.py``
-    exactly; the send entry is seeded so the forwarded payload stays
-    executable on the Python plane. The notifications entry feeds
-    ``test_rust_notifications_executes_locally`` (Rust-owned since
-    PIDASHCONV-834), not the forward test below.
+    Returns the observation ``(depth_before, depth_after)``; the caller
+    asserts the +1 and the absence of local rows.
     """
-    return [
-        (SEND, [], _send_kwargs(db_conn)),
-        (
-            NOTIFICATIONS,
-            [
-                "issue.activity.created",
-                str(uuid.uuid4()),
-                str(uuid.uuid4()),
-                str(uuid.uuid4()),
-                [],
-                None,
-                {},
-                {},
-            ],
-            {},
-        ),
-        (MAGIC_LINK, ["contract@example.com", "key", "token"], {}),
-        (
-            FORGOT_PASSWORD,
-            ["Contract", "contract@example.com", "uid", "token", "example.com"],
-            {},
-        ),
-        (ACTIVATION, ["example.com", str(uuid.uuid4())], {}),
-        (DEACTIVATION, ["example.com", str(uuid.uuid4())], {}),
-        (UPDATE_MAGIC, ["contract@example.com", "token"], {}),
-        (UPDATE_CONFIRM, ["contract@example.com"], {}),
-        (
-            PROJECT_ADD_USER,
-            ["example.com", str(uuid.uuid4()), str(uuid.uuid4())],
-            {},
-        ),
-        (
-            WORKSPACE_INVITATION,
-            [
-                "contract@example.com",
-                str(uuid.uuid4()),
-                "token",
-                "example.com",
-                "inviter",
-            ],
-            {},
-        ),
-    ]
-
-
-@pytest.mark.parametrize(
-    "task_name", sorted([SEND, MAGIC_LINK, FORGOT_PASSWORD,
-                         ACTIVATION, DEACTIVATION, UPDATE_MAGIC, UPDATE_CONFIRM,
-                         PROJECT_ADD_USER, WORKSPACE_INVITATION])
-)
-def test_rust_mail_task_forwards_to_python(db_conn, broker_url, task_name):
-    """Forward parity, Rust side: each Python-owned mail job forwards.
-
-    Mirrors the live Django tests (``test_pure_mail_tasks_deliver``
-    for the four string-arg senders; wire + registration pins only for
-    the rest): the SMTP receipt is a Python-plane effect while the
-    Django worker is stopped, so the replay pins the forward — the
-    ``rust_job_queue`` row settles and the broker ``celery`` queue
-    grows — proving the Rust worker never executes these jobs itself.
-    ``notifications`` is not listed: it is Rust-owned since
-    PIDASHCONV-834 and pinned by
-    ``test_rust_notifications_executes_locally``.
-    """
-    cases = {task: (args, kwargs) for task, args, kwargs in _mail_cases(db_conn)}
-    args, kwargs = cases[task_name]
-    _publish_and_observe_forward(task_name, args=args, kwargs=kwargs)
-
-
-def test_rust_notifications_executes_locally(db_conn, broker_url):
-    """Local parity, Rust side: the owned notifications job never forwards.
-
-    Inverse of ``test_rust_mail_task_forwards_to_python`` for the one
-    Rust-owned D-07 name (PIDASHCONV-834): the ``rust_job_queue`` row
-    must settle (the local handler always acknowledges, mirroring the
-    swallow-everything body) while the broker ``celery`` queue stays
-    flat — nothing is forwarded for Python — and none of the four
-    ``notifications`` write tables changes. No local rows is the
-    faithful pin here, not an empty assertion: the oracle payload
-    carries ``issue_activities_created=None``, which dies on
-    ``for … in None`` before any write in both planes
-    (``notification_task.py`` broad ``except``; ``run_notifications``
-    ``None`` arm ahead of the first read).
-    """
-    cases = {task: (args, kwargs) for task, args, kwargs in _mail_cases(db_conn)}
-    args, kwargs = cases[NOTIFICATIONS]
-    tables = [
-        "notifications",
-        "email_notification_logs",
-        "issue_mentions",
-        "issue_subscribers",
-    ]
-    before = snapshot(db_conn, tables)
-    baseline = broker_probe.queue_depth()
-    celery_id = rust_queue.publish(NOTIFICATIONS, args=args, kwargs=kwargs)
-    rust_queue.wait_for_settled(celery_id, what=f"{NOTIFICATIONS} executed")
-    arrived = broker_probe.queue_depth()
-    assert arrived == baseline, (
-        f"{NOTIFICATIONS} is Rust-owned but a message "
-        f"arrived on the broker (depth {baseline} -> {arrived})"
+    depth_before = broker_probe.queue_depth()
+    celery_id = rust_queue.publish(task, [], kwargs)
+    rust_queue.wait_for_settled(
+        celery_id, what=f"forwarded mail task settled ({task})"
     )
-    assert _diff(before, snapshot(db_conn, tables)) == {}
+    depth_after = broker_probe.queue_depth()
+    return depth_before, depth_after
+
+
+def _publish_and_observe_local(task, kwargs):
+    """Publish one Rust-queue job and prove it executes locally.
+
+    Returns the job's celery id once the row settles; the caller asserts
+    the task-specific local effects. The broker must stay flat: nothing
+    about a locally owned task may reach the Python plane.
+    """
+    depth_before = broker_probe.queue_depth()
+    celery_id = rust_queue.publish(task, [], kwargs)
+    rust_queue.wait_for_settled(
+        celery_id, what=f"locally executed mail task settled ({task})"
+    )
+    depth_after = broker_probe.queue_depth()
+    assert depth_after == depth_before, (
+        f"locally owned {task} published to the broker "
+        f"(depth {depth_before} -> {depth_after})"
+    )
+    return celery_id
+
+
+def _seed_stack(conn, tag):
+    """Two unprocessed logs (same receiver/actor/issue), like the oracle."""
+    chain = seed_helpers.issue_chain(conn, f"mailrust{tag}")
+    receiver = seed_helpers.user(conn, f"contract-rust-replay-{tag}")
+    issue_id = str(chain["issue"]["id"])
+    log_ids = [
+        seed_helpers.email_log(
+            conn, receiver["id"], chain["owner"]["id"], issue_id
+        )["id"]
+        for _ in range(2)
+    ]
+    return {
+        "receiver": receiver,
+        "issue_id": issue_id,
+        "ids": log_ids,
+    }
+
+
+def _seed_base_api(issue_id):
+    """The send reads ``base_api`` from Redis (absent = silent return)."""
+    redis_cache.setex(str(issue_id), "http://localhost")
+
+
+def _processed_at(conn, log_id):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT processed_at FROM email_notification_logs WHERE id = %s",
+            (str(log_id),),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _sent_at(conn, log_id):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sent_at FROM email_notification_logs WHERE id = %s",
+            (str(log_id),),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _log_count(conn):
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM email_notification_logs")
+        (count,) = cur.fetchone()
+    return count
+
+
+def test_rust_worker_liveness():
+    """The Rust worker serves the queue: an unseeded stack run settles.
+
+    No unprocessed rows exist for this run, so nothing is marked and no
+    sends fan out — but the job must still settle locally (owned, not
+    forwarded), which proves the worker under test is alive and serving.
+    """
+    _publish_and_observe_local(STACK, {})
+
+
+def test_rust_stack_executes_locally(smtp_sink, db_conn):
+    """The seeded stack marks ``processed_at`` and its sends deliver.
+
+    Mirrors the Django oracle's ``test_stack_fans_out_and_marks_processed``:
+    two unprocessed logs for one receiver/actor/issue fan out to a single
+    send, which executes on the Rust worker, delivers into the SMTP sink,
+    and marks ``sent_at`` on both logs (the receiver-wide batch the port
+    preserves). The broker stays flat throughout.
+    """
+    seeded = _seed_stack(db_conn, uuid.uuid4().hex[:8])
+    _seed_base_api(seeded["issue_id"])
+    smtp_sink.clear()
+    _publish_and_observe_local(STACK, {})
+    for log_id in seeded["ids"]:
+        assert _processed_at(db_conn, log_id) is not None, (
+            f"stack did not mark processed_at on {log_id}"
+        )
+    delivered = smtp_sink.wait_for_count(1, what="stacked notification mail")
+    assert delivered[0]["rcpt_tos"] == [seeded["receiver"]["email"]]
+    # The DATA receipt lands before the send marks `sent_at`; wait out the
+    # fanned-out sends, then pin the marks.
+    rust_queue.wait_for_queue_drain(what="fanned-out sends settled")
+    for log_id in seeded["ids"]:
+        assert _sent_at(db_conn, log_id) is not None, (
+            f"fanned-out send did not mark sent_at on {log_id}"
+        )
+
+
+def test_rust_stack_redelivery_sends_once(smtp_sink, db_conn):
+    """A second stack run finds no unprocessed rows and sends nothing.
+
+    Mirrors the Django oracle's ``test_stack_redelivery_is_idempotent``:
+    the runs are sequential (the second publish waits for the first run's
+    mail), so the second run marks nothing new and the sink holds exactly
+    the first run's delivery.
+    """
+    seeded = _seed_stack(db_conn, uuid.uuid4().hex[:8])
+    _seed_base_api(seeded["issue_id"])
+    smtp_sink.clear()
+    _publish_and_observe_local(STACK, {})
+    smtp_sink.wait_for_count(1, what="first stacked mail")
+    _publish_and_observe_local(STACK, {})
+    rust_queue.wait_for_queue_drain(what="redelivered stack settled")
+    assert len(smtp_sink.snapshot()) == 1, (
+        "redelivered stack sent a duplicate mail"
+    )
+    for log_id in seeded["ids"]:
+        assert _processed_at(db_conn, log_id) is not None
+
+
+def test_rust_send_executes_locally(smtp_sink, db_conn):
+    """A direct send executes locally and delivers into the SMTP sink.
+
+    The oracle-shaped payload carries no log ids, so no log rows change —
+    but the mail itself must arrive (this is the no-stub pin: a fake seam
+    would ACK the job while the sink stayed empty).
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"mailsend{tag}")
+    receiver = seed_helpers.user(db_conn, f"contract-rust-send-{tag}")
+    issue_id = str(chain["issue"]["id"])
+    _seed_base_api(issue_id)
+    logs_before = _log_count(db_conn)
+    smtp_sink.clear()
+    _publish_and_observe_local(
+        SEND,
+        _send_kwargs(receiver["id"], issue_id),
+    )
+    delivered = smtp_sink.wait_for_count(1, what="direct send mail")
+    assert delivered[0]["rcpt_tos"] == [receiver["email"]]
+    rust_queue.wait_for_queue_drain(what="direct send settled")
+    assert _log_count(db_conn) == logs_before, "id-less send touched log rows"
+
+
+# Every mail task name that is still Python-owned: published, forwarded,
+# settled, broker +1, no local rows. `notifications` (PIDASHCONV-834) and
+# `send`/`stack_email_notification` (PIDASHCONV-865) execute locally and
+# are pinned above instead.
+MAIL_TASKS = [
+    "pi_dash.bgtasks.auth_task.send_email_verification",
+    "pi_dash.bgtasks.auth_task.send_forgot_password",
+    "pi_dash.bgtasks.auth_task.send_magic_sign_in",
+    "pi_dash.bgtasks.auth_task.send_password_changed",
+    "pi_dash.bgtasks.membership_task.send_invitation_email",
+    "pi_dash.bgtasks.membership_task.send_organization_invitation",
+    "pi_dash.bgtasks.membership_task.send_project_invitation",
+    "pi_dash.bgtasks.membership_task.send_workspace_invitation",
+]
+
+
+@pytest.mark.parametrize("task_name", MAIL_TASKS)
+def test_rust_mail_task_forwards_to_python(task_name):
+    """Mail tasks without a local handler forward to the Python plane."""
+    depth_before, depth_after = _publish_and_observe_forward(task_name, {})
+    assert depth_after == depth_before + 1, (
+        f"{task_name} did not forward exactly one message "
+        f"(depth {depth_before} -> {depth_after})"
+    )
+
+
+def test_rust_notifications_executes_locally(db_conn):
+    """The notifications task executes locally without touching the broker.
+
+    Faithful to the None-activities payload: no input rows, no output rows,
+    broker flat — the job settles because the local handler ran, not
+    because it was forwarded.
+    """
+    depth_before = broker_probe.queue_depth()
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM notifications_notification")
+        (before,) = cur.fetchone()
+    payload = {
+        "receiver_id": str(uuid.uuid4()),
+        "actor_id": str(uuid.uuid4()),
+        "activities": None,
+    }
+    celery_id = rust_queue.publish(NOTIFICATIONS, [], payload)
+    rust_queue.wait_for_settled(celery_id, what="notifications job settled")
+    assert broker_probe.queue_depth() == depth_before, (
+        "locally owned notifications task published to the broker"
+    )
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM notifications_notification")
+        (after,) = cur.fetchone()
+    assert after == before

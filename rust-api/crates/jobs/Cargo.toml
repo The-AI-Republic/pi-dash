@@ -22,6 +22,10 @@ tracing = "0.1.44"
 # conversation (implicit TLS + STARTTLS). minijinja is the one new download;
 # every other pin below was already in the lockfile via pidash-api/db.
 minijinja = "2"
+# Live mail seams (PIDASHCONV-865): the send task's Redis lock + base_api
+# GET run over the same async client + TLS features as pidash-db (no new
+# lockfile packages; the sync trait methods bridge via block_in_place).
+redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots"] }
 regex = "1"
 base64 = "0.22"
 hmac = "0.12.1"

@@ -29,19 +29,17 @@
 //! is pinned against the `F-WIRE-MAIL` fixture below.
 //!
 //! Ownership: [`email_notification::register_email_notification_tasks`]
-//! builds the handler table for the two mail task names, but the worker
-//! binary does not call it yet — flipping now would steal live traffic
-//! from the Python workers while the concrete SMTP/template/Redis
-//! clients still live there (see the seam traits in
-//! [`email_notification`]). Every name in [`TASK_NAMES`] therefore
-//! routes to `PythonOwned` (see [`crate::worker::route_for`]); the
-//! domain gate flips ownership after the PIDASHCONV-21 proxy pass,
-//! mirroring the `tasks_cleanup` export tasks. [`is_mail_task`] is the
-//! routing predicate and [`TASK_NAMES`] is pinned against the
-//! `F-WIRE-MAIL` fixture below.
+//! builds the handler table for the two mail task names over the live
+//! seams in [`live`], and the worker binary calls it (PIDASHCONV-865),
+//! so both names are Rust-owned; [`NOTIFICATIONS_TASK`] is Rust-owned too
+//! (PIDASHCONV-834). The auth/membership ports stay unwired: no Django
+//! task of those names exists, so there is nothing to own.
+//! [`is_mail_task`] is the routing predicate and [`TASK_NAMES`] is pinned
+//! against the `F-WIRE-MAIL` fixture below.
 
 pub mod auth_mail;
 pub mod email_notification;
+pub mod live;
 pub mod mail_send;
 pub mod membership_mail;
 pub mod notifications;
