@@ -3845,6 +3845,80 @@ export interface ParityDriver {
   archivesCancelArchiveDialog(): Promise<void>;
   /** Fail the next module archive/restore write once (failure shaping). */
   archivesFailNextModuleWrite(): Promise<void>;
+
+  // Archived work-items list, filters, display, peek (NEWFRONT-222,
+  // ARCH-001..007). Observed on apps/web: the archives tab strip with
+  // cycle/module gating, the breadcrumb header with the archived-count
+  // badge, per-tab browser titles, the read-only archived list with row
+  // menus, the shared filter expression with its chip row, the Display
+  // control (grouping incl. none, ordering incl. manual, columns), and
+  // the side peek panel with locked fields and address sync. Appended;
+  // existing entries above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Open the archived work-items tab of a project; waits until the list settles. */
+  archivesOpenIssuesList(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Switch to an archives tab through the tab strip; waits for navigation. */
+  archivesOpenTab(tab: "issues" | "cycles" | "modules"): Promise<void>;
+  /** Visible archives tab labels in display order. */
+  archivesTabNames(): Promise<string[]>;
+  /** Label of the currently active archives tab. */
+  archivesActiveTab(): Promise<string>;
+  /** Whether the breadcrumb back control renders (narrow screens only). */
+  archivesBackPresent(): Promise<boolean>;
+  /** Activate the breadcrumb back control (narrow screens only). */
+  archivesClickBack(): Promise<void>;
+  /** Archived-count badge text, or null when the badge hides (zero). */
+  archivesCountBadge(): Promise<string | null>;
+  /** Hover tip of the count badge, or null when the badge hides. */
+  archivesCountBadgeTooltip(): Promise<string | null>;
+  /** Current browser tab title. */
+  archivesPageTitle(): Promise<string>;
+  /** Names of the archived issues rendered, in display order. */
+  archivesVisibleIssueNames(): Promise<string[]>;
+  /** Group header labels in display order (empty when grouping is off). */
+  archivesGroupHeadings(): Promise<string[]>;
+  /** Open the row menu of the named archived issue. */
+  archivesOpenRowMenu(name: string): Promise<void>;
+  /** Entries of the open row menu in display order. */
+  archivesRowMenuEntries(): Promise<string[]>;
+  /** Dismiss any open row menus. */
+  archivesCloseMenus(): Promise<void>;
+  /**
+   * Click a property cell of the named row and report whether any inline
+   * editor opens (the archived list is read-only, so never).
+   */
+  archivesInlineEditorOpens(name: string): Promise<boolean>;
+  /**
+   * Wait for the next archived-issues list fetch and return its query.
+   * Callers start this before the UI action that triggers the refetch.
+   */
+  archivesWaitForListQuery(): Promise<ArchivesListQuery>;
+  /** Full visible text of the named archived row (name plus property cells). */
+  archivesRowText(name: string): Promise<string>;
+  /** Title text shown in the archived peek, or null while it loads. */
+  archivesPeekTitle(): Promise<string | null>;
+  /** Whether the peek title is locked for editing (renders as plain text, no input). */
+  archivesPeekTitleLocked(): Promise<boolean>;
+  /** Visible text of the peek description, whitespace-collapsed. */
+  archivesPeekDescriptionText(): Promise<string>;
+  /** Whether the peek description can be edited. */
+  archivesPeekDescriptionEditable(): Promise<boolean>;
+  /** Whether the peek activity composer accepts input. */
+  archivesPeekActivityEditable(): Promise<boolean>;
+  /** Peek selection carried in the current address (nulls when absent). */
+  archivesPeekQueryParams(): Promise<{ issue: string | null; project: string | null; nesting: string | null }>;
+  /**
+   * Seed the project's stored archived filter expression and reload onto
+   * the list; resolves once the list settles with the expression applied.
+   * Stands in for the UI filter entry, which is inert on apps/web from
+   * the empty state (bug NEWFRONT-242).
+   */
+  archivesSeedStoredExpression(
+    workspaceSlug: string,
+    projectId: string,
+    expression: ArchivesFilterExpression
+  ): Promise<void>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -4424,4 +4498,23 @@ export interface ArchivesArchiveDialog {
   body: string;
   /** Confirm button label (progress state while the write runs). */
   confirmLabel: string;
+}
+
+/** One archived-issues list fetch as the UI sent it (NEWFRONT-222, ARCH-005/006). */
+export interface ArchivesListQuery {
+  /** Full request URL. */
+  url: string;
+  /** Decoded query params (repeated keys joined with commas). */
+  params: Record<string, string>;
+}
+
+/**
+ * A stored rich filter expression over archived work items (NEWFRONT-222,
+ * ARCH-005): the same condition shape the shared chip row renders.
+ */
+export interface ArchivesFilterExpression {
+  /** Conditions combined with AND; each holds one property operator to values. */
+  and?: Array<Record<string, string | Array<string>>>;
+  /** Conditions combined with OR; each holds one property operator to values. */
+  or?: Array<Record<string, string | Array<string>>>;
 }

@@ -16,6 +16,8 @@
 // workspace main so sidebar rows and issue rows never leak in.
 import { expect, type ElementHandle, type Locator, type Page } from "@playwright/test";
 import type {
+  ArchivesFilterExpression,
+  ArchivesListQuery,
   AddRunnerFormState,
   AddRunnerRemotePhase,
   ArchivesArchiveDialog,
@@ -21073,5 +21075,363 @@ export class WebDriver implements ParityDriver {
       (route) => route.abort(),
       { times: 1 }
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Archived work-items list, filters, display, peek (NEWFRONT-222,
+  // ARCH-001..007). Observed on apps/web: the tab strip links at
+  // .../archives/{issues,cycles,modules} with issues always rendered and
+  // cycles/modules gated on the project flags; the breadcrumb header with
+  // the archived-count badge (issues tab, hidden at zero); per-tab
+  // browser titles; the read-only archived list (anchors per row, group
+  // headers, row menus); the shared rich-filter row plus Display panel;
+  // the side peek with locked fields and peekIssueId address sync.
+  // ---------------------------------------------------------------------------
+
+  /** Tab-strip labels keyed by tab (matches the strip's own link text). */
+  private static readonly ARCHIVES_TAB_LABELS: Record<"issues" | "cycles" | "modules", string> = {
+    issues: "Work items",
+    cycles: "Cycles",
+    modules: "Modules",
+  };
+
+  /**
+   * Tab-strip link for a tab. Scoped by href plus the visible label: the
+   * breadcrumb also links at .../archives/issues (under another name) and
+   * the sidebar links at the live lists, so neither alone identifies the
+   * strip. Substring href match: the app renders trailing slashes.
+   */
+  private archivesTabLink(tab: "issues" | "cycles" | "modules"): Locator {
+    return this.page.locator(`a[href*="/archives/${tab}"]`, { hasText: WebDriver.ARCHIVES_TAB_LABELS[tab] }).first();
+  }
+
+  /** One archived list row by issue name (rows are anchors). */
+  private archivesIssueRow(name: string): Locator {
+    return this.page.locator('a[id^="issue-"]', { hasText: name }).first();
+  }
+
+  async archivesOpenIssuesList(workspaceSlug: string, projectId: string): Promise<void> {
+    // Attach the list-fetch waiter before navigating: the store fires the
+    // archived-issues read during hydration, right after load.
+    const settled = this.page
+      .waitForResponse(
+        (response) => response.url().includes("/archived-issues/") && response.request().method() === "GET",
+        { timeout: 120_000 }
+      )
+      .catch(() => null);
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/issues`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.archivesTabLink("issues").waitFor({ state: "visible", timeout: 120_000 });
+    // The fetch proves the list reached the store; the tab link proves the
+    // header rendered. Either may legitimately lag the other on a cold
+    // dev server, so wait for both, not one through the other.
+    await settled;
+  }
+
+  async archivesOpenTab(tab: "issues" | "cycles" | "modules"): Promise<void> {
+    await this.archivesTabLink(tab).click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForURL(`**/archives/${tab}**`, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesTabNames(): Promise<string[]> {
+    const names: string[] = [];
+    for (const tab of ["issues", "cycles", "modules"] as const) {
+      if ((await this.archivesTabLink(tab).count()) > 0) names.push(WebDriver.ARCHIVES_TAB_LABELS[tab]);
+    }
+    return names;
+  }
+
+  async archivesActiveTab(): Promise<string> {
+    // The app marks active by pathname match, so read the address rather
+    // than the highlight paint: same outcome, no style coupling.
+    const path = new URL(this.page.url()).pathname;
+    for (const tab of ["issues", "cycles", "modules"] as const) {
+      if (path.endsWith(`/archives/${tab}`) || path.includes(`/archives/${tab}/`))
+        return WebDriver.ARCHIVES_TAB_LABELS[tab];
+    }
+    throw new Error(`[parity] current address is on no archives tab (${path}).`);
+  }
+
+  /**
+   * The breadcrumb trail's header bar: the trail root (the shared
+   * Breadcrumbs row of h-6 crumb items) plus its badge sibling, reached
+   * through the trail's own parent so no page-wide scan can drift onto
+   * another header.
+   */
+  private archivesHeaderBar(): Locator {
+    const trail = this.page
+      .locator("div.flex.flex-grow.items-center")
+      .filter({ has: this.page.locator("div.flex.h-6.items-center") })
+      .first();
+    return trail.locator("xpath=parent::*");
+  }
+
+  /**
+   * The breadcrumb back affordance. The trail renders it only on narrow
+   * screens (at most 640px wide) as a bare "..." span directly in the
+   * trail (at desktop widths the trail shows the full crumb row with no
+   * back control). The project switcher crumb renders its own "..."
+   * truncation mark inside its trigger button at every width, so the
+   * back control is the trail's "..." span with no button ancestor.
+   */
+  private archivesBackControl(): Locator {
+    return this.page
+      .locator("div.flex.flex-grow.items-center")
+      .locator('xpath=.//span[normalize-space(.)="..." and not(ancestor::button)]')
+      .first();
+  }
+
+  async archivesBackPresent(): Promise<boolean> {
+    return (await this.archivesBackControl().count()) > 0;
+  }
+
+  async archivesClickBack(): Promise<void> {
+    await this.archivesBackControl().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesCountBadge(): Promise<string | null> {
+    // The badge renders beside the breadcrumb trail only while the count
+    // is positive; at zero the header carries no badge at all. It is the
+    // bar's only bare-number span (crumb labels are never bare numbers in
+    // parity fixtures).
+    const badge = this.archivesHeaderBar().locator("span").filter({ hasText: /^\d+$/ }).first();
+    if ((await badge.count()) === 0) return null;
+    const text = ((await badge.innerText().catch(() => "")) ?? "").trim();
+    return /^\d+$/.test(text) ? text : null;
+  }
+
+  async archivesCountBadgeTooltip(): Promise<string | null> {
+    const badge = this.archivesHeaderBar().locator("span").filter({ hasText: /^\d+$/ }).first();
+    if ((await badge.count()) === 0) return null;
+    await badge.hover({ timeout: WebDriver.WAIT_MS });
+    const tip = this.page.getByText(/in project's archived/).first();
+    try {
+      await tip.waitFor({ state: "visible", timeout: 10_000 });
+    } catch {
+      return null;
+    }
+    return ((await tip.innerText().catch(() => "")) ?? "").trim() || null;
+  }
+
+  async archivesPageTitle(): Promise<string> {
+    return await this.page.title();
+  }
+
+  async archivesVisibleIssueNames(): Promise<string[]> {
+    const rows = this.page.getByRole("main").locator('a[id^="issue-"]');
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      // A row mid-virtualization can detach between count() and the read;
+      // skip a stuck row and let the caller's poll re-read instead.
+      const text = await rows
+        .nth(i)
+        .locator("p")
+        .first()
+        .innerText({ timeout: 10_000 })
+        .catch(() => "");
+      if (text.trim() !== "") names.push(text.trim());
+    }
+    return names;
+  }
+
+  async archivesGroupHeadings(): Promise<string[]> {
+    const headers = this.page.locator('div[class*="group/list-header"]');
+    const count = await headers.count();
+    const titles: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const raw = await headers
+        .nth(i)
+        .innerText({ timeout: 10_000 })
+        .catch(() => "");
+      // Headers render "Title <count>"; the count is a trailing bare number.
+      const title = raw
+        .trim()
+        .replace(/\s+\d+\s*$/, "")
+        .trim();
+      if (title !== "") titles.push(title);
+    }
+    return titles;
+  }
+
+  async archivesOpenRowMenu(name: string): Promise<void> {
+    const row = this.archivesIssueRow(name);
+    await row.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    // The trigger is the row's last button, an icon-only ellipsis. It sits
+    // under the property strip for automation clicks, so hover it into its
+    // clickable state first; when a re-render still covers it, a forced
+    // dispatch opens the menu the click cannot reach.
+    const trigger = row.getByRole("button").last();
+    await trigger.hover({ timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+    try {
+      await trigger.click({ timeout: 10_000 });
+    } catch {
+      await trigger.dispatchEvent("click");
+    }
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesRowMenuEntries(): Promise<string[]> {
+    // Row menus render the entry title in an h5 with an optional note
+    // paragraph; fall back to the full item text when no h5 renders.
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    const entries: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const heading = items.nth(i).locator("h5").first();
+      const raw = (await heading.count()) > 0 ? await heading.innerText() : await items.nth(i).innerText();
+      entries.push((raw ?? "").trim().replace(/\s+/g, " "));
+    }
+    return entries;
+  }
+
+  async archivesCloseMenus(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("menuitem")
+      .first()
+      .waitFor({ state: "hidden", timeout: 10_000 })
+      .catch(() => undefined);
+  }
+
+  async archivesInlineEditorOpens(name: string): Promise<boolean> {
+    // Probe read-only-ness where a live list would edit: the row's state
+    // cell. An inline edit opens a picker popup (listbox) or a modal
+    // without navigating; the archived list must open neither. A row menu
+    // is not an editor, so menuitem popups never count.
+    const row = this.archivesIssueRow(name);
+    await row.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const before = this.page.url();
+    const cell = row.locator("button").first();
+    if ((await cell.count()) === 0) return false;
+    await cell.click({ timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+    await this.page.waitForTimeout(2_000);
+    if (this.page.url() !== before) return false;
+    const picker = this.page.locator('[role="listbox"]:visible, [role="dialog"]:visible');
+    return (await picker.count()) > 0;
+  }
+
+  async archivesWaitForListQuery(): Promise<ArchivesListQuery> {
+    const response = await this.page.waitForResponse(
+      (candidate) => candidate.url().includes("/archived-issues/") && candidate.request().method() === "GET",
+      { timeout: 60_000 }
+    );
+    const url = response.url();
+    const params: Record<string, string> = {};
+    for (const [key, value] of new URL(url).searchParams) {
+      params[key] = params[key] === undefined ? value : `${params[key]},${value}`;
+    }
+    return { url, params };
+  }
+
+  async archivesRowText(name: string): Promise<string> {
+    const row = this.archivesIssueRow(name);
+    await row.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    return ((await row.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  async archivesPeekTitle(): Promise<string | null> {
+    const portal = this.page.locator("#full-screen-portal");
+    const field = portal.getByPlaceholder("Work item title").first();
+    if ((await field.count()) > 0) return await field.inputValue();
+    // Locked titles render as plain text, not an input.
+    const locked = portal.locator('div[class*="text-20"]').first();
+    if ((await locked.count()) === 0) return null;
+    const text = ((await locked.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  async archivesPeekTitleLocked(): Promise<boolean> {
+    // Locked titles render as plain text: the peek is open with title
+    // text shown but no editable title input. Callers assert the title
+    // text first, so a still-loading peek never reads as locked. (The
+    // portal shell stays mounted when closed, so children decide open.)
+    const portal = this.page.locator("#full-screen-portal");
+    if ((await portal.count()) === 0) return false;
+    if ((await portal.locator("xpath=./*").count()) === 0) return false;
+    return (await portal.getByPlaceholder("Work item title").count()) === 0;
+  }
+
+  async archivesPeekDescriptionText(): Promise<string> {
+    const portal = this.page.locator("#full-screen-portal");
+    return ((await portal.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  async archivesPeekDescriptionEditable(): Promise<boolean> {
+    // The archived peek renders the description read-only: no editable
+    // description surface accepts input. Probe the peek's rich-text
+    // editables outside the activity composer: any editable one means the
+    // description (or title-adjacent body) still edits.
+    const portal = this.page.locator("#full-screen-portal");
+    const editables = portal.locator('[contenteditable="true"]');
+    const count = await editables.count();
+    return count > 0;
+  }
+
+  async archivesPeekActivityEditable(): Promise<boolean> {
+    // The activity composer is the peek's comment entry point; archived
+    // peeks render it disabled or not at all.
+    const portal = this.page.locator("#full-screen-portal");
+    const composer = portal.getByRole("button", { name: "Comment", exact: true });
+    if ((await composer.count()) === 0) return false;
+    return await composer.first().isEnabled();
+  }
+
+  async archivesPeekQueryParams(): Promise<{
+    issue: string | null;
+    project: string | null;
+    nesting: string | null;
+  }> {
+    const params = new URL(this.page.url()).searchParams;
+    return {
+      issue: params.get("peekIssueId"),
+      project: params.get("peekProjectId"),
+      nesting: params.get("peekNestingLevel"),
+    };
+  }
+
+  async archivesSeedStoredExpression(
+    workspaceSlug: string,
+    projectId: string,
+    expression: ArchivesFilterExpression
+  ): Promise<void> {
+    // The archived store persists its rich expression to the browser's
+    // local filter storage under the "issue_local_filters" key, one entry
+    // per view, and reads it back through the camel-case field. Write the
+    // entry the same shape and reload so the list boots with it applied.
+    await this.page.evaluate(
+      ({ workspaceSlug, projectId, expression }) => {
+        const KEY = "issue_local_filters";
+        let entries: Array<Record<string, unknown>> = [];
+        try {
+          const raw = window.localStorage.getItem(KEY);
+          entries = raw ? (JSON.parse(raw) as Array<Record<string, unknown>>) : [];
+        } catch {
+          entries = [];
+        }
+        const index = entries.findIndex(
+          (entry) =>
+            entry["key"] === "ARCHIVED" &&
+            entry["workspaceSlug"] === workspaceSlug &&
+            entry["viewId"] === projectId &&
+            entry["userId"] === undefined
+        );
+        if (index < 0) {
+          entries.push({
+            key: "ARCHIVED",
+            workspaceSlug,
+            viewId: projectId,
+            filters: { richFilters: expression },
+          });
+        } else {
+          const current = (entries[index]["filters"] as Record<string, unknown> | undefined) ?? {};
+          entries[index] = { ...entries[index], filters: { ...current, richFilters: expression } };
+        }
+        window.localStorage.setItem(KEY, JSON.stringify(entries));
+      },
+      { workspaceSlug, projectId, expression }
+    );
+    await this.page.reload();
+    await this.archivesTabLink("issues").waitFor({ state: "visible", timeout: 120_000 });
   }
 }
