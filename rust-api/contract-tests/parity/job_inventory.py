@@ -259,6 +259,17 @@ DORMANT_TASKS = {
     "runner.sweep_old_streams",
 }
 
+# Registered and scheduled, but the body deletes objects from a live S3
+# bucket and Rust has no live S3 delete path (ObjectStore has head/copy
+# only, the worker wires UnavailableObjectStore, "Sinks, never live
+# buckets"): a Rust handler would clear URLs without deleting objects.
+# The Python worker stays the owner post-switchover (hybrid worker) and
+# forwarding preserves the full Python execution. Verified by hand per
+# task (PIDASHCONV-835; revisit PIDASHCONV-858 by 2027-04-10).
+HYBRID_WORKER_TASKS = {
+    "pi_dash.bgtasks.exporter_expired_task.delete_old_s3_link",
+}
+
 # Defined but never referenced anywhere (dead tasks).
 DEAD_TASKS = {
     "pi_dash.bgtasks.analytic_plot_export.export_analytics_to_csv_email",
@@ -375,6 +386,12 @@ def _diff_task(name: str, task: dict, own: str) -> dict:
             return base | {
                 "disposition": "PROXIED",
                 "detail": "dormant (never published; forward preserves non-execution)",
+                "gap": "-",
+            }
+        if name in HYBRID_WORKER_TASKS:
+            return base | {
+                "disposition": "PROXIED",
+                "detail": "hybrid worker (no live S3 delete in Rust); forward preserves full python execution (PIDASHCONV-835)",
                 "gap": "-",
             }
         if not task["called"] and not task["scheduled"]:
