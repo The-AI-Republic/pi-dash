@@ -19,15 +19,15 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# D-37 ops repair (PIDASHCONV-808): batch `now` + fresh row ids for the
-# copy loop (same locked chrono 0.4.x / uuid 1.x as pidash-db, no lock churn).
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-# D-37 ops commands (PIDASHCONV-810): the pool handle for the ops SQL edge
-# (same locked sqlx 0.8.x as the workspace) and row-id parsing/generation
-# (same locked uuid 1.x as pidash-services — no lock churn). uuid features
-# are the union of both groups' needs.
+# D-37 ops (PIDASHCONV-807/808/810): batch `now` + fresh row ids
+# (same locked chrono 0.4.x / uuid 1.x as pidash-db, no lock churn),
+# the pool handle for the ops SQL edge (same locked sqlx 0.8.x as the
+# workspace), and JSON write models (same locked serde_json 1.x).
+# chrono/uuid features are the union of the groups' needs.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+serde_json = "1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
