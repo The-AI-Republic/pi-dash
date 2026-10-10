@@ -32,6 +32,7 @@ import json
 import os
 import socket
 import sys
+import time
 
 project = os.environ["PROJECT"]
 stack_dir = os.path.realpath(os.environ["STACK_DIR"])
@@ -88,13 +89,29 @@ busy = []
 for port in want:
     if port in own_ports:
         continue
-    sock = socket.socket()
     try:
-        sock.bind(("0.0.0.0", int(port)))
-    except (OSError, ValueError):
+        number = int(port)
+    except ValueError:
         busy.append(port)
-    finally:
-        sock.close()
+        continue
+    # SO_REUSEADDR like docker itself: a leftover TIME_WAIT from a just
+    # closed connection must not read as busy. Three attempts five seconds
+    # apart absorb a teardown that is still releasing its ports.
+    ok = False
+    for _ in range(3):
+        sock = socket.socket()
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("0.0.0.0", number))
+            ok = True
+        except OSError:
+            time.sleep(5)
+        finally:
+            sock.close()
+        if ok:
+            break
+    if not ok:
+        busy.append(port)
 if busy:
     report(
         "[parity] refusing to start: port(s) %s already in use. Another stack owns them "
