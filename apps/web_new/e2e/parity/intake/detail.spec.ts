@@ -347,7 +347,7 @@ test(
 
 /** Work-item link shape the copy action must place on the clipboard. */
 function workItemLinkPattern(seed: ParitySeedFacts, identifier: string): RegExp {
-  const oracleBase = (process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13058").replace(/\/+$/, "");
+  const oracleBase = (process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000").replace(/\/+$/, "");
   const escapedBase = oracleBase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const escapedSlug = seed.workspaceSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^${escapedBase}/${escapedSlug}/browse/${identifier}-\\d+/$`);
