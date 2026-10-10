@@ -41,18 +41,21 @@ Django source text and the in-process wire builder, so they already
 pass with no worker at all. Only the live worker tests have a replay
 form.
 
-Ownership split (mirrors the worker registry on rust-dev): all 11 D-07
-task names are Python-owned — the ``pidash-api`` binary registers no
-``tasks_mail`` handler (``bin/pidash-api/src/main.rs`` wires only
-cleanup + integrations), and ``crates/jobs/src/tasks_mail/mod.rs``
-keeps every name in ``TASK_NAMES`` routing to ``PythonOwned``
-(registering a local send handler would steal live traffic while the
-SMTP/template/Redis clients live on Python). Every test below
-therefore asserts observable AMQP forwarding — the ``rust_job_queue``
-row is acked AND the broker ``celery`` queue grows while the Django
-worker is stopped — instead of local DB effects, plus a no-local-row
-pin proving the Rust worker never executes these jobs itself. No
-skipped or weakened assertions.
+Ownership split (mirrors the worker registry on rust-dev): ten of the
+11 D-07 task names are Python-owned; ``notifications`` is Rust-owned —
+the ``pidash-api`` binary registers ``tasks_mail``'s pool-only
+``register_notifications_task`` (PIDASHCONV-834), while
+``send/stack_email_notification`` stay Python-owned until the live
+mail seams land (PIDASHCONV-865; registering a local send handler now
+would steal live traffic while the SMTP/template/Redis clients live
+on Python). Every test below therefore asserts observable AMQP
+forwarding — the ``rust_job_queue`` row is acked AND the broker
+``celery`` queue grows while the Django worker is stopped — instead
+of local DB effects, plus a no-local-row pin proving the Rust worker
+never executes those jobs itself; the one exception is
+``test_rust_notifications_executes_locally``, which pins the inverse
+for the Rust-owned name (row settles, broker stays flat, no local
+rows). No skipped or weakened assertions.
 
 ``project_invitation`` stays excluded: dead code per
 ``fixtures/tasks_mail/dead/DEAD.project_invitation.json`` (nothing
@@ -192,7 +195,9 @@ def _mail_cases(db_conn):
 
     Payload shapes match ``MAIL_TASKS`` in ``test_mail_tasks.py``
     exactly; the send entry is seeded so the forwarded payload stays
-    executable on the Python plane.
+    executable on the Python plane. The notifications entry feeds
+    ``test_rust_notifications_executes_locally`` (Rust-owned since
+    PIDASHCONV-834), not the forward test below.
     """
     return [
         (SEND, [], _send_kwargs(db_conn)),
@@ -240,12 +245,12 @@ def _mail_cases(db_conn):
 
 
 @pytest.mark.parametrize(
-    "task_name", sorted([SEND, NOTIFICATIONS, MAGIC_LINK, FORGOT_PASSWORD,
+    "task_name", sorted([SEND, MAGIC_LINK, FORGOT_PASSWORD,
                          ACTIVATION, DEACTIVATION, UPDATE_MAGIC, UPDATE_CONFIRM,
                          PROJECT_ADD_USER, WORKSPACE_INVITATION])
 )
 def test_rust_mail_task_forwards_to_python(db_conn, broker_url, task_name):
-    """Forward parity, Rust side: each mail job forwards for Python.
+    """Forward parity, Rust side: each Python-owned mail job forwards.
 
     Mirrors the live Django tests (``test_pure_mail_tasks_deliver``
     for the four string-arg senders; wire + registration pins only for
@@ -253,7 +258,45 @@ def test_rust_mail_task_forwards_to_python(db_conn, broker_url, task_name):
     Django worker is stopped, so the replay pins the forward — the
     ``rust_job_queue`` row settles and the broker ``celery`` queue
     grows — proving the Rust worker never executes these jobs itself.
+    ``notifications`` is not listed: it is Rust-owned since
+    PIDASHCONV-834 and pinned by
+    ``test_rust_notifications_executes_locally``.
     """
     cases = {task: (args, kwargs) for task, args, kwargs in _mail_cases(db_conn)}
     args, kwargs = cases[task_name]
     _publish_and_observe_forward(task_name, args=args, kwargs=kwargs)
+
+
+def test_rust_notifications_executes_locally(db_conn, broker_url):
+    """Local parity, Rust side: the owned notifications job never forwards.
+
+    Inverse of ``test_rust_mail_task_forwards_to_python`` for the one
+    Rust-owned D-07 name (PIDASHCONV-834): the ``rust_job_queue`` row
+    must settle (the local handler always acknowledges, mirroring the
+    swallow-everything body) while the broker ``celery`` queue stays
+    flat — nothing is forwarded for Python — and none of the four
+    ``notifications`` write tables changes. No local rows is the
+    faithful pin here, not an empty assertion: the oracle payload
+    carries ``issue_activities_created=None``, which dies on
+    ``for … in None`` before any write in both planes
+    (``notification_task.py`` broad ``except``; ``run_notifications``
+    ``None`` arm ahead of the first read).
+    """
+    cases = {task: (args, kwargs) for task, args, kwargs in _mail_cases(db_conn)}
+    args, kwargs = cases[NOTIFICATIONS]
+    tables = [
+        "notifications",
+        "email_notification_logs",
+        "issue_mentions",
+        "issue_subscribers",
+    ]
+    before = snapshot(db_conn, tables)
+    baseline = broker_probe.queue_depth()
+    celery_id = rust_queue.publish(NOTIFICATIONS, args=args, kwargs=kwargs)
+    rust_queue.wait_for_settled(celery_id, what=f"{NOTIFICATIONS} executed")
+    arrived = broker_probe.queue_depth()
+    assert arrived == baseline, (
+        f"{NOTIFICATIONS} is Rust-owned but a message "
+        f"arrived on the broker (depth {baseline} -> {arrived})"
+    )
+    assert _diff(before, snapshot(db_conn, tables)) == {}
