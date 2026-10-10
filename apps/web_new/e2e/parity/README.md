@@ -38,7 +38,17 @@ pnpm test:parity:new      # new app only (until areas land, these throw by desig
 pnpm test:parity           # both projects
 ```
 
-Run one inventory row with `-- --grep @iss-007`.
+Narrow a run by adding Playwright arguments after the script name:
+
+```sh
+pnpm test:parity:oracle --grep @iss-007                 # one inventory row
+pnpm test:parity:oracle runners/chat.spec.ts            # one spec file
+pnpm test:parity:oracle runners/ --list                 # list, do not run
+```
+
+Always narrow while you iterate; the full oracle suite is several hundred
+scenarios on one worker. A `--` before the arguments is accepted and
+ignored.
 
 ## Writing a scenario
 
