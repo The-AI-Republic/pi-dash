@@ -12738,9 +12738,12 @@ export interface ParityCycleUserProperties {
   richFilters: unknown;
   /** Legacy flat filters map. */
   filters: Record<string, unknown>;
+  /** Raw display-filters payload (layout lives inside), if any. */
+  displayFilters: unknown;
 }
 
 /** Read one cycle's per-user view preferences (layout + filters). */
+/** Read the caller's cycle user-properties (rich_filters prove hero breakdown clicks). */
 export async function serverCycleUserProperties(
   workspaceSlug: string,
   projectId: string,
@@ -12759,6 +12762,7 @@ export async function serverCycleUserProperties(
     layout: typeof display?.["layout"] === "string" ? (display["layout"] as string) : null,
     richFilters: rec["rich_filters"] ?? null,
     filters: (rec["filters"] as Record<string, unknown> | undefined) ?? {},
+    displayFilters: rec["display_filters"] ?? null,
   };
 }
 
@@ -14230,4 +14234,37 @@ export async function serverIntakeListPatch(
     body
   );
   if (!res.ok) throw new Error(`[parity] intake list patch failed with HTTP ${res.status}.`);
+}
+
+/** Workspace member id for an email (project adds address members, not users). */
+export async function serverWorkspaceMemberId(
+  workspaceSlug: string,
+  email: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/members/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] workspace member list failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Array<{ member?: { id?: unknown; email?: unknown } }>;
+  const id = rows.find((row) => row.member?.email === email)?.member?.id;
+  if (typeof id !== "string") throw new Error(`[parity] workspace user ${email} not found.`);
+  return id;
+}
+
+/** The project's stored IANA timezone (cycle date chips render its offset). */
+export async function serverProjectTimezone(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as { timezone?: unknown };
+  if (typeof record.timezone !== "string") throw new Error("[parity] project carried no string timezone.");
+  return record.timezone;
 }
