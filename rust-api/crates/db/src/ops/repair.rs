@@ -84,8 +84,7 @@ pub const TASK_SCHEDULE_ISSUE_DESCRIPTION_VERSION: &str =
 /// `TypeError` text of `None + index + 1` when a project has duplicate
 /// issues but no `IssueSequence` rows (`fix_duplicate_sequences.py:80`,
 /// wrapped by `:94-95`); verified against live Django.
-pub const NONE_SEQUENCE_MESSAGE: &str =
-    "unsupported operand type(s) for +: 'NoneType' and 'int'";
+pub const NONE_SEQUENCE_MESSAGE: &str = "unsupported operand type(s) for +: 'NoneType' and 'int'";
 /// `strict_str_to_int` rejection (`fix_duplicate_sequences.py:22-25`).
 pub const INVALID_INTEGER_MESSAGE: &str = "Invalid integer string";
 /// Identifier shape rejection (`fix_duplicate_sequences.py:43-44`).
@@ -116,19 +115,14 @@ pub fn convert_uuid_to_integer(id: &Uuid) -> i64 {
 /// observable outcome as CPython's unbounded filter that matches nothing.
 pub fn strict_str_to_int(s: &str) -> Result<i64, String> {
     let digits = s.strip_prefix('-').unwrap_or(s);
-    let gated =
-        !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
+    let gated = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
     if !gated {
         return Err(INVALID_INTEGER_MESSAGE.to_owned());
     }
     match s.parse::<i64>() {
         Ok(value) => Ok(value),
-        Err(e) if *e.kind() == std::num::IntErrorKind::PosOverflow => {
-            Ok(i64::MAX)
-        }
-        Err(e) if *e.kind() == std::num::IntErrorKind::NegOverflow => {
-            Ok(i64::MIN)
-        }
+        Err(e) if *e.kind() == std::num::IntErrorKind::PosOverflow => Ok(i64::MAX),
+        Err(e) if *e.kind() == std::num::IntErrorKind::NegOverflow => Ok(i64::MIN),
         Err(_) => Err(INVALID_INTEGER_MESSAGE.to_owned()),
     }
 }
@@ -196,9 +190,7 @@ pub fn renumber_plan(
         .iter()
         .enumerate()
         .map(|(index, id)| {
-            let next = last
-                .saturating_add(index as i64)
-                .saturating_add(1);
+            let next = last.saturating_add(index as i64).saturating_add(1);
             (*id, next)
         })
         .collect())
@@ -227,10 +219,7 @@ pub fn plan_sequence_updates(
 ) -> Vec<(Uuid, i64)> {
     issue_updates
         .iter()
-        .filter_map(|(issue_id, new_sequence)| {
-            map.get(issue_id)
-                .map(|row| (row.id, *new_sequence))
-        })
+        .filter_map(|(issue_id, new_sequence)| map.get(issue_id).map(|row| (row.id, *new_sequence)))
         .collect()
 }
 
@@ -344,8 +333,7 @@ pub const COMMENT_BATCH_SQL: &str = "SELECT id, comment_json, comment_html, \
 /// `bulk_update(..., ["description_id"])`
 /// (`copy_issue_comment_to_description.py:51`): one column, no
 /// `updated_at` bump (verified against live Django).
-pub const LINK_COMMENT_SQL: &str =
-    "UPDATE issue_comments SET description_id = $1 WHERE id = $2";
+pub const LINK_COMMENT_SQL: &str = "UPDATE issue_comments SET description_id = $1 WHERE id = $2";
 
 /// `Project.objects.get(identifier__iexact=..., workspace__slug=...)`
 /// (`fix_duplicate_sequences.py:50`): no `LIMIT` — `get()` needs the full
@@ -368,8 +356,7 @@ pub const ADVISORY_LOCK_SQL: &str = "SELECT pg_advisory_xact_lock($1)";
 
 /// `Max("sequence")` over the default manager
 /// (`fix_duplicate_sequences.py:68-71`).
-pub const MAX_SEQUENCE_SQL: &str =
-    "SELECT MAX(sequence) FROM issue_sequences \
+pub const MAX_SEQUENCE_SQL: &str = "SELECT MAX(sequence) FROM issue_sequences \
     WHERE deleted_at IS NULL AND project_id = $1";
 
 /// The id-map queryset (`fix_duplicate_sequences.py:76`) in `Meta.ordering
@@ -381,14 +368,12 @@ pub const PROJECT_SEQUENCES_SQL: &str = "SELECT id, issue_id, sequence \
 /// `bulk_update(bulk_issues, ["sequence_id"])`
 /// (`fix_duplicate_sequences.py:90`): one column, no `updated_at` bump
 /// (verified against live Django).
-pub const UPDATE_ISSUE_SEQUENCE_ID_SQL: &str =
-    "UPDATE issues SET sequence_id = $1 WHERE id = $2";
+pub const UPDATE_ISSUE_SEQUENCE_ID_SQL: &str = "UPDATE issues SET sequence_id = $1 WHERE id = $2";
 
 /// `bulk_update(bulk_issue_sequences, ["sequence"])`
 /// (`fix_duplicate_sequences.py:91`): one column, no `updated_at` bump
 /// (verified against live Django).
-pub const UPDATE_SEQUENCE_SQL: &str =
-    "UPDATE issue_sequences SET sequence = $1 WHERE id = $2";
+pub const UPDATE_SEQUENCE_SQL: &str = "UPDATE issue_sequences SET sequence = $1 WHERE id = $2";
 
 /// `Workspace.all_objects.get(slug=...)`
 /// (`update_deleted_workspace_slug.py:31`): the unfiltered manager, so no
@@ -399,8 +384,7 @@ pub const FIND_WORKSPACE_SQL: &str =
 /// `save(update_fields=["slug"])`
 /// (`update_deleted_workspace_slug.py:63-64`): the `slug` column only
 /// (verified — `updated_at` untouched).
-pub const UPDATE_WORKSPACE_SLUG_SQL: &str =
-    "UPDATE workspaces SET slug = $1 WHERE id = $2";
+pub const UPDATE_WORKSPACE_SLUG_SQL: &str = "UPDATE workspaces SET slug = $1 WHERE id = $2";
 
 /// Columns of the copy `INSERT`, in bind order.
 const DESCRIPTION_INSERT_COLUMNS: &str = "(id, created_at, updated_at, \
@@ -461,7 +445,10 @@ pub async fn fetch_comment_batch(
         .bind(limit)
         .fetch_all(pool)
         .await?;
-    rows.iter().map(map_comment_row).collect::<Result<Vec<_>, _>>().map_err(RepairError::Db)
+    rows.iter()
+        .map(map_comment_row)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(RepairError::Db)
 }
 
 /// One copy batch write (`copy_issue_comment_to_description.py:28-51`):
@@ -517,7 +504,11 @@ pub async fn find_project_rows(
         .fetch_all(pool)
         .await?;
     rows.iter()
-        .map(|row| Ok(ProjectRow { id: row.try_get("id")? }))
+        .map(|row| {
+            Ok(ProjectRow {
+                id: row.try_get("id")?,
+            })
+        })
         .collect::<Result<Vec<_>, sqlx::Error>>()
         .map_err(RepairError::Db)
 }
@@ -616,7 +607,11 @@ pub async fn begin_fix_tx<'a>(
         .iter()
         .map(map_sequence_row)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(FixTx { tx, max_sequence, sequences })
+    Ok(FixTx {
+        tx,
+        max_sequence,
+        sequences,
+    })
 }
 
 /// `Workspace.all_objects.get(slug=...)`
@@ -669,7 +664,10 @@ mod tests {
         let id = Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
         assert_eq!(convert_uuid_to_integer(&id), 8400349069047396436);
         let zero = Uuid::nil();
-        assert_eq!(convert_uuid_to_integer(&zero), convert_uuid_to_integer(&zero));
+        assert_eq!(
+            convert_uuid_to_integer(&zero),
+            convert_uuid_to_integer(&zero)
+        );
     }
 
     #[test]
@@ -678,7 +676,9 @@ mod tests {
         assert_eq!(strict_str_to_int("007"), Ok(7));
         assert_eq!(strict_str_to_int("-0"), Ok(0));
         assert_eq!(strict_str_to_int("-5"), Ok(-5));
-        for bad in ["", "-", "+5", " 5", "5 ", "1_0", "0x10", "3.0", "--5", "- 5"] {
+        for bad in [
+            "", "-", "+5", " 5", "5 ", "1_0", "0x10", "3.0", "--5", "- 5",
+        ] {
             assert_eq!(
                 strict_str_to_int(bad),
                 Err(INVALID_INTEGER_MESSAGE.to_owned()),
@@ -693,14 +693,8 @@ mod tests {
 
     #[test]
     fn identifier_split_requires_two_parts() {
-        assert_eq!(
-            parse_issue_identifier("PRB-5"),
-            Ok(("PRB".to_owned(), 5))
-        );
-        assert_eq!(
-            parse_issue_identifier("-5"),
-            Ok(("".to_owned(), 5))
-        );
+        assert_eq!(parse_issue_identifier("PRB-5"), Ok(("PRB".to_owned(), 5)));
+        assert_eq!(parse_issue_identifier("-5"), Ok(("".to_owned(), 5)));
         for bad in ["PRB", "A-B-C", ""] {
             assert_eq!(
                 parse_issue_identifier(bad),
@@ -732,7 +726,9 @@ mod tests {
     fn py_int_rejects_like_cpython() {
         // (Non-ASCII decimal digits like "５" are accepted by CPython
         // and rejected here; documented divergence, see module docs.)
-        for bad in ["", "   ", "0x10", "3.0", "abc", "1__0", "_1", "1_", "+-5", "--5"] {
+        for bad in [
+            "", "   ", "0x10", "3.0", "abc", "1__0", "_1", "1_", "+-5", "--5",
+        ] {
             assert_eq!(
                 parse_py_int(bad),
                 Err(format!("invalid literal for int() with base 10: '{bad}'")),
@@ -748,29 +744,39 @@ mod tests {
     fn renumber_rule_is_last_plus_index_plus_one() {
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
-        assert_eq!(
-            renumber_plan(Some(50), &[a, b]),
-            Ok(vec![(a, 51), (b, 52)])
-        );
+        assert_eq!(renumber_plan(Some(50), &[a, b]), Ok(vec![(a, 51), (b, 52)]));
         assert_eq!(renumber_plan(Some(50), &[]), Ok(vec![]));
         assert_eq!(
             renumber_plan(None, &[a]),
             Err(NONE_SEQUENCE_MESSAGE.to_owned())
         );
-        assert_eq!(
-            renumber_plan(Some(i64::MAX), &[a]),
-            Ok(vec![(a, i64::MAX)])
-        );
+        assert_eq!(renumber_plan(Some(i64::MAX), &[a]), Ok(vec![(a, i64::MAX)]));
     }
 
     #[test]
     fn sequence_map_last_wins_and_nulls_skip() {
         let issue = Uuid::new_v4();
         let other = Uuid::new_v4();
-        let newer = SequenceRow { id: Uuid::new_v4(), issue_id: Some(issue), sequence: 7 };
-        let older = SequenceRow { id: Uuid::new_v4(), issue_id: Some(issue), sequence: 7 };
-        let null = SequenceRow { id: Uuid::new_v4(), issue_id: None, sequence: 1 };
-        let solo = SequenceRow { id: Uuid::new_v4(), issue_id: Some(other), sequence: 9 };
+        let newer = SequenceRow {
+            id: Uuid::new_v4(),
+            issue_id: Some(issue),
+            sequence: 7,
+        };
+        let older = SequenceRow {
+            id: Uuid::new_v4(),
+            issue_id: Some(issue),
+            sequence: 7,
+        };
+        let null = SequenceRow {
+            id: Uuid::new_v4(),
+            issue_id: None,
+            sequence: 1,
+        };
+        let solo = SequenceRow {
+            id: Uuid::new_v4(),
+            issue_id: Some(other),
+            sequence: 9,
+        };
         // `-created_at` fetch order: newest first.
         let rows = vec![newer.clone(), solo.clone(), older.clone(), null];
         let map = build_sequence_map(&rows);
@@ -793,8 +799,9 @@ mod tests {
 
     #[test]
     fn stamped_slug_appends_epoch() {
-        let deleted_at =
-            DateTime::parse_from_rfc3339("2024-05-06T07:08:09Z").unwrap().to_utc();
+        let deleted_at = DateTime::parse_from_rfc3339("2024-05-06T07:08:09Z")
+            .unwrap()
+            .to_utc();
         assert_eq!(
             stamped_slug("probe808del", &deleted_at),
             "probe808del__1714979289"
@@ -814,7 +821,10 @@ mod tests {
     fn insert_builder_numbers_placeholders() {
         let one = descriptions_insert_sql(1);
         assert!(one.starts_with("INSERT INTO descriptions ("), "{one}");
-        assert!(one.contains("$1, $2, $3, $4, $5, $6, $7, $8, $9, $10"), "{one}");
+        assert!(
+            one.contains("$1, $2, $3, $4, $5, $6, $7, $8, $9, $10"),
+            "{one}"
+        );
         assert!(one.ends_with(" RETURNING id"), "{one}");
         let two = descriptions_insert_sql(2);
         assert!(two.contains("($11, $12, $13"), "{two}");

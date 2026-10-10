@@ -32,8 +32,8 @@ use uuid::Uuid;
 
 use pidash_db::ops::repair::{
     parse_issue_identifier, parse_py_int, slug_already_stamped, stamped_slug,
-    version_sync_kwarg_pairs, CommentRow, NewDescription, ProjectRow,
-    WorkspaceRow, TASK_SCHEDULE_ISSUE_DESCRIPTION_VERSION, TASK_SCHEDULE_ISSUE_VERSION,
+    version_sync_kwarg_pairs, CommentRow, NewDescription, ProjectRow, WorkspaceRow,
+    TASK_SCHEDULE_ISSUE_DESCRIPTION_VERSION, TASK_SCHEDULE_ISSUE_VERSION,
 };
 
 /// `copy` success line (`copy_issue_comment_to_description.py:53`).
@@ -44,8 +44,7 @@ pub const FIX_DONE_LINE: &str = "Sequence IDs updated successfully";
 pub const SYNC_VERSION_DONE_LINE: &str = "Successfully created issue version task";
 /// `sync_issue_description_version` success line
 /// (`sync_issue_description_version.py:23`).
-pub const SYNC_DESCRIPTION_DONE_LINE: &str =
-    "Successfully created issue description version task";
+pub const SYNC_DESCRIPTION_DONE_LINE: &str = "Successfully created issue description version task";
 
 /// `fix` count line (`fix_duplicate_sequences.py:58`): the raw identifier
 /// echoes back verbatim.
@@ -160,11 +159,7 @@ pub enum SlugDecision {
 /// Decide the slug branch. Every line is byte-exact (verified against
 /// live Django); the write path's line carries the ported
 /// mutated-slug-twice bug (`:67`).
-pub fn decide_slug(
-    workspace: Option<&WorkspaceRow>,
-    slug: &str,
-    dry_run: bool,
-) -> SlugDecision {
+pub fn decide_slug(workspace: Option<&WorkspaceRow>, slug: &str, dry_run: bool) -> SlugDecision {
     let Some(workspace) = workspace else {
         return SlugDecision::Print(format!("Workspace with slug '{slug}' not found."));
     };
@@ -253,7 +248,10 @@ pub fn sync_message(
     for (key, value) in version_sync_kwarg_pairs(batch_size, countdown) {
         kwargs.insert(key, value);
     }
-    Ok(SyncMessage { task: kind.task(), kwargs })
+    Ok(SyncMessage {
+        task: kind.task(),
+        kwargs,
+    })
 }
 
 #[cfg(test)]
@@ -348,7 +346,10 @@ mod tests {
         ];
         let ids = vec![Uuid::new_v4(), Uuid::new_v4()];
         let (descriptions, links) = plan_copy_batch(comments.clone(), now, ids.clone());
-        assert_eq!(links, vec![(comments[0].id, ids[0]), (comments[1].id, ids[1])]);
+        assert_eq!(
+            links,
+            vec![(comments[0].id, ids[0]), (comments[1].id, ids[1])]
+        );
         assert_eq!(descriptions[0].id, ids[0]);
         assert_eq!(descriptions[0].created_at, now);
         assert_eq!(descriptions[0].updated_at, now);
@@ -393,8 +394,12 @@ mod tests {
             )
         );
         let ws = workspace("del", Some(deleted));
-        let SlugDecision::Write { new_slug, success_line, name, workspace_id } =
-            decide_slug(Some(&ws), "del", false)
+        let SlugDecision::Write {
+            new_slug,
+            success_line,
+            name,
+            workspace_id,
+        } = decide_slug(Some(&ws), "del", false)
         else {
             panic!("expected a write");
         };
