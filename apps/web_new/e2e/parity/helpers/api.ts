@@ -12253,3 +12253,149 @@ export async function serverUnpinIssuePod(
 ): Promise<void> {
   await patchIssue(workspaceSlug, projectId, issueId, sessionCookie, { assigned_pod_id: null }, apiBase);
 }
+
+// --- Intake triage actions (NEWFRONT-259, INT-020/021/022/023/025).
+// --- Appended; existing helpers above are untouched per the shared
+// --- harness contract. Detail endpoints take the nested issue id, like
+// --- the merged inbox helpers.
+
+/** One intake row as the server reports it: triage fields plus the nested work item. */
+export interface ServerIntakeTriageDetail {
+  status: number;
+  snoozedTill: string | null;
+  duplicateTo: string | null;
+  name: string;
+  stateId: string;
+  issueId: string;
+  sequenceId: number;
+}
+
+/** One intake row as the server reports it, read by the nested issue id. */
+export async function serverIntakeTriageDetail(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerIntakeTriageDetail> {
+  const res = await fetchShared(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] triage-issue read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const issue = rec["issue"] as Record<string, unknown> | undefined;
+  return {
+    status: typeof rec["status"] === "number" ? (rec["status"] as number) : 0,
+    snoozedTill: typeof rec["snoozed_till"] === "string" ? (rec["snoozed_till"] as string) : null,
+    duplicateTo: typeof rec["duplicate_to"] === "string" ? (rec["duplicate_to"] as string) : null,
+    name: typeof issue?.["name"] === "string" ? (issue["name"] as string) : "",
+    stateId: typeof issue?.["state_id"] === "string" ? (issue["state_id"] as string) : "",
+    issueId: typeof issue?.["id"] === "string" ? (issue["id"] as string) : "",
+    sequenceId: typeof issue?.["sequence_id"] === "number" ? (issue["sequence_id"] as number) : 0,
+  };
+}
+
+/** HTTP status of one intake-row retrieve (presence proofs after delete). */
+export async function serverIntakeTriageInboxStatus(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetchShared(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  return res.status;
+}
+
+/** Raw triage PATCH (status / snoozed_till / duplicate_to); callers assert the status. */
+export async function serverIntakeTriagePatchRaw(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  body: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; body: string }> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`,
+    sessionCookie,
+    body
+  );
+  return { status: res.status, body: await res.text() };
+}
+
+/** Triage PATCH as an admin write; resolves with the stored row. */
+export async function serverIntakeTriagePatch(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  body: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerIntakeTriageDetail> {
+  const raw = await serverIntakeTriagePatchRaw(workspaceSlug, projectId, issueId, body, sessionCookie, apiBase);
+  if (raw.status < 200 || raw.status >= 300)
+    throw new Error(`[parity] triage patch failed with HTTP ${raw.status}: ${raw.body}`);
+  return serverIntakeTriageDetail(workspaceSlug, projectId, issueId, sessionCookie, apiBase);
+}
+
+/** Raw intake-row DELETE; callers assert the status (refusals are 403). */
+export async function serverIntakeTriageDeleteRaw(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`,
+    sessionCookie
+  );
+  return res.status;
+}
+
+/** Whether the underlying work item still exists (cascade proofs after delete). */
+export async function serverIntakeTriageWorkItemExists(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  return res.status === 200;
+}
+
+/** Duplicate-picker candidates as the search endpoint reports them. */
+export async function serverIntakeTriageSearchIssues(
+  workspaceSlug: string,
+  projectId: string,
+  query: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; name: string; sequenceId: number }[]> {
+  const params = new URLSearchParams({ search: query, workspace_search: "false" });
+  const res = await fetchShared(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/search-issues/?${params.toString()}`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] triage issue search failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : [];
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    return {
+      id: typeof rec["id"] === "string" ? (rec["id"] as string) : "",
+      name: typeof rec["name"] === "string" ? (rec["name"] as string) : "",
+      sequenceId: typeof rec["sequence_id"] === "number" ? (rec["sequence_id"] as number) : 0,
+    };
+  });
+}
