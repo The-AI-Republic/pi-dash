@@ -255,7 +255,7 @@ test(
 
       await test.step("a failed delete keeps the item with an error confirmation", async () => {
         await driver.archivesDetailMenuChoose("Delete");
-        expect(await driver.layoutsDeleteModalVisible()).toBe(true);
+        await expect.poll(() => driver.layoutsDeleteModalVisible(), { timeout: 60_000 }).toBe(true);
         await driver.archivesFailNextMutation("DELETE", `/issues/${issue.id}/`);
         try {
           await driver.layoutsDeleteModalConfirm();
@@ -268,7 +268,7 @@ test(
 
       await test.step("confirming deletes the row from the UI and the server", async () => {
         await driver.archivesDetailMenuChoose("Delete");
-        expect(await driver.layoutsDeleteModalVisible()).toBe(true);
+        await expect.poll(() => driver.layoutsDeleteModalVisible(), { timeout: 60_000 }).toBe(true);
         await driver.layoutsDeleteModalConfirm();
         await expect.poll(() => driver.sawToast("deleted successfully"), { timeout: 60_000 }).toBe(true);
         await expect.poll(() => driver.currentUrlPath(), { timeout: 120_000 }).toMatch(/\/archives\/issues\/?$/);
@@ -489,7 +489,7 @@ test(
       await test.step("a failed detail delete keeps the item archived with an error confirmation", async () => {
         await driver.openArchivedIssueDetail(seed.workspaceSlug, projectId, deleteIssue.id);
         await driver.archivesDetailMenuChoose("Delete");
-        expect(await driver.layoutsDeleteModalVisible()).toBe(true);
+        await expect.poll(() => driver.layoutsDeleteModalVisible(), { timeout: 60_000 }).toBe(true);
         await driver.archivesFailNextMutation("DELETE", `/issues/${deleteIssue.id}/`);
         try {
           await driver.layoutsDeleteModalConfirm();
@@ -502,7 +502,7 @@ test(
 
       await test.step("delete from detail navigates back to the archived list", async () => {
         await driver.archivesDetailMenuChoose("Delete");
-        expect(await driver.layoutsDeleteModalVisible()).toBe(true);
+        await expect.poll(() => driver.layoutsDeleteModalVisible(), { timeout: 60_000 }).toBe(true);
         await driver.layoutsDeleteModalConfirm();
         await expect.poll(() => driver.sawToast("deleted successfully"), { timeout: 60_000 }).toBe(true);
         await expect.poll(() => driver.currentUrlPath(), { timeout: 120_000 }).toMatch(/\/archives\/issues\/?$/);
@@ -558,18 +558,18 @@ test(
 
       await test.step("canceling the dialog changes nothing", async () => {
         await driver.layoutsRowMenuChoose(doneName, "Archive");
-        expect(await driver.layoutsArchiveModalVisible()).toBe(true);
+        await expect.poll(() => driver.layoutsArchiveModalVisible(), { timeout: 60_000 }).toBe(true);
         expect(await driver.archivesArchiveModalTitle()).toContain(dialogRef);
         expect(await driver.archivesArchiveModalBody()).toMatch(/restor/i);
         await driver.archivesArchiveModalCancel();
-        expect(await driver.layoutsArchiveModalVisible()).toBe(false);
+        await expect.poll(() => driver.layoutsArchiveModalVisible(), { timeout: 60_000 }).toBe(false);
         expect((await serverIssue(seed.workspaceSlug, projectId, doneIssue.id, session)).archived_at).toBeNull();
         expect(await driver.visibleIssueNames()).toContain(doneName);
       });
 
       await test.step("a failed archive keeps the item live with an error confirmation", async () => {
         await driver.layoutsRowMenuChoose(doneName, "Archive");
-        expect(await driver.layoutsArchiveModalVisible()).toBe(true);
+        await expect.poll(() => driver.layoutsArchiveModalVisible(), { timeout: 60_000 }).toBe(true);
         await driver.archivesFailNextMutation("POST", `/issues/${doneIssue.id}/archive/`);
         try {
           await driver.confirmArchive();
@@ -578,14 +578,14 @@ test(
           await driver.archivesClearMutationFailure();
         }
         // The dialog stays open on failure; dismiss it before moving on.
-        expect(await driver.layoutsArchiveModalVisible()).toBe(true);
+        await expect.poll(() => driver.layoutsArchiveModalVisible(), { timeout: 60_000 }).toBe(true);
         await driver.archivesArchiveModalCancel();
         expect((await serverIssue(seed.workspaceSlug, projectId, doneIssue.id, session)).archived_at).toBeNull();
       });
 
       await test.step("confirming archives the item into the archives tab", async () => {
         await driver.layoutsRowMenuChoose(doneName, "Archive");
-        expect(await driver.layoutsArchiveModalVisible()).toBe(true);
+        await expect.poll(() => driver.layoutsArchiveModalVisible(), { timeout: 60_000 }).toBe(true);
         await driver.confirmArchive();
         await expect.poll(() => driver.sawToast("Archive success"), { timeout: 60_000 }).toBe(true);
         await expect.poll(() => driver.visibleIssueNames(), { timeout: 120_000 }).not.toContain(doneName);
