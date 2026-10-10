@@ -116,10 +116,7 @@ mod tests {
         let error = redis
             .set_ex("some-issue-id", "https://app.example", 600)
             .expect_err("unconfigured origin must error");
-        assert!(
-            error.contains("REDIS_URL"),
-            "unexpected error: {error}"
-        );
+        assert!(error.contains("REDIS_URL"), "unexpected error: {error}");
     }
 
     #[test]
@@ -127,8 +124,7 @@ mod tests {
         // A refused connection is `Err` (the caller aborts), never a panic
         // or a hang: nothing listens on 6399 (same precedent as
         // pidash-db's redis test), so this fails fast without a server.
-        let client =
-            redis::Client::open("redis://127.0.0.1:6399/").expect("url parses");
+        let client = redis::Client::open("redis://127.0.0.1:6399/").expect("url parses");
         let redis = OriginRedis {
             client: Some(client),
         };
@@ -140,8 +136,7 @@ mod tests {
         // Live SETEX + GET + DEL on 127.0.0.1:6379 — the `redis` service
         // in the rust-api workflows (same precedent as pidash-db's
         // `invalidate_matching` roundtrip).
-        let client =
-            redis::Client::open("redis://127.0.0.1:6379/").expect("url parses");
+        let client = redis::Client::open("redis://127.0.0.1:6379/").expect("url parses");
         let redis = OriginRedis {
             client: Some(client),
         };
