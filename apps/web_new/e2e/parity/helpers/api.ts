@@ -2711,6 +2711,22 @@ export async function serverDeleteProject(
     throw new Error(`[parity] project delete failed with HTTP ${res.status}.`);
 }
 
+/** Archive a project; throws unless the server accepts. */
+export async function serverArchiveProject(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/archive/`,
+    sessionCookie,
+    {}
+  );
+  if (res.status !== 200) throw new Error(`[parity] project archive failed with HTTP ${res.status}.`);
+}
+
 /** Delete a work item; throws unless the server accepts. */
 export async function serverDeleteIssue(
   workspaceSlug: string,
@@ -5363,6 +5379,8 @@ export async function serverIssue(
     label_ids: strArray("label_ids"),
     archived_at: strOrNull("archived_at"),
     agent_executor: strOrNull("agent_executor"),
+    descriptionHtml: strOrNull("description_html"),
+    parentId: strOrNull("parent_id"),
     assigned_pod_id: strOrNull("assigned_pod_id"),
   };
 }
@@ -5874,6 +5892,8 @@ export interface ParityServerIssueDetail {
   archived_at: string | null;
   agent_executor: string | null;
   assigned_pod_id: string | null;
+  descriptionHtml: string | null;
+  parentId: string | null;
 }
 /** One project module as the server reports it. */
 export interface ParityServerModule {
@@ -7730,6 +7750,412 @@ export async function serverProfileStartOfWeek(
     throw new Error("[parity] profile carried no numeric start_of_the_week.");
   }
   return record.start_of_the_week;
+}
+
+// --- Draft oracle helpers (NEWFRONT-32, DRAFT-001–027). Appended; existing
+// --- helpers above are untouched per the shared harness contract. The
+// --- Status variants never throw on refusal codes: a 403/404/400 is the
+// --- asserted behavior on permission and validation paths.
+
+/** A workspace draft record as the list/create endpoints report it. */
+export interface ParityServerDraft {
+  id: string;
+  name: string;
+  projectId: string | null;
+  stateId: string | null;
+  priority: string | null;
+  estimatePoint: string | null;
+  startDate: string | null;
+  targetDate: string | null;
+  cycleId: string | null;
+  moduleIds: string[];
+  labelIds: string[];
+  assigneeIds: string[];
+  descriptionHtml: string | null;
+  createdAt: string;
+  typeId: string | null;
+}
+
+function draftOf(row: Record<string, unknown>): ParityServerDraft {
+  if (typeof row["id"] !== "string" || typeof row["name"] !== "string")
+    throw new Error("[parity] draft row carried no string id/name.");
+  const idsOf = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+  const strOrNull = (value: unknown): string | null => (typeof value === "string" ? value : null);
+  return {
+    id: row["id"],
+    name: row["name"],
+    projectId: strOrNull(row["project_id"] ?? row["project"]),
+    stateId: strOrNull(row["state_id"] ?? row["state"]),
+    priority: strOrNull(row["priority"]),
+    estimatePoint: strOrNull(row["estimate_point"]),
+    startDate: strOrNull(row["start_date"]),
+    targetDate: strOrNull(row["target_date"]),
+    cycleId: strOrNull(row["cycle_id"] ?? row["cycle"]),
+    moduleIds: idsOf(row["module_ids"]),
+    labelIds: idsOf(row["label_ids"]),
+    assigneeIds: idsOf(row["assignee_ids"]),
+    descriptionHtml: strOrNull(row["description_html"]),
+    createdAt: typeof row["created_at"] === "string" ? row["created_at"] : "",
+    typeId: strOrNull(row["type_id"] ?? row["type"]),
+  };
+}
+
+/** Fields a draft create/update accepts; the server validates project scoping and date order. */
+export interface ParityDraftWrite {
+  name?: string;
+  description_html?: string;
+  project_id?: string | null;
+  state_id?: string | null;
+  priority?: string | null;
+  estimate_point?: string | null;
+  start_date?: string | null;
+  target_date?: string | null;
+  cycle_id?: string | null;
+  module_ids?: string[];
+  label_ids?: string[];
+  assignee_ids?: string[];
+  parent_id?: string | null;
+  type_id?: string | null;
+}
+
+/** Create a workspace draft; resolves with the stored record (HTTP 201). */
+export async function serverCreateDraft(
+  workspaceSlug: string,
+  sessionCookie: string,
+  body: ParityDraftWrite,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerDraft> {
+  const res = await mutateJSON("POST", `${apiBase}/api/workspaces/${workspaceSlug}/draft-issues/`, sessionCookie, body);
+  if (res.status !== 201)
+    throw new Error(`[parity] draft create failed with HTTP ${res.status}: ${(await res.text()).slice(0, 200)}.`);
+  return draftOf((await res.json()) as Record<string, unknown>);
+}
+
+/** Create a workspace draft; resolves with the raw status for refusal-path assertions. */
+export async function serverCreateDraftStatus(
+  workspaceSlug: string,
+  sessionCookie: string,
+  body: ParityDraftWrite,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; bodyText: string }> {
+  const res = await mutateJSON("POST", `${apiBase}/api/workspaces/${workspaceSlug}/draft-issues/`, sessionCookie, body);
+  return { status: res.status, bodyText: (await res.text()).slice(0, 300) };
+}
+
+/** Read one workspace draft in full (HTTP 200); throws otherwise. */
+export async function serverDraftRecord(
+  workspaceSlug: string,
+  draftId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerDraft> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/draft-issues/${draftId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] draft read failed with HTTP ${res.status}.`);
+  return draftOf((await res.json()) as Record<string, unknown>);
+}
+
+/** Fetch one workspace draft; resolves with the raw status for refusal-path assertions. */
+export async function serverFetchDraftStatus(
+  workspaceSlug: string,
+  draftId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; bodyText: string }> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/draft-issues/${draftId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  return { status: res.status, bodyText: (await res.text()).slice(0, 300) };
+}
+
+/** Patch a workspace draft; the server answers 204 with no body on success. */
+export async function serverPatchDraft(
+  workspaceSlug: string,
+  draftId: string,
+  sessionCookie: string,
+  patch: ParityDraftWrite,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/draft-issues/${draftId}/`,
+    sessionCookie,
+    patch
+  );
+  if (res.status !== 204)
+    throw new Error(`[parity] draft patch failed with HTTP ${res.status}: ${(await res.text()).slice(0, 200)}.`);
+}
+
+/** Patch a workspace draft; resolves with the raw status for refusal-path assertions. */
+export async function serverPatchDraftStatus(
+  workspaceSlug: string,
+  draftId: string,
+  sessionCookie: string,
+  patch: ParityDraftWrite,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; bodyText: string }> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/draft-issues/${draftId}/`,
+    sessionCookie,
+    patch
+  );
+  return { status: res.status, bodyText: (await res.text()).slice(0, 300) };
+}
+
+/** Delete a workspace draft; resolves with the raw status for refusal-path assertions. */
+export async function serverDeleteDraftStatus(
+  workspaceSlug: string,
+  draftId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; bodyText: string }> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/draft-issues/${draftId}/`,
+    sessionCookie
+  );
+  return { status: res.status, bodyText: (await res.text()).slice(0, 300) };
+}
+
+/**
+ * Convert a draft into a project work item; the payload carries the draft's
+ * fields client-side (the server reads the project off the draft). Resolves
+ * with the created issue on HTTP 201.
+ */
+export async function serverConvertDraft(
+  workspaceSlug: string,
+  draftId: string,
+  sessionCookie: string,
+  body: Record<string, unknown> = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; name: string }> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/draft-to-issue/${draftId}/`,
+    sessionCookie,
+    body
+  );
+  if (res.status !== 201)
+    throw new Error(`[parity] draft convert failed with HTTP ${res.status}: ${(await res.text()).slice(0, 200)}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string" || typeof rec["name"] !== "string")
+    throw new Error("[parity] converted issue carried no string id/name.");
+  return { id: rec["id"], name: rec["name"] };
+}
+
+/** Convert a draft; resolves with the raw status for refusal-path assertions. */
+export async function serverConvertDraftStatus(
+  workspaceSlug: string,
+  draftId: string,
+  sessionCookie: string,
+  body: Record<string, unknown> = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; bodyText: string }> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/draft-to-issue/${draftId}/`,
+    sessionCookie,
+    body
+  );
+  return { status: res.status, bodyText: (await res.text()).slice(0, 300) };
+}
+
+/** One cursor page of the workspace drafts list, with the server's paging info. */
+export interface ParityDraftsPage {
+  status: number;
+  drafts: ParityServerDraft[];
+  total: number | null;
+  nextCursor: string | null;
+}
+
+/**
+ * Read one page of the drafts list with explicit cursor parameters (the UI
+ * sends `per_page` plus `cursor`). Parsing stays tolerant: the scenarios
+ * assert row contents, paging continuation only where the server reports it.
+ */
+export async function serverDraftsPage(
+  workspaceSlug: string,
+  sessionCookie: string,
+  query: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityDraftsPage> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/draft-issues/${query}`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] drafts page read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as Record<string, unknown>;
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload["results"] as unknown[]) ?? []);
+  const drafts = rows.map((row) => draftOf(row as Record<string, unknown>));
+  const info = (payload["pagination_info"] ?? payload) as Record<string, unknown>;
+  const totalRaw = info["total_results"] ?? info["count"] ?? payload["count"];
+  const cursorRaw = info["next_cursor"] ?? payload["next_cursor"];
+  return {
+    status: res.status,
+    drafts,
+    total: typeof totalRaw === "number" ? totalRaw : null,
+    nextCursor: typeof cursorRaw === "string" ? cursorRaw : null,
+  };
+}
+
+/** A file asset row as the file-assets endpoints report it. */
+export interface ParityFileAsset {
+  id: string;
+  assetKey: string;
+  draftIssueId: string | null;
+  issueId: string | null;
+  entityType: string | null;
+}
+
+function assetOf(row: Record<string, unknown>, workspaceId: string): ParityFileAsset {
+  if (typeof row["id"] !== "string") throw new Error("[parity] asset row carried no string id.");
+  const asset = typeof row["asset"] === "string" ? row["asset"] : "";
+  // The serializer resolves the storage key against the request path, so a
+  // read-back value repeats the workspace/key segments (request path plus
+  // the stored `{workspaceId}/{leaf}`); the true key is always the
+  // trailing pair, and the read-back route takes only the leaf.
+  const segments =
+    asset
+      .split("?")[0]
+      ?.split("/")
+      .filter((part) => part.length > 0) ?? [];
+  const tail = segments.slice(-2);
+  const key = tail.length === 2 && tail[0] === workspaceId ? (tail[1] as string) : (segments.at(-1) ?? "");
+  const strOrNull = (value: unknown): string | null => (typeof value === "string" ? value : null);
+  return {
+    id: row["id"],
+    assetKey: key,
+    draftIssueId: strOrNull(row["draft_issue"] ?? row["draft_issue_id"]),
+    issueId: strOrNull(row["issue"] ?? row["issue_id"]),
+    entityType: strOrNull(row["entity_type"]),
+  };
+}
+
+/**
+ * Attach a file to a workspace draft through the same signed-URL flow the
+ * description editor uses: create the asset row (linked to the draft),
+ * PUT the bytes to object storage, flip the upload status. Resolves with
+ * the stored row, including the storage key the read-back needs. Only
+ * image types are accepted, like the editor.
+ */
+export async function serverUploadDraftAsset(
+  workspaceSlug: string,
+  workspaceId: string,
+  projectId: string,
+  draftId: string,
+  sessionCookie: string,
+  file: { name: string; mime: string; bytes: Uint8Array },
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityFileAsset> {
+  const created = await mutateJSON(
+    "POST",
+    `${apiBase}/api/assets/v2/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    {
+      name: file.name,
+      type: file.mime,
+      size: file.bytes.length,
+      entity_type: "DRAFT_ISSUE_DESCRIPTION",
+      entity_identifier: draftId,
+    }
+  );
+  if (created.status !== 200 && created.status !== 201)
+    throw new Error(
+      `[parity] draft asset row create failed with HTTP ${created.status}: ${(await created.text()).slice(0, 200)}.`
+    );
+  const signed = (await created.json()) as {
+    asset_id: string;
+    upload_data: { url: string; fields: Record<string, string> };
+  };
+  if (typeof signed.asset_id !== "string" || typeof signed.upload_data?.url !== "string")
+    throw new Error("[parity] draft asset row create returned no signed URL.");
+  const form = new FormData();
+  for (const [key, value] of Object.entries(signed.upload_data.fields ?? {})) form.append(key, value);
+  form.append("file", new Blob([file.bytes], { type: file.mime }), file.name);
+  // The server signs the upload against the request host, so a direct API
+  // call yields an API-origin URL that Django cannot serve (404); only the
+  // parity proxy routes the bucket path to minio. Re-host the signed URL
+  // there — the signature covers the fields, not the host.
+  const uploadUrl = (() => {
+    try {
+      const proxy = new URL(process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000");
+      const target = new URL(signed.upload_data.url);
+      target.protocol = proxy.protocol;
+      target.host = proxy.host;
+      return target.toString();
+    } catch {
+      return signed.upload_data.url;
+    }
+  })();
+  // Object storage is stubbed on the shared runners (the minio image
+  // resolves to `sleep infinity`, so the proxy answers 502); the asset
+  // records, flip and convert-carry the scenarios assert are pure
+  // database rows and verify identically without bytes. Upload bytes when
+  // the store answers, but keep application errors strict: only a dead
+  // store (refused/502/503/504) falls back to record-only.
+  let stored: Response | null = null;
+  try {
+    stored = await fetch(uploadUrl, { method: "POST", body: form });
+  } catch {
+    stored = null;
+  }
+  if (stored === null || stored.status === 502 || stored.status === 503 || stored.status === 504) {
+    console.warn(
+      `[parity] object store unreachable (status ${stored === null ? "refused" : stored.status}); continuing record-only.`
+    );
+  } else if (!stored.ok) {
+    throw new Error(`[parity] draft asset byte upload failed with HTTP ${stored.status}.`);
+  }
+  const flipped = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/assets/v2/workspaces/${workspaceSlug}/projects/${projectId}/${signed.asset_id}/`,
+    sessionCookie,
+    {}
+  );
+  if (!flipped.ok) throw new Error(`[parity] draft asset status flip failed with HTTP ${flipped.status}.`);
+  const key = signed.upload_data.fields?.["key"] ?? "";
+  const at = key.indexOf(`${workspaceId}/`);
+  const assetKey = at < 0 ? key : key.slice(at + workspaceId.length + 1);
+  return serverFileAsset(workspaceId, assetKey, sessionCookie, apiBase);
+}
+
+/**
+ * The estimate system a project points at (NEWFRONT-32, DRAFT-017). The
+ * project LIST payload never carries this field; only the single-project
+ * detail does — which is exactly why the drafts screen cannot offer the
+ * estimate picker.
+ */
+export async function serverProjectEstimate(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string | null> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as Record<string, unknown>;
+  return typeof row["estimate"] === "string" ? row["estimate"] : null;
+}
+
+/** Read a file asset back by its storage key. */
+export async function serverFileAsset(
+  workspaceId: string,
+  assetKey: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityFileAsset> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/file-assets/${workspaceId}/${assetKey}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] file asset read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { data?: unknown };
+  const rows = Array.isArray(payload.data) ? payload.data : [];
+  if (rows.length === 0) throw new Error("[parity] file asset read returned no rows.");
+  return assetOf(rows[0] as Record<string, unknown>, workspaceId);
 }
 
 // --- Desktop-only chat + agent runtime fixtures and server reads

@@ -7157,4 +7157,158 @@ export class WebNewDriver implements ParityDriver {
   async runnersWaitRunnerRevokeWorking(): Promise<void> {
     return todo("runnersWaitRunnerRevokeWorking");
   }
+
+  // --- Workspace drafts oracle (NEWFRONT-32). Throwing stubs per the
+  // --- shared driver contract; the Drafts area fills these in.
+
+  async draftsPageTitle(): Promise<string> {
+    return todo("draftsPageTitle");
+  }
+  async draftsHeaderText(): Promise<string> {
+    return todo("draftsHeaderText");
+  }
+  async draftsCountChip(): Promise<string | null> {
+    return todo("draftsCountChip");
+  }
+  async draftsHeaderCreateState(): Promise<"enabled" | "disabled" | "absent"> {
+    return todo("draftsHeaderCreateState");
+  }
+  async draftsMainText(): Promise<string> {
+    return todo("draftsMainText");
+  }
+  async draftRowNames(): Promise<string[]> {
+    return todo("draftRowNames");
+  }
+  async draftRowProjectMarker(_name: string): Promise<string> {
+    return todo("draftRowProjectMarker");
+  }
+  async draftRowTypeMarkPresent(_name: string): Promise<boolean> {
+    return todo("draftRowTypeMarkPresent");
+  }
+  async draftRowMenuEntries(_name: string): Promise<string[]> {
+    return todo("draftRowMenuEntries");
+  }
+  async draftContextMenuEntries(_name: string): Promise<string[]> {
+    return todo("draftContextMenuEntries");
+  }
+  async draftRowMenuClick(_name: string, _entry: string): Promise<void> {
+    return todo("draftRowMenuClick");
+  }
+  async draftRowQuickActionVisible(_name: string): Promise<boolean> {
+    return todo("draftRowQuickActionVisible");
+  }
+  async editDraftByName(_name: string): Promise<void> {
+    return todo("editDraftByName");
+  }
+  async cancelDraftDelete(_name: string): Promise<void> {
+    return todo("cancelDraftDelete");
+  }
+  async confirmDraftDelete(): Promise<void> {
+    return todo("confirmDraftDelete");
+  }
+  async draftStateText(_name: string): Promise<string> {
+    return todo("draftStateText");
+  }
+  async draftOpenStatePicker(_name: string): Promise<void> {
+    return todo("draftOpenStatePicker");
+  }
+  async draftPriorityText(_name: string): Promise<string> {
+    return todo("draftPriorityText");
+  }
+  async draftOpenPriorityPicker(_name: string): Promise<void> {
+    return todo("draftOpenPriorityPicker");
+  }
+  async draftLabelsText(_name: string): Promise<string> {
+    return todo("draftLabelsText");
+  }
+  async draftOpenLabelsPicker(_name: string): Promise<void> {
+    return todo("draftOpenLabelsPicker");
+  }
+  async draftAssigneesText(_name: string): Promise<string> {
+    return todo("draftAssigneesText");
+  }
+  async draftOpenAssigneesPicker(_name: string): Promise<void> {
+    return todo("draftOpenAssigneesPicker");
+  }
+  async draftDatesText(_name: string): Promise<string> {
+    return todo("draftDatesText");
+  }
+  async draftOpenStartDatePicker(_name: string): Promise<void> {
+    return todo("draftOpenStartDatePicker");
+  }
+  async draftOpenDueDatePicker(_name: string): Promise<void> {
+    return todo("draftOpenDueDatePicker");
+  }
+  async draftPickerOptionSelected(_text: string): Promise<boolean> {
+    return todo("draftPickerOptionSelected");
+  }
+  async draftEstimateText(_name: string): Promise<string> {
+    return todo("draftEstimateText");
+  }
+  async draftOpenEstimatePicker(_name: string): Promise<void> {
+    return todo("draftOpenEstimatePicker");
+  }
+  async draftEstimatePickerVisible(_name: string): Promise<boolean> {
+    return todo("draftEstimatePickerVisible");
+  }
+  async draftCycleText(_name: string): Promise<string> {
+    return todo("draftCycleText");
+  }
+  async draftOpenCyclePicker(_name: string): Promise<void> {
+    return todo("draftOpenCyclePicker");
+  }
+  async draftCyclePickerVisible(_name: string): Promise<boolean> {
+    return todo("draftCyclePickerVisible");
+  }
+  async draftModuleText(_name: string): Promise<string> {
+    return todo("draftModuleText");
+  }
+  async draftOpenModulePicker(_name: string): Promise<void> {
+    return todo("draftOpenModulePicker");
+  }
+  async draftModulePickerVisible(_name: string): Promise<boolean> {
+    return todo("draftModulePickerVisible");
+  }
+  async draftFailNextPatch(_status: number, _delayMs: number): Promise<void> {
+    return todo("draftFailNextPatch");
+  }
+  async draftClearPatchFailure(): Promise<void> {
+    return todo("draftClearPatchFailure");
+  }
+  async draftsEntryRequests(_workspaceSlug: string): Promise<string[]> {
+    return todo("draftsEntryRequests");
+  }
+  async draftRowsDraggableCount(): Promise<number> {
+    return todo("draftRowsDraggableCount");
+  }
+  async draftsPressKey(_key: string): Promise<void> {
+    return todo("draftsPressKey");
+  }
+  async draftPublishError(): Promise<string | null> {
+    return todo("draftPublishError");
+  }
+  async draftsEmptyCreateState(): Promise<"enabled" | "disabled" | "absent"> {
+    return todo("draftsEmptyCreateState");
+  }
+  async draftsNoProjectCreateState(): Promise<"enabled" | "disabled" | "absent"> {
+    return todo("draftsNoProjectCreateState");
+  }
+  async draftsDelayList(_ms: number): Promise<void> {
+    return todo("draftsDelayList");
+  }
+  async draftsSkeletonVisible(): Promise<boolean> {
+    return todo("draftsSkeletonVisible");
+  }
+  async draftsLoadMoreVisible(): Promise<boolean> {
+    return todo("draftsLoadMoreVisible");
+  }
+  async draftsLoadMore(): Promise<void> {
+    return todo("draftsLoadMore");
+  }
+  async draftsListFetchCountOnRefocus(): Promise<number> {
+    return todo("draftsListFetchCountOnRefocus");
+  }
+  async draftsMainCheckboxCount(): Promise<number> {
+    return todo("draftsMainCheckboxCount");
+  }
 }
