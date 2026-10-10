@@ -5507,7 +5507,13 @@ export async function serverCycleDetail(
   cycleId: string,
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
-): Promise<{ name: string; startDate: string | null; endDate: string | null; snapshotEmpty: boolean }> {
+): Promise<{
+  name: string;
+  startDate: string | null;
+  endDate: string | null;
+  snapshotEmpty: boolean;
+  description: string | null;
+}> {
   const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/`, {
     headers: { cookie: sessionCookie },
   });
@@ -5519,6 +5525,11 @@ export async function serverCycleDetail(
     startDate: typeof rec["start_date"] === "string" ? (rec["start_date"] as string) : null,
     endDate: typeof rec["end_date"] === "string" ? (rec["end_date"] as string) : null,
     snapshotEmpty: snapshot === null || snapshot === undefined || JSON.stringify(snapshot) === "{}",
+    // NEWFRONT-250 (CYC-014): creation carries an optional description.
+    description:
+      typeof rec["description"] === "string" && (rec["description"] as string) !== ""
+        ? (rec["description"] as string)
+        : null,
   };
 }
 /** Current user as the server reports them. */
@@ -11835,4 +11846,44 @@ export async function archivesModuleArchivedAt(
     | undefined;
   if (match === undefined) throw new Error("[parity] module missing from the archived-modules collection.");
   return typeof match["archived_at"] === "string" ? match["archived_at"] : null;
+}
+
+/**
+ * Overlap verdict for a candidate cycle date range (NEWFRONT-250, CYC-016):
+ * the same POST date-check the create dialog runs before saving. Resolves
+ * true when the range is free, false when it overlaps an existing cycle.
+ */
+export async function serverCycleDateCheck(
+  workspaceSlug: string,
+  projectId: string,
+  payload: { start_date: string; end_date: string; cycle_id?: string },
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/date-check/`,
+    sessionCookie,
+    payload
+  );
+  if (!res.ok) throw new Error(`[parity] cycle date-check failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["status"] !== "boolean") throw new Error("[parity] date-check carried no boolean status.");
+  return rec["status"] as boolean;
+}
+
+/** Whether the project's cycles feature flag reads enabled (NEWFRONT-250, CYC-010). */
+export async function serverProjectCycleView(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["cycle_view"] !== "boolean") throw new Error("[parity] project carried no boolean cycle_view.");
+  return rec["cycle_view"] as boolean;
 }

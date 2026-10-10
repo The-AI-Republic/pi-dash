@@ -6873,4 +6873,144 @@ export class WebNewDriver implements ParityDriver {
   async cyclesEditDetailReadOnlyNotice(): Promise<string | null> {
     return todo("cyclesEditDetailReadOnlyNotice");
   }
+
+  // --- Cycles empty states, gone-away, create, validation (NEWFRONT-250,
+  // --- CYC-009..016). Oracle-stage stubs; the new-app driver implements
+  // --- them when the area is built.
+
+  async cyclesEmptyOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("cyclesEmptyOpenList");
+  }
+
+  async cyclesEmptyVisibleNames(): Promise<string[]> {
+    return todo("cyclesEmptyVisibleNames");
+  }
+
+  async cyclesEmptySkeletonVisible(): Promise<boolean> {
+    return todo("cyclesEmptySkeletonVisible");
+  }
+
+  async cyclesEmptyNoMatchHeading(): Promise<string | null> {
+    return todo("cyclesEmptyNoMatchHeading");
+  }
+
+  async cyclesEmptyNoMatchHint(): Promise<string | null> {
+    return todo("cyclesEmptyNoMatchHint");
+  }
+
+  async cyclesEmptySearchOpen(): Promise<void> {
+    return todo("cyclesEmptySearchOpen");
+  }
+
+  async cyclesEmptySearchFill(_text: string): Promise<void> {
+    return todo("cyclesEmptySearchFill");
+  }
+
+  async cyclesEmptySearchClear(): Promise<void> {
+    return todo("cyclesEmptySearchClear");
+  }
+
+  async cyclesEmptyFiltersOpen(): Promise<void> {
+    return todo("cyclesEmptyFiltersOpen");
+  }
+
+  async cyclesEmptyFiltersClose(): Promise<void> {
+    return todo("cyclesEmptyFiltersClose");
+  }
+
+  async cyclesEmptyFilterSections(): Promise<string[]> {
+    return todo("cyclesEmptyFilterSections");
+  }
+
+  async cyclesEmptyFilterOptionNames(): Promise<string[]> {
+    return todo("cyclesEmptyFilterOptionNames");
+  }
+
+  async cyclesEmptyFilterPick(_section: string, _optionName: string): Promise<void> {
+    return todo("cyclesEmptyFilterPick");
+  }
+
+  async cyclesEmptyFiltersClearAll(): Promise<void> {
+    return todo("cyclesEmptyFiltersClearAll");
+  }
+
+  async cyclesEmptySkeletonShownOnSlowFetch(_workspaceSlug: string, _projectId: string): Promise<boolean> {
+    return todo("cyclesEmptySkeletonShownOnSlowFetch");
+  }
+
+  async cyclesEmptyFeatureOffVisible(): Promise<boolean> {
+    return todo("cyclesEmptyFeatureOffVisible");
+  }
+
+  async cyclesEmptyFeatureOffActionDisabled(): Promise<boolean> {
+    return todo("cyclesEmptyFeatureOffActionDisabled");
+  }
+
+  async cyclesEmptyFeatureOffActionOpen(): Promise<void> {
+    return todo("cyclesEmptyFeatureOffActionOpen");
+  }
+
+  async cyclesEmptyZeroStateVisible(): Promise<boolean> {
+    return todo("cyclesEmptyZeroStateVisible");
+  }
+
+  async cyclesEmptyZeroStateCreateDisabled(): Promise<boolean> {
+    return todo("cyclesEmptyZeroStateCreateDisabled");
+  }
+
+  async cyclesEmptyZeroStateCreateOpen(): Promise<void> {
+    return todo("cyclesEmptyZeroStateCreateOpen");
+  }
+
+  async cyclesEmptyOpenDetail(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
+    return todo("cyclesEmptyOpenDetail");
+  }
+
+  async cyclesEmptyGoneAwayVisible(): Promise<boolean> {
+    return todo("cyclesEmptyGoneAwayVisible");
+  }
+
+  async cyclesEmptyGoneAwayBack(): Promise<void> {
+    return todo("cyclesEmptyGoneAwayBack");
+  }
+
+  async cyclesCreateOpenFromHeader(): Promise<void> {
+    return todo("cyclesCreateOpenFromHeader");
+  }
+
+  async cyclesCreateDialogOpen(): Promise<boolean> {
+    return todo("cyclesCreateDialogOpen");
+  }
+
+  async cyclesCreateDialogCancel(): Promise<void> {
+    return todo("cyclesCreateDialogCancel");
+  }
+
+  async cyclesCreateFillTitle(_title: string): Promise<void> {
+    return todo("cyclesCreateFillTitle");
+  }
+
+  async cyclesCreateFillDescription(_text: string): Promise<void> {
+    return todo("cyclesCreateFillDescription");
+  }
+
+  async cyclesCreateTitleError(): Promise<string | null> {
+    return todo("cyclesCreateTitleError");
+  }
+
+  async cyclesCreatePickDateRange(_startISO: string, _endISO: string): Promise<void> {
+    return todo("cyclesCreatePickDateRange");
+  }
+
+  async cyclesCreatePastDayDisabled(): Promise<boolean> {
+    return todo("cyclesCreatePastDayDisabled");
+  }
+
+  async cyclesCreatePickProject(_projectName: string): Promise<void> {
+    return todo("cyclesCreatePickProject");
+  }
+
+  async cyclesCreateSubmit(): Promise<void> {
+    return todo("cyclesCreateSubmit");
+  }
 }
