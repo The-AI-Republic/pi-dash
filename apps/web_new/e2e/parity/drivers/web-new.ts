@@ -82,6 +82,13 @@ import type {
   ServedShellMarkers,
   WorkspaceOnboardingView,
   PagesLiveSocketClose,
+
+  PagesPaneActor,
+  PagesPaneAssetRow,
+  PagesPaneOutlineHeading,
+  PagesPaneOverlayHeader,
+  PagesPaneStats,
+  PagesPaneVersionEntry,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -7947,5 +7954,231 @@ export class WebNewDriver implements ParityDriver {
   }
   async deskSigninOpenUpdateDialogLink(_label: string): Promise<string | null> {
     return todo("deskSigninOpenUpdateDialogLink");
+  }
+
+  // --- NEWFRONT-317 (pages navigation pane + versions, PAGE-045-054).
+  // --- Appended stubs; existing stubs above are untouched per the shared
+  // --- driver contract. The new app has no pages surface yet (Stage 0
+  // --- oracle convention: every method throws until the area lands).
+
+  async pagesPaneOpenDetail(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
+    return todo("pagesPaneOpenDetail");
+  }
+
+  async pagesPaneOpenDetailQuery(
+    _workspaceSlug: string,
+    _projectId: string,
+    _pageId: string,
+    _query: string
+  ): Promise<void> {
+    return todo("pagesPaneOpenDetailQuery");
+  }
+
+  async pagesPaneEditorText(): Promise<string> {
+    return todo("pagesPaneEditorText");
+  }
+
+  async pagesPaneEditorClickEnd(): Promise<void> {
+    return todo("pagesPaneEditorClickEnd");
+  }
+
+  async pagesPaneEditorType(_text: string): Promise<void> {
+    return todo("pagesPaneEditorType");
+  }
+
+  async pagesPaneEditorPressEnter(): Promise<void> {
+    return todo("pagesPaneEditorPressEnter");
+  }
+
+  async pagesPaneEditorScrollTop(): Promise<number> {
+    return todo("pagesPaneEditorScrollTop");
+  }
+
+  async pagesPaneEditorPasteHtml(_html: string): Promise<void> {
+    return todo("pagesPaneEditorPasteHtml");
+  }
+
+  async pagesPaneQueryParam(_key: string): Promise<string | null> {
+    return todo("pagesPaneQueryParam");
+  }
+
+  async pagesPaneIsOpen(): Promise<boolean> {
+    return todo("pagesPaneIsOpen");
+  }
+
+  async pagesPaneOpenViaToolbar(): Promise<void> {
+    return todo("pagesPaneOpenViaToolbar");
+  }
+
+  async pagesPaneClose(): Promise<void> {
+    return todo("pagesPaneClose");
+  }
+
+  async pagesPaneWidth(): Promise<number> {
+    return todo("pagesPaneWidth");
+  }
+
+  async pagesPaneTabNames(): Promise<string[]> {
+    return todo("pagesPaneTabNames");
+  }
+
+  async pagesPaneActiveTab(): Promise<string | null> {
+    return todo("pagesPaneActiveTab");
+  }
+
+  async pagesPaneSelectTab(_name: string): Promise<void> {
+    return todo("pagesPaneSelectTab");
+  }
+
+  async pagesPaneCanvasWidth(): Promise<number> {
+    return todo("pagesPaneCanvasWidth");
+  }
+
+  async pagesPaneSlideTransition(): Promise<boolean> {
+    return todo("pagesPaneSlideTransition");
+  }
+
+  async pagesPanePreviewVisible(): Promise<boolean> {
+    return todo("pagesPanePreviewVisible");
+  }
+
+  async pagesPanePreviewBarCount(): Promise<number> {
+    return todo("pagesPanePreviewBarCount");
+  }
+
+  async pagesPanePreviewHover(): Promise<void> {
+    return todo("pagesPanePreviewHover");
+  }
+
+  async pagesPanePreviewCardVisible(): Promise<boolean> {
+    return todo("pagesPanePreviewCardVisible");
+  }
+
+  async pagesPanePreviewCardHeadings(): Promise<string[]> {
+    return todo("pagesPanePreviewCardHeadings");
+  }
+
+  async pagesPanePreviewOpen(): Promise<void> {
+    return todo("pagesPanePreviewOpen");
+  }
+
+  async pagesPaneOutlineHeadings(): Promise<PagesPaneOutlineHeading[]> {
+    return todo("pagesPaneOutlineHeadings");
+  }
+
+  async pagesPaneOutlineClick(_text: string): Promise<void> {
+    return todo("pagesPaneOutlineClick");
+  }
+
+  async pagesPaneOutlineEmptyVisible(): Promise<boolean> {
+    return todo("pagesPaneOutlineEmptyVisible");
+  }
+
+  async pagesPaneAssetsRows(): Promise<PagesPaneAssetRow[]> {
+    return todo("pagesPaneAssetsRows");
+  }
+
+  async pagesPaneAssetsDownloadVisible(_name: string): Promise<boolean> {
+    return todo("pagesPaneAssetsDownloadVisible");
+  }
+
+  async pagesPaneAssetsEmptyVisible(): Promise<boolean> {
+    return todo("pagesPaneAssetsEmptyVisible");
+  }
+
+  async pagesPaneStats(): Promise<PagesPaneStats> {
+    return todo("pagesPaneStats");
+  }
+
+  async pagesPaneActors(): Promise<PagesPaneActor[]> {
+    return todo("pagesPaneActors");
+  }
+
+  async pagesPaneVersionEntries(): Promise<PagesPaneVersionEntry[]> {
+    return todo("pagesPaneVersionEntries");
+  }
+
+  async pagesPaneSelectVersion(_versionId: string): Promise<void> {
+    return todo("pagesPaneSelectVersion");
+  }
+
+  async pagesPaneSelectCurrentVersion(): Promise<void> {
+    return todo("pagesPaneSelectCurrentVersion");
+  }
+
+  async pagesPaneOverlayOpen(): Promise<boolean> {
+    return todo("pagesPaneOverlayOpen");
+  }
+
+  async pagesPaneOverlayHeader(): Promise<PagesPaneOverlayHeader> {
+    return todo("pagesPaneOverlayHeader");
+  }
+
+  async pagesPaneOverlayText(): Promise<string> {
+    return todo("pagesPaneOverlayText");
+  }
+
+  async pagesPaneOverlaySkeletonVisible(): Promise<boolean> {
+    return todo("pagesPaneOverlaySkeletonVisible");
+  }
+
+  async pagesPaneOverlayStallDetail(): Promise<void> {
+    return todo("pagesPaneOverlayStallDetail");
+  }
+
+  async pagesPaneOverlayReleaseDetail(): Promise<void> {
+    return todo("pagesPaneOverlayReleaseDetail");
+  }
+
+  async pagesPaneRestoreVisible(): Promise<boolean> {
+    return todo("pagesPaneRestoreVisible");
+  }
+
+  async pagesPaneRestore(): Promise<void> {
+    return todo("pagesPaneRestore");
+  }
+
+  async pagesPaneOverlayErrorVisible(): Promise<boolean> {
+    return todo("pagesPaneOverlayErrorVisible");
+  }
+
+  async pagesPaneOverlayErrorTexts(): Promise<{
+    heading: string | null;
+    body: string | null;
+    retry: string | null;
+  }> {
+    return todo("pagesPaneOverlayErrorTexts");
+  }
+
+  async pagesPaneOverlayRetry(): Promise<void> {
+    return todo("pagesPaneOverlayRetry");
+  }
+
+  async pagesPaneFailVersionDetail(): Promise<void> {
+    return todo("pagesPaneFailVersionDetail");
+  }
+
+  async pagesPaneUnfailVersionDetail(): Promise<void> {
+    return todo("pagesPaneUnfailVersionDetail");
+  }
+
+  async pagesPaneVersionDetailRequests(): Promise<number> {
+    return todo("pagesPaneVersionDetailRequests");
+  }
+
+  async pagesPaneEditorClickText(_text: string): Promise<void> {
+    return todo("pagesPaneEditorClickText");
+  }
+
+  async pagesPaneEditorClear(): Promise<void> {
+    return todo("pagesPaneEditorClear");
+  }
+
+  async pagesPaneOmitWorkspaceMember(_userId: string): Promise<void> {
+    return todo("pagesPaneOmitWorkspaceMember");
+  }
+
+  async pagesPaneRestoreWorkspaceMembers(): Promise<void> {
+    return todo("pagesPaneRestoreWorkspaceMembers");
   }
 }

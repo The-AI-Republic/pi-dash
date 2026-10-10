@@ -13116,3 +13116,202 @@ export async function serverDeskSigninSessionHasDesktopMarker(sessionCookie: str
   if (line === "") throw new Error("[parity] desktop-marker probe produced no row.");
   return (JSON.parse(line) as { desktop?: unknown }).desktop === true;
 }
+
+// --- Pages navigation pane + versions (NEWFRONT-317, PAGE-045-054).
+// --- Appended; existing helpers above are untouched per the shared driver
+// --- contract. The pane reads live editor state, so most assertions are
+// --- UI-side; these cover the version timeline's server state and the
+// --- description payloads the overlay and restore write.
+
+/** Project MEMBER role id (sibling of PROJECT_ROLE_GUEST above). */
+export const PROJECT_ROLE_MEMBER = 15;
+
+/** One page-version timeline row as the list endpoint returns it. */
+export interface ParityPageVersion {
+  id: string;
+  lastSavedAt: string;
+  ownedBy: string;
+}
+
+/** One page-version snapshot with both content payloads. */
+export interface ParityPageVersionDetail extends ParityPageVersion {
+  html: string;
+  jsonText: string | null;
+}
+
+/** Live page description payloads. */
+export interface ParityPageDescription {
+  html: string;
+  jsonText: string | null;
+}
+
+/** Live page record identity and actor facts. */
+export interface ParityPageRecord {
+  id: string;
+  name: string;
+  access: number | null;
+  ownedBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Read a page's live description payloads (HTML plus structured JSON). */
+export async function serverPageDescription(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityPageDescription> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/description/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] page description read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  return {
+    html: typeof rec["description_html"] === "string" ? rec["description_html"] : "",
+    jsonText:
+      rec["description_json"] === null || rec["description_json"] === undefined
+        ? null
+        : JSON.stringify(rec["description_json"]),
+  };
+}
+
+/**
+ * Overwrite a page's live description. Each HTML change queues the
+ * server-side version snapshot, so version fixtures stage through here
+ * with distinct authors (same-author snapshots coalesce server-side).
+ */
+export async function serverUpdatePageDescription(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  html: string,
+  jsonText: string | null = null,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const body: Record<string, unknown> = { description_html: html };
+  if (jsonText !== null) body["description_json"] = JSON.parse(jsonText) as unknown;
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/description/`,
+    {
+      method: "PATCH",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] page description write failed with HTTP ${res.status}: ${await res.text()}.`);
+}
+
+/** List a page's persisted version snapshots, oldest first as returned. */
+export async function serverPageVersions(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityPageVersion[]> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/versions/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] page versions read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    if (typeof rec["id"] !== "string" || typeof rec["last_saved_at"] !== "string")
+      throw new Error("[parity] version row carried no string id/last_saved_at.");
+    return {
+      id: rec["id"],
+      lastSavedAt: rec["last_saved_at"],
+      ownedBy: typeof rec["owned_by"] === "string" ? rec["owned_by"] : "",
+    };
+  });
+}
+
+/** Read one version snapshot with both content payloads. */
+export async function serverPageVersionDetail(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  versionId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityPageVersionDetail> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/versions/${versionId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] page version read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string" || typeof rec["last_saved_at"] !== "string")
+    throw new Error("[parity] version detail carried no string id/last_saved_at.");
+  return {
+    id: rec["id"],
+    lastSavedAt: rec["last_saved_at"],
+    ownedBy: typeof rec["owned_by"] === "string" ? rec["owned_by"] : "",
+    html: typeof rec["description_html"] === "string" ? rec["description_html"] : "",
+    jsonText:
+      rec["description_json"] === null || rec["description_json"] === undefined
+        ? null
+        : JSON.stringify(rec["description_json"]),
+  };
+}
+
+/** Read a page's record identity and actor facts. */
+export async function serverPageRecord(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityPageRecord> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] page read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  for (const key of ["id", "owned_by", "updated_by", "created_at", "updated_at"]) {
+    if (typeof rec[key] !== "string") throw new Error(`[parity] page record carried no string ${key}.`);
+  }
+  return {
+    id: rec["id"] as string,
+    name: typeof rec["name"] === "string" ? rec["name"] : "",
+    access: typeof rec["access"] === "number" ? rec["access"] : null,
+    ownedBy: rec["owned_by"] as string,
+    updatedBy: rec["updated_by"] as string,
+    createdAt: rec["created_at"] as string,
+    updatedAt: rec["updated_at"] as string,
+  };
+}
+
+/**
+ * Ensure the workspace user with `email` holds the MEMBER project role.
+ * Same shape as serverEnsureProjectGuest above, for the read-only-viewer
+ * fixtures (a non-owner member on a private page cannot edit).
+ */
+export async function serverEnsureProjectMember(
+  workspaceSlug: string,
+  projectId: string,
+  email: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const membersRes = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/members/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!membersRes.ok) throw new Error(`[parity] workspace member list failed with HTTP ${membersRes.status}.`);
+  const rows = (await membersRes.json()) as Array<{ member?: { id?: unknown; email?: unknown } }>;
+  const userId = rows.find((row) => row.member?.email === email)?.member?.id;
+  if (typeof userId !== "string") throw new Error(`[parity] workspace user ${email} not found.`);
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/members/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ members: [{ member_id: userId, role: PROJECT_ROLE_MEMBER }] }),
+  });
+  if (!res.ok) throw new Error(`[parity] project member ensure failed with HTTP ${res.status}.`);
+}
