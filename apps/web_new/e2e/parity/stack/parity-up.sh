@@ -13,6 +13,16 @@ export PARITY_DIR
 PARITY_DIR="$(cd "$STACK_DIR/.." && pwd)"
 export COMPOSE_FILE
 COMPOSE_FILE="$STACK_DIR/docker-compose.yml"
+# Resolve once and export, so the compose `name:` interpolation, every
+# compose call below, and the reaper all agree on one project (NEWFRONT-174).
+# Bring-up keeps the silent default under sudo: landing in the wrong project
+# fails loudly on ports/names instead of deleting data. Destructive scripts
+# do not get that leniency — see lib/parity-project.sh.
+# shellcheck source=lib/parity-project.sh
+. "$STACK_DIR/lib/parity-project.sh"
+export PARITY_PROJECT
+PARITY_PROJECT="$(parity_resolve_project_allow_sudo)"
+echo "[parity] compose project: $PARITY_PROJECT"
 export PARITY_API_PORT
 PARITY_API_PORT="${PARITY_API_PORT:-18019}"
 export PARITY_SEED_FILE

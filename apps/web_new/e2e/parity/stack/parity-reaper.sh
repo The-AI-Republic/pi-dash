@@ -53,7 +53,10 @@ case "${1:-}" in
     while kill -0 "$AGENT" 2>/dev/null; do
       sleep 15
     done
-    "$STACK_DIR/parity-down.sh" > /dev/null 2>&1 \
+    # Explicit project argument: argv survives sudo and env loss, exported
+    # PARITY_PROJECT does not (NEWFRONT-174). The fallback keeps -p for the
+    # same reason when the checkout (and parity-down.sh) is already gone.
+    "$STACK_DIR/parity-down.sh" "$PARITY_PROJECT" > /dev/null 2>&1 \
       || docker compose -p "$PARITY_PROJECT" down -v --remove-orphans > /dev/null 2>&1
     rm -f "${TMPDIR:-/tmp}/parity-reaper.$PARITY_PROJECT.$AGENT.pid"
     ;;
