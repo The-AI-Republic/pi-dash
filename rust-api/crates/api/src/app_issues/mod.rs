@@ -88,8 +88,9 @@ use render::v2_page;
 /// checks the method, so Django owns the verdict on unowned methods
 /// (`POST issues/list/` is Django's own 405-after-auth; `POST issues/`
 /// used to proxy to Django's create before handlers A took it over) —
-/// answering 405 in Rust would break both. `HEAD` rides axum's `get`
-/// handling like Django's `GET`-backed `HEAD`.
+/// answering 405 in Rust would break both. `HEAD` proxies explicitly:
+/// axum would auto-serve it from `get`, but Django defines no `head` and
+/// 405s after auth.
 pub fn routes() -> Router<AppState> {
     let proxy = crate::edge::proxy;
     Router::new()
@@ -100,6 +101,7 @@ pub fn routes() -> Router<AppState> {
                 .put(proxy)
                 .patch(proxy)
                 .delete(proxy)
+                .head(proxy)
                 .options(proxy)
                 .trace(proxy)
                 .fallback(proxy),
@@ -110,6 +112,7 @@ pub fn routes() -> Router<AppState> {
                 .put(handlers_core::put_update_issue)
                 .patch(handlers_core::partial_update_issue)
                 .delete(handlers_core::destroy_issue)
+                .head(proxy)
                 .post(proxy)
                 .options(proxy)
                 .trace(proxy)
@@ -149,6 +152,7 @@ pub fn routes() -> Router<AppState> {
                 .put(proxy)
                 .patch(proxy)
                 .delete(proxy)
+                .head(proxy)
                 .options(proxy)
                 .trace(proxy)
                 .fallback(proxy),
@@ -159,6 +163,7 @@ pub fn routes() -> Router<AppState> {
                 .put(handlers_labels_attachments::label_update)
                 .patch(handlers_labels_attachments::label_partial_update)
                 .delete(handlers_labels_attachments::label_destroy)
+                .head(proxy)
                 .post(proxy)
                 .options(proxy)
                 .trace(proxy)
@@ -182,6 +187,7 @@ pub fn routes() -> Router<AppState> {
                 .put(proxy)
                 .patch(proxy)
                 .delete(proxy)
+                .head(proxy)
                 .options(proxy)
                 .trace(proxy)
                 .fallback(proxy),
@@ -204,6 +210,7 @@ pub fn routes() -> Router<AppState> {
                 .put(proxy)
                 .patch(proxy)
                 .delete(proxy)
+                .head(proxy)
                 .options(proxy)
                 .trace(proxy)
                 .fallback(proxy),
@@ -213,6 +220,7 @@ pub fn routes() -> Router<AppState> {
             get(handlers_labels_attachments::v2_detail)
                 .patch(handlers_labels_attachments::v2_patch)
                 .delete(handlers_labels_attachments::v2_delete)
+                .head(proxy)
                 .post(proxy)
                 .put(proxy)
                 .options(proxy)
@@ -233,6 +241,7 @@ pub fn routes() -> Router<AppState> {
             get(handlers_archive::archive_retrieve)
                 .post(handlers_archive::archive_issue)
                 .delete(handlers_archive::unarchive_issue)
+                .head(crate::edge::proxy)
                 .put(crate::edge::proxy)
                 .patch(crate::edge::proxy)
                 .options(crate::edge::proxy),
@@ -262,6 +271,7 @@ fn owned(
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 

@@ -111,8 +111,9 @@ fn owned_post(
 }
 
 /// A GET-owned path: the GET handler serves from Rust, everything else
-/// falls through to Django. `HEAD` rides axum's `get` handling like
-/// Django's `GET`-backed `HEAD`.
+/// falls through to Django. `HEAD` proxies explicitly: axum would
+/// auto-serve it from `get`, but Django defines no `head` and 405s after
+/// auth.
 fn owned_get(
     get_handler: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
@@ -121,6 +122,7 @@ fn owned_get(
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 

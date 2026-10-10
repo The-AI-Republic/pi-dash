@@ -4251,6 +4251,7 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };
@@ -4267,7 +4268,7 @@ pub fn routes() -> Router<AppState> {
             "/api/workspaces/{slug}/invitations/",
             owned(
                 get(invite_list).post(invite_create),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -4276,35 +4277,35 @@ pub fn routes() -> Router<AppState> {
                 get(invite_retrieve)
                     .patch(invite_patch)
                     .delete(invite_destroy),
-                &["POST", "PUT", "OPTIONS"],
+                &["POST", "PUT", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/users/me/workspaces/invitations/",
             owned(
                 get(my_invites_list).post(my_invites_create),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/invitations/{pk}/join/",
             owned(
                 get(join_get).post(join_post),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/users/me/workspaces/join-requests/",
             owned(
                 get(user_join_requests_list).post(user_join_requests_create),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/join-requests/",
             owned(
                 get(admin_join_requests_list),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(

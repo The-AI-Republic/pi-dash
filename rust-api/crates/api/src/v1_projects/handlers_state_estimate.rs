@@ -148,11 +148,11 @@ type AssetLookup = Option<(String, Option<Uuid>, Option<Uuid>, Option<Uuid>)>;
 /// Register the two owned state paths. Estimate paths are deliberately absent
 /// (BUG-EST-404, see module docs): they proxy to Django, which 404s.
 ///
-/// `HEAD` and `TRACE` are owned explicitly (not axum's automatic HEAD-from-GET
-/// or its empty-body 405): DRF checks `http_method_names` only after
-/// `initial()`, so auth/permission denials win and survivors answer the JSON
-/// 405. `OPTIONS` proxies so DRF metadata (401 anon / 200 authed) is
-/// preserved.
+/// `HEAD` proxies (Django 405s it after auth; axum would auto-serve it
+/// from `get`). `TRACE` is owned explicitly (not axum's empty-body 405):
+/// DRF checks `http_method_names` only after `initial()`, so
+/// auth/permission denials win and survivors answer the JSON 405.
+/// `OPTIONS` proxies so DRF metadata (401 anon / 200 authed) is preserved.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -163,7 +163,7 @@ pub fn routes() -> Router<AppState> {
                 .patch(crate::edge::proxy)
                 .delete(crate::edge::proxy)
                 .options(crate::edge::proxy)
-                .head(head_state_list)
+                .head(crate::edge::proxy)
                 .trace(trace_state_list),
         )
         .route(
@@ -174,14 +174,14 @@ pub fn routes() -> Router<AppState> {
                 .post(crate::edge::proxy)
                 .put(crate::edge::proxy)
                 .options(crate::edge::proxy)
-                .head(head_state_detail)
+                .head(crate::edge::proxy)
                 .trace(trace_state_detail),
         )
 }
 
-/// Owned-path unowned methods (`HEAD`, `TRACE`): run the full prelude
-/// (auth → rewrite → gate) and answer DRF's `MethodNotAllowed` JSON only
-/// for survivors — denials keep their 401/403/404.
+/// Owned-path unowned methods (`TRACE`; `HEAD` proxies): run the full
+/// prelude (auth → rewrite → gate) and answer DRF's `MethodNotAllowed`
+/// JSON only for survivors — denials keep their 401/403/404.
 async fn method_not_allowed(
     state: &AppState,
     headers: &HeaderMap,
@@ -207,22 +207,6 @@ fn method_not_allowed_body(method: &str) -> String {
         "{{\"detail\":{}}}",
         json_string(&format!("Method \"{method}\" not allowed."))
     )
-}
-
-async fn head_state_list(
-    AxumState(state): AxumState<AppState>,
-    Path((slug, project_raw)): Path<(String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    method_not_allowed(
-        &state,
-        &headers,
-        &slug,
-        &project_raw,
-        V1Route::StateList,
-        "HEAD",
-    )
-    .await
 }
 
 async fn trace_state_list(
@@ -272,14 +256,6 @@ async fn method_not_allowed_detail(
         },
         Err(error) => error.into_response(),
     }
-}
-
-async fn head_state_detail(
-    AxumState(state): AxumState<AppState>,
-    Path((slug, project_raw, state_id)): Path<(String, String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    method_not_allowed_detail(&state, &headers, &slug, &project_raw, &state_id, "HEAD").await
 }
 
 async fn trace_state_detail(

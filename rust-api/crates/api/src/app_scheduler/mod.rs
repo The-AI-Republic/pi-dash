@@ -160,6 +160,7 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };
@@ -179,7 +180,7 @@ pub fn routes() -> Router<AppState> {
             owned(
                 axum::routing::get(handlers_bind::binding_list)
                     .post(handlers_bind::binding_install),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -188,7 +189,7 @@ pub fn routes() -> Router<AppState> {
                 axum::routing::get(handlers_bind::binding_detail)
                     .patch(handlers_bind::binding_patch)
                     .delete(handlers_bind::binding_uninstall),
-                &["PUT", "POST", "OPTIONS"],
+                &["PUT", "POST", "HEAD", "OPTIONS"],
             ),
         )
 }

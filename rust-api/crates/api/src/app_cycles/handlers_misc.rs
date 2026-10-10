@@ -2196,6 +2196,7 @@ pub fn routes() -> Router<AppState> {
                 .post(crate::edge::proxy)
                 .put(crate::edge::proxy)
                 .delete(crate::edge::proxy)
+                .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
 }

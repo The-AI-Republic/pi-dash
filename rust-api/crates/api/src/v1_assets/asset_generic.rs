@@ -250,6 +250,7 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/workspaces/{slug}/assets/{asset_id}/",
             get(generic_get)
                 .patch(generic_patch)
+                .head(crate::edge::proxy)
                 .fallback(crate::edge::proxy),
         )
 }

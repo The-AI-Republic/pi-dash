@@ -178,14 +178,14 @@ pub fn routes() -> Router<AppState> {
             "/api/workspaces/{slug}/members/",
             owned(
                 axum::routing::get(list_members),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/project-members/",
             owned(
                 axum::routing::get(project_members),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -194,7 +194,7 @@ pub fn routes() -> Router<AppState> {
                 axum::routing::get(retrieve_member)
                     .patch(partial_update_member)
                     .delete(destroy_member),
-                &["POST", "PUT", "OPTIONS"],
+                &["POST", "PUT", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -208,14 +208,14 @@ pub fn routes() -> Router<AppState> {
             "/api/users/last-visited-workspace/",
             owned(
                 axum::routing::get(last_visited),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/workspace-members/me/",
             owned(
                 axum::routing::get(member_me),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -240,6 +240,7 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };

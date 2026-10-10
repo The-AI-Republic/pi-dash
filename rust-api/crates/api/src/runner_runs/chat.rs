@@ -4141,6 +4141,7 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };
@@ -4156,7 +4157,7 @@ pub fn web_routes() -> Router<AppState> {
     use axum::routing::{get, post};
     const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
     const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
-    const GET_POST: &[&str] = &["PUT", "PATCH", "DELETE", "OPTIONS"];
+    const GET_POST: &[&str] = &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     Router::new()
         .route(
             "/api/runners/chat/sessions/",
@@ -4164,7 +4165,10 @@ pub fn web_routes() -> Router<AppState> {
         )
         .route(
             "/api/runners/chat/sessions/{session_id}/",
-            owned(get(chat_session_detail), GET_ONLY),
+            owned(
+                get(chat_session_detail),
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+            ),
         )
         .route(
             "/api/runners/chat/sessions/{session_id}/messages/",
@@ -4184,12 +4188,17 @@ pub fn web_routes() -> Router<AppState> {
         )
         .route(
             "/api/runners/chat/approvals/",
-            owned(get(chat_approvals_list), GET_ONLY),
+            owned(
+                get(chat_approvals_list),
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+            ),
         )
         .route(
             "/api/runners/chat/approvals/{approval_id}/decide/",
             owned(post(chat_approval_decide), POST_ONLY),
         )
+        // The stream keeps serving HEAD: Django allows it there (no G1
+        // gap), so GET_ONLY intentionally omits "HEAD".
         .route(
             "/api/runners/chat/sessions/{session_id}/events/",
             owned(get(super::sse::chat_event_stream), GET_ONLY),

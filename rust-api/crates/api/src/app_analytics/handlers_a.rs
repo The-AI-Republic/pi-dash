@@ -106,22 +106,22 @@ pub const ANALYTIC_VIEW_DETAIL_PATH: &str = "workspaces/<slug>/analytic-view/<uu
 /// Register the three owned routes. Nothing else: sibling paths stay
 /// unmatched and proxy to Django, and every non-owned method on the owned
 /// paths falls through to Django too (its 405-after-auth and metadata
-/// responses live there). `HEAD` rides axum's `get` handling like Django's
-/// `GET`-backed `HEAD`.
+/// responses live there). `HEAD` is listed with the unowned methods: axum
+/// would auto-serve it from `get`, but Django 405s after auth.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/workspaces/{slug}/analytics/",
             owned(
                 axum::routing::get(analytics_get),
-                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/analytic-view/",
             owned(
                 axum::routing::get(view_list).post(view_create),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -130,7 +130,7 @@ pub fn routes() -> Router<AppState> {
                 axum::routing::get(view_retrieve)
                     .patch(view_partial_update)
                     .delete(view_destroy),
-                &["POST", "PUT", "OPTIONS"],
+                &["POST", "PUT", "HEAD", "OPTIONS"],
             ),
         )
 }
@@ -148,6 +148,7 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };

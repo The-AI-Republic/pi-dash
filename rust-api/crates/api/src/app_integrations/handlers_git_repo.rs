@@ -119,7 +119,7 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-/// `repository/`: GET/PATCH/DELETE own their branches; POST/PUT/OPTIONS
+/// `repository/`: GET/PATCH/DELETE own their branches; POST/PUT/HEAD/OPTIONS
 /// fall through to Django (its create/update/405s live there).
 fn owned_repository() -> axum::routing::MethodRouter<AppState> {
     axum::routing::get(get_repository)
@@ -127,6 +127,7 @@ fn owned_repository() -> axum::routing::MethodRouter<AppState> {
         .delete(delete_repository)
         .post(crate::edge::proxy)
         .put(crate::edge::proxy)
+        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 

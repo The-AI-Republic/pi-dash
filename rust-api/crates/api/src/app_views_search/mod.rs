@@ -81,8 +81,9 @@ pub fn routes() -> Router<AppState> {
 
 /// A search path: the GET handler owns reads, everything else falls
 /// through to Django. OPTIONS proxies too: DRF answers metadata (401 anon
-/// / 200 authed) where axum would 405; `HEAD` rides axum's `get` handling
-/// like Django's `GET`-backed `HEAD`.
+/// / 200 authed) where axum would 405. `HEAD` proxies as well: Django
+/// defines no `head` and 405s after auth (axum would auto-serve it from
+/// `get`).
 pub fn owned(
     get_handler: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
@@ -91,6 +92,7 @@ pub fn owned(
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 

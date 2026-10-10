@@ -346,15 +346,16 @@ pub async fn require_admin(
 
 /// The owned methods on a license path serve from Rust while every other
 /// method falls through to Django (its 405-after-auth, sibling actions,
-/// and metadata responses live there). `HEAD` rides axum's `get` handling
-/// like Django's `GET`-backed `HEAD`; `OPTIONS` proxies so DRF metadata
-/// (401 anon / 200 authed) is preserved.
+/// and metadata responses live there). `HEAD` proxies explicitly: axum
+/// would auto-serve it from `get`, but Django defines no `head` and 405s
+/// after auth. `OPTIONS` proxies so DRF metadata (401 anon / 200 authed)
+/// is preserved.
 pub fn owned(
     methods: axum::routing::MethodRouter<AppState>,
     owned: &[&str],
 ) -> axum::routing::MethodRouter<AppState> {
     let mut router = methods;
-    for other in ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
+    for other in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
         if owned.contains(&other) {
             continue;
         }
@@ -364,6 +365,7 @@ pub fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             _ => router.options(crate::edge::proxy),
         };
     }

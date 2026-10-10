@@ -133,6 +133,7 @@ pub fn routes() -> Router<AppState> {
                 .put(crate::edge::proxy)
                 .patch(crate::edge::proxy)
                 .delete(crate::edge::proxy)
+                .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -142,6 +143,7 @@ pub fn routes() -> Router<AppState> {
                 .delete(quick_link_destroy)
                 .put(crate::edge::proxy)
                 .post(crate::edge::proxy)
+                .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -151,6 +153,7 @@ pub fn routes() -> Router<AppState> {
                 .put(crate::edge::proxy)
                 .post(crate::edge::proxy)
                 .delete(crate::edge::proxy)
+                .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -160,6 +163,7 @@ pub fn routes() -> Router<AppState> {
                 .put(crate::edge::proxy)
                 .post(crate::edge::proxy)
                 .delete(crate::edge::proxy)
+                .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -169,6 +173,7 @@ pub fn routes() -> Router<AppState> {
                 .patch(crate::edge::proxy)
                 .delete(crate::edge::proxy)
                 .post(crate::edge::proxy)
+                .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -178,6 +183,7 @@ pub fn routes() -> Router<AppState> {
                 .put(crate::edge::proxy)
                 .patch(crate::edge::proxy)
                 .delete(crate::edge::proxy)
+                .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -187,6 +193,7 @@ pub fn routes() -> Router<AppState> {
                 .delete(sticky_destroy)
                 .put(crate::edge::proxy)
                 .post(crate::edge::proxy)
+                .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -196,6 +203,7 @@ pub fn routes() -> Router<AppState> {
                 .put(crate::edge::proxy)
                 .post(crate::edge::proxy)
                 .delete(crate::edge::proxy)
+                .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
         .route(
@@ -205,6 +213,7 @@ pub fn routes() -> Router<AppState> {
                 .put(crate::edge::proxy)
                 .post(crate::edge::proxy)
                 .delete(crate::edge::proxy)
+                .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
 }

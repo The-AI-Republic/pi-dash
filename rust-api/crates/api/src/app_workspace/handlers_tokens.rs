@@ -143,6 +143,7 @@ pub fn routes() -> Router<AppState> {
                 .put(proxy)
                 .patch(proxy)
                 .delete(proxy)
+                .head(proxy)
                 .options(proxy)
                 .trace(proxy)
                 .fallback(proxy),
@@ -154,6 +155,7 @@ pub fn routes() -> Router<AppState> {
                 .delete(token_delete)
                 .post(proxy)
                 .put(proxy)
+                .head(proxy)
                 .options(proxy)
                 .trace(proxy)
                 .fallback(proxy),
@@ -165,6 +167,7 @@ pub fn routes() -> Router<AppState> {
                 .put(proxy)
                 .patch(proxy)
                 .delete(proxy)
+                .head(proxy)
                 .options(proxy)
                 .trace(proxy)
                 .fallback(proxy),

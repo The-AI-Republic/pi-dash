@@ -135,8 +135,9 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// The section-list path: only GET exists in Django, so only GET is
-/// owned. `HEAD` rides axum's `get` handling like Django's `GET`-backed
-/// `HEAD`; everything else proxies (DRF's 405-after-auth and metadata).
+/// owned. `HEAD` proxies explicitly (Django 405s it after auth; axum
+/// would auto-serve it from `get`); everything else proxies too (DRF's
+/// 405-after-auth and metadata).
 fn owned_list(
     owned: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
@@ -145,6 +146,7 @@ fn owned_list(
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 
@@ -161,7 +163,8 @@ fn owned_detail(
         .options(crate::edge::proxy)
 }
 
-/// The compiled path: only GET exists in Django.
+/// The compiled path: only GET exists in Django. HEAD proxies (Django
+/// 405s it after auth; axum would auto-serve it from `get`).
 fn owned_compiled(
     owned: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
@@ -170,6 +173,7 @@ fn owned_compiled(
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 

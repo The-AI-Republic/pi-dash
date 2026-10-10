@@ -2380,6 +2380,7 @@ fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };
@@ -2394,7 +2395,7 @@ fn owned(
 pub fn daemon_routes() -> Router<AppState> {
     use axum::routing::{get, post};
     const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
-    const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+    const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     Router::new()
         .route("/api/v1/runner/health/", owned(get(health), GET_ONLY))
         .route(

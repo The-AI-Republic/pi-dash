@@ -74,8 +74,8 @@ pub fn routes() -> Router<AppState> {
 
 /// The settings path: GET + PATCH serve from Rust, everything else falls
 /// through to Django (its 405-after-auth and metadata OPTIONS live
-/// there). `HEAD` rides axum's `get` handling like Django's `GET`-backed
-/// `HEAD`.
+/// there). `HEAD` proxies explicitly: axum would auto-serve it from
+/// `get`, but Django defines no `head` and 405s after auth.
 fn owned_settings(
     owned: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
@@ -83,6 +83,7 @@ fn owned_settings(
         .post(crate::edge::proxy)
         .put(crate::edge::proxy)
         .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 

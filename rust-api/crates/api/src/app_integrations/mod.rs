@@ -194,8 +194,9 @@ pub fn parse_id(raw: &str) -> Result<Uuid, Response> {
 
 /// An app path: the owned methods serve from Rust, everything else falls
 /// through to Django (its 405-after-auth and metadata responses live
-/// there). `HEAD` rides axum's `get` handling like Django's `GET`-backed
-/// `HEAD`.
+/// there). List `"HEAD"` alongside the other unowned methods: axum would
+/// auto-serve it from `get`, but Django defines no `head` and 405s after
+/// auth.
 pub fn owned(
     handler: axum::routing::MethodRouter<AppState>,
     unowned: &[&str],
@@ -207,6 +208,7 @@ pub fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };

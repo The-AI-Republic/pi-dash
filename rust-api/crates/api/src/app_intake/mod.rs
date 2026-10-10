@@ -286,8 +286,9 @@ fn python_dump_str(out: &mut String, text: &str) {
 
 /// An intake path: the owned methods serve from Rust, everything else
 /// falls through to Django (its 405-after-auth and metadata responses
-/// live there). `HEAD` rides axum's `get` handling like Django's
-/// `GET`-backed `HEAD`.
+/// live there). List `"HEAD"` alongside the other unowned methods: axum
+/// would auto-serve it from `get`, but Django defines no `head` and 405s
+/// after auth.
 pub fn owned(
     handler: axum::routing::MethodRouter<AppState>,
     unowned: &[&str],
@@ -299,6 +300,7 @@ pub fn owned(
             "PUT" => router.put(crate::edge::proxy),
             "PATCH" => router.patch(crate::edge::proxy),
             "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
             "OPTIONS" => router.options(crate::edge::proxy),
             _ => router.get(crate::edge::proxy),
         };
@@ -315,21 +317,21 @@ pub fn routes() -> Router<AppState> {
             "/api/workspaces/{slug}/projects/{project_id}/intake-issues/",
             owned(
                 axum::routing::get(issues::collection_list).post(issues::collection_create),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intakes/",
             owned(
                 axum::routing::get(intakes::list).post(intakes::create),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/inbox-issues/",
             owned(
                 axum::routing::get(issues::collection_list).post(issues::collection_create),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -338,14 +340,14 @@ pub fn routes() -> Router<AppState> {
                 axum::routing::get(intakes::retrieve)
                     .patch(intakes::partial_update)
                     .delete(intakes::destroy),
-                &["POST", "PUT", "OPTIONS"],
+                &["POST", "PUT", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/inboxes/",
             owned(
                 axum::routing::get(intakes::list).post(intakes::create),
-                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -354,7 +356,7 @@ pub fn routes() -> Router<AppState> {
                 axum::routing::get(intakes::retrieve)
                     .patch(intakes::partial_update)
                     .delete(intakes::destroy),
-                &["POST", "PUT", "OPTIONS"],
+                &["POST", "PUT", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -363,7 +365,7 @@ pub fn routes() -> Router<AppState> {
                 axum::routing::get(issues::retrieve)
                     .patch(issues::partial_update)
                     .delete(issues::destroy),
-                &["POST", "PUT", "OPTIONS"],
+                &["POST", "PUT", "HEAD", "OPTIONS"],
             ),
         )
         .route(
@@ -372,16 +374,16 @@ pub fn routes() -> Router<AppState> {
                 axum::routing::get(issues::retrieve)
                     .patch(issues::partial_update)
                     .delete(issues::destroy),
-                &["POST", "PUT", "OPTIONS"],
+                &["POST", "PUT", "HEAD", "OPTIONS"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intake-work-items/{work_item_id}/description-versions/",
-            owned(axum::routing::get(versions::list), &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"]),
+            owned(axum::routing::get(versions::list), &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intake-work-items/{work_item_id}/description-versions/{pk}/",
-            owned(axum::routing::get(versions::detail), &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"]),
+            owned(axum::routing::get(versions::detail), &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]),
         )
 }
 

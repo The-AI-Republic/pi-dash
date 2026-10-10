@@ -19,276 +19,33 @@ id, and filed as a fix issue first.
 
 Counts (2026-10-10, `pi_dash.settings.test`):
 
-- Routes: 528 Django rows — 255 OWNED, 273 MISSING (all listed below),
+- Routes: 528 Django rows — 502 OWNED, 26 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
 - Jobs: 85 tasks — 26 OWNED, 34 proxied by design, 25 MISSING;
   beat 26/26 OWNED.
 
 ## Routes
 
-### G1 — axum auto-HEAD serves what Django 405s (247 rows)
+### G1 — axum auto-HEAD serves what Django 405s (0 rows; fixed)
 
-Fix: PIDASHCONV-826. Axum auto-serves HEAD wherever GET is routed;
-Django has no HEAD arm, so HEAD 405s there. Every row below is a GET
-route whose only gap is `HEAD:serves-but-django-405`. Two further HEAD
-gaps live on the magic-generate routes under G1+G4 (shared with G4:
-whichever fix lands first re-lists those two lines).
+Fix: PIDASHCONV-826 (landed). Axum auto-served HEAD wherever GET was
+routed; Django has no HEAD arm, so HEAD 405s there. Every affected route
+now carries an explicit HEAD proxy arm and its inventory row lists HEAD
+as proxied, so the 247 rows reclassified to OWNED (signatures deleted
+below). The two
+magic-generate HEAD gaps stay under G1+G4 below (PIDASHCONV-829's
+scope: their HEAD gap is `drf-405body-vs-axum-405`, not
+`serves-but-django-405`).
 
 ```expected-routes
-G1 :: /api/assets/v2/static/{asset_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/assets/v2/workspaces/{slug}/check/{asset_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/assets/v2/workspaces/{slug}/download/{asset_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/assets/v2/workspaces/{slug}/projects/{project_id}/download/{asset_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/assets/v2/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/attachments/ :: HEAD:serves-but-django-405
-G1 :: /api/assets/v2/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/attachments/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/assets/v2/workspaces/{slug}/projects/{project_id}/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/assets/v2/workspaces/{slug}/{asset_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/instances/ :: HEAD:serves-but-django-405
-G1 :: /api/instances/configurations/ :: HEAD:serves-but-django-405
-G1 :: /api/instances/loop/jobs/ :: HEAD:serves-but-django-405
-G1 :: /api/instances/loop/jobs/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/instances/loop/jobs/{pk}/targets/ :: HEAD:serves-but-django-405
-G1 :: /api/instances/workspace-slug-check/ :: HEAD:serves-but-django-405
-G1 :: /api/instances/workspaces/ :: HEAD:serves-but-django-405
-G1 :: /api/integrations/github/app/callback/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/comments/{comment_id}/reactions/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/cycles/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/intakes/{intake_id}/inbox-issues/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/intakes/{intake_id}/intake-issues/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/intakes/{intake_id}/intake-issues/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/issues/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/issues/{issue_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/issues/{issue_id}/comments/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/issues/{issue_id}/comments/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/issues/{issue_id}/reactions/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/issues/{issue_id}/votes/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/labels/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/members/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/meta/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/modules/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/settings/ :: HEAD:serves-but-django-405
-G1 :: /api/public/anchor/{anchor}/states/ :: HEAD:serves-but-django-405
-G1 :: /api/public/assets/v2/anchor/{anchor}/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/public/workspaces/{slug}/project-boards/ :: HEAD:serves-but-django-405
-G1 :: /api/public/workspaces/{slug}/projects/{project_id}/anchor/ :: HEAD:serves-but-django-405
-G1 :: /api/runners/chat/approvals/ :: HEAD:serves-but-django-405
-G1 :: /api/runners/chat/sessions/ :: HEAD:serves-but-django-405
-G1 :: /api/runners/chat/sessions/{session_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/runners/chat/sessions/{session_id}/messages/ :: HEAD:serves-but-django-405
-G1 :: /api/runners/projects/ :: HEAD:serves-but-django-405
-G1 :: /api/timezones/ :: HEAD:serves-but-django-405
-G1 :: /api/unsplash/ :: HEAD:serves-but-django-405
-G1 :: /api/users/api-tokens/ :: HEAD:serves-but-django-405
-G1 :: /api/users/api-tokens/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/users/file-assets/{asset_key}/ :: HEAD:serves-but-django-405
-G1 :: /api/users/last-visited-workspace/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/accounts/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/accounts/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/activities/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/ai-assistant/agent-profile/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/ai-assistant/mcp-servers/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/auto-pm/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/instance-admin/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/integrations/github/app/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/notification-preferences/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/profile/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/settings/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/workspaces/invitations/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/workspaces/join-requests/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/workspaces/{slug}/activity-graph/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/workspaces/{slug}/dashboard/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/workspaces/{slug}/issues-completed-graph/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/workspaces/{slug}/project-roles/ :: HEAD:serves-but-django-405
-G1 :: /api/users/me/workspaces/{slug}/projects/invitations/ :: HEAD:serves-but-django-405
-G1 :: /api/users/session/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/auth/workspaces/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/runner/health/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/runner/projects/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/users/me/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/assets/{asset_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/invitations/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/invitations/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/members/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/{issue_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/projects/{project_id}/members/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/projects/{project_id}/members/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/projects/{project_id}/project-members/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/projects/{project_id}/project-members/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/projects/{project_id}/states/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/projects/{project_id}/states/{state_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/stickies/ :: HEAD:serves-but-django-405
-G1 :: /api/v1/workspaces/{slug}/stickies/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/file-assets/{workspace_id}/{asset_key}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/advance-analytics-charts/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/advance-analytics-stats/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/advance-analytics/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/ai-assistant/threads/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/ai-assistant/threads/{thread_id}/messages/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/analytic-view/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/analytic-view/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/analytics/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/cycles/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/default-analytics/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/draft-issues/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/draft-issues/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/entity-search/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/estimates/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/export-issues/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/home-preferences/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/home-preferences/{key}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/integrations/git/accounts/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/integrations/git/accounts/{account_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/integrations/git/accounts/{account_id}/repos/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/integrations/git/providers/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/integrations/github/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/integrations/github/repos/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/invitations/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/invitations/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/invitations/{pk}/join/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/issues/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/join-requests/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/labels/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/members/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/members/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/modules/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/project-identifiers/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/project-members/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/project-stats/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/details/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/advance-analytics-charts/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/advance-analytics-stats/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/advance-analytics/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/archived-cycles/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/archived-cycles/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/archived-issues/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/archived-modules/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/archived-modules/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/cycles/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/analytics/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/progress/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/user-properties/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/cycles/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/deleted-issues/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/estimates/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/estimates/{estimate_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/github/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/inbox-issues/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/inbox-issues/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/inboxes/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/inboxes/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/intake-issues/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/intake-state/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/intake-work-items/{work_item_id}/description-versions/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/intake-work-items/{work_item_id}/description-versions/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/intakes/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/intakes/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/invitations/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/invitations/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/issue-labels/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/issue-labels/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/issues-detail/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/issues/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/issues/list/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/issue-attachments/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/meta/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/sub-issues/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/issues/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/issues/{pk}/archive/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/join/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/members/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/members/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/modules/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/modules/{module_id}/archive/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/modules/{module_id}/issues/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/modules/{module_id}/module-links/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/modules/{module_id}/module-links/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/modules/{module_id}/user-properties/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/modules/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/pages-summary/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/pages/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/description/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/versions/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/versions/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/preferences/member/{member_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/project-deploy-boards/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/project-deploy-boards/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/project-estimates/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/project-members/me/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/repository/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/scheduler-bindings/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/scheduler-bindings/occurrences/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/scheduler-bindings/{binding_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/search-issues/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/states/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/states/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/user-favorite-modules/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/user-favorite-views/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/user-properties/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/v2/issues/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/views/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/projects/{project_id}/views/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/prompt-sections :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/prompts/{kind}/compiled :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/quick-links/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/quick-links/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/recent-visits/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/saved-analytic-view/{analytic_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/schedulers/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/schedulers/{scheduler_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/search/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/sidebar-preferences/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/states/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/stickies/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/stickies/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/user-activity/{user_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/user-favorite-projects/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/user-favorites/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/user-favorites/{favorite_id}/group/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/user-issues/{user_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/user-profile/{user_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/user-properties/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/user-stats/{user_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/users/notifications/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/users/notifications/unread/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/users/notifications/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/views/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/views/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/webhook-logs/{webhook_id}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/webhooks/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/webhooks/{pk}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/work-items/{project_identifier}-{issue_identifier}/ :: HEAD:serves-but-django-405
-G1 :: /api/workspaces/{slug}/workspace-members/me/ :: HEAD:serves-but-django-405
-G1 :: /auth/get-csrf-token/ :: HEAD:serves-but-django-405
-G1 :: /auth/gitea/ :: HEAD:serves-but-django-405
-G1 :: /auth/gitea/callback/ :: HEAD:serves-but-django-405
-G1 :: /auth/github/ :: HEAD:serves-but-django-405
-G1 :: /auth/github/callback/ :: HEAD:serves-but-django-405
-G1 :: /auth/gitlab/ :: HEAD:serves-but-django-405
-G1 :: /auth/gitlab/callback/ :: HEAD:serves-but-django-405
-G1 :: /auth/google/ :: HEAD:serves-but-django-405
-G1 :: /auth/google/callback/ :: HEAD:serves-but-django-405
-G1 :: /auth/spaces/gitea/ :: HEAD:serves-but-django-405
-G1 :: /auth/spaces/gitea/callback/ :: HEAD:serves-but-django-405
-G1 :: /auth/spaces/github/ :: HEAD:serves-but-django-405
-G1 :: /auth/spaces/github/callback/ :: HEAD:serves-but-django-405
-G1 :: /auth/spaces/gitlab/ :: HEAD:serves-but-django-405
-G1 :: /auth/spaces/gitlab/callback/ :: HEAD:serves-but-django-405
-G1 :: /auth/spaces/google/ :: HEAD:serves-but-django-405
-G1 :: /auth/spaces/google/callback/ :: HEAD:serves-but-django-405
 ```
 
 ### G1+G4 — magic-generate routes: HEAD (G1) + the rest (G4) (2 rows)
 
-Fixes: PIDASHCONV-826 (HEAD) + PIDASHCONV-829 (the rest). DRF
-POST-only routes: OPTIONS needs a proxy arm (Django answers 200
-metadata), the other methods need proxy arms for DRF's 405 body shape.
+Fix: PIDASHCONV-829 (all arms, including HEAD — PIDASHCONV-826 left
+these two lines untouched). DRF POST-only routes: OPTIONS needs a proxy
+arm (Django answers 200 metadata), the other methods need proxy arms for
+DRF's 405 body shape.
 
 ```expected-routes
 G1+G4 :: /auth/magic-generate/ :: GET:drf-405body-vs-axum-405;PUT:drf-405body-vs-axum-405;PATCH:drf-405body-vs-axum-405;DELETE:drf-405body-vs-axum-405;HEAD:drf-405body-vs-axum-405;OPTIONS:allows-but-405
