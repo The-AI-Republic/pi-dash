@@ -11635,3 +11635,106 @@ export async function serverDisplayName(sessionCookie: string, apiBase: string =
     throw new Error("[parity] users-me carried no display name.");
   return me.display_name;
 }
+
+// --- Archived-cycles oracle helpers (NEWFRONT-224, ARCH-014–019). Appended;
+// --- existing helpers above are untouched per the shared harness contract.
+
+/** One archived cycle row as the archived-cycles endpoints return it. */
+export interface ParityServerArchivedCycle {
+  id: string;
+  name: string;
+  archivedAt: string | null;
+}
+
+/**
+ * Archive a cycle through the API (setup for UI scenarios, never the
+ * assertion). The server only archives cycles whose end date is past, so
+ * fixtures backdate first (see serverPatchCycle); throws otherwise.
+ */
+export async function serverArchiveCycle(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/archive/`,
+    sessionCookie
+  );
+  if (!res.ok) throw new Error(`[parity] cycle archive failed with HTTP ${res.status}.`);
+}
+
+/**
+ * Restore an archived cycle through the API (teardown for UI scenarios).
+ * Targets the frontend-called unarchive path (DELETE on the cycle archive
+ * endpoint), which the NEWFRONT-224 stack probe confirmed live (204; the
+ * inventory-claimed archived-cycles unarchive path 404s); tolerates 404 so
+ * teardown never fails a scenario whose UI already restored the cycle.
+ */
+export async function serverRestoreCycle(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/archive/`,
+    sessionCookie
+  );
+  if (!res.ok && res.status !== 204 && res.status !== 404)
+    throw new Error(`[parity] cycle restore failed with HTTP ${res.status}.`);
+}
+
+/** Archived cycles of a project, in API order. */
+export async function serverArchivedCycles(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerArchivedCycle[]> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/archived-cycles/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] archived-cycles read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const record = row as { id?: unknown; name?: unknown; archived_at?: unknown };
+    if (typeof record.id !== "string" || typeof record.name !== "string") {
+      throw new Error("[parity] archived-cycle row carried no string id and name.");
+    }
+    return {
+      id: record.id,
+      name: record.name,
+      archivedAt: typeof record.archived_at === "string" ? record.archived_at : null,
+    };
+  });
+}
+
+/** One archived cycle's detail (the peek body source). */
+export async function serverArchivedCycleDetail(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerArchivedCycle> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/archived-cycles/${cycleId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] archived-cycle detail read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as { id?: unknown; name?: unknown; archived_at?: unknown };
+  if (typeof record.id !== "string" || typeof record.name !== "string") {
+    throw new Error("[parity] archived-cycle detail carried no string id and name.");
+  }
+  return {
+    id: record.id,
+    name: record.name,
+    archivedAt: typeof record.archived_at === "string" ? record.archived_at : null,
+  };
+}
