@@ -23802,4 +23802,291 @@ export class WebDriver implements ParityDriver {
       }
     });
   }
+
+  // --- Cycles edit/delete/archive oracles (NEWFRONT-251, CYC-017–024). ---
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+
+  /** Live list row hosting `name`: the detail link's grandparent row element. */
+  private cyclesEditRowRoot(name: string): Locator {
+    return this.page
+      .locator('a[href*="/cycles/"]:has(span.truncate)')
+      .filter({ hasText: name })
+      .first()
+      .locator("xpath=../..");
+  }
+
+  private cyclesEditDialog(): Locator {
+    // Toasts also carry role=dialog (aria-modal=false, h2 headings), so
+    // scope to headed modal dialogs only.
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.locator("h3") })
+      .first();
+  }
+
+  /** The delete-confirm dialog specifically (toasts must never match). */
+  private cyclesEditDeleteDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.locator("h3", { hasText: "Delete cycle" }) })
+      .first();
+  }
+
+  async cyclesEditOpenListRaw(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async cyclesEditOpenUpdateDialog(name: string): Promise<void> {
+    await this.cyclesEditRowRoot(name).locator('div[data-main-menu="true"]:visible > button').click({
+      timeout: WebDriver.OPEN_MS,
+    });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebDriver.OPEN_MS });
+    await this.page
+      .getByRole("menuitem")
+      .filter({ has: this.page.locator("h5", { hasText: "Edit" }) })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("heading", { name: "Update cycle" }).waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesEditDialogHeading(): Promise<string | null> {
+    if ((await this.page.getByRole("heading", { name: "Create cycle" }).count()) > 0) return "Create cycle";
+    if ((await this.page.getByRole("heading", { name: "Update cycle" }).count()) > 0) return "Update cycle";
+    return null;
+  }
+
+  async cyclesEditFillName(text: string): Promise<void> {
+    await this.cyclesEditDialog().locator('input[name="name"]').fill(text, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesEditFillDescription(text: string): Promise<void> {
+    await this.cyclesEditDialog().locator('textarea[name="description"]').fill(text, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesEditRangeOpen(): Promise<void> {
+    // In the update dialog the dates trigger is the form's first button:
+    // no project picker renders there, and the footer actions come after.
+    const form = this.page.getByRole("heading", { name: "Update cycle" }).locator("xpath=ancestor::form[1]");
+    await form.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.calendar().waitFor({ state: "visible", timeout: 15_000 });
+  }
+
+  async cyclesEditSubmitUpdate(): Promise<void> {
+    await this.cyclesEditDialog().getByRole("button", { name: "Update cycle" }).click({ timeout: WebDriver.OPEN_MS });
+    await this.page
+      .getByRole("heading", { name: "Update cycle" })
+      .waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesEditSubmitCountingDateChecks(): Promise<{ dateChecks: number }> {
+    let dateChecks = 0;
+    const listener = (request: { method(): string; url(): string }): void => {
+      if (request.method() === "POST" && request.url().includes("/cycles/date-check/")) dateChecks += 1;
+    };
+    this.page.on("request", listener);
+    try {
+      await this.cyclesEditSubmitUpdate();
+    } finally {
+      this.page.off("request", listener);
+    }
+    return { dateChecks };
+  }
+
+  async cyclesEditStoredCycleTab(): Promise<string | null> {
+    return this.page.evaluate(() => {
+      try {
+        const raw = window.localStorage.getItem("cycle_tab");
+        if (raw === null) return null;
+        const parsed: unknown = JSON.parse(raw);
+        return typeof parsed === "string" ? parsed : null;
+      } catch {
+        return null;
+      }
+    });
+  }
+
+  async cyclesEditClearStoredCycleTab(): Promise<void> {
+    await this.page.evaluate(() => {
+      window.localStorage.removeItem("cycle_tab");
+    });
+  }
+
+  async cyclesEditHeroCycleName(): Promise<string | null> {
+    // The hero is the "Active cycle" disclosure panel: either the empty
+    // view (no row link) or the current cycle's row.
+    const button = this.page.locator("button", { hasText: "Active cycle" }).first();
+    if ((await button.count()) === 0) return null;
+    // Child axis: the button's own label divs must not match, only the
+    // disclosure panel sibling does.
+    const panel = button.locator("xpath=../div").first();
+    const link = panel.locator('a[href*="/cycles/"]:has(span.truncate)').first();
+    if ((await link.count()) === 0) return null;
+    const name = (
+      (await link
+        .locator("span.truncate")
+        .first()
+        .innerText()
+        .catch(() => "")) as string
+    ).trim();
+    return name === "" ? null : name;
+  }
+
+  async cyclesEditPressEscape(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+  }
+
+  async cyclesEditTitleFocused(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      const el = document.activeElement;
+      return el instanceof HTMLInputElement && el.getAttribute("name") === "name";
+    });
+  }
+
+  async cyclesEditFocusTrail(steps: number): Promise<string[]> {
+    // Records the focused control's label now, then after each Tab press
+    // (same accessible-label style as the views dialog trail).
+    const trail: string[] = [];
+    for (let index = 0; index <= steps; index += 1) {
+      if (index > 0) await this.page.keyboard.press("Tab");
+      const label = await this.page
+        .evaluate(() => {
+          const el = document.activeElement as HTMLElement | null;
+          if (!el) return "";
+          const input = el as HTMLInputElement;
+          const label = el.getAttribute("aria-label") ?? input.placeholder ?? el.innerText ?? "";
+          return label.replace(/\s+/g, " ").trim().slice(0, 60);
+        })
+        .catch(() => "");
+      trail.push(label);
+    }
+    return trail;
+  }
+
+  async cyclesEditCreateButtonVisible(): Promise<boolean> {
+    return (await this.page.getByRole("button", { name: "Add cycle" }).count()) > 0;
+  }
+
+  async cyclesEditEmptyCreateState(): Promise<{ visible: boolean; disabled: boolean }> {
+    const button = this.page.getByRole("button", { name: "Set your first cycle" });
+    if ((await button.count()) === 0) return { visible: false, disabled: false };
+    const target = button.first();
+    const disabled = await target.isDisabled().catch(() => false);
+    const ariaDisabled = await target.getAttribute("aria-disabled").catch(() => null);
+    return { visible: true, disabled: disabled || ariaDisabled === "true" };
+  }
+
+  async cyclesEditOpenPeek(name: string): Promise<void> {
+    // Live rows peek through the hover-revealed row control (their link
+    // navigates to detail instead), so hover first, then click it.
+    const root = this.cyclesEditRowRoot(name);
+    await root.hover({ timeout: WebDriver.OPEN_MS });
+    await root.getByRole("button", { name: "More details" }).click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.page.url(), { timeout: WebDriver.OPEN_MS }).toContain("peekCycle=");
+  }
+
+  async cyclesEditOpenDetailMenu(): Promise<void> {
+    // The detail header holds several dropdown triggers; only the cycle
+    // quick-actions menu carries Delete plus the archive/restore entry,
+    // so open each visible trigger in reverse DOM order (quick actions
+    // sits last) until those entries show.
+    const triggers = this.page.locator('div[data-main-menu="true"] > button');
+    const total = await triggers.count();
+    for (let index = total - 1; index >= 0; index -= 1) {
+      const trigger = triggers.nth(index);
+      if (!(await trigger.isVisible().catch(() => false))) continue;
+      await trigger.click({ timeout: WebDriver.OPEN_MS });
+      const items = this.page.getByRole("menuitem");
+      const opened = await items
+        .first()
+        .waitFor({ state: "visible", timeout: 3_000 })
+        .then(
+          () => true,
+          () => false
+        );
+      if (opened) {
+        const titles = await items
+          .locator("h5")
+          .allInnerTexts()
+          .catch(() => [] as string[]);
+        const names = titles.map((title) => title.trim());
+        if (names.includes("Delete") && (names.includes("Archive") || names.includes("Restore"))) return;
+      }
+      await this.page.keyboard.press("Escape");
+    }
+    throw new Error("[parity] cycle detail menu with a Delete entry not found.");
+  }
+
+  async cyclesEditDeleteDialogText(): Promise<{ heading: string; body: string } | null> {
+    const dialog = this.cyclesEditDialog();
+    try {
+      await expect
+        .poll(async () => (await dialog.locator("h3").count()) > 0, { timeout: WebDriver.OPEN_MS })
+        .toBe(true);
+    } catch {
+      return null;
+    }
+    const heading = (
+      ((await dialog
+        .locator("h3")
+        .first()
+        .textContent()
+        .catch(() => "")) ?? "") as string
+    ).trim();
+    if (heading === "") return null;
+    const body = (
+      ((await dialog
+        .locator("xpath=.//h3/following-sibling::div[1]")
+        .textContent()
+        .catch(() => "")) ?? "") as string
+    ).trim();
+    return { heading, body };
+  }
+
+  async cyclesEditDeleteConfirm(): Promise<void> {
+    const dialog = this.cyclesEditDeleteDialog();
+    // Attach before clicking: an instantly-fulfilled write (failure
+    // shaping) would otherwise complete before the wait exists, wasting
+    // the budget while the toast expires. Returns once the write lands
+    // (the toast renders with it); callers read the toast immediately and
+    // let later assertions imply the close, so a slow detach can never
+    // outlast the toast.
+    const responded = this.page
+      .waitForResponse((response) => response.request().method() === "DELETE" && response.url().includes("/cycles/"), {
+        timeout: WebDriver.OPEN_MS,
+      })
+      .catch(() => null);
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    await responded;
+  }
+
+  async cyclesEditDeleteCancel(): Promise<void> {
+    const dialog = this.cyclesEditDeleteDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesEditFailNextDeleteWrite(): Promise<void> {
+    // Page-scoped: fulfills the permission refusal the server returns for
+    // forbidden deletes, passing every other request through untouched.
+    await this.page.route("**/cycles/*/", async (route) => {
+      if (route.request().method() === "DELETE") {
+        await route.fulfill({
+          status: 403,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "You don't have the required permissions." }),
+        });
+      } else {
+        await route.continue();
+      }
+    });
+  }
+
+  async cyclesEditDetailReadOnlyNotice(): Promise<string | null> {
+    const notice = this.page.getByText(/not editable/i).first();
+    if ((await notice.count()) === 0) return null;
+    const text = (((await notice.textContent().catch(() => "")) ?? "") as string).trim();
+    return text === "" ? null : text;
+  }
 }
