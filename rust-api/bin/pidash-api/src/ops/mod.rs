@@ -132,7 +132,16 @@ async fn run_create_bucket() -> Result<(), OpsFailure> {
     // exit 0); only the symbolic-code `ValueError` escapes.
     let target = match storage::resolve_create_target(&env) {
         Ok(target) => target,
-        Err(error) => {
+        // The client-build `ValueError` precedes the `Checking bucket...`
+        // print (`create_bucket.py:20-30`), so it stands alone ...
+        Err(error @ storage::S3SetupError::InvalidEndpoint(_)) => {
+            out(&format!("An error occurred: {error}"));
+            return Ok(());
+        }
+        // ... while the `None`-bucket `TypeError` arises at the
+        // `head_bucket` call, after `Checking bucket...` prints (:30-32).
+        Err(error @ storage::S3SetupError::BucketNone) => {
+            out(storage::CHECKING_BUCKET);
             out(&format!("An error occurred: {error}"));
             return Ok(());
         }
@@ -153,7 +162,8 @@ async fn run_update_bucket() -> Result<(), OpsFailure> {
             return Ok(());
         }
         // `get_s3_client()` at `update_bucket.py:138` is outside any
-        // `try`: a missing region escapes `handle` (traceback, exit 1).
+        // `try`: the client-build `ValueError` escapes `handle`
+        // (traceback, exit 1).
         Err(error) => return Err(OpsFailure(error.to_string())),
     };
     let ops = storage::ReqwestS3::new(&target);

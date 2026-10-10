@@ -31,7 +31,7 @@ fn database_url() -> Result<String, OpsFailure> {
 pub async fn run_wait_for_db() -> Result<(), OpsFailure> {
     let url = database_url()?;
     let mut out = print_line;
-    boot::run_wait_for_db(&url, &mut out, WAIT_FOR_DB_SLEEP, None)
+    boot::run_wait_for_db(&url, &mut out, WAIT_FOR_DB_SLEEP)
         .await
         .map_err(|error| OpsFailure(error.to_string()))?;
     Ok(())

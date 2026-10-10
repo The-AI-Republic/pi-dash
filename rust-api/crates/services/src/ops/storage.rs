@@ -9,7 +9,8 @@
 //! Request shapes were captured from botocore (boto3 1.34.96, the pinned
 //! version) against a logging stub: path-style URLs against an explicit
 //! endpoint, `GET /{bucket}?list-type=2&encoding-type=url` for lists
-//! (keys arrive URL-encoded and are decoded, like botocore does),
+//! (list keys arrive raw — botocore does NOT percent-decode despite
+//! `encoding-type=url`, so neither does the port),
 //! `PUT /{bucket}?policy` for policies, empty bodies on head/create, and
 //! auto-sent `Content-MD5` on PutObject/PutBucketPolicy only. The signer
 //! sends the real payload hash in `x-amz-content-sha256`, following the
@@ -22,9 +23,9 @@
 //!   call once and fails fast. Retry timing and the suffix are the only
 //!   divergence — every status/code/message classification matches.
 //! * Python tracebacks (unhandled `ValueError` from `int()`, uncaught
-//!   `ClientError` from the permissions.json fallback, `NoRegionError` in
-//!   `update_bucket`) become a one-line stderr message; the exit code (1)
-//!   matches.
+//!   `ClientError` from the permissions.json fallback, `ValueError` from
+//!   an empty region without an endpoint in `update_bucket`) become a
+//!   one-line stderr message; the exit code (1) matches.
 //! * Credentials resolve from the environment only. boto3 would fall
 //!   through to shared files and instance metadata; the project's config
 //!   registry classifies these keys as env-only, so that chain is out of
@@ -74,47 +75,86 @@ pub const TEST_OBJECT_BODY: &[u8] = b"Test";
 pub const UNBOUND_PERMISSIONS_MESSAGE: &str =
     "cannot access local variable 'permissions' where it is not associated with a value";
 
-/// The five environment variables both bucket commands read with
-/// `os.environ.get` (`create_bucket.py:21-28,32`, `update_bucket.py:18-27`).
-/// `None` means unset; an empty string is `Some("")` and behaves exactly
-/// like boto3 treats it (empty credentials are *used*, empty region is
-/// passed through — only `None` triggers the missing-value paths).
+/// The environment variables both bucket commands read with
+/// `os.environ.get` (`create_bucket.py:21-28,32`, `update_bucket.py:18-27`),
+/// plus `AWS_DEFAULT_REGION`, which boto3's own region chain consults when
+/// `AWS_REGION` is unset. `None` means unset; an empty string is `Some("")`
+/// and behaves exactly like boto3 treats it (empty credentials are *used*,
+/// a set-but-empty region wins over the chain — only `None` falls through).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct S3Env {
     pub endpoint_url: Option<String>,
     pub access_key_id: Option<String>,
     pub secret_access_key: Option<String>,
     pub region: Option<String>,
+    pub default_region: Option<String>,
     pub bucket: Option<String>,
 }
 
 impl S3Env {
-    /// Read the five variables from the process environment.
+    /// Read the variables from the process environment.
     pub fn from_env() -> Self {
         Self {
             endpoint_url: std::env::var("AWS_S3_ENDPOINT_URL").ok(),
             access_key_id: std::env::var("AWS_ACCESS_KEY_ID").ok(),
             secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").ok(),
             region: std::env::var("AWS_REGION").ok(),
+            default_region: std::env::var("AWS_DEFAULT_REGION").ok(),
             bucket: std::env::var("AWS_S3_BUCKET_NAME").ok(),
         }
     }
 }
 
-/// Client-construction failures, in the order Python raises them: region
-/// first (`boto3.client` raises `NoRegionError`), then the `None` bucket
-/// (which fails URL construction with a `TypeError`), and credentials last
-/// (raised lazily per call as [`S3CallError::NoCredentials`]).
+/// boto3's region chain for `region_name=os.environ.get("AWS_REGION")`
+/// (probed with pinned boto3 1.34.96, isolated config): an explicitly
+/// passed value wins even when empty; when `AWS_REGION` is unset,
+/// `AWS_DEFAULT_REGION` applies (also set-wins, even when empty); when
+/// both are unset, S3 defaults to `us-east-1` (S3-only — other services
+/// raise `NoRegionError` there, S3 never does).
+pub fn resolve_s3_region(env: &S3Env) -> String {
+    if let Some(region) = env.region.clone() {
+        return region;
+    }
+    if let Some(default) = env.default_region.clone() {
+        return default;
+    }
+    "us-east-1".to_string()
+}
+
+/// Client-construction failures, in the order Python raises them: the
+/// invalid endpoint first (`boto3.client` raises `ValueError`), then the
+/// `None` bucket (which fails URL construction with a `TypeError`), and
+/// credentials last (raised lazily per call as
+/// [`S3CallError::NoCredentials`]).
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum S3SetupError {
-    /// `NoRegionError`: `str()` is exactly this (pinned boto3 1.34.96).
-    #[error("You must specify a region.")]
-    NoRegion,
+    /// botocore's client-build `ValueError`, `f"Invalid endpoint:
+    /// {endpoint_url}"` (probed with pinned boto3 1.34.96): an explicitly
+    /// empty endpoint is always invalid (payload `""`, hence the trailing
+    /// space), and an empty region without an endpoint derives the invalid
+    /// `https://s3..amazonaws.com`. With a non-empty endpoint the empty
+    /// region passes through to signing instead.
+    #[error("Invalid endpoint: {0}")]
+    InvalidEndpoint(String),
     /// Not a `ParamValidationError`: with `Bucket=None`, botocore fails
     /// URL construction with this CPython `TypeError` (verified with the
     /// pinned boto3, with and without credentials set).
     #[error("expected string or bytes-like object, got 'NoneType'")]
     BucketNone,
+}
+
+/// The client-build endpoint check: an explicitly empty endpoint is
+/// always invalid, and an empty region without an endpoint derives the
+/// invalid `https://s3..amazonaws.com` (both probed with pinned boto3
+/// 1.34.96 — see [`S3SetupError::InvalidEndpoint`]).
+fn check_endpoint(endpoint_url: Option<&str>, region: &str) -> Result<(), S3SetupError> {
+    match endpoint_url {
+        Some("") => Err(S3SetupError::InvalidEndpoint(String::new())),
+        None if region.is_empty() => Err(S3SetupError::InvalidEndpoint(
+            "https://s3..amazonaws.com".to_string(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// A resolved call target: everything except the credentials, which stay
@@ -128,14 +168,17 @@ pub struct S3Target {
     pub bucket: String,
 }
 
-/// `create_bucket` setup: build the client (region check), then resolve
-/// the bucket (`create_bucket.py:20-32`).
+/// `create_bucket` setup: build the client (region chain, then the
+/// empty-region endpoint check), then resolve the bucket
+/// (`create_bucket.py:20-32`).
 pub fn resolve_create_target(env: &S3Env) -> Result<S3Target, S3SetupError> {
+    let region = resolve_s3_region(env);
+    check_endpoint(env.endpoint_url.as_deref(), &region)?;
     Ok(S3Target {
         endpoint_url: env.endpoint_url.clone(),
         access_key_id: env.access_key_id.clone(),
         secret_access_key: env.secret_access_key.clone(),
-        region: env.region.clone().ok_or(S3SetupError::NoRegion)?,
+        region,
         bucket: env.bucket.clone().ok_or(S3SetupError::BucketNone)?,
     })
 }
@@ -148,12 +191,16 @@ pub enum UpdateSetup {
     MissingBucket,
 }
 
-/// `update_bucket` setup: build the client (region check, fatal —
-/// `update_bucket.py:138` is outside any `try`), then the bucket check.
+/// `update_bucket` setup: build the client (region chain, then the
+/// empty-region endpoint check — fatal, since `update_bucket.py:138` is
+/// outside any `try`), then the bucket check (`if not bucket_name` at
+/// :142: `None` and `""` both take the unset line).
 pub fn resolve_update_target(env: &S3Env) -> Result<UpdateSetup, S3SetupError> {
-    let region = env.region.clone().ok_or(S3SetupError::NoRegion)?;
-    let Some(bucket) = env.bucket.clone() else {
-        return Ok(UpdateSetup::MissingBucket);
+    let region = resolve_s3_region(env);
+    check_endpoint(env.endpoint_url.as_deref(), &region)?;
+    let bucket = match env.bucket.clone() {
+        Some(bucket) if !bucket.is_empty() => bucket,
+        _ => return Ok(UpdateSetup::MissingBucket),
     };
     Ok(UpdateSetup::Ready(S3Target {
         endpoint_url: env.endpoint_url.clone(),
@@ -208,9 +255,10 @@ impl std::fmt::Display for S3CallError {
 impl std::error::Error for S3CallError {}
 
 /// The seven S3 calls the bucket commands make, in botocore terms:
-/// `head_bucket`, `create_bucket`, `list_objects_v2` (returning the
-/// decoded key list — `Contents` absent means empty), `get_object`,
-/// `put_object`, `delete_object`, `put_bucket_policy`.
+/// `head_bucket`, `create_bucket`, `list_objects_v2` (returning the raw
+/// key list — botocore does not decode, and `Contents` absent means
+/// empty), `get_object`, `put_object`, `delete_object`,
+/// `put_bucket_policy`.
 #[allow(async_fn_in_trait)]
 pub trait S3Ops {
     /// `HEAD /{bucket}`.
@@ -231,9 +279,12 @@ pub trait S3Ops {
 
 /// `create_bucket`'s `int(error_code)` failing on a symbolic code
 /// (`create_bucket.py:37` raises `ValueError` out of `handle` — traceback,
-/// exit 1).
+/// exit 1). The quotes are single: CPython formats the failed literal with
+/// `repr()`. (Over real HTTP this path is unreachable — neither stack
+/// delivers a body on HEAD, so the code is always synthesized numeric —
+/// but the `int()` translation is pinned exactly anyway.)
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
-#[error("invalid literal for int() with base 10: {0:?}")]
+#[error("invalid literal for int() with base 10: '{0}'")]
 pub struct NonNumericCode(pub String);
 
 /// `create_bucket.py:19-61`: check-then-create with the 404/403/else
@@ -558,40 +609,6 @@ pub fn uri_encode_path(path: &str) -> String {
     encoded
 }
 
-/// Decode `%XX` sequences (list keys arrive URL-encoded with
-/// `encoding-type=url`; `+` is a literal plus, not a space).
-pub fn uri_decode_key(encoded: &str) -> String {
-    let bytes = encoded.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let mut advanced = false;
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Some(high) = hex_value(bytes[index + 1]) {
-                if let Some(low) = hex_value(bytes[index + 2]) {
-                    decoded.push(high * 16 + low);
-                    index += 3;
-                    advanced = true;
-                }
-            }
-        }
-        if !advanced {
-            decoded.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
 /// Canonicalize a query string for signing: split on `&`, sort, render
 /// each pair as `name=value` (a bare name gains `=`), join with `&`.
 /// `?policy` therefore signs as `policy=`, like botocore.
@@ -708,7 +725,11 @@ fn xml_tag(text: &str, tag: &str) -> Option<String> {
     Some(text[start..end].to_string())
 }
 
-/// Collect every `<Key>` value of a ListBucketResult, URL-decoded.
+/// Collect every `<Key>` value of a ListBucketResult, raw: the XML
+/// parser unescapes entities, but the `%XX` sequences stay — botocore
+/// does not percent-decode list keys despite `encoding-type=url`
+/// (wire-verified with the pinned boto3), so a later `get_object` of an
+/// exotic key re-encodes the `%` (`%25`) exactly like Python's.
 pub fn parse_list_keys(body: &[u8]) -> Vec<String> {
     let Ok(text) = std::str::from_utf8(body) else {
         return Vec::new();
@@ -720,7 +741,7 @@ pub fn parse_list_keys(body: &[u8]) -> Vec<String> {
         let Some(end) = content.find("</Key>") else {
             break;
         };
-        keys.push(uri_decode_key(&xml_unescape(&content[..end])));
+        keys.push(xml_unescape(&content[..end]));
         rest = &content[end + "</Key>".len()..];
     }
     keys
@@ -794,9 +815,11 @@ pub fn resolve_request_base(
         // percent-encode exotic names, which S3 rejects anyway.
         (base, signed_host, format!("/{bucket}"))
     } else if region.is_empty() {
-        // botocore derives `https://s3..amazonaws.com` and rejects it;
-        // unreachable here (empty region is passed through to signing and
-        // the request fails at the server like Python's).
+        // botocore derives `https://s3..amazonaws.com` here and rejects it
+        // with `ValueError` at client build (probed) — the resolvers
+        // reproduce that as [`S3SetupError::InvalidEndpoint`] before any
+        // client is constructed, so this arm is the total-function
+        // fallback for direct callers only.
         (
             format!("https://{bucket}.s3.amazonaws.com"),
             format!("{bucket}.s3.amazonaws.com"),
@@ -829,10 +852,22 @@ pub struct ReqwestS3 {
     region: String,
 }
 
+/// botocore's timeout text: `ConnectTimeoutError` for connect stalls,
+/// `ReadTimeoutError` for post-connect stalls (both read from the
+/// installed botocore's `exceptions.py`).
+fn timeout_message(url: &str, is_connect: bool) -> String {
+    let kind = if is_connect { "Connect" } else { "Read" };
+    format!("{kind} timeout on endpoint URL: \"{url}\"")
+}
+
 impl ReqwestS3 {
-    /// Build from a resolved [`S3Target`]. Never fails — even an empty
-    /// region passes through to signing (botocore accepts `region_name=""`
-    /// and fails at the server instead).
+    /// Build from a resolved [`S3Target`]. Never fails: the resolvers
+    /// already rejected the invalid endpoint shapes, and an empty region
+    /// with an endpoint passes through to signing (botocore builds that
+    /// client too). The `.expect()` below can only fire without a
+    /// compiled-in TLS backend — rustls is a hard dependency, so it
+    /// cannot fail at runtime, like Python's client build, which cannot
+    /// fail once the region/endpoint are valid.
     pub fn new(target: &S3Target) -> Self {
         let (url_base, signed_host, path_prefix) = resolve_request_base(
             target.endpoint_url.as_deref(),
@@ -841,6 +876,12 @@ impl ReqwestS3 {
         );
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
+            // botocore S3 answers a 301 (wrong-region bucket) by
+            // re-signing for the new host and retrying; reqwest would
+            // follow the redirect with a stale signature instead, so
+            // redirects are surfaced (a corner beyond the entrypoint
+            // contract — explicit-endpoint MinIO never redirects).
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest client builds with a stock TLS backend");
         Self {
@@ -909,9 +950,9 @@ impl ReqwestS3 {
             // botocore reports every transport failure as
             // `EndpointConnectionError: Could not connect to the endpoint
             // URL: "{url}"` (DNS failures included); timeouts are the
-            // `Connect timeout` variant.
+            // `Connect`/`Read timeout` variants.
             if error.is_timeout() {
-                S3CallError::Transport(format!("Connect timeout on endpoint URL: \"{url}\""))
+                S3CallError::Transport(timeout_message(&url, error.is_connect()))
             } else {
                 S3CallError::Transport(format!("Could not connect to the endpoint URL: \"{url}\""))
             }
@@ -1196,8 +1237,14 @@ mod tests {
             "Unable to locate credentials"
         );
         assert_eq!(
-            S3SetupError::NoRegion.to_string(),
-            "You must specify a region."
+            S3SetupError::InvalidEndpoint("https://s3..amazonaws.com".to_string()).to_string(),
+            "Invalid endpoint: https://s3..amazonaws.com"
+        );
+        // An explicitly empty endpoint: botocore's f-string leaves the
+        // trailing space.
+        assert_eq!(
+            S3SetupError::InvalidEndpoint(String::new()).to_string(),
+            "Invalid endpoint: "
         );
         assert_eq!(
             S3SetupError::BucketNone.to_string(),
@@ -1205,25 +1252,87 @@ mod tests {
         );
     }
 
+    /// boto3's region chain, probed with pinned boto3 1.34.96: `AWS_REGION`
+    /// wins when set (even `""`), else `AWS_DEFAULT_REGION` (also set-wins,
+    /// even `""`), else S3's `us-east-1` default.
     #[test]
-    fn setup_precedence_region_then_bucket() {
-        let mut env = S3Env::default();
-        assert_eq!(resolve_create_target(&env), Err(S3SetupError::NoRegion));
-        env.region = Some("us-east-1".to_string());
-        assert_eq!(resolve_create_target(&env), Err(S3SetupError::BucketNone));
-        env.bucket = Some("b".to_string());
-        let target = resolve_create_target(&env).expect("resolved");
+    fn region_chain_resolution() {
+        let unset = S3Env::default();
+        assert_eq!(resolve_s3_region(&unset), "us-east-1");
+        let defaulted = S3Env {
+            default_region: Some("eu-west-2".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_s3_region(&defaulted), "eu-west-2");
+        let explicit = S3Env {
+            region: Some("ap-south-1".to_string()),
+            default_region: Some("eu-west-2".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_s3_region(&explicit), "ap-south-1");
+        // Set-but-empty wins over the chain on both steps.
+        let empty_explicit = S3Env {
+            region: Some(String::new()),
+            default_region: Some("eu-west-2".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_s3_region(&empty_explicit), "");
+        let empty_default = S3Env {
+            default_region: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_s3_region(&empty_default), "");
+    }
+
+    #[test]
+    fn setup_precedence_endpoint_then_bucket() {
+        // No region anywhere: S3 defaults to us-east-1 and setup succeeds
+        // (there is no `NoRegionError` for S3).
+        let mut env = S3Env {
+            bucket: Some("b".to_string()),
+            ..Default::default()
+        };
+        let target = resolve_create_target(&env).expect("default region resolves");
         assert_eq!(target.region, "us-east-1");
-        // Empty strings are passed through, like boto3 (verified: empty
-        // region builds the client, empty credentials are used).
+        // The client-build endpoint check precedes the bucket check.
         env.region = Some(String::new());
-        assert!(resolve_create_target(&env).is_ok());
-        // update_bucket distinguishes the missing bucket (its own line)
-        // from the missing region (fatal).
-        let mut env = S3Env::default();
-        assert_eq!(resolve_update_target(&env), Err(S3SetupError::NoRegion));
+        assert_eq!(
+            resolve_create_target(&env),
+            Err(S3SetupError::InvalidEndpoint(
+                "https://s3..amazonaws.com".to_string()
+            ))
+        );
+        // ... unless an endpoint is set: the empty region passes through.
+        env.endpoint_url = Some("http://127.0.0.1:4566".to_string());
+        let target = resolve_create_target(&env).expect("empty region with endpoint builds");
+        assert_eq!(target.region, "");
+        // An explicitly empty endpoint is always invalid.
+        env.endpoint_url = Some(String::new());
+        assert_eq!(
+            resolve_create_target(&env),
+            Err(S3SetupError::InvalidEndpoint(String::new()))
+        );
+        // The `None` bucket resolves after the endpoint check.
+        env.endpoint_url = None;
         env.region = Some("r".to_string());
+        env.bucket = None;
+        assert_eq!(resolve_create_target(&env), Err(S3SetupError::BucketNone));
+        // update_bucket distinguishes the missing bucket (its own line)
+        // from the invalid endpoint (fatal).
+        let mut env = S3Env::default();
         assert_eq!(resolve_update_target(&env), Ok(UpdateSetup::MissingBucket));
+        env.bucket = Some(String::new());
+        assert_eq!(resolve_update_target(&env), Ok(UpdateSetup::MissingBucket));
+        env.bucket = Some("b".to_string());
+        assert!(matches!(
+            resolve_update_target(&env),
+            Ok(UpdateSetup::Ready(_))
+        ));
+        env.region = Some(String::new());
+        assert!(matches!(
+            resolve_update_target(&env),
+            Err(S3SetupError::InvalidEndpoint(_))
+        ));
     }
 
     /// F37-02 create_bucket matrix, every branch.
@@ -1346,6 +1455,11 @@ mod tests {
         let (lines, mut out) = sink();
         let result = run_create_bucket(&fake, "bkt", &mut out).await;
         assert_eq!(result, Err(NonNumericCode("NoSuchBucket".to_string())));
+        // CPython's `int()` text quotes the literal with single quotes.
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "invalid literal for int() with base 10: 'NoSuchBucket'"
+        );
         assert_eq!(lines.borrow().as_slice(), ["Checking bucket..."]);
 
         // Transport on head: outer `except Exception`.
@@ -1704,14 +1818,17 @@ mod tests {
     }
 
     #[test]
-    fn path_encoding_and_key_decoding() {
+    fn path_encoding() {
         assert_eq!(uri_encode_path("a.txt"), "a.txt");
         assert_eq!(uri_encode_path("odd key+&.txt"), "odd%20key%2B%26.txt");
         assert_eq!(uri_encode_path("a/b"), "a/b");
         assert_eq!(uri_encode_path("caf\u{e9}.txt"), "caf%C3%A9.txt");
-        assert_eq!(uri_decode_key("odd%20key%2B%26.txt"), "odd key+&.txt");
-        assert_eq!(uri_decode_key("a+b"), "a+b");
-        assert_eq!(uri_decode_key("%zz"), "%zz");
+        // Raw list keys re-encode the `%` (`%25`) on the wire — the
+        // double-encoding Python produces by not decoding either.
+        assert_eq!(
+            uri_encode_path("odd%20key%2B%26.txt"),
+            "odd%2520key%252B%2526.txt"
+        );
     }
 
     #[test]
@@ -1726,17 +1843,34 @@ mod tests {
         );
         assert_eq!(parse_error_xml(b""), None);
         assert_eq!(parse_error_xml(b"<html>nope</html>"), None);
+        // List keys stay raw (`%XX` untouched); only XML entities decode.
         assert_eq!(
             parse_list_keys(
-                br#"<?xml version="1.0" ?><ListBucketResult><KeyCount>2</KeyCount><Contents><Key>a.txt</Key></Contents><Contents><Key>odd%20key.txt</Key></Contents></ListBucketResult>"#
+                br#"<?xml version="1.0" ?><ListBucketResult><KeyCount>3</KeyCount><Contents><Key>a.txt</Key></Contents><Contents><Key>odd%20key.txt</Key></Contents><Contents><Key>a &amp; b%20c</Key></Contents></ListBucketResult>"#
             ),
-            vec!["a.txt".to_string(), "odd key.txt".to_string()]
+            vec![
+                "a.txt".to_string(),
+                "odd%20key.txt".to_string(),
+                "a & b%20c".to_string(),
+            ]
         );
         assert!(parse_list_keys(
             br#"<?xml version="1.0" ?><ListBucketResult><KeyCount>0</KeyCount></ListBucketResult>"#
         )
         .is_empty());
         assert_eq!(xml_unescape("a &amp; b &#65; &#x42;"), "a & b A B");
+    }
+
+    #[test]
+    fn timeout_texts_match_botocore() {
+        assert_eq!(
+            timeout_message("http://x/bkt", true),
+            "Connect timeout on endpoint URL: \"http://x/bkt\""
+        );
+        assert_eq!(
+            timeout_message("http://x/bkt", false),
+            "Read timeout on endpoint URL: \"http://x/bkt\""
+        );
     }
 
     #[test]

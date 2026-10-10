@@ -11,19 +11,16 @@
 //! * `wait_for_db`: Python's check (`connections["default"]`) only builds
 //!   the connection wrapper and never raises, so the retry branch is dead
 //!   and `Database available!` prints even when the DB is down (F37-01
-//!   BUGS). A no-op wait would break the entrypoint contract (the migrator
-//!   runs `wait_for_db` before `migrate`), so the Rust port performs a real
-//!   connect + `SELECT 1` probe and retries with Python's own verbatim
-//!   retry line (including the `waititng` typo). The success-path bytes are
-//!   identical to Python.
+//!   BUGS — ported as is: the loop below always exits after one pass,
+//!   and the typo'd retry line is kept verbatim for the unreachable
+//!   branch).
 //! * `wait_for_migrations`: a missing `django_migrations` table counts
 //!   as pending in both implementations (Django's loader plans every
 //!   migration then, so it waits too — verified live). When the database
 //!   itself is down, Python crashes with an uncaught `OperationalError`
-//!   (traceback, exit 1) while the Rust port keeps waiting: the
-//!   entrypoint starts API containers while Postgres is still coming up,
-//!   and crashing the container there would break the boot the command
-//!   exists for. The success-path bytes are identical to Python.
+//!   (traceback, exit 1, empty stdout); the Rust port returns
+//!   [`BootError::DatabaseUnavailable`], which the CLI renders as a
+//!   one-line stderr message with the same exit code and no stdout.
 //! * The pending check is leaf-node parity, not a reimplementation of
 //!   `MigrationExecutor`: Django applies migrations in dependency order,
 //!   so every leaf node being applied implies its ancestors are applied,
@@ -78,6 +75,12 @@ pub enum BootError {
     /// fails fast instead of joining the retry loop.
     #[error("invalid DATABASE_URL: {0}")]
     BadDatabaseUrl(String),
+    /// The database is unreachable, or a probe query failed: Python's
+    /// uncaught `OperationalError` (traceback, exit 1). The text is a
+    /// one-line summary instead of libpq's message — the documented
+    /// crash-path class.
+    #[error("database unavailable: {0}")]
+    DatabaseUnavailable(String),
 }
 
 /// True while any leaf migration in [`LEAF_MIGRATIONS`] is absent from the
@@ -102,14 +105,29 @@ pub async fn fetch_applied_migrations(
     Ok(rows.into_iter().collect())
 }
 
-/// One `_pending_migrations()` probe: true while migrations are pending.
-/// Any failure (unreachable database, missing table) counts as pending —
-/// like Django's loader, which plans everything when the table is absent
-/// (see the module docs for the one divergence: a down database).
-pub async fn migrations_pending(connection: &mut sqlx::postgres::PgConnection) -> bool {
+/// Postgres `undefined_table`: the migrator hasn't run yet. Django's
+/// loader plans every migration when the table is absent (verified live:
+/// plan of 260, no raise), so this one error counts as pending; every
+/// other failure crashes, like Python's uncaught `OperationalError`.
+fn is_missing_table(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(database_error)
+            if database_error.code().as_deref() == Some("42P01")
+    )
+}
+
+/// One `_pending_migrations()` probe over an open connection: true while
+/// migrations are pending. A missing table counts as pending; any other
+/// query failure propagates (Python crashes with an uncaught
+/// `OperationalError` there).
+pub async fn migrations_pending(
+    connection: &mut sqlx::postgres::PgConnection,
+) -> Result<bool, sqlx::Error> {
     match fetch_applied_migrations(connection).await {
-        Ok(applied) => migrations_pending_from_applied(&applied),
-        Err(_) => true,
+        Ok(applied) => Ok(migrations_pending_from_applied(&applied)),
+        Err(error) if is_missing_table(&error) => Ok(true),
+        Err(error) => Err(error),
     }
 }
 
@@ -137,59 +155,53 @@ async fn probe_connection(
         .map_err(|_| sqlx::Error::PoolTimedOut)?
 }
 
-/// One `wait_for_db` probe: connect plus a trivial query (the translated
-/// one-shot check — see the module docs). The connection is closed before
-/// returning so a waiting loop holds nothing idle.
-async fn db_is_up(options: &sqlx::postgres::PgConnectOptions) -> bool {
-    let mut connection = match probe_connection(options).await {
-        Ok(connection) => connection,
-        Err(_) => return false,
-    };
-    let up = sqlx::query("SELECT 1")
-        .execute(&mut connection)
-        .await
-        .is_ok();
-    let _ = connection.close().await;
-    up
+/// The one-shot check, `connections["default"]`: it only builds the
+/// connection wrapper and never raises `OperationalError`, so it always
+/// succeeds and `wait_for_db` never retries (F37-01 BUGS). It performs
+/// no I/O — the wrapper was already built by parsing the URL.
+fn db_wrapper_is_up() -> bool {
+    true
 }
 
 /// One `_pending_migrations()` probe over a fresh single connection.
-async fn migrations_pending_probe(options: &sqlx::postgres::PgConnectOptions) -> bool {
-    let mut connection = match probe_connection(options).await {
-        Ok(connection) => connection,
-        // Unreachable database: pending (Python crashes with
-        // OperationalError here instead — see the module docs).
-        Err(_) => return true,
-    };
-    let pending = migrations_pending(&mut connection).await;
+/// An unreachable database — or any query failure other than a missing
+/// table — is fatal (Python's uncaught `OperationalError`: one stderr
+/// line, exit 1, no stdout).
+async fn migrations_pending_probe(
+    options: &sqlx::postgres::PgConnectOptions,
+) -> Result<bool, BootError> {
+    let mut connection = probe_connection(options)
+        .await
+        .map_err(|error| BootError::DatabaseUnavailable(error.to_string()))?;
+    let pending = migrations_pending(&mut connection)
+        .await
+        .map_err(|error| BootError::DatabaseUnavailable(error.to_string()))?;
     let _ = connection.close().await;
-    pending
+    Ok(pending)
 }
 
-/// `wait_for_db`: print the start line, then probe until the database
-/// answers, printing the retry line and sleeping `sleep` between attempts
-/// (`wait_for_db.py:15-24`). `max_attempts` caps the loop for tests only —
-/// production passes `None` (loop forever, like Python). Returns the number
-/// of probes performed.
+/// `wait_for_db`: print the start line, perform the one-shot check, print
+/// the success line (`wait_for_db.py:15-24`). The check never fails, so
+/// the loop always exits after one pass — even when the database is down —
+/// and the retry branch is unreachable (kept verbatim, with the
+/// `waititng` typo). Returns 1 (one probe performed).
 pub async fn run_wait_for_db(
     database_url: &str,
     out: &mut dyn FnMut(&str),
     sleep: Duration,
-    max_attempts: Option<u64>,
 ) -> Result<u64, BootError> {
-    let options = parse_database_url(database_url)?;
+    // Building the wrapper is parsing the URL: the only failure is a
+    // config error (fails fast, before any output).
+    parse_database_url(database_url)?;
     out(WAIT_DB_START);
     let mut attempts: u64 = 0;
     loop {
         attempts += 1;
-        if db_is_up(&options).await {
+        if db_wrapper_is_up() {
             out(WAIT_DB_OK);
             return Ok(attempts);
         }
         out(WAIT_DB_RETRY);
-        if max_attempts.is_some_and(|max| attempts >= max) {
-            return Ok(attempts);
-        }
         tokio::time::sleep(sleep).await;
     }
 }
@@ -208,7 +220,7 @@ pub async fn run_wait_for_migrations(
     let mut attempts: u64 = 0;
     loop {
         attempts += 1;
-        if !migrations_pending_probe(&options).await {
+        if !migrations_pending_probe(&options).await? {
             out(WAIT_MIGRATIONS_OK);
             return Ok(attempts);
         }
@@ -243,8 +255,11 @@ pub async fn clear_cache(redis_url: Option<&str>, key: Option<&str>) -> String {
 async fn clear_cache_inner(redis_url: Option<&str>, key: Option<&str>) -> Result<String, ()> {
     let url = redis_url.filter(|url| !url.is_empty()).ok_or(())?;
     let client = redis::Client::open(url).map_err(|_| ())?;
-    // Django socket timeouts (`settings/common.py:238-239`): 2s connect,
-    // 5s command.
+    // Deliberate CLI bounds (2s connect, 5s command): django-redis
+    // itself runs with blocking sockets here — `REDIS_SOCKET_*`
+    // (`settings/common.py:238-239`) feed `redis_instance()`, not the
+    // `CACHES` client — but a boot command must fail fast instead of
+    // hanging, so the port bounds the wait and reports the failure line.
     let mut connection = tokio::time::timeout(Duration::from_secs(2), async {
         client.get_multiplexed_async_connection().await
     })
@@ -332,64 +347,49 @@ mod tests {
     async fn bad_database_url_fails_fast_without_probing() {
         let mut lines = Vec::new();
         let mut out = |line: &str| lines.push(line.to_string());
-        let result = run_wait_for_db(
-            "not a database url %%",
-            &mut out,
-            Duration::from_millis(1),
-            None,
-        )
-        .await;
+        let result = run_wait_for_db("not a database url %%", &mut out, Duration::from_millis(1)).await;
         assert!(matches!(result, Err(BootError::BadDatabaseUrl(_))));
         assert!(lines.is_empty());
     }
 
-    /// Unreachable database: start line plus one retry line per capped
-    /// attempt, with the `waititng` typo byte-identical to Python.
+    /// A down database changes nothing: the one-shot check always succeeds
+    /// (F37-01 BUGS), so the command prints both lines and exits 0 without
+    /// touching the network (a dead port answers nothing, instantly).
     #[tokio::test]
-    async fn wait_for_db_retry_lines_against_dead_port() {
+    async fn wait_for_db_is_one_shot_against_dead_port() {
         let mut lines = Vec::new();
         let mut out = |line: &str| lines.push(line.to_string());
         let attempts = run_wait_for_db(
             "postgresql://127.0.0.1:9/pidash_806_nonexistent",
             &mut out,
             Duration::from_millis(1),
-            Some(2),
         )
         .await
-        .expect("capped loop returns");
-        assert_eq!(attempts, 2);
+        .expect("one-shot check succeeds");
+        assert_eq!(attempts, 1);
+        assert_eq!(lines, vec!["Waiting for database...", "Database available!"]);
+        // The unreachable retry line keeps Python's typo byte for byte.
         assert_eq!(
-            lines,
-            vec![
-                "Waiting for database...",
-                "Database unavailable, waititng 1 second...",
-                "Database unavailable, waititng 1 second...",
-            ]
+            WAIT_DB_RETRY,
+            "Database unavailable, waititng 1 second..."
         );
     }
 
-    /// Unreachable database: the migrations loop also waits (it does not
-    /// crash like Python — the entrypoint needs the wait).
+    /// A down database is fatal (Python's uncaught `OperationalError`):
+    /// no stdout at all, exit 1 via [`BootError::DatabaseUnavailable`].
     #[tokio::test]
-    async fn wait_for_migrations_polls_against_dead_port() {
+    async fn wait_for_migrations_down_db_fails_without_output() {
         let mut lines = Vec::new();
         let mut out = |line: &str| lines.push(line.to_string());
-        let attempts = run_wait_for_migrations(
+        let result = run_wait_for_migrations(
             "postgresql://127.0.0.1:9/pidash_806_nonexistent",
             &mut out,
             Duration::from_millis(1),
             Some(2),
         )
-        .await
-        .expect("capped loop returns");
-        assert_eq!(attempts, 2);
-        assert_eq!(
-            lines,
-            vec![
-                "Waiting for database migrations to complete...",
-                "Waiting for database migrations to complete...",
-            ]
-        );
+        .await;
+        assert!(matches!(result, Err(BootError::DatabaseUnavailable(_))));
+        assert!(lines.is_empty());
     }
 
     #[tokio::test]
