@@ -1,0 +1,67 @@
+# Rust API image (PIDASHCONV-813, D-37): translates apps/api/Dockerfile.api.
+# Multi-stage: cargo build in a Rust builder, then a minimal Debian runtime
+# (binary + entrypoints + data; no toolchain, no Python). Build from the
+# repo root so both trees are in context:
+#   docker build -f rust-api/Dockerfile.api -t pidash-api:test .
+#
+# The migrator entrypoint still shells to `python manage.py migrate`
+# (migrate stays Django until switchover); until migrate is ported the
+# migrator job stays pinned to the Python image (deployments follow-up).
+
+FROM rust:bookworm AS builder
+
+WORKDIR /app
+
+# Both trees: the binary embeds files from apps/api at compile time
+# (email templates, prompting fragments), so the builder needs them.
+COPY rust-api ./rust-api
+COPY apps/api ./apps/api
+
+# Cache mounts keep rebuilds incremental; a clean checkout builds cold.
+# The target dir lives in the mount, so the binary is copied out to keep it.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/rust-api/target \
+    cargo build --release --bin pidash-api \
+        --manifest-path rust-api/Cargo.toml && \
+    cp rust-api/target/release/pidash-api /tmp/pidash-api
+
+FROM debian:bookworm-slim
+
+# set environment variables (keys preserved from the Python image, :4-7)
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV INSTANCE_CHANGELOG_URL=https://airepublic.com/pages/691ef037bcfe416a902e48cb55f59891/
+
+# Shell tools the entrypoints need (signature block, concurrency math):
+# bash (the scripts), hostname/ip/free (machine signature), CA certs
+# (Postgres/S3/GitHub TLS; sqlx uses rustls, so no libssl).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    hostname \
+    iproute2 \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /code
+
+COPY --from=builder /tmp/pidash-api /usr/local/bin/pidash-api
+# register-instance reads ./package.json (cwd) for the version fallback
+COPY apps/api/package.json ./package.json
+# Worker seed data. FLAT layout (./seeds/*.json, no data/ segment): the live
+# worker joins seed_dir/filename directly (main.rs seed_data_dir), unlike
+# Python's SEED_DIR/data join — follow-up aligns the worker, then this
+# moves to data/.
+COPY apps/api/pi_dash/seeds/data/ ./seeds/
+# Entrypoints only (never the pidash-api/ sources beside them)
+COPY rust-api/bin/docker-entrypoint-*.sh ./bin/
+
+RUN mkdir -p /code/pi_dash/logs
+RUN chmod +x ./bin/*
+RUN chmod -R 777 /code
+
+# Expose container port and run entry point script
+EXPOSE 8000
+
+CMD ["./bin/docker-entrypoint-api.sh"]

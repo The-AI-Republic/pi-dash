@@ -1,0 +1,73 @@
+name: rust-api-contract-tests-ops-image
+
+# PIDASHCONV-813: ops image + entrypoints + runbook contract suite.
+# Replays F37-12 (rust-api/contract-tests/ops/test_image.py — static:
+# no servers, no database) and builds rust-api/Dockerfile.api from a
+# clean checkout, then smokes the image (binary runs, files shipped,
+# entrypoint tools present).
+
+on:
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-ops-image.yml"
+  pull_request:
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-ops-image.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ops-image:
+    name: ops image build + F37-12 replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.x"
+          cache: pip
+          cache-dependency-path: rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install contract-test dependencies
+        working-directory: rust-api/contract-tests
+        run: pip install -r requirements.txt
+
+      - name: Build pidash-api binary
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Run ops image contract suite
+        working-directory: rust-api/contract-tests
+        env:
+          PIDASH_API_BIN: ${{ github.workspace }}/rust-api/target/debug/pidash-api
+        run: python -m pytest ops/test_image.py -v
+
+      - name: Build image from clean checkout
+        run: docker build -f rust-api/Dockerfile.api -t pidash-api:test .
+
+      - name: Smoke the image
+        run: |
+          docker run --rm pidash-api:test pidash-api ops wait_for_db --help
+          docker run --rm pidash-api:test pidash-api worker --help > /dev/null
+          docker run --rm pidash-api:test ls -l /code/bin /code/seeds /code/package.json
+          docker run --rm pidash-api:test bash -c 'command -v hostname ip free && echo tools-ok'
+          docker run --rm pidash-api:test bash -c 'for f in /code/bin/*.sh; do bash -n "$f" || exit 1; done && echo scripts-ok'
