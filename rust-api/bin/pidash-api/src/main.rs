@@ -170,6 +170,7 @@ fn seed_data_dir() -> std::path::PathBuf {
 
 async fn worker(concurrency: u32) -> MainResult {
     let db = pidash_db::DbConfig::from_env()?;
+    let settings = Settings::from_env()?;
     let pools = pidash_db::Pools::connect(&db, None).await?;
     tracing::info!(target = %db.redacted_url(), "connected postgres");
     pidash_jobs::queue::ensure_schema(pools.primary()).await?;
@@ -282,15 +283,42 @@ async fn worker(concurrency: u32) -> MainResult {
     // neither exists (only test fakes) — never register them here
     // until the seams land (PIDASHCONV-861).
     pidash_jobs::tasks_ticker::scan::register_scanners(&mut registry, pools.primary().clone());
+    // D-07 send/stack (PIDASHCONV-865; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`). The live
+    // mail seams exist (`tasks_mail::live`), so the Rust worker owns both
+    // names — otherwise the tasks are lost at switchover (parity gap
+    // W-mail). A missing/unparsable `REDIS_URL` or a drifted template
+    // fails boot (fail-fast, like the missing database above):
+    // registering without the seams would ACK-and-drop mail.
+    let mail_redis = pidash_jobs::tasks_mail::live::LiveRedisMail::from_settings(&settings)
+        .map_err(|detail| format!("worker mail redis unavailable: {detail}"))?;
+    let mail_renderer = pidash_jobs::tasks_mail::live::IssueUpdatesRenderer::new()
+        .map_err(|error| format!("worker mail renderer unavailable: {error}"))?;
+    pidash_jobs::tasks_mail::register_email_notification_tasks(
+        &mut registry,
+        pidash_jobs::tasks_mail::email_notification::stack_handler(
+            std::sync::Arc::new(
+                pidash_jobs::tasks_mail::email_notification::SqlStackStore::new(
+                    pools.primary().clone(),
+                ),
+            ),
+            std::sync::Arc::new(pidash_jobs::tasks_mail::live::QueueStackOutbox::new(
+                pools.primary().clone(),
+            )),
+        ),
+        pidash_jobs::tasks_mail::email_notification::send_handler(
+            std::sync::Arc::new(mail_redis),
+            std::sync::Arc::new(pidash_jobs::tasks_mail::live::SqlMailDb::new(
+                pools.primary().clone(),
+            )),
+            std::sync::Arc::new(mail_renderer),
+            std::sync::Arc::new(pidash_jobs::tasks_mail::live::SmtpMailer::new()),
+        ),
+    );
     // D-07 notifications (PIDASHCONV-834; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). The
     // pool-only handler exists, so the Rust worker owns it —
     // otherwise the task is lost at switchover (parity gap W-mail).
-    // `send/stack_email_notification` stay Python-owned:
-    // `register_email_notification_tasks` needs pre-built handlers
-    // and no live `RedisMail`/`MailDb`/`Renderer`/`Mailer` or
-    // Rust-queue `StackOutbox` seam exists (only test fakes) — never
-    // register them here until the seams land (PIDASHCONV-865).
     pidash_jobs::tasks_mail::register_notifications_task(&mut registry, pools.primary().clone());
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,

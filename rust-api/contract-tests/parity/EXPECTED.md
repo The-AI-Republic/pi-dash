@@ -21,7 +21,7 @@ Counts (2026-10-10, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 508 OWNED, 20 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 85 tasks — 34 OWNED, 35 proxied by design, 16 MISSING;
+- Jobs: 85 tasks — 36 OWNED, 35 proxied by design, 14 MISSING;
   beat 26/26 OWNED.
 
 ## Routes
@@ -196,15 +196,16 @@ W-ticker :: pi_dash.bgtasks.agent_ticker.fire_tick :: must-wire (lost without py
 W-scheduler :: pi_dash.bgtasks.scheduler.fire_scheduler_binding :: must-wire (lost without python worker)
 ```
 
-### W-mail (2 rows; notifications resolved by PIDASHCONV-834)
+### W-mail (0 rows; wired by PIDASHCONV-865)
 
-Fix: PIDASHCONV-865. The notifications row is gone (wired by PIDASHCONV-834:
-`register_notifications_task` in `worker()`, pool-only handler). Send/stack
-need live mail seams and none exist — that is PIDASHCONV-865, not wiring.
+Fix: PIDASHCONV-865 (landed). The notifications row went first (wired by
+PIDASHCONV-834: `register_notifications_task` in `worker()`, pool-only
+handler); the send/stack rows are gone here (live `RedisMail`/`MailDb`/
+`Renderer`/`Mailer` seams plus a Rust-queue `StackOutbox` in
+`tasks_mail::live`, wired via `register_email_notification_tasks` in
+`worker()`). The `W-mail` gap id stays reserved in `WIRE_GAPS`.
 
 ```expected-jobs
-W-mail :: pi_dash.bgtasks.email_notification_task.send_email_notification :: must-wire (lost without python worker)
-W-mail :: pi_dash.bgtasks.email_notification_task.stack_email_notification :: must-wire (lost without python worker)
 ```
 
 ### W-export (0 rows; reclassified to PROXIED)
