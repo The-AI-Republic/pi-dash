@@ -34,6 +34,8 @@ import type {
   DevMachineRow,
   GanttSidebarRow,
   GanttZoom,
+  IntakeShellListQuery,
+  IntakeShellTab,
   KanbanCard,
   KanbanColumn,
   DocumentShellFacts,
@@ -7156,5 +7158,85 @@ export class WebNewDriver implements ParityDriver {
 
   async runnersWaitRunnerRevokeWorking(): Promise<void> {
     return todo("runnersWaitRunnerRevokeWorking");
+  }
+
+  // --- Intake list shell (NEWFRONT-255, INT-001-005/008/012). Throwing
+  // --- stubs; the build slice that lands this area fills them in.
+
+  async intakeShellOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("intakeShellOpen");
+  }
+
+  async intakeShellOpenRetiredInbox(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("intakeShellOpenRetiredInbox");
+  }
+
+  async intakeShellTabLabels(): Promise<string[]> {
+    return todo("intakeShellTabLabels");
+  }
+
+  async intakeShellActiveTab(): Promise<IntakeShellTab> {
+    return todo("intakeShellActiveTab");
+  }
+
+  async intakeShellOpenCount(): Promise<string | null> {
+    return todo("intakeShellOpenCount");
+  }
+
+  async intakeShellClickTab(_tab: IntakeShellTab): Promise<void> {
+    return todo("intakeShellClickTab");
+  }
+
+  async intakeShellListTitles(): Promise<string[]> {
+    return todo("intakeShellListTitles");
+  }
+
+  async intakeShellPlaceholderVisible(): Promise<boolean> {
+    return todo("intakeShellPlaceholderVisible");
+  }
+
+  async intakeShellBreadcrumbTrail(): Promise<string[]> {
+    return todo("intakeShellBreadcrumbTrail");
+  }
+
+  async intakeShellBreadcrumbIntakeHref(): Promise<string | null> {
+    return todo("intakeShellBreadcrumbIntakeHref");
+  }
+
+  async intakeShellPageTitle(): Promise<string> {
+    return todo("intakeShellPageTitle");
+  }
+
+  async intakeShellFeatureGateVisible(): Promise<boolean> {
+    return todo("intakeShellFeatureGateVisible");
+  }
+
+  async intakeShellFeatureGateActionEnabled(): Promise<boolean> {
+    return todo("intakeShellFeatureGateActionEnabled");
+  }
+
+  async intakeShellFeatureGateActionGo(): Promise<string> {
+    return todo("intakeShellFeatureGateActionGo");
+  }
+
+  async intakeShellListEmptyHeading(): Promise<string | null> {
+    return todo("intakeShellListEmptyHeading");
+  }
+
+  async intakeShellEmptyCreateClick(): Promise<string> {
+    return todo("intakeShellEmptyCreateClick");
+  }
+
+  async intakeShellFilterToggleStatus(_option: "Pending" | "Snoozed"): Promise<void> {
+    return todo("intakeShellFilterToggleStatus");
+  }
+
+  async intakeShellBeginListSpy(): Promise<void> {
+    return todo("intakeShellBeginListSpy");
+  }
+
+  async intakeShellListQueries(): Promise<IntakeShellListQuery[]> {
+    return todo("intakeShellListQueries");
+  }
   }
 }

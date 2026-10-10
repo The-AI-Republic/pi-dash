@@ -12253,3 +12253,115 @@ export async function serverUnpinIssuePod(
 ): Promise<void> {
   await patchIssue(workspaceSlug, projectId, issueId, sessionCookie, { assigned_pod_id: null }, apiBase);
 }
+
+// --- Intake list shell (NEWFRONT-255, INT-001-005/008/012). Appended;
+// --- existing helpers above are untouched per the shared parity contract.
+// --- The intake read endpoints take the nested issue id; the feature flag
+// --- reads and writes as `inbox_view` on the project (an alias over the
+// --- intake-view column).
+
+/** Whether the project's intake view is switched on. */
+export async function serverIntakeShellInboxView(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  return rec["inbox_view"] === true;
+}
+
+/** Switch the project's intake view on or off (the view maps the alias onto its column). */
+export async function serverIntakeShellSetInboxView(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  on: boolean,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    { inbox_view: on }
+  );
+  if (!res.ok) throw new Error(`[parity] project intake-view patch failed with HTTP ${res.status}.`);
+}
+
+/** Intake fields a scenario may set on an inbox row (status moves, snooze dates). */
+export interface ServerIntakeShellInboxPatch {
+  status?: number;
+  snoozed_till?: string | null;
+  duplicate_to?: string;
+}
+
+/** Patch an inbox row by its nested issue id; resolves with the stored intake status. */
+export async function serverIntakeShellPatchInboxIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  patch: ServerIntakeShellInboxPatch,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number }> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`,
+    sessionCookie,
+    patch
+  );
+  if (!res.ok) throw new Error(`[parity] inbox-issue patch failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["status"] !== "number") throw new Error("[parity] patched inbox issue carried no numeric status.");
+  return { status: rec["status"] as number };
+}
+
+/** One inbox row with its intake status, as the list endpoint reports it. */
+export interface ServerIntakeShellInboxRow {
+  issueId: string;
+  name: string;
+  status: number;
+}
+
+/**
+ * Inbox rows on a project, optionally narrowed to a status query (the
+ * comma-joined form the UI sends, e.g. "-2" or "1,-1,2"; omitted to let
+ * the server apply its own default). Resolves with the rows plus the
+ * collection total the pending badge mirrors.
+ */
+export async function serverIntakeShellInboxIssues(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  statusQuery?: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ rows: ServerIntakeShellInboxRow[]; total: number }> {
+  const query = statusQuery === undefined ? "" : `?status=${encodeURIComponent(statusQuery)}`;
+  const res = await fetchShared(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${query}`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] inbox-issues read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const total =
+    !Array.isArray(payload) && typeof (payload as { total_results?: unknown }).total_results === "number"
+      ? (payload as { total_results: number }).total_results
+      : rows.length;
+  return {
+    rows: rows.map((row) => {
+      const rec = row as Record<string, unknown>;
+      const issue = rec["issue"] as Record<string, unknown> | undefined;
+      return {
+        issueId: typeof issue?.["id"] === "string" ? (issue["id"] as string) : "",
+        name: typeof issue?.["name"] === "string" ? (issue["name"] as string) : "",
+        status: typeof rec["status"] === "number" ? (rec["status"] as number) : 0,
+      };
+    }),
+    total,
+  };
+}
