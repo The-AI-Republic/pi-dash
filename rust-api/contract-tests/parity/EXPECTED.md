@@ -196,12 +196,15 @@ gap id stays reserved in `WIRE_GAPS`).
 ```expected-jobs
 ```
 
-### W-activity (1 row)
+### W-activity (0 rows; fixed)
 
-Fix: PIDASHCONV-836.
+Fix: PIDASHCONV-836 (landed). `register_activity_task` is wired in
+`worker()` with the live `OriginRedis` (sync SETEX from `REDIS_URL`;
+an unconfigured Redis aborts origin-bearing calls exactly like
+Django's `redis_instance()` `RuntimeError` under the broad-except).
+The row reclassified to OWNED (signature deleted).
 
 ```expected-jobs
-W-activity :: pi_dash.bgtasks.issue_activities_task.issue_activity :: must-wire (lost without python worker)
 ```
 
 ### Proxied by design (31 rows)
