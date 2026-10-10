@@ -25081,9 +25081,18 @@ export class WebDriver implements ParityDriver {
     });
   }
 
-  /** Run-detail pane state, polled until it leaves `loading`. */
+  /** Run-detail pane, polled until the navigation lands and the fetch settles. */
   private async waitRunsDetailSettled(): Promise<void> {
     const deadline = Date.now() + 60_000;
+    // The URL commits before React re-renders, so the first polls still see
+    // the pre-navigation "none" pane: wait for it to give way first, or the
+    // settle poll below returns on a state that predates the navigation.
+    for (;;) {
+      const state = await this.runDetailState();
+      if (state !== "none") break;
+      if (Date.now() > deadline) throw new Error("[parity] run detail never left none.");
+      await this.page.waitForTimeout(250);
+    }
     for (;;) {
       const state = await this.runDetailState();
       if (state !== "loading") return;
@@ -25092,40 +25101,91 @@ export class WebDriver implements ParityDriver {
     }
   }
 
-  async openRunsList(workspaceSlug: string, projectId?: string): Promise<void> {
-    await this.page.goto(`${this.runsBase(workspaceSlug, projectId)}/runs`);
-    await this.page.waitForLoadState("domcontentloaded");
+  /** Wait until the runs list shows real content: rows with text, or the empty state. */
+  private async waitRunsListSettled(): Promise<void> {
     const deadline = Date.now() + 90_000;
     for (;;) {
       if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
         throw new Error("[parity] session lost while opening the runs list.");
       }
       // The header row renders for populated and empty lists alike, so it
-      // gates both; rows or the empty text prove the first fetch landed.
+      // gates both; rows with text or the empty text prove the first fetch
+      // landed. (Skeleton rows render textless, so a bare row count would
+      // return before the data arrives.)
       if ((await this.runsTable().getByRole("columnheader", { name: "Prompt" }).count()) > 0) {
-        const rows = await this.runsTable().locator("tbody tr").count();
-        if (rows > 0) return;
+        if (await this.runsEmptyVisible()) return;
+        const rows = this.runsTable().locator("tbody tr");
+        if ((await rows.count()) > 0) {
+          const firstText = (
+            (await rows
+              .first()
+              .innerText()
+              .catch(() => "")) ?? ""
+          ).trim();
+          if (firstText !== "") return;
+        }
       }
       if (Date.now() > deadline) throw new Error("[parity] runs list never settled.");
-      await this.page.waitForTimeout(2_000);
+      await this.page.waitForTimeout(1_000);
     }
   }
 
-  async openRunsListAtPage(workspaceSlug: string, page: number, projectId?: string): Promise<void> {
-    await this.page.goto(`${this.runsBase(workspaceSlug, projectId)}/runs?page=${page}`);
-    await this.page.waitForLoadState("domcontentloaded");
-    const deadline = Date.now() + 90_000;
-    for (;;) {
-      if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
-        throw new Error("[parity] session lost while opening the runs list.");
+  /** The runs-list collection fetch (detail reads carry a run id in the path). */
+  private static isRunsListResponseUrl(url: string): boolean {
+    return url.includes("/api/runners/runs/?");
+  }
+
+  /**
+   * Open a runs-area route only after its collection fetch lands. The empty
+   * state renders while the first fetch is still in flight, so the fetch —
+   * not the DOM alone — proves the rows are real. The listener attaches
+   * before navigation (no race), but the deadline runs from page load, so a
+   * slow compile under host contention cannot eat the fetch budget.
+   */
+  private async gotoRunsRoute(path: string, isListed: (url: string) => boolean): Promise<void> {
+    let listed = false;
+    const onResponse = (response: { url(): string }): void => {
+      if (isListed(response.url())) listed = true;
+    };
+    this.page.on("response", onResponse);
+    try {
+      await this.page.goto(path);
+      await this.page.waitForLoadState("domcontentloaded");
+      // Two windows with one reload between: a loaded host can stall the
+      // boot fetch invisibly (no request is ever sent), and a reload shakes
+      // it loose — the same stall openAuthenticated already retries.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const deadline = Date.now() + 120_000;
+        for (;;) {
+          if (listed) return;
+          if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
+            throw new Error("[parity] session lost while opening the runs area.");
+          }
+          if (Date.now() > deadline) break;
+          await this.page.waitForTimeout(1_000);
+        }
+        if (attempt === 0) {
+          await this.page.reload();
+          await this.page.waitForLoadState("domcontentloaded");
+        }
       }
-      if ((await this.runsTable().getByRole("columnheader", { name: "Prompt" }).count()) > 0) {
-        const rows = await this.runsTable().locator("tbody tr").count();
-        if (rows > 0) return;
-      }
-      if (Date.now() > deadline) throw new Error("[parity] runs list never settled.");
-      await this.page.waitForTimeout(2_000);
+      throw new Error("[parity] runs-area fetch never landed.");
+    } finally {
+      this.page.off("response", onResponse);
     }
+  }
+
+  async openRunsList(workspaceSlug: string, projectId?: string): Promise<void> {
+    await this.gotoRunsRoute(`${this.runsBase(workspaceSlug, projectId)}/runs`, WebDriver.isRunsListResponseUrl);
+    await this.waitRunsListSettled();
+  }
+
+  async openRunsListAtPage(workspaceSlug: string, page: number, projectId?: string): Promise<void> {
+    await this.gotoRunsRoute(
+      `${this.runsBase(workspaceSlug, projectId)}/runs?page=${page}`,
+      WebDriver.isRunsListResponseUrl
+    );
+    await this.waitRunsListSettled();
   }
 
   async runsHistoryLength(): Promise<number> {
@@ -25139,8 +25199,9 @@ export class WebDriver implements ParityDriver {
   }
 
   async openApprovals(workspaceSlug: string, projectId?: string): Promise<void> {
-    await this.page.goto(`${this.runsBase(workspaceSlug, projectId)}/approvals`);
-    await this.page.waitForLoadState("domcontentloaded");
+    await this.gotoRunsRoute(`${this.runsBase(workspaceSlug, projectId)}/approvals`, (url) =>
+      url.includes("/api/runners/approvals/")
+    );
     const deadline = Date.now() + 90_000;
     for (;;) {
       if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
@@ -25200,20 +25261,44 @@ export class WebDriver implements ParityDriver {
       .catch(() => false);
   }
 
-  /** Click a pager control and wait for the page label to turn over. */
+  /** Click a pager control and wait for the new page's rows to arrive. */
   private async runsTurnPage(name: "Previous" | "Next"): Promise<void> {
     const before = await this.runsPager();
     if (before === null) throw new Error("[parity] no pager to turn (empty list).");
+    const rows = this.runsTable().locator("tbody tr");
+    const beforeText = (
+      (await rows
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
     await this.page.getByRole("button", { name }).first().click({ timeout: WebDriver.OPEN_MS });
     const deadline = Date.now() + 30_000;
     for (;;) {
       const now = await this.runsPager();
-      if (now !== null && now.label !== before.label) return;
+      if (now !== null && now.label !== before.label) break;
       if (Date.now() > deadline) {
         throw new Error(`[parity] pager never turned past ${JSON.stringify(before.label)}.`);
       }
       await this.page.waitForTimeout(500);
     }
+    // The label turns on navigation while the previous page's rows stay
+    // mounted until the new fetch lands; wait for the rows to turn over.
+    const rowsDeadline = Date.now() + 30_000;
+    for (;;) {
+      const nowText = (
+        (await rows
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (nowText !== "" && nowText !== beforeText) break;
+      if (Date.now() > rowsDeadline) {
+        throw new Error("[parity] pager turned but the rows never followed.");
+      }
+      await this.page.waitForTimeout(500);
+    }
+    await this.waitRunsListSettled();
   }
 
   async runsNextPage(): Promise<void> {
@@ -25227,6 +25312,9 @@ export class WebDriver implements ParityDriver {
   async runsSelectRun(promptMarker: string): Promise<void> {
     const row = this.runsTable().locator("tbody tr", { hasText: promptMarker }).first();
     await row.click({ timeout: WebDriver.OPEN_MS });
+    // The click navigates client-side; wait for the run id to land in the
+    // URL before judging the pane, or the pre-navigation "none" state wins.
+    await this.page.waitForURL(/\/runs\/[0-9a-f-]{36}/i, { timeout: WebDriver.OPEN_MS });
     await this.waitRunsDetailSettled();
   }
 
@@ -25235,18 +25323,9 @@ export class WebDriver implements ParityDriver {
     if ((await this.page.getByText("Loading run details…").count()) > 0) return "loading";
     // The loaded header renders the run id as a lone UUID in a mono block;
     // list prompts never take that shape, so the match needs no pane scope.
-    const idDiv = this.page.locator(
-      "xpath=//div[normalize-space(text()) and string-length(normalize-space(text()))=36 and translate(substring(normalize-space(text()),9,1),'ABCDEFabcdef0123456789','')='' and substring(normalize-space(text()),9,1)!='' and contains(normalize-space(text()),'-')]"
-    );
-    if ((await idDiv.count()) > 0) {
-      const text = (
-        (await idDiv
-          .first()
-          .innerText()
-          .catch(() => "")) ?? ""
-      ).trim();
-      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) return "loaded";
-    }
+    // (Matched by subtree text, not the first text node: JSX whitespace
+    // around the id makes text() an empty first node.)
+    if ((await this.runDetailIdDiv()) !== null) return "loaded";
     if ((await this.page.getByText("Select a run on the left.").count()) > 0) return "none";
     return "loading";
   }
@@ -25288,7 +25367,9 @@ export class WebDriver implements ParityDriver {
   }
 
   async runDetailScheduler(): Promise<{ name: string; href: string } | null> {
-    const link = this.page.locator('a[href*="/schedulers/"]').first();
+    // The detail's scheduler row pairs a "Scheduler:" label with the link;
+    // the sidebar schedulers nav link has no such label and must not match.
+    const link = this.page.locator('div:has(> span:text("Scheduler:")) > a[href*="/schedulers/"]').first();
     if ((await link.count()) === 0) return null;
     const href = await link.getAttribute("href");
     if (href === null) return null;

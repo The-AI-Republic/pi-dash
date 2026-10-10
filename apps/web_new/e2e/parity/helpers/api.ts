@@ -12635,7 +12635,11 @@ export async function runsExhaustTicker(issueId: string): Promise<{ used: number
   const out = await runsShell(
     `import json\n` +
       `from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker\n` +
-      `ticker = IssueAgentTicker.objects.get(issue_id=${JSON.stringify(issueId)})\n` +
+      // Rows are created lazily by the scheduling machinery; mirror its
+      // disabled-unarmed defaults so a fresh issue's row looks produced.
+      `ticker, _ = IssueAgentTicker.objects.get_or_create(issue_id=${JSON.stringify(issueId)}, defaults={\n` +
+      `    "user_disabled": False, "next_run_at": None, "used": 0, "granted": 0,\n` +
+      `    "enabled": False, "disarm_reason": ""})\n` +
       `cap = ticker.effective_max_ticks()\n` +
       `ticker.used = cap\n` +
       `ticker.save(update_fields=["used"])\n` +
@@ -12720,4 +12724,45 @@ export async function runsTickerBudget(issueId: string): Promise<{ used: number;
     throw new Error("[parity] ticker read returned no budget.");
   }
   return { used: parsed.used, granted: parsed.granted, cap: parsed.cap };
+}
+
+/**
+ * Register a scenario-owned runner (offline manual enrollment, owned by the
+ * seed user) in the project's default pod, so dispatch preflight finds
+ * execution capacity. Offline is honest capacity: the matcher counts
+ * registered non-revoked runners regardless of heartbeat, and the
+ * dispatched run waits visibly in queued. Callers delete it afterward.
+ */
+export async function runsCreateRunner(
+  workspaceSlug: string,
+  email: string,
+  projectId: string,
+  name: string
+): Promise<string> {
+  const out = await runsShell(
+    `import json\n` +
+      `from pi_dash.db.models import User, Workspace\n` +
+      `from pi_dash.runner.models import Pod, Runner\n` +
+      `ws = Workspace.objects.get(slug=${JSON.stringify(workspaceSlug)})\n` +
+      `user = User.objects.get(email=${JSON.stringify(email)})\n` +
+      `pod = Pod.objects.get(project_id=${JSON.stringify(projectId)}, is_default=True)\n` +
+      `runner = Runner.objects.create(owner=user, workspace=ws, pod=pod,\n` +
+      `    name=${JSON.stringify(name)})\n` +
+      `print("PARITY_RUNNER_MADE:" + json.dumps(str(runner.id)))\n`
+  );
+  const line = /^PARITY_RUNNER_MADE:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  const id = (line === "" ? null : (JSON.parse(line) as unknown)) as string | null;
+  if (typeof id !== "string") {
+    throw new Error("[parity] runner create returned no id.");
+  }
+  return id;
+}
+
+/** Delete a scenario-owned runner (best-effort: already-gone is fine). */
+export async function runsDeleteRunner(runnerId: string): Promise<void> {
+  await runsShell(
+    `from pi_dash.runner.models import Runner\n` +
+      `Runner.objects.filter(pk=${JSON.stringify(runnerId)}).delete()\n` +
+      `print("PARITY_RUNNER_GONE:1")\n`
+  );
 }

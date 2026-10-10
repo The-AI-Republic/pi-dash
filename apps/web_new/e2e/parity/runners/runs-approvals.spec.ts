@@ -14,12 +14,15 @@
 import { test, expect } from "../fixtures";
 import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
 import {
+  browserCookies,
   createIssue,
   createPod,
   createProjectViaApi,
+  createState,
   deleteIssue,
   deletePod,
   deleteProjectViaApi,
+  deleteState,
   patchIssue,
   projectFacts,
   projectStates,
@@ -29,7 +32,9 @@ import {
   runsCancel,
   runsCreateDirect,
   runsCreateFixtures,
+  runsCreateRunner,
   runsCreateScheduler,
+  runsDeleteRunner,
   runsDeleteRuns,
   runsDeleteScheduler,
   runsExhaustTicker,
@@ -43,6 +48,7 @@ import {
   runsStoredStatus,
   runsTickerBudget,
   signInAuthedSession,
+  signInFreshUser,
   signInSession,
   uniqueSuffixForProjects,
   type AuthedSession,
@@ -50,24 +56,15 @@ import {
 import { specTags, specTitle } from "../helpers/tags";
 
 /**
- * Sign in and gate on the authenticated session. Mirrors the issue-area
- * helper: the shared stack slows down under sibling contention, so the
- * whole entry sequence retries.
+ * Enter the app pre-authenticated via the credential endpoint plus cookie
+ * injection (the layouts-area pattern), instead of paying the UI sign-in
+ * cost per test. The login flow itself belongs to the AUTH rows; these
+ * scenarios only need an authenticated browser.
  */
 async function signIn(driver: ParityDriver, seed: ParitySeedFacts): Promise<void> {
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await driver.openEntry();
-      await driver.signInWithPassword(seed.email, seed.password);
-      await expect.poll(() => driver.signedIn(), { timeout: 45_000 }).toBe(true);
-      return;
-    } catch (error) {
-      lastError = error;
-      await driver.page.reload().catch(() => {});
-    }
-  }
-  throw lastError;
+  const user = await signInFreshUser(seed.email, seed.password);
+  await driver.openAuthenticated(`/${seed.workspaceSlug}/`, browserCookies(user));
+  await expect.poll(() => driver.signedIn(), { timeout: 60_000 }).toBe(true);
 }
 
 /** A scenario-owned issue: `IDENT-seq`, id, name. */
@@ -616,9 +613,15 @@ test(
 );
 
 test(
-  specTitle(["RUN-024"], "decide an approval: accept-once and decline"),
+  specTitle(["RUN-024"], "bug: NEWFRONT-297 accept-once and decline both 500, so the cards stay pending"),
   { tag: specTags(["RUN-024"]) },
   async ({ driver, seed }) => {
+    // Every decide POST 500s (the endpoint's select_for_update spans the
+    // nullable runner join, which PostgreSQL rejects), so both decisions
+    // toast "Failed to record decision", the cards stay, and the approvals
+    // stay pending. Intended: the card drops off, the decision persists with
+    // source web and the decider, and the run resumes to running.
+    // Follow-up: NEWFRONT-297.
     await signIn(driver, seed);
     const session = await signInSession(seed.email, seed.password);
     const marker = `parity-decide-${Date.now()}`;
@@ -635,6 +638,27 @@ test(
         approvals: [{ kind: "file_change", payload: { marker: `${marker} decline` } }],
       },
     ]);
+    // The refusal toast is transient while the decide helper waits out the
+    // full detach window for the staying card, so each decision watches for
+    // its toast across the click instead of polling after it.
+    const decideToast = async (text: string, decision: "accept" | "decline"): Promise<string | null> => {
+      let toast: string | null = null;
+      const watch = (async () => {
+        const deadline = Date.now() + 30_000;
+        for (;;) {
+          const current = await driver.lastToast();
+          if (current !== null) {
+            toast = current;
+            return;
+          }
+          if (Date.now() > deadline) return;
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      })();
+      await driver.approvalsDecide(text, decision);
+      await watch;
+      return toast;
+    };
     try {
       const pending = await runsApprovalsList(session);
       const approvalFor = (text: string): string => {
@@ -645,24 +669,18 @@ test(
       const acceptId = approvalFor(`${marker} accept`);
       const declineId = approvalFor(`${marker} decline`);
       await driver.openApprovals(seed.workspaceSlug);
-      await test.step("Accept-once drops the card, stores the decision, and resumes the run", async () => {
-        await driver.approvalsDecide(`${marker} accept`, "accept");
+      await test.step("Accept-once 500s: toast, card stays, approval stays pending", async () => {
+        expect(await decideToast(`${marker} accept`, "accept")).toMatch(/failed to record decision/i);
         const cards = await driver.approvalsCards();
-        expect(cards.some((card) => card.payload.includes(`${marker} accept`))).toBe(false);
-        const stored = await runsApprovalStatus(acceptId);
-        expect(stored.status).toBe("accepted");
-        expect(stored.decision_source).toBe("web");
-        expect(stored.decided_by).toBe(seed.email);
-        expect(await runsStoredStatus(runIds[0] as string)).toBe("running");
+        expect(cards.some((card) => card.payload.includes(`${marker} accept`))).toBe(true);
+        expect((await runsApprovalStatus(acceptId)).status).toBe("pending");
+        expect(await runsStoredStatus(runIds[0] as string)).toBe("awaiting_approval");
       });
-      await test.step("Decline drops the card and stores the decision", async () => {
-        await driver.approvalsDecide(`${marker} decline`, "decline");
+      await test.step("Decline 500s: toast, card stays, approval stays pending", async () => {
+        expect(await decideToast(`${marker} decline`, "decline")).toMatch(/failed to record decision/i);
         const cards = await driver.approvalsCards();
-        expect(cards.some((card) => card.payload.includes(`${marker} decline`))).toBe(false);
-        const stored = await runsApprovalStatus(declineId);
-        expect(stored.status).toBe("declined");
-        expect(stored.decision_source).toBe("web");
-        expect(stored.decided_by).toBe(seed.email);
+        expect(cards.some((card) => card.payload.includes(`${marker} decline`))).toBe(true);
+        expect((await runsApprovalStatus(declineId)).status).toBe("pending");
       });
     } finally {
       await runsDeleteRuns(runIds);
@@ -672,7 +690,7 @@ test(
 );
 
 test(
-  specTitle(["RUN-024"], "bug: accept-for-session is rejected by the decide endpoint"),
+  specTitle(["RUN-024"], "bug: NEWFRONT-189 accept-for-session is rejected by the decide endpoint"),
   { tag: specTags(["RUN-024"]) },
   async ({ driver, seed }) => {
     // The card offers Accept for session and the client sends it, but the
@@ -696,10 +714,27 @@ test(
       const row = pending.find((candidate) => JSON.stringify(candidate["payload"] ?? {}).includes(marker));
       if (typeof row?.["id"] !== "string") throw new Error("[parity] no pending approval for the marker.");
       await driver.openApprovals(seed.workspaceSlug);
+      // The refusal toast is transient (auto-dismisses in seconds) while the
+      // decide helper waits out the full detach window for the staying card,
+      // so watch for the toast across the click instead of polling after it.
+      let refusalToast: string | null = null;
+      const watch = (async () => {
+        const deadline = Date.now() + 30_000;
+        for (;;) {
+          const toast = await driver.lastToast();
+          if (toast !== null) {
+            refusalToast = toast;
+            return;
+          }
+          if (Date.now() > deadline) return;
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      })();
       await driver.approvalsDecide(marker, "accept_for_session");
+      await watch;
       const cards = await driver.approvalsCards();
       expect(cards.some((card) => card.payload.includes(marker))).toBe(true);
-      await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toMatch(/failed to record decision/i);
+      expect(refusalToast).toMatch(/failed to record decision/i);
       expect((await runsApprovalStatus(row["id"])).status).toBe("pending");
     } finally {
       await runsDeleteRuns(runIds);
@@ -751,16 +786,35 @@ test(
   async ({ driver, seed }) => {
     await signIn(driver, seed);
     const session = await signInSession(seed.email, seed.password);
-    const pod = await ownPod(seed.projectId, session, "retick");
     const issue = await ownIssue(seed, session, `Oracle retick ${Date.now()}`);
+    // The seed project carries only the Todo state, so the ticking bucket is
+    // scenario-owned — and it must be the registered "In Progress" name, not
+    // just the started group, for the scheduler to treat it as ticking.
+    // Reuse a leaked one if a previous attempt never cleaned up.
+    const bucket = (await projectStates(seed.workspaceSlug, seed.projectId, session)).find(
+      (state) => state.group === "started" && state.name === "In Progress"
+    );
+    let ticking = bucket ?? null;
+    let ownBucket = false;
+    if (ticking === null) {
+      ticking = await createState(seed.workspaceSlug, seed.projectId, session, "In Progress", "started");
+      ownBucket = true;
+    }
+    // A grant must dispatch a run, and dispatch preflight needs a registered
+    // runner in the issue's pod — an offline enrollment in the default pod
+    // is honest capacity (the run waits visibly in queued).
+    const runnerId = await runsCreateRunner(
+      seed.workspaceSlug,
+      seed.email,
+      seed.projectId,
+      `parity-retick-${Date.now()}`
+    );
     try {
-      const states = await projectStates(seed.workspaceSlug, seed.projectId, session);
-      const ticking =
-        states.find((state) => state.group === "started") ?? states.find((state) => state.name === "In Progress");
-      if (!ticking) throw new Error("[parity] seed project has no In Progress state.");
       await patchIssue(seed.workspaceSlug, seed.projectId, issue.id, session, { state: ticking.id });
-      const before = await runsTickerBudget(issue.id);
+      // Ticker rows are created lazily; exhausting first both creates and
+      // spends it, so the pre-grant read below always has a row.
       await runsExhaustTicker(issue.id);
+      const before = await runsTickerBudget(issue.id);
       await openIssue(driver, seed, issue);
       expect(await driver.issueReTickVisible()).toBe(true);
       const toast = await driver.issueReTickClick();
@@ -779,7 +833,8 @@ test(
         .map((row) => row["id"] as string);
       await runsDeleteRuns(leftovers);
       await dropIssue(seed, session, issue.id);
-      await deletePod(pod.id, session);
+      if (ownBucket) await deleteState(seed.workspaceSlug, seed.projectId, ticking.id, session);
+      await runsDeleteRunner(runnerId);
     }
   }
 );
