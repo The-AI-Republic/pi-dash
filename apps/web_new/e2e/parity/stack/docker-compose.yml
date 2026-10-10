@@ -170,17 +170,14 @@ services:
       - api
 
   # The old app as a production build (opt-in: PARITY_ORACLE_MODE=prod).
-  # Same code as `oracle`, built with apps/web/Dockerfile.web and served as
+  # Same code as `oracle`, built by Dockerfile.oracle-prod and served as
   # static files by nginx on :3000. It needs a fraction of the dev server's
   # CPU and memory, and its image layers are reused until the old app's own
   # sources change. Behind a profile so the default stack is unchanged.
   oracle-prod:
     build:
       context: ../../../../..
-      dockerfile: apps/web/Dockerfile.web
-      args:
-        # Empty base keeps API calls same-origin; the proxy routes them.
-        VITE_API_BASE_URL: ""
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle-prod
     image: parity19-oracle-prod:local
     container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-prod
     mem_limit: 256m

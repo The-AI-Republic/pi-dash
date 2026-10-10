@@ -67,7 +67,7 @@ PARITY_ORACLE_MODE=prod apps/web_new/e2e/parity/stack/parity-up.sh
 ```
 
 serves the same code as a production build instead (`oracle-prod`: built by
-`apps/web/Dockerfile.web`, static files behind nginx). It uses a few MB and
+`Dockerfile.oracle-prod`, static files behind nginx). It uses a few MB and
 almost no CPU, and Docker reuses its layers until the old app's own sources
 change, so only the first bring-up pays for the build.
 
