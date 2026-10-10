@@ -227,7 +227,9 @@ test(
     await test.step("a valid title clears the error", async () => {
       await driver.modulesDialogFillTitle("Validation Passes");
       await driver.modulesDialogSubmitCreate();
-      expect(await driver.modulesDialogOpen()).toBe(false);
+      // Toast first (it expires), then the close (React unmounts behind it).
+      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Success!" });
+      await expect.poll(() => driver.modulesDialogOpen(), { timeout: 30_000 }).toBe(false);
       const live = await serverProjectModules(world.workspaceSlug, world.projectId, world.owner.cookie);
       expect(live.map((row) => row.name)).toContain("Validation Passes");
     });
@@ -263,7 +265,8 @@ test(
       await driver.modulesDialogFillTitle("Reset Probe");
       await driver.modulesDialogFillDescription("Reset description");
       await driver.modulesDialogSubmitCreate();
-      expect(await driver.modulesDialogOpen()).toBe(false);
+      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Success!" });
+      await expect.poll(() => driver.modulesDialogOpen(), { timeout: 30_000 }).toBe(false);
       await driver.modulesOpenCreateFromHeader();
       expect(await driver.modulesDialogTitle()).toBe("");
       expect(await driver.modulesDialogDescription()).toBe("");
@@ -305,8 +308,9 @@ test(
     await driver.modulesDialogSubmitCreate();
 
     await test.step("the dialog closes with a success notice", async () => {
-      expect(await driver.modulesDialogOpen()).toBe(false);
+      // Toast first (it expires), then the close (React unmounts behind it).
       await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Success!" });
+      await expect.poll(() => driver.modulesDialogOpen(), { timeout: 30_000 }).toBe(false);
       await driver.archivesAwaitModuleRow("Full Module");
     });
 
@@ -405,8 +409,9 @@ test(
       await driver.modulesDialogFillTitle("Prefill Edited");
       await driver.modulesDialogPickStatus("In Progress");
       await driver.modulesDialogSubmitUpdate();
-      expect(await driver.modulesDialogOpen()).toBe(false);
+      // Toast first (it expires), then the close (React unmounts behind it).
       await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Success!" });
+      await expect.poll(() => driver.modulesDialogOpen(), { timeout: 30_000 }).toBe(false);
       const detail = await modulesModuleDetail(world.workspaceSlug, world.projectId, moduleId, world.owner.cookie);
       expect(detail.name).toBe("Prefill Edited");
       expect(detail.status).toBe("in-progress");
