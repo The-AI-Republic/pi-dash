@@ -4675,6 +4675,51 @@ export interface ParityDriver {
   runnersWaitRunnerDeleteWorking(): Promise<void>;
   /** Wait until the revoke-runner confirm shows its in-flight state. */
   runnersWaitRunnerRevokeWorking(): Promise<void>;
+
+  // --- Intake list shell (NEWFRONT-255, INT-001-005/008/012). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+  // --- Selectors follow the intake screen observed on the running old app:
+  // --- the Open/Closed tab bar, the pending-count badge on the active Open
+  // --- tab, id-anchored list rows, and the per-situation empty states.
+
+  /** Open the intake screen of a project; settles once the tab bar or the feature gate shows. */
+  intakeShellOpen(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Open the retired project-inbox address; settles once it lands on the intake route. */
+  intakeShellOpenRetiredInbox(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Tab labels in display order (Open, Closed). */
+  intakeShellTabLabels(): Promise<string[]>;
+  /** Which tab is currently highlighted. */
+  intakeShellActiveTab(): Promise<IntakeShellTab>;
+  /** Pending total on the Open tab, or null when the badge is absent. */
+  intakeShellOpenCount(): Promise<string | null>;
+  /** Click `tab` and settle once the URL and the list reflect it. */
+  intakeShellClickTab(tab: IntakeShellTab): Promise<void>;
+  /** Titles of the rendered list rows, in display order. */
+  intakeShellListTitles(): Promise<string[]>;
+  /** Whether the pick-an-item placeholder shows in the detail area. */
+  intakeShellPlaceholderVisible(): Promise<boolean>;
+  /** Breadcrumb trail texts (project, Intake area) as the header renders them. */
+  intakeShellBreadcrumbTrail(): Promise<string[]>;
+  /** Href of the Intake breadcrumb link, or null when it is absent. */
+  intakeShellBreadcrumbIntakeHref(): Promise<string | null>;
+  /** Current document title. */
+  intakeShellPageTitle(): Promise<string>;
+  /** Whether the intake-disabled gate shows instead of the list. */
+  intakeShellFeatureGateVisible(): Promise<boolean>;
+  /** Whether the gate's settings shortcut is enabled. */
+  intakeShellFeatureGateActionEnabled(): Promise<boolean>;
+  /** Click the gate's settings shortcut; resolves with the landed path. */
+  intakeShellFeatureGateActionGo(): Promise<string>;
+  /** Heading of the list empty state, or null when rows render. */
+  intakeShellListEmptyHeading(): Promise<string | null>;
+  /** Click the empty-Open create action; resolves with the landed path (unreached on the old app while NEWFRONT-262 stands; the new-app build exercises it). */
+  intakeShellEmptyCreateClick(): Promise<string>;
+  /** Toggle a status-filter option in the filter panel, then close it and settle. */
+  intakeShellFilterToggleStatus(option: "Pending" | "Snoozed"): Promise<void>;
+  /** Start recording intake list reads (list endpoint GETs). */
+  intakeShellBeginListSpy(): Promise<void>;
+  /** Intake list reads captured since the spy began, in order. */
+  intakeShellListQueries(): Promise<IntakeShellListQuery[]>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -5344,4 +5389,15 @@ export interface ArchivesTrafficCounts {
   detailReads: number;
   /** POST/DELETE archive and restore writes. */
   writes: number;
+}
+
+/** Intake tab keys (NEWFRONT-255, INT-004). */
+export type IntakeShellTab = "open" | "closed";
+
+/** One intake list fetch as the UI sent it (NEWFRONT-255, INT-004/012). */
+export interface IntakeShellListQuery {
+  /** Full request URL. */
+  url: string;
+  /** Decoded query params (repeated keys joined with commas). */
+  params: Record<string, string>;
 }

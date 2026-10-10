@@ -42,6 +42,8 @@ import type {
   DevMachineRow,
   GanttSidebarRow,
   GanttZoom,
+  IntakeShellListQuery,
+  IntakeShellTab,
   KanbanCard,
   KanbanColumn,
   LayoutsLayoutKey,
@@ -25062,5 +25064,220 @@ export class WebDriver implements ParityDriver {
     const dialog = await this.runnersWaitForConfirm("Revoke runner?");
     const revoke = dialog.getByRole("button", { name: "Revoke", exact: true });
     await expect.poll(() => revoke.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  // --- Intake list shell (NEWFRONT-255, INT-001-005/008/012). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+  // --- Observed on the running old app: the tab bar is two clickable divs
+  // --- (no roles) whose labels read Open/Closed; the active one carries the
+  // --- accent highlight and, for Open, the pending-total badge. List rows
+  // --- are id-anchored links each holding the title heading.
+
+  private intakeShellListUrls: string[] = [];
+
+  /** The tab bar cell holding `label` (the clickable div, not its label). */
+  private intakeShellTab(label: "Open" | "Closed"): Locator {
+    // The label child holds bare text (no element children); requiring
+    // that excludes the header row, whose matching child is the cell
+    // itself (label plus badge plus underline).
+    return this.page.locator(`xpath=//div[./div[normalize-space(.)="${label}" and count(*) = 0]]`);
+  }
+
+  private intakeShellRowLinks(): Locator {
+    return this.page.locator('a[id^="inbox-issue-list-item-"]');
+  }
+
+  private intakeShellEmptyHeadings(): Locator {
+    return this.page.getByRole("heading", { name: /No matching results\.|Log Intake requests|No request closed yet/ });
+  }
+
+  /** Settle once the shell committed: tab bar up, the feature gate, or a named load failure. */
+  private async intakeShellWaitSettled(): Promise<void> {
+    const tabs = this.intakeShellTab("Open")
+      .first()
+      .waitFor({ timeout: 120_000 })
+      .then(
+        () => "tabs",
+        () => "lost"
+      );
+    const gate = this.page
+      .getByRole("heading", { name: "Intake is not enabled for the project." })
+      .waitFor({ timeout: 120_000 })
+      .then(
+        () => "gate",
+        () => "lost"
+      );
+    const broken = this.page
+      .getByText("Error fetching the intake work items please try again later.")
+      .waitFor({ timeout: 120_000 })
+      .then(
+        () => "init-error",
+        () => "lost"
+      );
+    const winner = await Promise.race([tabs, gate, broken]);
+    if (winner === "init-error")
+      throw new Error("[parity] the intake list fetch failed on load (init-error); check the oracle API health.");
+    if (winner === "lost") {
+      const url = this.page.url();
+      const body = await this.page.evaluate(() => document.body.innerText.slice(0, 300)).catch(() => "<unreadable>");
+      throw new Error(
+        `[parity] the intake shell never settled at ${url} (no tabs, gate, or load error within 120s; body: ${JSON.stringify(body)})`
+      );
+    }
+  }
+
+  /** Settle a list refresh: rows render, or an empty state does. */
+  private async intakeShellWaitList(): Promise<void> {
+    await Promise.race([
+      this.intakeShellRowLinks().first().waitFor({ timeout: WebDriver.WAIT_MS }),
+      this.intakeShellEmptyHeadings().first().waitFor({ timeout: WebDriver.WAIT_MS }),
+    ]);
+  }
+
+  async intakeShellOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.intakeShellWaitSettled();
+  }
+
+  async intakeShellOpenRetiredInbox(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/inbox`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.waitForURL(new RegExp(`/projects/${projectId}/intake`), { timeout: 120_000 });
+    await this.intakeShellWaitSettled();
+  }
+
+  async intakeShellTabLabels(): Promise<string[]> {
+    const open = this.intakeShellTab("Open").first();
+    const closed = this.intakeShellTab("Closed").first();
+    await open.waitFor({ timeout: WebDriver.WAIT_MS });
+    await closed.waitFor({ timeout: WebDriver.WAIT_MS });
+    // Each cell holds its label plus (for the active Open tab) the count
+    // badge, so read the label child rather than the whole cell.
+    const read = async (cell: Locator, label: string): Promise<string> =>
+      (await cell.locator(`xpath=./div[normalize-space(.)="${label}"]`).first().innerText()).trim();
+    return [await read(open, "Open"), await read(closed, "Closed")];
+  }
+
+  async intakeShellActiveTab(): Promise<IntakeShellTab> {
+    const highlighted = async (label: "Open" | "Closed"): Promise<boolean> => {
+      const cell = this.intakeShellTab(label).first();
+      await cell.waitFor({ timeout: WebDriver.WAIT_MS });
+      const classes = await cell.evaluate((node) => (node as HTMLElement).className);
+      return String(classes).includes("text-accent-primary");
+    };
+    return (await highlighted("Open")) ? "open" : "closed";
+  }
+
+  async intakeShellOpenCount(): Promise<string | null> {
+    const cell = this.intakeShellTab("Open").first();
+    await cell.waitFor({ timeout: WebDriver.WAIT_MS });
+    const text = (await cell.innerText()).replace(/\s+/g, " ").trim();
+    const digits = text.replace(/^Open\s*/, "");
+    return /^\d+$/.test(digits) ? digits : null;
+  }
+
+  async intakeShellClickTab(tab: IntakeShellTab): Promise<void> {
+    const label = tab === "open" ? "Open" : "Closed";
+    await this.intakeShellTab(label).first().click({ timeout: WebDriver.WAIT_MS });
+    // Poll the address bar rather than waiting on a navigation event: the
+    // tab switch is a client-side push the navigation watcher can miss.
+    await this.page.waitForFunction(
+      (want) => new URL(window.location.href).searchParams.get("currentTab") === want,
+      tab,
+      { timeout: WebDriver.WAIT_MS }
+    );
+    await this.intakeShellWaitList();
+  }
+
+  async intakeShellListTitles(): Promise<string[]> {
+    const texts = await this.intakeShellRowLinks().locator("h3").allInnerTexts();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async intakeShellPlaceholderVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByText("Select an Intake work item to view its details"));
+  }
+
+  async intakeShellBreadcrumbTrail(): Promise<string[]> {
+    const trail = this.page.getByTestId("intake-breadcrumb");
+    await trail.getByRole("link", { name: "Intake" }).waitFor({ timeout: WebDriver.WAIT_MS });
+    const project = (await trail.getByRole("button").first().innerText()).replace(/\s+/g, " ").trim();
+    const intake = (await trail.getByRole("link", { name: "Intake" }).first().innerText()).trim();
+    return [project, intake].filter((t) => t.length > 0);
+  }
+
+  async intakeShellBreadcrumbIntakeHref(): Promise<string | null> {
+    return this.readAttr(this.page.getByTestId("intake-breadcrumb").getByRole("link", { name: "Intake" }), "href");
+  }
+
+  async intakeShellPageTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async intakeShellFeatureGateVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("heading", { name: "Intake is not enabled for the project." }));
+  }
+
+  async intakeShellFeatureGateActionEnabled(): Promise<boolean> {
+    const action = this.page.getByRole("button", { name: "Manage features" });
+    await action.waitFor({ timeout: WebDriver.WAIT_MS });
+    return action.isEnabled();
+  }
+
+  async intakeShellFeatureGateActionGo(): Promise<string> {
+    await this.page.getByRole("button", { name: "Manage features" }).click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForURL(/\/settings\/projects\//, { timeout: WebDriver.WAIT_MS });
+    return this.currentPath();
+  }
+
+  async intakeShellListEmptyHeading(): Promise<string | null> {
+    if ((await this.intakeShellRowLinks().count()) > 0) return null;
+    return this.readText(this.intakeShellEmptyHeadings());
+  }
+
+  async intakeShellEmptyCreateClick(): Promise<string> {
+    await this.page.getByRole("button", { name: "Create Intake request" }).click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForLoadState("domcontentloaded");
+    return this.currentPath();
+  }
+
+  async intakeShellFilterToggleStatus(option: "Pending" | "Snoozed"): Promise<void> {
+    // The filter trigger is icon-only at narrow widths and gains its
+    // "Filters" label past 1280px, so widen first and drive the labeled
+    // control like a user with a wide window would.
+    await this.page.setViewportSize({ width: 1440, height: 900 });
+    const panelHeading = this.page.getByText("Work item Status", { exact: false });
+    // Idempotent like the shared pickers: never toggle an open panel shut
+    // with a blind click when a previous call left it open.
+    if (!(await this.isShown(panelHeading))) {
+      await this.page.getByRole("button", { name: "Filters" }).click({ timeout: WebDriver.WAIT_MS });
+      await panelHeading.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    }
+    await this.page.getByRole("button", { name: option, exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await this.page.keyboard.press("Escape");
+    await panelHeading.first().waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+    await this.intakeShellWaitList();
+  }
+
+  async intakeShellBeginListSpy(): Promise<void> {
+    this.intakeShellListUrls = [];
+    await this.page.route("**/api/**", async (route) => {
+      const req = route.request();
+      if (req.method() === "GET" && /\/(inbox|intake)-issues\/(\?|$)/.test(req.url())) {
+        this.intakeShellListUrls.push(req.url());
+      }
+      await route.continue();
+    });
+  }
+
+  async intakeShellListQueries(): Promise<IntakeShellListQuery[]> {
+    return this.intakeShellListUrls.map((url) => {
+      const params: Record<string, string> = {};
+      for (const [key, value] of new URL(url).searchParams) {
+        params[key] = params[key] === undefined ? value : `${params[key]},${value}`;
+      }
+      return { url, params };
+    });
   }
 }
