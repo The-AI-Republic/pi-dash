@@ -17,6 +17,7 @@
 //! [`build_app`] is the application seam: tests and later issues wrap it
 //! with extra routes or layers without touching `main`.
 
+mod inventory;
 mod ops;
 
 use clap::{Parser, Subcommand};
@@ -50,6 +51,18 @@ enum Mode {
     Ops {
         #[command(subcommand)]
         command: ops::OpsCommand,
+    },
+    /// Print the route inventory (parity tooling, PIDASHCONV-820).
+    Routes {
+        /// Emit the machine-readable inventory as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the job inventory (parity tooling, PIDASHCONV-820).
+    Jobs {
+        /// Emit the machine-readable inventory as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -282,8 +295,12 @@ fn main() -> MainResult {
     let cli = Cli::parse();
     // Ops commands mirror Django management output byte for byte, so
     // they emit no tracing events: the subscriber stays off and stderr
-    // carries only failures.
-    if !matches!(cli.mode, Mode::Ops { .. }) {
+    // carries only failures. Same for the inventory commands: stdout
+    // carries the inventory (JSON with --json) and nothing else.
+    if !matches!(
+        cli.mode,
+        Mode::Ops { .. } | Mode::Routes { .. } | Mode::Jobs { .. }
+    ) {
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
@@ -298,6 +315,22 @@ fn main() -> MainResult {
         Mode::Serve { bind } => runtime.block_on(serve(&bind)),
         Mode::Worker { concurrency } => runtime.block_on(worker(concurrency)),
         Mode::Ops { command } => runtime.block_on(ops::run(command)),
+        Mode::Routes { json } => {
+            if json {
+                println!("{}", inventory::routes_json());
+            } else {
+                print!("{}", inventory::routes_text());
+            }
+            Ok(())
+        }
+        Mode::Jobs { json } => {
+            if json {
+                println!("{}", inventory::jobs_json());
+            } else {
+                print!("{}", inventory::jobs_text());
+            }
+            Ok(())
+        }
     }
 }
 
@@ -383,7 +416,21 @@ mod tests {
             Cli::try_parse_from(["pidash-api", "worker", "--concurrency", "2"]).expect("worker");
         match worker.mode {
             Mode::Worker { concurrency } => assert_eq!(concurrency, 2),
-            Mode::Serve { .. } | Mode::Ops { .. } => panic!("wrong mode"),
+            _ => panic!("wrong mode"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_inventory_modes() {
+        let routes = Cli::try_parse_from(["pidash-api", "routes", "--json"]).expect("routes");
+        match routes.mode {
+            Mode::Routes { json } => assert!(json),
+            _ => panic!("wrong mode"),
+        }
+        let jobs = Cli::try_parse_from(["pidash-api", "jobs"]).expect("jobs");
+        match jobs.mode {
+            Mode::Jobs { json } => assert!(!json),
+            _ => panic!("wrong mode"),
         }
     }
 

@@ -1,0 +1,76 @@
+name: rust-api-parity
+
+# PIDASHCONV-820 (stage 8, V-01): standing route + job parity proof.
+# Diffs Django's URL conf and Celery registry against the Rust router
+# and worker inventory (`pidash-api routes/jobs --json`) and fails on
+# anything not classified in rust-api/contract-tests/parity/EXPECTED.md,
+# so a route, method, task, or beat entry added on either side cannot
+# go unnoticed. No services: both dumps are import-only (no DB/broker).
+# The pin tests behind the Rust tables run in rust-api.yml (`cargo test
+# --workspace` covers pidash-api-bin's inventory tests).
+
+on:
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-parity.yml"
+  pull_request:
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-parity.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parity:
+    name: route + job parity vs EXPECTED.md
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.test
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.x"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements/base.txt
+            apps/api/requirements/test.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/test.txt
+
+      - name: Build pidash-api binary
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Route parity check
+        run: >
+          python rust-api/contract-tests/parity/route_inventory.py check
+          --binary rust-api/target/debug/pidash-api
+
+      - name: Job parity check
+        run: >
+          python rust-api/contract-tests/parity/job_inventory.py check
+          --binary rust-api/target/debug/pidash-api
