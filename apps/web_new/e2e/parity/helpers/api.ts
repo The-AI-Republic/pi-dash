@@ -12253,3 +12253,166 @@ export async function serverUnpinIssuePod(
 ): Promise<void> {
   await patchIssue(workspaceSlug, projectId, issueId, sessionCookie, { assigned_pod_id: null }, apiBase);
 }
+
+// ---------------------------------------------------------------------------
+// Intake-create oracle helpers (NEWFRONT-257, rows INT-013–017/033).
+//
+// Appended; existing helpers above are untouched per the shared contract.
+// The create dialog posts the work item nested under `issue` and forces the
+// triage state server-side, so validation probes post raw payloads and read
+// the status back instead of throwing, and the detail read carries the
+// intake source plus the nested issue fields the create rows assert on.
+// ---------------------------------------------------------------------------
+
+/** Raw intake-create answer: HTTP status plus the parsed JSON body. */
+export interface ServerIntakeCreateRawResult {
+  status: number;
+  body: unknown;
+}
+
+/**
+ * POST a raw issue payload to the intake-create endpoint without throwing
+ * on 4xx, so validation scenarios can assert the refusal (empty name and
+ * out-of-range priority both answer 400 with nothing created).
+ */
+export async function serverIntakeCreateRaw(
+  workspaceSlug: string,
+  projectId: string,
+  issue: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerIntakeCreateRawResult> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/`,
+    sessionCookie,
+    { source: "IN_APP", issue }
+  );
+  let body: unknown = null;
+  try {
+    body = (await res.json()) as unknown;
+  } catch {
+    body = null;
+  }
+  return { status: res.status, body };
+}
+
+/** One created intake request as the server reports it (source plus nested issue fields). */
+export interface ServerIntakeCreateDetail {
+  inboxId: string;
+  issueId: string;
+  status: number;
+  source: string;
+  name: string;
+  descriptionHtml: string;
+  priority: string | null;
+  stateId: string;
+  targetDate: string | null;
+}
+
+/** One intake request by its nested issue id: intake row plus nested issue fields. */
+export async function serverIntakeCreateDetail(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerIntakeCreateDetail> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] inbox-issue read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const issue = rec["issue"] as Record<string, unknown> | undefined;
+  if (typeof rec["id"] !== "string" || issue === undefined || typeof issue["id"] !== "string")
+    throw new Error("[parity] inbox-issue detail carried no inbox/issue ids.");
+  const strOrNull = (row: Record<string, unknown>, key: string): string | null => {
+    const value = row[key];
+    return typeof value === "string" ? value : null;
+  };
+  return {
+    inboxId: rec["id"] as string,
+    issueId: issue["id"] as string,
+    status: typeof rec["status"] === "number" ? (rec["status"] as number) : 0,
+    source: typeof rec["source"] === "string" ? (rec["source"] as string) : "",
+    name: typeof issue["name"] === "string" ? (issue["name"] as string) : "",
+    descriptionHtml: typeof issue["description_html"] === "string" ? (issue["description_html"] as string) : "",
+    priority: strOrNull(issue, "priority"),
+    stateId: typeof issue["state_id"] === "string" ? (issue["state_id"] as string) : "",
+    targetDate: strOrNull(issue, "target_date"),
+  };
+}
+
+/** One file asset linked to a work item (entity kind plus upload flag). */
+export interface ServerIntakeCreateIssueAsset {
+  id: string;
+  entityType: string;
+  uploaded: boolean;
+}
+
+/**
+ * File assets linked to one work item. The attachments REST list only
+ * shows ISSUE_ATTACHMENT rows, while composed images are
+ * ISSUE_DESCRIPTION, so the bulk-link proof reads through the shell.
+ */
+export async function serverIntakeCreateIssueAssets(issueId: string): Promise<ServerIntakeCreateIssueAsset[]> {
+  const out = await apiShell(
+    `from pi_dash.db.models.asset import FileAsset\n` +
+      `for a in FileAsset.objects.filter(issue_id=${JSON.stringify(issueId)}):\n` +
+      `    print("PARITY_ASSET:" + str(a.id) + "|" + str(a.entity_type) + "|" + str(a.is_uploaded))\n`
+  );
+  return out
+    .split("\n")
+    .map((line) => /^PARITY_ASSET:(.+)\|(.+)\|(.+)$/.exec(line.trim()))
+    .filter((match) => match !== null)
+    .map((match) => ({
+      id: (match as RegExpExecArray)[1] as string,
+      entityType: (match as RegExpExecArray)[2] as string,
+      uploaded: (match as RegExpExecArray)[3] === "True",
+    }));
+}
+
+/** Triage-state probe: 200 carries the state, 404 carries no state (never throws on 404). */
+export interface ServerIntakeCreateTriageProbe {
+  status: number;
+  id: string | null;
+  name: string | null;
+}
+
+/**
+ * Delete the project's triage state through the Django shell. The states
+ * REST API excludes triage rows (its queryset filters them out), so no
+ * REST delete exists; the shell is the documented removal path for the
+ * INT-033 auto-creation proof. Resolves with the deleted row count.
+ */
+export async function serverIntakeCreateDeleteTriage(projectId: string): Promise<number> {
+  const out = await apiShell(
+    `from pi_dash.db.models import State\n` +
+      `result = State.triage_objects.filter(project_id=${JSON.stringify(projectId)}).delete()\n` +
+      `deleted = result[0] if isinstance(result, tuple) else result\n` +
+      `print("PARITY_DELETED:" + str(deleted))\n`
+  );
+  const count = /^PARITY_DELETED:(\d+)$/m.exec(out)?.[1] ?? "";
+  if (count === "") throw new Error("[parity] triage delete produced no count.");
+  return Number(count);
+}
+
+/** Project triage state read that tolerates the missing-state 404 (INT-033 auto-creation proof). */
+export async function serverIntakeCreateTriageProbe(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerIntakeCreateTriageProbe> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/intake-state/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status === 404) return { status: 404, id: null, name: null };
+  if (!res.ok) throw new Error(`[parity] intake-state read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  return {
+    status: res.status,
+    id: typeof rec["id"] === "string" ? rec["id"] : null,
+    name: typeof rec["name"] === "string" ? rec["name"] : null,
+  };
+}

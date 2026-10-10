@@ -4675,6 +4675,55 @@ export interface ParityDriver {
   runnersWaitRunnerDeleteWorking(): Promise<void>;
   /** Wait until the revoke-runner confirm shows its in-flight state. */
   runnersWaitRunnerRevokeWorking(): Promise<void>;
+  // --- Intake-create dialog oracles (NEWFRONT-257, INT-013–017/033). ---
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. Continues the merged intakeCreate family from
+  // --- NEWFRONT-122 (open, title fill, submit) with the rest of the
+  // --- dialog surface: description editing, priority picking, the
+  // --- over-long-title guard, the create-more toggle, discard/escape,
+  // --- and deterministic editor-upload control for the busy-editor
+  // --- guard plus the creation-attachment path.
+  /** Whether the intake-create dialog currently shows. */
+  intakeCreateDialogOpen(): Promise<boolean>;
+  /** Current value of the dialog's title field. */
+  intakeCreateTitleValue(): Promise<string>;
+  /** Over-long-title warning text, or "" when no warning shows. */
+  intakeCreateTitleHint(): Promise<string>;
+  /** Whether the dialog's Create submit control is disabled. */
+  intakeCreateSubmitDisabled(): Promise<boolean>;
+  /** Type `text` into the dialog's description editor. */
+  intakeCreateFillDescription(text: string): Promise<void>;
+  /** Plain text currently in the dialog's description editor. */
+  intakeCreateDescriptionText(): Promise<string>;
+  /** Priority name currently shown on the dialog's priority picker. */
+  intakeCreatePriorityValue(): Promise<string>;
+  /** Open the dialog's priority picker and choose `label`. */
+  intakeCreateSetPriority(label: string): Promise<void>;
+  /** Whether the dialog's create-more toggle is on. */
+  intakeCreateMoreOn(): Promise<boolean>;
+  /** Flip the dialog's create-more toggle. */
+  intakeCreateToggleMore(): Promise<void>;
+  /** Click the dialog's Discard control (no close wait; callers assert). */
+  intakeCreateDiscard(): Promise<void>;
+  /** Press Escape with the dialog open. */
+  intakeCreatePressEscape(): Promise<void>;
+  /** Submit with create-more on; resolves once the creation toast shows (the dialog stays open). */
+  intakeCreateSubmitStayingOpen(): Promise<void>;
+  /**
+   * Hold the next editor-asset upload POST unanswered so the editor stays
+   * busy deterministically; resolves once armed.
+   */
+  intakeCreateStallNextUpload(): Promise<void>;
+  /** Let held editor-asset uploads through and disarm the stall. */
+  intakeCreateReleaseUpload(): Promise<void>;
+  /**
+   * Insert an image into the dialog's description editor through its
+   * insert menu, supplying `file` to the picker. When a stall is armed,
+   * resolves once the upload request is observed (still held).
+   */
+  intakeCreateInsertImage(file: { name: string; mime: string; bytes: Buffer }): Promise<void>;
+  /** Images currently rendered in the dialog's description editor. */
+  intakeCreateEditorImageCount(): Promise<number>;
 }
 
 /** One catalog table row: the user-visible definition facts. */

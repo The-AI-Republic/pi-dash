@@ -25063,4 +25063,202 @@ export class WebDriver implements ParityDriver {
     const revoke = dialog.getByRole("button", { name: "Revoke", exact: true });
     await expect.poll(() => revoke.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
   }
+  // --- Intake-create dialog oracles (NEWFRONT-257, INT-013–017/033). ---
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. Observed on the running old app: the intake
+  // --- header's "Add work item" action opens the dialog under a "Create
+  // --- intake work item" heading; the form holds a name input with an
+  // --- over-long warning, a rich-text editor, inline property pickers
+  // --- (state first, priority second), and a footer with a create-more
+  // --- toggle plus Discard/Create controls.
+
+  private intakeCreateHeading(): Locator {
+    return this.page.getByRole("heading", { name: "Create intake work item" });
+  }
+
+  private intakeCreateEditor(): Locator {
+    return this.intakeForm().locator('[contenteditable="true"]').first();
+  }
+
+  private intakeCreatePriorityTrigger(): Locator {
+    // Positional like the merged state trigger (first): the state picker
+    // renders two buttons, so the priority trigger sits at index two and
+    // shows the current priority label (default "None").
+    return this.intakeForm().getByRole("button").nth(2);
+  }
+
+  async intakeCreateDialogOpen(): Promise<boolean> {
+    const heading = this.intakeCreateHeading();
+    if ((await heading.count()) === 0) return false;
+    return heading.first().isVisible();
+  }
+
+  async intakeCreateTitleValue(): Promise<string> {
+    return this.intakeForm().locator('input[name="name"]').inputValue({ timeout: 30_000 });
+  }
+
+  async intakeCreateTitleHint(): Promise<string> {
+    const hint = this.intakeForm().locator("span", { hasText: /255/ }).first();
+    if ((await hint.count()) === 0) return "";
+    return ((await hint.innerText().catch(() => "")) ?? "").trim();
+  }
+
+  async intakeCreateSubmitDisabled(): Promise<boolean> {
+    const submit = this.intakeForm().locator('button[type="submit"]');
+    await submit.waitFor({ timeout: 30_000 });
+    return submit.isDisabled();
+  }
+
+  async intakeCreateFillDescription(text: string): Promise<void> {
+    const editor = this.intakeCreateEditor();
+    await editor.click({ timeout: 30_000 });
+    await editor.pressSequentially(text, { timeout: 30_000 });
+  }
+
+  async intakeCreateDescriptionText(): Promise<string> {
+    const editor = this.intakeCreateEditor();
+    await editor.waitFor({ timeout: 30_000 });
+    return ((await editor.innerText().catch(() => "")) ?? "").trim();
+  }
+
+  async intakeCreatePriorityValue(): Promise<string> {
+    const trigger = this.intakeCreatePriorityTrigger();
+    await trigger.waitFor({ timeout: 30_000 });
+    return (await trigger.innerText()).trim();
+  }
+
+  async intakeCreateSetPriority(label: string): Promise<void> {
+    if (await this.pickerOpen()) {
+      await this.page.keyboard.press("Escape");
+    }
+    await this.intakeCreatePriorityTrigger().click({ timeout: 30_000 });
+    await this.pickerListbox().waitFor({ state: "attached", timeout: 15_000 });
+    await this.pickerOptions().first().waitFor({ timeout: 15_000 });
+    await this.pickerListbox().getByRole("option", { name: label }).first().click({ timeout: 15_000 });
+  }
+
+  async intakeCreateMoreOn(): Promise<boolean> {
+    const toggle = this.intakeForm().getByRole("switch").first();
+    await toggle.waitFor({ timeout: 30_000 });
+    return (await toggle.getAttribute("aria-checked")) === "true";
+  }
+
+  async intakeCreateToggleMore(): Promise<void> {
+    const before = await this.intakeCreateMoreOn();
+    await this.intakeForm().getByText("Create more").first().click({ timeout: 30_000 });
+    await expect.poll(async () => this.intakeCreateMoreOn(), { timeout: 10_000 }).toBe(!before);
+  }
+
+  async intakeCreateDiscard(): Promise<void> {
+    await this.intakeForm().getByRole("button", { name: "Discard" }).click({ timeout: 30_000 });
+  }
+
+  async intakeCreatePressEscape(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+  }
+
+  async intakeCreateSubmitStayingOpen(): Promise<void> {
+    // Create-more keeps the dialog mounted, so the creation toast (not
+    // the dialog close) is the completion signal.
+    await this.intakeForm().locator('button[type="submit"]').click({ timeout: 30_000 });
+    await expect.poll(() => this.isToastVisible("created successfully"), { timeout: 30_000 }).toBe(true);
+  }
+
+  private intakeCreateUploadStall:
+    | {
+        matches: (url: URL) => boolean;
+        handler: (route: Route) => Promise<void>;
+        held: Route[];
+      }
+    | undefined;
+
+  async intakeCreateStallNextUpload(): Promise<void> {
+    // Hold the editor-asset metadata POST unanswered (the signed-URL PUT
+    // and status update never start), so the editor's busy flag stays set
+    // until the release call. Only intake-create uploads run in these
+    // scenarios, so holding every matching POST is the same as the next.
+    const stall = {
+      matches: (url: URL) => /\/api\/assets\/v2\/workspaces\/.+\/projects\/.+\/$/.test(url.pathname),
+      handler: async (route: Route) => {
+        if (route.request().method() !== "POST") {
+          await route.continue();
+          return;
+        }
+        stall.held.push(route);
+      },
+      held: [] as Route[],
+    };
+    this.intakeCreateUploadStall = stall;
+    await this.page.route(stall.matches, stall.handler);
+  }
+
+  async intakeCreateReleaseUpload(): Promise<void> {
+    const current = this.intakeCreateUploadStall;
+    this.intakeCreateUploadStall = undefined;
+    if (current) {
+      await this.page.unroute(current.matches, current.handler).catch(() => {});
+      for (const route of current.held) {
+        // Wait for the upload's final status-update answer so callers
+        // observe a settled editor (the metadata POST answer and the
+        // rendered image both race the busy flag flip).
+        const settled = this.page
+          .waitForResponse(
+            (response) =>
+              response.request().method() === "PATCH" &&
+              /\/api\/assets\/v2\/workspaces\/.+\/projects\/.+\/.+\/$/.test(new URL(response.url()).pathname),
+            { timeout: 60_000 }
+          )
+          .catch(() => null);
+        await route.continue().catch(() => {});
+        await settled;
+      }
+    }
+  }
+
+  async intakeCreateInsertImage(file: { name: string; mime: string; bytes: Buffer }): Promise<void> {
+    const stalled = this.intakeCreateUploadStall !== undefined;
+    // Registered before the file is supplied: when stalled, the metadata
+    // POST being observed (still held) is the return signal; otherwise
+    // the upload's final status-update answer proves the editor settled
+    // (the rendered image alone races the busy flag flip).
+    const uploadSeen = stalled
+      ? this.page.waitForRequest(
+          (request) =>
+            request.method() === "POST" &&
+            /\/api\/assets\/v2\/workspaces\/.+\/projects\/.+\/$/.test(new URL(request.url()).pathname),
+          { timeout: 30_000 }
+        )
+      : this.page.waitForResponse(
+          (response) =>
+            response.request().method() === "PATCH" &&
+            /\/api\/assets\/v2\/workspaces\/.+\/projects\/.+\/.+\/$/.test(new URL(response.url()).pathname),
+          { timeout: 60_000 }
+        );
+    const editor = this.intakeCreateEditor();
+    await editor.click({ timeout: 30_000 });
+    await editor.press("End");
+    // The slash menu only triggers at a word boundary, so the slash is
+    // always preceded by a space (a stray space in the description is
+    // harmless to every assertion).
+    await editor.pressSequentially(" /", { timeout: 30_000 });
+    // The slash menu renders its entries as plain buttons (no listbox
+    // roles); the image entry is the only "Image" button on the page.
+    const imageEntry = this.page.getByRole("button", { name: "Image" });
+    await imageEntry.first().waitFor({ timeout: 15_000 });
+    const chooserWait = this.page.waitForEvent("filechooser", { timeout: 30_000 }).catch(() => null);
+    await imageEntry.first().click({ timeout: 15_000 });
+    const chooser = await chooserWait;
+    if (chooser) {
+      await chooser.setFiles([{ name: file.name, mimeType: file.mime, buffer: file.bytes }]);
+    } else {
+      const input = this.intakeForm().locator('input[type="file"]').first();
+      await input.waitFor({ state: "attached", timeout: 30_000 });
+      await input.setInputFiles([{ name: file.name, mimeType: file.mime, buffer: file.bytes }]);
+    }
+    await uploadSeen;
+  }
+
+  async intakeCreateEditorImageCount(): Promise<number> {
+    return this.intakeForm().locator(".tiptap img").count();
+  }
 }
