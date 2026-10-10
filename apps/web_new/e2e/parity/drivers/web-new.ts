@@ -7415,4 +7415,41 @@ export class WebNewDriver implements ParityDriver {
   async cyclesCreateSubmit(): Promise<void> {
     return todo("cyclesCreateSubmit");
   }
+
+  // --- Cycles archive/menu/transfer acceptance (NEWFRONT-252, CYC-025-031
+  // --- plus CYC-046). Stage 0 oracle stubs; the cycles build slice lands them.
+
+  async cyclesRowFavoriteState(_name: string): Promise<"starred" | "unstarred" | "absent"> {
+    return todo("cyclesRowFavoriteState");
+  }
+  async cyclesRowFavoriteToggle(_name: string): Promise<void> {
+    return todo("cyclesRowFavoriteToggle");
+  }
+  async cyclesDelayFavoriteWrites(_delayMs: number): Promise<void> {
+    return todo("cyclesDelayFavoriteWrites");
+  }
+  async cyclesClearFavoriteDelays(): Promise<void> {
+    return todo("cyclesClearFavoriteDelays");
+  }
+  async cyclesRowMenuTriggerVisible(_name: string): Promise<boolean> {
+    return todo("cyclesRowMenuTriggerVisible");
+  }
+  async cyclesRowHover(_name: string): Promise<void> {
+    return todo("cyclesRowHover");
+  }
+  async cyclesRowMenuOpenNewTab(_name: string): Promise<string> {
+    return todo("cyclesRowMenuOpenNewTab");
+  }
+  async cyclesTransferSearchFill(_text: string): Promise<void> {
+    return todo("cyclesTransferSearchFill");
+  }
+  async cyclesTransferEmptyText(): Promise<string | null> {
+    return todo("cyclesTransferEmptyText");
+  }
+  async cyclesArchivedEmptyDetail(): Promise<string | null> {
+    return todo("cyclesArchivedEmptyDetail");
+  }
+  async cyclesGrantClipboardAccess(): Promise<void> {
+    return todo("cyclesGrantClipboardAccess");
+  }
 }
