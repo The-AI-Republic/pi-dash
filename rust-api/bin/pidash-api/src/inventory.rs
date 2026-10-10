@@ -1293,7 +1293,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.issue_activities_task.issue_activity",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.issue_automation_task.archive_and_close_old_issues",
@@ -1790,6 +1790,12 @@ mod tests {
             registry.register(name, stub());
         }
         registry.register(pidash_jobs::tasks_webhooks::PROCESS_LOGS_TASK, stub());
+        // `register_activity_task` takes `Pools` too (PIDASHCONV-836): a
+        // stub over the same name const the real call registers.
+        registry.register(
+            pidash_jobs::tasks_webhooks::ISSUE_ACTIVITY_TASK,
+            stub(),
+        );
         // Real registrations (the same calls `worker()` makes).
         tasks_cleanup::register_versions(&mut registry, pool.clone());
         tasks_cleanup::assets::register_assets(
@@ -1826,6 +1832,7 @@ mod tests {
             tasks_cleanup::WORKSPACE_SEED_TASK_NAME,
             tasks_cleanup::dummy_data::TASK_NAME,
             pidash_jobs::tasks_webhooks::PROCESS_LOGS_TASK,
+            pidash_jobs::tasks_webhooks::ISSUE_ACTIVITY_TASK,
         ]);
         expected_rust.extend(pidash_jobs::integrations::git_sync::TASK_NAMES);
         expected_rust.extend(pidash_jobs::integrations::github_sync::TASK_NAMES);
