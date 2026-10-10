@@ -86,13 +86,16 @@ oracle the step passes instantly.
 ## Reset
 
 ```sh
-apps/web_new/e2e/parity/stack/parity-reset.sh
+apps/web_new/e2e/parity/stack/parity-reset.sh [project]
 ```
 
 Drops this stack's scratch volumes and rebuilds through `parity-up.sh`.
 It honors `PARITY_NS` like the other scripts, and prints its target
-(project, containers, volumes) first; if the names ever stop matching
-this stack, stop and ask a human instead of proceeding.
+(project, containers, volumes) first; a pre-down assertion also refuses
+when the target project owns foreign-named containers. If the names ever
+stop matching this stack, stop and ask a human instead of proceeding.
+Pass the project explicitly whenever sudo is involved (see "Slots and
+sudo" below).
 
 ## Concurrent runs
 
@@ -159,12 +162,75 @@ old-app bugs exist only in that mode.
 ## Teardown
 
 ```sh
-apps/web_new/e2e/parity/stack/parity-down.sh
+apps/web_new/e2e/parity/stack/parity-down.sh [project]
 ```
 
 Removes the stack's containers, network and scratch volumes (images stay,
 so the next bring-up is fast). It honors `PARITY_NS`: it tears down your
-namespace's stack, never a sibling's. Run it when you are done.
+namespace's stack, never a sibling's. As with reset, the script prints
+its target and asserts container names before destroying; pass the
+project explicitly whenever sudo is involved (see "Slots and sudo"
+below). Run it when you are done.
+
+## Slots and sudo
+
+Parallel runs on one daemon isolate by namespace: export `PARITY_NS`
+and every script resolves the same compose project, container names,
+ports, volumes and seed file for it (see "Concurrent runs" above). An
+explicit `PARITY_PROJECT` always wins over the derivation; the default
+when nothing is set is `parity19`.
+
+Never combine exported `PARITY_*` variables with `sudo` plus a stack
+script (or `sudo docker compose`): sudo's `env_reset` drops the exported
+variables, the resolver silently falls back to the default project, and
+a `down -v` meant for your private slot deletes a sibling slot's live
+stack including its volumes. This happened once (NEWFRONT-174); the
+destructive scripts now refuse the ambiguous shape instead of guessing,
+but raw `docker compose` commands have no such guard.
+
+Safe forms, in order of preference:
+
+```sh
+# 1. No sudo at all (preferred; needs docker-group membership).
+export PARITY_NS=257
+apps/web_new/e2e/parity/stack/parity-down.sh
+
+# 2. Project as an argument: argv survives sudo, exported env does not.
+sudo apps/web_new/e2e/parity/stack/parity-down.sh parity257
+
+# 3. Env passed explicitly through sudo.
+sudo env PARITY_NS=257 apps/web_new/e2e/parity/stack/parity-down.sh
+```
+
+For `parity-reset.sh` under sudo, prefer form 3 on a namespaced stack:
+reset's bring-up half derives the stack's ports from the namespace,
+which a bare project argument cannot carry. `parity-down.sh` needs only
+the project, so form 2 is complete there.
+
+Rule of thumb: every project-scoped compose command spells its project
+with `-p` (argv), never through environment interpolation alone.
+Operators may additionally set `Defaults env_keep += "PARITY_*"` in
+sudoers on runner hosts; the scripts do not rely on it.
+
+## Sibling stack deleted? Recover in minutes
+
+If your stack's containers or volumes vanish because another slot's `down`
+hit your project (symptom: sudden DB/API failures, `docker ps` no longer
+shows your containers), only scratch rows are lost — images and checkouts
+survive. From your own checkout (never rebuild images from someone else's:
+they bake the wrong code), with your namespace exported:
+
+```sh
+export PARITY_NS=257   # or yours; omit for the default stack
+apps/web_new/e2e/parity/stack/parity-up.sh
+```
+
+That one command re-does the whole path: bring up, wait for migrations
+(`migrate --check`), bootstrap the instance, reseed the parity workspace,
+regenerate the seed file. Then rerun your scenarios; they regenerate the
+rest of the scratch data. The whole recovery is about ten minutes when
+images are cached. Leave a `process:` note on NEWFRONT-1 saying which
+slot hit you, so the pattern stays visible.
 
 Inside a Pi Dash agent run you do not have to remember: `parity-up.sh` arms
 `parity-reaper.sh`, a detached watcher that runs the teardown when the
