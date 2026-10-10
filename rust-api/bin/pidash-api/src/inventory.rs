@@ -1904,7 +1904,8 @@ mod tests {
         // task at all, so it is not in the table either.
         assert!(!registry.owns(tasks_cleanup::RESTORE_TASK_NAME));
         // Deliberately unregistered: `assistant.run_turn` has no live
-        // `TurnSeam` (PIDASHCONV-831), so it stays Python-owned.
+        // `TurnSeam` (hybrid worker per PIDASHCONV-857), so it stays
+        // Python-owned.
         assert!(!registry.owns(pidash_jobs::assistant::RUN_TURN_TASK));
         // Deliberately unregistered: the fire tasks have no live
         // seams (PIDASHCONV-861), so they stay Python-owned.

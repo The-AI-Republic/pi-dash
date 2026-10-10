@@ -21,7 +21,7 @@ Counts (2026-10-10, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 508 OWNED, 20 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 85 tasks — 33 OWNED, 35 proxied by design, 17 MISSING;
+- Jobs: 85 tasks — 33 OWNED, 36 proxied by design, 16 MISSING;
   beat 26/26 OWNED.
 
 ## Routes
@@ -164,14 +164,17 @@ worker runs them: `copy_s3_objects_of_description_and_assets`,
 their domain gates); recorded here and in the V-01 PR, for the V-05
 ported-bug register to catalog.
 
-### W-assistant (1 row; sweep resolved by PIDASHCONV-831)
+### W-assistant (0 rows; sweep wired, turn reclassified to PROXIED)
 
-Fix: PIDASHCONV-857. The sweep row is gone (wired by PIDASHCONV-831:
-`register_sweep_handler` in `worker()`, live store). `run_turn` needs a
-live `TurnSeam` and none exists — that is PIDASHCONV-857, not wiring.
+Fix: PIDASHCONV-857 (hybrid-worker decision, not wiring: the Python
+worker stays the owner post-switchover — see the `assistant.run_turn`
+bullet under "Proxied by design". The sweep row is gone (wired by
+PIDASHCONV-831: `register_sweep_handler` in `worker()`, live store);
+`run_turn` needs a live `TurnSeam`/agent runtime and none exists, so
+there is nothing to wire; the `W-assistant` gap id stays reserved in
+`WIRE_GAPS`).
 
 ```expected-jobs
-W-assistant :: assistant.run_turn :: must-wire (lost without python worker)
 ```
 
 ### W-cloud-agent (3 rows)
@@ -239,7 +242,7 @@ W-runner :: runner.sweep_agent_chat_state :: must-wire (lost without python work
 W-runner :: runner.sweep_chat_message_dedupe :: must-wire (lost without python worker)
 ```
 
-### Proxied by design (35 rows)
+### Proxied by design (36 rows)
 
 No fix issue: forwarding preserves Django's outcome on every row.
 
@@ -262,6 +265,19 @@ No fix issue: forwarding preserves Django's outcome on every row.
   stage-8 switchover track (PIDASHCONV-835); revisit PIDASHCONV-858
   by 2027-04-10, or when Rust ships a live S3 delete path, whichever
   comes first.
+- `assistant.run_turn`: hybrid worker (PIDASHCONV-857). Published on
+  every assistant message POST (`messages.py:103`), but the body runs
+  the pydantic-ai agent loop and Rust has no live `TurnSeam`/agent
+  runtime (only `#[cfg(test)]` fakes; `Agent.run` has no Rust
+  counterpart; the PIDASHCONV-254 rmcp/schemars/provider-client plan
+  was never built). A Rust handler would fail or ACK every turn while
+  running nothing, diverging from Django — so the Python worker stays
+  the owner post-switchover (the AMQP broker stays too: the Rust
+  handler enqueues into `rust_job_queue` and the Rust worker forwards
+  to Python over Celery protocol). Decision owner: stage-8
+  switchover track (PIDASHCONV-857); revisit PIDASHCONV-863 by
+  2027-04-10, or when Rust ships a live TurnSeam, whichever comes
+  first.
 - `managed_runner.expire_waiting_runs`: cloud-only app; the OSS beat
   entry fires into the void on both sides.
 - `project_invitation`: never invoked (`invite.py:105` calls `.delay`
@@ -271,6 +287,7 @@ No fix issue: forwarding preserves Django's outcome on every row.
 - `export_analytics_to_csv_email`: dead (defined, never referenced).
 
 ```expected-jobs
+PROXIED :: assistant.run_turn :: hybrid worker (no live TurnSeam/agent runtime in Rust); forward preserves full python execution (PIDASHCONV-857)
 PROXIED :: celery.accumulate :: celery-builtin; no canvas usage
 PROXIED :: celery.backend_cleanup :: celery-builtin; no canvas usage
 PROXIED :: celery.chain :: celery-builtin; no canvas usage
