@@ -119,12 +119,28 @@ pub const SPACE_SIGN_UP_PATH: &str = "/auth/spaces/magic-sign-up/";
 /// routers; merges keep both sides.
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route(APP_GENERATE_PATH, post(generate_app))
-        .route(APP_SIGN_IN_PATH, post(sign_in_app))
-        .route(APP_SIGN_UP_PATH, post(sign_up_app))
-        .route(SPACE_GENERATE_PATH, post(generate_space))
-        .route(SPACE_SIGN_IN_PATH, post(sign_in_space))
-        .route(SPACE_SIGN_UP_PATH, post(sign_up_space))
+        .route(APP_GENERATE_PATH, owned_post(post(generate_app)))
+        .route(APP_SIGN_IN_PATH, owned_post(post(sign_in_app)))
+        .route(APP_SIGN_UP_PATH, owned_post(post(sign_up_app)))
+        .route(SPACE_GENERATE_PATH, owned_post(post(generate_space)))
+        .route(SPACE_SIGN_IN_PATH, owned_post(post(sign_in_space)))
+        .route(SPACE_SIGN_UP_PATH, owned_post(post(sign_up_space)))
+}
+
+/// An owned POST path: writes serve from Rust, everything else falls
+/// through to Django. OPTIONS proxies too: DRF answers 200 metadata on
+/// the generate routes (and Django answers 200 `Allow` on sign-in/up)
+/// where axum would 405. `HEAD` rides axum's `get` handling, like the
+/// email/password siblings (PIDASHCONV-829).
+fn owned_post(
+    post_handler: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    post_handler
+        .get(crate::edge::proxy)
+        .put(crate::edge::proxy)
+        .patch(crate::edge::proxy)
+        .delete(crate::edge::proxy)
+        .options(crate::edge::proxy)
 }
 
 // ---------------------------------------------------------------------------
