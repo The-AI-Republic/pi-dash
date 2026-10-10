@@ -274,6 +274,71 @@ def traces_tap():
         connection.close()
 
 
+def purge_traces_leftovers() -> int:
+    """Ack this suite's `instance_traces` messages off the shared `celery` queue.
+
+    Both legs publish through the real topology (the Rust publisher even
+    declares the durable `celery` queue), so every register invocation
+    leaves an original on `celery` next to the tap-queue copy this suite
+    asserts on. A later broker-draining suite in the same job (e.g.
+    ops/test_repair.py's sync tests, whose drain requeues non-matching
+    messages until its marker arrives) would spin on those leftovers
+    forever: get-then-requeue redelivers the same message, so a sweep
+    containing one never terminates and the sweep deadline never fires
+    (observed as a 60-minute aggregate-workflow timeout). Purge them here.
+
+    Matching by task name is safe: only register flows publish
+    `instance_traces`, and every assertion on those messages consumes the
+    tap-queue copy, never the `celery` original.
+
+    Single pass, strictly terminating: each fetched message is acked
+    (traces) or held and requeued once at the end (anything else), with
+    a cap so a pathological shared queue cannot stall teardown. Returns
+    the number of traces messages purged. Best-effort: a missing broker
+    or queue means nothing could have been left behind.
+    """
+    try:
+        connection = pika.BlockingConnection(pika.URLParameters(broker_url()))
+    except Exception:
+        return 0
+    purged = 0
+    try:
+        channel = connection.channel()
+        try:
+            channel.queue_declare(queue="celery", passive=True)
+        except Exception:
+            return 0
+        held: list = []
+        for _ in range(10_000):
+            method, properties, _body = channel.basic_get(
+                queue="celery", auto_ack=False
+            )
+            if method is None:
+                break
+            headers = (properties.headers if properties else None) or {}
+            if headers.get("task") == TRACES_TASK:
+                channel.basic_ack(method.delivery_tag)
+                purged += 1
+            else:
+                held.append(method.delivery_tag)
+        for tag in held:
+            channel.basic_reject(tag, requeue=True)
+    except Exception:
+        pass
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+    return purged
+
+
+@pytest.fixture(autouse=True)
+def traces_queue_hygiene():
+    yield
+    purge_traces_leftovers()
+
+
 # ---------------------------------------------------------------------------
 # seeding (raw SQL; the suite never imports Django)
 # ---------------------------------------------------------------------------
@@ -639,6 +704,39 @@ def test_register_empty_signature_rejected(scratch_pair):
     )
     assert dbh.fetchone(django_db, "select count(*) as n from instances")["n"] == 0
     assert dbh.fetchone(rust_db, "select count(*) as n from instances")["n"] == 0
+
+
+def test_traces_cleanup_purges_celery_leftovers():
+    # The register legs publish real `instance_traces` messages through
+    # the shared `celery` queue; the per-test teardown purge must remove
+    # exactly those (and nothing else) so a later broker-draining suite
+    # in the same job never sees them (a requeue drain spins forever on
+    # one: observed as a 60-minute aggregate-workflow timeout).
+    connection = pika.BlockingConnection(pika.URLParameters(broker_url()))
+    try:
+        channel = connection.channel()
+        channel.queue_declare(queue="celery", durable=True)
+        depth_before = channel.queue_declare(
+            queue="celery", passive=True
+        ).method.message_count
+        channel.basic_publish(
+            exchange="",
+            routing_key="celery",
+            body=json.dumps([[], {"probe": "809-purge"}]).encode(),
+            properties=pika.BasicProperties(
+                content_type="application/json",
+                headers={"task": TRACES_TASK},
+            ),
+        )
+        purged = purge_traces_leftovers()
+        assert purged >= 1
+        depth_after = channel.queue_declare(
+            queue="celery", passive=True
+        ).method.message_count
+        assert depth_after == depth_before - purged + 1
+        assert purge_traces_leftovers() == 0
+    finally:
+        connection.close()
 
 
 # ---------------------------------------------------------------------------
