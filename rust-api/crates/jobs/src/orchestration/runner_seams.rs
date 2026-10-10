@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -50,7 +50,6 @@ use pidash_db::tx::Transaction;
 use pidash_services::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
 use pidash_services::dispatch::{AdmissionCache, LlmProfile};
 use pidash_services::orchestration::clock::{self as clock, ClockIssue, ClockWrite, RunEndedRef};
-use pidash_services::runner_runs::finalization::TERMINAL_EFFECTS_TASK;
 use pidash_types::orchestration::{StateRef, TickerEventKind};
 
 use super::creation_jobs::StoreDeps;
@@ -59,7 +58,8 @@ use super::fire_tick_seam::{
     create_ticker_sql, emit_logs, lock_ticker_by_issue_sql, map_policy, map_ticker,
     maybe_apply_deferred_pause as drive_pause, save_clock_sql, DispatchJobsError,
 };
-use crate::queue::{enqueue, NewJob};
+use crate::queue::enqueue;
+use crate::runner_runs::sweeps_chat::terminal_effects_job;
 
 // ---------------------------------------------------------------------------
 // Per-call admission cache
@@ -174,21 +174,13 @@ async fn run_creator(pool: &PgPool, run_id: Uuid) -> Result<Option<Uuid>, sqlx::
 
 /// Enqueue the drivers' pending terminal effects into `rust_job_queue`
 /// (the D-15 pipeline entry): one `apply_agent_run_terminal_effects`
-/// job per id.
+/// job per id, in the shared [`terminal_effects_job`] wire shape.
 async fn drain_terminal_effects(
     pool: &PgPool,
     terminal_effects: &[Uuid],
 ) -> Result<(), sqlx::Error> {
     for run_id in terminal_effects {
-        enqueue(
-            pool,
-            &NewJob::new(
-                TERMINAL_EFFECTS_TASK,
-                json!([run_id.to_string()]),
-                json!({}),
-            ),
-        )
-        .await?;
+        enqueue(pool, &terminal_effects_job(run_id)).await?;
     }
     Ok(())
 }

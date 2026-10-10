@@ -3,10 +3,11 @@
 //! Live matcher-drain executors (PIDASHCONV-862).
 //!
 //! Public [`drain_for_runner_by_id`] + [`drain_pod_by_id`] over
-//! (`pool`, `redis client`, [`RunnerSettings`]), unifying the four
+//! (`pool`, `redis client`, [`RunnerSettings`]), unifying the five
 //! private api copies (`runner_sessions/runner_open.rs`,
 //! `runner_sessions/runner_poll.rs`, `runner_enroll/teardown.rs`,
-//! `app_issues/handlers_versions_move.rs`): lookup-miss → `Ok` with
+//! `app_issues/handlers_versions_move.rs`,
+//! `v1_work_items/handlers_move_search.rs`): lookup-miss → `Ok` with
 //! no transaction; else one transaction over lock → claim → assign
 //! ([`ASSIGN_RUN_UPDATE_SQL`][drain_kernel::ASSIGN_RUN_UPDATE_SQL]
 //! with a fresh microsecond `now` per assignment); commit; then one
@@ -29,15 +30,16 @@
 //! # Translation notes
 //!
 //! * `visibility` reads as `i16` (the column is
-//!   `PositiveSmallIntegerField` → `smallint`); three of the four
-//!   private copies agree.
+//!   `PositiveSmallIntegerField` → `smallint`); three of the five
+//!   private copies agree (the two move copies read `i32`).
 //! * `run_config` reads as `Value` (the column is `NOT NULL` with a
 //!   `default=dict`); a non-object answers [`DrainError::Config`],
 //!   like the private copies' `Err`.
 //! * Timestamps truncate to microseconds (Django datetimes are
-//!   microsecond-exact); two private copies use `Utc::now()`
-//!   directly, two use a micros helper — same stored rows either
-//!   way, micros matches the comparisons.
+//!   microsecond-exact; Postgres rounds stored nanos, so a raw
+//!   `Utc::now()` can land 1µs off Python). The threshold
+//!   comparison is unaffected either way (heartbeat stamps are
+//!   microsecond-exact, so truncation never flips it).
 //! * A lock/claim miss commits the empty transaction (the
 //!   `runner_open.rs` shape) rather than dropping it (the
 //!   `runner_poll.rs` shape) — same rows, no writes either way.
@@ -382,9 +384,6 @@ async fn drain_pod(
         ));
     }
     tx.commit().await?;
-    if !plans.is_empty() {
-        tracing::info!("{}", drain_kernel::drain_pod_log(&pod_id, plans.len()));
-    }
     let store = PoolPubsubStore::new(pool.clone(), redis.cloned(), runner.clone());
     for plan in &plans {
         let drain_kernel::DrainEffect::SendAssign { runner_id, message } = &plan.after_commit;
@@ -392,6 +391,11 @@ async fn drain_pod(
         for warning in &outcome.warnings {
             tracing::warn!("{warning}");
         }
+    }
+    // After the sends (`matcher.py:235-238`): a dispatch failure
+    // propagates with no info line, exactly as Python.
+    if !plans.is_empty() {
+        tracing::info!("{}", drain_kernel::drain_pod_log(&pod_id, plans.len()));
     }
     Ok(plans.len())
 }

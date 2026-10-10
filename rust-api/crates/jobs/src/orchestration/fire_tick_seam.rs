@@ -180,7 +180,7 @@ fn map_candidate(row: &PgRow) -> Result<CandidateUser, sqlx::Error> {
 /// `services::orchestration::clock`; never a fork — the text still comes
 /// from the L5 consts). Longer names first so `:id` never corrupts
 /// `:issue_id`.
-pub(crate) fn translate_clock_sql(sql: &str, params: &[&str]) -> String {
+fn translate_clock_sql(sql: &str, params: &[&str]) -> String {
     let mut ordered: Vec<(usize, &&str)> = params.iter().enumerate().collect();
     ordered.sort_by_key(|item| std::cmp::Reverse(item.1.len()));
     let mut out = sql.to_owned();
