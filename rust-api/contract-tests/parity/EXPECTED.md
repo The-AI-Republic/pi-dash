@@ -21,7 +21,7 @@ Counts (2026-10-10, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 502 OWNED, 26 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 85 tasks — 28 OWNED, 34 proxied by design, 23 MISSING;
+- Jobs: 85 tasks — 29 OWNED, 34 proxied by design, 22 MISSING;
   beat 26/26 OWNED.
 
 ## Routes
@@ -201,12 +201,15 @@ Fix: PIDASHCONV-835.
 W-export :: pi_dash.bgtasks.exporter_expired_task.delete_old_s3_link :: must-wire (lost without python worker)
 ```
 
-### W-activity (1 row)
+### W-activity (0 rows; fixed)
 
-Fix: PIDASHCONV-836.
+Fix: PIDASHCONV-836 (landed). `register_activity_task` is wired in
+`worker()` with the live `OriginRedis` (sync SETEX from `REDIS_URL`;
+an unconfigured Redis aborts origin-bearing calls exactly like
+Django's `redis_instance()` `RuntimeError` under the broad-except).
+The row reclassified to OWNED (signature deleted).
 
 ```expected-jobs
-W-activity :: pi_dash.bgtasks.issue_activities_task.issue_activity :: must-wire (lost without python worker)
 ```
 
 ### W-automation (1 row)

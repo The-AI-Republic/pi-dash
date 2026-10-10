@@ -2742,6 +2742,7 @@ dependencies = [
  "pidash-jobs",
  "pidash-services",
  "pidash-types",
+ "redis",
  "reqwest",
  "serde_json",
  "sqlx",

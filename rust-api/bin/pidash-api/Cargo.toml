@@ -21,6 +21,12 @@ axum = "0.8"
 # no lock churn; features are the union the groups need.
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 clap = { version = "4", features = ["derive"] }
+# D-08 issue_activity worker wiring (PIDASHCONV-836): the jobs crate's
+# `RedisOrigin` seam is sync while the foundation handle is async-only, so
+# the binary owns a thin blocking adapter over the same locked redis 1.7.1
+# pidash-db uses (no lock churn; `tls-rustls-webpki-roots` because
+# production `REDIS_URL` values are `rediss://`, same as pidash-db).
+redis = { version = "1", default-features = false, features = ["tls-rustls-webpki-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
