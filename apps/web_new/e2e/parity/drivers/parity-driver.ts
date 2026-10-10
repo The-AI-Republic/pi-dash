@@ -4177,6 +4177,88 @@ export interface ParityDriver {
   viewsDetailAddClick(): Promise<void>;
   /** Whether the detail body text currently contains `name`. */
   viewsDetailShowsIssue(name: string): Promise<boolean>;
+  /** Custom workspace view names in list order. */
+  wsViewsListNames(): Promise<string[]>;
+  /** Static default view names in list order. */
+  wsViewsDefaultNames(): Promise<string[]>;
+  /** Browser tab title on the workspace views list. */
+  wsViewsListTabTitle(): Promise<string>;
+  /** Fill the workspace views list search box. */
+  wsViewsSearchFill(text: string): Promise<void>;
+  /** Description under a custom row, or "" when the row shows none. */
+  wsViewsRowDescription(name: string): Promise<string>;
+  /** Open a custom row's overflow menu. */
+  wsViewsRowMenuOpen(name: string): Promise<void>;
+  /** Visible entries of the open row menu. */
+  wsViewsRowMenuEntries(): Promise<string[]>;
+  /** Pick an entry of the open row menu. */
+  wsViewsRowMenuPick(entry: string): Promise<void>;
+  /** Whether the customs-loading skeleton shows. */
+  wsViewsSkeletonVisible(): Promise<boolean>;
+  /** Whether the skeleton appears at any point within `windowMs`. */
+  wsViewsSkeletonFlashed(windowMs: number): Promise<boolean>;
+  /** Delay every customs-list GET by `ms` for the rest of the test. */
+  wsViewsDelayNextList(ms: number): Promise<void>;
+  /** Fail the next workspace-views write with `status` (once). */
+  wsViewsFailNextWrite(status: number): Promise<void>;
+  /** Whether the workspace tab strip renders anywhere. */
+  wsViewsStripVisible(): Promise<boolean>;
+  /** Whether any star control renders on the workspace views list. */
+  wsViewsListStarVisible(): Promise<boolean>;
+  /** Whether a default row carries an overflow menu button. */
+  wsViewsDefaultRowHasMenu(name: string): Promise<boolean>;
+  /** Click a custom row through to its detail page. */
+  wsViewsRowOpen(name: string): Promise<void>;
+  /** Display dropdown option texts inside the open create/edit dialog. */
+  wsViewsDialogDisplayOptions(): Promise<string[]>;
+  /** Browser tab title on a workspace view detail. */
+  wsViewsDetailTabTitle(): Promise<string>;
+  /** Detail breadcrumb texts (views list, current view). */
+  wsViewsDetailCrumbs(): Promise<string[]>;
+  /** Open the detail switcher from the current view `name`. */
+  wsViewsDetailSwitcherOpen(name: string): Promise<void>;
+  /** Switcher option names in display order. */
+  wsViewsDetailSwitcherOptions(): Promise<string[]>;
+  /** Whether the switcher offers a search box. */
+  wsViewsDetailSwitcherSearchVisible(): Promise<boolean>;
+  /** Type into the switcher search box. */
+  wsViewsDetailSwitcherSearch(text: string): Promise<void>;
+  /** Pick a switcher option by name. */
+  wsViewsDetailSwitcherPick(name: string): Promise<void>;
+  /** Whether a layout selector renders in the detail header. */
+  wsViewsDetailLayoutVisible(): Promise<boolean>;
+  /** Whether the display dropdown renders in the detail header. */
+  wsViewsDetailDisplayVisible(): Promise<boolean>;
+  /** Whether the work-item filter toggle renders in the detail header. */
+  wsViewsDetailFiltersToggleVisible(): Promise<boolean>;
+  /** Whether the Add view button renders in the detail header. */
+  wsViewsDetailAddVisible(): Promise<boolean>;
+  /** Click the Add view button. */
+  wsViewsDetailAddClick(): Promise<void>;
+  /** Open the detail header quick-actions menu. */
+  wsViewsDetailMenuOpen(): Promise<void>;
+  /** Visible entries of the open detail menu. */
+  wsViewsDetailMenuEntries(): Promise<string[]>;
+  /** Copy-link from the detail menu; returns the clipboard text. */
+  wsViewsDetailCopyLink(): Promise<string>;
+  /** Open-in-new-tab from the detail menu; returns the popup URL. */
+  wsViewsDetailOpenNewTabHref(): Promise<string>;
+  /** Missing-view error title, or "" when the detail renders. */
+  wsViewsDetailErrorTitle(): Promise<string>;
+  /** Click the error state's way-back button. */
+  wsViewsDetailErrorBack(): Promise<void>;
+  /** Whether the settings page shows the not-authorized notice. */
+  viewsSettingsNotAuthorized(): Promise<boolean>;
+  /** The Enable-views switch state on the features settings page. */
+  viewsSettingsViewsToggleValue(): Promise<boolean>;
+  /** Flip the Enable-views switch. */
+  viewsSettingsViewsToggleFlip(): Promise<void>;
+  /** Focused control labels while tabbing through the open view dialog. */
+  viewsDialogTabOrder(): Promise<string[]>;
+  /** Drag one project-list row onto another by name. */
+  viewsListDragRow(from: string, to: string): Promise<void>;
+  /** Whether any export/import/print control shows on a views page. */
+  viewsPageExportImportVisible(): Promise<boolean>;
 }
 
 /** One catalog table row: the user-visible definition facts. */

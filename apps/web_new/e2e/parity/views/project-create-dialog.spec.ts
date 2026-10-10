@@ -67,13 +67,13 @@ test(
 
     await test.step("Escape and Cancel close without saving", async () => {
       await driver.viewsDialogEscape();
-      expect(await driver.viewsDialogOpen()).toBe(false);
+      await expect.poll(() => driver.viewsDialogOpen(), POLL).toBe(false);
       await driver.viewsOpenCreateFromHeader();
       await expect.poll(() => driver.viewsDialogOpen(), POLL).toBe(true);
       await driver.viewsDialogFillTitle("Never saved");
       await driver.viewsDialogFillDescription("discarded");
       await driver.viewsDialogCancel();
-      expect(await driver.viewsDialogOpen()).toBe(false);
+      await expect.poll(() => driver.viewsDialogOpen(), POLL).toBe(false);
       const server = await serverSavedViews(workspaceSlug, projectId, owner.cookie);
       expect(server).toHaveLength(0);
     });

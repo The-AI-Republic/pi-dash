@@ -28,9 +28,13 @@ test(
       expect(await driver.viewsGateManageEnabled()).toBe(true);
     });
 
-    await test.step("the shortcut lands on the project features settings page", async () => {
+    await test.step("bug: NEWFRONT-247 the shortcut lands on a 404, not the features settings", async () => {
+      // bug: NEWFRONT-247 — the button points at the bare /features index,
+      // which has no page (only per-feature sub-pages exist); intended is
+      // the project features settings page.
       await driver.viewsGateManageOpen();
-      expect(await driver.viewsGateTitle()).toBe("");
+      await expect.poll(() => driver.currentUrlPath(), POLL).toMatch(/\/settings\/projects\/[^/]+\/features\/?$/);
+      await expect.poll(() => driver.viewsGateTitle(), POLL).toBe("");
     });
 
     await test.step("enabling the feature replaces the gate with the list", async () => {

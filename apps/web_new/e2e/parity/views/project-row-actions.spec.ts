@@ -143,7 +143,7 @@ test(
       await driver.viewsDialogFillTitle(renamed);
       await driver.viewsDialogFillDescription("after");
       await driver.viewsDialogSubmit();
-      expect(await driver.viewsDialogOpen()).toBe(false);
+      await expect.poll(() => driver.viewsDialogOpen(), POLL).toBe(false);
       await expect.poll(() => driver.viewsListNames(), POLL).toEqual([renamed]);
       const detail = await serverProjectViewDetail(workspaceSlug, projectId, created, owner.cookie);
       expect(detail.name).toBe(renamed);

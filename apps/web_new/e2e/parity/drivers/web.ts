@@ -22385,4 +22385,359 @@ export class WebDriver implements ParityDriver {
   async viewsDetailTabTitle(): Promise<string> {
     return this.page.title();
   }
+
+  // --- Workspace views list (NEWFRONT-42, VIEW-029-033, VIEW-039). Static
+  // defaults render above customs; customs carry an overflow menu that
+  // defaults lack, which is also how the two groups are told apart.
+  private wsViewsListMain(): Locator {
+    return this.page.getByRole("main").last();
+  }
+
+  private wsViewsCustomRows(): Locator {
+    return this.wsViewsListMain()
+      .getByRole("link")
+      .filter({ has: this.page.getByRole("button") });
+  }
+
+  async wsViewsListNames(): Promise<string[]> {
+    const rows = this.wsViewsCustomRows();
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const text = await rows
+        .nth(index)
+        .innerText({ timeout: 5_000 })
+        .catch(() => "");
+      const first = text
+        .split("\n")
+        .map((t) => t.trim())
+        .find((t) => t.length > 0);
+      if (first) names.push(first);
+    }
+    return names;
+  }
+
+  async wsViewsDefaultNames(): Promise<string[]> {
+    const rows = this.wsViewsListMain()
+      .getByRole("link")
+      .filter({ hasNot: this.page.getByRole("button") });
+    const texts = await rows.allInnerTexts().catch(() => []);
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
+  }
+
+  async wsViewsListTabTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async wsViewsSearchFill(text: string): Promise<void> {
+    await this.wsViewsListMain().getByPlaceholder("Search").fill(text, { timeout: 30_000 });
+  }
+
+  async wsViewsRowDescription(name: string): Promise<string> {
+    const row = this.wsViewsCustomRows().filter({ hasText: name }).first();
+    const text = await row.innerText({ timeout: 15_000 }).catch(() => "");
+    const lines = text
+      .split("\n")
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0);
+    return lines.length > 1 ? (lines[1] as string) : "";
+  }
+
+  private wsViewsRowByName(name: string): Locator {
+    return this.wsViewsCustomRows().filter({ hasText: name }).first();
+  }
+
+  async wsViewsRowMenuOpen(name: string): Promise<void> {
+    const row = this.wsViewsRowByName(name);
+    await row.hover({ timeout: 10_000 }).catch(() => undefined);
+    await row.getByRole("button").first().click({ timeout: 30_000 });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+  }
+
+  async wsViewsRowMenuEntries(): Promise<string[]> {
+    const texts = await this.page.getByRole("menuitem").allInnerTexts();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
+  }
+
+  async wsViewsRowMenuPick(entry: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name: entry }).first().click({ timeout: 30_000 });
+  }
+
+  async wsViewsSkeletonVisible(): Promise<boolean> {
+    return this.isShown(this.wsViewsListMain().locator("div.animate-pulse.flex-col"));
+  }
+
+  async wsViewsSkeletonFlashed(windowMs: number): Promise<boolean> {
+    // waitForFunction polls in-page, so a sub-second flash is caught
+    // where round-tripped polls would miss it.
+    return this.page
+      .waitForFunction(
+        () => {
+          const mains = [...document.querySelectorAll("main")];
+          const last = mains[mains.length - 1];
+          const skel = last?.querySelector("div.animate-pulse.flex-col") as HTMLElement | null;
+          return skel !== null && skel.offsetParent !== null;
+        },
+        null,
+        { timeout: windowMs }
+      )
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  async wsViewsDelayNextList(ms: number): Promise<void> {
+    // Delay (not fail) the next customs-list GET so the skeleton window
+    // stays open long enough to assert; detail GETs pass through.
+    const matches = (url: URL) => /\/api\/workspaces\/[^/]+\/views\/?(\?|$)/.test(url.pathname + url.search);
+    // Delay every matching GET (no once-flag): the dev oracle
+    // double-mounts, so a second undelayed fetch would collapse the
+    // skeleton window. Context-scoped; the test's end drops the route.
+    const handler = async (route: Route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    };
+    await this.page.route(matches, handler);
+  }
+
+  async wsViewsFailNextWrite(status: number): Promise<void> {
+    // Workspace twin of viewsFailNextWrite: the workspace modal writes
+    // to /workspaces/{ws}/views/ with no /projects/ segment, so the
+    // project predicate never matches it.
+    const matches = (url: URL) => url.pathname.includes("/views") && !url.pathname.includes("/projects/");
+    const handler = async (route: Route) => {
+      const method = route.request().method();
+      if (method === "GET" || method === "OPTIONS" || method === "HEAD") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({ status, contentType: "application/json", body: "{}" });
+      await this.page.unroute(matches, handler).catch(() => undefined);
+    };
+    await this.page.route(matches, handler);
+  }
+
+  async wsViewsStripVisible(): Promise<boolean> {
+    return (await this.page.locator("[id^='global-view-']").count()) > 0;
+  }
+
+  async wsViewsListStarVisible(): Promise<boolean> {
+    return this.isShown(this.wsViewsListMain().locator("svg.lucide-star"));
+  }
+
+  async wsViewsDefaultRowHasMenu(name: string): Promise<boolean> {
+    const row = this.wsViewsListMain().getByRole("link", { name }).first();
+    return (await row.getByRole("button").count()) > 0;
+  }
+
+  async wsViewsRowOpen(name: string): Promise<void> {
+    await this.wsViewsRowByName(name).click({ timeout: 30_000 });
+    await this.page.waitForURL(/\/workspace-views\//, { timeout: 30_000 }).catch(() => undefined);
+  }
+
+  async wsViewsDialogDisplayOptions(): Promise<string[]> {
+    // Unlike the project dialog's inline panel, the workspace dialog's
+    // Display is a headless popover; read it like the detail one.
+    const dialog = this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: /Create View|Update View/ }) });
+    const displayButton = dialog.getByRole("button", { name: "Display", exact: true });
+    await displayButton.click({ timeout: 30_000 });
+    const panel = this.page
+      .locator("div[data-headlessui-state='open']:visible", { hasText: "Display Properties" })
+      .last();
+    await panel.waitFor({ timeout: 15_000 });
+    const text = await panel.innerText({ timeout: 15_000 });
+    // Toggle the popover shut via its trigger: a bare Escape also reaches
+    // the dialog's own dismiss handler and closes the whole modal.
+    await displayButton.click({ timeout: 30_000 });
+    await panel.waitFor({ state: "hidden", timeout: 15_000 }).catch(() => undefined);
+    return text
+      .split("\n")
+      .map((t) => t.replace(/\s+/g, " ").trim())
+      .filter((t) => t.length > 0);
+  }
+
+  // --- Workspace view detail (NEWFRONT-42, VIEW-031, VIEW-033, VIEW-037,
+  // --- VIEW-038, VIEW-040). Same header shape as the project detail:
+  // breadcrumb switcher, Display, filter toggle, Add view, quick actions.
+  private wsViewsDetailHeader(): Locator {
+    return this.page.getByRole("main").nth(1);
+  }
+
+  async wsViewsDetailTabTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async wsViewsDetailCrumbs(): Promise<string[]> {
+    const header = this.wsViewsDetailHeader();
+    const clean = (raw: string) => raw.replace(/\s+/g, " ").trim();
+    const views = clean(
+      (await header
+        .getByText("Views", { exact: true })
+        .innerText()
+        .catch(() => "")) ?? ""
+    );
+    const current = clean(
+      (await header
+        .getByRole("button")
+        .nth(0)
+        .innerText()
+        .catch(() => "")) ?? ""
+    );
+    return [views, current].filter((t) => t !== "");
+  }
+
+  async wsViewsDetailSwitcherOpen(name: string): Promise<void> {
+    await this.wsViewsDetailHeader().getByRole("button", { name }).first().click({ timeout: 30_000 });
+    await this.viewsDetailSwitcherOptionList().first().waitFor({ timeout: 15_000 });
+  }
+
+  async wsViewsDetailSwitcherOptions(): Promise<string[]> {
+    await this.viewsDetailSwitcherOptionList().first().waitFor({ timeout: 15_000 });
+    const texts = await this.viewsDetailSwitcherOptionList().allInnerTexts();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
+  }
+
+  async wsViewsDetailSwitcherSearchVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("combobox"));
+  }
+
+  async wsViewsDetailSwitcherSearch(text: string): Promise<void> {
+    await this.page.getByRole("combobox").first().fill(text, { timeout: 30_000 });
+  }
+
+  async wsViewsDetailSwitcherPick(name: string): Promise<void> {
+    await this.viewsDetailSwitcherOptionList().getByText(name, { exact: false }).first().click({ timeout: 30_000 });
+    await this.viewsDetailSwitcherOptionList()
+      .first()
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
+
+  async wsViewsDetailLayoutVisible(): Promise<boolean> {
+    return (await this.wsViewsDetailHeader().locator("button:visible:has(svg.size-3\\.5)").count()) > 0;
+  }
+
+  async wsViewsDetailDisplayVisible(): Promise<boolean> {
+    return this.isShown(this.wsViewsDetailHeader().getByRole("button", { name: "Display", exact: true }));
+  }
+
+  async wsViewsDetailFiltersToggleVisible(): Promise<boolean> {
+    return this.isShown(this.wsViewsDetailHeader().locator("button:has(svg.lucide-list-filter)"));
+  }
+
+  async wsViewsDetailAddVisible(): Promise<boolean> {
+    return this.isShown(this.wsViewsDetailHeader().getByRole("button", { name: "Add view", exact: true }));
+  }
+
+  async wsViewsDetailAddClick(): Promise<void> {
+    await this.wsViewsDetailHeader().getByRole("button", { name: "Add view", exact: true }).click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Create View" }).first().waitFor({ timeout: 15_000 });
+  }
+
+  async wsViewsDetailMenuOpen(): Promise<void> {
+    await this.wsViewsDetailHeader()
+      .locator("button")
+      .filter({ has: this.page.locator("svg.lucide-ellipsis") })
+      .first()
+      .click({ timeout: 30_000 });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+  }
+
+  async wsViewsDetailMenuEntries(): Promise<string[]> {
+    const texts = await this.page.getByRole("menuitem").allInnerTexts();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
+  }
+
+  async wsViewsDetailCopyLink(): Promise<string> {
+    await this.page
+      .context()
+      .grantPermissions(["clipboard-read", "clipboard-write"])
+      .catch(() => undefined);
+    await this.page.getByRole("menuitem", { name: "Copy link" }).first().click({ timeout: 30_000 });
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async wsViewsDetailOpenNewTabHref(): Promise<string> {
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 30_000 }),
+      this.page.getByRole("menuitem", { name: "Open in new tab" }).first().click({ timeout: 30_000 }),
+    ]);
+    const href = popup.url();
+    await popup.close().catch(() => undefined);
+    return href;
+  }
+
+  async wsViewsDetailErrorTitle(): Promise<string> {
+    const heading = this.page.getByRole("heading", { name: "View does not exist", exact: true });
+    if ((await heading.count()) === 0) return "";
+    return "View does not exist";
+  }
+
+  async wsViewsDetailErrorBack(): Promise<void> {
+    await this.page.getByRole("button", { name: "Go to All work items" }).first().click({ timeout: 30_000 });
+    await this.page.waitForURL(/\/workspace-views\/all-issues/, { timeout: 30_000 }).catch(() => undefined);
+  }
+
+  // --- Settings toggle, dialog tab order, drag/print negatives
+  // --- (NEWFRONT-42, VIEW-041, VIEW-044, VIEW-047).
+  async viewsSettingsNotAuthorized(): Promise<boolean> {
+    // Wait for whichever renders first: the gate notice or the toggle.
+    const heading = this.page.getByRole("heading", { name: /not authorized/i });
+    await heading.or(this.page.getByRole("switch").first()).first().waitFor({ timeout: 30_000 });
+    return this.isShown(heading);
+  }
+
+  async viewsSettingsViewsToggleValue(): Promise<boolean> {
+    const value = await this.page.getByRole("switch").first().getAttribute("aria-checked");
+    return value === "true";
+  }
+
+  async viewsSettingsViewsToggleFlip(): Promise<void> {
+    await this.page.getByRole("switch").first().click({ timeout: 30_000 });
+  }
+
+  async viewsDialogTabOrder(): Promise<string[]> {
+    // Start in the title field, then Tab through the dialog, recording
+    // each focused control's accessible label.
+    await this.viewsDialog().getByPlaceholder("Title").click({ timeout: 30_000 });
+    const order: string[] = [];
+    for (let index = 0; index < 10; index += 1) {
+      await this.page.keyboard.press("Tab");
+      const label = await this.page
+        .evaluate(() => {
+          const el = document.activeElement as HTMLElement | null;
+          if (!el) return "";
+          const input = el as HTMLInputElement;
+          const label = el.getAttribute("aria-label") ?? input.placeholder ?? el.innerText ?? "";
+          return label.replace(/\s+/g, " ").trim().slice(0, 40);
+        })
+        .catch(() => "");
+      if (label !== "") order.push(label);
+    }
+    return order;
+  }
+
+  async viewsListDragRow(from: string, to: string): Promise<void> {
+    const rows = this.page.getByRole("main").last().getByRole("link");
+    const source = rows.filter({ hasText: from }).first();
+    const target = rows.filter({ hasText: to }).first();
+    const fromBox = await source.boundingBox({ timeout: 15_000 });
+    const toBox = await target.boundingBox({ timeout: 15_000 });
+    if (!fromBox || !toBox) throw new Error("[parity] drag endpoints have no box.");
+    await this.page.mouse.move(fromBox.x + fromBox.width / 2, fromBox.y + fromBox.height / 2);
+    await this.page.mouse.down();
+    await this.page.mouse.move(toBox.x + toBox.width / 2, toBox.y + toBox.height / 2, { steps: 12 });
+    await this.page.mouse.up();
+  }
+
+  async viewsPageExportImportVisible(): Promise<boolean> {
+    const main = this.page.getByRole("main").last();
+    if (await this.isShown(main.getByRole("button", { name: /export|import|print/i }))) return true;
+    return this.isShown(main.getByRole("menuitem", { name: /export|import|print/i }));
+  }
 }
