@@ -295,7 +295,7 @@ test(
       await test.step("drive the editor busy with a held upload", async () => {
         await driver.intakeCreateFillTitle(`${tag} request`);
         await driver.intakeCreateStallNextUpload();
-        await driver.intakeCreateInsertImage({ name: "dot.png", mimeType: "image/png", bytes: tinyPng() });
+        await driver.intakeCreateInsertImage({ name: "dot.png", mime: "image/png", bytes: tinyPng() });
       });
 
       await test.step("discard warns and keeps the dialog", async () => {
@@ -335,7 +335,7 @@ test(
       // Discard, dialog kept. See NEWFRONT-304 and the INT-016 row.
       await driver.intakeCreateFillTitle(`${tag} request`);
       await driver.intakeCreateStallNextUpload();
-      await driver.intakeCreateInsertImage({ name: "dot.png", mimeType: "image/png", bytes: tinyPng() });
+      await driver.intakeCreateInsertImage({ name: "dot.png", mime: "image/png", bytes: tinyPng() });
       await driver.intakeCreatePressEscape();
       await expect.poll(() => driver.intakeCreateDialogOpen(), { timeout: 15_000 }).toBe(false);
       await driver.intakeCreateReleaseUpload();
@@ -379,7 +379,7 @@ test(
       await test.step("compose with an image", async () => {
         await driver.intakeCreateFillTitle(title);
         await driver.intakeCreateFillDescription(`${tag} body`);
-        await driver.intakeCreateInsertImage({ name: "dot.png", mimeType: "image/png", bytes: tinyPng() });
+        await driver.intakeCreateInsertImage({ name: "dot.png", mime: "image/png", bytes: tinyPng() });
         await expect.poll(() => driver.intakeCreateEditorImageCount(), { timeout: 60_000 }).toBe(1);
       });
 
