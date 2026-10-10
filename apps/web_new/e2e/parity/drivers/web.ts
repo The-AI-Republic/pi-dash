@@ -42,6 +42,8 @@ import type {
   DevMachineRow,
   GanttSidebarRow,
   GanttZoom,
+  IntakeXApiRequest,
+  IntakeXTab,
   KanbanCard,
   KanbanColumn,
   LayoutsLayoutKey,
@@ -25062,5 +25064,244 @@ export class WebDriver implements ParityDriver {
     const dialog = await this.runnersWaitForConfirm("Revoke runner?");
     const revoke = dialog.getByRole("button", { name: "Revoke", exact: true });
     await expect.poll(() => revoke.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  // --- Intake cross-cutting (NEWFRONT-260, INT-018/030/031/032/034). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+  // --- Observed on the running old app: the intake screen lives under the
+  // --- project intake route with its tab and selected item in the query
+  // --- string; list rows are id-anchored links holding a title heading; the
+  // --- detail edits through a shared title field; below the wide breakpoint
+  // --- the list becomes a toggled overlay and the detail actions collapse
+  // --- into the mobile header's overflow menu.
+
+  private intakeXTraffic: IntakeXApiRequest[] = [];
+
+  /** The tab-bar cell behind `label` (the clickable parent of the bare label text). */
+  private intakeXTabCell(label: "Open" | "Closed"): Locator {
+    return this.page.locator(`xpath=//div[normalize-space(.)="${label}" and count(*)=0]/parent::div`).first();
+  }
+
+  private intakeXRowLinks(): Locator {
+    return this.page.locator('a[id^="inbox-issue-list-item-"]');
+  }
+
+  /** Settle once the screen committed: tab bar up, the feature gate, or a named load failure. */
+  private async intakeXWaitReady(): Promise<void> {
+    const tabs = this.intakeXTabCell("Open")
+      .waitFor({ timeout: 120_000 })
+      .then(
+        () => "tabs",
+        () => "lost"
+      );
+    const gate = this.page
+      .getByRole("heading", { name: "Intake is not enabled for the project." })
+      .waitFor({ timeout: 120_000 })
+      .then(
+        () => "gate",
+        () => "lost"
+      );
+    const broken = this.page
+      .getByText("Error fetching the intake work items please try again later.")
+      .waitFor({ timeout: 120_000 })
+      .then(
+        () => "init-error",
+        () => "lost"
+      );
+    const winner = await Promise.race([tabs, gate, broken]);
+    if (winner === "init-error")
+      throw new Error("[parity] the intake list fetch failed on load (init-error); check the oracle API health.");
+    if (winner === "lost") {
+      const url = this.page.url();
+      const body = await this.page.evaluate(() => document.body.innerText.slice(0, 300)).catch(() => "<unreadable>");
+      throw new Error(
+        `[parity] the intake screen never settled at ${url} (no tabs, gate, or load error within 120s; body: ${JSON.stringify(body)})`
+      );
+    }
+  }
+
+  /** Settle a list refresh: rows render, a placeholder does, or the detail took over on narrow screens. */
+  private async intakeXWaitList(): Promise<void> {
+    await Promise.race([
+      this.intakeXRowLinks().first().waitFor({ timeout: WebDriver.WAIT_MS }),
+      this.page
+        .getByRole("heading", { name: /No matching results\.|Log Intake requests|No request closed yet/ })
+        .first()
+        .waitFor({ timeout: WebDriver.WAIT_MS }),
+      this.page.locator("#title-input").first().waitFor({ timeout: WebDriver.WAIT_MS }),
+    ]);
+  }
+
+  /** The detail column: the flex column holding the shared title field. */
+  private intakeXDetailScope(): Locator {
+    return this.page.locator('xpath=//div[.//*[@id="title-input"]]').last();
+  }
+
+  /** The mobile-only chrome: nodes inside the below-wide container. */
+  private intakeXMobileScope(): Locator {
+    return this.page.locator('xpath=//div[contains(@class,"lg:hidden")]');
+  }
+
+  async intakeXOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.intakeXWaitReady();
+  }
+
+  async intakeXOpenDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake?currentTab=open&inboxIssueId=${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Either the detail renders, or the screen drops the id and falls back
+    // to the list (a refused or stale target); both are settled outcomes.
+    await this.page.waitForFunction(
+      (want) =>
+        document.querySelector("#title-input") !== null ||
+        new URL(window.location.href).searchParams.get("inboxIssueId") !== want,
+      issueId,
+      { timeout: 120_000 }
+    );
+  }
+
+  async intakeXListTitles(): Promise<string[]> {
+    const texts = await this.intakeXRowLinks().locator("h3").allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
+  }
+
+  async intakeXActiveTab(): Promise<IntakeXTab> {
+    const marked = async (label: "Open" | "Closed"): Promise<boolean> => {
+      const cell = this.intakeXTabCell(label);
+      await cell.waitFor({ timeout: WebDriver.WAIT_MS });
+      const classes = await cell.evaluate((node) => (node as HTMLElement).className);
+      return String(classes).includes("text-accent-primary");
+    };
+    return (await marked("Open")) ? "open" : "closed";
+  }
+
+  async intakeXClickTab(tab: IntakeXTab): Promise<void> {
+    await this.intakeXTabCell(tab === "open" ? "Open" : "Closed").click({ timeout: WebDriver.WAIT_MS });
+    // Poll the address bar rather than waiting on a navigation event: the
+    // tab switch is a client-side push the navigation watcher can miss.
+    await this.page.waitForFunction(
+      (want) => new URL(window.location.href).searchParams.get("currentTab") === want,
+      tab,
+      { timeout: WebDriver.WAIT_MS }
+    );
+    await this.intakeXWaitList();
+  }
+
+  async intakeXDetailTitle(): Promise<string | null> {
+    const field = this.page.locator("#title-input").first();
+    if ((await field.count()) === 0) return null;
+    return ((await field.inputValue().catch(() => "")) as string) || null;
+  }
+
+  async intakeXOpenCreate(): Promise<void> {
+    await this.page.getByRole("button", { name: "Add work item" }).click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByRole("heading", { name: "Create intake work item" }).waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async intakeXCreateFillTitle(title: string): Promise<void> {
+    await this.page.getByRole("dialog").getByPlaceholder("Title").fill(title, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async intakeXCreateDuplicateDetectionVisible(): Promise<boolean> {
+    const dialog = this.page.getByRole("dialog");
+    // The overlay wrapper reports hidden while its panel shows, so wait for
+    // attachment and judge the candidate buttons by their own visibility.
+    await dialog.waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    // The compose dialog holds no triage actions, so any duplicate affordance
+    // inside it is the detection UI (a stubbed-out button in this checkout).
+    const candidates = dialog.getByRole("button", { name: /duplicate/i });
+    const total = await candidates.count();
+    for (let index = 0; index < total; index += 1) {
+      if (await candidates.nth(index).isVisible()) return true;
+    }
+    return false;
+  }
+
+  async intakeXDetailDuplicateDetectionVisible(): Promise<boolean> {
+    const scope = this.intakeXDetailScope();
+    await this.page.locator("#title-input").first().waitFor({ timeout: WebDriver.WAIT_MS });
+    // The detail's own "mark as duplicate" triage action is sibling-owned
+    // behavior, not detection: exclude it and report anything else that
+    // offers duplicate comparison.
+    const candidates = scope.getByRole("button", { name: /duplicate/i });
+    const total = await candidates.count();
+    if (total === 0) return false;
+    for (let index = 0; index < total; index += 1) {
+      const label = (
+        (await candidates
+          .nth(index)
+          .innerText()
+          .catch(() => "")) as string
+      ).trim();
+      if (label !== "" && label.toLowerCase() !== "mark as duplicate") return true;
+    }
+    return false;
+  }
+
+  async intakeXSetViewport(width: number, height: number): Promise<void> {
+    await this.page.setViewportSize({ width, height });
+  }
+
+  async intakeXMobileHeaderVisible(): Promise<boolean> {
+    return this.isShown(this.intakeXMobileScope().locator("svg.lucide-panel-left").first());
+  }
+
+  async intakeXListPaneVisible(): Promise<boolean> {
+    const cell = this.intakeXTabCell("Open");
+    if ((await cell.count()) === 0) return false;
+    // The collapsed pane slides off-canvas (still rendered, so a visibility
+    // read would lie); report whether its tab cell sits inside the viewport.
+    const box = await cell.boundingBox();
+    const viewport = this.page.viewportSize();
+    if (box === null || viewport === null) return false;
+    return box.width > 0 && box.x >= 0 && box.x < viewport.width;
+  }
+
+  async intakeXToggleMobileSidebar(): Promise<void> {
+    await this.intakeXMobileScope().locator("svg.lucide-panel-left").first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async intakeXMobileMenuItems(): Promise<string[]> {
+    // The overflow trigger is the header's unlabeled icon button (the
+    // horizontal-dots glyph; the icon set ships it under its new name).
+    await this.intakeXMobileScope().locator("svg.lucide-ellipsis").first().click({ timeout: WebDriver.WAIT_MS });
+    const entries = this.page.getByRole("menuitem");
+    await entries.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const labels = (await entries.allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim());
+    await this.page.keyboard.press("Escape");
+    await entries.first().waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+    return labels.filter((label) => label.length > 0);
+  }
+
+  async intakeXBeginApiSpy(): Promise<void> {
+    this.intakeXTraffic = [];
+    await this.page.route("**/api/**", async (route) => {
+      const req = route.request();
+      this.intakeXTraffic.push({ method: req.method(), url: req.url() });
+      await route.continue();
+    });
+  }
+
+  async intakeXApiRequests(): Promise<IntakeXApiRequest[]> {
+    return [...this.intakeXTraffic];
+  }
+
+  async intakeXRefocusPage(): Promise<void> {
+    await this.page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    await this.page.waitForTimeout(500);
+    await this.page.bringToFront().catch(() => undefined);
+    await this.page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await this.page.waitForTimeout(1500);
+  }
+
+  async intakeXSourceIndicatorVisible(): Promise<boolean> {
+    // The cloud pill would mark each row's origin; the OSS stub renders
+    // nothing, so any origin-naming badge inside the rows is the signal.
+    const rows = this.intakeXRowLinks();
+    if ((await rows.count()) === 0) return false;
+    const badges = rows.getByText(/^(in-?app|forms?|e-?mail)$/i);
+    return (await badges.count()) > 0;
   }
 }

@@ -4675,6 +4675,51 @@ export interface ParityDriver {
   runnersWaitRunnerDeleteWorking(): Promise<void>;
   /** Wait until the revoke-runner confirm shows its in-flight state. */
   runnersWaitRunnerRevokeWorking(): Promise<void>;
+
+  // --- Intake cross-cutting (NEWFRONT-260, INT-018/030/031/032/034).
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract. Minimal intake navigation of our own (sibling list blocks
+  // --- are unmerged, so small overlap is expected): open the screen and one
+  // --- request's detail, read list titles, switch tabs, open the create
+  // --- dialog; plus narrow-viewport, no-live-push, and edition reads.
+  /** Open the intake screen of a project; settles once the tab bar or the feature gate shows. */
+  intakeXOpen(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Open one request's detail through its deep link; settles once the detail renders or the list redirect lands. */
+  intakeXOpenDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void>;
+  /** Titles of the rendered list rows, in display order. */
+  intakeXListTitles(): Promise<string[]>;
+  /** Which tab is currently highlighted. */
+  intakeXActiveTab(): Promise<IntakeXTab>;
+  /** Click `tab` and settle once the URL and the list reflect it. */
+  intakeXClickTab(tab: IntakeXTab): Promise<void>;
+  /** Title the open detail shows, or null when no detail is open. */
+  intakeXDetailTitle(): Promise<string | null>;
+  /** Open the create dialog from the intake screen; settles once the dialog shows. */
+  intakeXOpenCreate(): Promise<void>;
+  /** Fill the open create dialog's title field. */
+  intakeXCreateFillTitle(title: string): Promise<void>;
+  /** Whether duplicate-detection UI shows inside the open create dialog. */
+  intakeXCreateDuplicateDetectionVisible(): Promise<boolean>;
+  /** Whether duplicate-detection UI shows inside the open detail. */
+  intakeXDetailDuplicateDetectionVisible(): Promise<boolean>;
+  /** Resize the viewport (narrow widths render the mobile intake chrome). */
+  intakeXSetViewport(width: number, height: number): Promise<void>;
+  /** Whether the mobile action header currently shows. */
+  intakeXMobileHeaderVisible(): Promise<boolean>;
+  /** Whether the request list pane is currently on screen. */
+  intakeXListPaneVisible(): Promise<boolean>;
+  /** Toggle the list pane through the mobile sidebar control. */
+  intakeXToggleMobileSidebar(): Promise<void>;
+  /** Labels of the mobile action header's overflow menu entries (opens the menu, reads it, closes it). */
+  intakeXMobileMenuItems(): Promise<string[]>;
+  /** Start recording intake API traffic (list/detail reads). */
+  intakeXBeginApiSpy(): Promise<void>;
+  /** Intake API requests captured since the spy began, in order. */
+  intakeXApiRequests(): Promise<IntakeXApiRequest[]>;
+  /** Move window focus away and back (the detail fetch must not revalidate on focus). */
+  intakeXRefocusPage(): Promise<void>;
+  /** Whether any request-source indicator shows in the list rows. */
+  intakeXSourceIndicatorVisible(): Promise<boolean>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -5344,4 +5389,15 @@ export interface ArchivesTrafficCounts {
   detailReads: number;
   /** POST/DELETE archive and restore writes. */
   writes: number;
+}
+
+/** Intake tab keys (NEWFRONT-260, INT-031). */
+export type IntakeXTab = "open" | "closed";
+
+/** One intake API request as the UI sent it (NEWFRONT-260, INT-018/031). */
+export interface IntakeXApiRequest {
+  /** HTTP method. */
+  method: string;
+  /** Full request URL. */
+  url: string;
 }
