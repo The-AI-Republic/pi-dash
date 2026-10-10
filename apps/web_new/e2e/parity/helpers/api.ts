@@ -12253,3 +12253,184 @@ export async function serverUnpinIssuePod(
 ): Promise<void> {
   await patchIssue(workspaceSlug, projectId, issueId, sessionCookie, { assigned_pod_id: null }, apiBase);
 }
+
+// --- Intake cross-cutting (NEWFRONT-260, INT-018/030/031/032/034). Appended;
+// --- existing helpers above are untouched per the shared parity contract.
+// --- The retrieve endpoint takes the nested issue id; issue fields patch
+// --- nested under `issue` while intake fields (status, snooze, duplicate
+// --- target) patch flat; guests read only their own rows unless the project
+// --- lets guests view everything.
+
+/** Intake fields a cross-cutting scenario may set on an inbox row. */
+export interface ServerIntakeXInboxPatch {
+  status?: number;
+  snoozed_till?: string | null;
+  duplicate_to?: string;
+  /** Nested issue rename (what the list and detail render as the title). */
+  name?: string;
+}
+
+/** Patch an inbox row by its nested issue id; resolves with the stored status and title. */
+export async function serverIntakeXPatchInboxIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  patch: ServerIntakeXInboxPatch,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; name: string }> {
+  const body: Record<string, unknown> = {};
+  if (patch.status !== undefined) body["status"] = patch.status;
+  if (patch.snoozed_till !== undefined) body["snoozed_till"] = patch.snoozed_till;
+  if (patch.duplicate_to !== undefined) body["duplicate_to"] = patch.duplicate_to;
+  if (patch.name !== undefined) body["issue"] = { name: patch.name };
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`,
+    sessionCookie,
+    body
+  );
+  if (!res.ok) throw new Error(`[parity] inbox-issue patch failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const issue = rec["issue"] as Record<string, unknown> | undefined;
+  if (typeof rec["status"] !== "number") throw new Error("[parity] patched inbox issue carried no numeric status.");
+  return {
+    status: rec["status"] as number,
+    name: typeof issue?.["name"] === "string" ? (issue["name"] as string) : "",
+  };
+}
+
+/** One inbox row with its intake status, source and author. */
+export interface ServerIntakeXInboxRow {
+  issueId: string;
+  name: string;
+  status: number;
+  source: string;
+  createdBy: string;
+}
+
+/**
+ * Inbox rows on a project, optionally narrowed to a status query (the
+ * comma-joined form the UI sends, e.g. "-2"; omitted to let the server apply
+ * its own default). Resolves with the rows plus the collection total.
+ */
+export async function serverIntakeXInboxIssues(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  statusQuery?: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ rows: ServerIntakeXInboxRow[]; total: number }> {
+  const query = statusQuery === undefined ? "" : `?status=${encodeURIComponent(statusQuery)}`;
+  const res = await fetchShared(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${query}`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] inbox-issues read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const total =
+    !Array.isArray(payload) && typeof (payload as { total_results?: unknown }).total_results === "number"
+      ? (payload as { total_results: number }).total_results
+      : rows.length;
+  return {
+    rows: rows.map((row) => {
+      const rec = row as Record<string, unknown>;
+      const issue = rec["issue"] as Record<string, unknown> | undefined;
+      return {
+        issueId: typeof issue?.["id"] === "string" ? (issue["id"] as string) : "",
+        name: typeof issue?.["name"] === "string" ? (issue["name"] as string) : "",
+        status: typeof rec["status"] === "number" ? (rec["status"] as number) : 0,
+        source: typeof rec["source"] === "string" ? (rec["source"] as string) : "",
+        createdBy: typeof rec["created_by"] === "string" ? (rec["created_by"] as string) : "",
+      };
+    }),
+    total,
+  };
+}
+
+/** An inbox-issue retrieve that surfaces the HTTP status (guest refusals answer 403). */
+export interface ServerIntakeXInboxRead {
+  httpStatus: number;
+  name: string;
+  status: number;
+  source: string;
+  createdBy: string;
+}
+
+/** Read one inbox row by its nested issue id without throwing on refusal. */
+export async function serverIntakeXReadInboxIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerIntakeXInboxRead> {
+  const res = await fetchShared(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  const empty: ServerIntakeXInboxRead = { httpStatus: res.status, name: "", status: 0, source: "", createdBy: "" };
+  if (!res.ok) return empty;
+  const rec = (await res.json()) as Record<string, unknown>;
+  const issue = rec["issue"] as Record<string, unknown> | undefined;
+  const createdBy =
+    typeof rec["created_by"] === "string"
+      ? (rec["created_by"] as string)
+      : typeof issue?.["created_by"] === "string"
+        ? (issue["created_by"] as string)
+        : "";
+  return {
+    httpStatus: res.status,
+    name: typeof issue?.["name"] === "string" ? (issue["name"] as string) : "",
+    status: typeof rec["status"] === "number" ? (rec["status"] as number) : 0,
+    source: typeof rec["source"] === "string" ? (rec["source"] as string) : "",
+    createdBy,
+  };
+}
+
+/** Project flags the cross-cutting scenarios toggle. */
+export interface ServerIntakeXProjectPatch {
+  guest_view_all_features?: boolean;
+}
+
+/** Patch scenario-owned project flags (the guest-view-all toggle). */
+export async function serverIntakeXPatchProject(
+  workspaceSlug: string,
+  projectId: string,
+  patch: ServerIntakeXProjectPatch,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    patch
+  );
+  if (!res.ok) throw new Error(`[parity] project flags patch failed with HTTP ${res.status}.`);
+}
+
+/** Project flags the cross-cutting scenarios assert. */
+export interface ServerIntakeXProjectFlags {
+  inboxView: boolean;
+  guestViewAll: boolean;
+}
+
+/** Read the intake-view and guest-view-all flags off a project. */
+export async function serverIntakeXProjectFlags(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerIntakeXProjectFlags> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  return {
+    inboxView: rec["inbox_view"] === true,
+    guestViewAll: rec["guest_view_all_features"] === true,
+  };
+}

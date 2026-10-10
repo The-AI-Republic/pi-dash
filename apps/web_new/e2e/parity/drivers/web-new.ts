@@ -34,6 +34,8 @@ import type {
   DevMachineRow,
   GanttSidebarRow,
   GanttZoom,
+  IntakeXApiRequest,
+  IntakeXTab,
   KanbanCard,
   KanbanColumn,
   DocumentShellFacts,
@@ -7156,5 +7158,85 @@ export class WebNewDriver implements ParityDriver {
 
   async runnersWaitRunnerRevokeWorking(): Promise<void> {
     return todo("runnersWaitRunnerRevokeWorking");
+  }
+
+  // --- Intake cross-cutting (NEWFRONT-260, INT-018/030/031/032/034).
+  // --- Appended; existing stubs above are untouched per the shared driver
+  // --- contract.
+
+  async intakeXOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("intakeXOpen");
+  }
+
+  async intakeXOpenDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
+    return todo("intakeXOpenDetail");
+  }
+
+  async intakeXListTitles(): Promise<string[]> {
+    return todo("intakeXListTitles");
+  }
+
+  async intakeXActiveTab(): Promise<IntakeXTab> {
+    return todo("intakeXActiveTab");
+  }
+
+  async intakeXClickTab(_tab: IntakeXTab): Promise<void> {
+    return todo("intakeXClickTab");
+  }
+
+  async intakeXDetailTitle(): Promise<string | null> {
+    return todo("intakeXDetailTitle");
+  }
+
+  async intakeXOpenCreate(): Promise<void> {
+    return todo("intakeXOpenCreate");
+  }
+
+  async intakeXCreateFillTitle(_title: string): Promise<void> {
+    return todo("intakeXCreateFillTitle");
+  }
+
+  async intakeXCreateDuplicateDetectionVisible(): Promise<boolean> {
+    return todo("intakeXCreateDuplicateDetectionVisible");
+  }
+
+  async intakeXDetailDuplicateDetectionVisible(): Promise<boolean> {
+    return todo("intakeXDetailDuplicateDetectionVisible");
+  }
+
+  async intakeXSetViewport(_width: number, _height: number): Promise<void> {
+    return todo("intakeXSetViewport");
+  }
+
+  async intakeXMobileHeaderVisible(): Promise<boolean> {
+    return todo("intakeXMobileHeaderVisible");
+  }
+
+  async intakeXListPaneVisible(): Promise<boolean> {
+    return todo("intakeXListPaneVisible");
+  }
+
+  async intakeXToggleMobileSidebar(): Promise<void> {
+    return todo("intakeXToggleMobileSidebar");
+  }
+
+  async intakeXMobileMenuItems(): Promise<string[]> {
+    return todo("intakeXMobileMenuItems");
+  }
+
+  async intakeXBeginApiSpy(): Promise<void> {
+    return todo("intakeXBeginApiSpy");
+  }
+
+  async intakeXApiRequests(): Promise<IntakeXApiRequest[]> {
+    return todo("intakeXApiRequests");
+  }
+
+  async intakeXRefocusPage(): Promise<void> {
+    return todo("intakeXRefocusPage");
+  }
+
+  async intakeXSourceIndicatorVisible(): Promise<boolean> {
+    return todo("intakeXSourceIndicatorVisible");
   }
 }
