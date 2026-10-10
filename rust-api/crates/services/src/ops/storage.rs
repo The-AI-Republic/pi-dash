@@ -9,8 +9,9 @@
 //! Request shapes were captured from botocore (boto3 1.34.96, the pinned
 //! version) against a logging stub: path-style URLs against an explicit
 //! endpoint, `GET /{bucket}?list-type=2&encoding-type=url` for lists
-//! (list keys arrive raw — botocore does NOT percent-decode despite
-//! `encoding-type=url`, so neither does the port),
+//! (botocore auto-sets `EncodingType=url` and then URL-decodes the keys
+//! iff the response echoes `<EncodingType>url</EncodingType>` —
+//! `handlers.py:784-850` — so the port decodes on exactly that echo),
 //! `PUT /{bucket}?policy` for policies, empty bodies on head/create, and
 //! auto-sent `Content-MD5` on PutObject/PutBucketPolicy only. The signer
 //! sends the real payload hash in `x-amz-content-sha256`, following the
@@ -255,8 +256,8 @@ impl std::fmt::Display for S3CallError {
 impl std::error::Error for S3CallError {}
 
 /// The seven S3 calls the bucket commands make, in botocore terms:
-/// `head_bucket`, `create_bucket`, `list_objects_v2` (returning the raw
-/// key list — botocore does not decode, and `Contents` absent means
+/// `head_bucket`, `create_bucket`, `list_objects_v2` (returning the key
+/// list with botocore's echo-gated decode — `Contents` absent means
 /// empty), `get_object`, `put_object`, `delete_object`,
 /// `put_bucket_policy`.
 #[allow(async_fn_in_trait)]
@@ -609,6 +610,47 @@ pub fn uri_encode_path(path: &str) -> String {
     encoded
 }
 
+/// Decode a listed key exactly like botocore's `unquote_str` (which is
+/// `urllib.parse.unquote_plus` — `botocore/compat.py:62`): `%XX` sequences
+/// become their bytes (invalid UTF-8 becomes U+FFFD, like
+/// `errors="replace"`), and `+` is a space. Malformed `%` sequences pass
+/// through untouched, like `unquote`.
+pub fn uri_decode_key(encoded: &str) -> String {
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let mut advanced = false;
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Some(high) = hex_value(bytes[index + 1]) {
+                if let Some(low) = hex_value(bytes[index + 2]) {
+                    decoded.push(high * 16 + low);
+                    index += 3;
+                    advanced = true;
+                }
+            }
+        }
+        if !advanced {
+            decoded.push(if bytes[index] == b'+' {
+                b' '
+            } else {
+                bytes[index]
+            });
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Canonicalize a query string for signing: split on `&`, sort, render
 /// each pair as `name=value` (a bare name gains `=`), join with `&`.
 /// `?policy` therefore signs as `policy=`, like botocore.
@@ -725,15 +767,20 @@ fn xml_tag(text: &str, tag: &str) -> Option<String> {
     Some(text[start..end].to_string())
 }
 
-/// Collect every `<Key>` value of a ListBucketResult, raw: the XML
-/// parser unescapes entities, but the `%XX` sequences stay — botocore
-/// does not percent-decode list keys despite `encoding-type=url`
-/// (wire-verified with the pinned boto3), so a later `get_object` of an
-/// exotic key re-encodes the `%` (`%25`) exactly like Python's.
+/// Collect every `<Key>` value of a ListBucketResult, with botocore's
+/// echo-gated decode: the XML parser unescapes entities, and the `%XX`
+/// sequences decode iff the response echoes `<EncodingType>url</EncodingType>`
+/// (`botocore/handlers.py:843-850` — S3, MinIO and LocalStack all echo,
+/// since we ask with `encoding-type=url`). Without the echo the keys
+/// pass through raw, so a later `get_object` re-encodes the `%` (`%25`)
+/// exactly like Python's against the same server.
 pub fn parse_list_keys(body: &[u8]) -> Vec<String> {
     let Ok(text) = std::str::from_utf8(body) else {
         return Vec::new();
     };
+    // Keys are XML-escaped in the body, so a literal `<EncodingType>`
+    // substring can only be real markup (the single top-level element).
+    let encoded = xml_tag(text, "EncodingType").as_deref() == Some("url");
     let mut keys = Vec::new();
     let mut rest = text;
     while let Some(start) = rest.find("<Key>") {
@@ -741,7 +788,8 @@ pub fn parse_list_keys(body: &[u8]) -> Vec<String> {
         let Some(end) = content.find("</Key>") else {
             break;
         };
-        keys.push(xml_unescape(&content[..end]));
+        let key = xml_unescape(&content[..end]);
+        keys.push(if encoded { uri_decode_key(&key) } else { key });
         rest = &content[end + "</Key>".len()..];
     }
     keys
@@ -1818,17 +1866,21 @@ mod tests {
     }
 
     #[test]
-    fn path_encoding() {
+    fn path_encoding_and_key_decoding() {
         assert_eq!(uri_encode_path("a.txt"), "a.txt");
         assert_eq!(uri_encode_path("odd key+&.txt"), "odd%20key%2B%26.txt");
         assert_eq!(uri_encode_path("a/b"), "a/b");
         assert_eq!(uri_encode_path("caf\u{e9}.txt"), "caf%C3%A9.txt");
         // Raw list keys re-encode the `%` (`%25`) on the wire — the
-        // double-encoding Python produces by not decoding either.
+        // double-encoding Python produces against a non-echoing server.
         assert_eq!(
             uri_encode_path("odd%20key%2B%26.txt"),
             "odd%2520key%252B%2526.txt"
         );
+        // `unquote_plus` semantics, like botocore's `unquote_str`.
+        assert_eq!(uri_decode_key("odd%20key%2B%26.txt"), "odd key+&.txt");
+        assert_eq!(uri_decode_key("a+b"), "a b");
+        assert_eq!(uri_decode_key("%zz"), "%zz");
     }
 
     #[test]
@@ -1843,16 +1895,32 @@ mod tests {
         );
         assert_eq!(parse_error_xml(b""), None);
         assert_eq!(parse_error_xml(b"<html>nope</html>"), None);
-        // List keys stay raw (`%XX` untouched); only XML entities decode.
+        // The `<EncodingType>url</EncodingType>` echo gates the decode
+        // (botocore/handlers.py:843-850): echoing servers yield decoded
+        // keys, non-echoing servers yield the raw `%XX` text.
         assert_eq!(
             parse_list_keys(
-                br#"<?xml version="1.0" ?><ListBucketResult><KeyCount>3</KeyCount><Contents><Key>a.txt</Key></Contents><Contents><Key>odd%20key.txt</Key></Contents><Contents><Key>a &amp; b%20c</Key></Contents></ListBucketResult>"#
+                br#"<?xml version="1.0" ?><ListBucketResult><EncodingType>url</EncodingType><KeyCount>3</KeyCount><Contents><Key>a.txt</Key></Contents><Contents><Key>odd%20key.txt</Key></Contents><Contents><Key>a &amp; b%20c</Key></Contents></ListBucketResult>"#
             ),
             vec![
                 "a.txt".to_string(),
-                "odd%20key.txt".to_string(),
-                "a & b%20c".to_string(),
+                "odd key.txt".to_string(),
+                "a & b c".to_string(),
             ]
+        );
+        assert_eq!(
+            parse_list_keys(
+                br#"<?xml version="1.0" ?><ListBucketResult><KeyCount>2</KeyCount><Contents><Key>a.txt</Key></Contents><Contents><Key>odd%20key.txt</Key></Contents></ListBucketResult>"#
+            ),
+            vec!["a.txt".to_string(), "odd%20key.txt".to_string()]
+        );
+        // Any other echo value passes through raw, like botocore's
+        // `== 'url'` comparison.
+        assert_eq!(
+            parse_list_keys(
+                br#"<?xml version="1.0" ?><ListBucketResult><EncodingType>qux</EncodingType><KeyCount>1</KeyCount><Contents><Key>odd%20key.txt</Key></Contents></ListBucketResult>"#
+            ),
+            vec!["odd%20key.txt".to_string()]
         );
         assert!(parse_list_keys(
             br#"<?xml version="1.0" ?><ListBucketResult><KeyCount>0</KeyCount></ListBucketResult>"#

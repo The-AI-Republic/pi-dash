@@ -297,9 +297,31 @@ def _error_xml(code, message):
 def _empty_list_xml(bucket):
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
-        "<ListBucketResult>"
+        "<ListBucketResult><EncodingType>url</EncodingType>"
         f"<Name>{bucket}</Name><KeyCount>0</KeyCount>"
         "</ListBucketResult>"
+    ).encode()
+
+
+def _echo_list_xml(bucket, keys):
+    """Compliant list body: encoded keys plus the `<EncodingType>url</EncodingType>`
+    echo (S3/MinIO/LocalStack all echo) — botocore decodes these."""
+    items = "".join(f"<Contents><Key>{key}</Key></Contents>" for key in keys)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<ListBucketResult><EncodingType>url</EncodingType>"
+        f"<Name>{bucket}</Name><KeyCount>{len(keys)}</KeyCount>{items}</ListBucketResult>"
+    ).encode()
+
+
+def _raw_list_xml(bucket, keys):
+    """Non-echoing list body: encoded keys WITHOUT the echo element —
+    botocore passes these through raw (handlers.py:843-850)."""
+    items = "".join(f"<Contents><Key>{key}</Key></Contents>" for key in keys)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<ListBucketResult>"
+        f"<Name>{bucket}</Name><KeyCount>{len(keys)}</KeyCount>{items}</ListBucketResult>"
     ).encode()
 
 
@@ -357,15 +379,23 @@ class _StubHandler(BaseHTTPRequestHandler):
                 pass
             self.close_connection = True
             return None
-        status, payload = entry
-        return self._respond(status, payload)
+        if len(entry) == 3:
+            status, payload, force_body = entry
+        else:
+            status, payload = entry
+            force_body = False
+        return self._respond(status, payload, force_body=force_body)
 
-    def _respond(self, status, payload):
+    def _respond(self, status, payload, force_body=False):
         self.send_response(status)
         self.send_header("Content-Type", "application/xml")
         self.send_header("Content-Length", str(len(payload)))
+        if force_body and self.command == "HEAD":
+            # Lie like a server that sends bodies on HEAD — then hang up,
+            # so the unread bytes cannot poison the next request.
+            self.send_header("Connection", "close")
         self.end_headers()
-        if self.command != "HEAD" and payload:
+        if (self.command != "HEAD" or force_body) and payload:
             try:
                 self.wfile.write(payload)
             except (BrokenPipeError, ConnectionResetError):
@@ -462,30 +492,18 @@ def test_wait_for_db_live():
     assert proc.stderr == ""
 
 
-def test_wait_for_db_retries_with_typo_line():
-    """Against a dead port the loop waits (still running) and prints the
-    verbatim ``waititng`` retry line (F37-01 BUGS — Python's own line, in
-    a working loop; see the Rust module docs for the translation note)."""
-    env = dict(os.environ)
-    env["DATABASE_URL"] = "postgresql://127.0.0.1:9/pidash_806_dead"
-    proc = subprocess.Popen(
-        [pidash_bin(), "ops", "wait_for_db"],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
+def test_wait_for_db_down_db_still_succeeds_immediately():
+    """A down database changes nothing: the one-shot check always succeeds
+    (F37-01 BUGS — ``connections["default"]`` never raises), so the command
+    exits 0 at once with both lines. (The suite would hang here if the
+    command waited, so completing at all proves one-shot.)"""
+    proc = run_ops(
+        "wait_for_db",
+        env_extra={"DATABASE_URL": "postgresql://127.0.0.1:9/pidash_806_dead"},
     )
-    try:
-        first = proc.stdout.readline()
-        second = proc.stdout.readline()
-        assert first == "Waiting for database...\n"
-        assert second == "Database unavailable, waititng 1 second...\n"
-        time.sleep(2.5)
-        assert proc.poll() is None, "wait_for_db must keep waiting, not exit"
-    finally:
-        proc.kill()
-        proc.wait(timeout=10)
+    assert proc.returncode == 0
+    assert proc.stdout == "Waiting for database...\nDatabase available!\n"
+    assert proc.stderr == ""
 
 
 def test_wait_for_migrations_complete():
@@ -571,6 +589,20 @@ def test_wait_for_db_missing_database_url_exits_1():
     assert proc.returncode == 1
     assert proc.stdout == ""
     assert proc.stderr == "DATABASE_URL is not set\n"
+
+
+def test_wait_for_migrations_down_db_exits_1_without_output():
+    """A down database is fatal (Python's uncaught ``OperationalError``):
+    exit 1 with empty stdout. The stderr text is a one-line summary, not
+    libpq's message, so it is asserted loosely (one non-empty line)."""
+    proc = run_ops(
+        "wait_for_migrations",
+        env_extra={"DATABASE_URL": "postgresql://127.0.0.1:9/pidash_806_dead"},
+    )
+    assert proc.returncode == 1
+    assert proc.stdout == ""
+    assert proc.stderr != "" and proc.stderr.endswith("\n")
+    assert len(proc.stderr.strip().splitlines()) == 1
 
 
 def test_migrations_leaf_crosscheck_from_repo_files():
@@ -712,6 +744,8 @@ def s3_setup_bucket(bucket, keys=()):
 
 
 def s3_list_keys(bucket):
+    """List keys via the same query the binary sends, decoded exactly like
+    botocore decodes them (the server echoes ``<EncodingType>url``)."""
     resp = s3_call("GET", s3_bucket_url(bucket, "list-type=2&encoding-type=url"))
     assert resp.status_code == 200, resp.text
     root = ET.fromstring(resp.content)
@@ -858,16 +892,15 @@ def test_create_bucket_dead_port_transport_message():
 
 
 def test_create_bucket_setup_errors():
-    """Missing region/bucket/credentials — deterministic botocore texts."""
-    proc = run_ops("create_bucket", env_del=["AWS_REGION"])
-    assert proc.returncode == 0
-    # Region is checked before any output: the client never builds.
-    assert proc.stdout == "An error occurred: You must specify a region.\n"
-    assert proc.stderr == ""
-
+    """Missing bucket/credentials and invalid endpoints — deterministic
+    botocore texts. (An unset region is NOT an error: S3 defaults to
+    ``us-east-1`` — see ``test_create_bucket_region_chain_via_stub``.)"""
+    # No bucket: the TypeError arises at the head_bucket call, AFTER
+    # `Checking bucket...` prints (create_bucket.py:30-32).
     proc = run_ops("create_bucket", env_del=["AWS_S3_BUCKET_NAME"])
     assert proc.returncode == 0
     assert proc.stdout == (
+        "Checking bucket...\n"
         "An error occurred: expected string or bytes-like object, got 'NoneType'\n"
     )
     assert proc.stderr == ""
@@ -879,6 +912,114 @@ def test_create_bucket_setup_errors():
     )
     assert proc.returncode == 0
     assert proc.stdout == "Checking bucket...\nAn error occurred: Unable to locate credentials\n"
+    assert proc.stderr == ""
+
+    # Client-build failures precede the `Checking bucket...` print
+    # (create_bucket.py:20-30): an empty region without an endpoint ...
+    proc = run_ops(
+        "create_bucket",
+        env_extra={
+            "AWS_REGION": "",
+            "AWS_S3_BUCKET_NAME": "buildfail-bkt",
+        },
+        env_del=["AWS_S3_ENDPOINT_URL", "AWS_DEFAULT_REGION"],
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == "An error occurred: Invalid endpoint: https://s3..amazonaws.com\n"
+    assert proc.stderr == ""
+
+    # ... and an explicitly empty endpoint (note botocore's trailing space).
+    proc = run_ops(
+        "create_bucket",
+        env_extra={
+            "AWS_S3_ENDPOINT_URL": "",
+            "AWS_S3_BUCKET_NAME": "buildfail-bkt",
+        },
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == "An error occurred: Invalid endpoint: \n"
+    assert proc.stderr == ""
+
+
+def test_create_bucket_no_region_proceeds_with_default():
+    """Unset region (both variables): S3 defaults to ``us-east-1`` and the
+    command proceeds past setup — here into a transport error, via the
+    outer ``except Exception`` arm (exit 0)."""
+    bucket = "noregion-bkt"
+    proc = run_ops(
+        "create_bucket",
+        env_extra={
+            "AWS_S3_ENDPOINT_URL": "http://127.0.0.1:9",
+            "AWS_S3_BUCKET_NAME": bucket,
+        },
+        env_del=["AWS_REGION", "AWS_DEFAULT_REGION"],
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == (
+        "Checking bucket...\n"
+        f'An error occurred: Could not connect to the endpoint URL: "http://127.0.0.1:9/{bucket}"\n'
+    )
+    assert proc.stderr == ""
+
+
+def test_create_bucket_region_chain_via_stub(stub_s3):
+    """The region chain, pinned end to end through the signed scope of a
+    real request: ``AWS_DEFAULT_REGION`` applies when ``AWS_REGION`` is
+    unset, else S3's ``us-east-1`` default."""
+    bucket = "regionchain-bkt"
+    stub_s3.routes[("HEAD", bucket, "bucket")] = (403, b"")
+    expected = (
+        f"Checking bucket...\n"
+        f"Access to the bucket '{bucket}' is forbidden. Check permissions.\n"
+    )
+
+    env = stub_env(stub_s3, bucket)
+    del env["AWS_REGION"]
+    env["AWS_DEFAULT_REGION"] = "eu-west-2"
+    proc = run_ops(
+        "create_bucket", env_extra=env, env_del=["AWS_REGION", "AWS_DEFAULT_REGION"]
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == expected
+    assert proc.stderr == ""
+    (logged,) = stub_s3.log
+    received = {k.lower(): v for k, v in logged["headers"].items()}
+    assert "/eu-west-2/s3/aws4_request" in received["authorization"]
+
+    stub_s3.log.clear()
+    env = stub_env(stub_s3, bucket)
+    del env["AWS_REGION"]
+    proc = run_ops(
+        "create_bucket", env_extra=env, env_del=["AWS_REGION", "AWS_DEFAULT_REGION"]
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == expected
+    assert proc.stderr == ""
+    (logged,) = stub_s3.log
+    received = {k.lower(): v for k, v in logged["headers"].items()}
+    assert "/us-east-1/s3/aws4_request" in received["authorization"]
+
+
+def test_create_bucket_head_body_ignored_like_botocore(stub_s3):
+    """A HEAD error carrying an XML body (some servers send one) is
+    ignored: like botocore, the client synthesizes the numeric code from
+    the status — so the symbolic ``int()`` path stays unreachable over
+    real HTTP in both stacks (probed live), and this 404 takes the create
+    branch."""
+    bucket = "headbody-bkt"
+    stub_s3.routes[("HEAD", bucket, "bucket")] = (
+        404,
+        _error_xml("NoSuchBucket", "The specified bucket does not exist"),
+        True,
+    )
+    stub_s3.routes[("PUT", bucket, "bucket")] = (200, b"")
+    proc = run_ops("create_bucket", env_extra=stub_env(stub_s3, bucket))
+    assert proc.returncode == 0
+    assert proc.stdout == (
+        "Checking bucket...\n"
+        f"Bucket '{bucket}' does not exist. Creating bucket...\n"
+        f"Bucket '{bucket}' created successfully.\n"
+    )
     assert proc.stderr == ""
 
 
@@ -903,6 +1044,9 @@ def _expected_policy(bucket, keys):
 
 def test_update_bucket_success(tmp_path):
     bucket = fresh_bucket("opsupd")
+    # The exotic key succeeds in both stacks: LocalStack echoes
+    # `<EncodingType>url</EncodingType>`, so botocore — and the binary —
+    # decode it before the GetObject probe (live-diffed against manage.py).
     keys = ["a.txt", "odd key+&.txt"]
     s3_setup_bucket(bucket, keys)
     try:
@@ -983,6 +1127,19 @@ def test_update_bucket_unset_bucket(tmp_path):
     assert proc.stderr == ""
 
 
+def test_update_bucket_empty_string_bucket(tmp_path):
+    """``if not bucket_name`` (update_bucket.py:142): the empty string
+    takes the unset line, like a missing variable (F37-02 "unset/empty")."""
+    proc = run_ops(
+        "update_bucket",
+        env_extra={"AWS_S3_BUCKET_NAME": ""},
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == "Please set the AWS_S3_BUCKET_NAME environment variable.\n"
+    assert proc.stderr == ""
+
+
 def test_update_bucket_no_credentials_exits_1(tmp_path):
     """Without credentials the head call already fails (only `ClientError`
     is caught there), so the run ends after `Checking bucket...`."""
@@ -997,11 +1154,42 @@ def test_update_bucket_no_credentials_exits_1(tmp_path):
     assert proc.stderr == "Unable to locate credentials\n"
 
 
-def test_update_bucket_no_region_exits_1(tmp_path):
-    proc = run_ops("update_bucket", env_del=["AWS_REGION"], cwd=tmp_path)
+def test_update_bucket_no_region_proceeds_past_setup(tmp_path):
+    """Unset region (both variables): S3 defaults to ``us-east-1`` and the
+    command proceeds past setup — here the head call fails, which escapes
+    ``handle`` (traceback, exit 1 in Python; one stderr line here)."""
+    bucket = "updnoregion-bkt"
+    proc = run_ops(
+        "update_bucket",
+        env_extra={
+            "AWS_S3_ENDPOINT_URL": "http://127.0.0.1:9",
+            "AWS_S3_BUCKET_NAME": bucket,
+        },
+        env_del=["AWS_REGION", "AWS_DEFAULT_REGION"],
+        cwd=tmp_path,
+    )
+    transport = f'Could not connect to the endpoint URL: "http://127.0.0.1:9/{bucket}"'
+    assert proc.returncode == 1
+    assert proc.stdout == "Checking bucket...\n"
+    assert proc.stderr == f"{transport}\n"
+
+
+def test_update_bucket_invalid_endpoint_exits_1(tmp_path):
+    """``get_s3_client()`` at update_bucket.py:138 is outside any ``try``:
+    the client-build ``ValueError`` escapes (traceback, exit 1 in Python;
+    one stderr line and empty stdout here)."""
+    proc = run_ops(
+        "update_bucket",
+        env_extra={
+            "AWS_REGION": "",
+            "AWS_S3_BUCKET_NAME": "buildfail-bkt",
+        },
+        env_del=["AWS_S3_ENDPOINT_URL", "AWS_DEFAULT_REGION"],
+        cwd=tmp_path,
+    )
     assert proc.returncode == 1
     assert proc.stdout == ""
-    assert proc.stderr == "You must specify a region.\n"
+    assert proc.stderr == "Invalid endpoint: https://s3..amazonaws.com\n"
 
 
 def test_update_bucket_denied_probes_fallback_via_stub(stub_s3, tmp_path):
@@ -1072,6 +1260,78 @@ def test_update_bucket_error_text_parity_via_stub(stub_s3, tmp_path):
         + "Permissions have been written to permissions.json.\n"
     )
     assert proc.stderr == ""
+
+
+def test_update_bucket_echoing_server_decodes_keys_via_stub(stub_s3, tmp_path):
+    """Echoing list body (the compliant shape): the exotic key decodes, so
+    the GetObject probe re-encodes it once — the logged GET path is
+    single-encoded — and the run succeeds with decoded ARNs."""
+    bucket = "echo-bkt"
+    stub_s3.routes[("HEAD", bucket, "bucket")] = (200, b"")
+    stub_s3.routes[("GET", bucket, "list")] = [
+        (200, _echo_list_xml(bucket, ["odd%20key%2B%26.txt"])),
+        (200, _echo_list_xml(bucket, ["odd%20key%2B%26.txt"])),
+        (200, _echo_list_xml(bucket, ["a.txt"])),
+    ]
+    stub_s3.routes[("GET", bucket, "object")] = (200, b"x")
+    stub_s3.routes[("PUT", bucket, "object")] = (200, b"")
+    stub_s3.routes[("DELETE", bucket, "object")] = (204, b"")
+    stub_s3.routes[("PUT", bucket, "policy")] = (200, b"")
+    proc = run_ops("update_bucket", env_extra=stub_env(stub_s3, bucket), cwd=tmp_path)
+    assert proc.returncode == 0
+    assert proc.stdout == (
+        f"Checking bucket...\n"
+        f"Bucket '{bucket}' exists.\n"
+        "Access key has the required permissions.\n"
+        "Bucket is private, but existing objects remain public.\n"
+    )
+    assert proc.stderr == ""
+    gets = [
+        entry for entry in stub_s3.log
+        if entry["method"] == "GET" and not entry["query"]
+    ]
+    assert [entry["path"] for entry in gets] == [f"/{bucket}/odd%20key%2B%26.txt"]
+    policies = [entry for entry in stub_s3.log if entry["query"] == "policy"]
+    assert f"arn:aws:s3:::{bucket}/a.txt" in policies[-1]["body"].decode()
+
+
+def test_update_bucket_non_echoing_server_keeps_raw_keys_via_stub(stub_s3, tmp_path):
+    """Non-echoing list body (no `<EncodingType>` element): botocore passes
+    the keys through raw, so the GetObject probe double-encodes (`%25`) and
+    the server answers NoSuchKey — the run prints the GetObject error line
+    and falls back, writing permissions.json with the raw (encoded) ARNs
+    (live-diffed against manage.py on the same stub shape)."""
+    bucket = "noecho-bkt"
+    stub_s3.routes[("HEAD", bucket, "bucket")] = (200, b"")
+    stub_s3.routes[("GET", bucket, "list")] = [
+        (200, _raw_list_xml(bucket, ["odd%20key%2B%26.txt"])),
+    ] * 3
+    stub_s3.routes[("GET", bucket, "object")] = (
+        404,
+        _error_xml("NoSuchKey", "The specified key does not exist."),
+    )
+    stub_s3.routes[("PUT", bucket, "object")] = (200, b"")
+    stub_s3.routes[("DELETE", bucket, "object")] = (204, b"")
+    stub_s3.routes[("PUT", bucket, "policy")] = (200, b"")
+    proc = run_ops("update_bucket", env_extra=stub_env(stub_s3, bucket), cwd=tmp_path)
+    assert proc.returncode == 0
+    assert proc.stdout == (
+        f"Checking bucket...\n"
+        f"Bucket '{bucket}' exists.\n"
+        "Error in GetObject: An error occurred (NoSuchKey) "
+        "when calling the GetObject operation: The specified key does not exist.\n"
+        "Generating permissions.json for manual bucket policy update.\n"
+        "Permissions have been written to permissions.json.\n"
+    )
+    assert proc.stderr == ""
+    assert (tmp_path / "permissions.json").read_bytes() == json.dumps(
+        _expected_policy(bucket, ["odd%20key%2B%26.txt"])
+    ).encode()
+    gets = [
+        entry for entry in stub_s3.log
+        if entry["method"] == "GET" and not entry["query"]
+    ]
+    assert [entry["path"] for entry in gets] == [f"/{bucket}/odd%2520key%252B%2526.txt"]
 
 
 def test_update_bucket_dropped_list_takes_quirk_path_via_stub(stub_s3, tmp_path):

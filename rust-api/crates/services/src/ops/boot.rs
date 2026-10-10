@@ -347,7 +347,8 @@ mod tests {
     async fn bad_database_url_fails_fast_without_probing() {
         let mut lines = Vec::new();
         let mut out = |line: &str| lines.push(line.to_string());
-        let result = run_wait_for_db("not a database url %%", &mut out, Duration::from_millis(1)).await;
+        let result =
+            run_wait_for_db("not a database url %%", &mut out, Duration::from_millis(1)).await;
         assert!(matches!(result, Err(BootError::BadDatabaseUrl(_))));
         assert!(lines.is_empty());
     }
@@ -367,12 +368,12 @@ mod tests {
         .await
         .expect("one-shot check succeeds");
         assert_eq!(attempts, 1);
-        assert_eq!(lines, vec!["Waiting for database...", "Database available!"]);
-        // The unreachable retry line keeps Python's typo byte for byte.
         assert_eq!(
-            WAIT_DB_RETRY,
-            "Database unavailable, waititng 1 second..."
+            lines,
+            vec!["Waiting for database...", "Database available!"]
         );
+        // The unreachable retry line keeps Python's typo byte for byte.
+        assert_eq!(WAIT_DB_RETRY, "Database unavailable, waititng 1 second...");
     }
 
     /// A down database is fatal (Python's uncaught `OperationalError`):
