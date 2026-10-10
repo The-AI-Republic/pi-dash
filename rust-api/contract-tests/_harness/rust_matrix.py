@@ -32,6 +32,7 @@ from pathlib import Path
 CT = Path(__file__).resolve().parent.parent
 HTTP_SUITES_TXT = CT / "HTTP_SUITES.txt"
 IGNORES_TXT = CT / "TASK_ORACLE_IGNORES.txt"
+WORKER_SUITES_TXT = CT / "WORKER_SUITES.txt"
 KNOWN_FAILURES_MD = CT / "KNOWN_RUST_FAILURES.md"
 
 # Suite directories that never drive HTTP, hence never join the Rust matrix.
@@ -66,6 +67,10 @@ def read_list(path: Path) -> list[str]:
 
 def http_suites() -> list[str]:
     return read_list(HTTP_SUITES_TXT)
+
+
+def worker_suites() -> list[str]:
+    return read_list(WORKER_SUITES_TXT)
 
 
 def on_disk_suite_dirs() -> set[str]:
@@ -132,6 +137,9 @@ def cmd_check() -> int:
             errors.append(f"{IGNORES_TXT.name}:{lineno}: `{rel}` does not exist")
         elif rel.split("/", 1)[0] not in listed:
             errors.append(f"{IGNORES_TXT.name}:{lineno}: `{rel}` is not under a listed suite")
+    for suite in worker_suites():
+        if suite not in listed:
+            errors.append(f"{WORKER_SUITES_TXT.name}: `{suite}` is not a listed suite")
     try:
         known = known_failures()
     except ValueError as exc:
@@ -149,6 +157,7 @@ def cmd_check() -> int:
         f"rust_matrix check ok: {len(listed)} HTTP suites, "
         f"{len(TASK_ONLY_DIRS)} task-only dirs, "
         f"{len(read_list(IGNORES_TXT))} ignored files, "
+        f"{len(worker_suites())} worker suites, "
         f"{len(known)} known failures"
     )
     return 0
