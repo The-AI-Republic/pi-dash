@@ -15,7 +15,7 @@ import pytest
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from _harness import auth, config, factory  # noqa: E402
+from _harness import auth, config, ensure_instance, factory  # noqa: E402
 
 
 def _tag() -> str:
@@ -32,6 +32,9 @@ class Ctx:
 def ctx():
     c = Ctx()
     tag = c.tag
+    # Sign-in refuses with INSTANCE_NOT_CONFIGURED until a set-up Instance
+    # row exists; seed it on fresh databases (no-op when one is present).
+    ensure_instance()
     owner = factory.create_user(f"{tag}-owner@example.com")
     member = factory.create_user(f"{tag}-member@example.com")
     both = factory.create_user(f"{tag}-both@example.com")
