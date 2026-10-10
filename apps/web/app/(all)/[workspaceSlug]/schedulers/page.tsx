@@ -62,8 +62,9 @@ const SchedulersListPage = observer(function SchedulersListPage() {
       });
     } catch (e: unknown) {
       const err = e as { error?: string; slug?: string[]; name?: string[]; prompt?: string[] } | null;
-      const detail =
-        err?.error ?? err?.slug?.[0] ?? err?.name?.[0] ?? err?.prompt?.[0] ?? t("Could not create the scheduler.");
+      // The form shows a slug error under the slug field.
+      if (err?.slug?.[0]) throw e;
+      const detail = err?.error ?? err?.name?.[0] ?? err?.prompt?.[0] ?? t("Could not create the scheduler.");
       setToast({
         type: TOAST_TYPE.ERROR,
         title: t("Something went wrong"),
@@ -82,8 +83,10 @@ const SchedulersListPage = observer(function SchedulersListPage() {
   }) => {
     if (!editTarget) return;
     try {
-      // Slug is read-only on the backend; only send the editable fields.
+      // Send the slug only when the admin changed it, so an untouched slug
+      // is never rewritten (and a built-in's locked slug is never sent).
       await schedulerStore.updateScheduler(slug, editTarget.id, {
+        ...(values.slug !== editTarget.slug ? { slug: values.slug } : {}),
         name: values.name,
         description: values.description,
         prompt: values.prompt,
@@ -98,7 +101,9 @@ const SchedulersListPage = observer(function SchedulersListPage() {
         message: t("Subsequent runs will use the updated definition."),
       });
     } catch (e: unknown) {
-      const err = e as { error?: string; name?: string[]; prompt?: string[] } | null;
+      const err = e as { error?: string; slug?: string[]; name?: string[]; prompt?: string[] } | null;
+      // The form shows a slug error under the slug field.
+      if (err?.slug?.[0]) throw e;
       const detail = err?.error ?? err?.name?.[0] ?? err?.prompt?.[0] ?? t("Could not update the scheduler.");
       setToast({
         type: TOAST_TYPE.ERROR,

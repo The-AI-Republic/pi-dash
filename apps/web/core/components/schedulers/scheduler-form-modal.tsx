@@ -28,8 +28,13 @@ interface SchedulerFormValues {
 type Props = {
   isOpen: boolean;
   onClose: () => void;
+  /**
+   * Reject with the API error body to surface a slug field error
+   * (`{ slug: [...] }`) under the slug field; any other failure is the
+   * caller's to report.
+   */
   onSubmit: (values: SchedulerFormValues) => Promise<void>;
-  /** When set, the form is in edit mode — slug is locked. */
+  /** When set, the form is in edit mode. The slug stays editable unless the scheduler is built-in. */
   scheduler?: IScheduler | null;
 };
 
@@ -51,6 +56,7 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
     control,
     handleSubmit,
     reset,
+    setError,
     formState: { errors, isSubmitting },
   } = useForm<SchedulerFormValues>({ defaultValues: emptyValues });
 
@@ -71,7 +77,15 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
   }, [isOpen, scheduler, reset]);
 
   const handleFormSubmit: SubmitHandler<SchedulerFormValues> = async (values) => {
-    await onSubmit(values);
+    try {
+      await onSubmit({ ...values, slug: values.slug.trim() });
+    } catch (e: unknown) {
+      // Slug uniqueness is per workspace, and a built-in's slug is locked —
+      // surface the serializer's 400 on the slug field instead of a toast.
+      const slugError = (e as { slug?: string[] } | null)?.slug?.[0];
+      if (!slugError) throw e;
+      setError("slug", { type: "server", message: slugError });
+    }
   };
 
   return (
@@ -87,7 +101,8 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
           descriptionName="description"
           promptName="prompt"
           colorName="color"
-          slugDisabled={isEdit}
+          slugDisabled={!!scheduler?.is_builtin}
+          slugDisabledReason={t("Built-in schedulers keep their slug.")}
         />
 
         <div className="flex items-start justify-between gap-4">
