@@ -24,6 +24,13 @@ const STUB_BODY: &[u8] = b"{\"status\": \"STUB\"}";
 const RUST_BODY: &[u8] = b"{\"status\": \"OK\"}";
 const ROBOTS_BODY: &[u8] = b"User-agent: *\nDisallow: /";
 const PROBE_PATH: &str = "/shadow-secret-probe/";
+/// gzip (mtime=0) of `STUB_BODY`: Django's `GZipMiddleware` encodes real
+/// traffic, and the proxy forwards wire bytes untouched.
+const GZIPPED_STUB_BODY: &[u8] = &[
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0xab, 0x56, 0x2a, 0x2e, 0x49, 0x2c,
+    0x29, 0x2d, 0x56, 0xb2, 0x52, 0x50, 0x0a, 0x0e, 0x09, 0x75, 0x52, 0xaa, 0x05, 0x00, 0xa6, 0xa5,
+    0xa2, 0x73, 0x12, 0x00, 0x00, 0x00,
+];
 
 // ---------------------------------------------------------------------------
 // Log capture (process-global for this test binary; assertions use
@@ -113,12 +120,38 @@ async fn stub_app() -> axum::Router {
         )
             .into_response()
     }
+    async fn encoded() -> Response {
+        (
+            [
+                (axum::http::header::CONTENT_TYPE, "application/json"),
+                (axum::http::header::CONTENT_ENCODING, "gzip"),
+            ],
+            GZIPPED_STUB_BODY,
+        )
+            .into_response()
+    }
     axum::Router::new()
         .route("/", any(root))
         .route("/robots.txt", any(robots))
         .route("/api/v1/things", any(echo))
         .route(PROBE_PATH, any(stub_secret))
+        .route("/encoded/", any(encoded))
         .fallback((axum::http::StatusCode::NOT_FOUND, "stub 404"))
+}
+
+/// Same shape as [`secret_probe`], but Django answers content-encoded:
+/// without the encoding skip the shadow would compare gzipped bytes
+/// against this plain side B and false-mismatch.
+async fn encoded_probe(State(state): State<AppState>, req: Request) -> Response {
+    if state.edge().flags().is_rust(pidash_api::Prefix::Web) {
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            RUST_BODY,
+        )
+            .into_response()
+    } else {
+        pidash_api::edge::proxy(State(state), req).await
+    }
 }
 
 /// A flag-gated test double in the shape of the web handlers: while the
@@ -495,6 +528,35 @@ async fn inflight_cap_zero_skips() {
     })
     .await;
     assert_eq!(snapshot["totals"]["compared"], 0, "{snapshot}");
+}
+
+#[tokio::test]
+async fn content_encoded_responses_skip() {
+    let (stub_base, _stub) = spawn(stub_app().await).await;
+    let extra = axum::Router::new().route("/encoded/", get(encoded_probe));
+    let edge = spawn_edge(&stub_base, Some(enabled()), extra).await;
+    let client = client();
+
+    // The shadow dispatch has no decoder, so encoded bodies skip — while
+    // the client still streams Django's exact wire bytes.
+    let response = client
+        .get(format!("{}/encoded/", edge.base))
+        .send()
+        .await
+        .expect("get encoded");
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    assert_eq!(
+        response.bytes().await.expect("body").as_ref(),
+        GZIPPED_STUB_BODY
+    );
+
+    let snapshot = wait_for_metrics(&client, &edge.base, |snapshot| {
+        snapshot["totals"]["skipped"] == 1
+    })
+    .await;
+    assert_eq!(snapshot["totals"]["compared"], 0, "{snapshot}");
+    assert_eq!(snapshot["totals"]["skipped"], 1, "{snapshot}");
 }
 
 #[tokio::test]

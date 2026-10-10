@@ -797,7 +797,11 @@ impl ShadowRequestParts {
 /// cap skip shadow without teeing: the client streams exactly as today.
 /// Bodies that are definitionally empty (HEAD, 204/304, zero
 /// content-length) also skip the tee: the client path is today's exact
-/// code, and the shadow side starts complete.
+/// code, and the shadow side starts complete. Bodies under a
+/// content-encoding skip as well, but only when a body is expected (HEAD
+/// still compares status and content-type): the shadow dispatch has no
+/// decoder and captures the Rust side pre-encoding, so comparing encoded
+/// bytes would false-mismatch on every gzipped response.
 pub(crate) async fn respond_with_shadow(
     plan: ShadowPlan,
     upstream: reqwest::Response,
@@ -815,6 +819,17 @@ pub(crate) async fn respond_with_shadow(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok());
     if is_event_stream(&content_type) || expected_len.is_some_and(|len| len > MAX_CAPTURE_BYTES) {
+        plan.gate.count(&plan.template, Outcome::Skipped);
+        return crate::edge::forward_upstream_response(
+            status,
+            &headers,
+            axum::body::Body::from_stream(upstream.bytes_stream()),
+        );
+    }
+    if has_content_encoding(&headers)
+        && expects_body(&parts.method, status.as_u16())
+        && expected_len != Some(0)
+    {
         plan.gate.count(&plan.template, Outcome::Skipped);
         return crate::edge::forward_upstream_response(
             status,
@@ -859,6 +874,18 @@ fn is_event_stream(content_type: &str) -> bool {
         .split(';')
         .next()
         .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+}
+
+/// Whether the upstream response carries a content encoding (gzip, br,
+/// …). `identity` means no transformation and stays comparable.
+fn has_content_encoding(headers: &HeaderMap) -> bool {
+    headers.get(header::CONTENT_ENCODING).is_some_and(|value| {
+        value.to_str().is_ok_and(|encoding| {
+            encoding
+                .split(',')
+                .any(|token| !token.trim().eq_ignore_ascii_case("identity"))
+        })
+    })
 }
 
 /// The background comparison. The permit is held until the outcome is
@@ -1179,14 +1206,15 @@ fn truncate_lossy(bytes: &[u8], max_chars: usize) -> String {
 }
 
 fn truncate_to_bytes(text: String, max_bytes: usize) -> String {
+    const MARKER: &str = "…[truncated]";
     if text.len() <= max_bytes {
         return text;
     }
-    let mut end = max_bytes;
+    let mut end = max_bytes.saturating_sub(MARKER.len());
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}…[truncated]", &text[..end])
+    format!("{}{MARKER}", &text[..end])
 }
 
 // ---------------------------------------------------------------------------
@@ -1681,6 +1709,33 @@ mod tests {
         assert!(
             diff.contains("only in redacted or volatile values"),
             "{diff}"
+        );
+    }
+
+    #[test]
+    fn content_encoding_gate() {
+        let headers = |encoding: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            if let Some(value) = encoding {
+                headers.insert(header::CONTENT_ENCODING, value.parse().unwrap());
+            }
+            headers
+        };
+        assert!(!has_content_encoding(&headers(None)));
+        assert!(has_content_encoding(&headers(Some("gzip"))));
+        assert!(has_content_encoding(&headers(Some("br"))));
+        assert!(!has_content_encoding(&headers(Some("identity"))));
+        assert!(!has_content_encoding(&headers(Some("Identity"))));
+    }
+
+    #[test]
+    fn truncation_cap_includes_marker() {
+        let capped = truncate_to_bytes("x".repeat(5000), DIFF_CAP_BYTES);
+        assert!(capped.len() <= DIFF_CAP_BYTES, "len {}", capped.len());
+        assert!(capped.ends_with("…[truncated]"), "{capped}");
+        assert_eq!(
+            truncate_to_bytes("short".to_owned(), DIFF_CAP_BYTES),
+            "short"
         );
     }
 

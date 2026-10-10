@@ -140,7 +140,7 @@ denylist in `edge_shadow.rs` (`DENYLIST`) excludes `GET`s with side
 effects: the CSRF-token mint, OAuth initiates/callbacks (all four
 providers, app + space), and the presigned-URL `GET`s. Shadow work runs
 after the response is sent with a 10 s budget per phase and the
-concurrency cap above; event streams and bodies over 8 MiB skip.
+concurrency cap above; event streams, content-encoded bodies, and bodies over 8 MiB skip.
 
 Comparison: status, content-type, body. Byte-identical bodies match;
 otherwise JSON bodies are normalized over the fixed volatile allowlist
