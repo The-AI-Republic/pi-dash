@@ -25,6 +25,17 @@
 //! - `POST /api/instances/admins/sign-out/` — plain view (no DRF
 //!   permission layer): stamps `last_logout_ip/time`, flushes the session,
 //!   and 302s to the safe admin URL; ANY exception still 302s.
+//! - `POST /api/instances/admins/sign-up/` + `POST .../sign-in/` — plain
+//!   form views (`admin.py:89-358`): branch evaluation comes from the
+//!   [`handlers_auth_forms`](super::handlers_auth_forms) kernel, this
+//!   module adds the HTTP shell (form parsing, snapshots, row writes,
+//!   session issuance, 302s).
+//!
+//! The three plain-view POSTs sit behind `CsrfViewMiddleware` (unlike the
+//! DRF units, which use the CSRF-exempt session auth): a missing cookie
+//! or token answers the 200 `csrf_failure` page, never the view. The gate
+//! mirrors `auth_session/email.rs` and renders the shared
+//! [`crate::auth_session::render::render_csrf_failure`] page.
 //!
 //! Layering: this module owns the HTTP shell (routes, session auth, the
 //! `InstanceAdminPermission` gate, SQL text, row fetching). Output shapes
@@ -47,31 +58,43 @@
 //! - key order of serializer objects follows the Rust view declaration,
 //!   not DRF's `user_detail`-first order; the suites compare parsed JSON.
 
-use axum::extract::{Extension, Request, State};
+use axum::extract::{ConnectInfo, Extension, Request, State};
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use hmac::Hmac;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::net::SocketAddr;
 use uuid::Uuid;
 
+use pidash_auth::csrf as csrf_kernel;
+use pidash_auth::session as session_kernel;
+use pidash_auth::signing::{Signer, SESSION_SIGNING_SALT};
 use pidash_types::license::serializers_core::{
     instance_admin_me_to_representation, instance_admin_to_representation, AdminMeRow,
     InstanceAdminRow, LiteUserRow,
 };
 
+use super::handlers_auth_forms as forms;
+use crate::auth_session::render::render_csrf_failure;
 use crate::edge;
 use crate::middleware::SessionHandle;
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 
-/// Register the six owned endpoints. Cutover granularity is the
+/// Register the seven owned endpoints. Cutover granularity is the
 /// route + method (pilot `owned()` pattern): sibling methods on these
 /// paths keep proxying so Django's own 405s/permission denials are
-/// preserved byte-for-byte with no per-method logic.
+/// preserved byte-for-byte with no per-method logic. Every route carries
+/// an explicit `.head(edge::proxy)` arm: Django's `View.setup()` aliases
+/// `head=get`, so HEAD runs the GET handler server-side (200, empty
+/// body), and the proxy preserves those exact bytes instead of axum's
+/// auto-HEAD over the Rust handler.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -81,6 +104,7 @@ pub fn routes() -> Router<AppState> {
                 .put(edge::proxy)
                 .patch(edge::proxy)
                 .delete(edge::proxy)
+                .head(edge::proxy)
                 .options(edge::proxy),
         )
         .route(
@@ -90,6 +114,7 @@ pub fn routes() -> Router<AppState> {
                 .post(edge::proxy)
                 .put(edge::proxy)
                 .patch(edge::proxy)
+                .head(edge::proxy)
                 .options(edge::proxy),
         )
         .route(
@@ -99,6 +124,7 @@ pub fn routes() -> Router<AppState> {
                 .put(edge::proxy)
                 .patch(edge::proxy)
                 .delete(edge::proxy)
+                .head(edge::proxy)
                 .options(edge::proxy),
         )
         .route(
@@ -108,11 +134,32 @@ pub fn routes() -> Router<AppState> {
                 .put(edge::proxy)
                 .patch(edge::proxy)
                 .delete(edge::proxy)
+                .head(edge::proxy)
                 .options(edge::proxy),
         )
         .route(
             "/api/instances/admins/sign-out/",
             post(sign_out)
+                .get(edge::proxy)
+                .head(edge::proxy)
+                .put(edge::proxy)
+                .patch(edge::proxy)
+                .delete(edge::proxy)
+                .options(edge::proxy),
+        )
+        .route(
+            "/api/instances/admins/sign-in/",
+            post(sign_in)
+                .get(edge::proxy)
+                .head(edge::proxy)
+                .put(edge::proxy)
+                .patch(edge::proxy)
+                .delete(edge::proxy)
+                .options(edge::proxy),
+        )
+        .route(
+            "/api/instances/admins/sign-up/",
+            post(sign_up)
                 .get(edge::proxy)
                 .head(edge::proxy)
                 .put(edge::proxy)
@@ -896,7 +943,14 @@ async fn sign_out(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Response, Denial> {
+    // `CsrfViewMiddleware` runs before the view body: a token-less POST
+    // never reaches `admin.py:385`.
+    let pairs = form_pairs(content_type_of(&headers), &body);
+    if csrf_gate(&headers, &pairs).is_err() {
+        return Ok(csrf_failure_response(&state));
+    }
     let urls = &state.settings().urls;
     let target = sign_out_redirect(
         urls.admin_base_url.as_deref(),
@@ -927,6 +981,24 @@ async fn sign_out(
         .execute(pool)
         .await
         .map_err(|_| Denial::ServerError)?;
+        // `logout()`: `Session.flush()` drops the presented row (this
+        // route always reads the admin cookie); the middleware then
+        // answers the cookie deletion because the session reads empty.
+        // Anonymous hits never reach here (the `get(pk=None)` raises
+        // first, skipping `logout()` entirely — same early-out).
+        let cookie_header = headers
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if let Some(key) =
+            session_kernel::cookie_value(cookie_header, session_kernel::ADMIN_SESSION_COOKIE_NAME)
+        {
+            sqlx::query("DELETE FROM sessions WHERE session_key = $1")
+                .bind(key)
+                .execute(pool)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+        }
         if let Some(handle) = extension.as_ref().map(|ext| ext.0.clone()) {
             handle.lock().clear();
         }
@@ -942,12 +1014,977 @@ async fn sign_out(
         .expect("redirect response"))
 }
 
+// ---------------------------------------------------------------------------
+// Form-POST auth flows: sign-up / sign-in (`admin.py:89-358`)
+// ---------------------------------------------------------------------------
+
+/// `CsrfViewMiddleware` cookie name (`settings/common.py`, Django default).
+const CSRF_COOKIE_NAME: &str = "csrftoken";
+
+/// `CSRF_COOKIE_AGE` (Django default): the rotated login cookie's age.
+const CSRF_AGE_SECS: i64 = 31_449_600;
+
+/// `make_password` iteration count (Django 4.2 default hasher).
+const PBKDF2_ITERATIONS: u32 = 600_000;
+
+/// `BasePasswordHasher.salt()` length: 128 bits over the 62-char alphabet.
+const PASSWORD_SALT_LEN: usize = 22;
+
+/// Salt for `user.get_session_auth_hash()` (same construction as
+/// `super::SESSION_AUTH_HASH_SALT`; `auth_session/email.rs` carries its
+/// own copy too).
+const SESSION_AUTH_HASH_SALT: &str =
+    "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
+
+/// Why the CSRF gate rejected (Django `REASON_*`; the failure page never
+/// renders the reason, so these are log labels only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CsrfDenial {
+    NoCookie,
+    BadToken,
+}
+
+/// Where the request token came from (`CsrfViewMiddleware._check_token`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenSource {
+    Post,
+    Header,
+}
+
+impl TokenSource {
+    /// `_bad_token_message` source rendering (`csrf.py:347-352`).
+    fn describe(self) -> &'static str {
+        match self {
+            TokenSource::Post => "POST",
+            TokenSource::Header => "the 'X-Csrftoken' HTTP header",
+        }
+    }
+}
+
+fn content_type_of(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+}
+
+/// `request.POST` as last-wins pairs, only for form content types (any
+/// other content type leaves `POST` empty in Django).
+fn form_pairs(content_type: Option<&str>, body: &[u8]) -> Vec<(String, String)> {
+    let is_form = content_type.is_some_and(|ct| {
+        ct.split(';').next().is_some_and(|mime| {
+            mime.trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        })
+    });
+    if !is_form {
+        return Vec::new();
+    }
+    serde_urlencoded::from_bytes::<Vec<(String, String)>>(body).unwrap_or_default()
+}
+
+/// `QueryDict.get`: the last value for `key`, or `None`.
+fn form_last(pairs: &[(String, String)], key: &str) -> Option<String> {
+    pairs
+        .iter()
+        .rev()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+}
+
+/// Resolve the request token in Django's order: the last
+/// `csrfmiddlewaretoken` form value when non-empty, else the header when
+/// present (even empty — an empty header fails format, it does not fall
+/// through to "missing").
+fn csrf_token_source(
+    pairs: &[(String, String)],
+    header_token: Option<&str>,
+) -> Option<(String, TokenSource)> {
+    if let Some(value) = pairs
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "csrfmiddlewaretoken")
+        .map(|(_, v)| v.as_str())
+        .filter(|v| !v.is_empty())
+    {
+        return Some((value.to_owned(), TokenSource::Post));
+    }
+    header_token.map(|token| (token.to_owned(), TokenSource::Header))
+}
+
+/// `_check_token` + `_does_token_match` over one token: the format gate
+/// first, then the unmask-and-compare, rendered like `_bad_token_message`.
+fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<(), String> {
+    if let Err(error) = csrf_kernel::check_token_format(token) {
+        return Err(format!(
+            "CSRF token from {} {}.",
+            source.describe(),
+            error.reason()
+        ));
+    }
+    if csrf_kernel::tokens_match(token, secret) {
+        Ok(())
+    } else {
+        Err(format!("CSRF token from {} incorrect.", source.describe()))
+    }
+}
+
+/// Mirror `CsrfViewMiddleware.process_view`: the `csrftoken` cookie must be
+/// present and the request token must check out. A malformed cookie secret
+/// can never match (Django would mint a fresh secret and then fail the
+/// compare the same way).
+fn csrf_gate(headers: &HeaderMap, pairs: &[(String, String)]) -> Result<(), CsrfDenial> {
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let secret = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME)
+        .ok_or(CsrfDenial::NoCookie)?;
+    let header_token = headers.get("x-csrftoken").and_then(|v| v.to_str().ok());
+    let (token, source) = csrf_token_source(pairs, header_token).ok_or(CsrfDenial::BadToken)?;
+    csrf_check_token(&secret, &token, source).map_err(|_| CsrfDenial::BadToken)
+}
+
+/// `base_host` with no surface flags (`WEB_URL or APP_BASE_URL`): the
+/// `root_url` the `csrf_failure` view renders.
+fn failure_root_url(state: &AppState) -> String {
+    let urls = &state.settings().urls;
+    urls.web_url
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.app_base_url.as_deref().filter(|s| !s.is_empty()))
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// The `csrf_failure` page: 200 + `text/html`.
+fn csrf_failure_response(state: &AppState) -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::VARY, "Cookie"),
+        ],
+        render_csrf_failure(&failure_root_url(state)),
+    )
+        .into_response()
+}
+
+/// `HttpResponseRedirect`: 302 + `Location`, `Vary: Cookie`, and any
+/// `Set-Cookie` values the branch issued.
+fn redirect_response(location: &str, set_cookies: Vec<String>) -> Result<Response, Denial> {
+    let location = axum::http::HeaderValue::from_str(location).map_err(|_| Denial::ServerError)?;
+    let mut builder = Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, location)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::VARY, "Cookie");
+    for cookie in set_cookies {
+        builder = builder.header(header::SET_COOKIE, cookie);
+    }
+    Ok(builder
+        .body(axum::body::Body::empty())
+        .expect("static redirect"))
+}
+
+/// Admin base URL for the redirect targets (`host.py:16-39` through the
+/// §3 kernel): `ADMIN_BASE_URL` wins when configured and non-empty, else
+/// `WEB_URL or APP_BASE_URL`. Both-unset with no admin URL is a
+/// deployment misconfiguration that raises `TypeError` in Python (500).
+fn admin_base(state: &AppState) -> Result<String, Denial> {
+    let urls = &state.settings().urls;
+    let admin_url = urls.admin_base_url.as_deref().filter(|s| !s.is_empty());
+    let origin = failure_root_url(state);
+    if admin_url.is_none() && origin.is_empty() {
+        return Err(Denial::ServerError);
+    }
+    Ok(forms::admin_base_url(
+        &origin,
+        admin_url,
+        Some(urls.admin_base_path.as_str()),
+    ))
+}
+
+/// `user.get_session_auth_hash()`: `salted_hmac(...get_session_auth_hash,
+/// password).hexdigest()`.
+fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
+    use hmac::Mac as _;
+    let key = Sha256::digest([SESSION_AUTH_HASH_SALT.as_bytes(), secret_key].concat());
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
+    mac.update(password_field.as_bytes());
+    hex_encode(&mac.finalize().into_bytes())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// `get_random_string(22)` over the Django alphabet
+/// (`BasePasswordHasher.salt()`), drawn from UUID4 bytes with rejection
+/// (`auth_session/magic.rs` `django_random_string`).
+fn django_random_string(n: usize) -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut out = String::with_capacity(n);
+    let mut rand = Uuid::new_v4().into_bytes();
+    let mut at = 0;
+    while out.len() < n {
+        if at == rand.len() {
+            rand = Uuid::new_v4().into_bytes();
+            at = 0;
+        }
+        let byte = rand[at];
+        at += 1;
+        if byte < 248 {
+            out.push(ALPHABET[(byte % 62) as usize] as char);
+        }
+    }
+    out
+}
+
+/// `make_password(password)` (`admin.py:215`): PBKDF2, fresh salt, the
+/// pinned Django 4.2 iteration count.
+fn encode_password(password: &str) -> String {
+    forms::encode_password(
+        password,
+        &django_random_string(PASSWORD_SALT_LEN),
+        PBKDF2_ITERATIONS,
+    )
+}
+
+/// `zxcvbn(password)["score"]` (same estimator, 0-4 scale; `admin.py:191`
+/// scores the raw posted password).
+fn password_score(password: &str) -> u8 {
+    zxcvbn::zxcvbn(password, &[]).score() as u8
+}
+
+/// `User.save` display-name fill (`user.py:177-182`): the local part
+/// (`split("@")[0]`; the `len(...)` guard is always truthy).
+fn display_name_for(email: &str) -> String {
+    email.split('@').next().unwrap_or("").to_owned()
+}
+
+/// `get_random_color` (`utils/color.py:9`): `#` + six hex digits.
+fn background_color() -> String {
+    format!("#{}", hex_encode(&Uuid::new_v4().into_bytes()[..3]))
+}
+
+/// Cookie attributes shared by the session + rotated CSRF cookies.
+struct CookieCtx {
+    domain: Option<String>,
+    secure: bool,
+}
+
+fn cookie_ctx(state: &AppState) -> CookieCtx {
+    let session = &state.settings().session;
+    CookieCtx {
+        domain: session.cookie_domain.clone(),
+        secure: session.cookie_secure,
+    }
+}
+
+/// `process_response` session cookie for the fresh/cycled admin key:
+/// `set_expiry(ADMIN_SESSION_COOKIE_AGE)` means the cookie carries the age
+/// (`get_expiry_age()`), never browser-close semantics.
+fn session_set_cookie(key: &str, ctx: &CookieCtx, age_secs: i64, now_unix: i64) -> String {
+    session_kernel::render_set_cookie(&session_kernel::SetCookie {
+        name: session_kernel::ADMIN_SESSION_COOKIE_NAME.to_owned(),
+        value: key.to_owned(),
+        expires: Some(session_kernel::http_date(now_unix + age_secs)),
+        max_age: Some(age_secs),
+        domain: ctx.domain.clone(),
+        path: "/".to_owned(),
+        secure: ctx.secure,
+        httponly: true,
+        samesite: "Lax".to_owned(),
+    })
+}
+
+/// `rotate_token`: fresh 32-char CSRF secret (`login()` rotates the CSRF
+/// secret on every login via `rotate_token`).
+fn csrf_rotate_cookie(secret: &str, ctx: &CookieCtx) -> String {
+    session_kernel::render_set_cookie(&session_kernel::SetCookie {
+        name: CSRF_COOKIE_NAME.to_owned(),
+        value: secret.to_owned(),
+        expires: Some(session_kernel::http_date(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+                + CSRF_AGE_SECS,
+        )),
+        max_age: Some(CSRF_AGE_SECS),
+        domain: ctx.domain.clone(),
+        path: "/".to_owned(),
+        secure: ctx.secure,
+        httponly: true,
+        samesite: "Lax".to_owned(),
+    })
+}
+
+/// The auth keys `login()` writes into the session payload.
+fn auth_payload_entries(
+    user_id: Uuid,
+    password_field: &str,
+    device_info: &serde_json::Value,
+    secret_key: &[u8],
+) -> Vec<(String, serde_json::Value)> {
+    vec![
+        (
+            "_auth_user_id".to_owned(),
+            serde_json::Value::String(user_id.to_string()),
+        ),
+        (
+            "_auth_user_backend".to_owned(),
+            serde_json::Value::String(forms::LOGIN_BACKEND.to_owned()),
+        ),
+        (
+            "_auth_user_hash".to_owned(),
+            serde_json::Value::String(session_auth_hash(password_field, secret_key)),
+        ),
+        ("device_info".to_owned(), device_info.clone()),
+    ]
+}
+
+/// `login()` + `user_login`, keeping Django's key discipline
+/// (`django/contrib/auth/__init__.py:106-118`): a presented session that
+/// already authenticates this same user keeps its key (entries merged over
+/// the surviving payload, row updated in place); anything else cycles the
+/// key (presented row deleted, fresh row inserted).
+/// `expire_date = now + ADMIN_SESSION_COOKIE_AGE` on both arms. Returns
+/// the two `Set-Cookie` values (admin session + rotated CSRF secret).
+#[allow(clippy::too_many_arguments)]
+async fn issue_admin_session(
+    pool: &PgPool,
+    presented_key: Option<&str>,
+    user_id: Uuid,
+    password_field: &str,
+    device_info: serde_json::Value,
+    secret_key: &[u8],
+    ctx: &CookieCtx,
+    age_secs: i64,
+    now_unix: i64,
+) -> Result<Vec<String>, sqlx::Error> {
+    let signer = Signer::new(secret_key, SESSION_SIGNING_SALT);
+    let entries = auth_payload_entries(user_id, password_field, &device_info, secret_key);
+    let user_id_str = user_id.to_string();
+    let expire_unix = now_unix + age_secs;
+    if let Some(old) = presented_key.filter(|key| session_kernel::is_plausible_session_key(key)) {
+        let row: Option<(String, i64)> = sqlx::query_as(
+            r#"SELECT "session_data", EXTRACT(EPOCH FROM "expire_date")::BIGINT FROM "sessions" WHERE "session_key" = $1"#,
+        )
+        .bind(old)
+        .fetch_optional(pool)
+        .await?;
+        if let Some((session_data, expire_date_unix)) = row {
+            if !session_kernel::is_expired(expire_date_unix, now_unix) {
+                let unwrapped: Option<serde_json::Map<String, serde_json::Value>> =
+                    signer.unsign_object(&session_data).ok();
+                if let Some(mut payload) = unwrapped {
+                    let same_user = payload.get("_auth_user_id").and_then(|v| v.as_str())
+                        == Some(user_id_str.as_str())
+                        && payload.get("_auth_user_backend").and_then(|v| v.as_str())
+                            == Some(forms::LOGIN_BACKEND)
+                        && payload.get("_auth_user_hash").and_then(|v| v.as_str())
+                            == Some(session_auth_hash(password_field, secret_key).as_str());
+                    if same_user {
+                        for (key, value) in &entries {
+                            payload.insert(key.clone(), value.clone());
+                        }
+                        let session_data = signer
+                            .sign_object(&payload, now_unix as u64)
+                            .map_err(|_| sqlx::Error::RowNotFound)?;
+                        sqlx::query(
+                            r#"UPDATE "sessions" SET "session_data" = $2,
+                               "expire_date" = to_timestamp($3::DOUBLE PRECISION),
+                               "user_id" = $4, "device_info" = $5
+                               WHERE "session_key" = $1"#,
+                        )
+                        .bind(old)
+                        .bind(&session_data)
+                        .bind(expire_unix as f64)
+                        .bind(user_id.to_string())
+                        .bind(sqlx::types::Json(device_info.clone()))
+                        .execute(pool)
+                        .await?;
+                        return Ok(vec![
+                            session_set_cookie(old, ctx, age_secs, now_unix),
+                            csrf_rotate_cookie(&csrf_kernel::new_secret(), ctx),
+                        ]);
+                    }
+                }
+            }
+            sqlx::query(r#"DELETE FROM "sessions" WHERE "session_key" = $1"#)
+                .bind(old)
+                .execute(pool)
+                .await?;
+        }
+    }
+    let mut payload = serde_json::Map::new();
+    for (key, value) in &entries {
+        payload.insert(key.clone(), value.clone());
+    }
+    let session_data = signer
+        .sign_object(&payload, now_unix as u64)
+        .map_err(|_| sqlx::Error::RowNotFound)?;
+    let key = loop {
+        let key = session_kernel::generate_session_key();
+        let inserted = sqlx::query(
+            r#"INSERT INTO "sessions" ("session_key", "session_data", "expire_date", "user_id", "device_info")
+               VALUES ($1, $2, to_timestamp($3::DOUBLE PRECISION), $4, $5)
+               ON CONFLICT ("session_key") DO NOTHING"#,
+        )
+        .bind(&key)
+        .bind(&session_data)
+        .bind(expire_unix as f64)
+        .bind(user_id.to_string())
+        .bind(sqlx::types::Json(device_info.clone()))
+        .execute(pool)
+        .await?;
+        if inserted.rows_affected() > 0 {
+            break key;
+        }
+    };
+    Ok(vec![
+        session_set_cookie(&key, ctx, age_secs, now_unix),
+        csrf_rotate_cookie(&csrf_kernel::new_secret(), ctx),
+    ])
+}
+
+/// `InstanceAdmin.objects.first()` existence (`admin.py:108`): any live row.
+async fn any_admin_exists(pool: &PgPool) -> Result<bool, Denial> {
+    let row: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM instance_admins WHERE deleted_at IS NULL LIMIT 1")
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
+}
+
+/// `User.objects.filter(email).exists()` (`admin.py:173`).
+async fn user_exists_by_email(pool: &PgPool, email: &str) -> Result<bool, Denial> {
+    let row: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM users WHERE email = $1 LIMIT 1")
+        .bind(email)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
+}
+
+/// `User.objects.filter(email).first()` (`admin.py:294`): id, active flag,
+/// password field.
+async fn signin_user_lookup(
+    pool: &PgPool,
+    email: &str,
+) -> Result<Option<(Uuid, bool, String)>, Denial> {
+    sqlx::query_as(
+        "SELECT id, is_active, password FROM users WHERE email = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)
+}
+
+/// `InstanceAdmin.objects.filter(instance, user)` existence (`admin.py:335`):
+/// any live row — no role gate, no verified gate.
+async fn is_instance_admin(
+    pool: &PgPool,
+    instance_id: &Uuid,
+    user_id: &Uuid,
+) -> Result<bool, Denial> {
+    let row: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM instance_admins WHERE instance_id = $1 AND user_id = $2 AND deleted_at IS NULL LIMIT 1",
+    )
+    .bind(instance_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
+}
+
+/// `User.objects.create(...)` (`admin.py:210-217`) + `User.save()` side
+/// effects (`user.py:169-187`): every NOT NULL column is supplied (Django
+/// emits no DB-level defaults). `is_active` is already TRUE (model
+/// default); `token` stays `""` (`token_updated_at` NULL → no rotation).
+#[allow(clippy::too_many_arguments)]
+async fn insert_signup_user(
+    pool: &PgPool,
+    now: DateTime<Utc>,
+    email: &str,
+    first_name: &str,
+    last_name: &str,
+    password_hash: &str,
+) -> Result<Uuid, Denial> {
+    let id = Uuid::new_v4();
+    let username = Uuid::new_v4().simple().to_string();
+    sqlx::query(
+        "INSERT INTO \"users\" (\"id\", \"password\", \"last_login\", \"username\", \"mobile_number\", \
+         \"email\", \"display_name\", \"first_name\", \"last_name\", \"avatar\", \"avatar_asset_id\", \
+         \"cover_image\", \"cover_image_asset_id\", \"date_joined\", \"created_at\", \"updated_at\", \
+         \"last_location\", \"created_location\", \"is_superuser\", \"is_managed\", \
+         \"is_password_expired\", \"is_active\", \"is_staff\", \"is_email_verified\", \
+         \"is_password_autoset\", \"is_password_reset_required\", \"token\", \"last_active\", \
+         \"last_login_time\", \"last_logout_time\", \"last_login_ip\", \"last_logout_ip\", \
+         \"last_login_medium\", \"last_login_uagent\", \"token_updated_at\", \"is_bot\", \"bot_type\", \
+         \"user_timezone\", \"is_email_valid\", \"masked_at\") \
+         VALUES ($1, $2, NULL, $3, NULL, $4, $5, $6, $7, '', NULL, NULL, NULL, $8, $8, $8, \
+         '', '', FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, '', $8, NULL, NULL, '', '', \
+         'email', '', NULL, FALSE, NULL, 'UTC', FALSE, NULL)",
+    )
+    .bind(id)
+    .bind(password_hash)
+    .bind(&username)
+    .bind(email)
+    .bind(display_name_for(email))
+    .bind(first_name)
+    .bind(last_name)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(id)
+}
+
+/// `post_save` receiver `create_user_notification` (`user.py:306-320`): a
+/// preferences row on every non-bot create (anonymous save → NULL audit).
+async fn insert_notification_prefs(
+    pool: &PgPool,
+    now: DateTime<Utc>,
+    user_id: &Uuid,
+) -> Result<(), Denial> {
+    sqlx::query(
+        "INSERT INTO \"user_notification_preferences\" (\"id\", \"created_at\", \"updated_at\", \
+         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"user_id\", \"workspace_id\", \
+         \"project_id\", \"property_change\", \"state_change\", \"comment\", \"mention\", \
+         \"issue_completed\") \
+         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(now)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(())
+}
+
+/// `Profile.objects.create(user, company_name)` (`admin.py:218`) with the
+/// model defaults (`user.py:200-278` + `color.py:9-14`).
+async fn insert_signup_profile(
+    pool: &PgPool,
+    now: DateTime<Utc>,
+    user_id: &Uuid,
+    company_name: &str,
+) -> Result<(), Denial> {
+    sqlx::query(
+        "INSERT INTO \"profiles\" (\"id\", \"created_at\", \"updated_at\", \
+         \"user_id\", \"theme\", \"is_app_rail_docked\", \
+         \"is_tour_completed\", \"onboarding_step\", \"use_case\", \"role\", \"is_onboarded\", \
+         \"last_workspace_id\", \"billing_address_country\", \"billing_address\", \
+         \"has_billing_address\", \"company_name\", \"notification_view_mode\", \
+         \"is_smooth_cursor_enabled\", \"is_mobile_onboarded\", \"mobile_onboarding_step\", \
+         \"mobile_timezone_auto_set\", \"language\", \"start_of_the_week\", \"goals\", \
+         \"background_color\", \"is_navigation_tour_completed\", \"has_marketing_email_consent\", \
+         \"is_subscribed_to_changelog\", \"product_tour\", \"settings\") \
+         VALUES ($1, $2, $2, $3, '{}', TRUE, FALSE, \
+         '{\"profile_complete\": false, \"workspace_create\": false, \
+           \"workspace_invite\": false, \"workspace_join\": false}', \
+         NULL, NULL, FALSE, NULL, 'INDIA', NULL, FALSE, $4, 'full', FALSE, FALSE, \
+         '{\"profile_complete\": false, \"workspace_create\": false, \"workspace_join\": false}', \
+         FALSE, 'en', 0, '{}', $5, FALSE, FALSE, FALSE, \
+         '{\"work_items\": false, \"cycles\": false, \"modules\": false, \"intake\": false, \
+           \"pages\": false}', '{}')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(now)
+    .bind(user_id)
+    .bind(company_name)
+    .bind(background_color())
+    .execute(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(())
+}
+
+/// The stamp `save()` (`admin.py:220-226,347-353`): login stamps plus the
+/// `User.save` token rotation (`token_updated_at` set → fresh 64-hex
+/// `token`). `None` ip/user-agent renders NULL: both columns are NOT NULL,
+/// so such a request raises — the 500 Python answers uncaught.
+async fn apply_login_stamps(
+    pool: &PgPool,
+    user_id: &Uuid,
+    now: DateTime<Utc>,
+    ip: Option<&str>,
+    user_agent: Option<&str>,
+) -> Result<(), Denial> {
+    let rotated = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    sqlx::query(
+        "UPDATE \"users\" SET \"is_active\" = TRUE, \"last_active\" = $1, \
+         \"last_login_time\" = $1, \"last_login_ip\" = $2, \"last_login_uagent\" = $3, \
+         \"token_updated_at\" = $1, \"token\" = $4, \"updated_at\" = $1 \
+         WHERE \"id\" = $5",
+    )
+    .bind(now)
+    .bind(ip)
+    .bind(user_agent)
+    .bind(rotated)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(())
+}
+
+/// `InstanceAdmin.objects.create(user, instance)` (`admin.py:229`): role 20
+/// + unverified (column defaults), NULL audit (anonymous save).
+async fn insert_signup_admin(
+    pool: &PgPool,
+    now: DateTime<Utc>,
+    user_id: &Uuid,
+    instance_id: &Uuid,
+) -> Result<(), Denial> {
+    sqlx::query(
+        "INSERT INTO instance_admins (id, created_at, updated_at, deleted_at, role, is_verified, created_by_id, updated_by_id, user_id, instance_id) VALUES ($1, $2, $2, NULL, 20, FALSE, NULL, NULL, $3, $4)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(now)
+    .bind(user_id)
+    .bind(instance_id)
+    .execute(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(())
+}
+
+/// `instance.save()` (`admin.py:231-234`): setup done, the company name
+/// verbatim, telemetry as coerced. `Invalid` raises on save in Python (500
+/// *after* the earlier rows committed), so the caller returns before this
+/// UPDATE runs.
+async fn apply_instance_setup(
+    pool: &PgPool,
+    instance_id: &Uuid,
+    now: DateTime<Utc>,
+    company_name: &str,
+    telemetry: bool,
+) -> Result<(), Denial> {
+    sqlx::query(
+        "UPDATE instances SET is_setup_done = TRUE, instance_name = $1, is_telemetry_enabled = $2, updated_at = $3, updated_by_id = NULL WHERE id = $4",
+    )
+    .bind(company_name)
+    .bind(telemetry)
+    .bind(now)
+    .bind(instance_id)
+    .execute(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(())
+}
+
+/// Shared success tail: stamps, `user_login` session issuance, 302.
+#[allow(clippy::too_many_arguments)]
+async fn finish_login(
+    state: &AppState,
+    pool: &PgPool,
+    headers: &HeaderMap,
+    peer: Option<String>,
+    user_id: Uuid,
+    password_field: &str,
+    base: &str,
+    location: &str,
+) -> Result<Response, Denial> {
+    let now = Utc::now();
+    let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+    let remote = peer;
+    let ip = forms::client_ip(forwarded, remote.as_deref());
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    apply_login_stamps(pool, &user_id, now, ip.as_deref(), user_agent.as_deref()).await?;
+    let settings = state.settings();
+    let info = forms::device_info(user_agent.as_deref().unwrap_or(""), ip.as_deref(), base);
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let presented =
+        session_kernel::cookie_value(cookie_header, session_kernel::ADMIN_SESSION_COOKIE_NAME);
+    let cookies = issue_admin_session(
+        pool,
+        presented.as_deref(),
+        user_id,
+        password_field,
+        info,
+        settings.secret_key.as_bytes(),
+        &cookie_ctx(state),
+        settings.session.admin_cookie_age_secs,
+        now.timestamp(),
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    redirect_response(location, cookies)
+}
+
+/// `POST /api/instances/admins/sign-up/` (`admin.py:89-239`): the CSRF
+/// gate, then the kernel branch evaluation over live snapshots, then — on
+/// success only — the writes in Python order (each its own autocommit
+/// statement; no `transaction.atomic` in `admin.py`), session issuance,
+/// and the 302. `invalidate_cache` is freshness-only (see module docs).
+async fn sign_up(State(state): State<AppState>, req: Request) -> Result<Response, Denial> {
+    let (parts, body) = req.into_parts();
+    let headers = &parts.headers;
+    let body = axum::body::to_bytes(body, 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    let peer = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip().to_string());
+    let pairs = form_pairs(content_type_of(headers), &body);
+    if csrf_gate(headers, &pairs).is_err() {
+        return Ok(csrf_failure_response(&state));
+    }
+    let pool = pools(&state)?;
+    let base = admin_base(&state)?;
+    let form = forms::SignupForm {
+        email: form_last(&pairs, "email"),
+        password: form_last(&pairs, "password"),
+        first_name: form_last(&pairs, "first_name"),
+        last_name: form_last(&pairs, "last_name").unwrap_or_default(),
+        company_name: form_last(&pairs, "company_name").unwrap_or_default(),
+        telemetry: match form_last(&pairs, "is_telemetry_enabled") {
+            Some(text) => forms::TelemetryRaw::Text(text),
+            None => forms::TelemetryRaw::Missing,
+        },
+    };
+    // Snapshots in Python-evaluation order: instance, any-admin, then
+    // (presence is form-only) the normalized email's validity, user
+    // existence, and the raw password's zxcvbn score.
+    let instance_id = instance_first(pool).await?;
+    let admin_exists = any_admin_exists(pool).await?;
+    let email = form
+        .email
+        .as_deref()
+        .map(forms::normalize_email)
+        .unwrap_or_default();
+    let email_valid = forms::email_is_valid(&email);
+    let user_exists = user_exists_by_email(pool, &email).await?;
+    let score = form.password.as_deref().map(password_score).unwrap_or(0);
+    let outcome = forms::decide_signup(
+        &base,
+        &form,
+        &forms::SignupSnapshot {
+            instance_exists: instance_id.is_some(),
+            admin_exists,
+            user_exists,
+            email_valid,
+            password_score: score,
+        },
+    );
+    if outcome.code.is_some() {
+        return redirect_response(&outcome.location, Vec::new());
+    }
+    // Success: users → (post_save) prefs → profile → stamps → admin →
+    // instance → session. `code: None` proves presence, so the first-name
+    // and password unwraps hold.
+    let password = form.password.clone().ok_or(Denial::ServerError)?;
+    let first_name = form.first_name.clone().ok_or(Denial::ServerError)?;
+    let password_hash = encode_password(&password);
+    let now = Utc::now();
+    let user_id = insert_signup_user(
+        pool,
+        now,
+        &email,
+        &first_name,
+        &form.last_name,
+        &password_hash,
+    )
+    .await?;
+    insert_notification_prefs(pool, now, &user_id).await?;
+    insert_signup_profile(pool, now, &user_id, &form.company_name).await?;
+    let instance_id = instance_id.ok_or(Denial::ServerError)?;
+    insert_signup_admin(pool, now, &user_id, &instance_id).await?;
+    let forms::TelemetryStored::Bool(telemetry) = forms::coerce_telemetry(&form.telemetry) else {
+        return Err(Denial::ServerError);
+    };
+    apply_instance_setup(pool, &instance_id, now, &form.company_name, telemetry).await?;
+    finish_login(
+        &state,
+        pool,
+        headers,
+        peer,
+        user_id,
+        &password_hash,
+        &base,
+        &outcome.location,
+    )
+    .await
+}
+
+/// `POST /api/instances/admins/sign-in/` (`admin.py:242-358`): same shell
+/// as [`sign_up`]; the membership check has no role gate (any live
+/// `InstanceAdmin` row for `(instance, user)` passes).
+async fn sign_in(State(state): State<AppState>, req: Request) -> Result<Response, Denial> {
+    let (parts, body) = req.into_parts();
+    let headers = &parts.headers;
+    let body = axum::body::to_bytes(body, 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    let peer = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip().to_string());
+    let pairs = form_pairs(content_type_of(headers), &body);
+    if csrf_gate(headers, &pairs).is_err() {
+        return Ok(csrf_failure_response(&state));
+    }
+    let pool = pools(&state)?;
+    let base = admin_base(&state)?;
+    let form = forms::SigninForm {
+        email: form_last(&pairs, "email"),
+        password: form_last(&pairs, "password"),
+    };
+    let instance_id = instance_first(pool).await?;
+    let email = form
+        .email
+        .as_deref()
+        .map(forms::normalize_email)
+        .unwrap_or_default();
+    let email_valid = forms::email_is_valid(&email);
+    let lookup = signin_user_lookup(pool, &email).await?;
+    let user = match &lookup {
+        None => None,
+        Some((id, is_active, password_field)) => {
+            let password_ok = form
+                .password
+                .as_deref()
+                .is_some_and(|candidate| forms::check_password(candidate, password_field));
+            let membership = match instance_id {
+                Some(instance) => is_instance_admin(pool, &instance, id).await?,
+                None => false,
+            };
+            Some(forms::SigninUserState {
+                is_active: *is_active,
+                password_ok,
+                is_instance_admin: membership,
+            })
+        }
+    };
+    let outcome = forms::decide_signin(
+        &base,
+        &form,
+        &forms::SigninSnapshot {
+            instance_exists: instance_id.is_some(),
+            email_valid,
+            user,
+        },
+    );
+    if outcome.code.is_some() {
+        return redirect_response(&outcome.location, Vec::new());
+    }
+    let (user_id, _, password_field) = lookup.ok_or(Denial::ServerError)?;
+    finish_login(
+        &state,
+        pool,
+        headers,
+        peer,
+        user_id,
+        &password_field,
+        &base,
+        &outcome.location,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn denial_body(denial: Denial) -> (StatusCode, String) {
         denial.status_and_body()
+    }
+
+    #[test]
+    fn csrf_token_source_prefers_the_form_field() {
+        let pairs = vec![("csrfmiddlewaretoken".to_owned(), "from-post".to_owned())];
+        assert_eq!(
+            csrf_token_source(&pairs, Some("from-header")),
+            Some(("from-post".to_owned(), TokenSource::Post))
+        );
+        let empty: Vec<(String, String)> = Vec::new();
+        assert_eq!(
+            csrf_token_source(&empty, Some("h")),
+            Some(("h".to_owned(), TokenSource::Header))
+        );
+        // An empty header is still a (failing) token, not "missing".
+        assert_eq!(
+            csrf_token_source(&empty, Some("")),
+            Some(("".to_owned(), TokenSource::Header))
+        );
+        assert_eq!(csrf_token_source(&empty, None), None);
+        // An empty form field falls through to the header.
+        let blank = vec![("csrfmiddlewaretoken".to_owned(), String::new())];
+        assert_eq!(
+            csrf_token_source(&blank, Some("h")),
+            Some(("h".to_owned(), TokenSource::Header))
+        );
+        assert_eq!(csrf_token_source(&blank, None), None);
+    }
+
+    #[test]
+    fn csrf_gate_round_trip() {
+        // No cookie → NoCookie, even with a token present.
+        let mut headers = HeaderMap::new();
+        let pairs = vec![("csrfmiddlewaretoken".to_owned(), "x".repeat(64))];
+        assert_eq!(csrf_gate(&headers, &pairs), Err(CsrfDenial::NoCookie));
+        // Cookie + masked token → pass.
+        let secret = csrf_kernel::new_secret();
+        let token = csrf_kernel::mask_secret(&secret).expect("mask");
+        headers.insert(
+            header::COOKIE,
+            format!("csrftoken={secret}").parse().expect("cookie"),
+        );
+        let pairs = vec![("csrfmiddlewaretoken".to_owned(), token)];
+        assert_eq!(csrf_gate(&headers, &pairs), Ok(()));
+        // Cookie + wrong token → BadToken.
+        let pairs = vec![("csrfmiddlewaretoken".to_owned(), "x".repeat(64))];
+        assert_eq!(csrf_gate(&headers, &pairs), Err(CsrfDenial::BadToken));
+        // Cookie but no token anywhere → BadToken.
+        let empty: Vec<(String, String)> = Vec::new();
+        assert_eq!(csrf_gate(&headers, &empty), Err(CsrfDenial::BadToken));
+    }
+
+    #[test]
+    fn csrf_check_token_renders_django_reasons() {
+        let secret = csrf_kernel::new_secret();
+        let masked = csrf_kernel::mask_secret(&secret).expect("mask");
+        assert!(csrf_check_token(&secret, &masked, TokenSource::Post).is_ok());
+        assert_eq!(
+            csrf_check_token(&secret, &"x".repeat(64), TokenSource::Post),
+            Err("CSRF token from POST incorrect.".to_owned())
+        );
+        assert!(csrf_check_token(&secret, "short", TokenSource::Header)
+            .unwrap_err()
+            .contains("the 'X-Csrftoken' HTTP header"));
+    }
+
+    #[test]
+    fn form_pairs_only_reads_forms_last_wins() {
+        let pairs = form_pairs(Some("application/x-www-form-urlencoded"), b"a=1&a=2");
+        assert_eq!(form_last(&pairs, "a").as_deref(), Some("2"));
+        assert!(form_pairs(Some("application/json"), b"a=1").is_empty());
+        assert!(form_pairs(None, b"a=1").is_empty());
+        let pairs = form_pairs(
+            Some("application/x-www-form-urlencoded; charset=UTF-8"),
+            b"a=1",
+        );
+        assert_eq!(form_last(&pairs, "a").as_deref(), Some("1"));
     }
 
     #[test]
