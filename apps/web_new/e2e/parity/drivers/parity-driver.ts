@@ -5033,8 +5033,101 @@ export interface ParityDriver {
   pagesLiveDescriptionFetchCount(): Promise<number>;
   /** Whether the sync loader skeleton is currently showing. */
   pagesLiveSyncLoaderVisible(): Promise<boolean>;
-}
 
+  // --- Intake triage actions (NEWFRONT-259, INT-020/021/022/023/025).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. The intake detail header offers Accept/Decline
+  // --- buttons plus an overflow menu (snooze, duplicate, copy link,
+  // --- delete) while the request is open; each action confirms through
+  // --- its own dialog and then moves focus to a neighbour request.
+
+  /** Whether the header's Accept control is currently offered. */
+  intakeTriageAcceptVisible(): Promise<boolean>;
+  /** Whether the header's Decline control is currently offered. */
+  intakeTriageDeclineVisible(): Promise<boolean>;
+  /** Click the header's Accept control; opens the add-to-project dialog for admins. */
+  intakeTriageClickAccept(): Promise<void>;
+  /** Whether the add-to-project dialog is currently open. */
+  intakeTriageAcceptDialogVisible(): Promise<boolean>;
+  /** Add-to-project dialog heading plus primary-button label. */
+  intakeTriageAcceptDialogText(): Promise<{ heading: string; confirm: string }>;
+  /** Confirm the add-to-project dialog; resolves once the write lands. */
+  intakeTriageAcceptDialogConfirm(): Promise<void>;
+  /** Cancel the add-to-project dialog; resolves once it closes. */
+  intakeTriageAcceptDialogCancel(): Promise<void>;
+  /** Click the header's Decline control; opens the decline dialog for admins. */
+  intakeTriageClickDecline(): Promise<void>;
+  /** Whether the decline confirmation dialog is currently open. */
+  intakeTriageDeclineDialogVisible(): Promise<boolean>;
+  /** Decline dialog heading plus body text (warns the action cannot be undone). */
+  intakeTriageDeclineDialogText(): Promise<{ heading: string; body: string }>;
+  /** Confirm the decline dialog; resolves once the write lands. */
+  intakeTriageDeclineConfirm(): Promise<void>;
+  /** Cancel the decline dialog; resolves once it closes. */
+  intakeTriageDeclineCancel(): Promise<void>;
+  /** Whether the header's overflow (more-actions) trigger is currently offered. */
+  intakeTriageOverflowVisible(): Promise<boolean>;
+  /** Open the header's overflow menu; resolves once its items render. */
+  intakeTriageOpenOverflow(): Promise<void>;
+  /** Overflow menu item labels in display order. */
+  intakeTriageOverflowOptions(): Promise<string[]>;
+  /** Choose the overflow menu's Snooze entry; opens the snooze date dialog. */
+  intakeTriageClickSnooze(): Promise<void>;
+  /** Whether the snooze date dialog is currently open. */
+  intakeTriageSnoozeDialogVisible(): Promise<boolean>;
+  /** Whether the snooze calendar disables every past day. */
+  intakeTriageSnoozePastDisabled(): Promise<boolean>;
+  /** Pick the day `daysAhead` days in the future in the snooze calendar. */
+  intakeTriageSnoozePickFuture(daysAhead: number): Promise<void>;
+  /** Confirm the snooze dialog; resolves once the write lands. */
+  intakeTriageSnoozeConfirm(): Promise<void>;
+  /** Cancel the snooze dialog; resolves once it closes. */
+  intakeTriageSnoozeCancel(): Promise<void>;
+  /** Header status chip text, or null when no chip renders. */
+  intakeTriageStatusChipText(): Promise<string | null>;
+  /** Choose the overflow menu's Un-snooze entry; resolves once the write lands. */
+  intakeTriageClickUnsnooze(): Promise<void>;
+  /** Choose the overflow menu's Mark-as-duplicate entry; opens the target picker. */
+  intakeTriageClickMarkDuplicate(): Promise<void>;
+  /** Whether the duplicate-target picker is currently open. */
+  intakeTriageDuplicateDialogVisible(): Promise<boolean>;
+  /** Search the duplicate-target picker; resolves once results settle. */
+  intakeTriageDuplicateSearch(query: string): Promise<void>;
+  /** Duplicate-picker candidate labels (identifier plus title) in display order. */
+  intakeTriageDuplicateOptions(): Promise<string[]>;
+  /** Pick the candidate whose label contains `name`; resolves once the write lands. */
+  intakeTriageDuplicatePick(name: string): Promise<void>;
+  /** Properties panel's duplicate-of reference text, or null when absent. */
+  intakeTriageDuplicateOfText(): Promise<string | null>;
+  /** Choose the overflow menu's Delete entry; opens the delete dialog. */
+  intakeTriageClickDelete(): Promise<void>;
+  /** Whether the delete confirmation dialog is currently open. */
+  intakeTriageDeleteDialogVisible(): Promise<boolean>;
+  /** Delete dialog heading plus body text. */
+  intakeTriageDeleteDialogText(): Promise<{ heading: string; body: string }>;
+  /** Confirm the delete dialog; resolves once the write lands. */
+  intakeTriageDeleteConfirm(): Promise<void>;
+  /** Cancel the delete dialog; resolves once it closes. */
+  intakeTriageDeleteCancel(): Promise<void>;
+  /** Current `inboxIssueId` URL param, or null when the URL carries none. */
+  intakeTriageCurrentIssueId(): Promise<string | null>;
+  /** Current `currentTab` URL param, or null when the URL carries none. */
+  intakeTriageCurrentTab(): Promise<string | null>;
+  /** Open one intake request on an explicit tab; waits for its detail. */
+  intakeTriageOpenIssueOnTab(workspaceSlug: string, projectId: string, issueId: string, tab: string): Promise<void>;
+  /**
+   * Open the list's filter panel (minimal navigation aid: snoozed rows
+   * leave the default open list, so revisiting one needs the status
+   * filter; full filter behavior belongs to NEWFRONT-256).
+   */
+  intakeTriageFilterOpen(): Promise<void>;
+  /** Toggle one work-item-status option; resolves once the list refetches. */
+  intakeTriageFilterToggleStatus(name: string): Promise<void>;
+  /** Close the list's filter panel. */
+  intakeTriageFilterClose(): Promise<void>;
+  /** Open a listed request through its sidebar link; resolves once its detail shows. */
+  intakeTriageListOpenIssue(name: string): Promise<void>;
+}
 
 /** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */
 export interface ModulesToast {
@@ -5063,7 +5156,6 @@ export interface ModulesTimelineRow {
   /** Whether a status glyph renders beside the name. */
   statusGlyph: boolean;
 }
-
 
 /** One collaboration socket close as the browser observed it. */
 export interface PagesLiveSocketClose {
