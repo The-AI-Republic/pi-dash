@@ -12452,3 +12452,47 @@ export async function serverCycleDetailFull(
     endDate: typeof rec["end_date"] === "string" ? rec["end_date"] : null,
   };
 }
+
+// --- Cycles archive/menu/transfer acceptance (NEWFRONT-252, CYC-025-031
+// --- plus CYC-046). Appended; the helpers above are untouched per the
+// --- shared contract. Favorite setup/teardown for UI scenarios; the row
+// --- marker makes the same calls.
+
+/**
+ * Favorite a cycle through the API. POSTs the cycle id to the
+ * user-favorite-cycles collection (throws naming the failure).
+ */
+export async function cyclesFavoriteCycle(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/user-favorite-cycles/`,
+    sessionCookie,
+    { cycle: cycleId }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle favorite failed with HTTP ${res.status}.`);
+}
+
+/**
+ * Unfavorite a cycle through the API. Tolerates 404 so teardown never
+ * fails a scenario whose UI already removed the mark.
+ */
+export async function cyclesUnfavoriteCycle(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/user-favorite-cycles/${cycleId}/`,
+    sessionCookie
+  );
+  if (!res.ok && res.status !== 404) throw new Error(`[parity] cycle unfavorite failed with HTTP ${res.status}.`);
+}
