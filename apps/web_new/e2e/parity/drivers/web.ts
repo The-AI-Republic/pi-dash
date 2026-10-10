@@ -25063,4 +25063,447 @@ export class WebDriver implements ParityDriver {
     const revoke = dialog.getByRole("button", { name: "Revoke", exact: true });
     await expect.poll(() => revoke.isDisabled(), { timeout: WebDriver.OPEN_MS }).toBe(true);
   }
+
+  // --- Intake triage actions (NEWFRONT-259, INT-020/021/022/023/025).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. Observed on the running old app: the desktop
+  // --- intake detail header carries Accept/Decline buttons, prev/next
+  // --- navigation, a status chip and one overflow menu (snooze,
+  // --- duplicate, copy link, delete) while the request is open; each
+  // --- action confirms through a dialog and then advances to a neighbour.
+
+  /** Desktop intake detail header, scoped from its prev/next navigation. */
+  private intakeTriageHeader(): Locator {
+    return this.page
+      .getByRole("button", { name: "Next work item" })
+      .locator("xpath=ancestor::*[contains(@class, 'justify-between')][1]");
+  }
+
+  /** Overflow trigger inside the intake header (a headless menu button). */
+  private intakeTriageMenuTrigger(): Locator {
+    return this.intakeTriageHeader().locator('button[aria-haspopup="menu"]');
+  }
+
+  /** Items of the currently open overflow menu. */
+  private intakeTriageMenuItems(): Locator {
+    return this.page.getByRole("menu").getByRole("menuitem");
+  }
+
+  private async intakeTriageEnsureMenuOpen(): Promise<void> {
+    if ((await this.intakeTriageMenuItems().count()) > 0) return;
+    await this.intakeTriageMenuTrigger().click({ timeout: 30_000 });
+    await this.intakeTriageMenuItems().first().waitFor({ timeout: 30_000 });
+  }
+
+  private async intakeTriageWaitUrlChange(before: string): Promise<void> {
+    await this.page.waitForFunction((prev) => window.location.href !== prev, before, { timeout: 30_000 });
+  }
+
+  // Dialog visibility anchors on visible content, never on the dialog
+  // node itself: the old app's modal wrapper reports invisible to
+  // Playwright even while open. The ancestor dialog only scopes inner
+  // button queries (several labels repeat the header's own buttons).
+
+  /** Visible marker of the add-to-project dialog. */
+  private intakeTriageAcceptMarker(): Locator {
+    return this.page.getByRole("heading", { name: /to project work items/ });
+  }
+
+  /** Add-to-project dialog, scoped from its move heading. */
+  private intakeTriageAcceptDialog(): Locator {
+    return this.intakeTriageAcceptMarker().locator("xpath=ancestor::*[@role='dialog']");
+  }
+
+  /** Visible marker of the decline confirmation dialog. */
+  private intakeTriageDeclineMarker(): Locator {
+    return this.page.getByRole("heading", { name: "Decline work item", exact: true });
+  }
+
+  /** Decline confirmation dialog, scoped from its heading. */
+  private intakeTriageDeclineDialog(): Locator {
+    return this.intakeTriageDeclineMarker().locator("xpath=ancestor::*[@role='dialog']");
+  }
+
+  /** Visible marker of the delete confirmation dialog. */
+  private intakeTriageDeleteMarker(): Locator {
+    return this.page.getByRole("heading", { name: "Delete work item", exact: true });
+  }
+
+  /** Delete confirmation dialog, scoped from its heading. */
+  private intakeTriageDeleteDialog(): Locator {
+    return this.intakeTriageDeleteMarker().locator("xpath=ancestor::*[@role='dialog']");
+  }
+
+  /** Visible marker of the snooze dialog (its confirm button). */
+  private intakeTriageSnoozeMarker(): Locator {
+    return this.page.getByRole("dialog").getByRole("button", { name: "Snooze", exact: true });
+  }
+
+  /** Snooze dialog: heading-less, scoped from its calendar. */
+  private intakeTriageSnoozeDialog(): Locator {
+    return this.page.locator(".rdp-root").locator("xpath=ancestor::*[@role='dialog']");
+  }
+
+  /** Visible marker of the duplicate-target picker (its search box). */
+  private intakeTriageDuplicateMarker(): Locator {
+    return this.page.getByRole("dialog").getByPlaceholder("Search...");
+  }
+
+  /** Duplicate-target picker, scoped from its search box. */
+  private intakeTriageDuplicateDialog(): Locator {
+    return this.intakeTriageDuplicateMarker().locator("xpath=ancestor::*[@role='dialog']");
+  }
+
+  async intakeTriageAcceptVisible(): Promise<boolean> {
+    const button = this.intakeTriageHeader().getByRole("button", { name: "Accept", exact: true });
+    if ((await button.count()) === 0) return false;
+    return button.first().isVisible();
+  }
+
+  async intakeTriageDeclineVisible(): Promise<boolean> {
+    const button = this.intakeTriageHeader().getByRole("button", { name: "Decline", exact: true });
+    if ((await button.count()) === 0) return false;
+    return button.first().isVisible();
+  }
+
+  async intakeTriageClickAccept(): Promise<void> {
+    await this.intakeTriageHeader().getByRole("button", { name: "Accept", exact: true }).click({ timeout: 30_000 });
+  }
+
+  async intakeTriageAcceptDialogVisible(): Promise<boolean> {
+    const marker = this.intakeTriageAcceptMarker();
+    if ((await marker.count()) === 0) return false;
+    return marker.first().isVisible();
+  }
+
+  async intakeTriageAcceptDialogText(): Promise<{ heading: string; confirm: string }> {
+    const marker = this.intakeTriageAcceptMarker();
+    await marker.first().waitFor({ timeout: 30_000 });
+    const heading = (await marker.first().innerText()).trim();
+    const confirm = (
+      await this.intakeTriageAcceptDialog()
+        .getByRole("button", { name: "Add to project", exact: true })
+        .first()
+        .innerText()
+    ).trim();
+    return { heading, confirm };
+  }
+
+  async intakeTriageAcceptDialogConfirm(): Promise<void> {
+    const before = this.page.url();
+    await this.intakeTriageAcceptDialog()
+      .getByRole("button", { name: "Add to project", exact: true })
+      .click({ timeout: 30_000 });
+    await this.intakeTriageAcceptMarker().waitFor({ state: "hidden", timeout: 30_000 });
+    await this.intakeTriageWaitUrlChange(before);
+  }
+
+  async intakeTriageAcceptDialogCancel(): Promise<void> {
+    await this.intakeTriageAcceptDialog()
+      .getByRole("button", { name: "Discard", exact: true })
+      .click({ timeout: 30_000 });
+    await this.intakeTriageAcceptMarker().waitFor({ state: "hidden", timeout: 30_000 });
+  }
+
+  async intakeTriageClickDecline(): Promise<void> {
+    await this.intakeTriageHeader().getByRole("button", { name: "Decline", exact: true }).click({ timeout: 30_000 });
+  }
+
+  async intakeTriageDeclineDialogVisible(): Promise<boolean> {
+    const marker = this.intakeTriageDeclineMarker();
+    if ((await marker.count()) === 0) return false;
+    return marker.first().isVisible();
+  }
+
+  async intakeTriageDeclineDialogText(): Promise<{ heading: string; body: string }> {
+    const marker = this.intakeTriageDeclineMarker();
+    await marker.first().waitFor({ timeout: 30_000 });
+    const heading = (await marker.first().innerText()).trim();
+    const body = (await marker.locator("xpath=following-sibling::div[1]").innerText()).trim();
+    return { heading, body };
+  }
+
+  async intakeTriageDeclineConfirm(): Promise<void> {
+    const before = this.page.url();
+    await this.intakeTriageDeclineDialog()
+      .getByRole("button", { name: "Decline", exact: true })
+      .click({ timeout: 30_000 });
+    await this.intakeTriageDeclineMarker().waitFor({ state: "hidden", timeout: 30_000 });
+    await this.intakeTriageWaitUrlChange(before);
+  }
+
+  async intakeTriageDeclineCancel(): Promise<void> {
+    await this.intakeTriageDeclineDialog()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: 30_000 });
+    await this.intakeTriageDeclineMarker().waitFor({ state: "hidden", timeout: 30_000 });
+  }
+
+  async intakeTriageOverflowVisible(): Promise<boolean> {
+    const trigger = this.intakeTriageMenuTrigger();
+    if ((await trigger.count()) === 0) return false;
+    return trigger.first().isVisible();
+  }
+
+  async intakeTriageOpenOverflow(): Promise<void> {
+    await this.intakeTriageEnsureMenuOpen();
+  }
+
+  async intakeTriageOverflowOptions(): Promise<string[]> {
+    await this.intakeTriageEnsureMenuOpen();
+    const texts = await this.intakeTriageMenuItems().allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async intakeTriageClickSnooze(): Promise<void> {
+    await this.intakeTriageEnsureMenuOpen();
+    await this.intakeTriageMenuItems().getByRole("button", { name: "Snooze", exact: true }).click({ timeout: 30_000 });
+    await this.intakeTriageSnoozeMarker().first().waitFor({ timeout: 30_000 });
+  }
+
+  async intakeTriageSnoozeDialogVisible(): Promise<boolean> {
+    const marker = this.intakeTriageSnoozeMarker();
+    if ((await marker.count()) === 0) return false;
+    return marker.first().isVisible();
+  }
+
+  async intakeTriageSnoozePastDisabled(): Promise<boolean> {
+    const dialog = this.intakeTriageSnoozeDialog();
+    await this.intakeTriageSnoozeMarker().first().waitFor({ timeout: 30_000 });
+    const days = dialog.locator("button.rdp-day_button");
+    const readPastDisabled = async (todayNum: number): Promise<boolean[]> => {
+      const total = await days.count();
+      const past: boolean[] = [];
+      for (let i = 0; i < total; i++) {
+        const text = ((await days.nth(i).innerText()) ?? "").trim();
+        const num = Number(text);
+        if (!Number.isInteger(num) || num >= todayNum) continue;
+        past.push(await days.nth(i).isDisabled());
+      }
+      return past;
+    };
+    let past = await readPastDisabled(new Date().getDate());
+    if (past.length === 0) {
+      // First of the month: no past day in view — step to the previous
+      // month, where every day is past, and require them all disabled.
+      await dialog.locator("button.rdp-button_previous").click({ timeout: 15_000 });
+      past = await readPastDisabled(32);
+      await dialog.locator("button.rdp-button_next").click({ timeout: 15_000 });
+    }
+    return past.length > 0 && past.every(Boolean);
+  }
+
+  async intakeTriageSnoozePickFuture(daysAhead: number): Promise<void> {
+    const dialog = this.intakeTriageSnoozeDialog();
+    await this.intakeTriageSnoozeMarker().first().waitFor({ timeout: 30_000 });
+    const target = new Date();
+    target.setDate(target.getDate() + daysAhead);
+    const monthNames = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+    // The dropdown caption renders a month select (12 options) and a year
+    // select side by side; tell them apart by option count.
+    const selects = dialog.locator("select");
+    const selectTotal = await selects.count();
+    for (let i = 0; i < selectTotal; i++) {
+      const options = await selects.nth(i).locator("option").allInnerTexts();
+      if (options.length === 12) {
+        await selects.nth(i).selectOption({ label: monthNames[target.getMonth()] ?? "" });
+      } else if (options.length > 1) {
+        await selects.nth(i).selectOption({ label: String(target.getFullYear()) });
+      }
+    }
+    const day = dialog
+      .locator("button.rdp-day_button")
+      .filter({ hasText: new RegExp(`^${target.getDate()}$`) })
+      .first();
+    await day.click({ timeout: 15_000 });
+  }
+
+  async intakeTriageSnoozeConfirm(): Promise<void> {
+    const before = this.page.url();
+    await this.intakeTriageSnoozeMarker().click({ timeout: 30_000 });
+    await this.intakeTriageSnoozeMarker().waitFor({ state: "hidden", timeout: 30_000 });
+    await this.intakeTriageWaitUrlChange(before);
+  }
+
+  async intakeTriageSnoozeCancel(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.intakeTriageSnoozeMarker().waitFor({ state: "hidden", timeout: 30_000 });
+  }
+
+  async intakeTriageStatusChipText(): Promise<string | null> {
+    const chip = this.intakeTriageHeader().getByText(/^(Pending|Declined|Accepted|Duplicate|\d+ days? to go)$/);
+    if ((await chip.count()) === 0) return null;
+    return (await chip.first().innerText()).trim();
+  }
+
+  async intakeTriageClickUnsnooze(): Promise<void> {
+    const before = this.page.url();
+    await this.intakeTriageEnsureMenuOpen();
+    await this.intakeTriageMenuItems()
+      .getByRole("button", { name: /un\s?snooze/i })
+      .click({ timeout: 30_000 });
+    await this.intakeTriageWaitUrlChange(before);
+  }
+
+  async intakeTriageClickMarkDuplicate(): Promise<void> {
+    await this.intakeTriageEnsureMenuOpen();
+    await this.intakeTriageMenuItems()
+      .getByRole("button", { name: "Mark as duplicate", exact: true })
+      .click({ timeout: 30_000 });
+    await this.intakeTriageDuplicateMarker().first().waitFor({ timeout: 30_000 });
+  }
+
+  async intakeTriageDuplicateDialogVisible(): Promise<boolean> {
+    const marker = this.intakeTriageDuplicateMarker();
+    if ((await marker.count()) === 0) return false;
+    return marker.first().isVisible();
+  }
+
+  async intakeTriageDuplicateSearch(query: string): Promise<void> {
+    const dialog = this.intakeTriageDuplicateDialog();
+    const input = this.intakeTriageDuplicateMarker();
+    await input.waitFor({ timeout: 30_000 });
+    await input.fill(query);
+    // The picker debounces 500ms and swaps results for a loader mid-fetch,
+    // so outlast the debounce, then settle on options or the empty state.
+    await this.page.waitForTimeout(900);
+    const settled = dialog
+      .getByRole("option")
+      .first()
+      .or(dialog.getByText(/No .* work items found/));
+    await settled.first().waitFor({ timeout: 30_000 });
+  }
+
+  async intakeTriageDuplicateOptions(): Promise<string[]> {
+    const dialog = this.intakeTriageDuplicateDialog();
+    const texts = await dialog.getByRole("option").allInnerTexts();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async intakeTriageDuplicatePick(name: string): Promise<void> {
+    const dialog = this.intakeTriageDuplicateDialog();
+    await dialog.getByRole("option").filter({ hasText: name }).first().click({ timeout: 30_000 });
+    await this.intakeTriageDuplicateMarker().waitFor({ state: "hidden", timeout: 30_000 });
+    // No navigation follows a duplicate write; the properties panel's new
+    // reference is the signal the write landed.
+    await this.page.getByText("Duplicate of", { exact: true }).first().waitFor({ timeout: 30_000 });
+  }
+
+  async intakeTriageDuplicateOfText(): Promise<string | null> {
+    const label = this.page.getByText("Duplicate of", { exact: true });
+    if ((await label.count()) === 0) return null;
+    const row = label.locator("xpath=ancestor::div[2]");
+    return (await row.first().innerText()).trim();
+  }
+
+  async intakeTriageClickDelete(): Promise<void> {
+    await this.intakeTriageEnsureMenuOpen();
+    await this.intakeTriageMenuItems().getByRole("button", { name: "Delete", exact: true }).click({ timeout: 30_000 });
+    await this.intakeTriageDeleteMarker().first().waitFor({ timeout: 30_000 });
+  }
+
+  async intakeTriageDeleteDialogVisible(): Promise<boolean> {
+    const marker = this.intakeTriageDeleteMarker();
+    if ((await marker.count()) === 0) return false;
+    return marker.first().isVisible();
+  }
+
+  async intakeTriageDeleteDialogText(): Promise<{ heading: string; body: string }> {
+    const marker = this.intakeTriageDeleteMarker();
+    await marker.first().waitFor({ timeout: 30_000 });
+    const heading = (await marker.first().innerText()).trim();
+    const body = (await marker.locator("xpath=following-sibling::div[1]").innerText()).trim();
+    return { heading, body };
+  }
+
+  async intakeTriageDeleteConfirm(): Promise<void> {
+    const before = this.page.url();
+    await this.intakeTriageDeleteDialog()
+      .getByRole("button", { name: "Delete", exact: true })
+      .click({ timeout: 30_000 });
+    await this.intakeTriageDeleteMarker().waitFor({ state: "hidden", timeout: 30_000 });
+    await this.intakeTriageWaitUrlChange(before);
+  }
+
+  async intakeTriageDeleteCancel(): Promise<void> {
+    await this.intakeTriageDeleteDialog()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: 30_000 });
+    await this.intakeTriageDeleteMarker().waitFor({ state: "hidden", timeout: 30_000 });
+  }
+
+  async intakeTriageCurrentIssueId(): Promise<string | null> {
+    return new URL(this.page.url()).searchParams.get("inboxIssueId");
+  }
+
+  async intakeTriageCurrentTab(): Promise<string | null> {
+    return new URL(this.page.url()).searchParams.get("currentTab");
+  }
+
+  async intakeTriageOpenIssueOnTab(
+    workspaceSlug: string,
+    projectId: string,
+    issueId: string,
+    tab: string
+  ): Promise<void> {
+    // Same slow triage chain as the tab-less open: resolve the row, then
+    // load the detail. An explicit tab keeps resolved and snoozed rows
+    // addressable — without one the screen falls back to the tab's first
+    // item when the row is outside the default list.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake?currentTab=${tab}&inboxIssueId=${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.getByRole("group", { name: "Add comment" }).first().waitFor({ timeout: 300_000 });
+  }
+
+  /** Work-item-status section header inside the open filter panel. */
+  private intakeTriageFilterStatusHeader(): Locator {
+    return this.page.getByText(/Work item Status/);
+  }
+
+  async intakeTriageFilterOpen(): Promise<void> {
+    const header = this.intakeTriageFilterStatusHeader();
+    if ((await header.count()) > 0 && (await header.first().isVisible())) return;
+    await this.page.locator("button:has(svg.lucide-list-filter)").first().click({ timeout: 30_000 });
+    await header.first().waitFor({ timeout: 30_000 });
+  }
+
+  async intakeTriageFilterToggleStatus(name: string): Promise<void> {
+    const header = this.intakeTriageFilterStatusHeader();
+    await header.first().waitFor({ timeout: 30_000 });
+    const before = (await header.first().innerText()).trim();
+    await this.page.getByRole("button", { name, exact: true }).click({ timeout: 30_000 });
+    // The header carries the applied-status count; its change is the
+    // signal the toggle refetched the list.
+    await expect(header.first()).not.toHaveText(before, { timeout: 30_000 });
+  }
+
+  async intakeTriageFilterClose(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.intakeTriageFilterStatusHeader().waitFor({ state: "hidden", timeout: 30_000 });
+  }
+
+  async intakeTriageListOpenIssue(name: string): Promise<void> {
+    // Sidebar links carry identifier, title, date and priority in one
+    // accessible name; the exact title matches only its own row.
+    await this.page.getByRole("link", { name }).first().click({ timeout: 30_000 });
+    // Client-side navigation keeps filter state; the detail title input
+    // settling on the row's name is the signal it landed.
+    await expect(this.page.getByRole("textbox", { name: "Work item title" })).toHaveValue(name, {
+      timeout: 30_000,
+    });
+  }
 }

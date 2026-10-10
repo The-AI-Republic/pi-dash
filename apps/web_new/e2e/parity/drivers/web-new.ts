@@ -7157,4 +7157,175 @@ export class WebNewDriver implements ParityDriver {
   async runnersWaitRunnerRevokeWorking(): Promise<void> {
     return todo("runnersWaitRunnerRevokeWorking");
   }
+
+  // --- Intake triage actions (NEWFRONT-259, INT-020/021/022/023/025).
+
+  async intakeTriageAcceptVisible(): Promise<boolean> {
+    return todo("intakeTriageAcceptVisible");
+  }
+
+  async intakeTriageDeclineVisible(): Promise<boolean> {
+    return todo("intakeTriageDeclineVisible");
+  }
+
+  async intakeTriageClickAccept(): Promise<void> {
+    return todo("intakeTriageClickAccept");
+  }
+
+  async intakeTriageAcceptDialogVisible(): Promise<boolean> {
+    return todo("intakeTriageAcceptDialogVisible");
+  }
+
+  async intakeTriageAcceptDialogText(): Promise<{ heading: string; confirm: string }> {
+    return todo("intakeTriageAcceptDialogText");
+  }
+
+  async intakeTriageAcceptDialogConfirm(): Promise<void> {
+    return todo("intakeTriageAcceptDialogConfirm");
+  }
+
+  async intakeTriageAcceptDialogCancel(): Promise<void> {
+    return todo("intakeTriageAcceptDialogCancel");
+  }
+
+  async intakeTriageClickDecline(): Promise<void> {
+    return todo("intakeTriageClickDecline");
+  }
+
+  async intakeTriageDeclineDialogVisible(): Promise<boolean> {
+    return todo("intakeTriageDeclineDialogVisible");
+  }
+
+  async intakeTriageDeclineDialogText(): Promise<{ heading: string; body: string }> {
+    return todo("intakeTriageDeclineDialogText");
+  }
+
+  async intakeTriageDeclineConfirm(): Promise<void> {
+    return todo("intakeTriageDeclineConfirm");
+  }
+
+  async intakeTriageDeclineCancel(): Promise<void> {
+    return todo("intakeTriageDeclineCancel");
+  }
+
+  async intakeTriageOverflowVisible(): Promise<boolean> {
+    return todo("intakeTriageOverflowVisible");
+  }
+
+  async intakeTriageOpenOverflow(): Promise<void> {
+    return todo("intakeTriageOpenOverflow");
+  }
+
+  async intakeTriageOverflowOptions(): Promise<string[]> {
+    return todo("intakeTriageOverflowOptions");
+  }
+
+  async intakeTriageClickSnooze(): Promise<void> {
+    return todo("intakeTriageClickSnooze");
+  }
+
+  async intakeTriageSnoozeDialogVisible(): Promise<boolean> {
+    return todo("intakeTriageSnoozeDialogVisible");
+  }
+
+  async intakeTriageSnoozePastDisabled(): Promise<boolean> {
+    return todo("intakeTriageSnoozePastDisabled");
+  }
+
+  async intakeTriageSnoozePickFuture(_daysAhead: number): Promise<void> {
+    return todo("intakeTriageSnoozePickFuture");
+  }
+
+  async intakeTriageSnoozeConfirm(): Promise<void> {
+    return todo("intakeTriageSnoozeConfirm");
+  }
+
+  async intakeTriageSnoozeCancel(): Promise<void> {
+    return todo("intakeTriageSnoozeCancel");
+  }
+
+  async intakeTriageStatusChipText(): Promise<string | null> {
+    return todo("intakeTriageStatusChipText");
+  }
+
+  async intakeTriageClickUnsnooze(): Promise<void> {
+    return todo("intakeTriageClickUnsnooze");
+  }
+
+  async intakeTriageClickMarkDuplicate(): Promise<void> {
+    return todo("intakeTriageClickMarkDuplicate");
+  }
+
+  async intakeTriageDuplicateDialogVisible(): Promise<boolean> {
+    return todo("intakeTriageDuplicateDialogVisible");
+  }
+
+  async intakeTriageDuplicateSearch(_query: string): Promise<void> {
+    return todo("intakeTriageDuplicateSearch");
+  }
+
+  async intakeTriageDuplicateOptions(): Promise<string[]> {
+    return todo("intakeTriageDuplicateOptions");
+  }
+
+  async intakeTriageDuplicatePick(_name: string): Promise<void> {
+    return todo("intakeTriageDuplicatePick");
+  }
+
+  async intakeTriageDuplicateOfText(): Promise<string | null> {
+    return todo("intakeTriageDuplicateOfText");
+  }
+
+  async intakeTriageClickDelete(): Promise<void> {
+    return todo("intakeTriageClickDelete");
+  }
+
+  async intakeTriageDeleteDialogVisible(): Promise<boolean> {
+    return todo("intakeTriageDeleteDialogVisible");
+  }
+
+  async intakeTriageDeleteDialogText(): Promise<{ heading: string; body: string }> {
+    return todo("intakeTriageDeleteDialogText");
+  }
+
+  async intakeTriageDeleteConfirm(): Promise<void> {
+    return todo("intakeTriageDeleteConfirm");
+  }
+
+  async intakeTriageDeleteCancel(): Promise<void> {
+    return todo("intakeTriageDeleteCancel");
+  }
+
+  async intakeTriageCurrentIssueId(): Promise<string | null> {
+    return todo("intakeTriageCurrentIssueId");
+  }
+
+  async intakeTriageCurrentTab(): Promise<string | null> {
+    return todo("intakeTriageCurrentTab");
+  }
+
+  async intakeTriageOpenIssueOnTab(
+    _workspaceSlug: string,
+    _projectId: string,
+    _issueId: string,
+    _tab: string
+  ): Promise<void> {
+    return todo("intakeTriageOpenIssueOnTab");
+  }
+
+  async intakeTriageFilterOpen(): Promise<void> {
+    return todo("intakeTriageFilterOpen");
+  }
+
+  async intakeTriageFilterToggleStatus(_name: string): Promise<void> {
+    return todo("intakeTriageFilterToggleStatus");
+  }
+
+  async intakeTriageFilterClose(): Promise<void> {
+    return todo("intakeTriageFilterClose");
+  }
+
+  async intakeTriageListOpenIssue(_name: string): Promise<void> {
+    return todo("intakeTriageListOpenIssue");
+  }
 }
