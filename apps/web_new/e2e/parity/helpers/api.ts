@@ -12253,3 +12253,222 @@ export async function serverUnpinIssuePod(
 ): Promise<void> {
   await patchIssue(workspaceSlug, projectId, issueId, sessionCookie, { assigned_pod_id: null }, apiBase);
 }
+
+// --- Intake list content (NEWFRONT-256, INT-006/007/009/010/011). The merged
+// --- serverCreateInboxIssue sends only a name; these helpers carry
+// --- priority/labels/assignees at create time, intake PATCH (status/source),
+// --- and param-aware list reads mirroring the UI's own query params, so
+// --- scenarios can cross-check UI order/filter/paging against server state.
+
+/** One intake list row as the list endpoint reports it. */
+export interface ServerIntakeListRow {
+  inboxId: string;
+  issueId: string;
+  status: number;
+  source: string;
+  name: string;
+  sequenceId: number;
+  priority: string | null;
+  createdAt: string;
+  createdBy: string;
+  labelIds: string[];
+}
+
+function serverIntakeListRowOf(rec: Record<string, unknown>): ServerIntakeListRow {
+  const issue = rec["issue"] as Record<string, unknown> | undefined;
+  if (typeof rec["id"] !== "string" || issue === undefined || typeof issue["id"] !== "string")
+    throw new Error("[parity] intake list row carried no inbox/issue ids.");
+  const labelIds = issue["label_ids"];
+  return {
+    inboxId: rec["id"] as string,
+    issueId: issue["id"] as string,
+    status: typeof rec["status"] === "number" ? (rec["status"] as number) : 0,
+    source: typeof rec["source"] === "string" ? (rec["source"] as string) : "",
+    name: typeof issue["name"] === "string" ? (issue["name"] as string) : "",
+    sequenceId: typeof issue["sequence_id"] === "number" ? (issue["sequence_id"] as number) : 0,
+    priority: typeof issue["priority"] === "string" ? (issue["priority"] as string) : null,
+    createdAt: typeof issue["created_at"] === "string" ? (issue["created_at"] as string) : "",
+    createdBy: typeof issue["created_by"] === "string" ? (issue["created_by"] as string) : "",
+    labelIds: Array.isArray(labelIds) ? labelIds.map(String) : [],
+  };
+}
+
+/** One intake list page: rows plus the cursor envelope. */
+export interface ServerIntakeListPage {
+  rows: ServerIntakeListRow[];
+  nextCursor: string;
+  nextPageResults: boolean;
+  totalResults: number;
+}
+
+/** List intake rows with the UI's own query params (status, priority, labels, dates, order_by, cursor). */
+export async function serverIntakeListPage(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  params: Record<string, string | number> = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerIntakeListPage> {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) query.set(key, String(value));
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${suffix}`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] intake list read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as Record<string, unknown>;
+  const raw: unknown[] = Array.isArray(payload) ? payload : ((payload["results"] as unknown[]) ?? []);
+  return {
+    rows: raw.map((row) => serverIntakeListRowOf(row as Record<string, unknown>)),
+    nextCursor: typeof payload["next_cursor"] === "string" ? (payload["next_cursor"] as string) : "",
+    nextPageResults: payload["next_page_results"] === true,
+    totalResults: typeof payload["total_results"] === "number" ? (payload["total_results"] as number) : 0,
+  };
+}
+
+/** Every intake row matching `params`, following next_cursor (bounded at 20 pages). */
+export async function serverIntakeListAll(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  params: Record<string, string | number> = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerIntakeListRow[]> {
+  const all: ServerIntakeListRow[] = [];
+  let cursor = typeof params["cursor"] === "string" ? (params["cursor"] as string) : "";
+  for (let page = 0; page < 20; page += 1) {
+    const next: Record<string, string | number> = { ...params };
+    if (cursor !== "") next["cursor"] = cursor;
+    const fetched = await serverIntakeListPage(workspaceSlug, projectId, sessionCookie, next, apiBase);
+    all.push(...fetched.rows);
+    if (!fetched.nextPageResults || fetched.nextCursor === "") return all;
+    cursor = fetched.nextCursor;
+  }
+  throw new Error("[parity] intake list read exceeded 20 pages.");
+}
+
+/** Rich intake detail (the list serializer omits updated_at/assignees/state). */
+export interface ServerIntakeListDetail {
+  status: number;
+  source: string;
+  name: string;
+  sequenceId: number;
+  priority: string | null;
+  stateId: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+  labelIds: string[];
+  assigneeIds: string[];
+}
+
+/** One intake row by nested issue id, with dates/assignees/state for cross-checks. */
+export async function serverIntakeListDetail(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerIntakeListDetail> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] intake detail read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const issue = rec["issue"] as Record<string, unknown> | undefined;
+  if (issue === undefined) throw new Error("[parity] intake detail carried no nested issue.");
+  const strArray = (value: unknown): string[] => (Array.isArray(value) ? value.map(String) : []);
+  return {
+    status: typeof rec["status"] === "number" ? (rec["status"] as number) : 0,
+    source: typeof rec["source"] === "string" ? (rec["source"] as string) : "",
+    name: typeof issue["name"] === "string" ? (issue["name"] as string) : "",
+    sequenceId: typeof issue["sequence_id"] === "number" ? (issue["sequence_id"] as number) : 0,
+    priority: typeof issue["priority"] === "string" ? (issue["priority"] as string) : null,
+    stateId: typeof issue["state_id"] === "string" ? (issue["state_id"] as string) : "",
+    createdAt: typeof issue["created_at"] === "string" ? (issue["created_at"] as string) : "",
+    updatedAt: typeof issue["updated_at"] === "string" ? (issue["updated_at"] as string) : "",
+    createdBy: typeof issue["created_by"] === "string" ? (issue["created_by"] as string) : "",
+    labelIds: strArray(issue["label_ids"]),
+    assigneeIds: strArray(issue["assignee_ids"]),
+  };
+}
+
+/** Options for rich intake-row creation (beyond the merged name-only helper). */
+export interface ServerIntakeListCreateOptions {
+  priority?: string;
+  labelIds?: string[];
+  assigneeIds?: string[];
+  /** FORMS/EMAIL rows: create ignores it server-side, so it is applied via admin PATCH after. */
+  source?: string;
+}
+
+/** Create an intake row carrying priority/labels/assignees (and optionally a non-default source). */
+export async function serverIntakeListCreate(
+  workspaceSlug: string,
+  projectId: string,
+  name: string,
+  sessionCookie: string,
+  opts: ServerIntakeListCreateOptions = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ inboxId: string; issueId: string }> {
+  const issue: Record<string, unknown> = { name };
+  if (opts.priority !== undefined) issue["priority"] = opts.priority;
+  if (opts.labelIds !== undefined) issue["label_ids"] = opts.labelIds;
+  if (opts.assigneeIds !== undefined) issue["assignee_ids"] = opts.assigneeIds;
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/`,
+    sessionCookie,
+    { source: "IN_APP", issue }
+  );
+  if (!res.ok) throw new Error(`[parity] intake list create failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const nested = rec["issue"] as Record<string, unknown> | undefined;
+  if (typeof rec["id"] !== "string" || typeof nested?.["id"] !== "string")
+    throw new Error("[parity] created intake row carried no inbox/issue ids.");
+  const created = { inboxId: rec["id"] as string, issueId: nested["id"] as string };
+  if (opts.source !== undefined && opts.source !== "IN_APP") {
+    await serverIntakeListPatch(
+      workspaceSlug,
+      projectId,
+      created.issueId,
+      { source: opts.source },
+      sessionCookie,
+      apiBase
+    );
+  }
+  return created;
+}
+
+/** Intake PATCH payload: top-level intake fields plus nested issue fields. */
+export interface ServerIntakeListPatchData {
+  status?: number;
+  source?: string;
+  snoozedTill?: string | null;
+  duplicateTo?: string;
+  issue?: Record<string, unknown>;
+}
+
+/** PATCH an intake row by nested issue id (admin session for status/source changes). */
+export async function serverIntakeListPatch(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  data: ServerIntakeListPatchData,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const body: Record<string, unknown> = {};
+  if (data.status !== undefined) body["status"] = data.status;
+  if (data.source !== undefined) body["source"] = data.source;
+  if (data.snoozedTill !== undefined) body["snoozed_till"] = data.snoozedTill;
+  if (data.duplicateTo !== undefined) body["duplicate_to"] = data.duplicateTo;
+  if (data.issue !== undefined) body["issue"] = data.issue;
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/inbox-issues/${issueId}/`,
+    sessionCookie,
+    body
+  );
+  if (!res.ok) throw new Error(`[parity] intake list patch failed with HTTP ${res.status}.`);
+}

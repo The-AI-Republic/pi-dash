@@ -4675,6 +4675,118 @@ export interface ParityDriver {
   runnersWaitRunnerDeleteWorking(): Promise<void>;
   /** Wait until the revoke-runner confirm shows its in-flight state. */
   runnersWaitRunnerRevokeWorking(): Promise<void>;
+  // --- Intake list content (NEWFRONT-256, INT-006/007/009/010/011). Row
+  // --- reads, cursor paging, the filter panel + chips, custom date ranges,
+  // --- and the order menu. Sections/options/chips speak canonical keys and
+  // --- data identities (names, not copy) so the same scenario runs on the
+  // --- redesigned UI; only domain vocabulary (status/priority/preset names)
+  // --- is asserted literally.
+
+  /** Open the intake list on `tab`; resolves once rows or the empty state settle. */
+  intakeListOpen(workspaceSlug: string, projectId: string, tab: "open" | "closed"): Promise<void>;
+  /** Nested issue ids of the rendered rows, in display order. */
+  intakeListRowIds(): Promise<string[]>;
+  /** Project-scoped id label of one row (identifier + sequence). */
+  intakeListRowIdLabel(issueId: string): Promise<string>;
+  /** Status chip text of one row, or null when no chip renders. */
+  intakeListRowStatusChip(issueId: string): Promise<string | null>;
+  /** Title text of one row. */
+  intakeListRowTitle(issueId: string): Promise<string>;
+  /** Created-date text of one row. */
+  intakeListRowCreatedText(issueId: string): Promise<string>;
+  /** Created-date tooltip (hover): heading plus content. */
+  intakeListRowCreatedTooltip(issueId: string): Promise<IntakeListTooltip>;
+  /** Priority key one row's marker presents (urgent/high/medium/low/none). */
+  intakeListRowPriority(issueId: string): Promise<string>;
+  /** Label pill texts of one row (collapsed to a count pill at four or more). */
+  intakeListRowLabels(issueId: string): Promise<string[]>;
+  /** Which avatar one row shows: a member, the intake identity, or none. */
+  intakeListRowAvatarKind(issueId: string): Promise<"member" | "intake" | "none">;
+  /** Scroll the list to the bottom to trigger the next page fetch. */
+  intakeListScrollToBottom(): Promise<void>;
+  /** Whether placeholder rows render (a page is loading). */
+  intakeListSkeletonsVisible(): Promise<boolean>;
+  /** Whether the header syncing hint renders. */
+  intakeListSyncingVisible(): Promise<boolean>;
+  /** Resolve once exactly `count` rows render (bounded wait). */
+  intakeListWaitForRowCount(count: number): Promise<void>;
+  /** Delay the next list reads by `ms` so loading states can be observed. */
+  intakeListDelayNextListReads(ms: number): Promise<void>;
+  /** Open the filter panel; idempotent when already open. */
+  intakeListOpenFilters(): Promise<void>;
+  /** Close the filter panel (Escape); idempotent when already closed. */
+  intakeListCloseFilters(): Promise<void>;
+  /** Type into the panel's search box (replaces any previous query). */
+  intakeListFilterSearch(query: string): Promise<void>;
+  /** Canonical keys of the sections the panel currently shows. */
+  intakeListFilterSections(): Promise<IntakeListFilterKey[]>;
+  /** Option identities of one section, in display order. */
+  intakeListFilterOptions(key: IntakeListFilterKey): Promise<string[]>;
+  /** Pick (toggle) one option in one section; resolves once the list refetches. */
+  intakeListFilterPick(key: IntakeListFilterKey, option: string): Promise<void>;
+  /** Whether one option renders checked. */
+  intakeListFilterChecked(key: IntakeListFilterKey, option: string): Promise<boolean>;
+  /** Applied count one section header carries (0 when it shows none). */
+  intakeListFilterSectionCount(key: IntakeListFilterKey): Promise<number>;
+  /** Applied-filter chips as canonical groups with data-identity values. */
+  intakeListChips(): Promise<IntakeListChip[]>;
+  /** Remove one chip value; resolves once the list refetches. */
+  intakeListChipRemove(key: IntakeListFilterKey, value: string): Promise<void>;
+  /** Clear a whole chip group; resolves once the list refetches. */
+  intakeListChipClearGroup(key: IntakeListFilterKey): Promise<void>;
+  /** Start capturing intake-list request URLs (idempotent). */
+  intakeListBeginRequestSpy(): Promise<void>;
+  /** Query params of the most recent captured list request, or null when none. */
+  intakeListLastRequestParams(): Promise<Record<string, string> | null>;
+  /** Open the order menu; idempotent when already open. */
+  intakeListOpenOrderMenu(): Promise<void>;
+  /** Current order state: the checked field plus the checked direction. */
+  intakeListOrderState(): Promise<IntakeListOrderState>;
+  /** Pick an order field; resolves once the list refetches. */
+  intakeListPickOrderField(field: IntakeListOrderField): Promise<void>;
+  /** Pick a sort direction; resolves once the list refetches. */
+  intakeListPickOrderDirection(direction: "asc" | "desc"): Promise<void>;
+  /** Open the custom-date modal for one date section. */
+  intakeListOpenCustomDate(key: "createdAt" | "updatedAt"): Promise<void>;
+  /** Apply an explicit from/to range in the open custom-date modal. */
+  intakeListCustomDateApply(fromISO: string, toISO: string): Promise<void>;
+}
+
+/** Canonical filter-section keys for the intake list panel. */
+export type IntakeListFilterKey =
+  | "status"
+  | "priority"
+  | "assignees"
+  | "createdBy"
+  | "labels"
+  | "createdAt"
+  | "updatedAt";
+
+/** One applied-filter chip group: canonical key plus data-identity values. */
+export interface IntakeListChip {
+  /** Canonical group key. */
+  key: IntakeListFilterKey;
+  /** Chip values in display order. */
+  values: string[];
+}
+
+/** Order-menu state: the checked field plus the checked direction. */
+export interface IntakeListOrderState {
+  /** Checked order field. */
+  field: IntakeListOrderField;
+  /** Checked sort direction. */
+  direction: "asc" | "desc";
+}
+
+/** Canonical order fields for the intake list. */
+export type IntakeListOrderField = "created" | "updated" | "id";
+
+/** A hover tooltip: heading plus content. */
+export interface IntakeListTooltip {
+  /** Heading line (empty when the tooltip shows content only). */
+  heading: string;
+  /** Content text. */
+  content: string;
 }
 
 /** One catalog table row: the user-visible definition facts. */

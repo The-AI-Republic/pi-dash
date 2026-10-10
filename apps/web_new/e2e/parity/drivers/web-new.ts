@@ -74,6 +74,11 @@ import type {
   RunnersTableRow,
   ServedShellMarkers,
   WorkspaceOnboardingView,
+  IntakeListChip,
+  IntakeListFilterKey,
+  IntakeListOrderField,
+  IntakeListOrderState,
+  IntakeListTooltip,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -7156,5 +7161,111 @@ export class WebNewDriver implements ParityDriver {
 
   async runnersWaitRunnerRevokeWorking(): Promise<void> {
     return todo("runnersWaitRunnerRevokeWorking");
+  }
+
+  // --- Intake list content (NEWFRONT-256, INT-006/007/009/010/011). Throwing
+  // --- stubs: the web_new driver implements these when the area is built.
+
+  async intakeListOpen(_workspaceSlug: string, _projectId: string, _tab: "open" | "closed"): Promise<void> {
+    return todo("intakeListOpen");
+  }
+  async intakeListRowIds(): Promise<string[]> {
+    return todo("intakeListRowIds");
+  }
+  async intakeListRowIdLabel(_issueId: string): Promise<string> {
+    return todo("intakeListRowIdLabel");
+  }
+  async intakeListRowStatusChip(_issueId: string): Promise<string | null> {
+    return todo("intakeListRowStatusChip");
+  }
+  async intakeListRowTitle(_issueId: string): Promise<string> {
+    return todo("intakeListRowTitle");
+  }
+  async intakeListRowCreatedText(_issueId: string): Promise<string> {
+    return todo("intakeListRowCreatedText");
+  }
+  async intakeListRowCreatedTooltip(_issueId: string): Promise<IntakeListTooltip> {
+    return todo("intakeListRowCreatedTooltip");
+  }
+  async intakeListRowPriority(_issueId: string): Promise<string> {
+    return todo("intakeListRowPriority");
+  }
+  async intakeListRowLabels(_issueId: string): Promise<string[]> {
+    return todo("intakeListRowLabels");
+  }
+  async intakeListRowAvatarKind(_issueId: string): Promise<"member" | "intake" | "none"> {
+    return todo("intakeListRowAvatarKind");
+  }
+  async intakeListScrollToBottom(): Promise<void> {
+    return todo("intakeListScrollToBottom");
+  }
+  async intakeListSkeletonsVisible(): Promise<boolean> {
+    return todo("intakeListSkeletonsVisible");
+  }
+  async intakeListSyncingVisible(): Promise<boolean> {
+    return todo("intakeListSyncingVisible");
+  }
+  async intakeListWaitForRowCount(_count: number): Promise<void> {
+    return todo("intakeListWaitForRowCount");
+  }
+  async intakeListDelayNextListReads(_ms: number): Promise<void> {
+    return todo("intakeListDelayNextListReads");
+  }
+  async intakeListOpenFilters(): Promise<void> {
+    return todo("intakeListOpenFilters");
+  }
+  async intakeListCloseFilters(): Promise<void> {
+    return todo("intakeListCloseFilters");
+  }
+  async intakeListFilterSearch(_query: string): Promise<void> {
+    return todo("intakeListFilterSearch");
+  }
+  async intakeListFilterSections(): Promise<IntakeListFilterKey[]> {
+    return todo("intakeListFilterSections");
+  }
+  async intakeListFilterOptions(_key: IntakeListFilterKey): Promise<string[]> {
+    return todo("intakeListFilterOptions");
+  }
+  async intakeListFilterPick(_key: IntakeListFilterKey, _option: string): Promise<void> {
+    return todo("intakeListFilterPick");
+  }
+  async intakeListFilterChecked(_key: IntakeListFilterKey, _option: string): Promise<boolean> {
+    return todo("intakeListFilterChecked");
+  }
+  async intakeListFilterSectionCount(_key: IntakeListFilterKey): Promise<number> {
+    return todo("intakeListFilterSectionCount");
+  }
+  async intakeListChips(): Promise<IntakeListChip[]> {
+    return todo("intakeListChips");
+  }
+  async intakeListChipRemove(_key: IntakeListFilterKey, _value: string): Promise<void> {
+    return todo("intakeListChipRemove");
+  }
+  async intakeListChipClearGroup(_key: IntakeListFilterKey): Promise<void> {
+    return todo("intakeListChipClearGroup");
+  }
+  async intakeListBeginRequestSpy(): Promise<void> {
+    return todo("intakeListBeginRequestSpy");
+  }
+  async intakeListLastRequestParams(): Promise<Record<string, string> | null> {
+    return todo("intakeListLastRequestParams");
+  }
+  async intakeListOpenOrderMenu(): Promise<void> {
+    return todo("intakeListOpenOrderMenu");
+  }
+  async intakeListOrderState(): Promise<IntakeListOrderState> {
+    return todo("intakeListOrderState");
+  }
+  async intakeListPickOrderField(_field: IntakeListOrderField): Promise<void> {
+    return todo("intakeListPickOrderField");
+  }
+  async intakeListPickOrderDirection(_direction: "asc" | "desc"): Promise<void> {
+    return todo("intakeListPickOrderDirection");
+  }
+  async intakeListOpenCustomDate(_key: "createdAt" | "updatedAt"): Promise<void> {
+    return todo("intakeListOpenCustomDate");
+  }
+  async intakeListCustomDateApply(_fromISO: string, _toISO: string): Promise<void> {
+    return todo("intakeListCustomDateApply");
   }
 }
