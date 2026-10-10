@@ -474,7 +474,9 @@ test(
       await driver.archivesChooseLiveModuleMenuEntry("Delete Me", "Delete");
       await driver.modulesDeleteConfirm();
       await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Success!" });
-      expect(await driver.currentUrlPath()).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/modules/`);
+      // No navigation: the address keeps its entered form (a push would
+      // normalize the trailing slash, as the detail case below shows).
+      expect(await driver.currentUrlPath()).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/modules`);
       expect(await modulesModuleGone(world.workspaceSlug, world.projectId, moduleId, world.owner.cookie)).toBe(true);
       await expect.poll(() => driver.archivesModuleRowNames()).not.toContain("Delete Me");
     });
