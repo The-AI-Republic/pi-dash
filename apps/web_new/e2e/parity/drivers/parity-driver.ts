@@ -4675,6 +4675,84 @@ export interface ParityDriver {
   runnersWaitRunnerDeleteWorking(): Promise<void>;
   /** Wait until the revoke-runner confirm shows its in-flight state. */
   runnersWaitRunnerRevokeWorking(): Promise<void>;
+
+  // --- Live cycles list, rows, detail nav, peek, search, filters
+  // --- (NEWFRONT-249, CYC-001–008). Appended; existing methods above are
+  // --- untouched per the shared driver contract. Covers the project
+  // --- cycles list (hero plus grouped rows), row markers, detail
+  // --- addresses, the peek query key, search, filters, and chips.
+  /** Open the project's live cycles list; ends with rows or an empty view settled. */
+  cyclesOpenList(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Cycle names currently rendered as rows, in display order (hero first, then groups). */
+  cyclesVisibleNames(): Promise<string[]>;
+  /** Group headings currently rendered (Active/Upcoming/Completed), in display order. */
+  cyclesGroupHeadings(): Promise<string[]>;
+  /** Per-group row counts parsed from the group headings. */
+  cyclesGroupCounts(): Promise<{ upcoming: number; completed: number }>;
+  /** Toggle one group disclosure by heading prefix (Upcoming/Completed/Active). */
+  cyclesGroupToggle(section: string): Promise<void>;
+  /** Whether one group disclosure is currently expanded. */
+  cyclesGroupExpanded(section: string): Promise<boolean>;
+  /** Active-cycle hero row name, or null when no hero row shows. */
+  cyclesHeroName(): Promise<string | null>;
+  /** Href of the named row's detail link, or null when absent. */
+  cyclesRowHref(name: string): Promise<string | null>;
+  /** Click the named row; ends on its detail page. */
+  cyclesClickRow(name: string): Promise<void>;
+  /** Open a cycle detail address directly; ends with detail settled. */
+  cyclesOpenDetail(workspaceSlug: string, projectId: string, cycleId: string): Promise<void>;
+  /** Cycle name shown on the detail page, or null when absent. */
+  cyclesDetailName(): Promise<string | null>;
+  /** Work-item names shown on the detail page, in display order. */
+  cyclesDetailIssueNames(): Promise<string[]>;
+  /** Per-row marker facts for the named row (ring, dates, extras, favorite). */
+  cyclesRowFacts(name: string): Promise<CyclesRowFacts>;
+  /** Open the side peek for the named row; waits for the peek to show it. */
+  cyclesOpenPeek(name: string): Promise<void>;
+  /** Open the list at a shared peek link; ends with the peek settled. */
+  cyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void>;
+  /** Peek panel heading, or null when no peek is open. */
+  cyclesPeekName(): Promise<string | null>;
+  /** The peekCycle address param, or null when absent. */
+  cyclesPeekParam(): Promise<string | null>;
+  /** Close the open peek via its dismiss control; waits for it to clear. */
+  cyclesClosePeek(): Promise<void>;
+  /** Reload the current page; ends with the list settled. */
+  cyclesReload(): Promise<void>;
+  /** Navigate back client-side (detail to list); ends with the list settled. */
+  cyclesGoBack(): Promise<void>;
+  /** Whether the header search box is currently expanded. */
+  cyclesSearchExpanded(): Promise<boolean>;
+  /** Expand the search box via the magnifier; waits for expansion. */
+  cyclesSearchOpen(): Promise<void>;
+  /** Replace the search box text (the list filters live). */
+  cyclesSearchFill(text: string): Promise<void>;
+  /** Current search box text. */
+  cyclesSearchText(): Promise<string>;
+  /** Press Escape while the search box is focused. */
+  cyclesSearchEscape(): Promise<void>;
+  /** Click the search box clear control; waits for it to collapse. */
+  cyclesSearchClear(): Promise<void>;
+  /** Click a neutral header area (outside-click behavior). */
+  cyclesClickAway(): Promise<void>;
+  /** Open the filters menu; waits for its panel. */
+  cyclesFiltersOpen(): Promise<void>;
+  /** Dismiss the filters menu. */
+  cyclesFiltersClose(): Promise<void>;
+  /** Filter dimension headings in the open panel, in display order. */
+  cyclesFilterSections(): Promise<string[]>;
+  /** Filter option labels in the open panel, in display order. */
+  cyclesFilterOptionNames(): Promise<string[]>;
+  /** Pick one filter option within its dimension; waits for the list to update. */
+  cyclesFilterPick(section: string, optionName: string): Promise<void>;
+  /** Applied-filter chip texts in display order (empty when no row shows). */
+  cyclesFilterChipTexts(): Promise<string[]>;
+  /** Remove the chip carrying `chipText`; waits for the list to update. */
+  cyclesFilterRemoveChip(chipText: string): Promise<void>;
+  /** Click the clear-all control; waits for the chip row to clear. */
+  cyclesFiltersClearAll(): Promise<void>;
+  /** Whether the filters menu button carries its active-filters marker. */
+  cyclesFiltersActive(): Promise<boolean>;
 }
 
 /** One catalog table row: the user-visible definition facts. */
@@ -5344,4 +5422,20 @@ export interface ArchivesTrafficCounts {
   detailReads: number;
   /** POST/DELETE archive and restore writes. */
   writes: number;
+}
+
+/** Per-row marker facts on the live cycles list (NEWFRONT-249, CYC-002). */
+export interface CyclesRowFacts {
+  /** Completion-ring reading: percent text, "done" at 100, or null when no ring shows. */
+  progress: string | null;
+  /** Rendered date span text, or null when the row shows no dates. */
+  dateText: string | null;
+  /** Work-item count text on draft/upcoming rows, or null when absent. */
+  workItemCount: string | null;
+  /** Whether a creator avatar shows on the row. */
+  hasCreatorAvatar: boolean;
+  /** Whether a favorite control shows on the row. */
+  hasFavorite: boolean;
+  /** Whether the favorite control renders selected. */
+  favoriteSelected: boolean;
 }

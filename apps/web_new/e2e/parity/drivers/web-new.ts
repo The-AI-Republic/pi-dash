@@ -36,6 +36,7 @@ import type {
   GanttZoom,
   KanbanCard,
   KanbanColumn,
+  CyclesRowFacts,
   DocumentShellFacts,
   NotFoundFacts,
   ParityBrowserCookie,
@@ -6976,6 +6977,116 @@ export class WebNewDriver implements ParityDriver {
   }
   async archivesTabClick(_tab: ArchivesTab): Promise<void> {
     return todo("archivesTabClick");
+
+  // --- Live cycles list (NEWFRONT-249, CYC-001–008). Appended; the stubs
+  // --- above are untouched per the shared driver contract.
+  async cyclesOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("cyclesOpenList");
+  }
+  async cyclesVisibleNames(): Promise<string[]> {
+    return todo("cyclesVisibleNames");
+  }
+  async cyclesGroupHeadings(): Promise<string[]> {
+    return todo("cyclesGroupHeadings");
+  }
+  async cyclesGroupCounts(): Promise<{ upcoming: number; completed: number }> {
+    return todo("cyclesGroupCounts");
+  }
+  async cyclesGroupToggle(_section: string): Promise<void> {
+    return todo("cyclesGroupToggle");
+  }
+  async cyclesGroupExpanded(_section: string): Promise<boolean> {
+    return todo("cyclesGroupExpanded");
+  }
+  async cyclesHeroName(): Promise<string | null> {
+    return todo("cyclesHeroName");
+  }
+  async cyclesRowHref(_name: string): Promise<string | null> {
+    return todo("cyclesRowHref");
+  }
+  async cyclesClickRow(_name: string): Promise<void> {
+    return todo("cyclesClickRow");
+  }
+  async cyclesOpenDetail(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
+    return todo("cyclesOpenDetail");
+  }
+  async cyclesDetailName(): Promise<string | null> {
+    return todo("cyclesDetailName");
+  }
+  async cyclesDetailIssueNames(): Promise<string[]> {
+    return todo("cyclesDetailIssueNames");
+  }
+  async cyclesRowFacts(_name: string): Promise<CyclesRowFacts> {
+    return todo("cyclesRowFacts");
+  }
+  async cyclesOpenPeek(_name: string): Promise<void> {
+    return todo("cyclesOpenPeek");
+  }
+  async cyclesOpenPeekLink(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
+    return todo("cyclesOpenPeekLink");
+  }
+  async cyclesPeekName(): Promise<string | null> {
+    return todo("cyclesPeekName");
+  }
+  async cyclesPeekParam(): Promise<string | null> {
+    return todo("cyclesPeekParam");
+  }
+  async cyclesClosePeek(): Promise<void> {
+    return todo("cyclesClosePeek");
+  }
+  async cyclesReload(): Promise<void> {
+    return todo("cyclesReload");
+  }
+  async cyclesGoBack(): Promise<void> {
+    return todo("cyclesGoBack");
+  }
+  async cyclesSearchExpanded(): Promise<boolean> {
+    return todo("cyclesSearchExpanded");
+  }
+  async cyclesSearchOpen(): Promise<void> {
+    return todo("cyclesSearchOpen");
+  }
+  async cyclesSearchFill(_text: string): Promise<void> {
+    return todo("cyclesSearchFill");
+  }
+  async cyclesSearchText(): Promise<string> {
+    return todo("cyclesSearchText");
+  }
+  async cyclesSearchEscape(): Promise<void> {
+    return todo("cyclesSearchEscape");
+  }
+  async cyclesSearchClear(): Promise<void> {
+    return todo("cyclesSearchClear");
+  }
+  async cyclesClickAway(): Promise<void> {
+    return todo("cyclesClickAway");
+  }
+  async cyclesFiltersOpen(): Promise<void> {
+    return todo("cyclesFiltersOpen");
+  }
+  async cyclesFiltersClose(): Promise<void> {
+    return todo("cyclesFiltersClose");
+  }
+  async cyclesFilterSections(): Promise<string[]> {
+    return todo("cyclesFilterSections");
+  }
+  async cyclesFilterOptionNames(): Promise<string[]> {
+    return todo("cyclesFilterOptionNames");
+  }
+  async cyclesFilterPick(_section: string, _optionName: string): Promise<void> {
+    return todo("cyclesFilterPick");
+  }
+  async cyclesFilterChipTexts(): Promise<string[]> {
+    return todo("cyclesFilterChipTexts");
+  }
+  async cyclesFilterRemoveChip(_chipText: string): Promise<void> {
+    return todo("cyclesFilterRemoveChip");
+  }
+  async cyclesFiltersClearAll(): Promise<void> {
+    return todo("cyclesFiltersClearAll");
+  }
+  async cyclesFiltersActive(): Promise<boolean> {
+    return todo("cyclesFiltersActive");
   }
 
   async cyclesEditOpenUpdateDialog(_name: string): Promise<void> {
