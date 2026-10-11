@@ -1462,12 +1462,15 @@ async fn generate(
         InitiateOutcome::Emit { attempt } => attempt,
         InitiateOutcome::Exhausted { branch } => {
             let (slug, code) = exhausted_error(branch);
+            // The payload takes the bare email: the sign-up arm raises
+            // with `self.key` (`:80`), and the `magic_` prefix is added
+            // separately at `:60`.
             return json_400(
                 code,
                 slug,
                 &[(
                     "email",
-                    ParamValue::Str(payload_email(branch, &key).to_owned()),
+                    ParamValue::Str(payload_email(branch, &email).to_owned()),
                 )],
             );
         }
