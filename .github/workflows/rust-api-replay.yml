@@ -91,8 +91,8 @@ jobs:
       REPLAY_DJANGO_DB: postgresql://pi_dash:pi_dash@localhost:5432/replay_django
       REPLAY_RUST_DB: postgresql://pi_dash:pi_dash@localhost:5432/replay_rust
       REPLAY_TEMPLATE_DB: postgresql://pi_dash:pi_dash@localhost:5432/replay_template
-      REPLAY_UPSTREAM_BROKER_URL: redis://localhost:6379/17
-      CELERY_BROKER_URL: redis://localhost:6379/16
+      REPLAY_UPSTREAM_BROKER_URL: redis://localhost:6379/12
+      CELERY_BROKER_URL: redis://localhost:6379/11
       REPLAY_DJANGO_REDIS_URL: redis://localhost:6379/13
       REPLAY_RUST_REDIS_URL: redis://localhost:6379/15
       REPLAY_RUST_AMQP_URL: amqp://pi_dash:pi_dash@localhost:5672/replay
@@ -175,7 +175,7 @@ jobs:
         working-directory: apps/api
         run: |
           DATABASE_URL="$REPLAY_DJANGO_DB" \
-          REDIS_URL="redis://localhost:6379/13" AMQP_URL="redis://localhost:6379/16" \
+          REDIS_URL="redis://localhost:6379/13" AMQP_URL="redis://localhost:6379/11" \
           EMAIL_PORT="$REPLAY_DJANGO_SMTP_PORT" \
           nohup python manage.py runserver 127.0.0.1:8001 --noreload \
             > /tmp/replay-django-direct.log 2>&1 &
@@ -189,7 +189,7 @@ jobs:
         working-directory: apps/api
         run: |
           DATABASE_URL="$REPLAY_RUST_DB" \
-          REDIS_URL="redis://localhost:6379/14" AMQP_URL="redis://localhost:6379/17" \
+          REDIS_URL="redis://localhost:6379/14" AMQP_URL="redis://localhost:6379/12" \
           EMAIL_PORT="$REPLAY_RUST_SMTP_PORT" \
           nohup python manage.py runserver 127.0.0.1:8002 --noreload \
             > /tmp/replay-django-upstream.log 2>&1 &
