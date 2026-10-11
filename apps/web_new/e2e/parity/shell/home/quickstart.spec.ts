@@ -14,7 +14,12 @@
 // card offers no control until a project exists (its done state arrives
 // through joining); guests are offered nothing create/invite/setup-like.
 import { test, expect } from "../../fixtures";
-import { serverCreateWorkspace, serverSetTourCompleted, signInSessionRetry } from "../../helpers/api";
+import {
+  awaitWorkspaceSeededProjectWithSession,
+  serverCreateWorkspace,
+  serverSetTourCompleted,
+  signInSessionRetry,
+} from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
 
 const ROWS = ["SHELL-008", "SHELL-009", "SHELL-010"];
@@ -22,7 +27,12 @@ const stamp = Date.now().toString(36);
 
 async function freshWorkspace(session: string): Promise<string> {
   const slug = `home-qs-${stamp}-${Math.floor(Math.random() * 1e6)}`;
-  return serverCreateWorkspace(session, `Home quickstart ${slug}`, slug);
+  const name = `Home quickstart ${slug}`;
+  await serverCreateWorkspace(session, name, slug);
+  // The dashboard renders its body (and the create card's done marker)
+  // only once the backend seed lands; wait for it instead of racing it.
+  await awaitWorkspaceSeededProjectWithSession(session, slug, name);
+  return slug;
 }
 
 test(

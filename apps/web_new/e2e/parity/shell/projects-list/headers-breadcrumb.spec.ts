@@ -13,6 +13,7 @@ import {
   browserSessionCookies,
   createProjectViaApi,
   createWorkspaceForProjects,
+  drainWorkspaceSeed,
   markOnboardedForProjects,
   seatFreshMember,
   setLastWorkspaceForProjects,
@@ -28,7 +29,9 @@ const CRUMB = ["SHELL-045"];
 async function ownerWithOneProject(prefix: string) {
   const owner = await signUpAuthedSession(prefix);
   const suffix = uniqueSuffixForProjects();
-  const ws = await createWorkspaceForProjects(owner, { name: `${prefix} WS ${suffix}`, slug: `${prefix}-${suffix}` });
+  const wsName = `${prefix} WS ${suffix}`;
+  const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `${prefix}-${suffix}` });
+  await drainWorkspaceSeed(owner, ws.slug, wsName);
   await markOnboardedForProjects(owner);
   await setLastWorkspaceForProjects(owner, ws.id);
   await createProjectViaApi(owner, ws.slug, { name: `${prefix} Card`, identifier: prefix.slice(0, 4).toUpperCase() });

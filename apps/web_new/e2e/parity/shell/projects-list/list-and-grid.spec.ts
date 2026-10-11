@@ -10,6 +10,7 @@ import {
   browserSessionCookies,
   createProjectViaApi,
   createWorkspaceForProjects,
+  drainWorkspaceSeed,
   markOnboardedForProjects,
   projectsDetails,
   setLastWorkspaceForProjects,
@@ -27,7 +28,9 @@ test(
   async ({ driver }) => {
     const owner = await signUpAuthedSession("parity-grid");
     const suffix = uniqueSuffixForProjects();
-    const ws = await createWorkspaceForProjects(owner, { name: `Grid WS ${suffix}`, slug: `grid-${suffix}` });
+    const wsName = `Grid WS ${suffix}`;
+    const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `grid-${suffix}` });
+    await drainWorkspaceSeed(owner, ws.slug, wsName);
     await markOnboardedForProjects(owner);
     await setLastWorkspaceForProjects(owner, ws.id);
 
@@ -62,7 +65,9 @@ test(
   async ({ driver }) => {
     const owner = await signUpAuthedSession("parity-skel");
     const suffix = uniqueSuffixForProjects();
-    const ws = await createWorkspaceForProjects(owner, { name: `Skel WS ${suffix}`, slug: `skel-${suffix}` });
+    const wsName = `Skel WS ${suffix}`;
+    const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `skel-${suffix}` });
+    await drainWorkspaceSeed(owner, ws.slug, wsName);
     await markOnboardedForProjects(owner);
     await setLastWorkspaceForProjects(owner, ws.id);
     await createProjectViaApi(owner, ws.slug, { name: "Skeleton Only", identifier: "SKL1" });

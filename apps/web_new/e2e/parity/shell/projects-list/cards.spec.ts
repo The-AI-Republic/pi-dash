@@ -15,6 +15,7 @@ import {
   browserSessionCookies,
   createProjectViaApi,
   createWorkspaceForProjects,
+  drainWorkspaceSeed,
   markOnboardedForProjects,
   projectByName,
   projectMemberRole,
@@ -35,7 +36,9 @@ test(
   async ({ driver }) => {
     const owner = await signUpAuthedSession("parity-card");
     const suffix = uniqueSuffixForProjects();
-    const ws = await createWorkspaceForProjects(owner, { name: `Card WS ${suffix}`, slug: `card-${suffix}` });
+    const wsName = `Card WS ${suffix}`;
+    const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `card-${suffix}` });
+    await drainWorkspaceSeed(owner, ws.slug, wsName);
     await markOnboardedForProjects(owner);
     await setLastWorkspaceForProjects(owner, ws.id);
     await createProjectViaApi(owner, ws.slug, { name: "Secret Card", identifier: "SCRD", network: NETWORK.PRIVATE });
@@ -106,7 +109,9 @@ test(
   async ({ driver }) => {
     const owner = await signUpAuthedSession("parity-route");
     const suffix = uniqueSuffixForProjects();
-    const ws = await createWorkspaceForProjects(owner, { name: `Route WS ${suffix}`, slug: `route-${suffix}` });
+    const wsName = `Route WS ${suffix}`;
+    const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `route-${suffix}` });
+    await drainWorkspaceSeed(owner, ws.slug, wsName);
     await markOnboardedForProjects(owner);
     await setLastWorkspaceForProjects(owner, ws.id);
     const memberProjectId = await createProjectViaApi(owner, ws.slug, { name: "Owned Proj", identifier: "OWND" });
@@ -147,7 +152,9 @@ test(
   async ({ driver }) => {
     const owner = await signUpAuthedSession("parity-actions");
     const suffix = uniqueSuffixForProjects();
-    const ws = await createWorkspaceForProjects(owner, { name: `Actions WS ${suffix}`, slug: `actions-${suffix}` });
+    const wsName = `Actions WS ${suffix}`;
+    const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `actions-${suffix}` });
+    await drainWorkspaceSeed(owner, ws.slug, wsName);
     await markOnboardedForProjects(owner);
     await setLastWorkspaceForProjects(owner, ws.id);
     const projId = await createProjectViaApi(owner, ws.slug, { name: "Owned Action", identifier: "OWNA" });

@@ -19,6 +19,7 @@ import {
   browserCookies,
   createProjectView,
   createWorkspaceViaApi,
+  drainWorkspaceSeed,
   markOnboarded,
   serverArchiveIssue,
   serverCreateCycle,
@@ -73,6 +74,7 @@ async function freshEmptyWorkspace(): Promise<{ slug: string; user: FreshUser }>
   const user = await signUpFreshUser("parity-empty");
   const slug = uniqueSlug("pwempty");
   const workspace = await createWorkspaceViaApi(user, { name: "Parity Empty", slug });
+  await drainWorkspaceSeed(user, workspace.slug, "Parity Empty");
   await markOnboarded(user);
   await setLastWorkspace(user, workspace.id);
   return { slug, user };
