@@ -270,6 +270,14 @@ def test_destroy_archived_page(user_client, world, db):
     assert (
         db.fetchval("SELECT deleted_at FROM pages WHERE id=%s", (world["page"]["id"],)) is not None
     )
+    # NOTE (ported behavior, PIDASHCONV-908): destroy re-saves through
+    # Page.save(), which recomputes description_stripped from
+    # description_html — strip_tags('<p></p>') is '', overwriting the
+    # seeded NULL.
+    assert (
+        db.fetchval("SELECT description_stripped FROM pages WHERE id=%s", (world["page"]["id"],))
+        == ""
+    )
     # NOTE (ported behavior): destroy soft-deletes, and the default manager
     # hides soft-deleted rows — so the permission lookup raises DoesNotExist
     # and the detail view 404s (via BaseViewSet.handle_exception) after a
