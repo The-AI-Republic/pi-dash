@@ -14909,3 +14909,23 @@ export async function drainWorkspaceSeedWithSession(
 ): Promise<void> {
   return drainSeededProject(() => cookieProjectList(sessionCookie, apiBase, slug), slug, workspaceName, opts);
 }
+
+// --- Modules list frame and header controls (NEWFRONT-306, MOD-001..007).
+// --- Appended; existing helpers above are untouched per the shared contract.
+
+/** Favorite one module for the session user (favorites-filter fixture setup). */
+export async function modulesFavoriteModule(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/user-favorite-modules/`,
+    sessionCookie,
+    { module: moduleId }
+  );
+  if (!res.ok) throw new Error(`[parity] module favorite failed with HTTP ${res.status}.`);
+}
