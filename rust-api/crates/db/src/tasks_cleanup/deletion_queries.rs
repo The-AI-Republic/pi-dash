@@ -15,13 +15,14 @@
 //! Query-building uses `sea-query` with every literal inlined, executed
 //! through `sqlx::query(&sql)`. Inlining is safe here: table and column
 //! names come from internal constants or the live catalog (both quoted by
-//! the builder), primary keys are parsed as `Uuid` before use, and the
-//! cutoff is formatted by `chrono`. No caller input reaches SQL raw.
+//! the builder), primary keys are typed (`RowPk`: parsed `Uuid` or
+//! catalog-decoded `i64`) before use, and the cutoff is formatted by
+//! `chrono`. No caller input reaches SQL raw.
 
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use sea_query::{Alias, Expr, PostgresQueryBuilder, Query};
+use sea_query::{Alias, Expr, Order, PostgresQueryBuilder, Query, SimpleExpr};
 use sqlx::{PgPool, Row};
 
 /// `deleted_at` marker column, as on every `SoftDeleteModel`.
@@ -169,7 +170,7 @@ pub fn hard_delete_before_sql(table: &str, cutoff: &str) -> String {
 pub fn soft_stamp_sql(
     table: &str,
     pk_col: &str,
-    pk: &uuid::Uuid,
+    pk: &RowPk,
     now: &str,
     has_updated_at: bool,
 ) -> String {
@@ -183,7 +184,7 @@ pub fn soft_stamp_sql(
     } else {
         stmt.value(Alias::new(DELETED_AT.to_owned()), now);
     }
-    stmt.and_where(Expr::col(Alias::new(pk_col.to_owned())).eq(*pk));
+    stmt.and_where(Expr::col(Alias::new(pk_col.to_owned())).eq(pk.as_query_value()));
     stmt.to_string(PostgresQueryBuilder)
 }
 
@@ -193,7 +194,7 @@ pub fn soft_stamp_sql(
 pub fn null_fk_one_to_one_sql(
     child_table: &str,
     child_pk_col: &str,
-    child_pk: &uuid::Uuid,
+    child_pk: &RowPk,
     fk_col: &str,
     now: &str,
     has_updated_at: bool,
@@ -208,7 +209,7 @@ pub fn null_fk_one_to_one_sql(
     } else {
         stmt.value(Alias::new(fk_col.to_owned()), None::<&str>);
     }
-    stmt.and_where(Expr::col(Alias::new(child_pk_col.to_owned())).eq(*child_pk));
+    stmt.and_where(Expr::col(Alias::new(child_pk_col.to_owned())).eq(child_pk.as_query_value()));
     stmt.to_string(PostgresQueryBuilder)
 }
 
@@ -226,22 +227,36 @@ pub fn null_fk_one_to_one_sql(
 /// Django's `exclude()` NULL-preserving semantics (a bare `NOT (group =
 /// 'triage')` over a left join would drop NULL-state rows; `NOT EXISTS`
 /// retains them).
+///
+/// `states` children carry the `StateManager` guard
+/// (`db/models/state.py:79-83`): `.exclude(group=TRIAGE)`. `group` is NOT
+/// NULL with no `null=True`, so a plain `<> 'triage'` is exact — there are
+/// no NULL rows to preserve.
 pub fn null_fk_bulk_sql(
     child_table: &str,
     fk_col: &str,
-    parent_pk: &uuid::Uuid,
+    parent_pk: &RowPk,
     scope_live: bool,
 ) -> String {
     let mut stmt = Query::update();
     stmt.table(Alias::new(child_table.to_owned()))
         .value(Alias::new(fk_col.to_owned()), None::<&str>)
-        .and_where(Expr::col(Alias::new(fk_col.to_owned())).eq(*parent_pk));
+        .and_where(Expr::col(Alias::new(fk_col.to_owned())).eq(parent_pk.as_query_value()));
     if scope_live {
         stmt.and_where(Expr::col(Alias::new(DELETED_AT.to_owned())).is_null());
     }
     if child_table == "issues" {
         // `IssueManager.get_queryset()`: `.exclude(archived_at__isnull=False)`
         // and `.exclude(is_draft=True)` — plain column predicates.
+        //
+        // SET_NULL-only, deliberately: the to-many null path inherits the
+        // child *default* manager (`IssueManager`), but the CASCADE
+        // to-many path names `(manager="objects")` — and `Issue.objects`
+        // is the inherited `SoftDeletionManager` (live-only; `Issue` is
+        // the one model whose `objects` differs from its default
+        // manager). A live Django run stamps triage-state issues through
+        // `issues.project_id` CASCADE, so the fetch carries no `issues`
+        // guard (PIDASHCONV-900 run 3 parity probe).
         stmt.and_where(
             Expr::col((
                 Alias::new(child_table.to_owned()),
@@ -300,7 +315,23 @@ pub fn null_fk_bulk_sql(
             );
         stmt.and_where(Expr::exists(archived_project).not());
     }
+    if child_table == "states" {
+        stmt.and_where(states_scope_predicate(child_table));
+    }
     stmt.to_string(PostgresQueryBuilder)
+}
+
+/// `StateManager.get_queryset()` as one predicate
+/// (`db/models/state.py:79-83`): `.exclude(group=TRIAGE)`. Shared by the
+/// SET_NULL bulk null and the CASCADE to-many fetch — `State.objects`
+/// *is* `StateManager` (unlike `Issue.objects`), so both paths scope
+/// triage out and the two call sites must never drift.
+fn states_scope_predicate(child_table: &str) -> SimpleExpr {
+    Expr::col((
+        Alias::new(child_table.to_owned()),
+        Alias::new("group".to_owned()),
+    ))
+    .ne("triage")
 }
 
 /// Live-schema snapshot for one task run: every base table's columns plus
@@ -468,6 +499,38 @@ const PROTECT_AUDIT_FKS: &[(&str, &str)] = &[
     ("agent_run", "created_by_id"),
 ];
 
+/// `(child_table, fk_column)` pairs whose reverse relation is hidden
+/// (`related_name='+'`): Python's `instance._meta.get_fields()` defaults to
+/// `include_hidden=False`, so `soft_delete_related_objects` never
+/// enumerates them — whatever their `on_delete`. The catalog walk sees
+/// every one as a real FK, so the services walk skips these
+/// before dispatch (PIDASHCONV-900 review defect 2).
+///
+/// All 7 are `SET_NULL` in `_meta` and stay listed in [`SET_NULL_FKS`]
+/// (that map is the `on_delete` ground truth); this set models the
+/// separate `get_fields()` visibility rule. Same `_meta`-mirror
+/// maintenance class: a migration adding a `related_name='+'` FK must
+/// extend it. Regenerate from a Django shell with:
+///
+/// ```python
+/// from django.apps import apps
+/// from django.db import models
+/// for m in apps.get_models(include_auto_created=False):
+///     for f in m._meta.get_fields(include_hidden=True):
+///         if isinstance(f, (models.ForeignKey, models.OneToOneField)) and f.concrete \
+///                 and (f.remote_field.related_name or "").endswith("+"):
+///             print((m._meta.db_table, f.column))
+/// ```
+const HIDDEN_REVERSE_FKS: &[(&str, &str)] = &[
+    ("assistant_thread", "active_turn_id"),
+    ("assistant_turn", "user_message_id"),
+    ("issue_agent_ticker", "pending_entry_actor_id"),
+    ("issue_agent_ticker", "resume_parent_run_id"),
+    ("loop_targets", "last_run_id"),
+    ("loop_targets", "thread_id"),
+    ("scheduler_bindings", "last_run_id"),
+];
+
 /// One reverse foreign key into `parent_table`: the catalog form of a
 /// Django reverse relation (`instance._meta.get_fields()` filtered to
 /// `one_to_many or one_to_one`, `auto_created`, not concrete).
@@ -514,6 +577,16 @@ impl ReverseRelation {
                 && !PROTECT_AUDIT_FKS
                     .iter()
                     .any(|(table, column)| *table == self.child_table && *column == self.fk_column))
+    }
+
+    /// True when Python never enumerates this relation at all
+    /// (`related_name='+'`, invisible to the default `get_fields()`).
+    /// Checked before [`Self::is_do_nothing`] /
+    /// [`Self::is_set_null`] — hidden wins over `on_delete`.
+    pub fn is_hidden(&self) -> bool {
+        HIDDEN_REVERSE_FKS
+            .iter()
+            .any(|(table, column)| *table == self.child_table && *column == self.fk_column)
     }
 }
 
@@ -605,12 +678,58 @@ pub fn now_stamp() -> String {
     format_cutoff(chrono::Utc::now())
 }
 
+/// A walked row's primary key: `UUID` on 112 of the 113 `deleted_at`
+/// tables, `BIGINT` on `project_identifiers` (a `BigAutoField`, the only
+/// non-UUID soft-delete PK in the schema — PIDASHCONV-900 review defect
+/// 3). Django stamps identifier rows through the project O2O and the
+/// workspace to-many CASCADEs like any other child; decoding the child
+/// pk as `Uuid`-only turned those relations into error-skips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RowPk {
+    Uuid(uuid::Uuid),
+    Int(i64),
+}
+
+impl std::fmt::Display for RowPk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RowPk::Uuid(pk) => write!(f, "{pk}"),
+            RowPk::Int(pk) => write!(f, "{pk}"),
+        }
+    }
+}
+
+impl RowPk {
+    /// The pk as a query value (`UUID` / `BIGINT`).
+    fn as_query_value(&self) -> sea_query::Value {
+        match self {
+            RowPk::Uuid(pk) => (*pk).into(),
+            RowPk::Int(pk) => (*pk).into(),
+        }
+    }
+}
+
+/// Decode a fetched child pk: UUID first (112 tables), then 64-bit, then
+/// 32-bit ints (only `project_identifiers` is non-UUID today; the `i32`
+/// arm keeps a future `AutoField` child working). A pk of any other type
+/// surfaces as the decode error — an honest failure, never a skip.
+fn decode_child_pk(row: &sqlx::postgres::PgRow) -> Result<RowPk, sqlx::Error> {
+    if let Ok(pk) = row.try_get::<uuid::Uuid, _>("pk") {
+        return Ok(RowPk::Uuid(pk));
+    }
+    if let Ok(pk) = row.try_get::<i64, _>("pk") {
+        return Ok(RowPk::Int(pk));
+    }
+    row.try_get::<i32, _>("pk")
+        .map(|pk| RowPk::Int(i64::from(pk)))
+}
+
 /// The `model_class.all_objects.get(pk)` snapshot: unscoped (sees already
 /// soft-deleted rows), `None` when the row is gone (the `DoesNotExist`
 /// silent return at `:25-28`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowState {
-    pub pk: uuid::Uuid,
+    pub pk: RowPk,
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
@@ -631,7 +750,7 @@ pub async fn fetch_row(
     match row {
         None => Ok(None),
         Some(row) => Ok(Some(RowState {
-            pk: *pk,
+            pk: RowPk::Uuid(*pk),
             deleted_at: if schema.has_deleted_at(table) {
                 row.try_get("deleted_at")?
             } else {
@@ -647,30 +766,34 @@ pub async fn fetch_live_one_to_one(
     pool: &PgPool,
     schema: &SchemaInfo,
     relation: &ReverseRelation,
-    parent_pk: &uuid::Uuid,
+    parent_pk: &RowPk,
 ) -> Result<Option<RowState>, sqlx::Error> {
-    let select = if schema.has_deleted_at(&relation.child_table) {
-        format!(
-            "SELECT \"{pk}\" AS pk, \"deleted_at\" FROM \"{child}\" WHERE \"{fk}\" = '{parent}' AND \"deleted_at\" IS NULL LIMIT 1",
-            pk = relation.child_pk,
-            child = relation.child_table,
-            fk = relation.fk_column,
-            parent = parent_pk,
+    // Built in a block: the builder owns non-`Send` `SeaRc` handles,
+    // so it must drop before the `.await` below (a builder local alive
+    // at an await point would poison the walk future's `Send` bound at
+    // the jobs handler).
+    let select = {
+        let mut stmt = Query::select();
+        stmt.expr_as(
+            Expr::col(Alias::new(relation.child_pk.clone())),
+            Alias::new("pk".to_owned()),
         )
-    } else {
-        format!(
-            "SELECT \"{pk}\" AS pk FROM \"{child}\" WHERE \"{fk}\" = '{parent}' LIMIT 1",
-            pk = relation.child_pk,
-            child = relation.child_table,
-            fk = relation.fk_column,
-            parent = parent_pk,
-        )
+        .from(Alias::new(relation.child_table.clone()))
+        .and_where(
+            Expr::col(Alias::new(relation.fk_column.clone())).eq(parent_pk.as_query_value()),
+        );
+        if schema.has_deleted_at(&relation.child_table) {
+            stmt.expr(Expr::col(Alias::new(DELETED_AT.to_owned())))
+                .and_where(Expr::col(Alias::new(DELETED_AT.to_owned())).is_null());
+        }
+        stmt.limit(1);
+        stmt.to_string(PostgresQueryBuilder)
     };
     let row = sqlx::query(&select).fetch_optional(pool).await?;
     match row {
         None => Ok(None),
         Some(row) => Ok(Some(RowState {
-            pk: row.try_get("pk")?,
+            pk: decode_child_pk(&row)?,
             deleted_at: if schema.has_deleted_at(&relation.child_table) {
                 row.try_get("deleted_at")?
             } else {
@@ -680,11 +803,44 @@ pub async fn fetch_live_one_to_one(
     }
 }
 
+/// Render the to-many live-children SELECT (split from
+/// [`fetch_live_to_many`] so the `states` scoping below is unit-pinned).
+/// The `(manager="objects").all()` queryset is `objects`-scoped — for
+/// `states` that is `StateManager` (triage excluded), for every other
+/// model the plain live scope (`Issue.objects` is the inherited
+/// `SoftDeletionManager`, so `issues` deliberately carry no
+/// `IssueManager` guard here — unlike the SET_NULL path, which inherits
+/// the child *default* manager).
+fn live_to_many_select(
+    child_table: &str,
+    child_pk: &str,
+    fk_col: &str,
+    parent_pk: &RowPk,
+) -> String {
+    let mut stmt = Query::select();
+    stmt.expr_as(
+        Expr::col(Alias::new(child_pk.to_owned())),
+        Alias::new("pk".to_owned()),
+    )
+    .expr(Expr::col(Alias::new(DELETED_AT.to_owned())))
+    .from(Alias::new(child_table.to_owned()))
+    .and_where(Expr::col(Alias::new(fk_col.to_owned())).eq(parent_pk.as_query_value()))
+    .and_where(Expr::col(Alias::new(DELETED_AT.to_owned())).is_null());
+    if child_table == "states" {
+        stmt.and_where(states_scope_predicate(child_table));
+    }
+    stmt.order_by(Alias::new(child_pk.to_owned()), Order::Asc)
+        .to_string(PostgresQueryBuilder)
+}
+
 /// Fetch every LIVE row behind a to-many CASCADE: the catalog form of the
 /// `(manager="objects").all()` queryset (`deletion_task.py:83`).
 /// Reverse-FK related managers ARE callable (`RelatedManager.__call__`
 /// rebuilds with the named manager class), so Django iterates the
-/// `objects`-scoped children — live rows only on soft-delete models.
+/// `objects`-scoped children — live rows only on soft-delete models,
+/// further scoped by the child `objects` manager (`StateManager` for
+/// `states`; every other model inherits the plain live scope — see
+/// `live_to_many_select`).
 /// The catalog equivalent is the `deleted_at IS NULL` guard on tables
 /// carrying the column. Tables without `deleted_at` yield no rows:
 /// Django's per-row `hasattr(related_obj, "deleted_at")` guard (`:86`)
@@ -696,22 +852,21 @@ pub async fn fetch_live_to_many(
     pool: &PgPool,
     schema: &SchemaInfo,
     relation: &ReverseRelation,
-    parent_pk: &uuid::Uuid,
+    parent_pk: &RowPk,
 ) -> Result<Vec<RowState>, sqlx::Error> {
     if !schema.has_deleted_at(&relation.child_table) {
         return Ok(Vec::new());
     }
-    let select = format!(
-        "SELECT \"{pk}\" AS pk, \"deleted_at\" FROM \"{child}\" WHERE \"{fk}\" = '{parent}' AND \"deleted_at\" IS NULL ORDER BY \"{pk}\"",
-        pk = relation.child_pk,
-        child = relation.child_table,
-        fk = relation.fk_column,
-        parent = parent_pk,
+    let select = live_to_many_select(
+        &relation.child_table,
+        &relation.child_pk,
+        &relation.fk_column,
+        parent_pk,
     );
     let mut out = Vec::new();
     for row in sqlx::query(&select).fetch_all(pool).await? {
         out.push(RowState {
-            pk: row.try_get("pk")?,
+            pk: decode_child_pk(&row)?,
             deleted_at: row.try_get("deleted_at")?,
         });
     }
@@ -728,7 +883,7 @@ pub async fn stamp_row(
     pool: &PgPool,
     schema: &SchemaInfo,
     table: &str,
-    pk: &uuid::Uuid,
+    pk: &RowPk,
     now: &str,
 ) -> Result<u64, sqlx::Error> {
     let sql = soft_stamp_sql(
@@ -746,7 +901,7 @@ pub async fn null_one_to_one(
     pool: &PgPool,
     schema: &SchemaInfo,
     relation: &ReverseRelation,
-    child_pk: &uuid::Uuid,
+    child_pk: &RowPk,
     now: &str,
 ) -> Result<u64, sqlx::Error> {
     let sql = null_fk_one_to_one_sql(
@@ -765,7 +920,7 @@ pub async fn null_bulk(
     pool: &PgPool,
     schema: &SchemaInfo,
     relation: &ReverseRelation,
-    parent_pk: &uuid::Uuid,
+    parent_pk: &RowPk,
 ) -> Result<u64, sqlx::Error> {
     let sql = null_fk_bulk_sql(
         &relation.child_table,
@@ -874,11 +1029,11 @@ mod tests {
     fn soft_stamp_sets_both_markers() {
         let pk = uuid("12345678-1234-1234-1234-1234567890ab");
         assert_eq!(
-            soft_stamp_sql("issues", "id", &pk, "2026-09-28 06:00:00+00:00", true),
+            soft_stamp_sql("issues", "id", &RowPk::Uuid(pk), "2026-09-28 06:00:00+00:00", true),
             "UPDATE \"issues\" SET \"deleted_at\" = '2026-09-28 06:00:00+00:00', \"updated_at\" = '2026-09-28 06:00:00+00:00' WHERE \"id\" = '12345678-1234-1234-1234-1234567890ab'"
         );
         assert_eq!(
-            soft_stamp_sql("issues", "id", &pk, "2026-09-28 06:00:00+00:00", false),
+            soft_stamp_sql("issues", "id", &RowPk::Uuid(pk), "2026-09-28 06:00:00+00:00", false),
             "UPDATE \"issues\" SET \"deleted_at\" = '2026-09-28 06:00:00+00:00' WHERE \"id\" = '12345678-1234-1234-1234-1234567890ab'"
         );
     }
@@ -888,15 +1043,15 @@ mod tests {
         let parent = uuid("12345678-1234-1234-1234-1234567890ab");
         let child = uuid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         assert_eq!(
-            null_fk_one_to_one_sql("pages", "id", &child, "workspace_id", "2026-09-28 06:00:00+00:00", true),
+            null_fk_one_to_one_sql("pages", "id", &RowPk::Uuid(child), "workspace_id", "2026-09-28 06:00:00+00:00", true),
             "UPDATE \"pages\" SET \"workspace_id\" = NULL, \"updated_at\" = '2026-09-28 06:00:00+00:00' WHERE \"id\" = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'"
         );
         assert_eq!(
-            null_fk_bulk_sql("issue_comments", "issue_id", &parent, true),
+            null_fk_bulk_sql("issue_comments", "issue_id", &RowPk::Uuid(parent), true),
             "UPDATE \"issue_comments\" SET \"issue_id\" = NULL WHERE \"issue_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL"
         );
         assert_eq!(
-            null_fk_bulk_sql("issue_comments", "issue_id", &parent, false),
+            null_fk_bulk_sql("issue_comments", "issue_id", &RowPk::Uuid(parent), false),
             "UPDATE \"issue_comments\" SET \"issue_id\" = NULL WHERE \"issue_id\" = '12345678-1234-1234-1234-1234567890ab'"
         );
     }
@@ -909,19 +1064,88 @@ mod tests {
         // `EstimatePoint` or `IssueType` must leave those rows' FKs alone.
         let parent = uuid("12345678-1234-1234-1234-1234567890ab");
         assert_eq!(
-            null_fk_bulk_sql("issues", "estimate_point_id", &parent, true),
+            null_fk_bulk_sql("issues", "estimate_point_id", &RowPk::Uuid(parent), true),
             "UPDATE \"issues\" SET \"estimate_point_id\" = NULL WHERE \"estimate_point_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = FALSE AND (NOT EXISTS(SELECT 1 FROM \"states\" WHERE \"states\".\"id\" = \"issues\".\"state_id\" AND \"states\".\"group\" = 'triage')) AND (NOT EXISTS(SELECT 1 FROM \"projects\" WHERE \"projects\".\"id\" = \"issues\".\"project_id\" AND \"projects\".\"archived_at\" IS NOT NULL))"
         );
         assert_eq!(
-            null_fk_bulk_sql("issues", "type_id", &parent, true),
+            null_fk_bulk_sql("issues", "type_id", &RowPk::Uuid(parent), true),
             "UPDATE \"issues\" SET \"type_id\" = NULL WHERE \"type_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = FALSE AND (NOT EXISTS(SELECT 1 FROM \"states\" WHERE \"states\".\"id\" = \"issues\".\"state_id\" AND \"states\".\"group\" = 'triage')) AND (NOT EXISTS(SELECT 1 FROM \"projects\" WHERE \"projects\".\"id\" = \"issues\".\"project_id\" AND \"projects\".\"archived_at\" IS NOT NULL))"
         );
         // The triage / project guards retain NULL-FK rows (Django
         // `exclude()` left-join semantics): no bare `NOT (group = ...)`
         // that three-valued logic would turn against NULLs.
-        let sql = null_fk_bulk_sql("issues", "estimate_point_id", &parent, true);
+        let sql = null_fk_bulk_sql("issues", "estimate_point_id", &RowPk::Uuid(parent), true);
         assert!(sql.contains("NOT EXISTS"), "{sql}");
         assert!(!sql.contains("NOT (\"states\""), "{sql}");
+    }
+
+    #[test]
+    fn states_bulk_null_excludes_triage() {
+        // D1 (PIDASHCONV-900 review): the reverse related manager
+        // inherits the child default manager, and `State`'s is
+        // `StateManager` (excludes `group='triage'`). Soft-deleting a
+        // user must leave triage states' audit FKs alone.
+        let parent = uuid("12345678-1234-1234-1234-1234567890ab");
+        assert_eq!(
+            null_fk_bulk_sql("states", "created_by_id", &RowPk::Uuid(parent), true),
+            "UPDATE \"states\" SET \"created_by_id\" = NULL WHERE \"created_by_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND \"states\".\"group\" <> 'triage'"
+        );
+    }
+
+    #[test]
+    fn live_to_many_select_carries_objects_manager_scoping() {
+        // D1 (PIDASHCONV-900 review): the CASCADE to-many fetch is the
+        // `(manager="objects").all()` queryset — `StateManager`-scoped
+        // for `states` (triage rows never stamped or recursed into;
+        // `group` is NOT NULL, hence the plain predicate). `issues`
+        // deliberately carry NO `IssueManager` guard: `Issue.objects`
+        // is the inherited live-only manager (the `IssueManager`
+        // scoping lives on the SET_NULL path, which inherits the child
+        // *default* manager) — a live Django run stamps triage-state
+        // issues through `issues.project_id` CASCADE.
+        let parent = uuid("12345678-1234-1234-1234-1234567890ab");
+        assert_eq!(
+            live_to_many_select("states", "id", "project_id", &RowPk::Uuid(parent)),
+            "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"states\" WHERE \"project_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND \"states\".\"group\" <> 'triage' ORDER BY \"id\" ASC"
+        );
+        assert_eq!(
+            live_to_many_select("issues", "id", "project_id", &RowPk::Uuid(parent)),
+            "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"issues\" WHERE \"project_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL ORDER BY \"id\" ASC"
+        );
+        assert_eq!(
+            live_to_many_select("loop_targets", "id", "job_id", &RowPk::Uuid(parent)),
+            "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"loop_targets\" WHERE \"job_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL ORDER BY \"id\" ASC"
+        );
+    }
+
+    #[test]
+    fn hidden_reverse_relations_skip_before_dispatch() {
+        // D2 (PIDASHCONV-900 review): `related_name='+'` relations are
+        // invisible to Python's `get_fields()`, so the walk never sees
+        // them whatever their `on_delete`. All 7 are SET_NULL in
+        // `_meta` — they stay listed there as ground truth — but the
+        // services walk skips them before dispatch.
+        assert_eq!(HIDDEN_REVERSE_FKS.len(), 7);
+        for (table, column) in HIDDEN_REVERSE_FKS {
+            let relation = ReverseRelation {
+                child_table: (*table).to_owned(),
+                fk_column: (*column).to_owned(),
+                child_pk: "id".to_owned(),
+                delete_rule: "NO ACTION".to_owned(),
+                one_to_one: false,
+            };
+            assert!(relation.is_hidden(), "{table}.{column}");
+            assert!(relation.is_set_null(), "{table}.{column}");
+        }
+        let visible = ReverseRelation {
+            child_table: "webhook_logs".to_owned(),
+            fk_column: "created_by_id".to_owned(),
+            child_pk: "id".to_owned(),
+            delete_rule: "NO ACTION".to_owned(),
+            one_to_one: false,
+        };
+        assert!(!visible.is_hidden());
+        assert!(visible.is_set_null());
     }
 
     #[test]
@@ -977,6 +1201,49 @@ mod tests {
             };
             assert!(!other.is_do_nothing() && !other.is_set_null(), "{rule}");
         }
+    }
+
+    #[test]
+    fn int_pks_render_as_bare_bigint_literals() {
+        // D3 (PIDASHCONV-900 review): `project_identifiers` rows stamp
+        // and null through the same builders with a bare BIGINT
+        // literal — never a quoted UUID — and stringify plainly for
+        // the walk's visited set.
+        let pk = RowPk::Int(7);
+        assert_eq!(pk.to_string(), "7");
+        assert_eq!(
+            RowPk::Uuid(uuid("12345678-1234-1234-1234-1234567890ab")).to_string(),
+            "12345678-1234-1234-1234-1234567890ab"
+        );
+        assert_eq!(
+            soft_stamp_sql(
+                "project_identifiers",
+                "id",
+                &pk,
+                "2026-09-28 06:00:00+00:00",
+                true
+            ),
+            "UPDATE \"project_identifiers\" SET \"deleted_at\" = '2026-09-28 06:00:00+00:00', \"updated_at\" = '2026-09-28 06:00:00+00:00' WHERE \"id\" = 7"
+        );
+        assert_eq!(
+            null_fk_one_to_one_sql(
+                "project_identifiers",
+                "id",
+                &pk,
+                "project_id",
+                "2026-09-28 06:00:00+00:00",
+                true
+            ),
+            "UPDATE \"project_identifiers\" SET \"project_id\" = NULL, \"updated_at\" = '2026-09-28 06:00:00+00:00' WHERE \"id\" = 7"
+        );
+        assert_eq!(
+            null_fk_bulk_sql("project_identifiers", "workspace_id", &pk, true),
+            "UPDATE \"project_identifiers\" SET \"workspace_id\" = NULL WHERE \"workspace_id\" = 7 AND \"deleted_at\" IS NULL"
+        );
+        assert_eq!(
+            live_to_many_select("project_identifiers", "id", "workspace_id", &pk),
+            "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"project_identifiers\" WHERE \"workspace_id\" = 7 AND \"deleted_at\" IS NULL ORDER BY \"id\" ASC"
+        );
     }
 
     #[test]

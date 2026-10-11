@@ -11,7 +11,9 @@
 //!   rows are found); a missing row returns silently (`DoesNotExist` at
 //!   `:25-28`); an unknown `(app_label, model_name)` fails loudly (the
 //!   `apps.get_model` `LookupError`, which the `except` does not catch).
-//! - Relations first, self last. `DO_NOTHING` skips. `SET_NULL` nulls
+//! - Relations first, self last. Hidden (`related_name='+'`) relations
+//!   are skipped before dispatch (Python's `get_fields()` never
+//!   enumerates them). `DO_NOTHING` skips. `SET_NULL` nulls
 //!   (one-to-one: single-row `save(update_fields)` with the `auto_now`
 //!   bump; to-many: scoped queryset `update`, no `updated_at` touch).
 //!   To-many nulling into `issues` carries the `IssueManager` guards
@@ -204,6 +206,9 @@ pub async fn soft_delete_related_objects(
 
         let relations = reverse_relations(reads, &table).await.map_err(db_error)?;
         for relation in &relations {
+            if relation.is_hidden() {
+                continue;
+            }
             if relation.is_do_nothing() {
                 continue;
             }

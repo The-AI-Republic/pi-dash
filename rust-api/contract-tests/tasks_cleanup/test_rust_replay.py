@@ -360,6 +360,272 @@ def test_rust_soft_delete_user_nulls_audit_fks(db_conn, broker_url):
     )
 
 
+def _fresh_project(db_conn, tag):
+    """Randomized owner → workspace → project chain (re-run safe)."""
+    owner = seed_helpers.user(db_conn, f"rust-replay-{tag}-owner")
+    workspace = seed_helpers.workspace(db_conn, f"rreplay{tag}", owner["id"])
+    project = seed_helpers.project(db_conn, workspace["id"])
+    return owner, workspace, project
+
+
+def _column_value(conn, table: str, pk, column: str):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f'SELECT {column} FROM "{table}" WHERE id = %s::uuid', (str(pk),)
+        )
+        return cur.fetchone()[column]
+
+
+def _soft_deleted_int(conn, table: str, pk: int) -> bool:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(f'SELECT deleted_at FROM "{table}" WHERE id = %s', (pk,))
+        row = cur.fetchone()
+        return row is not None and row["deleted_at"] is not None
+
+
+def test_rust_soft_delete_project_preserves_triage_subtree(db_conn, broker_url):
+    """PIDASHCONV-900 review defect 1 (CASCADE side): the to-many fetch is
+    the `(manager="objects").all()` queryset. `State.objects` is
+    `StateManager`, so triage states are never stamped or recursed into —
+    but `Issue.objects` is the inherited live-only manager (`IssueManager`
+    lives on `issue_objects`, the *default* manager, which only the SET_NULL
+    path inherits), so a triage-state issue IS stamped through
+    `issues.project_id` CASCADE. A live Django run confirms both halves.
+    """
+    _owner, workspace, project = _fresh_project(db_conn, "d1casc")
+    live = seed_helpers.state(
+        db_conn, project["id"], workspace["id"], group="backlog"
+    )
+    triage = seed_helpers.state(
+        db_conn,
+        project["id"],
+        workspace["id"],
+        name="Triage",
+        group="triage",
+        is_triage=True,
+    )
+    live_issue = insert_row(
+        db_conn,
+        "issues",
+        {
+            "workspace_id": str(workspace["id"]),
+            "project_id": str(project["id"]),
+            "state_id": str(live["id"]),
+            "name": "live issue",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 1,
+            "is_draft": False,
+            "sort_order": 65535,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+    triage_issue = insert_row(
+        db_conn,
+        "issues",
+        {
+            "workspace_id": str(workspace["id"]),
+            "project_id": str(project["id"]),
+            "state_id": str(triage["id"]),
+            "name": "triage issue",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 2,
+            "is_draft": False,
+            "sort_order": 65536,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+    celery_id = rust_queue.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", "project", str(project["id"])],
+        kwargs={"using": None},
+    )
+    wait_for(
+        lambda: _soft_deleted(db_conn, "projects", project["id"]),
+        what="project row stamped by rust worker",
+    )
+    rust_queue.wait_for_settled(celery_id, what="project soft-delete acked")
+    assert _soft_deleted(db_conn, "states", live["id"]), "live state not stamped"
+    assert _soft_deleted(db_conn, "issues", live_issue["id"]), "live issue not stamped"
+    assert not _soft_deleted(db_conn, "states", triage["id"]), (
+        "StateManager parity broken: triage state stamped"
+    )
+    # NOT live: Issue.objects is live-only, so Django stamps triage-state
+    # issues through the project CASCADE (verified by the parity probe).
+    assert _soft_deleted(db_conn, "issues", triage_issue["id"]), (
+        "objects-manager parity broken: triage-state issue not stamped"
+    )
+
+
+def test_rust_soft_delete_user_preserves_triage_audit_fks(db_conn, broker_url):
+    """PIDASHCONV-900 review defect 1 (SET_NULL side): the default reverse
+    manager inherits the child default manager, so nulling audit FKs into
+    `states` skips triage rows. Deleting a user nulls a live state's
+    `created_by_id` but leaves a triage state's untouched.
+
+    Entry asymmetry, documented: Django's task itself raises
+    `AttributeError` on `("db", "user")` (`User` has no `all_objects`),
+    while the Rust worker deliberately walks it (nulling audit FKs,
+    leaving the user row live). The nulling dispatch asserted here is
+    queryset-faithful — the `state_created_by` reverse manager excludes
+    triage — as the parity probe confirms.
+    """
+    _owner, workspace, project = _fresh_project(db_conn, "d1null")
+    target = seed_helpers.user(db_conn, "rust-replay-d1null-target")
+    live = seed_helpers.state(
+        db_conn,
+        project["id"],
+        workspace["id"],
+        group="backlog",
+        created_by_id=str(target["id"]),
+    )
+    triage = seed_helpers.state(
+        db_conn,
+        project["id"],
+        workspace["id"],
+        name="Triage",
+        group="triage",
+        is_triage=True,
+        created_by_id=str(target["id"]),
+    )
+    celery_id = rust_queue.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", "user", str(target["id"])],
+        kwargs={"using": None},
+    )
+    wait_for(
+        lambda: _column_is_null(db_conn, "states", live["id"], "created_by_id"),
+        what="live state audit FK nulled by rust worker",
+    )
+    rust_queue.wait_for_settled(celery_id, what="user soft-delete acked")
+    assert _column_value(db_conn, "states", triage["id"], "created_by_id") == target["id"], (
+        "StateManager parity broken: triage state audit FK nulled"
+    )
+
+
+def test_rust_soft_delete_user_keeps_hidden_fks(db_conn, broker_url):
+    """PIDASHCONV-900 review defect 2: `related_name='+'` relations are
+    invisible to Python's `get_fields()`, so the walk never nulls them.
+    Deleting a user nulls a visible audit FK (control) but leaves the
+    hidden `issue_agent_ticker.pending_entry_actor_id` intact.
+
+    Same `("db", "user")` entry asymmetry as the triage-audit test
+    above: Django's task raises on user entry, the Rust worker walks
+    it. The skip asserted here is `_meta`-faithful — the relation is
+    absent from `get_fields()` — as the parity probe confirms.
+    """
+    _owner, workspace, project = _fresh_project(db_conn, "d2hid")
+    state = seed_helpers.state(db_conn, project["id"], workspace["id"])
+    target = seed_helpers.user(db_conn, "rust-replay-d2hid-target")
+    issue = insert_row(
+        db_conn,
+        "issues",
+        {
+            "workspace_id": str(workspace["id"]),
+            "project_id": str(project["id"]),
+            "state_id": str(state["id"]),
+            "name": "ticker issue",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 1,
+            "is_draft": False,
+            "sort_order": 65535,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+    ticker = insert_row(
+        db_conn,
+        "issue_agent_ticker",
+        {
+            "issue_id": str(issue["id"]),
+            "pending_entry_actor_id": str(target["id"]),
+            "used": 0,
+            "granted": 0,
+            "waited": 0,
+            "user_disabled": False,
+            "enabled": True,
+            "disarm_reason": "",
+            "pending_entry": False,
+            "pending_entry_free": False,
+            "pending_entry_trigger": "",
+        },
+    )
+    control = insert_row(
+        db_conn,
+        "webhook_logs",
+        {
+            "workspace_id": str(workspace["id"]),
+            "webhook": str(uuid.uuid4()),
+            "event_type": "issue",
+            "retry_count": 0,
+            "created_by_id": str(target["id"]),
+        },
+    )
+    celery_id = rust_queue.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", "user", str(target["id"])],
+        kwargs={"using": None},
+    )
+    wait_for(
+        lambda: _column_is_null(db_conn, "webhook_logs", control["id"], "created_by_id"),
+        what="visible audit FK nulled by rust worker",
+    )
+    rust_queue.wait_for_settled(celery_id, what="user soft-delete acked")
+    assert _column_value(
+        db_conn, "issue_agent_ticker", ticker["id"], "pending_entry_actor_id"
+    ) == ticker["pending_entry_actor_id"], (
+        "hidden-reverse parity broken: pending_entry_actor_id nulled"
+    )
+    assert not _soft_deleted(db_conn, "issue_agent_ticker", ticker["id"])
+
+
+def test_rust_soft_delete_project_stamps_identifier(db_conn, broker_url):
+    """PIDASHCONV-900 review defect 3: `project_identifiers` has a bigint
+    PK and `deleted_at`; Python stamps it through the project O2O
+    (`project_identifier`) CASCADE. The Rust walk must stamp it too —
+    not error-skip the relation on the non-UUID child PK.
+    """
+    _owner, workspace, project = _fresh_project(db_conn, "d3int")
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT nextval(pg_get_serial_sequence('project_identifiers', 'id')) AS nid"
+        )
+        ident_id = cur.fetchone()["nid"]
+    ident = insert_row(
+        db_conn,
+        "project_identifiers",
+        {
+            "id": ident_id,
+            "workspace_id": str(workspace["id"]),
+            "project_id": str(project["id"]),
+            "name": uuid.uuid4().hex[:12].upper(),
+        },
+    )
+    celery_id = rust_queue.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", "project", str(project["id"])],
+        kwargs={"using": None},
+    )
+    wait_for(
+        lambda: _soft_deleted(db_conn, "projects", project["id"]),
+        what="project row stamped by rust worker",
+    )
+    rust_queue.wait_for_settled(celery_id, what="project soft-delete acked")
+    assert _soft_deleted_int(db_conn, "project_identifiers", ident["id"]), (
+        "bigint-PK parity broken: project_identifiers row not stamped"
+    )
+
+
 def test_rust_eta_delayed_execution(db_conn, broker_url):
     """ETA parity through the Rust worker: countdown delays the delete."""
     row = insert_row(
@@ -558,7 +824,7 @@ def test_rust_workspace_seed_before_after(db_conn, broker_url):
 
     before_projects = _seed_count(db_conn, "projects")
 
-    rust_queue.publish(
+    seed_celery_id = rust_queue.publish(
         f"{M}.workspace_seed_task.workspace_seed", args=[str(workspace["id"])]
     )
 
@@ -584,6 +850,11 @@ def test_rust_workspace_seed_before_after(db_conn, broker_url):
         or None,
         what="rust seed issues created",
     )
+    # The seed job creates views/pages after issues: wait for the ack
+    # itself before asserting the tail entities, or a loaded box reads
+    # zero pages (PIDASHCONV-900 run 3: deterministic on fresh DBs
+    # under load, pages land seconds after issues).
+    rust_queue.wait_for_settled(seed_celery_id, what="rust seed job acked")
 
     # Project shape: workspace name, derived identifier, seed payload,
     # bot audit, first-project default, workspace timezone.

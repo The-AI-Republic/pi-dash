@@ -18,7 +18,8 @@ pub use deletion_queries::{
     format_cutoff, hard_delete_before_sql, hard_delete_table, load_schema_info, now_stamp,
     null_bulk, null_fk_bulk_sql, null_fk_one_to_one_sql, null_one_to_one, parse_pk,
     reverse_relations, run_named_hard_deletes, run_sweep_hard_deletes, soft_stamp_sql, stamp_row,
-    sweep_tables, LookupError, ReverseRelation, RowState, SchemaInfo, HARD_DELETE_NAMED_TABLES,
+    sweep_tables, LookupError, ReverseRelation, RowPk, RowState, SchemaInfo,
+    HARD_DELETE_NAMED_TABLES,
 };
 
 // D-09 version-task query units (stage 5, PIDASHCONV-188): the SQL behind
