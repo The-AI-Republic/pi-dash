@@ -1618,18 +1618,21 @@ fn issue_activity_message(
     pidash_jobs::celery::CeleryTaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs)
 }
 
-/// `soft_delete_related_objects.delay("db", "cycle", pk, "default")`
-/// (`db/mixins.py:77`): positional args, no kwargs.
+/// `soft_delete_related_objects.delay("db", "cycle", pk, using=None)`
+/// (`db/mixins.py:78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it.
 fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
     pidash_jobs::celery::CeleryTaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
             Value::String("cycle".to_owned()),
             Value::String(pk.to_string()),
-            Value::String("default".to_owned()),
         ],
-        Map::new(),
+        kwargs,
     )
 }
 // ---------------------------------------------------------------------------
@@ -2551,6 +2554,26 @@ mod tests {
         // Same-day start returns now.
         let today = now.with_timezone(&tz).date_naive();
         assert_eq!(convert_start(&tz, today, now).expect("today"), now);
+    }
+
+    #[test]
+    fn soft_delete_message_shape() {
+        let id = uuid::Uuid::nil();
+        let message = soft_delete_message(&id);
+        assert_eq!(
+            message.task,
+            pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("cycle".to_owned()),
+                Value::String(id.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+        assert_eq!(message.kwargs.len(), 1);
     }
 }
 

@@ -1417,20 +1417,28 @@ async fn soft_delete(
     .map_err(|_| Denial::ServerError.into_response())
 }
 
-/// `soft_delete_related_objects.delay("db", "notification", pk, None)`
-/// (`db/mixins.py:77-79`): best-effort post-commit enqueue like the
-/// D-32 intake handlers — without it the response still stands.
-async fn enqueue_soft_delete(pool: &PgPool, pk: &Uuid) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+/// `soft_delete_related_objects.delay("db", "notification", pk, using=None)`
+/// (`db/mixins.py:78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it.
+fn soft_delete_message(pk: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = serde_json::Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
             Value::String("notification".to_owned()),
             Value::String(pk.to_string()),
-            Value::Null,
         ],
-        Default::default(),
-    );
+        kwargs,
+    )
+}
+
+/// Best-effort post-commit enqueue like the D-32 intake handlers —
+/// without it the response still stands.
+async fn enqueue_soft_delete(pool: &PgPool, pk: &Uuid) {
+    let message = soft_delete_message(pk);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),
@@ -2583,6 +2591,26 @@ fn parse_datetime_field(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soft_delete_message_shape() {
+        let id = Uuid::nil();
+        let message = soft_delete_message(&id);
+        assert_eq!(
+            message.task,
+            pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("notification".to_owned()),
+                Value::String(id.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+        assert_eq!(message.kwargs.len(), 1);
+    }
 
     /// The twelve owned method+path rows: list + partial_update + the
     /// four read/archive transitions + unread + mark-all-read carry

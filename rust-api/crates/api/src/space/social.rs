@@ -661,21 +661,26 @@ async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::Cele
     }
 }
 
-/// `soft_delete_related_objects.delay("db", "<model>", pk, "default")`
-/// (`db/mixins.py:77`): positional args, no kwargs. Fires on every
-/// instance `.delete()` in these views.
-async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &uuid::Uuid) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+/// `soft_delete_related_objects.delay("db", <model>, pk, using=None)`
+/// (`db/mixins.py:78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it. Fires on every instance `.delete()` in these views.
+fn soft_delete_message(model: &str, pk: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = serde_json::Map::new();
+    kwargs.insert("using".to_owned(), serde_json::Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             serde_json::Value::String("db".to_owned()),
             serde_json::Value::String(model.to_owned()),
             serde_json::Value::String(pk.to_string()),
-            serde_json::Value::String("default".to_owned()),
         ],
-        Default::default(),
-    );
-    enqueue_message(pool, message).await;
+        kwargs,
+    )
+}
+
+async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &uuid::Uuid) {
+    enqueue_message(pool, soft_delete_message(model, pk)).await;
 }
 
 /// The member side effect shared by the comment / reaction / vote creates:
@@ -3440,6 +3445,26 @@ async fn vote_destroy_inner(
 mod tests {
     use super::*;
     use tower::ServiceExt;
+
+    #[test]
+    fn soft_delete_message_shape() {
+        let id = uuid::Uuid::nil();
+        let message = soft_delete_message("issuecomment", &id);
+        assert_eq!(
+            message.task,
+            pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("issuecomment".to_owned()),
+                Value::String(id.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+        assert_eq!(message.kwargs.len(), 1);
+    }
 
     fn actor_detail_fixture() -> ActorDetailView {
         ActorDetailView {

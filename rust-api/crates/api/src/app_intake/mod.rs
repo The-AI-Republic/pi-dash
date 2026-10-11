@@ -701,26 +701,55 @@ pub async fn enqueue_message(pool: &PgPool, message: pidash_jobs::celery::Celery
     }
 }
 
-/// `soft_delete_related_objects.delay(app_label, model_name, pk, using)`
-/// (`db/mixins.py:77`): positional args, no kwargs. The app views call
-/// `.delete()` with no `using`, so the fourth arg is null.
-pub async fn enqueue_soft_delete(pool: &PgPool, app_label: &str, model_name: &str, pk: &Uuid) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+/// `soft_delete_related_objects.delay(app_label, model_name, pk, using=None)`
+/// (`db/mixins.py:78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it. The app views call `.delete()` with no `using`.
+fn soft_delete_message(
+    app_label: &str,
+    model_name: &str,
+    pk: &Uuid,
+) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = serde_json::Map::new();
+    kwargs.insert("using".to_owned(), serde_json::Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             serde_json::Value::String(app_label.to_string()),
             serde_json::Value::String(model_name.to_string()),
             serde_json::Value::String(pk.to_string()),
-            serde_json::Value::Null,
         ],
-        Default::default(),
-    );
-    enqueue_message(pool, message).await;
+        kwargs,
+    )
+}
+
+pub async fn enqueue_soft_delete(pool: &PgPool, app_label: &str, model_name: &str, pk: &Uuid) {
+    enqueue_message(pool, soft_delete_message(app_label, model_name, pk)).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soft_delete_message_shape() {
+        let id = Uuid::nil();
+        let message = soft_delete_message("db", "intake", &id);
+        assert_eq!(
+            message.task,
+            pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                serde_json::Value::String("db".to_owned()),
+                serde_json::Value::String("intake".to_owned()),
+                serde_json::Value::String(id.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&serde_json::Value::Null));
+        assert_eq!(message.kwargs.len(), 1);
+    }
 
     /// `Project.resolve` raises `Http404("Project not found")`
     /// (`db/models/project.py:214-218`, no trailing period); DRF's

@@ -2193,19 +2193,33 @@ pub async fn summary(
 
 /// Soft-delete fan-out (`db/mixins.py:72-78`): instance `delete()` stamps
 /// `deleted_at` + `save()` (so `updated_at`/`updated_by` move) and enqueues
-/// `soft_delete_related_objects("db", <model>, <pk>, "default")`.
-pub async fn enqueue_soft_delete(pool: &PgPool, model: &str, pk: &uuid::Uuid) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+/// `soft_delete_related_objects("db", <model>, <pk>, using=None)` — three
+/// positional args, `using` as a null kwarg, exactly as Python's
+/// `.delay(label, name, pk, using=using)` call sends it.
+fn soft_delete_message(model: &str, pk: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = serde_json::Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
             Value::String(model.to_owned()),
             Value::String(pk.to_string()),
-            Value::String("default".to_owned()),
         ],
-        Default::default(),
+        kwargs,
+    )
+}
+
+pub async fn enqueue_soft_delete(pool: &PgPool, model: &str, pk: &uuid::Uuid) {
+    let message = soft_delete_message(model, pk);
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        Value::Array(message.args.clone()),
+        Value::Object(message.kwargs.clone()),
     );
-    enqueue_best_effort(pool, &message.task.clone(), message.kwargs.clone()).await;
+    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
+        tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
+    }
 }
 
 fn page_denial(error: crate::paginator::PageError) -> Denial {
@@ -3458,6 +3472,26 @@ pub async fn insert_default_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soft_delete_message_shape() {
+        let id = uuid::Uuid::nil();
+        let message = soft_delete_message("project", &id);
+        assert_eq!(
+            message.task,
+            pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("project".to_owned()),
+                Value::String(id.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+        assert_eq!(message.kwargs.len(), 1);
+    }
 
     #[test]
     fn activate_timezone_empty_zone_500s() {

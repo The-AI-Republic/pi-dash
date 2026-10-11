@@ -1268,20 +1268,26 @@ async fn enqueue_message(pool: &PgPool, message: pidash_jobs::celery::CeleryTask
     }
 }
 
-/// `soft_delete_related_objects.delay("db", "intakeissue", pk, "default")`
-/// (`db/mixins.py:77`): positional args, no kwargs.
-async fn enqueue_soft_delete(pool: &PgPool, intake_issue_id: &Uuid) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+/// `soft_delete_related_objects.delay("db", "intakeissue", pk, using=None)`
+/// (`db/mixins.py:78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it.
+fn soft_delete_message(intake_issue_id: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = serde_json::Map::new();
+    kwargs.insert("using".to_owned(), serde_json::Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             serde_json::Value::String("db".to_string()),
             serde_json::Value::String("intakeissue".to_string()),
             serde_json::Value::String(intake_issue_id.to_string()),
-            serde_json::Value::String("default".to_string()),
         ],
-        Default::default(),
-    );
-    enqueue_message(pool, message).await;
+        kwargs,
+    )
+}
+
+async fn enqueue_soft_delete(pool: &PgPool, intake_issue_id: &Uuid) {
+    enqueue_message(pool, soft_delete_message(intake_issue_id)).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -2152,4 +2158,29 @@ fn advisory_key(project_id: &Uuid) -> i64 {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(project_id.to_string().as_bytes());
     i64::from_be_bytes(digest[..8].try_into().expect("eight bytes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn soft_delete_message_shape() {
+        let id = Uuid::nil();
+        let message = soft_delete_message(&id);
+        assert_eq!(
+            message.task,
+            pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                serde_json::Value::String("db".to_owned()),
+                serde_json::Value::String("intakeissue".to_owned()),
+                serde_json::Value::String(id.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&serde_json::Value::Null));
+        assert_eq!(message.kwargs.len(), 1);
+    }
 }

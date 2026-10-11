@@ -958,22 +958,29 @@ async fn patch_status(
 // unbind (github.py:1174-1205)
 // ---------------------------------------------------------------------------
 
-/// `soft_delete_related_objects.delay("db", <model>, <pk>, "default")`
-/// (`db/mixins.py:72-78`): positional args, no kwargs. Published through
-/// the Postgres queue for the worker to forward to the broker
-/// (Python-owned task), best-effort after commit like the space intake
-/// precedent — without it the response still stands.
-async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &'static str, id: &Uuid) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+/// `soft_delete_related_objects.delay("db", <model>, <pk>, using=None)`
+/// (`db/mixins.py:78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it.
+fn soft_delete_message(model: &'static str, id: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = serde_json::Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
             Value::String(model.to_owned()),
             Value::String(id.to_string()),
-            Value::String("default".to_owned()),
         ],
-        Default::default(),
-    );
+        kwargs,
+    )
+}
+
+/// Published through the Postgres queue for the worker to forward to
+/// the broker (Python-owned task), best-effort after commit like the
+/// space intake precedent — without it the response still stands.
+async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &'static str, id: &Uuid) {
+    let message = soft_delete_message(model, id);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),
@@ -1831,6 +1838,26 @@ async fn bind_transaction(
 mod tests {
     use super::*;
     use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
+
+    #[test]
+    fn soft_delete_message_shape() {
+        let id = Uuid::nil();
+        let message = soft_delete_message("githubrepositorysync", &id);
+        assert_eq!(
+            message.task,
+            pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("githubrepositorysync".to_owned()),
+                Value::String(id.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+        assert_eq!(message.kwargs.len(), 1);
+    }
 
     fn decide(method: &str, ws_role: Option<i32>, pm_role: Option<i32>) -> GateOutcome {
         let path = if method == "POST" {

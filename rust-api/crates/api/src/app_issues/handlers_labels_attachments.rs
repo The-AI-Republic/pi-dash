@@ -1484,19 +1484,20 @@ fn asset_metadata_message(asset_id: &Uuid) -> pidash_jobs::celery::CeleryTaskMes
 }
 
 /// `soft_delete_related_objects.delay("db", "label", pk, using=None)`
-/// (`db/mixins.py:77`, via `Label.delete()`): the `None` travels as a null
-/// fourth positional (the api-token precedent; the worker parses
-/// positional-or-kwarg and reads null as unset).
+/// (`db/mixins.py:78`, via `Label.delete()`): three positional args,
+/// `using` stays a null kwarg — exactly as Python's
+/// `.delay(label, name, pk, using=using)` call sends it.
 fn label_soft_delete_message(pk: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
     pidash_jobs::celery::CeleryTaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
             Value::String("label".to_owned()),
             Value::String(pk.to_string()),
-            Value::Null,
         ],
-        Map::new(),
+        kwargs,
     )
 }
 
@@ -4375,10 +4376,10 @@ mod tests {
                 Value::String("db".to_owned()),
                 Value::String("label".to_owned()),
                 Value::String(asset.to_string()),
-                Value::Null,
             ]
         );
-        assert!(soft.kwargs.is_empty());
+        assert_eq!(soft.kwargs.get("using"), Some(&Value::Null));
+        assert_eq!(soft.kwargs.len(), 1);
     }
 
     // ---- misc pure helpers ------------------------------------------------------------------

@@ -824,9 +824,7 @@ pub async fn enqueue_best_effort(pool: &PgPool, job: &pidash_jobs::queue::NewJob
 /// `deleted_at` + `save()` (so `updated_at`/`updated_by` move) and enqueues
 /// `soft_delete_related_objects(app_label, model_name, pk, using=None)` —
 /// `using` as a null kwarg, exactly as Python's
-/// `.delay(label, name, pk, using=using)` call sends it. (The D-19 project
-/// handlers send a positional `"default"` instead; the worker accepts both
-/// forms, but this port follows the Python call.)
+/// `.delay(label, name, pk, using=using)` call sends it.
 pub async fn enqueue_soft_delete(pool: &PgPool, model: &str, pk: &uuid::Uuid) {
     let mut kwargs = serde_json::Map::with_capacity(1);
     kwargs.insert("using".to_owned(), Value::Null);
