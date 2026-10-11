@@ -54,7 +54,7 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Router;
 use serde_json::{Map, Value};
@@ -1470,6 +1470,23 @@ fn utc_stamp_text(now: &chrono::DateTime<chrono::Utc>) -> String {
     now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
 
+/// `Location` value for a created link URL, mirroring Django's
+/// `ResponseHeaders` (`django/http/response.py:47-90`): values that fit
+/// latin-1 go on the wire as latin-1 (what `serialize_headers` emits —
+/// `ü` as one `0xFC` byte, verified live), not UTF-8. Beyond latin-1
+/// Django MIME-encodes the value (RFC 2047); that path is shared with
+/// every Django response header and is not ported here, so those URLs
+/// fall back to their UTF-8 bytes (same 201 status). Values no header
+/// can carry (control bytes the URL validator lets through in the path)
+/// fail at Django's server layer, so they 500 here too.
+fn location_header_value(url: &str) -> Result<HeaderValue, Denial> {
+    if !url.is_ascii() && url.chars().all(|c| (c as u32) <= 0xFF) {
+        let bytes: Vec<u8> = url.chars().map(|c| c as u8).collect();
+        return HeaderValue::from_bytes(&bytes).map_err(|_| Denial::ServerError);
+    }
+    HeaderValue::from_str(url).map_err(|_| Denial::ServerError)
+}
+
 /// `POST` module-links collection: 201 with the link row.
 async fn link_create(
     State(state): State<AppState>,
@@ -1554,7 +1571,11 @@ async fn link_create(
         return Err(integrity_denial(&error));
     }
     let deleted_at_text = deleted_at.map(|stamp| utc_stamp_text(&stamp));
-    Ok(json_response(
+    // DRF `CreateModelMixin.get_success_headers`: the default create answers
+    // 201 with `Location: <data['url']>` — the created link's target URL,
+    // not a resource URL (PIDASHCONV-873).
+    let location = location_header_value(&url)?;
+    let mut response = json_response(
         StatusCode::CREATED,
         render_link_written(
             &id,
@@ -1570,7 +1591,9 @@ async fn link_create(
             &module_id,
             &timezone,
         ),
-    ))
+    );
+    response.headers_mut().insert(header::LOCATION, location);
+    Ok(response)
 }
 
 /// DRF `get_object()` miss over the link queryset: `Http404` rendered by
@@ -2779,6 +2802,19 @@ mod tests {
         ] {
             assert_eq!(django_url_valid(url), expected, "{url:?}");
         }
+    }
+
+    #[test]
+    fn location_header_value_matches_django_bytes() {
+        // Wire bytes recorded live from Django 4.2 runserver (PIDASHCONV-873):
+        // ASCII passes through, latin-1 goes out as latin-1 (ü = 0xFC, not
+        // UTF-8), control bytes fail (Django 500s at its server layer).
+        let ascii = location_header_value("https://example.com/specs").expect("ascii");
+        assert_eq!(ascii.as_bytes(), b"https://example.com/specs");
+        let latin1 = location_header_value("https://example.com/\u{fc}ser").expect("latin-1");
+        assert_eq!(latin1.as_bytes(), b"https://example.com/\xfcser");
+        assert!(location_header_value("https://example.com/\x01").is_err());
+        assert!(location_header_value("https://example.com/\x7f").is_err());
     }
 
     #[test]
