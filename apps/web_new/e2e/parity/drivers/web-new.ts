@@ -100,6 +100,7 @@ import type {
   IntakeListOrderField,
   IntakeListOrderState,
   IntakeListTooltip,
+  EstimatesFamilyOption,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -9079,5 +9080,59 @@ export class WebNewDriver implements ParityDriver {
   }
   async cyclesHeroDetailPickLayout(_option: string): Promise<void> {
     return todo("cyclesHeroDetailPickLayout");
+  }
+
+  // --- Estimates permissions matrix + edition split (NEWFRONT-326,
+  // --- EST-024 + EST-029). Stage 0 oracle convention: todo() stubs until
+  // --- the estimates area lands in apps/web_new. The shell child's
+  // --- navigation (NEWFRONT-321, merged) is stubbed above.
+
+  async estimatesEnableSwitchVisible(): Promise<boolean> {
+    return todo("estimatesEnableSwitchVisible");
+  }
+  async estimatesActiveSystemName(): Promise<string> {
+    return todo("estimatesActiveSystemName");
+  }
+  async estimatesActiveRowButtonCount(): Promise<number> {
+    return todo("estimatesActiveRowButtonCount");
+  }
+  async estimatesOpenCreateDialog(): Promise<void> {
+    return todo("estimatesOpenCreateDialog");
+  }
+  async estimatesDialogOpen(): Promise<boolean> {
+    return todo("estimatesDialogOpen");
+  }
+  async estimatesFamilyOptions(): Promise<EstimatesFamilyOption[]> {
+    return todo("estimatesFamilyOptions");
+  }
+  async estimatesSelectFamily(_family: "points" | "categories"): Promise<void> {
+    return todo("estimatesSelectFamily");
+  }
+  async estimatesPickStarter(_title: string): Promise<void> {
+    return todo("estimatesPickStarter");
+  }
+  async estimatesSubmit(): Promise<void> {
+    return todo("estimatesSubmit");
+  }
+  async estimatesActiveRowDeleteClick(): Promise<void> {
+    return todo("estimatesActiveRowDeleteClick");
+  }
+  async estimatesConfirmDialogOpen(): Promise<boolean> {
+    return todo("estimatesConfirmDialogOpen");
+  }
+  async estimatesConfirmDialogCancel(): Promise<void> {
+    return todo("estimatesConfirmDialogCancel");
+  }
+  async estimatesEditDeleteConfirmDialogTitle(): Promise<string> {
+    return todo("estimatesEditDeleteConfirmDialogTitle");
+  }
+  async estimatesEditDeleteConfirmDialogBody(): Promise<string> {
+    return todo("estimatesEditDeleteConfirmDialogBody");
+  }
+  async estimatesEditDeleteConfirmDialogConfirm(): Promise<void> {
+    return todo("estimatesEditDeleteConfirmDialogConfirm");
+  }
+  async estimatesEditDeleteActiveRowEditControlVisible(): Promise<boolean> {
+    return todo("estimatesEditDeleteActiveRowEditControlVisible");
   }
 }
