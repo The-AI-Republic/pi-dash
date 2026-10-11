@@ -14,6 +14,7 @@
 // back to structural reads (icon glyph, header position) proven
 // element-identical on the oracle. Tab reads scope to the nested
 // workspace main so sidebar rows and issue rows never leak in.
+import { readFileSync, statSync } from "node:fs";
 import { expect, type CDPSession, type ElementHandle, type Locator, type Page, type Route } from "@playwright/test";
 import type {
   ArchivesFilterExpression,

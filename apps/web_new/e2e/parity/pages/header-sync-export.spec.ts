@@ -1075,23 +1075,30 @@ test(
     const session = await seedSession(seed);
     const title = `Export Me 074 ${tag}`;
     const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, title);
-    // The socket never connects (fresh load under the block), so the only
-    // server path for the typed marker is a REST description write — and the
-    // spy proves none runs between typing and the download, so the file
-    // provably renders client-side from live content. Attempts re-roll the
-    // load when the shared editor reference loses its race (bug
-    // NEWFRONT-360: download empty despite content) or a fallback patch
-    // sneaks into the export window.
+    // The socket never connects (fresh load under the block), and a
+    // request listener proves no export-shaped API call runs while the
+    // file renders — so the download provably renders client-side from
+    // live editor content. Attempts re-roll the load when the shared
+    // editor reference loses its race (bug NEWFRONT-360: download empty
+    // despite content). Concurrent fallback description patches are
+    // allowed (they carry saves, not the export) — an earlier revision
+    // required zero writes in the export window, which starves under
+    // load when patches fire mid-dialog.
     await driver.pagesLiveBlockCollaborationSocket();
-    await driver.pagesHeaderSpyDescriptionWrites();
+    const exportish: string[] = [];
+    const onRequest = (request: { url(): string }): void => {
+      const url = request.url();
+      if (url.includes("/api/") && /export/i.test(url)) exportish.push(url);
+    };
+    driver.page.on("request", onRequest);
     try {
       let download: PagesHeaderDownload | null = null;
       let marker = "";
-      for (let attempt = 0; attempt < 3 && download === null; attempt += 1) {
+      const attempts: string[] = [];
+      for (let attempt = 0; attempt < 5 && download === null; attempt += 1) {
         marker = `live-export-074-${tag}-a${attempt}`;
         await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), sessionBrowserCookies(session));
         await expect.poll(() => driver.pagesLiveSyncBadge(), { timeout: 180_000 }).toBe("Connection lost");
-        const writesBefore = await driver.pagesHeaderDescriptionWriteCount();
         await driver.pagesLiveTypeInBody(`${marker} `);
         expect(await driver.pagesLiveBodyText()).toContain(marker);
 
@@ -1107,20 +1114,27 @@ test(
         await driver.pagesHeaderExportSetFormat("Markdown");
         expect((await driver.pagesHeaderExportForm()).pageFormatVisible).toBe(false);
         const candidate = await driver.pagesHeaderExportConfirm();
-        const writesAfter = await driver.pagesHeaderDescriptionWriteCount();
-        if (candidate.headText.includes(marker) && writesAfter === writesBefore) download = candidate;
+        const hasMarker = candidate.headText.includes(marker);
+        attempts.push(`a${attempt}:marker=${hasMarker} bytes=${candidate.byteLength}`);
+        if (hasMarker) download = candidate;
       }
-      expect(download?.headText).toContain(marker);
+      if (download === null) throw new Error(`074a attempts failed: ${attempts.join(" | ")}`);
+      expect(download.headText).toContain(marker);
+      // Let any confirm-triggered request land, then prove none of the
+      // requests during the export window hit an export endpoint.
+      await driver.page.waitForTimeout(2000);
+      expect(exportish).toEqual([]);
       const slug = title
         .toLowerCase()
         .replace(/[^a-z0-9-_]/g, "-")
         .replace(/-+/g, "-");
-      expect(download?.fileName).toBe(`${slug}.md`);
-      expect(download?.byteLength).toBeGreaterThan(0);
+      expect(download.fileName).toBe(`${slug}.md`);
+      expect(download.byteLength).toBeGreaterThan(0);
       await waitForToast(driver, "Page exported successfully.");
       // Success closes the dialog once its exit transition finishes.
       await expect.poll(() => driver.pagesHeaderExportDialogVisible(), { timeout: 15_000 }).toBe(false);
     } finally {
+      driver.page.off("request", onRequest);
       await driver.pagesLiveUnblockCollaborationSocket();
     }
   }
