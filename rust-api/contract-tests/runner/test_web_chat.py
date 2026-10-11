@@ -170,6 +170,18 @@ def test_web_chat_warm_shape_online(user_client, chat_world, machine_flow, seede
     response = web_post(user_client, f"{WEB}/chat/sessions/{_sid(chat_world)}/warm/", {})
     assert response.status_code == 202, response.text
     assert response.json() == {"ok": True}
+    # No live control session exists for this runner, so post-commit
+    # dispatch fails and the backstop appends one chat_warm_failed event
+    # with {"code": "dispatch_failed"} (PIDASHCONV-889).
+    rows = seeder.db.fetchall(
+        "SELECT kind, payload, message_id FROM agent_chat_event"
+        " WHERE session_id = %s",
+        (_sid(chat_world),),
+    )
+    failed = [row for row in rows if row["kind"] == "chat_warm_failed"]
+    assert len(failed) == 1
+    assert failed[0]["payload"] == {"code": "dispatch_failed"}
+    assert failed[0]["message_id"] is None
 
 
 def test_web_chat_cancel_noop_shape(user_client, chat_world):
