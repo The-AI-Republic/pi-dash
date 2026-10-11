@@ -114,6 +114,7 @@ import type {
   ModulesGateFacts,
   PagesListRowDetail,
   PagesListTab,
+  PagesRowTab,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -9844,5 +9845,199 @@ export class WebNewDriver implements ParityDriver {
 
   async pagesListContextMenuItems(): Promise<string[]> {
     return todo("pagesListContextMenuItems");
+  }
+
+  // --- Pages create, star, row actions, move (NEWFRONT-313, PAGE-007-017). ---
+
+  async pagesRowOpenList(
+    _workspaceSlug: string,
+    _projectId: string,
+    _tab?: PagesRowTab
+  ): Promise<void> {
+    return todo("pagesRowOpenList");
+  }
+
+  async pagesRowOpenDetail(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
+    return todo("pagesRowOpenDetail");
+  }
+
+  async pagesRowTitles(): Promise<string[]> {
+    return todo("pagesRowTitles");
+  }
+
+  async pagesRowActiveTab(): Promise<PagesRowTab | null> {
+    return todo("pagesRowActiveTab");
+  }
+
+  async pagesRowSelectTab(_tab: PagesRowTab): Promise<void> {
+    return todo("pagesRowSelectTab");
+  }
+
+  async pagesCreateQuickVisible(): Promise<boolean> {
+    return todo("pagesCreateQuickVisible");
+  }
+
+  async pagesCreateQuick(): Promise<string> {
+    return todo("pagesCreateQuick");
+  }
+
+  async pagesCreateFailNextCreate(_status?: number): Promise<void> {
+    return todo("pagesCreateFailNextCreate");
+  }
+
+  async pagesCreateOpenDialog(): Promise<void> {
+    return todo("pagesCreateOpenDialog");
+  }
+
+  async pagesCreateDialogVisible(): Promise<boolean> {
+    return todo("pagesCreateDialogVisible");
+  }
+
+  async pagesCreateDialogSetTitle(_text: string): Promise<void> {
+    return todo("pagesCreateDialogSetTitle");
+  }
+
+  async pagesCreateDialogTitleValue(): Promise<string> {
+    return todo("pagesCreateDialogTitleValue");
+  }
+
+  async pagesCreateDialogOverLengthVisible(): Promise<boolean> {
+    return todo("pagesCreateDialogOverLengthVisible");
+  }
+
+  async pagesCreateDialogSubmitEnabled(): Promise<boolean> {
+    return todo("pagesCreateDialogSubmitEnabled");
+  }
+
+  async pagesCreateDialogAccess(): Promise<"open" | "restricted"> {
+    return todo("pagesCreateDialogAccess");
+  }
+
+  async pagesCreateDialogSetAccess(_which: "open" | "restricted"): Promise<void> {
+    return todo("pagesCreateDialogSetAccess");
+  }
+
+  async pagesCreateDialogPickIconMark(): Promise<void> {
+    return todo("pagesCreateDialogPickIconMark");
+  }
+
+  async pagesCreateDialogHasMark(): Promise<boolean> {
+    return todo("pagesCreateDialogHasMark");
+  }
+
+  async pagesCreateDialogCancel(): Promise<void> {
+    return todo("pagesCreateDialogCancel");
+  }
+
+  async pagesCreateDialogSubmit(): Promise<string> {
+    return todo("pagesCreateDialogSubmit");
+  }
+
+  async pagesRowStarVisible(_title: string): Promise<boolean> {
+    return todo("pagesRowStarVisible");
+  }
+
+  async pagesRowStarSelected(_title: string): Promise<boolean> {
+    return todo("pagesRowStarSelected");
+  }
+
+  async pagesRowToggleStar(_title: string): Promise<void> {
+    return todo("pagesRowToggleStar");
+  }
+
+  async pagesRowFilterFavoritesOnly(): Promise<void> {
+    return todo("pagesRowFilterFavoritesOnly");
+  }
+
+  async pagesRowClearFilters(): Promise<void> {
+    return todo("pagesRowClearFilters");
+  }
+
+  async pagesRowFavoritesNavOpen(): Promise<boolean> {
+    return todo("pagesRowFavoritesNavOpen");
+  }
+
+  async pagesRowOpenMenu(_title: string): Promise<void> {
+    return todo("pagesRowOpenMenu");
+  }
+
+  async pagesRowOpenContextMenu(_title: string): Promise<void> {
+    return todo("pagesRowOpenContextMenu");
+  }
+
+  async pagesRowMenuItems(): Promise<string[]> {
+    return todo("pagesRowMenuItems");
+  }
+
+  async pagesRowMenuClick(_item: string): Promise<void> {
+    return todo("pagesRowMenuClick");
+  }
+
+  async pagesRowOpenInNewTab(_title: string): Promise<string> {
+    return todo("pagesRowOpenInNewTab");
+  }
+
+  async pagesRowCopyLink(_title: string): Promise<void> {
+    return todo("pagesRowCopyLink");
+  }
+
+  async pagesRowDuplicate(_title: string): Promise<void> {
+    return todo("pagesRowDuplicate");
+  }
+
+  async pagesRowToggleAccess(_title: string): Promise<void> {
+    return todo("pagesRowToggleAccess");
+  }
+
+  async pagesRowToggleLock(_title: string): Promise<void> {
+    return todo("pagesRowToggleLock");
+  }
+
+  async pagesRowToggleArchive(_title: string): Promise<void> {
+    return todo("pagesRowToggleArchive");
+  }
+
+  async pagesRowDeleteModalVisible(): Promise<boolean> {
+    return todo("pagesRowDeleteModalVisible");
+  }
+
+  async pagesRowDeleteModalText(): Promise<string> {
+    return todo("pagesRowDeleteModalText");
+  }
+
+  async pagesRowDeleteConfirmBusy(): Promise<boolean> {
+    return todo("pagesRowDeleteConfirmBusy");
+  }
+
+  async pagesRowDeleteModalCancel(): Promise<void> {
+    return todo("pagesRowDeleteModalCancel");
+  }
+
+  async pagesRowDeleteModalConfirm(): Promise<void> {
+    return todo("pagesRowDeleteModalConfirm");
+  }
+
+  async pagesRowSlowNextDelete(_ms?: number): Promise<void> {
+    return todo("pagesRowSlowNextDelete");
+  }
+
+  async pagesRowDetailOpenOptions(): Promise<void> {
+    return todo("pagesRowDetailOpenOptions");
+  }
+
+  async pagesRowDetailReadOnly(): Promise<boolean> {
+    return todo("pagesRowDetailReadOnly");
+  }
+
+  async pagesRowDetailMoveVisible(): Promise<boolean> {
+    return todo("pagesRowDetailMoveVisible");
+  }
+
+  async pagesRowDetailNotFoundVisible(): Promise<boolean> {
+    return todo("pagesRowDetailNotFoundVisible");
+  }
+
+  async pagesRowDetailNotFoundBackToList(): Promise<void> {
+    return todo("pagesRowDetailNotFoundBackToList");
   }
 }

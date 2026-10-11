@@ -6269,7 +6269,111 @@ export interface ParityDriver {
   pagesListRowRightClick(title: string): Promise<void>;
   /** Visible context-menu item labels, in order. */
   pagesListContextMenuItems(): Promise<string[]>;
+
+  // --- Pages create, star, row actions, move (NEWFRONT-313, PAGE-007-017).
+  // Minimal list navigation lives here under pagesRow* names; the full
+  // list surface (tabs, search, sort, filters, row rendering) belongs to
+  // NEWFRONT-312 and the detail mirrors to NEWFRONT-318 — duplicated
+  // minimal readers converge at rebase.
+
+  /** Open the project pages list, optionally on one tab; resolves once rows settle. */
+  pagesRowOpenList(workspaceSlug: string, projectId: string, tab?: PagesRowTab): Promise<void>;
+  /** Open one page's detail; resolves once the canvas or the error panel shows. */
+  pagesRowOpenDetail(workspaceSlug: string, projectId: string, pageId: string): Promise<void>;
+  /** Visible row titles in display order. */
+  pagesRowTitles(): Promise<string[]>;
+  /** Active list tab from the URL query, or null when the strip is absent. */
+  pagesRowActiveTab(): Promise<PagesRowTab | null>;
+  /** Switch the list tab by clicking the strip; resolves once rows settle. */
+  pagesRowSelectTab(tab: PagesRowTab): Promise<void>;
+  /** Whether the header quick-create control renders for the current role. */
+  pagesCreateQuickVisible(): Promise<boolean>;
+  /** Click quick-create; resolves with the new page id once its detail lands. */
+  pagesCreateQuick(): Promise<string>;
+  /** Fail the next page-creation POST with `status` (once); error-path aid. */
+  pagesCreateFailNextCreate(status?: number): Promise<void>;
+  /** Open the form-based creation dialog through the palette; resolves once it shows. */
+  pagesCreateOpenDialog(): Promise<void>;
+  /** Whether the creation dialog is showing. */
+  pagesCreateDialogVisible(): Promise<boolean>;
+  /** Fill the dialog title field. */
+  pagesCreateDialogSetTitle(text: string): Promise<void>;
+  /** Current dialog title value. */
+  pagesCreateDialogTitleValue(): Promise<string>;
+  /** Whether the dialog shows its over-length message. */
+  pagesCreateDialogOverLengthVisible(): Promise<boolean>;
+  /** Whether the dialog submit control is enabled. */
+  pagesCreateDialogSubmitEnabled(): Promise<boolean>;
+  /** Visibility the dialog currently offers. */
+  pagesCreateDialogAccess(): Promise<"open" | "restricted">;
+  /** Choose the dialog visibility. */
+  pagesCreateDialogSetAccess(which: "open" | "restricted"): Promise<void>;
+  /** Pick the dialog mark by choosing the first icon entry; resolves once applied. */
+  pagesCreateDialogPickIconMark(): Promise<void>;
+  /** Whether the dialog currently carries a mark. */
+  pagesCreateDialogHasMark(): Promise<boolean>;
+  /** Cancel the dialog; resolves once it closes. */
+  pagesCreateDialogCancel(): Promise<void>;
+  /** Submit the dialog; resolves with the new page id once its detail lands. */
+  pagesCreateDialogSubmit(): Promise<string>;
+  /** Whether the row's star renders for the current role. */
+  pagesRowStarVisible(title: string): Promise<boolean>;
+  /** Whether the row's star shows the favorite state. */
+  pagesRowStarSelected(title: string): Promise<boolean>;
+  /** Toggle the row's star; resolves once the star settles. */
+  pagesRowToggleStar(title: string): Promise<void>;
+  /** Apply the favorites-only list filter (minimal aid; full filters are NEWFRONT-312). */
+  pagesRowFilterFavoritesOnly(): Promise<void>;
+  /** Clear the list filters back to the unfiltered rows (minimal aid). */
+  pagesRowClearFilters(): Promise<void>;
+  /** Whether the favorites navigation section currently stands expanded. */
+  pagesRowFavoritesNavOpen(): Promise<boolean>;
+  /** Open one row's overflow menu; resolves once its items show. */
+  pagesRowOpenMenu(title: string): Promise<void>;
+  /** Open one row's context menu; resolves once its items show. */
+  pagesRowOpenContextMenu(title: string): Promise<void>;
+  /** Visible titles of the currently open row/detail menu, in order. */
+  pagesRowMenuItems(): Promise<string[]>;
+  /** Click the open menu's item by title; resolves once the menu closes. */
+  pagesRowMenuClick(item: string): Promise<void>;
+  /** Run the row's new-tab action; resolves with the opened URL (popup closed). */
+  pagesRowOpenInNewTab(title: string): Promise<string>;
+  /** Run the row's copy-link action; resolves once the notice shows. */
+  pagesRowCopyLink(title: string): Promise<void>;
+  /** Run the row's duplicate action; resolves once the notice shows. */
+  pagesRowDuplicate(title: string): Promise<void>;
+  /** Run the row's visibility toggle; resolves once the notice shows. */
+  pagesRowToggleAccess(title: string): Promise<void>;
+  /** Run the row's lock toggle; resolves once the notice shows. */
+  pagesRowToggleLock(title: string): Promise<void>;
+  /** Run the row's shelve/restore toggle; resolves once the notice shows. */
+  pagesRowToggleArchive(title: string): Promise<void>;
+  /** Whether the delete confirmation dialog is showing. */
+  pagesRowDeleteModalVisible(): Promise<boolean>;
+  /** Full text of the delete confirmation dialog. */
+  pagesRowDeleteModalText(): Promise<string>;
+  /** Whether the delete confirm control currently shows its busy state. */
+  pagesRowDeleteConfirmBusy(): Promise<boolean>;
+  /** Cancel the delete dialog; resolves once it closes. */
+  pagesRowDeleteModalCancel(): Promise<void>;
+  /** Confirm the delete dialog; resolves once it closes. */
+  pagesRowDeleteModalConfirm(): Promise<void>;
+  /** Delay the next page DELETE by `ms` (once); busy-state aid. */
+  pagesRowSlowNextDelete(ms?: number): Promise<void>;
+  /** Open the detail view's options menu; resolves once its items show. */
+  pagesRowDetailOpenOptions(): Promise<void>;
+  /** Whether the detail view currently renders in its read-only state. */
+  pagesRowDetailReadOnly(): Promise<boolean>;
+  /** Whether a move affordance renders in the detail header for this page. */
+  pagesRowDetailMoveVisible(): Promise<boolean>;
+  /** Whether the detail view shows its not-found state for a missing page. */
+  pagesRowDetailNotFoundVisible(): Promise<boolean>;
+  /** Follow the not-found view's recovery link back to the pages list. */
+  pagesRowDetailNotFoundBackToList(): Promise<void>;
 }
+
+/** Pages list tabs as the row-actions scenarios address them (NEWFRONT-313). */
+export type PagesRowTab = "open" | "restricted" | "shelved";
 
 /** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */
 export interface ModulesToast {
