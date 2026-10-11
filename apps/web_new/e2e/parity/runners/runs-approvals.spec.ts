@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Oracle scenarios: runs, approvals, run dispatch, re-tick (NEWFRONT-180).
-// The seeded stack enrolls no runners, pods, runs, approvals or tickers,
-// so every scenario builds what it needs: plain runs through the direct
-// web path, and states no web endpoint can produce (statuses, events,
+// The seeded stack enrolls runners for the seed user (plus the default
+// pod) but no runs, approvals or tickers, so every scenario builds what
+// it needs: plain runs through the direct web path, and states no web
+// endpoint can produce (statuses, events,
 // approvals, diagnostics, tool plans, ticker exhaustion, scheduler
 // bindings) as scenario-owned ORM rows through the runsShell helpers —
 // created per attempt with unique markers and deleted afterward, so a
@@ -759,11 +760,18 @@ test(
       expect(pinBefore).toBe("local_runner");
       const defaultBefore = await runsProjectDefaultExecutor(seed.workspaceSlug, seed.projectId, session);
       await openIssue(driver, seed, issue);
-      // No runners are enrolled, so dispatch deterministically reports
-      // failure (the graceful-failure path); the executor assertions below
-      // are what this row owns.
+      // The seed enrolls runners for the seed user, so dispatch normally
+      // succeeds — but capacity is not this row's business, so both
+      // outcomes are accepted with strictly correlated server state:
+      // started ⟺ exactly one run attached, failed ⟺ zero runs.
       const dispatch = await driver.issueRunAiDispatch();
-      expect(dispatch.toast).toMatch(/failed to start agent run/i);
+      const attached = (await recentRuns(session)).filter((row) => row["work_item"] === issue.id);
+      if (dispatch.toast !== null && /agent run started/i.test(dispatch.toast)) {
+        expect(attached).toHaveLength(1);
+      } else {
+        expect(dispatch.toast).toMatch(/failed to start agent run/i);
+        expect(attached).toHaveLength(0);
+      }
       expect(await runsIssueExecutor(seed.workspaceSlug, seed.projectId, issue.id, session)).toBe(pinBefore);
       expect(await runsProjectDefaultExecutor(seed.workspaceSlug, seed.projectId, session)).toBe(defaultBefore);
       // On a plain browser the desktop-managed preparation path makes no
@@ -773,8 +781,14 @@ test(
       );
       expect(prepHits).toEqual([]);
       expect(dispatch.requestUrls.some((url) => url.includes("/api/runners/runs/"))).toBe(true);
-      expect((await recentRuns(session)).filter((row) => row["work_item"] === issue.id)).toHaveLength(0);
     } finally {
+      // dropIssue nulls work_item instead of cascading, so attached runs
+      // are captured and deleted first — or the success path leaks one
+      // queued run per attempt.
+      const leftovers = (await recentRuns(session))
+        .filter((row) => row["work_item"] === issue.id)
+        .map((row) => row["id"] as string);
+      await runsDeleteRuns(leftovers);
       await dropIssue(seed, session, issue.id);
     }
   }

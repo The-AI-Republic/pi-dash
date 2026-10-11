@@ -32355,9 +32355,7 @@ export class WebDriver implements ParityDriver {
     // alone cannot settle the rows: the pages response is the signal.
     const fetched = this.page
       .waitForResponse(
-        (response) =>
-          response.url().includes(`/projects/${projectId}/pages/`) &&
-          response.request().method() === "GET",
+        (response) => response.url().includes(`/projects/${projectId}/pages/`) && response.request().method() === "GET",
         { timeout: WebDriver.DETAIL_MS }
       )
       .catch(() => undefined);
@@ -32397,9 +32395,7 @@ export class WebDriver implements ParityDriver {
     await expect
       .poll(
         async () => {
-          const editors = await this.page
-            .locator(`#editor-container-${pageId}-title .tiptap`)
-            .count();
+          const editors = await this.page.locator(`#editor-container-${pageId}-title .tiptap`).count();
           if (editors > 0) return "ready";
           if (!this.page.url().includes(pageId)) return "gone";
           if ((await this.pagesRowDetailNotFoundHeading().count()) > 0) return "gone";
@@ -32445,9 +32441,7 @@ export class WebDriver implements ParityDriver {
       .click({ timeout: WebDriver.OPEN_MS });
     // Clicking the active tab is a client-side no-op, so only the URL
     // (already correct in that case) plus a settle proves the switch.
-    await expect
-      .poll(() => this.pagesRowActiveTab(), { timeout: WebDriver.OPEN_MS })
-      .toBe(tab);
+    await expect.poll(() => this.pagesRowActiveTab(), { timeout: WebDriver.OPEN_MS }).toBe(tab);
     await this.page.waitForTimeout(800);
   }
 
@@ -32456,10 +32450,7 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesCreateQuick(): Promise<string> {
-    await this.page
-      .getByRole("button", { name: "Add page" })
-      .first()
-      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("button", { name: "Add page" }).first().click({ timeout: WebDriver.OPEN_MS });
     // Success navigates to the new id; a failed create stays put and
     // reports through a notice instead — race the two so the failure
     // path rejects fast instead of burning the whole detail budget.
@@ -32495,9 +32486,7 @@ export class WebDriver implements ParityDriver {
     await this.pressPaletteOpenChord();
     await expect.poll(() => this.isCommandPaletteOpen(), { timeout: WebDriver.OPEN_MS }).toBe(true);
     await this.typeInCommandPalette("New page");
-    await expect
-      .poll(() => this.paletteHasCommand("New page"), { timeout: WebDriver.OPEN_MS })
-      .toBe(true);
+    await expect.poll(() => this.paletteHasCommand("New page"), { timeout: WebDriver.OPEN_MS }).toBe(true);
     await this.activatePaletteCommand("New page");
     await this.page.getByPlaceholder("Title").waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
   }
@@ -32521,7 +32510,10 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesCreateDialogOverLengthVisible(): Promise<boolean> {
-    const text = (await this.pagesCreateDialog().innerText({ timeout: WebDriver.OPEN_MS }).catch(() => "")) ?? "";
+    const text =
+      (await this.pagesCreateDialog()
+        .innerText({ timeout: WebDriver.OPEN_MS })
+        .catch(() => "")) ?? "";
     return text.includes("255");
   }
 
@@ -32566,16 +32558,12 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesCreateDialogCancel(): Promise<void> {
-    await this.pagesCreateDialog()
-      .getByRole("button", { name: "Cancel" })
-      .click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesCreateDialog().getByRole("button", { name: "Cancel" }).click({ timeout: WebDriver.OPEN_MS });
     await this.page.getByPlaceholder("Title").waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
   }
 
   async pagesCreateDialogSubmit(): Promise<string> {
-    await this.pagesCreateDialog()
-      .getByRole("button", { name: "Create Page" })
-      .click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesCreateDialog().getByRole("button", { name: "Create Page" }).click({ timeout: WebDriver.OPEN_MS });
     // A valid submit closes the dialog before navigating; validation
     // failures keep it open, so a stuck dialog rejects fast here.
     try {
@@ -32605,9 +32593,7 @@ export class WebDriver implements ParityDriver {
     await this.pagesRowHover(title);
     const before = await this.pagesRowStarSelected(title);
     await this.pagesRowStarButton(title).click({ timeout: WebDriver.OPEN_MS });
-    await expect
-      .poll(() => this.pagesRowStarSelected(title), { timeout: WebDriver.OPEN_MS })
-      .toBe(!before);
+    await expect.poll(() => this.pagesRowStarSelected(title), { timeout: WebDriver.OPEN_MS }).toBe(!before);
     // The star flips optimistically while the notice trails the server
     // roundtrip; settle on the notice so readers observe it.
     await this.pagesRowWaitToast();
@@ -32625,23 +32611,15 @@ export class WebDriver implements ParityDriver {
       .locator("div", { hasText: "Created date" })
       .filter({ has: this.page.getByRole("button", { name: "Favorites" }) })
       .last();
-    await panel
-      .getByRole("button", { name: "Favorites" })
-      .click({ timeout: WebDriver.OPEN_MS });
+    await panel.getByRole("button", { name: "Favorites" }).click({ timeout: WebDriver.OPEN_MS });
     await this.page.keyboard.press("Escape");
     await expect
-      .poll(
-        async () => this.page.getByRole("button", { name: "Clear All" }).count(),
-        { timeout: WebDriver.OPEN_MS }
-      )
+      .poll(async () => this.page.getByRole("button", { name: "Clear All" }).count(), { timeout: WebDriver.OPEN_MS })
       .toBeGreaterThan(0);
   }
 
   async pagesRowClearFilters(): Promise<void> {
-    await this.page
-      .getByRole("button", { name: "Clear All" })
-      .first()
-      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("button", { name: "Clear All" }).first().click({ timeout: WebDriver.OPEN_MS });
     await this.page
       .getByRole("button", { name: "Clear All" })
       .first()
@@ -32650,7 +32628,11 @@ export class WebDriver implements ParityDriver {
 
   async pagesRowFavoritesNavOpen(): Promise<boolean> {
     const sidebar =
-      (await this.page.locator("aside, [role='complementary']").first().innerText({ timeout: WebDriver.OPEN_MS }).catch(() => "")) ?? "";
+      (await this.page
+        .locator("aside, [role='complementary']")
+        .first()
+        .innerText({ timeout: WebDriver.OPEN_MS })
+        .catch(() => "")) ?? "";
     const section = sidebar.split("Favorites")[1]?.split("Projects")[0] ?? "";
     return section.replace(/\s+/g, " ").trim().length > 0;
   }
@@ -32687,10 +32669,7 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesRowMenuClick(item: string): Promise<void> {
-    await this.page
-      .getByRole("menuitem", { name: item, exact: true })
-      .first()
-      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem", { name: item, exact: true }).first().click({ timeout: WebDriver.OPEN_MS });
     await this.page
       .getByRole("menuitem")
       .first()
@@ -32773,27 +32752,25 @@ export class WebDriver implements ParityDriver {
     const buttons = this.pagesRowDeleteDialog().getByRole("button");
     const total = await buttons.count();
     for (let index = 0; index < total; index += 1) {
-      if (await buttons.nth(index).isDisabled().catch(() => false)) return true;
+      if (
+        await buttons
+          .nth(index)
+          .isDisabled()
+          .catch(() => false)
+      )
+        return true;
     }
     return false;
   }
 
   async pagesRowDeleteModalCancel(): Promise<void> {
-    await this.pagesRowDeleteDialog()
-      .getByRole("button", { name: "Cancel" })
-      .click({ timeout: WebDriver.OPEN_MS });
-    await this.pagesRowDeletePanel()
-      .first()
-      .waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
+    await this.pagesRowDeleteDialog().getByRole("button", { name: "Cancel" }).click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesRowDeletePanel().first().waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
   }
 
   async pagesRowDeleteModalConfirm(): Promise<void> {
-    await this.pagesRowDeleteDialog()
-      .getByRole("button", { name: "Delete" })
-      .click({ timeout: WebDriver.OPEN_MS });
-    await this.pagesRowDeletePanel()
-      .first()
-      .waitFor({ state: "hidden", timeout: WebDriver.DETAIL_MS });
+    await this.pagesRowDeleteDialog().getByRole("button", { name: "Delete" }).click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesRowDeletePanel().first().waitFor({ state: "hidden", timeout: WebDriver.DETAIL_MS });
   }
 
   async pagesRowSlowNextDelete(ms?: number): Promise<void> {
@@ -35337,7 +35314,6 @@ export class WebDriver implements ParityDriver {
     return { name: lines[at + 1] ?? "", values: lines[at + 2] ?? "" };
   }
 
-
   // --- Intake-create dialog oracles (NEWFRONT-257, INT-013–017/033). ---
   // --- Appended; existing methods above are untouched per the shared
   // --- driver contract. Observed on the running old app: the intake
@@ -37310,13 +37286,20 @@ export class WebDriver implements ParityDriver {
     // The detail header cluster carries several unnamed icon buttons;
     // the options trigger is the one whose menu holds the Export entry.
     await this.pagesRowCloseMenu();
-    const triggers = this.page.getByRole("main").last().locator("button").filter({
-      has: this.page.locator("svg.lucide-ellipsis"),
-    });
+    const triggers = this.page
+      .getByRole("main")
+      .last()
+      .locator("button")
+      .filter({
+        has: this.page.locator("svg.lucide-ellipsis"),
+      });
     const total = await triggers.count();
     for (let index = 0; index < Math.min(total, 6); index += 1) {
       await triggers.nth(index).click({ timeout: WebDriver.OPEN_MS });
-      const items = await this.page.getByRole("menuitem").allInnerTexts({ timeout: WebDriver.OPEN_MS }).catch(() => []);
+      const items = await this.page
+        .getByRole("menuitem")
+        .allInnerTexts({ timeout: WebDriver.OPEN_MS })
+        .catch(() => []);
       if (items.includes("Export")) return;
       await this.page.keyboard.press("Escape");
       await this.page.waitForTimeout(400);
@@ -37337,7 +37320,11 @@ export class WebDriver implements ParityDriver {
     // The community move control renders nothing; the licensed header
     // would carry a move trigger beside the lock control.
     if ((await this.page.locator("svg.lucide-file-output").count()) > 0) return true;
-    const header = this.page.getByRole("main").last().innerText({ timeout: WebDriver.OPEN_MS }).catch(() => "");
+    const header = this.page
+      .getByRole("main")
+      .last()
+      .innerText({ timeout: WebDriver.OPEN_MS })
+      .catch(() => "");
     return ((await header) ?? "").includes("Move to");
   }
 
@@ -38837,7 +38824,6 @@ export class WebDriver implements ParityDriver {
       } else {
         await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
       }
-    });
     });
   }
   async runCancelAvailable(): Promise<boolean> {

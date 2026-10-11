@@ -6823,7 +6823,6 @@ export interface ParityDriver {
    * network shaping; the loader itself is the behavior under test.
    */
   runDetailLoadingObserved(workspaceSlug: string, runId: string): Promise<boolean>;
-}
 
   // -------------------------------------------------------------------------
   // Pages detail header actions + sync/save/export (NEWFRONT-318,
