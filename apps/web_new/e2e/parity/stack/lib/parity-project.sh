@@ -15,8 +15,9 @@
 #      holding foreign-named containers is a mis-scoped teardown; refuse it
 #      rather than reap what may be a sibling's work.
 #
-# Must stay safe under both `set -euo pipefail` (up/down/reset) and plain
-# `set -u` (reaper). Fails closed: any unexpected state refuses.
+# Sourced by the destructive scripts (down/reset) under `set -euo pipefail`;
+# keep it safe under plain `set -u` too. Fails closed: any unexpected state
+# refuses.
 #
 # Usage in a destructive script (down/reset):
 #   . "$STACK_DIR/lib/parity-project.sh"
