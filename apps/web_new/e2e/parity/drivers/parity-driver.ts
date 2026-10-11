@@ -5225,6 +5225,30 @@ export interface ParityDriver {
   estimatesOpenSystemGuess(workspaceSlug: string, projectId: string, estimateId: string): Promise<void>;
   /** Whether the app-level not-found surface shows. */
   estimatesNotFoundVisible(): Promise<boolean>;
+
+  // --- Estimates consumers: analytics axes (NEWFRONT-325, EST-020).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. The project analytics dialog (openAnalytics)
+  // --- hosts a Customized Insights section with y-axis, x-axis and
+  // --- group-by selects plus a bar chart backed by a data table. The
+  // --- analytics area (NEWFRONT-56, still Backlog) reuses these
+  // --- estimates*-named readers when it lands.
+  /** Open the project analytics dialog from the issues header; ends with it visible. */
+  estimatesOpenAnalytics(): Promise<void>;
+  /** Current y-axis metric label in the dialog's Customized Insights section. */
+  estimatesAnalyticsYAxisValue(): Promise<string>;
+  /** Metric labels the open y-axis select offers, in display order. */
+  estimatesAnalyticsYAxisOptions(): Promise<string[]>;
+  /** Pick a y-axis metric; resolves once the select shows it. */
+  estimatesAnalyticsPickYAxis(label: string): Promise<void>;
+  /** Current x-axis property label in the dialog's Customized Insights section. */
+  estimatesAnalyticsXAxisValue(): Promise<string>;
+  /** Property labels the open x-axis select offers, in display order. */
+  estimatesAnalyticsXAxisOptions(): Promise<string[]>;
+  /** Pick an x-axis property; resolves once the select shows it. */
+  estimatesAnalyticsPickXAxis(label: string): Promise<void>;
+  /** Cell texts of the Customized Insights data table, row by row (header first). */
+  estimatesAnalyticsTableRows(): Promise<string[][]>;
 }
 
 /** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */

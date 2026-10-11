@@ -28679,4 +28679,170 @@ export class WebDriver implements ParityDriver {
   async estimatesNotFoundVisible(): Promise<boolean> {
     return (await this.page.getByRole("heading", { name: /something went wrong/i }).count()) > 0;
   }
+
+  // --- Estimates consumers: analytics axes (NEWFRONT-325, EST-020).
+  // --- Observed on the running old app: the project analytics dialog
+  // --- carries one "Customized Insights" section whose header row holds
+  // --- the y-axis, x-axis and group-by selects (CustomSelect buttons,
+  // --- in that order) and whose body holds the bar chart plus the data
+  // --- table. Options render as role=option in a portal.
+
+  async estimatesOpenAnalytics(): Promise<void> {
+    // Exact-name match: the issues header also carries filter and
+    // project buttons whose labels merely contain the word.
+    await this.page
+      .getByRole("button", { name: "Analytics", exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("dialog").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  /** The Customized Insights section inside the open analytics dialog. */
+  private estimatesAnalyticsSection(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .first()
+      .getByRole("heading", { name: "Customized Insights" })
+      .locator("xpath=ancestor::div[3]");
+  }
+
+  /** Axis select buttons (y, x, group) in the section header row. */
+  private estimatesAnalyticsAxisButtons(): Locator {
+    return this.estimatesAnalyticsSection().locator(":scope > div").first().getByRole("button");
+  }
+
+  private async estimatesAnalyticsAxisValue(index: 0 | 1): Promise<string> {
+    const button = this.estimatesAnalyticsAxisButtons().nth(index);
+    await button.waitFor({ timeout: WebDriver.OPEN_MS });
+    return ((await button.innerText()) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  /** The select toggles on click, so open/close must be state-driven, never assumed. */
+  private async estimatesAnalyticsOptionsOpen(): Promise<boolean> {
+    return (await this.page.getByRole("option").count()) > 0;
+  }
+
+  private async estimatesAnalyticsAxisOpen(index: 0 | 1): Promise<void> {
+    const button = this.estimatesAnalyticsAxisButtons().nth(index);
+    await button.scrollIntoViewIfNeeded({ timeout: WebDriver.OPEN_MS });
+    for (let round = 0; round < 3 && !(await this.estimatesAnalyticsOptionsOpen()); round++) {
+      await button.click({ timeout: WebDriver.OPEN_MS });
+      await this.page
+        .getByRole("option")
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined);
+    }
+    await this.page.getByRole("option").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  private async estimatesAnalyticsAxisClose(index: 0 | 1): Promise<void> {
+    const button = this.estimatesAnalyticsAxisButtons().nth(index);
+    for (let round = 0; round < 3 && (await this.estimatesAnalyticsOptionsOpen()); round++) {
+      await button.click({ timeout: WebDriver.OPEN_MS });
+      await this.page
+        .waitForFunction(() => document.querySelectorAll('[role="option"]').length === 0, {
+          timeout: WebDriver.OPEN_MS,
+        })
+        .catch(() => undefined);
+    }
+  }
+
+  private async estimatesAnalyticsAxisOptions(index: 0 | 1): Promise<string[]> {
+    await this.estimatesAnalyticsAxisClose(index);
+    await this.estimatesAnalyticsAxisOpen(index);
+    const options = this.page.getByRole("option");
+    const total = await options.count();
+    const labels: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await options
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") labels.push(text);
+    }
+    await this.estimatesAnalyticsAxisClose(index);
+    return labels;
+  }
+
+  private async estimatesAnalyticsPickAxis(index: 0 | 1, label: string): Promise<void> {
+    await this.estimatesAnalyticsAxisClose(index);
+    await this.estimatesAnalyticsAxisOpen(index);
+    await this.page.getByRole("option", { name: label }).first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.estimatesAnalyticsAxisValue(index), { timeout: WebDriver.OPEN_MS }).toBe(label);
+  }
+
+  async estimatesAnalyticsYAxisValue(): Promise<string> {
+    return this.estimatesAnalyticsAxisValue(0);
+  }
+
+  async estimatesAnalyticsYAxisOptions(): Promise<string[]> {
+    return this.estimatesAnalyticsAxisOptions(0);
+  }
+
+  async estimatesAnalyticsPickYAxis(label: string): Promise<void> {
+    await this.estimatesAnalyticsPickAxis(0, label);
+  }
+
+  async estimatesAnalyticsXAxisValue(): Promise<string> {
+    return this.estimatesAnalyticsAxisValue(1);
+  }
+
+  async estimatesAnalyticsXAxisOptions(): Promise<string[]> {
+    return this.estimatesAnalyticsAxisOptions(1);
+  }
+
+  async estimatesAnalyticsPickXAxis(label: string): Promise<void> {
+    await this.estimatesAnalyticsPickAxis(1, label);
+  }
+
+  async estimatesAnalyticsTableRows(): Promise<string[][]> {
+    const table = this.estimatesAnalyticsSection().getByRole("table").first();
+    await table.waitFor({ timeout: WebDriver.OPEN_MS });
+    const rows = table.getByRole("row");
+    const total = await rows.count();
+    const out: string[][] = [];
+    for (let i = 0; i < total; i++) {
+      const cells = rows.nth(i).getByRole("cell");
+      const cellsTotal = await cells.count();
+      if (cellsTotal === 0) {
+        const headers = rows.nth(i).getByRole("columnheader");
+        const headersTotal = await headers.count();
+        const head: string[] = [];
+        for (let h = 0; h < headersTotal; h++) {
+          head.push(
+            (
+              (await headers
+                .nth(h)
+                .innerText()
+                .catch(() => "")) ?? ""
+            )
+              .replace(/\s+/g, " ")
+              .trim()
+          );
+        }
+        if (head.some((t) => t !== "")) out.push(head);
+        continue;
+      }
+      const texts: string[] = [];
+      for (let c = 0; c < cellsTotal; c++) {
+        texts.push(
+          (
+            (await cells
+              .nth(c)
+              .innerText()
+              .catch(() => "")) ?? ""
+          )
+            .replace(/\s+/g, " ")
+            .trim()
+        );
+      }
+      out.push(texts);
+    }
+    return out;
+  }
 }
