@@ -6705,6 +6705,8 @@ export interface ParityDriver {
   modulesDetailProgressStatsRows(): Promise<ModulesDetailStatRow[]>;
   /** Click a breakdown entry; the caller polls the narrowed list. */
   modulesDetailProgressEntryClick(title: string): Promise<void>;
+  /** Whether a breakdown entry is clickable (detail once the filter instance loads; never in peek). */
+  modulesDetailProgressEntryClickable(title: string): Promise<boolean>;
   /** Whether the links section renders expanded. */
   modulesDetailLinksOpen(): Promise<boolean>;
   /** Toggle the links section; resolves once the click lands. */

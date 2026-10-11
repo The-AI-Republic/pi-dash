@@ -209,7 +209,9 @@ test.describe("module detail on desktop", () => {
         });
 
         await test.step("an empty module shows no badge", async () => {
-          expect(await driver.modulesDetailBadgeText()).toBe(null);
+          // The badge clears once module B's issues load; the jump lands
+          // first, so settle on the empty state rather than racing it.
+          await expect.poll(() => driver.modulesDetailBadgeText(), { timeout: 30_000 }).toBe(null);
           const detail = await serverModulesDetailGet(seed.workspaceSlug, projectId, idB, session);
           expect(detail.totalIssues).toBe(0);
         });
@@ -899,6 +901,7 @@ test.describe("module detail on desktop", () => {
             sessionBrowserCookies(session)
           );
           await driver.archivesOpenModulesTab(seed.workspaceSlug, projectId);
+          await driver.archivesAwaitModuleRow(`${tag} archived`);
           await driver.archivesOpenModulePeek(`${tag} archived`);
           expect(await driver.modulesDetailSidebarName()).toBe(`${tag} archived`);
           expect(await driver.modulesDetailSidebarStatusDisabled()).toBe(true);
@@ -1074,7 +1077,7 @@ test.describe("module detail on desktop", () => {
   test(
     specTitle(
       ["MOD-034"],
-      "bug: NEWFRONT-337 breakdown tabs remember per module but show rotated contents; entries never filter (NEWFRONT-343); read-only in peek"
+      "bug: NEWFRONT-337 breakdown tabs remember per module but show rotated contents; entries filter the list; read-only in peek"
     ),
     { tag: specTags(["MOD-034"]) },
     async ({ driver, seed }) => {
@@ -1115,6 +1118,14 @@ test.describe("module detail on desktop", () => {
       const label = await serverCreateLabel(seed.workspaceSlug, projectId, labelName, "#ff0000", session);
       await serverPatchIssue(seed.workspaceSlug, projectId, backlog, { label_ids: [label.id] }, session);
       await serverAddIssuesToModule(seed.workspaceSlug, projectId, idA, [backlog, todo, done], session);
+      const teammate = requireMention(seed);
+      await serverAddProjectMembers(
+        seed.workspaceSlug,
+        projectId,
+        [{ memberId: teammate.id, role: ROLE_MEMBER }],
+        session
+      );
+      await serverPatchIssue(seed.workspaceSlug, projectId, todo, { assignee_ids: [teammate.id] }, session);
       const peekIssue = await createStateIssue(seed, projectId, `${tag} peek issue`, "backlog", session);
       await serverAddIssuesToModule(seed.workspaceSlug, projectId, idB, [peekIssue], session);
       try {
@@ -1143,38 +1154,51 @@ test.describe("module detail on desktop", () => {
           expect(rows.find((row) => row.title === "Backlog")).toEqual({ title: "Backlog", percent: 33, total: 3 });
         });
 
-        await test.step("live clicking Backlog filters nothing (NEWFRONT-343)", async () => {
-          await driver.modulesDetailProgressEntryClick("Backlog");
-          // Dead clicks: a fixed app narrows the list to Backlog here
-          // and writes a state-group condition; live the list keeps all
-          // three items and the server sees no condition.
-          await driver.page.waitForTimeout(5_000);
-          expect(await driver.layoutsListGroupIssueNames("All work items")).toEqual(
-            expect.arrayContaining([backlogName, todoName, doneName])
-          );
-          expect(
+        await test.step("entries filter the list on detail", async () => {
+          // Entries wire their handlers once the filter instance loads;
+          // settle on the clickable marker instead of racing that window.
+          await driver.modulesDetailProgressStatsTab("Labels");
+          await expect
+            .poll(() => driver.modulesDetailProgressEntryClickable("Backlog"), { timeout: 30_000 })
+            .toBe(true);
+          const listNames = () => driver.layoutsListGroupIssueNames("All work items");
+          const richFiltersText = async () =>
             JSON.stringify(
               (await serverModulesDetailUserProperties(seed.workspaceSlug, projectId, idA, session)).richFilters
-            )
-          ).not.toContain("backlog");
-          expect(await serverModuleIssueIds(seed.workspaceSlug, projectId, idA, session)).toEqual(
-            expect.arrayContaining([backlog, todo, done])
-          );
-        });
-
-        await test.step("entries stay dead under the other live tabs", async () => {
+            );
+          const allNames = expect.arrayContaining([backlogName, todoName, doneName]);
+          // A breakdown click that lands while the panel re-renders can
+          // miss (swallowed, no error): re-click until the list shows the
+          // effect. Each miss leaves the list unchanged, so retries converge.
+          const clickUntilList = async (entry: string, expected: unknown) => {
+            for (let i = 0; i < 3; i++) {
+              await driver.modulesDetailProgressEntryClick(entry);
+              try {
+                await expect.poll(listNames, { timeout: 15_000 }).toEqual(expected);
+                return;
+              } catch {
+                // Missed; click again.
+              }
+            }
+            await expect.poll(listNames, { timeout: 30_000 }).toEqual(expected);
+          };
+          // State groups (live under the Labels tab while NEWFRONT-337 stands).
+          await clickUntilList("Backlog", [backlogName]);
+          await expect.poll(richFiltersText, { timeout: 30_000 }).toContain("backlog");
+          await clickUntilList("Backlog", allNames);
+          await expect.poll(richFiltersText, { timeout: 30_000 }).not.toContain("state_group");
+          // Assignees (live under the States tab while NEWFRONT-337 stands).
           await driver.modulesDetailProgressStatsTab("States");
-          await driver.modulesDetailProgressEntryClick("No assignee");
-          await driver.page.waitForTimeout(3_000);
-          expect(await driver.layoutsListGroupIssueNames("All work items")).toEqual(
-            expect.arrayContaining([backlogName, todoName, doneName])
-          );
+          await clickUntilList(teammate.displayName, [todoName]);
+          await expect.poll(richFiltersText, { timeout: 30_000 }).toContain(teammate.id);
+          await clickUntilList(teammate.displayName, allNames);
+          await expect.poll(richFiltersText, { timeout: 30_000 }).not.toContain(teammate.id);
+          // Labels (live under the Assignees tab while NEWFRONT-337 stands).
           await driver.modulesDetailProgressStatsTab("Assignees");
-          await driver.modulesDetailProgressEntryClick(labelName);
-          await driver.page.waitForTimeout(3_000);
-          expect(await driver.layoutsListGroupIssueNames("All work items")).toEqual(
-            expect.arrayContaining([backlogName, todoName, doneName])
-          );
+          await clickUntilList(labelName, [backlogName]);
+          await expect.poll(richFiltersText, { timeout: 30_000 }).toContain(label.id);
+          await clickUntilList(labelName, allNames);
+          await expect.poll(richFiltersText, { timeout: 30_000 }).not.toContain(label.id);
         });
 
         await test.step("peek breakdowns switch tabs but write no filter", async () => {
@@ -1189,6 +1213,7 @@ test.describe("module detail on desktop", () => {
           await driver.archivesOpenLiveModulePeek(nameB);
           await driver.modulesDetailProgressStatsTab("Labels");
           expect(await driver.modulesDetailActiveStatsTab()).toBe("Labels");
+          expect(await driver.modulesDetailProgressEntryClickable("Backlog")).toBe(false);
           await driver.modulesDetailProgressEntryClick("Backlog");
           await driver.page.waitForTimeout(3_000);
           const filters = JSON.stringify(

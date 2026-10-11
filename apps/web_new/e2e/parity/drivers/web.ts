@@ -35733,7 +35733,9 @@ export class WebDriver implements ParityDriver {
     const badge = this.modulesDetailHeader().locator("span.rounded-xl").first();
     if ((await badge.count()) === 0) return null;
     if (!(await badge.isVisible().catch(() => false))) return null;
-    return ((await badge.innerText()) ?? "").trim();
+    // Bounded read: a churning header must fail the caller's poll, not
+    // burn the whole test timeout inside one innerText call.
+    return ((await badge.innerText({ timeout: WebDriver.OPEN_MS })) ?? "").trim();
   }
 
   async modulesDetailBadgeTooltip(): Promise<string | null> {
@@ -35852,19 +35854,39 @@ export class WebDriver implements ParityDriver {
   }
 
   async modulesDetailFilterToggleVisible(): Promise<boolean> {
-    // Icon-only square button between the layout switcher and Display;
-    // its propel icon carries no lucide class (unlike the sidebar-toggle
-    // and quick-actions squares around it). Absent on small screens.
-    const squares = this.modulesDetailHeader().locator("button.aspect-square");
+    // Two live branches, both between the layout switcher and Display.
+    // With no conditions and the filter row hidden the toggle is the wide
+    // add-filter combobox button, whose icon is the lucide list-filter
+    // (nothing else in the header uses it); once conditions exist, the row
+    // shows, or the filter instance is still loading, it is the square
+    // IconButton whose propel icon carries no lucide class (unlike the
+    // sidebar-toggle and quick-actions squares around it). The desktop row
+    // hides below the md breakpoint, so both read invisible there.
+    const header = this.modulesDetailHeader();
+    const combos = header.locator("button:has(svg.lucide-list-filter)");
+    const comboTotal = await combos.count();
+    for (let i = 0; i < comboTotal; i++) {
+      if (
+        await combos
+          .nth(i)
+          .isVisible()
+          .catch(() => false)
+      )
+        return true;
+    }
+    const squares = header.locator("button.aspect-square");
     const total = await squares.count();
     for (let i = 0; i < total; i++) {
       const icon = squares.nth(i).locator("svg").first();
       const classes = (await icon.getAttribute("class").catch(() => "")) ?? "";
       if (classes !== "" && !classes.includes("lucide")) {
-        return squares
-          .nth(i)
-          .isVisible()
-          .catch(() => false);
+        if (
+          await squares
+            .nth(i)
+            .isVisible()
+            .catch(() => false)
+        )
+          return true;
       }
     }
     return false;
@@ -37008,23 +37030,35 @@ export class WebDriver implements ParityDriver {
   }
 
   async modulesDetailSidebarSetStatus(status: string): Promise<void> {
-    const current = await this.modulesDetailSidebarStatus();
-    if (current === null) throw new Error("[parity] module status pill never rendered.");
-    await this.modulesDetailPanel()
-      .getByRole("button", { name: current, exact: true })
-      .first()
-      .click({ timeout: WebDriver.OPEN_MS });
-    const option = this.page.getByRole("option", { name: status }).first();
-    await option.click({ timeout: WebDriver.OPEN_MS });
-    // A landed selection closes the menu: if the options are still
-    // attached the click missed, so click once more before polling.
-    const detached = await this.page
-      .getByRole("option")
-      .first()
-      .waitFor({ state: "detached", timeout: 5_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (!detached) await option.click({ timeout: WebDriver.OPEN_MS });
+    // A swallowed option click (menu churn under load) closes nothing and
+    // selects nothing: verify the pill after each attempt and reselect
+    // until it lands, instead of failing one blind attempt.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const current = await this.modulesDetailSidebarStatus();
+      if (current === null) throw new Error("[parity] module status pill never rendered.");
+      if (current === status) return;
+      await this.modulesDetailPanel()
+        .getByRole("button", { name: current, exact: true })
+        .first()
+        .click({ timeout: WebDriver.OPEN_MS });
+      const option = this.page.getByRole("option", { name: status }).first();
+      await option.click({ timeout: WebDriver.OPEN_MS });
+      // A landed selection closes the menu: if the options are still
+      // attached the click missed, so click once more before polling.
+      const detached = await this.page
+        .getByRole("option")
+        .first()
+        .waitFor({ state: "detached", timeout: 5_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!detached) await option.click({ timeout: WebDriver.OPEN_MS });
+      try {
+        await expect.poll(() => this.modulesDetailSidebarStatus(), { timeout: WebDriver.OPEN_MS }).toBe(status);
+        return;
+      } catch {
+        // Selection missed; reopen and try again.
+      }
+    }
     await expect.poll(() => this.modulesDetailSidebarStatus(), { timeout: WebDriver.OPEN_MS }).toBe(status);
   }
 
@@ -37169,31 +37203,45 @@ export class WebDriver implements ParityDriver {
   }
 
   async modulesDetailSlowFetchShowsLoader(): Promise<boolean> {
-    const pattern = "**/api/workspaces/*/projects/*/modules/*/";
+    // The sidebar renders from the store, which several fetches fill on
+    // this page (workspace + project modules lists, details, user
+    // properties): delay every modules GET, or the undelayed one wins the
+    // race and the skeleton window shrinks to whatever the first paint
+    // catches (a ~200ms race the watch routinely misses).
+    const pattern = "**/api/workspaces/**/modules**";
     await this.page.route(pattern, async (route) => {
       if (route.request().method() === "GET") {
         await new Promise((resolve) => setTimeout(resolve, 4000));
       }
-      await route.continue();
+      try {
+        await route.continue();
+      } catch {
+        // A delayed handler can outlive the test: teardown disposes the
+        // route while it sleeps ("already handled" on a closed page).
+        // Rethrow when the page is still open — that is a real bug.
+        if (!this.page.isClosed()) throw new Error("[parity] loader delay route failed on an open page.");
+      }
     });
-    try {
-      // Watch before reloading: domcontentloaded can resolve after the
-      // delayed fetch already settled, missing the loader window.
-      const seenPromise = this.modulesDetailPanel()
-        .locator(".animate-pulse")
-        .first()
-        .waitFor({ timeout: 20_000 })
-        .then(
-          () => true,
-          () => false
-        );
-      await this.page.reload({ waitUntil: "domcontentloaded" });
-      const seen = await seenPromise;
-      await this.modulesDetailPanelSettled();
-      return seen;
-    } finally {
-      await this.page.unroute(pattern);
-    }
+    // Watch before reloading: domcontentloaded can resolve after the
+    // delayed fetch already settled, missing the loader window. The
+    // window is generous because a loaded box boots the reload slowly
+    // while sibling workers hammer the stack; the delayed skeleton
+    // itself persists until the fetches resolve.
+    const seenPromise = this.modulesDetailPanel()
+      .locator(".animate-pulse")
+      .first()
+      .waitFor({ timeout: 90_000 })
+      .then(
+        () => true,
+        () => false
+      );
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    const seen = await seenPromise;
+    await this.modulesDetailPanelSettled();
+    // No unroute: the route dies with this test's page, and unrouting
+    // here races in-flight delayed handlers ("already handled" on an
+    // open page). Later steps in this test use the API, not the page.
+    return seen;
   }
 
   async modulesDetailProgressOpen(): Promise<boolean> {
@@ -37372,6 +37420,18 @@ export class WebDriver implements ParityDriver {
     const entry = panel.locator("div.flex.w-full.items-center.justify-between", { hasText: title }).first();
     await entry.scrollIntoViewIfNeeded({ timeout: WebDriver.OPEN_MS });
     await entry.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailProgressEntryClickable(title: string): Promise<boolean> {
+    // The shared row marks itself cursor-pointer exactly when it wires a
+    // click handler, which needs an editable mount (detail, never peek)
+    // with its filter instance loaded; polling this settles the transient
+    // dead window instead of racing it.
+    const panel = this.modulesDetailPanel().locator("[role='tabpanel'][data-headlessui-state='selected']");
+    const entry = panel.locator("div.flex.w-full.items-center.justify-between", { hasText: title }).first();
+    if ((await entry.count()) === 0) return false;
+    const classes = (await entry.getAttribute("class").catch(() => "")) ?? "";
+    return classes.split(/\s+/).includes("cursor-pointer");
   }
 
   async modulesDetailLinksOpen(): Promise<boolean> {
