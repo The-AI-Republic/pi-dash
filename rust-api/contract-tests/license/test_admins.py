@@ -114,3 +114,51 @@ def test_signup_screen_visited_without_instance(anon_api):
     res = anon_api.post("/api/instances/admins/sign-up-screen-visited/")
     assert res.status_code == 400
     assert res.json() == {"error": "Instance is not configured"}
+
+
+def test_collection_put_is_django_405(admin_api):
+    # Unowned methods proxy, so Django's own DRF 405 body is preserved.
+    res = admin_api.put("/api/instances/admins/", json={})
+    assert res.status_code == 405
+    assert res.json() == {"detail": 'Method "PUT" not allowed.'}
+
+
+def test_member_detail_post_is_django_500(admin_api, world):
+    # The detail path mounts the same view class, whose post() takes no
+    # pk: the kwarg raises TypeError (500), before the body is ever read.
+    res = admin_api.post(f"/api/instances/admins/{world['admin']['id']}/", json={})
+    assert res.status_code == 500
+
+
+def test_member_detail_get_is_django_500(admin_api, world):
+    # Same TypeError as POST: get() takes no pk either.
+    res = admin_api.get(f"/api/instances/admins/{world['admin']['id']}/")
+    assert res.status_code == 500
+
+
+def test_collection_delete_is_django_500(admin_api):
+    # Mirror image: delete() requires pk, so the collection path 500s.
+    res = admin_api.delete("/api/instances/admins/")
+    assert res.status_code == 500
+
+
+def test_head_on_list_matches_django(admin_api):
+    # Django's View.setup() aliases head=get, so HEAD runs the GET
+    # handler and answers 200 (empty body); the explicit HEAD proxy arm
+    # preserves those exact bytes instead of axum's auto-HEAD.
+    res = admin_api.head("/api/instances/admins/")
+    assert res.status_code == 200
+    assert res.content == b""
+
+
+def test_options_proxies_drf_metadata(admin_api):
+    res = admin_api.options("/api/instances/admins/")
+    assert res.status_code == 200
+    assert res.json()["name"] == "Instance Admin Endpoint"
+
+
+def test_delete_non_uuid_pk_is_django_404(admin_api):
+    # The <uuid:pk> converter rejects non-UUIDs before the view; Rust
+    # falls through to the proxy for Django's own 404.
+    res = admin_api.delete("/api/instances/admins/not-a-uuid/")
+    assert res.status_code == 404

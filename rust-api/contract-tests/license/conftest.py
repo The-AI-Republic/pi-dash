@@ -27,6 +27,13 @@ def db():
 
 @pytest.fixture(autouse=True)
 def clean_db(db):
+    # Sweep rows with FKs into users that Database.reset() does not know
+    # about (the signal-created preference rows sign-up leaves behind) so
+    # the reset below never hits a foreign key.
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM user_notification_preferences")
+        conn.commit()
     db.reset()
     yield
 

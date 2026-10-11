@@ -19,7 +19,7 @@ id, and filed as a fix issue first.
 
 Counts (2026-10-10, `pi_dash.settings.test`):
 
-- Routes: 528 Django rows — 514 OWNED, 14 MISSING (all listed below),
+- Routes: 528 Django rows — 521 OWNED, 7 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
 - Jobs: 85 tasks — 51 OWNED, 31 proxied by design, 3 MISSING;
   beat 26/26 OWNED.
@@ -48,18 +48,15 @@ PIDASHCONV-829's proxy arms resolve them, so that section is empty too.
 Both rows are gone: the proxy arms (including HEAD via axum's `get`
 handling) make the generate routes match Django on every method.
 
-### G2 — license instance-admin session/auth endpoints unported (7 rows)
+### G2 — license instance-admin session/auth endpoints unported (0 rows; fixed)
 
-Fix: PIDASHCONV-827. No Rust route at all.
+Fix: PIDASHCONV-827 (landed). The 7 paths are Rust-owned (the 5 merged
+`handlers_admin` routes were wired into `license::routes()`,
+`sign-in/`/`sign-up/` were ported, every route carries an explicit
+`.head(proxy)` arm so no HEAD gap remains). No live rows; the header
+counts already reflect this.
 
 ```expected-routes
-G2 :: /api/instances/admins/ :: no-rust-route
-G2 :: /api/instances/admins/me/ :: no-rust-route
-G2 :: /api/instances/admins/session/ :: no-rust-route
-G2 :: /api/instances/admins/sign-in/ :: no-rust-route
-G2 :: /api/instances/admins/sign-out/ :: no-rust-route
-G2 :: /api/instances/admins/sign-up/ :: no-rust-route
-G2 :: /api/instances/admins/{pk}/ :: no-rust-route
 ```
 
 ### G3 — DRF router artifacts: api-root index + format suffixes (0 rows; fixed)

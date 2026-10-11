@@ -9,7 +9,9 @@
 //! * [`handlers_instance`] — `views/instance.py` (`InstanceEndpoint`
 //!   GET/PATCH, `SignUpScreenVisitedEndpoint` POST; PIDASHCONV-120).
 //! * [`handlers_admin`] — admins CRUD + me/session/sign-out
-//!   (PIDASHCONV-121; `admin.py:44-86` and `admin.py:361-398`).
+//!   (PIDASHCONV-121; `admin.py:44-86` and `admin.py:361-398`) plus the
+//!   sign-in/sign-up HTTP shell over the [`handlers_auth_forms`] kernel
+//!   (PIDASHCONV-827; `admin.py:89-358`).
 //! * [`handlers_auth_forms`] — admin sign-up + sign-in form-POST redirect
 //!   flows (PIDASHCONV-122; `admin.py:89-358`).
 //! * [`handlers_config_workspace`] — configuration + workspace family
@@ -394,5 +396,7 @@ pub use handlers_config_workspace::config_workspace_routes;
 /// Owned D-01 instance-console routes (cutover granularity: registered
 /// paths serve from Rust, everything else keeps proxying).
 pub fn routes() -> Router<AppState> {
-    handlers_instance::routes().merge(config_workspace_routes())
+    handlers_instance::routes()
+        .merge(config_workspace_routes())
+        .merge(handlers_admin::routes())
 }
