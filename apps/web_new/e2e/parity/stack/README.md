@@ -241,3 +241,39 @@ desktop build of web_new with the same seeded stack.
   scenarios have someone to @-mention besides the author.
 
 To change the seed, edit that file and rerun `parity-up.sh`.
+
+## Disk-full guard
+
+Stale artifacts accumulate on the shared validation host across slots
+(`/tmp` build/probe dirs from finished runs, docker build cache and image
+layers), and nothing reclaims them on its own. At 100% any slot's Postgres
+PANICs with `No space left on device` mid-sweep; the API starts returning
+500s and the sweep burns (NEWFRONT-175).
+
+`parity-up.sh` therefore runs `parity-disk-check.sh` before the docker
+build. The check reads the filesystems holding `/` and Docker's data-root,
+warns at `PARITY_DISK_WARN_PCT` (default 80% used) and refuses to start at
+`PARITY_DISK_MAX_USE_PCT` (default 90%). Run it by hand before a long
+sweep against a kept stack, where no fresh bring-up runs the gate:
+
+```sh
+apps/web_new/e2e/parity/stack/parity-disk-check.sh [--path <dir>]...
+```
+
+If a sweep dies with Postgres `No space left on device`, sudden API 500s,
+or mass sign-in/load failures, check host disk first — before debugging
+the spec (read-only):
+
+```sh
+df -h /
+df -h /tmp
+docker system df
+```
+
+Recovery is: free space, restart the slot's Postgres, verify the seed
+(three issues, grouped reads), then re-sweep from pristine state
+(`parity-reset.sh`). Freeing host disk is the operator's janitoring
+(NEWFRONT-248): agents must not prune sibling stacks, images, volumes,
+build caches, or `/tmp` files owned by other runs. `PARITY_IGNORE_DISK_CHECK=1`
+bypasses the refusal for emergencies only — never on a shared host
+without the operator's acknowledgement.
