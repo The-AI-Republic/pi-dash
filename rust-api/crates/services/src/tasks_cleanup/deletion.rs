@@ -19,10 +19,14 @@
 //!   NULL-FK rows retained) — the reverse manager inherits the child
 //!   default manager.
 //!   Everything else takes the CASCADE branch: one-to-one stamps with a
-//!   full save and recurses depth-first; to-many hits ported bug BUG-DEL-1
-//!   (the manager is called as a function, `TypeError`, caught at `:97`,
-//!   warning reported, relation skipped — to-many CASCADE children are
-//!   never soft-deleted).
+//!   full save and recurses depth-first; to-many iterates the live-scoped
+//!   `(manager="objects").all()` queryset (`:82-96`), stamping each child
+//!   with a full save and recursing into it. (PIDASHCONV-900 corrected the
+//!   port's BUG-DEL-1 claim of a manager-call `TypeError` here: reverse-FK
+//!   related managers ARE callable — `RelatedManager.__call__`
+//!   (`django/db/models/fields/related_descriptors.py:650`) rebuilds the
+//!   manager with the named class — and a live `soft_delete_related_objects`
+//!   run on `("db", "loopjob")` stamps both to-many children.)
 //! - `SET_NULL` failures propagate (that branch sits outside the `try`);
 //!   CASCADE-branch failures are warnings and the walk continues.
 //! - Recursion is an explicit worklist with a visited set instead of
@@ -41,7 +45,7 @@
 use std::collections::HashSet;
 
 use pidash_db::tasks_cleanup::{
-    cascade_to_many_message, entry_table_for, fetch_live_one_to_one, fetch_row, load_schema_info,
+    entry_table_for, fetch_live_one_to_one, fetch_live_to_many, fetch_row, load_schema_info,
     now_stamp, null_bulk, null_one_to_one, parse_pk, reverse_relations, run_named_hard_deletes,
     run_sweep_hard_deletes, stamp_row, sweep_tables, LookupError, RowState,
 };
@@ -156,8 +160,8 @@ pub struct SoftDeleteOutcome {
     pub stamped: usize,
     /// Rows touched by FK nulling.
     pub nulled_rows: usize,
-    /// Skipped-relation lines (the to-many CASCADE bug, CASCADE-branch
-    /// row errors). The walk continued past every one.
+    /// Per-relation error lines (CASCADE-branch row failures). The walk
+    /// continued past every one.
     pub warnings: Vec<String>,
 }
 
@@ -225,9 +229,10 @@ pub async fn soft_delete_related_objects(
             }
             // CASCADE branch (and RESTRICT / SET DEFAULT / anything else,
             // exactly like the Python `else`): inside the `try`, so a row
-            // failure becomes a warning and the walk continues.
-            let step: Result<Option<(String, RowState)>, DeletionError> = async {
-                if relation.one_to_one {
+            // failure becomes a warning and the walk continues with the
+            // next relation (`:97-99`).
+            if relation.one_to_one {
+                let step: Result<Option<(String, RowState)>, DeletionError> = async {
                     let related = fetch_live_one_to_one(reads, &schema, relation, &state.pk)
                         .await
                         .map_err(db_error)?;
@@ -249,26 +254,51 @@ pub async fn soft_delete_related_objects(
                     .await
                     .map_err(db_error)?;
                     Ok(Some((relation.child_table.clone(), related)))
-                } else {
-                    // BUG-DEL-1, ported as-is: the related manager is
-                    // not callable, so this branch never touches rows.
-                    Ok(None)
                 }
-            }
-            .await;
-            match step {
-                Ok(None) if !relation.one_to_one => {
-                    outcome.warnings.push(cascade_to_many_message(&accessor(
-                        &relation.child_table,
-                        &relation.fk_column,
-                    )));
+                .await;
+                match step {
+                    Ok(None) => {}
+                    Ok(Some((child_table, child_state))) => {
+                        outcome.stamped += 1;
+                        stack.push((child_table, child_state));
+                    }
+                    Err(error) => {
+                        outcome.warnings.push(format!(
+                            "Error handling relation {}: {error}",
+                            accessor(&relation.child_table, &relation.fk_column)
+                        ));
+                    }
                 }
-                Ok(None) => {}
-                Ok(Some((child_table, child_state))) => {
-                    outcome.stamped += 1;
-                    stack.push((child_table, child_state));
+            } else {
+                // To-many (`:82-96`): `(manager="objects").all()` is the
+                // live-scoped child queryset — reverse-FK related managers
+                // ARE callable (`RelatedManager.__call__` rebuilds with the
+                // named manager), so every live child is stamped with a
+                // full save and recursed into. Each stamped child joins the
+                // worklist immediately, mirroring the per-child recursion:
+                // a later sibling's failure warns and abandons only the
+                // rest of this relation, like the Python `except`.
+                let step: Result<(), DeletionError> = async {
+                    let children = fetch_live_to_many(reads, &schema, relation, &state.pk)
+                        .await
+                        .map_err(db_error)?;
+                    for child in &children {
+                        stamp_row(
+                            writes,
+                            &schema,
+                            &relation.child_table,
+                            &child.pk,
+                            &now_stamp(),
+                        )
+                        .await
+                        .map_err(db_error)?;
+                        outcome.stamped += 1;
+                        stack.push((relation.child_table.clone(), child.clone()));
+                    }
+                    Ok(())
                 }
-                Err(error) => {
+                .await;
+                if let Err(error) = step {
                     outcome.warnings.push(format!(
                         "Error handling relation {}: {error}",
                         accessor(&relation.child_table, &relation.fk_column)

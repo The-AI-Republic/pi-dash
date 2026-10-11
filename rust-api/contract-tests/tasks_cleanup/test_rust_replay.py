@@ -250,6 +250,116 @@ def test_rust_hard_delete_removes_tombstoned_rows(db_conn, broker_url):
     )
 
 
+def test_rust_soft_delete_loopjob_cascades(db_conn, broker_url):
+    """PIDASHCONV-900: the Rust worker resolves ("db", "loopjob") and runs
+    the soft-delete the loop DELETE handler enqueues (PIDASHCONV-888).
+
+    Django parity (`deletion_task.py:18-105`): reverse-FK related managers
+    ARE callable (`RelatedManager.__call__` rebuilds with the named
+    manager), so the to-many CASCADE relations (`loop_targets`,
+    `loop_user_preferences`) stamp every live child and the job row
+    itself is stamped last. Without the ENTRY_TABLES row the Rust worker
+    failed this job as UnknownModel and parked it after retries; now the
+    queue row is acked (deleted) and the database matches Django exactly.
+    """
+    owner = seed_helpers.user(db_conn, "rust-replay-loopjob-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplayloopjob", owner["id"])
+    member = seed_helpers.user(db_conn, "rust-replay-loopjob-member")
+    job = insert_row(
+        db_conn,
+        "loop_jobs",
+        {
+            "slug": f"rust-replay-loopjob-{uuid.uuid4().hex[:8]}",
+            "name": "replay job",
+            "public_name": "Replay Job",
+            "public_description": "seeded",
+            "prompt": "Do the thing.",
+            "min_role": 15,
+            "enabled": True,
+            "is_builtin": False,
+            "dtstart": _old(days=1),
+            "rrule": "FREQ=DAILY;BYHOUR=3;BYMINUTE=0",
+            "tzid": "UTC",
+        },
+    )
+    target = insert_row(
+        db_conn,
+        "loop_targets",
+        {
+            "job_id": str(job["id"]),
+            "workspace_id": str(workspace["id"]),
+            "user_id": str(member["id"]),
+            "last_skip_reason": "",
+        },
+    )
+    pref = insert_row(
+        db_conn,
+        "loop_user_preferences",
+        {
+            "user_id": str(member["id"]),
+            "job_id": str(job["id"]),
+            "enabled": False,
+        },
+    )
+    celery_id = rust_queue.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", "loopjob", str(job["id"])],
+        kwargs={"using": None},
+    )
+    wait_for(
+        lambda: _soft_deleted(db_conn, "loop_jobs", job["id"]),
+        what="loop_jobs row stamped by rust worker",
+    )
+    rust_queue.wait_for_settled(celery_id, what="loopjob soft-delete acked")
+    assert _soft_deleted(db_conn, "loop_targets", target["id"]), (
+        "cascade parity broken: live loop_targets child not stamped"
+    )
+    assert _soft_deleted(db_conn, "loop_user_preferences", pref["id"]), (
+        "cascade parity broken: live loop_user_preferences child not stamped"
+    )
+
+
+def test_rust_soft_delete_user_nulls_audit_fks(db_conn, broker_url):
+    """PIDASHCONV-900: `SET_NULL` reverse relations null instead of stamping.
+
+    Django dispatches on `relation.on_delete` (`deletion_task.py:44-64`),
+    but emits bare `NO ACTION` FK constraints for every behavior, so the
+    Rust walk dispatches from the `_meta`-derived map (audit
+    `created_by`/`updated_by` columns plus `SET_NULL_FKS`). Deleting a
+    user nulls the audit FKs pointing at them. `users` itself carries no
+    `deleted_at` (`User` is not a `SoftDeleteModel`), so Django leaves the
+    user row live — the nulled FK is the observable effect.
+    """
+    owner = seed_helpers.user(db_conn, "rust-replay-null-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplaynull", owner["id"])
+    target = seed_helpers.user(db_conn, "rust-replay-null-target")
+    row = insert_row(
+        db_conn,
+        "webhook_logs",
+        {
+            "workspace_id": str(workspace["id"]),
+            "webhook": str(uuid.uuid4()),
+            "event_type": "issue",
+            "retry_count": 0,
+            "created_by_id": str(target["id"]),
+        },
+    )
+    celery_id = rust_queue.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", "user", str(target["id"])],
+        kwargs={"using": None},
+    )
+    wait_for(
+        lambda: _column_is_null(db_conn, "webhook_logs", row["id"], "created_by_id"),
+        what="audit FK nulled by rust worker",
+    )
+    rust_queue.wait_for_settled(celery_id, what="user soft-delete acked")
+    assert not _missing(db_conn, "users", target["id"])
+    assert not _soft_deleted(db_conn, "webhook_logs", row["id"]), (
+        "SET_NULL parity broken: nulled child stamped"
+    )
+
+
 def test_rust_eta_delayed_execution(db_conn, broker_url):
     """ETA parity through the Rust worker: countdown delays the delete."""
     row = insert_row(
@@ -360,6 +470,15 @@ def _missing(conn, table: str, pk) -> bool:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(f'SELECT 1 FROM "{table}" WHERE id = %s::uuid', (str(pk),))
         return cur.fetchone() is None
+
+
+def _column_is_null(conn, table: str, pk, column: str) -> bool:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f'SELECT {column} FROM "{table}" WHERE id = %s::uuid', (str(pk),)
+        )
+        row = cur.fetchone()
+        return row is not None and row[column] is None
 
 
 def _count(conn, table: str, page_id, expected: int):

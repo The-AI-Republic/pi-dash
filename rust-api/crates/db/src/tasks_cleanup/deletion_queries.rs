@@ -3,7 +3,7 @@
 //! Ports the data-access half of
 //! `apps/api/pi_dash/bgtasks/deletion_task.py` (all 193 lines,
 //! PIDASHCONV-186). The walk orchestration (relation order, recursion,
-//! the ported bugs) lives in `pidash-services`; this module owns SQL
+//! the ported bug BUG-DEL-2) lives in `pidash-services`; this module owns SQL
 //! shapes, the 18-table hard-delete order, the `(app_label, model_name)`
 //! entry map, and the Postgres-catalog discovery that stands in for
 //! Django's `_meta` reverse-relation graph.
@@ -101,6 +101,7 @@ const ENTRY_TABLES: &[(&str, &str, &str)] = &[
     ("db", "issuereaction", "issue_reactions"),
     ("db", "issueview", "issue_views"),
     ("db", "label", "labels"),
+    ("db", "loopjob", "loop_jobs"),
     ("db", "module", "modules"),
     ("db", "moduleissue", "module_issues"),
     ("db", "moduleuserproperty", "module_user_properties"),
@@ -302,19 +303,6 @@ pub fn null_fk_bulk_sql(
     stmt.to_string(PostgresQueryBuilder)
 }
 
-/// The ported-bug line for the to-many CASCADE branch
-/// (`deletion_task.py:83`): the code calls the related manager as a
-/// function — `getattr(instance, related_name)(manager="objects").all()`
-/// — but a RelatedManager is not callable, so every to-many CASCADE
-/// relation raises `TypeError`, lands in the `except Exception` at `:97`,
-/// prints `Error handling relation <name>: ...`, and is skipped. Net
-/// effect: to-many CASCADE children are NEVER soft-deleted. Ported as-is
-/// (BUG-DEL-1); the services walk reports this text as a warning and
-/// continues without touching a row.
-pub fn cascade_to_many_message(accessor: &str) -> String {
-    format!("Error handling relation {accessor}: 'RelatedManager' object is not callable")
-}
-
 /// Live-schema snapshot for one task run: every base table's columns plus
 /// each table's single-column primary key. The column sets answer
 /// `hasattr(obj, "deleted_at")` / `hasattr(obj, "updated_at")`; views
@@ -397,6 +385,89 @@ pub fn sweep_tables(schema: &SchemaInfo) -> Vec<String> {
     tables
 }
 
+/// `(child_table, fk_column)` pairs whose Django `on_delete` is
+/// `SET_NULL`, beyond the audit-column rule in
+/// [`ReverseRelation::is_set_null`]: 43 pairs across every app, frozen
+/// from `_meta` (PIDASHCONV-900). Django emits bare FK constraints (`NO
+/// ACTION`) for every `on_delete`, so the catalog cannot drive the
+/// walk's branch dispatch — this table is the `_meta` mirror, in the same
+/// maintenance class as [`ENTRY_TABLES`]: a migration adding a
+/// non-`CASCADE` FK must extend it. Regenerate from a Django shell with:
+///
+/// ```python
+/// from django.apps import apps
+/// from django.db import models
+/// for m in apps.get_models(include_auto_created=False):
+///     for f in m._meta.get_fields():
+///         if isinstance(f, (models.ForeignKey, models.OneToOneField)) and f.concrete \
+///                 and f.remote_field.on_delete.__name__ == "SET_NULL" \
+///                 and f.column not in ("created_by_id", "updated_by_id"):
+///             print((m._meta.db_table, f.column))
+/// ```
+const SET_NULL_FKS: &[(&str, &str)] = &[
+    ("agent_chat_approval", "decided_by_id"),
+    ("agent_chat_event", "message_id"),
+    ("agent_run", "owner_id"),
+    ("agent_run", "parent_run_id"),
+    ("agent_run", "pinned_runner_id"),
+    ("agent_run", "runner_id"),
+    ("agent_run", "scheduler_binding_id"),
+    ("agent_run", "work_item_id"),
+    ("agent_run_approval", "decided_by_id"),
+    ("assistant_thread", "active_turn_id"),
+    ("assistant_turn", "user_message_id"),
+    ("deploy_boards", "intake_id"),
+    ("draft_issues", "estimate_point_id"),
+    ("draft_issues", "type_id"),
+    ("git_provider_accounts", "workspace_integration_id"),
+    ("git_webhook_deliveries", "repository_id"),
+    ("github_repository_syncs", "label_id"),
+    ("instance_admins", "user_id"),
+    ("intake_issues", "duplicate_to_id"),
+    ("issue_activities", "actor_id"),
+    ("issue_agent_ticker", "pending_entry_actor_id"),
+    ("issue_agent_ticker", "resume_parent_run_id"),
+    ("issue_sequences", "issue_id"),
+    ("issue_versions", "activity_id"),
+    ("issues", "estimate_point_id"),
+    ("issues", "type_id"),
+    ("loop_targets", "last_run_id"),
+    ("loop_targets", "thread_id"),
+    ("machine_token", "dev_machine_id"),
+    ("modules", "lead_id"),
+    ("notifications", "triggered_by_id"),
+    ("project_deploy_boards", "intake_id"),
+    ("projects", "cover_image_asset_id"),
+    ("projects", "default_state_id"),
+    ("projects", "estimate_id"),
+    ("runner", "dev_machine_id"),
+    ("scheduler_bindings", "actor_id"),
+    ("scheduler_bindings", "last_run_id"),
+    ("scheduler_bindings", "pod_id"),
+    ("users", "avatar_asset_id"),
+    ("users", "cover_image_asset_id"),
+    ("workspace_join_requests", "responded_by_id"),
+    ("workspaces", "logo_asset_id"),
+];
+
+/// `(child_table, fk_column)` pairs whose Django `on_delete` is
+/// `DO_NOTHING` (the walk's only skip branch): both live on
+/// `issue_activities` (`db/models/issue.py:515,525`). Same `_meta`-mirror
+/// maintenance class as [`SET_NULL_FKS`].
+const DO_NOTHING_FKS: &[(&str, &str)] = &[
+    ("issue_activities", "issue_comment_id"),
+    ("issue_activities", "issue_id"),
+];
+
+/// Audit FKs that break the audit-column rule: both are `PROTECT`, so the
+/// Python `else` stamps rather than nulling. Every other
+/// `created_by_id`/`updated_by_id` column (227 of 229) is `SET_NULL`
+/// (`db/mixins.py` `UserAuditModel`).
+const PROTECT_AUDIT_FKS: &[(&str, &str)] = &[
+    ("agent_chat_session", "created_by_id"),
+    ("agent_run", "created_by_id"),
+];
+
 /// One reverse foreign key into `parent_table`: the catalog form of a
 /// Django reverse relation (`instance._meta.get_fields()` filtered to
 /// `one_to_many or one_to_one`, `auto_created`, not concrete).
@@ -408,8 +479,10 @@ pub struct ReverseRelation {
     pub fk_column: String,
     /// Child primary-key column (for single-row one-to-one writes).
     pub child_pk: String,
-    /// Catalog `DELETE_RULE`: CASCADE / SET NULL / NO ACTION / RESTRICT /
-    /// SET DEFAULT — the DDL spelling of `on_delete`.
+    /// Catalog `DELETE_RULE`. Django emulates every `on_delete` in the
+    /// ORM and emits bare FK constraints, so this reads `NO ACTION` for
+    /// all 620 constraints — it carries no dispatch signal (an explicit
+    /// `SET NULL` is still honored if one ever appears).
     pub delete_rule: String,
     /// True when the FK column carries a single-column UNIQUE (or PK):
     /// the catalog form of a reverse `OneToOneRel`.
@@ -417,17 +490,30 @@ pub struct ReverseRelation {
 }
 
 impl ReverseRelation {
-    /// `relation.on_delete.__name__` classifier:
-    /// `DO_NOTHING` (DDL `NO ACTION`) skips; `SET_NULL` (DDL `SET NULL`)
-    /// nulls; everything else takes the CASCADE branch — including
-    /// `RESTRICT`/`SET DEFAULT`, exactly like the Python `else` at `:64`
-    /// (ported as-is).
+    /// `relation.on_delete.__name__` classifier, mirroring the Python
+    /// branches at `deletion_task.py:44-64`: `DO_NOTHING` skips (exactly
+    /// [`DO_NOTHING_FKS`]); `SET_NULL` nulls; everything else takes the
+    /// CASCADE branch — including `CASCADE`, `PROTECT`, `RESTRICT` and
+    /// `SET DEFAULT`, exactly like the Python `else` (ported as-is).
+    ///
+    /// The DDL rule alone cannot decide: Django emits `NO ACTION` for
+    /// `CASCADE`, `PROTECT`, `SET_NULL` and `DO_NOTHING` alike, so the
+    /// map below is the `_meta` ground truth.
     pub fn is_do_nothing(&self) -> bool {
-        self.delete_rule == "NO ACTION"
+        DO_NOTHING_FKS
+            .iter()
+            .any(|(table, column)| *table == self.child_table && *column == self.fk_column)
     }
 
     pub fn is_set_null(&self) -> bool {
         self.delete_rule == "SET NULL"
+            || SET_NULL_FKS
+                .iter()
+                .any(|(table, column)| *table == self.child_table && *column == self.fk_column)
+            || ((self.fk_column == "created_by_id" || self.fk_column == "updated_by_id")
+                && !PROTECT_AUDIT_FKS
+                    .iter()
+                    .any(|(table, column)| *table == self.child_table && *column == self.fk_column))
     }
 }
 
@@ -594,6 +680,44 @@ pub async fn fetch_live_one_to_one(
     }
 }
 
+/// Fetch every LIVE row behind a to-many CASCADE: the catalog form of the
+/// `(manager="objects").all()` queryset (`deletion_task.py:83`).
+/// Reverse-FK related managers ARE callable (`RelatedManager.__call__`
+/// rebuilds with the named manager class), so Django iterates the
+/// `objects`-scoped children — live rows only on soft-delete models.
+/// The catalog equivalent is the `deleted_at IS NULL` guard on tables
+/// carrying the column. Tables without `deleted_at` yield no rows:
+/// Django's per-row `hasattr(related_obj, "deleted_at")` guard (`:86`)
+/// skips the stamp AND the recursion for every such child, and the guard
+/// is table-level (it cannot vary row to row). Ordered by pk for a
+/// deterministic walk; Python's queryset order is likewise fixed but not
+/// meaningful, since every child is stamped and recursed into.
+pub async fn fetch_live_to_many(
+    pool: &PgPool,
+    schema: &SchemaInfo,
+    relation: &ReverseRelation,
+    parent_pk: &uuid::Uuid,
+) -> Result<Vec<RowState>, sqlx::Error> {
+    if !schema.has_deleted_at(&relation.child_table) {
+        return Ok(Vec::new());
+    }
+    let select = format!(
+        "SELECT \"{pk}\" AS pk, \"deleted_at\" FROM \"{child}\" WHERE \"{fk}\" = '{parent}' AND \"deleted_at\" IS NULL ORDER BY \"{pk}\"",
+        pk = relation.child_pk,
+        child = relation.child_table,
+        fk = relation.fk_column,
+        parent = parent_pk,
+    );
+    let mut out = Vec::new();
+    for row in sqlx::query(&select).fetch_all(pool).await? {
+        out.push(RowState {
+            pk: row.try_get("pk")?,
+            deleted_at: row.try_get("deleted_at")?,
+        });
+    }
+    Ok(out)
+}
+
 /// Execute a rendered statement; returns affected rows.
 async fn execute(pool: &PgPool, sql: &str) -> Result<u64, sqlx::Error> {
     Ok(sqlx::query(sql).execute(pool).await?.rows_affected())
@@ -737,6 +861,7 @@ mod tests {
         assert_eq!(entry_table_for("db", "workspace"), Some("workspaces"));
         assert_eq!(entry_table_for("db", "issue"), Some("issues"));
         assert_eq!(entry_table_for("db", "issuelink"), Some("issue_links"));
+        assert_eq!(entry_table_for("db", "loopjob"), Some("loop_jobs"));
         assert_eq!(
             entry_table_for("db", "apiactivitylog"),
             Some("api_activity_logs")
@@ -801,33 +926,57 @@ mod tests {
 
     #[test]
     fn on_delete_classifier_mirrors_python_branches() {
-        let base = ReverseRelation {
-            child_table: "issues".to_owned(),
-            fk_column: "project_id".to_owned(),
+        // Bare NO ACTION carries no signal (Django emits it for every
+        // on_delete): an unlisted pair takes the CASCADE branch.
+        let cascade = ReverseRelation {
+            child_table: "loop_targets".to_owned(),
+            fk_column: "job_id".to_owned(),
             child_pk: "id".to_owned(),
             delete_rule: "NO ACTION".to_owned(),
             one_to_one: false,
         };
-        assert!(base.is_do_nothing() && !base.is_set_null());
-        let set_null = ReverseRelation {
+        assert!(!cascade.is_do_nothing() && !cascade.is_set_null());
+        // An explicit DDL action still dispatches directly.
+        let ddl_null = ReverseRelation {
             delete_rule: "SET NULL".to_owned(),
-            ..base.clone()
+            ..cascade.clone()
         };
-        assert!(set_null.is_set_null() && !set_null.is_do_nothing());
+        assert!(ddl_null.is_set_null() && !ddl_null.is_do_nothing());
+        // Audit columns null via the UserAuditModel rule ...
+        let audit = ReverseRelation {
+            child_table: "issues".to_owned(),
+            fk_column: "created_by_id".to_owned(),
+            ..cascade.clone()
+        };
+        assert!(audit.is_set_null() && !audit.is_do_nothing());
+        // ... except the two PROTECT audit FKs, which stamp via the else.
+        let protect_audit = ReverseRelation {
+            child_table: "agent_run".to_owned(),
+            fk_column: "created_by_id".to_owned(),
+            ..cascade.clone()
+        };
+        assert!(!protect_audit.is_set_null() && !protect_audit.is_do_nothing());
+        // A listed SET_NULL pair nulls despite NO ACTION DDL.
+        let listed_null = ReverseRelation {
+            child_table: "loop_targets".to_owned(),
+            fk_column: "thread_id".to_owned(),
+            ..cascade.clone()
+        };
+        assert!(listed_null.is_set_null() && !listed_null.is_do_nothing());
+        // The only skip branch: the two DO_NOTHING pairs.
+        let skip = ReverseRelation {
+            child_table: "issue_activities".to_owned(),
+            fk_column: "issue_id".to_owned(),
+            ..cascade.clone()
+        };
+        assert!(skip.is_do_nothing() && !skip.is_set_null());
         for rule in ["CASCADE", "RESTRICT", "SET DEFAULT"] {
             let other = ReverseRelation {
                 delete_rule: rule.to_owned(),
-                ..base.clone()
+                ..cascade.clone()
             };
             assert!(!other.is_do_nothing() && !other.is_set_null(), "{rule}");
         }
-    }
-
-    #[test]
-    fn cascade_bug_message_names_the_relation() {
-        let message = cascade_to_many_message("issue_project");
-        assert!(message.starts_with("Error handling relation issue_project: "));
-        assert!(message.contains("not callable"));
     }
 
     #[test]
