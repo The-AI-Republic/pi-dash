@@ -121,6 +121,8 @@ import type {
   ModulesBreadcrumb,
   ModulesChip,
   ModulesGateFacts,
+  PagesListRowDetail,
+  PagesListTab,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -33387,6 +33389,41 @@ export class WebDriver implements ParityDriver {
     return null;
   }
 
+  // --- Pages list discovery (NEWFRONT-312, PAGE-001-006).
+
+  private pagesListTabLink(tab: PagesListTab): Locator {
+    const label = tab === "public" ? "Public" : tab === "private" ? "Private" : "Archived";
+    return this.page.getByRole("link", { name: label, exact: true });
+  }
+
+  private pagesListSearchInput(): Locator {
+    return this.page.getByPlaceholder("Search pages");
+  }
+
+  private pagesListRowLink(title: string): Locator {
+    return this.page.getByRole("link", { name: title, exact: true });
+  }
+
+  /**
+   * Bounded re-locating reads: the list header remounts on tab switches
+   * and refetches, so a raw getAttribute/innerText can detach mid-read
+   * and hang until the test timeout. Each attempt re-locates fresh, caps
+   * the read at 5s, and retries a detach; a genuinely absent node or
+   * attribute still reads back null immediately.
+   */
+  private async pagesListReadAttr(fresh: () => Locator, name: string): Promise<string | null> {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const locator = fresh().first();
+      if ((await locator.count()) === 0) return null;
+      try {
+        return await locator.getAttribute(name, { timeout: 5_000 });
+      } catch {
+        await this.page.waitForTimeout(500);
+      }
+    }
+    return null;
+  }
+
   /** One list tab's link (Public, Private, Archived). */
   private pagesGatingTabLink(tab: PagesGatingTab): Locator {
     const label = tab === "public" ? "Public" : tab === "private" ? "Private" : "Archived";
@@ -33429,6 +33466,45 @@ export class WebDriver implements ParityDriver {
       await this.page.waitForTimeout(500);
       const current: string[] = await this.pagesGatingRowTitles();
       if (current.join(" ") === previous.join(" ")) return current;
+      if (Date.now() > deadline) return current;
+      previous = current;
+    }
+  }
+
+  private async pagesListReadInnerText(fresh: () => Locator): Promise<string | null> {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const locator = fresh().first();
+      if ((await locator.count()) === 0) return null;
+      try {
+        return await locator.innerText({ timeout: 5_000 });
+      } catch {
+        await this.page.waitForTimeout(500);
+      }
+    }
+    return null;
+  }
+
+  private async pagesListReadInputValue(fresh: () => Locator): Promise<string | null> {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const locator = fresh().first();
+      if ((await locator.count()) === 0) return null;
+      try {
+        return await locator.inputValue({ timeout: 5_000 });
+      } catch {
+        await this.page.waitForTimeout(500);
+      }
+    }
+    return null;
+  }
+
+  /** Row titles until two consecutive reads agree (client-side reorder settles). */
+  private async pagesListStableTitles(): Promise<string[]> {
+    const deadline = Date.now() + WebDriver.OPEN_MS;
+    let previous: string[] = await this.pagesListRowTitles();
+    for (;;) {
+      await this.page.waitForTimeout(500);
+      const current: string[] = await this.pagesListRowTitles();
+      if (current.join("\u0000") === previous.join("\u0000")) return current;
       if (Date.now() > deadline) return current;
       previous = current;
     }
@@ -33497,6 +33573,74 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesGatingActiveTab(): Promise<PagesGatingTab> {
+    const type = new URL(this.page.url()).searchParams.get("type");
+    if (type === "private") return "private";
+    if (type === "archived") return "archived";
+    return "public";
+  }
+
+  async pagesListOpenProjectPages(workspaceSlug: string, projectId: string, query?: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages${query ?? ""}`, {
+      waitUntil: "domcontentloaded",
+    });
+    // One of four terminal states proves the list route mounted: the tab
+    // strip (pages exist), the feature-off gate, the empty state, or the
+    // no-results state (a sticky query cannot happen on fresh load, but a
+    // shared project may already carry search-unfriendly rows).
+    await Promise.race([
+      this.pagesListTabLink("public")
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined),
+      this.page
+        .getByRole("button", { name: "Manage features" })
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined),
+      this.page
+        .getByRole("button", { name: "Create your first Page" })
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined),
+      this.page
+        .getByText("No matching results.", { exact: true })
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined),
+    ]);
+    await this.pagesListStableTitles().catch(() => []);
+  }
+
+  async pagesListGateVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Manage features" }).first());
+  }
+
+  async pagesListGateManageEnabled(): Promise<boolean> {
+    const button = this.page.getByRole("button", { name: "Manage features" }).first();
+    await button.waitFor({ timeout: WebDriver.OPEN_MS });
+    return button.isEnabled();
+  }
+
+  async pagesListGateOpenManage(): Promise<void> {
+    await this.page.getByRole("button", { name: "Manage features" }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.waitForURL(/\/settings\/projects\//, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesListTabsVisible(): Promise<boolean> {
+    return this.isShown(this.pagesListTabLink("public").first());
+  }
+
+  async pagesListTabs(): Promise<string[]> {
+    const labels: string[] = [];
+    for (const tab of ["public", "private", "archived"] as const) {
+      if (await this.isShown(this.pagesListTabLink(tab).first())) {
+        labels.push(tab === "public" ? "Public" : tab === "private" ? "Private" : "Archived");
+      }
+    }
+    return labels;
+  }
+
+  async pagesListActiveTab(): Promise<PagesListTab> {
     const type = new URL(this.page.url()).searchParams.get("type");
     if (type === "private") return "private";
     if (type === "archived") return "archived";
@@ -34030,6 +34174,24 @@ export class WebDriver implements ParityDriver {
     return null;
   }
 
+  async pagesListMarkedTab(): Promise<PagesListTab | null> {
+    // The marked link's label styling differs from its siblings'; compare
+    // without naming any class.
+    const tabs = ["public", "private", "archived"] as const;
+    const styles = new Map<PagesListTab, string>();
+    for (const tab of tabs) {
+      const link = this.pagesListTabLink(tab);
+      if (!(await this.isShown(link.first()))) return null;
+      styles.set(tab, (await this.pagesListReadAttr(() => link.locator("div"), "class")) ?? "");
+    }
+    for (const tab of tabs) {
+      const mine = styles.get(tab) ?? "";
+      const others = tabs.filter((other) => other !== tab).map((other) => styles.get(other) ?? "");
+      if (others.every((other) => other !== mine) && others[0] === others[1]) return tab;
+    }
+    return null;
+  }
+
   async pagesGatingClickVersionLink(versionId: string): Promise<void> {
     await this.pagesGatingPaneRoot()
       .locator(`a[href*="version=${versionId}"]`)
@@ -34192,6 +34354,121 @@ export class WebDriver implements ParityDriver {
       if ((await titles.count()) === 0) continue;
       const text = ((await titles.last().innerText()).trim() ?? "").trim();
       if (text !== "") labels.push(text);
+    }
+    return labels;
+  }
+
+  async pagesListTabHref(tab: PagesListTab): Promise<string | null> {
+    if (!(await this.isShown(this.pagesListTabLink(tab).first()))) return null;
+    return this.pagesListReadAttr(() => this.pagesListTabLink(tab), "href");
+  }
+
+  async pagesListClickTab(tab: PagesListTab): Promise<void> {
+    await this.pagesListTabLink(tab).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesListStableTitles();
+  }
+
+  async pagesListRowTitles(): Promise<string[]> {
+    // Detail links carry /pages/<id>; tab links carry ?type=. The title
+    // span is the link's only text.
+    const links = this.page.locator('a[href*="/pages/"]');
+    const count = await links.count();
+    const titles: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const href = (await this.pagesListReadAttr(() => links.nth(index), "href")) ?? "";
+      if (!/\/pages\/[0-9a-fA-F-]{8}/.test(href) || href.includes("?type=")) continue;
+      const text = ((await this.pagesListReadInnerText(() => links.nth(index))) ?? "").trim();
+      if (text.length > 0) titles.push(text);
+    }
+    return titles;
+  }
+
+  async pagesListSearchOpen(): Promise<void> {
+    const input = this.pagesListSearchInput();
+    await input.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    if (await this.pagesListSearchExpanded()) return;
+    const container = input.locator("xpath=../..");
+    await container.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(async () => this.pagesListSearchExpanded(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  async pagesListSearchExpanded(): Promise<boolean> {
+    // The input stays mounted when collapsed (zero width, transparent), so
+    // visibility never flips; the rendered width is the open signal.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const input = this.pagesListSearchInput();
+      if ((await input.count()) === 0) return false;
+      try {
+        const width = await input
+          .first()
+          .evaluate((node) => node.getBoundingClientRect().width, null, { timeout: 5_000 });
+        return width > 50;
+      } catch {
+        await this.page.waitForTimeout(500);
+      }
+    }
+    return false;
+  }
+
+  async pagesListSearchType(text: string): Promise<void> {
+    await this.pagesListSearchOpen();
+    await this.pagesListSearchInput().first().fill(text, { timeout: WebDriver.OPEN_MS });
+    await this.pagesListStableTitles();
+  }
+
+  async pagesListSearchValue(): Promise<string | null> {
+    if (!(await this.pagesListSearchExpanded())) return null;
+    return this.pagesListReadInputValue(() => this.pagesListSearchInput());
+  }
+
+  async pagesListSearchEscape(): Promise<void> {
+    await this.pagesListSearchInput().first().press("Escape", { timeout: WebDriver.OPEN_MS });
+    await this.page.waitForTimeout(500);
+  }
+
+  async pagesListSearchClear(): Promise<void> {
+    const input = this.pagesListSearchInput();
+    const container = input.locator("xpath=../..");
+    await container.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(async () => this.pagesListSearchExpanded(), { timeout: WebDriver.OPEN_MS }).toBe(false);
+  }
+
+  async pagesListClickAway(): Promise<void> {
+    // The active tab is outside the search input and re-selecting it is a
+    // no-op, so it is the neutral click-away target.
+    await this.pagesListTabLink(await this.pagesListActiveTab())
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.waitForTimeout(500);
+  }
+
+  async pagesListNoResultsVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByText("No matching results.", { exact: true }).first());
+  }
+
+  async pagesListSortState(): Promise<{ label: string; descending: boolean }> {
+    for (const label of ["Name", "Date created", "Date modified"]) {
+      const button = this.page.getByRole("button", { name: label, exact: true });
+      if (await this.isShown(button.first())) {
+        const iconClass = (await this.pagesListReadAttr(() => button.locator("svg"), "class")) ?? "";
+        return { label, descending: iconClass.includes("arrow-down-wide-narrow") };
+      }
+    }
+    throw new Error("[parity] sort control shows no known key label.");
+  }
+
+  async pagesListSortOpen(): Promise<void> {
+    const { label } = await this.pagesListSortState();
+    await this.page.getByRole("button", { name: label, exact: true }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem", { name: "Name" }).first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesListSortOptions(): Promise<string[]> {
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index++) {
+      labels.push(((await this.pagesListReadInnerText(() => items.nth(index))) ?? "").trim());
     }
     return labels;
   }
@@ -34363,5 +34640,237 @@ export class WebDriver implements ParityDriver {
         .locator("div:visible", { hasText: "only enabled when sorted by manual" })
         .count()) > 0
     );
+  }
+
+  async pagesListSortChooseKey(label: string): Promise<void> {
+    await this.pagesListSortOpen();
+    await this.page.getByRole("menuitem", { name: label }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesListStableTitles();
+  }
+
+  async pagesListSortChooseDirection(label: string): Promise<void> {
+    await this.pagesListSortOpen();
+    await this.page.getByRole("menuitem", { name: label }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesListStableTitles();
+  }
+
+  /** Panel/sidebar Search inputs (exact: the list's "Search pages" must not match). */
+  private pagesListSearchBoxes(): Locator {
+    return this.page.getByPlaceholder("Search", { exact: true });
+  }
+
+  /** The open filters panel, scoped off the sidebar's own Search input. */
+  private pagesListFilterPanel(): Locator {
+    // The sidebar carries its own Search input, so the panel's is the last
+    // in DOM order (the panel renders in a portal at the body end); its
+    // third ancestor div holds the search row plus all sections.
+    return this.pagesListSearchBoxes().last().locator("xpath=ancestor::div[3]");
+  }
+
+  async pagesListFiltersOpen(): Promise<void> {
+    // Idempotent: the Filters button toggles, so never click into a close.
+    if ((await this.pagesListSearchBoxes().count()) === 2) return;
+    await this.page.getByRole("button", { name: "Filters", exact: true }).first().click({ timeout: WebDriver.OPEN_MS });
+    // The sidebar's Search input is always present; the panel adds a second.
+    await expect.poll(async () => this.pagesListSearchBoxes().count(), { timeout: WebDriver.OPEN_MS }).toBe(2);
+  }
+
+  async pagesListFiltersClose(): Promise<void> {
+    if ((await this.pagesListSearchBoxes().count()) === 1) return;
+    await this.page.keyboard.press("Escape");
+    await expect.poll(async () => this.pagesListSearchBoxes().count(), { timeout: WebDriver.OPEN_MS }).toBe(1);
+  }
+
+  async pagesListFilterToggleFavorites(): Promise<void> {
+    // Scoped: the sidebar has its own Favorites disclosure.
+    await this.pagesListFilterPanel()
+      .getByRole("button", { name: "Favorites", exact: true })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesListStableTitles();
+  }
+
+  async pagesListFilterChooseDate(label: string): Promise<void> {
+    await this.pagesListFilterPanel()
+      .getByRole("button", { name: label, exact: true })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesListStableTitles();
+  }
+
+  async pagesListFilterSearch(text: string): Promise<void> {
+    await this.pagesListSearchBoxes().last().fill(text, { timeout: WebDriver.OPEN_MS });
+    await this.page.waitForTimeout(500);
+  }
+
+  async pagesListFilterCreatorOptions(): Promise<string[]> {
+    const panel = this.pagesListFilterPanel();
+    // Non-exact: the header carries an applied count once picked.
+    const header = panel.getByText("Created by");
+    if ((await header.count()) === 0) return [];
+    const section = header.first().locator("xpath=ancestor::div[2]");
+    const buttons = section.getByRole("button");
+    const count = await buttons.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index++) {
+      // Creator buttons pair an avatar initial with the name div; read the
+      // name div so the initial never leaks into the label.
+      const nameDiv = buttons.nth(index).locator("div.text-secondary");
+      const text =
+        (await nameDiv.count()) > 0
+          ? ((await this.pagesListReadInnerText(() => nameDiv)) ?? "").trim()
+          : ((await this.pagesListReadInnerText(() => buttons.nth(index))) ?? "").trim();
+      if (text.length > 0 && text !== "View all" && text !== "View less") labels.push(text);
+    }
+    return labels;
+  }
+
+  async pagesListFilterPickCreator(label: string): Promise<void> {
+    // Non-exact: the accessible name carries the avatar initial too.
+    await this.pagesListFilterPanel().getByRole("button", { name: label }).click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesListStableTitles();
+  }
+
+  async pagesListChips(): Promise<string[]> {
+    const clear = this.page.getByRole("button", { name: "Clear all" });
+    if ((await clear.count()) === 0) return [];
+    const text = (
+      (await this.pagesListReadInnerText(() => clear.first().locator("xpath=ancestor::div[1]"))) ?? ""
+    ).trim();
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  }
+
+  async pagesListChipRemove(keyLabel: string): Promise<void> {
+    const clear = this.page.getByRole("button", { name: "Clear all" }).first();
+    const row = clear.locator("xpath=ancestor::div[1]");
+    // The key span's second ancestor is the chip; its last button removes
+    // the whole chip (value chips carry their own earlier buttons).
+    const chip = row.locator("span", { hasText: keyLabel }).first().locator("xpath=ancestor::div[2]");
+    await chip.getByRole("button").last().click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesListStableTitles();
+  }
+
+  async pagesListClearAll(): Promise<void> {
+    await this.page.getByRole("button", { name: "Clear all" }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesListStableTitles();
+  }
+
+  /** Tooltip popup text after hovering `target` (Base UI portal, 200ms delay). */
+  private async pagesListTooltipText(target: Locator, previous: string | null): Promise<string | null> {
+    await target.hover({ timeout: WebDriver.OPEN_MS });
+    const popup = () => this.page.locator("div[data-base-ui-portal] div[data-open]").last();
+    try {
+      await popup().waitFor({ timeout: 5_000 });
+      // The portal keeps the previous tooltip until the new one swaps in,
+      // with a transient empty gap while it reopens; wait for content
+      // that is neither empty nor stale.
+      await expect
+        .poll(
+          async () => {
+            const el = popup();
+            if ((await el.count()) === 0) return null;
+            let text = "";
+            try {
+              text = ((await el.innerText({ timeout: 1_000 })).trim() ?? "").trim();
+            } catch {
+              return null;
+            }
+            if (text === "" || text === (previous ?? "")) return null;
+            return text;
+          },
+          { timeout: 5_000 }
+        )
+        .not.toBeNull();
+    } catch {
+      // Fall through to a final read: identical consecutive tooltips are
+      // legal, and a missing popup reads back empty.
+    }
+    const text = ((await this.pagesListReadInnerText(popup)) ?? "").trim();
+    return text.length > 0 ? text : null;
+  }
+
+  async pagesListRowDetail(title: string): Promise<PagesListRowDetail> {
+    const link = this.pagesListRowLink(title).first();
+    await link.waitFor({ timeout: WebDriver.OPEN_MS });
+    const row = link.locator("xpath=ancestor::div[3]");
+    // Icon-only controls carry no accessible name; the glyph classes
+    // observed on the running app tell the controls apart.
+    const star = row.locator("button:has(svg.lucide-star)");
+    const starOffered = (await star.count()) > 0;
+    let starred = false;
+    if (starOffered) {
+      const starClass = (await this.pagesListReadAttr(() => star.locator("svg"), "class")) ?? "";
+      starred = starClass.includes("fill-");
+    }
+    const menuOffered = (await row.locator("button:has(svg.lucide-ellipsis)").count()) > 0;
+    // Hover reveals each detail as a tooltip; each hover swaps the shared
+    // portal content, so no explicit dismiss is needed between reads.
+    const avatar = row.locator("div.rounded-full").first();
+    const owner = (await avatar.count()) > 0 ? await this.pagesListTooltipText(avatar, null) : null;
+    // The private glyph carries no distinctive class, so locate the glyph
+    // wrapper observed on the running app instead of the svg itself.
+    const glyph = row.locator("div.cursor-default.text-tertiary svg").first();
+    const visibility = (await glyph.count()) > 0 ? await this.pagesListTooltipText(glyph, owner) : null;
+    const info = row.locator("svg.lucide-info").first();
+    const createdOn = (await info.count()) > 0 ? await this.pagesListTooltipText(info, visibility) : null;
+    const markOffered = (await link.locator("svg").count()) > 0;
+    return { title, markOffered, owner, visibility, createdOn, starOffered, starred, menuOffered };
+  }
+
+  async pagesListClickRow(title: string): Promise<void> {
+    await this.pagesListRowLink(title).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.waitForURL(/\/pages\/[0-9a-fA-F-]{8}/, { timeout: WebDriver.OPEN_MS });
+    // Either the editors or the sync loader prove the detail mounted; the
+    // loader is the terminal state when the socket can never connect.
+    await Promise.race([
+      this.page
+        .locator(".tiptap")
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined),
+      this.page
+        .locator(".document-editor-loader")
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined),
+    ]);
+  }
+
+  async pagesListDismissMenus(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForTimeout(500);
+  }
+
+  async pagesListRowMenuItems(title: string): Promise<string[]> {
+    const link = this.pagesListRowLink(title).first();
+    await link.waitFor({ timeout: WebDriver.OPEN_MS });
+    const row = link.locator("xpath=ancestor::div[3]");
+    await row.locator("button:has(svg.lucide-ellipsis)").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebDriver.OPEN_MS });
+    return this.pagesListSortOptions();
+  }
+
+  /** The open row context menu (every row mounts one; the open wrapper takes pointer events). */
+  private pagesListOpenContextMenu(): Locator {
+    return this.page.locator("div.pointer-events-auto > div[data-context-menu=true]");
+  }
+
+  async pagesListRowRightClick(title: string): Promise<void> {
+    await this.pagesListRowLink(title).first().click({ button: "right", timeout: WebDriver.OPEN_MS });
+    // The context menu is plain buttons in a portal, not menuitem roles.
+    await this.pagesListOpenContextMenu().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesListContextMenuItems(): Promise<string[]> {
+    const menu = this.pagesListOpenContextMenu();
+    await menu.waitFor({ timeout: WebDriver.OPEN_MS });
+    const buttons = menu.getByRole("button");
+    const count = await buttons.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index++) {
+      labels.push(((await this.pagesListReadInnerText(() => buttons.nth(index))) ?? "").trim());
+    }
+    return labels;
   }
 }
