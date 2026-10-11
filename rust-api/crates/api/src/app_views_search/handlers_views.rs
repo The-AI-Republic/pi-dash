@@ -2666,8 +2666,9 @@ async fn project_put(
 }
 
 /// `DELETE .../views/<pk>/` (`:365-398`): PROJECT ADMIN-or-creator gate,
-/// then the admin-or-owner recheck; soft-deletes the view and its
-/// favorites, hard-deletes its recent visits.
+/// then the admin-or-owner recheck; soft-deletes the view (the instance
+/// `delete()` enqueues `soft_delete_related_objects`, `db/mixins.py:78`)
+/// and its favorites, hard-deletes its recent visits.
 async fn project_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, pk)): Path<(String, String, String)>,
@@ -2700,6 +2701,10 @@ async fn project_destroy(
         .execute(&pool)
         .await
         .map_err(|_| Denial::ServerError)?;
+    // Instance `delete()` → `.delay(...)` (`db/mixins.py:78`): stamp,
+    // then enqueue — same order as the mixin, before the favorites and
+    // recent-visits cleanup below (`base.py:379-392`).
+    enqueue_message(&pool, soft_delete_message(&pk)).await;
     sqlx::query(
         r#"UPDATE user_favorites SET deleted_at = $4 FROM workspaces w
            WHERE user_favorites.workspace_id = w.id AND w.slug = $1 AND w.deleted_at IS NULL
@@ -3431,6 +3436,36 @@ mod pidashconv_924_tests {
         // with `using=None` — three positional args, `using` stays a
         // null kwarg (never a positional `"default"`).
         let pk = uuid::Uuid::parse_str("66666666-0000-4000-8000-000000000002").expect("pk");
+        let message = soft_delete_message(&pk);
+        assert_eq!(
+            message.task,
+            "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("issueview".to_owned()),
+                Value::String(pk.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.len(), 1);
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_923_tests {
+    use serde_json::Value;
+
+    use super::soft_delete_message;
+
+    #[test]
+    fn soft_delete_message_matches_the_mixin_call() {
+        // `db/mixins.py:78`: `.delay(label, name, pk, using=using)`
+        // with `using=None` — three positional args, `using` stays a
+        // null kwarg (never a positional `"default"`).
+        let pk = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
         let message = soft_delete_message(&pk);
         assert_eq!(
             message.task,
