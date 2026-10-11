@@ -8,7 +8,7 @@
 // real stack.
 import { createServer, type Server } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { serverPageRecord } from "./api";
+import { pagesLiveOracleBase, serverPageRecord } from "./api";
 
 let payload: Record<string, unknown>;
 let server: Server;
@@ -74,5 +74,44 @@ describe("serverPageRecord", () => {
     await expect(serverPageRecord("ws", "project", "page-1", "session=x", apiBase)).rejects.toThrow(
       "[parity] page record carried no string id."
     );
+  });
+});
+
+// Oracle-base wrappers must derive from PARITY_NS like every other suite
+// URL (NEWFRONT-353): a hardcoded :13000 default points at the wrong stack
+// under a bare namespaced run.
+describe("pagesLiveOracleBase", () => {
+  const names = ["PARITY_NS", "PARITY_ORACLE_URL", "PARITY_ORACLE_PORT"] as const;
+  let saved: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    saved = {};
+    for (const name of names) {
+      saved[name] = process.env[name];
+      delete process.env[name];
+    }
+  });
+
+  afterEach(() => {
+    for (const name of names) {
+      const value = saved[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+
+  it("derives the oracle port from PARITY_NS", () => {
+    process.env["PARITY_NS"] = "257";
+    expect(pagesLiveOracleBase()).toBe("http://localhost:13057");
+  });
+
+  it("keeps the legacy default with no namespace", () => {
+    expect(pagesLiveOracleBase()).toBe("http://localhost:13000");
+  });
+
+  it("lets an explicit PARITY_ORACLE_URL win, trimmed of trailing slashes", () => {
+    process.env["PARITY_NS"] = "257";
+    process.env["PARITY_ORACLE_URL"] = "http://proxy:8080//";
+    expect(pagesLiveOracleBase()).toBe("http://proxy:8080");
   });
 });
