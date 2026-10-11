@@ -6963,64 +6963,6 @@ export interface ParityDriver {
   pagesToolbarFloatingToggle(): Promise<boolean>;
   /** Seed the sticky-toolbar preference before the next navigation. */
   pagesToolbarSeedStickyPref(value: boolean): Promise<void>;
-}
-
-/** Pages list tabs as the row-actions scenarios address them (NEWFRONT-313). */
-export type PagesRowTab = "open" | "restricted" | "shelved";
-
-/** Current page mark as the detail header renders it (NEWFRONT-315, PAGE-027). */
-export interface PagesMarkCurrent {
-  kind: "emoji" | "icon";
-  /** Emoji glyph, or the vector-icon name. */
-  label: string;
-}
-
-/** One toolbar tooltip: action name plus optional key hint (NEWFRONT-315, PAGE-029-031). */
-export interface PagesToolbarTooltip {
-  name: string;
-  hint: string | null;
-}
-
-/** Color popover swatch counts per row (NEWFRONT-315, PAGE-036). */
-export interface PagesToolbarColorCounts {
-  text: number;
-  textClear: boolean;
-  background: number;
-  backgroundClear: boolean;
-}
-
-/** Color preview state on the toolbar button (NEWFRONT-315, PAGE-036). */
-export interface PagesToolbarColorPreview {
-  text: string | null;
-  background: string | null;
-}
-
-/** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */
-export interface ModulesToast {
-  /** Toast title. */
-  title: string;
-  /** Toast message. */
-  message: string;
-}
-
-/** One overflow menu entry with its gating state (NEWFRONT-308, MOD-017). */
-export interface ModulesMenuEntry {
-  /** Entry title. */
-  title: string;
-  /** Whether the entry renders disabled. */
-  disabled: boolean;
-  /** Explanation under the title, or null when none shows. */
-  description: string | null;
-}
-
-/** One timeline sidebar row (NEWFRONT-308, MOD-021). */
-export interface ModulesTimelineRow {
-  /** Module name. */
-  name: string;
-  /** Detail href, or null when the row is not a link. */
-  href: string | null;
-  /** Whether a status glyph renders beside the name. */
-  statusGlyph: boolean;
 
   // --- NEWFRONT-317 (pages navigation pane + versions, PAGE-045-054).
   // --- Appended; existing methods above are untouched per the shared
@@ -7146,6 +7088,64 @@ export interface ModulesTimelineRow {
    * so the pane's shared editor handle remounts on warm client state.
    */
   pagesPaneProfileRoundtrip(): Promise<void>;
+}
+
+/** Pages list tabs as the row-actions scenarios address them (NEWFRONT-313). */
+export type PagesRowTab = "open" | "restricted" | "shelved";
+
+/** Current page mark as the detail header renders it (NEWFRONT-315, PAGE-027). */
+export interface PagesMarkCurrent {
+  kind: "emoji" | "icon";
+  /** Emoji glyph, or the vector-icon name. */
+  label: string;
+}
+
+/** One toolbar tooltip: action name plus optional key hint (NEWFRONT-315, PAGE-029-031). */
+export interface PagesToolbarTooltip {
+  name: string;
+  hint: string | null;
+}
+
+/** Color popover swatch counts per row (NEWFRONT-315, PAGE-036). */
+export interface PagesToolbarColorCounts {
+  text: number;
+  textClear: boolean;
+  background: number;
+  backgroundClear: boolean;
+}
+
+/** Color preview state on the toolbar button (NEWFRONT-315, PAGE-036). */
+export interface PagesToolbarColorPreview {
+  text: string | null;
+  background: string | null;
+}
+
+/** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */
+export interface ModulesToast {
+  /** Toast title. */
+  title: string;
+  /** Toast message. */
+  message: string;
+}
+
+/** One overflow menu entry with its gating state (NEWFRONT-308, MOD-017). */
+export interface ModulesMenuEntry {
+  /** Entry title. */
+  title: string;
+  /** Whether the entry renders disabled. */
+  disabled: boolean;
+  /** Explanation under the title, or null when none shows. */
+  description: string | null;
+}
+
+/** One timeline sidebar row (NEWFRONT-308, MOD-021). */
+export interface ModulesTimelineRow {
+  /** Module name. */
+  name: string;
+  /** Detail href, or null when the row is not a link. */
+  href: string | null;
+  /** Whether a status glyph renders beside the name. */
+  statusGlyph: boolean;
 }
 
 /** One outline heading as the pane lists it (NEWFRONT-317, PAGE-047). */
