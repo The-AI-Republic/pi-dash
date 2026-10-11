@@ -85,10 +85,24 @@ async function pasteImage(driver: ParityDriver, imageSrc: string): Promise<void>
 /** Poll the open menu for `label`, falling back to a reload when the live
  * update was stomped (bug NEWFRONT-369: on a slow stack a late-resolving
  * load-time record fetch overwrites the mutation's store update, leaving
- * the menu on pre-mutation entries until a reload renders server truth). */
+ * the menu on pre-mutation entries until a reload renders server truth).
+ * The live poll needs two consecutive sightings: out-of-order fetch
+ * resolutions can flap the menu between pre- and post-mutation sets
+ * (observed live). */
 async function expectMenuItemOrReload(driver: ParityDriver, label: string): Promise<void> {
+  let stable = false;
   try {
-    await expect.poll(() => driver.pagesHeaderMenuItems(), { timeout: 15_000 }).toContain(label);
+    await expect
+      .poll(
+        async () => {
+          const present = (await driver.pagesHeaderMenuItems()).includes(label);
+          const ok = present && stable;
+          stable = present;
+          return ok;
+        },
+        { timeout: 15_000 }
+      )
+      .toBe(true);
     return;
   } catch {
     // Live update lost to the stomp — recover via persisted server truth.
@@ -97,6 +111,31 @@ async function expectMenuItemOrReload(driver: ParityDriver, label: string): Prom
   await driver.pagesLiveWaitSynced();
   await driver.pagesHeaderOpenOptions();
   await expect.poll(() => driver.pagesHeaderMenuItems(), { timeout: 30_000 }).toContain(label);
+}
+
+/** Poll the open menu for the full shelved set (Restore + Delete, no Archive/visibility/toolbar), reloading once when the live menu flaps or sticks on pre-shelve entries (bug NEWFRONT-369 family). */
+async function expectShelvedMenuOrReload(driver: ParityDriver): Promise<void> {
+  const probe = async (): Promise<boolean> => {
+    const items = await driver.pagesHeaderMenuItems();
+    return (
+      items.includes("Restore") &&
+      items.includes("Delete") &&
+      !items.includes("Archive") &&
+      !items.includes("Make private") &&
+      !items.includes("Make public") &&
+      !items.includes("Sticky toolbar")
+    );
+  };
+  try {
+    await expect.poll(probe, { timeout: 15_000 }).toBe(true);
+    return;
+  } catch {
+    // Flapping or stuck menu — recover via persisted server truth.
+  }
+  await driver.page.reload();
+  await driver.pagesLiveWaitSynced();
+  await driver.pagesHeaderOpenOptions();
+  await expect.poll(probe, { timeout: 30_000 }).toBe(true);
 }
 
 /** Quiesce until no toast shows for a sustained window: a single null
@@ -544,12 +583,7 @@ test(
     // Shelved content stays readable but frozen; visibility switching hides.
     await expectEditableOrReload(driver, false);
     await driver.pagesHeaderOpenOptions();
-    await expectMenuItemOrReload(driver, "Restore");
-    const items = await driver.pagesHeaderMenuItems();
-    expect(items).toContain("Delete");
-    expect(items).not.toContain("Make private");
-    expect(items).not.toContain("Make public");
-    expect(items).not.toContain("Sticky toolbar");
+    await expectShelvedMenuOrReload(driver);
     await driver.page.keyboard.press("Escape");
     await expect.poll(() => driver.pagesHeaderMenuItems(), { timeout: 15_000 }).toEqual([]);
     // Let the archive notice dismiss so the restore notice is not swallowed.
