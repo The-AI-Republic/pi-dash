@@ -25,7 +25,6 @@ mod execute_seams;
 mod inventory;
 #[cfg(test)]
 mod model_runtime;
-mod ops;
 #[cfg(test)]
 mod runner_seams;
 
@@ -59,7 +58,7 @@ enum Mode {
     /// Run a Django management-command port (D-37 ops).
     Ops {
         #[command(subcommand)]
-        command: ops::OpsCommand,
+        command: pidash_ops::OpsCommand,
     },
     /// Print the route inventory (parity tooling, PIDASHCONV-820).
     Routes {
@@ -298,7 +297,7 @@ fn main() -> MainResult {
     match cli.mode {
         Mode::Serve { bind } => runtime.block_on(serve(&bind)),
         Mode::Worker { concurrency } => runtime.block_on(worker(concurrency)),
-        Mode::Ops { command } => runtime.block_on(ops::run(command)),
+        Mode::Ops { command } => runtime.block_on(pidash_ops::run(command)),
         Mode::Routes { json } => {
             if json {
                 println!("{}", inventory::routes_json());
@@ -436,8 +435,8 @@ mod tests {
         match ops.mode {
             Mode::Ops {
                 command:
-                    ops::OpsCommand::Instance(
-                        ops::instance::InstanceCommand::DryRunSchedulerMigration {
+                    pidash_ops::OpsCommand::Instance(
+                        pidash_ops::instance::InstanceCommand::DryRunSchedulerMigration {
                             workspace,
                             json,
                         },
@@ -448,6 +447,83 @@ mod tests {
             }
             _ => panic!("wrong mode"),
         }
+    }
+
+    /// The `ops` argv shapes moved to `pidash-ops` with the modules
+    /// (PIDASHCONV-919); they stay pinned here, against the real binary
+    /// `Cli`, with the same assertions.
+    fn parse_ops(argv: &[&str]) -> pidash_ops::OpsCommand {
+        let mut full = vec!["pidash-api", "ops"];
+        full.extend(argv.iter());
+        match Cli::try_parse_from(full)
+            .unwrap_or_else(|error| panic!("parses {argv:?}: {error}"))
+            .mode
+        {
+            Mode::Ops { command } => command,
+            _ => panic!("wrong mode for {argv:?}"),
+        }
+    }
+
+    /// Command names are underscored Django names, not kebab-case.
+    #[test]
+    fn command_names_match_django() {
+        for (argv, check) in [
+            ("wait_for_db", "WaitForDb"),
+            ("wait_for_migrations", "WaitForMigrations"),
+            ("clear_cache", "ClearCache"),
+            ("create_bucket", "CreateBucket"),
+            ("update_bucket", "UpdateBucket"),
+        ] {
+            let command = parse_ops(&[argv]);
+            assert!(
+                format!("{command:?}").starts_with(check),
+                "{argv} parses to {check}"
+            );
+        }
+        assert!(
+            Cli::try_parse_from(["pidash-api", "ops", "wait-for-db"]).is_err(),
+            "kebab-case is not a Django command name"
+        );
+    }
+
+    /// `--key` takes an optional value (`nargs="?"`): absent and bare
+    /// both yield the full-clear path, like argparse's `None` const.
+    #[test]
+    fn clear_cache_key_arg_shapes() {
+        assert!(matches!(
+            parse_ops(&["clear_cache"]),
+            pidash_ops::OpsCommand::ClearCache(pidash_ops::boot::ClearCacheArgs { key: None })
+        ));
+        assert!(matches!(
+            parse_ops(&["clear_cache", "--key"]),
+            pidash_ops::OpsCommand::ClearCache(pidash_ops::boot::ClearCacheArgs { key: Some(_) })
+        ));
+        match parse_ops(&["clear_cache", "--key", "k"]) {
+            pidash_ops::OpsCommand::ClearCache(args) => {
+                assert_eq!(args.key.as_deref(), Some("k"))
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// Unknown options fail with exit code 2, like argparse.
+    #[test]
+    fn unknown_option_exits_2() {
+        let error = Cli::try_parse_from(["pidash-api", "ops", "clear_cache", "--bogus"])
+            .expect_err("rejects");
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn cli_parses_ops_activate_user() {
+        let ops = Cli::try_parse_from(["pidash-api", "ops", "activate_user", "a@b.com"])
+            .expect("ops activate_user");
+        assert!(matches!(
+            ops.mode,
+            Mode::Ops {
+                command: pidash_ops::OpsCommand::ActivateUser(_)
+            }
+        ));
     }
 
     /// PIDASHCONV-224: the worker owns every local D-09 task name, while

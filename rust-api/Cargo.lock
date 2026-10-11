@@ -2743,6 +2743,7 @@ dependencies = [
  "pidash-auth",
  "pidash-db",
  "pidash-jobs",
+ "pidash-ops",
  "pidash-services",
  "pidash-types",
  "redis",
@@ -2839,6 +2840,22 @@ dependencies = [
  "tracing",
  "uuid",
  "webpki-roots",
+]
+
+[[package]]
+name = "pidash-ops"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "pidash-db",
+ "pidash-jobs",
+ "pidash-services",
+ "reqwest",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

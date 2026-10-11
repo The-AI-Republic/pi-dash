@@ -14,14 +14,17 @@ pidash-auth = { path = "../../crates/auth" }
 pidash-services = { path = "../../crates/services" }
 pidash-api = { path = "../../crates/api" }
 pidash-jobs = { path = "../../crates/jobs" }
+# D-37 ops CLI (PIDASHCONV-919): the ops command set lives in the shared
+# library crate so the cloud binary embeds the same argv/dispatch.
+pidash-ops = { path = "../../crates/ops" }
 axum = "0.8"
 # Model runtime (PIDASHCONV-866): GitHub contents payloads are base64.
 # Same locked base64 0.22.x as the workspace (no lock churn).
 base64 = "0.22"
-# D-37 ops (PIDASHCONV-807/808/809, one line):
-# batch `now` + fresh row ids (807/808) and Utc timestamps for
-# register/dry-run (809). Same locked chrono 0.4.x as pidash-db, so
-# no lock churn; features are the union the groups need.
+# Seam providers + model runtime (PIDASHCONV-859/832/866): Utc
+# timestamps. (The D-37 ops groups moved to pidash-ops with their own
+# pin.) Same locked chrono 0.4.x as pidash-db, so no lock churn;
+# features are the union the groups need.
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 clap = { version = "4", features = ["derive"] }
 # Model runtime (PIDASHCONV-866): concurrent tool-call polling
@@ -49,9 +52,10 @@ sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# D-37 ops row ids (PIDASHCONV-807/808/810):
+# Seam-provider + model-runtime ids (PIDASHCONV-859/832/866):
 # same locked uuid 1.x as pidash-db/pidash-services (no lock churn);
-# features are the union of the groups' needs.
+# features are the union of the groups' needs. (The D-37 ops groups
+# moved to pidash-ops with their own pin.)
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 
 [dev-dependencies]
