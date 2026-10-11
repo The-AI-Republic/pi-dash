@@ -311,12 +311,14 @@ async fn live_preference_id(
 /// re-toggle instead of duplicating — the partial unique constraints
 /// would reject a second live row anyway); otherwise one row is inserted.
 ///
-/// Audit stamping mirrors `BaseModel.save` via crum: on create
-/// `created_by` is the request user and `updated_by` stays `None`; on
-/// update `updated_by` becomes the request user and `created_by` is
-/// untouched. `updated_at` is refreshed on update (`auto_now`); every
-/// other column keeps its stored value, so the `UPDATE` names only the
-/// three columns `save()` observably changes.
+/// `update_or_create` persists the update branch via
+/// `obj.save(update_fields={"enabled", <auto_now fields>})`
+/// (`django/db/models/query.py`): `BaseModel.save` still assigns
+/// `self.updated_by` through crum, but only in memory — `_save_table`
+/// writes the listed fields, so `updated_by` never reaches the row.
+/// The `UPDATE` therefore names `enabled` and `updated_at` only; on
+/// create `created_by` is the request user and `updated_by` stays
+/// `None`.
 async fn upsert_preference(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
@@ -331,12 +333,11 @@ async fn upsert_preference(
             let now = chrono::Utc::now();
             sqlx::query(
                 r#"UPDATE loop_user_preferences
-                   SET enabled = $1, updated_at = $2, updated_by_id = $3
-                   WHERE id = $4"#,
+                   SET enabled = $1, updated_at = $2
+                   WHERE id = $3"#,
             )
             .bind(enabled)
             .bind(now)
-            .bind(user_id)
             .bind(id)
             .execute(pool)
             .await
