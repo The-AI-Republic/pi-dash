@@ -40,8 +40,8 @@ pub use body_limit::{BodyLimitLayer, BODY_TOO_LARGE_JSON, DEFAULT_BODY_LIMIT_BYT
 pub use cors::{CorsConfig, CorsLayer, DEFAULT_HEADERS, DEFAULT_METHODS};
 pub use gzip::{GzipLayer, MIN_COMPRESS_BYTES};
 pub use logging::{
-    ApiTokenLogRecord, LogSink, LoggerUserId, LoggingConfig, RequestLogRecord, RequestLoggerLayer,
-    TokenLogLayer, TracingSink, REQUEST_LOGGER_TARGET,
+    ApiTokenLogRecord, LogSink, LoggerUserId, LoggingConfig, QueueSink, RequestLogRecord,
+    RequestLoggerLayer, TokenLogLayer, TracingSink, REQUEST_LOGGER_TARGET,
 };
 pub use security::{SecurityConfig, SecurityLayer};
 pub use session::{
@@ -89,8 +89,9 @@ pub(crate) fn append_vary(headers: &mut http::HeaderMap, field: &'static str) {
 /// Wrap every route — including the Django fallback proxy — in the
 /// middleware stack, innermost layer first so [`CorsLayer`] ends up
 /// outermost, exactly like `MIDDLEWARE` order. One sink serves both logging
-/// layers; the binary passes [`TracingSink`]. Takes the finalized router
-/// (after `with_state`), so `build_app` is the single wiring point.
+/// layers; the binary passes [`QueueSink`] (tracing plus the `process_logs`
+/// enqueue). Takes the finalized router (after `with_state`), so
+/// `build_app` is the single wiring point.
 pub fn stack<S, K>(
     router: Router,
     cors: &CorsConfig,

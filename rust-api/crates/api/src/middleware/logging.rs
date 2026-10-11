@@ -29,12 +29,15 @@
 //! The Python middleware hands the payload to the `process_logs` Celery
 //! task (`.delay()`), whose Mongo/Postgres writes belong to the bgtasks
 //! domain port. This layer computes the exact payloads and delivers them to
-//! a [`LogSink`]; the shipped [`TracingSink`] emits them as structured
-//! tracing events (the `RequestLogger` half is the `pi_dash.api.request`
-//! logger by another name). The bgtasks port consumes [`ApiTokenLogRecord`]
-//! to enqueue `process_logs` without recomputing anything. Sinks are
-//! infallible by construction — Python swallows logging exceptions via
-//! `log_exception`, and there is nothing to swallow here.
+//! a [`LogSink`]; the shipped [`QueueSink`] both emits them as structured
+//! tracing events (via its inner [`TracingSink`]) and enqueues
+//! `process_logs` into `rust_job_queue` with the same `(log_data,
+//! mongo_log)` kwargs the middleware computed — no second record builder.
+//! The enqueue is best-effort: Python swallows logging exceptions via
+//! `log_exception`, so a failed enqueue warns and the response stands
+//! (contract-test databases have no queue table; the worker creates it at
+//! boot). Sinks are infallible by construction — `token` returns `()`,
+//! and there is nothing to swallow.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -101,9 +104,12 @@ pub struct ApiTokenLogRecord {
 }
 
 /// Where log records go. Infallible by construction (see module docs).
+/// `token` is async so queue-backed sinks can enqueue `process_logs`
+/// before the response goes out — Django's `.delay()` likewise publishes
+/// to the broker inside the request cycle, after the view commits.
 pub trait LogSink: Clone + Send + Sync + 'static {
     fn request(&self, record: &RequestLogRecord);
-    fn token(&self, record: &ApiTokenLogRecord);
+    fn token(&self, record: &ApiTokenLogRecord) -> impl Future<Output = ()> + Send;
 }
 
 /// The shipped sink: structured tracing events. The request half targets
@@ -127,7 +133,7 @@ impl LogSink for TracingSink {
         );
     }
 
-    fn token(&self, record: &ApiTokenLogRecord) {
+    async fn token(&self, record: &ApiTokenLogRecord) {
         tracing::info!(
             target: REQUEST_LOGGER_TARGET,
             token_identifier = %record.token_identifier,
@@ -147,6 +153,136 @@ impl LogSink for TracingSink {
             record.path,
             record.response_code,
         );
+    }
+}
+
+impl ApiTokenLogRecord {
+    /// The Postgres-shaped `log_data` dict (`logger.py:123-134`), keys in
+    /// Python insertion order. `None`s stay present as null — Python always
+    /// sends every key.
+    pub fn log_data(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut map = serde_json::Map::with_capacity(10);
+        map.insert(
+            "token_identifier".to_string(),
+            serde_json::Value::String(self.token_identifier.clone()),
+        );
+        map.insert(
+            "path".to_string(),
+            serde_json::Value::String(self.path.clone()),
+        );
+        map.insert(
+            "method".to_string(),
+            serde_json::Value::String(self.method.clone()),
+        );
+        map.insert(
+            "query_params".to_string(),
+            serde_json::Value::String(self.query_params.clone()),
+        );
+        map.insert(
+            "headers".to_string(),
+            serde_json::Value::String(self.headers.clone()),
+        );
+        map.insert("body".to_string(), opt_str(&self.body));
+        map.insert("response_body".to_string(), opt_str(&self.response_body));
+        map.insert(
+            "response_code".to_string(),
+            serde_json::Value::from(self.response_code),
+        );
+        map.insert("ip_address".to_string(), opt_str(&self.ip_address));
+        map.insert("user_agent".to_string(), opt_str(&self.user_agent));
+        map
+    }
+
+    /// The mongo-shaped doc (`logger.py:141-146`): `log_data` plus the four
+    /// extension fields, in Python insertion order.
+    pub fn mongo_log(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut map = self.log_data();
+        map.insert(
+            "created_at".to_string(),
+            serde_json::Value::String(self.created_at.clone()),
+        );
+        map.insert(
+            "updated_at".to_string(),
+            serde_json::Value::String(self.updated_at.clone()),
+        );
+        map.insert("created_by".to_string(), opt_str(&self.created_by));
+        map.insert("updated_by".to_string(), opt_str(&self.updated_by));
+        map
+    }
+
+    /// The Celery `.delay(log_data=..., mongo_log=...)` call
+    /// (`logger.py:149`) as a queue row: empty args, the two payloads as
+    /// kwargs. The task name is the jobs crate's own const, not a copy.
+    pub fn process_logs_job(&self) -> pidash_jobs::queue::NewJob {
+        let kwargs = serde_json::Value::Object(serde_json::Map::from_iter([
+            (
+                "log_data".to_string(),
+                serde_json::Value::Object(self.log_data()),
+            ),
+            (
+                "mongo_log".to_string(),
+                serde_json::Value::Object(self.mongo_log()),
+            ),
+        ]));
+        pidash_jobs::queue::NewJob::new(
+            pidash_jobs::tasks_webhooks::PROCESS_LOGS_TASK,
+            serde_json::Value::Array(Vec::new()),
+            kwargs,
+        )
+    }
+}
+
+fn opt_str(value: &Option<String>) -> serde_json::Value {
+    value
+        .clone()
+        .map(serde_json::Value::String)
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// The shipped sink: tracing events plus a best-effort `process_logs`
+/// enqueue into `rust_job_queue`. `pool: None` (pool-less states, unit
+/// tests) degrades to tracing only. A failed enqueue warns and the
+/// response stands — Python's `log_exception` swallow, verbatim.
+#[derive(Debug, Clone)]
+pub struct QueueSink<S = TracingSink> {
+    pool: Option<sqlx::PgPool>,
+    inner: S,
+}
+
+impl QueueSink<TracingSink> {
+    pub fn new(pool: Option<sqlx::PgPool>) -> Self {
+        Self {
+            pool,
+            inner: TracingSink,
+        }
+    }
+}
+
+impl<S> QueueSink<S> {
+    pub fn with_inner(pool: Option<sqlx::PgPool>, inner: S) -> Self {
+        Self { pool, inner }
+    }
+}
+
+impl<S: LogSink> LogSink for QueueSink<S> {
+    fn request(&self, record: &RequestLogRecord) {
+        self.inner.request(record);
+    }
+
+    async fn token(&self, record: &ApiTokenLogRecord) {
+        self.inner.token(record).await;
+        let Some(pool) = self.pool.clone() else {
+            return;
+        };
+        let job = record.process_logs_job();
+        if let Err(error) = pidash_jobs::queue::enqueue(&pool, &job).await {
+            tracing::warn!(
+                target: REQUEST_LOGGER_TARGET,
+                %error,
+                task = job.task.as_str(),
+                "process_logs enqueue failed; response stands",
+            );
+        }
     }
 }
 
@@ -487,6 +623,10 @@ where
             // Buffer the request body so it can be logged AND forwarded —
             // Django reads `request.body` up front the same way. An
             // unreadable body fails closed (502), like the other layers.
+            // The peer is snapshotted first: `get_client_ip` falls back to
+            // `REMOTE_ADDR` (the connection peer) when `X-Forwarded-For` is
+            // absent, so the token log carries it like the request log.
+            let peer = peer_addr(&req);
             let (parts, body) = req.into_parts();
             let request_bytes = match http_body_util::BodyExt::collect(body).await {
                 Ok(collected) => collected.to_bytes(),
@@ -496,7 +636,7 @@ where
             let path = parts.uri.path().to_string();
             let query_params = parts.uri.query().unwrap_or("").to_string();
             let headers_rendered = render_headers(&parts.headers);
-            let ip_address = client_ip(&parts.headers, None);
+            let ip_address = client_ip(&parts.headers, peer);
             let agent = parts
                 .headers
                 .get(header::USER_AGENT)
@@ -512,7 +652,7 @@ where
             };
             if config.enabled {
                 let now = utc_now_iso();
-                sink.token(&ApiTokenLogRecord {
+                let record = ApiTokenLogRecord {
                     token_identifier: api_key,
                     path,
                     method,
@@ -527,7 +667,8 @@ where
                     updated_at: now,
                     created_by: user_id.clone(),
                     updated_by: user_id,
-                });
+                };
+                sink.token(&record).await;
             }
             Ok(Response::from_parts(resp_parts, Body::from(response_bytes)))
         })
@@ -565,7 +706,7 @@ mod tests {
                 .push(Record::Request(record.clone()));
         }
 
-        fn token(&self, record: &ApiTokenLogRecord) {
+        async fn token(&self, record: &ApiTokenLogRecord) {
             self.records
                 .lock()
                 .expect("sink lock")
@@ -793,6 +934,138 @@ mod tests {
             .expect("serve");
         assert_eq!(response.status(), StatusCode::OK);
         assert!(sink.take().is_empty());
+    }
+
+    #[test]
+    fn process_logs_job_matches_celery_wire() {
+        // `.delay(log_data=..., mongo_log=...)`: empty args, the two
+        // payloads as kwargs, keys in Python insertion order, `None`s as
+        // null (Python always sends every key).
+        let record = ApiTokenLogRecord {
+            token_identifier: "sekret".to_string(),
+            path: "/api/x/".to_string(),
+            method: "POST".to_string(),
+            query_params: "a=1".to_string(),
+            headers: "{'X-Api-Key': 'sekret'}".to_string(),
+            body: Some("{\"k\": 1}".to_string()),
+            response_body: None,
+            response_code: 201,
+            ip_address: Some("1.2.3.4".to_string()),
+            user_agent: None,
+            created_at: "2026-10-10T12:00:00+00:00".to_string(),
+            updated_at: "2026-10-10T12:00:00+00:00".to_string(),
+            created_by: Some("user-9".to_string()),
+            updated_by: Some("user-9".to_string()),
+        };
+        let job = record.process_logs_job();
+        assert_eq!(job.task, "pi_dash.bgtasks.logger_task.process_logs");
+        assert_eq!(job.args, serde_json::Value::Array(Vec::new()));
+        let kwargs = job.kwargs.as_object().expect("kwargs object");
+        assert_eq!(kwargs.keys().collect::<Vec<_>>(), ["log_data", "mongo_log"]);
+        let log_data = kwargs["log_data"].as_object().expect("log_data");
+        assert_eq!(
+            log_data.keys().collect::<Vec<_>>(),
+            [
+                "token_identifier",
+                "path",
+                "method",
+                "query_params",
+                "headers",
+                "body",
+                "response_body",
+                "response_code",
+                "ip_address",
+                "user_agent",
+            ]
+        );
+        assert_eq!(log_data["token_identifier"], "sekret");
+        assert_eq!(log_data["response_code"], 201);
+        assert_eq!(log_data["response_body"], serde_json::Value::Null);
+        assert_eq!(log_data["user_agent"], serde_json::Value::Null);
+        let mongo_log = kwargs["mongo_log"].as_object().expect("mongo_log");
+        assert_eq!(
+            mongo_log.keys().collect::<Vec<_>>(),
+            [
+                "token_identifier",
+                "path",
+                "method",
+                "query_params",
+                "headers",
+                "body",
+                "response_body",
+                "response_code",
+                "ip_address",
+                "user_agent",
+                "created_at",
+                "updated_at",
+                "created_by",
+                "updated_by",
+            ]
+        );
+        assert_eq!(mongo_log["created_by"], "user-9");
+        // The mongo half extends the postgres half, field for field.
+        for (key, value) in log_data {
+            assert_eq!(&mongo_log[key], value, "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn token_log_uses_connect_info_peer_without_forwarded_header() {
+        // `get_client_ip` falls back to `REMOTE_ADDR` (the connection
+        // peer) when `X-Forwarded-For` is absent — the token log carries
+        // it like the request log does.
+        let sink = VecSink::default();
+        let response = TokenLogLayer::new(LoggingConfig::enabled(), sink.clone())
+            .layer(ok_router())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/x/")
+                    .header("x-api-key", "sekret")
+                    .extension(axum::extract::ConnectInfo(
+                        "127.0.0.1:4321"
+                            .parse::<std::net::SocketAddr>()
+                            .expect("addr"),
+                    ))
+                    .body(Body::from("hi"))
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        let records = sink.take();
+        assert_eq!(records.len(), 1);
+        let Record::Token(record) = &records[0] else {
+            panic!("expected a token record");
+        };
+        assert_eq!(record.ip_address.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn queue_sink_without_pool_delegates_only() {
+        // Pool-less states (and unit tests) degrade to tracing only: the
+        // record still reaches the inner sink, and nothing is enqueued.
+        let inner = VecSink::default();
+        let sink = QueueSink::with_inner(None, inner.clone());
+        let response = TokenLogLayer::new(LoggingConfig::enabled(), sink)
+            .layer(ok_router())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/x/")
+                    .header("x-api-key", "sekret")
+                    .body(Body::from("hi"))
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        let records = inner.take();
+        assert_eq!(records.len(), 1);
+        let Record::Token(record) = &records[0] else {
+            panic!("expected a token record");
+        };
+        assert_eq!(record.token_identifier, "sekret");
     }
 
     #[tokio::test]

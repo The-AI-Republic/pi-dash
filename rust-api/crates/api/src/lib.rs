@@ -69,7 +69,7 @@ pub use edge::{EdgeFlags, EdgeHandle, Prefix, DEFAULT_UPSTREAM};
 pub use edge_shadow::{ShadowConfig, METRICS_PATH as SHADOW_METRICS_PATH};
 pub use middleware::{
     stack, ApiTokenLogRecord, BodyLimitLayer, CorsConfig, CorsLayer, GzipLayer, LogSink,
-    LoggerUserId, LoggingConfig, MemorySessionStore, PgSessionStore, RequestLogRecord,
+    LoggerUserId, LoggingConfig, MemorySessionStore, PgSessionStore, QueueSink, RequestLogRecord,
     RequestLoggerLayer, RequestSession, SecurityConfig, SecurityLayer, SessionConfig,
     SessionExpiry, SessionHandle, SessionLayer, SessionRow, SessionStore, StoreError,
     StoredSession, TokenLogLayer, TracingSink,
@@ -107,6 +107,9 @@ pub fn build_app(state: AppState, extra: Option<axum::Router<AppState>>) -> axum
     let store = state
         .pools()
         .map(|pools| PgSessionStore::new(pools.primary().clone()));
+    // The token-log `process_logs` enqueue rides the same primary pool;
+    // pool-less states degrade to tracing only (`QueueSink` with `None`).
+    let queue_pool = state.pools().map(|pools| pools.primary().clone());
     let router = with_routes(state, extra.unwrap_or_default());
     stack(
         router,
@@ -115,7 +118,7 @@ pub fn build_app(state: AppState, extra: Option<axum::Router<AppState>>) -> axum
         settings.file_size_limit.max(0) as u64,
         &LoggingConfig::enabled(),
         SessionConfig::from_settings(&settings, store),
-        TracingSink,
+        QueueSink::new(queue_pool),
     )
 }
 
