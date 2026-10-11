@@ -1711,7 +1711,7 @@ async fn bulk_insert(
         return Ok(Vec::new());
     }
     let mut builder = sqlx::QueryBuilder::new(
-        "INSERT INTO issue_activities (id, created_at, updated_at, created_by, updated_by, deleted_at, project_id, workspace_id, issue_id, verb, field, old_value, new_value, comment, attachments, issue_comment_id, actor_id, old_identifier, new_identifier, epoch) ",
+        "INSERT INTO issue_activities (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, verb, field, old_value, new_value, comment, attachments, issue_comment_id, actor_id, old_identifier, new_identifier, epoch) ",
     );
     builder.push_values(rows.iter(), |mut row, bound| {
         row.push_bind(Uuid::new_v4())
@@ -1768,7 +1768,7 @@ async fn insert_immediate(
 ) -> Result<(), DispatchError> {
     let bound = bind_row(row.clone())?;
     sqlx::query(
-        "INSERT INTO issue_activities (id, created_at, updated_at, created_by, updated_by, deleted_at, project_id, workspace_id, issue_id, verb, field, old_value, new_value, comment, attachments, issue_comment_id, actor_id, old_identifier, new_identifier, epoch) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, $8, $9, $10, $11, '{}'::varchar[], $12, $13, $14, $15, $16)",
+        "INSERT INTO issue_activities (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, verb, field, old_value, new_value, comment, attachments, issue_comment_id, actor_id, old_identifier, new_identifier, epoch) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, $8, $9, $10, $11, '{}'::varchar[], $12, $13, $14, $15, $16)",
     )
     .bind(Uuid::new_v4())
     .bind(created_at)
