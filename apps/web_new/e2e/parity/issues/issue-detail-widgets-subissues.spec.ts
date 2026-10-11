@@ -6,11 +6,11 @@
 // and adding sub-issues, remove vs delete — against scenario-owned
 // issues, green on apps/web first.
 //
-// bug: NEWFRONT-139 — on the seeded dev stack the widget panel never
-// renders its rows (header counts are correct, the body stays empty), so
-// every row-dependent assertion below documents the observed gap instead
-// of the intended rows. Intended: rows render with identifier, name, and
-// inline properties; row menus offer remove/delete/edit.
+// Dev-only bug NEWFRONT-139 — on the dev oracle the widget panel never
+// renders its rows (StrictMode double-toggle of the visibility flag). The
+// production oracle renders rows with identifier and name, and every
+// row-dependent assertion below polls for that. Row menus (remove/delete/
+// edit) and inline property edits stay uncovered; see ISS-176/ISS-177.
 // Rows: ISS-173, ISS-174, ISS-175, ISS-176.
 import { test, expect } from "../fixtures";
 import { createState, deleteState, fetchIssue, issueFacts, patchIssue, signInSession, subIssues } from "../helpers/api";
@@ -18,7 +18,7 @@ import { specTags, specTitle } from "../helpers/tags";
 import { dropIssue, ownIssue, signIn } from "./detail-support";
 
 test(
-  specTitle(["ISS-173"], "bug: NEWFRONT-139 widget action row and sections render only with content"),
+  specTitle(["ISS-173"], "widget action row and sections render with content"),
   { tag: specTags(["ISS-173"]) },
   async ({ driver, seed }) => {
     await signIn(driver, seed);
@@ -47,8 +47,10 @@ test(
         expect(await driver.widgetTitles()).not.toContain("Attachments");
         expect(await driver.widgetProgress("Sub-work items")).toBe("0/1 Done");
       });
-      await test.step("bug: the panel body stays empty though the server has the child", async () => {
-        expect(await driver.widgetRowNames("Sub-work items")).toEqual([]);
+      await test.step("the panel body renders the child row", async () => {
+        await expect
+          .poll(async () => (await driver.widgetRowNames("Sub-work items")).join("\n"), { timeout: 30_000 })
+          .toContain(child.name);
         const subs = await subIssues(seed.workspaceSlug, seed.projectId, issue.id, session);
         expect(subs.map((row) => row["name"])).toContain(child.name);
       });
@@ -60,7 +62,7 @@ test(
 );
 
 test(
-  specTitle(["ISS-174"], "bug: NEWFRONT-139 sub-issue progress rollup without rendered rows"),
+  specTitle(["ISS-174"], "sub-issue progress rollup with rendered rows"),
   { tag: specTags(["ISS-174"]) },
   async ({ driver, seed }) => {
     await signIn(driver, seed);
@@ -82,8 +84,12 @@ test(
       await test.step("progress counts the completed child", async () => {
         await expect.poll(() => driver.widgetProgress("Sub-work items"), { timeout: 30_000 }).toBe("1/2 Done");
       });
-      await test.step("bug: rows stay unrendered though the server has both children", async () => {
-        expect(await driver.widgetRowNames("Sub-work items")).toEqual([]);
+      await test.step("both children render rows", async () => {
+        for (const name of [open.name, done.name]) {
+          await expect
+            .poll(async () => (await driver.widgetRowNames("Sub-work items")).join("\n"), { timeout: 30_000 })
+            .toContain(name);
+        }
         const subs = await subIssues(seed.workspaceSlug, seed.projectId, parent.id, session);
         expect(subs.map((row) => row["name"]).sort()).toEqual([done.name, open.name].sort());
       });
@@ -97,7 +103,7 @@ test(
 );
 
 test(
-  specTitle(["ISS-175"], "bug: NEWFRONT-139 sub-issue create-new modal and add-existing"),
+  specTitle(["ISS-175"], "sub-issue create-new modal and add-existing"),
   { tag: specTags(["ISS-175"]) },
   async ({ driver, seed }) => {
     await signIn(driver, seed);
@@ -133,8 +139,12 @@ test(
           .toBe(parent.id);
         await expect.poll(() => driver.widgetProgress("Sub-work items"), { timeout: 60_000 }).toBe("0/2 Done");
       });
-      await test.step("bug: neither child renders a row", async () => {
-        expect(await driver.widgetRowNames("Sub-work items")).toEqual([]);
+      await test.step("both children render rows", async () => {
+        for (const name of [createdName, existing.name]) {
+          await expect
+            .poll(async () => (await driver.widgetRowNames("Sub-work items")).join("\n"), { timeout: 30_000 })
+            .toContain(name);
+        }
       });
     } finally {
       const rows = await issueFacts(seed.workspaceSlug, seed.projectId, session).catch(() => []);
@@ -147,7 +157,7 @@ test(
 );
 
 test(
-  specTitle(["ISS-176"], "bug: NEWFRONT-139 sub-issue remove vs delete is unreachable without rows"),
+  specTitle(["ISS-176"], "sub-issue remove vs delete with rendered rows"),
   { tag: specTags(["ISS-176"]) },
   async ({ driver, seed }) => {
     await signIn(driver, seed);
@@ -162,8 +172,14 @@ test(
       await driver.openIssueDetail(seed.workspaceSlug, parent.seq);
       await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(parent.name);
       await expect.poll(() => driver.widgetProgress("Sub-work items"), { timeout: 30_000 }).toBe("0/2 Done");
-      await test.step("bug: no rows render, so the row menus are unreachable", async () => {
-        expect(await driver.widgetRowNames("Sub-work items")).toEqual([]);
+      await test.step("both children render rows", async () => {
+        // The per-row ellipsis menus stay uncovered: detach/delete below go
+        // through the API and assert the header counts, not the menus.
+        for (const name of [detached.name, destroyed.name]) {
+          await expect
+            .poll(async () => (await driver.widgetRowNames("Sub-work items")).join("\n"), { timeout: 30_000 })
+            .toContain(name);
+        }
       });
       await test.step("remove (detach) keeps the issue and drops the count", async () => {
         await patchIssue(seed.workspaceSlug, seed.projectId, detached.id, session, { parent_id: null });

@@ -76,13 +76,12 @@ export async function mintPasswordResetToken(email: string): Promise<{ uid: stri
 export async function mintMagicCode(email: string, code?: string): Promise<string> {
   const value = code ?? String(Math.floor(100000 + Math.random() * 900000));
   const payload = JSON.stringify({ current_attempt: 0, email, token: value });
-  await execFileAsync(
-    "docker",
-    ["exec", "-i", "parity19-redis", "redis-cli", "SET", `magic_${email}`, payload, "EX", "600"],
-    {
-      timeout: 60_000,
-    }
-  );
+  // Slotted stacks rename the redis container (NEWFRONT-246); the shared
+  // parity19 default is unchanged.
+  const container = process.env["PARITY_REDIS_CONTAINER"] ?? "parity19-redis";
+  await execFileAsync("docker", ["exec", "-i", container, "redis-cli", "SET", `magic_${email}`, payload, "EX", "600"], {
+    timeout: 60_000,
+  });
   return value;
 }
 

@@ -185,11 +185,12 @@ services:
     depends_on:
       - api
 
-  # The old app as a production build (opt-in: PARITY_ORACLE_MODE=prod).
-  # Same code as `oracle`, built by Dockerfile.oracle-prod and served as
-  # static files by nginx on :3000. It needs a fraction of the dev server's
-  # CPU and memory, and its image layers are reused until the old app's own
-  # sources change. Behind a profile so the default stack is unchanged.
+  # The old app as a production build (the default oracle; select the dev
+  # server with PARITY_ORACLE_MODE=dev). Same code as `oracle`, built by
+  # Dockerfile.oracle-prod and served as static files by nginx on :3000. It
+  # needs a fraction of the dev server's CPU and memory, and its image layers
+  # are reused until the old app's own sources change. Behind a profile so a
+  # bare `docker compose up` never starts both oracles at once.
   oracle-prod:
     build:
       context: ../../../../..

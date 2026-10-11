@@ -37,7 +37,10 @@ test.describe("repository star action", () => {
       test.setTimeout(300_000);
       const src = await driver.repoStarIconSrc();
       expect(src).not.toBeNull();
-      expect(src).toMatch(/github-(white|black)\.png/);
+      // The production build fingerprints assets (github-white-<hash>.png)
+      // while the dev server serves them unhashed; both name the same
+      // theme-adaptive asset (NEWFRONT-246).
+      expect(src).toMatch(/github-(white|black)(-[A-Za-z0-9_-]+)?\.png/);
     }
   );
 });

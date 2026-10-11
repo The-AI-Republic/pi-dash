@@ -121,6 +121,11 @@ test(
       `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
       sessionBrowserCookies(session)
     );
+    // Settle before switching: the switcher buttons render before the
+    // stored selection applies (filters still fetching), and a switch
+    // clicked into that window is overwritten when the fetch lands (the
+    // suite's ISS-001 coverage polls here for the same reason).
+    await expect.poll(async () => driver.layoutsListVisible(), { timeout: 120_000 }).toEqual(true);
 
     await test.step("a UI switch survives reload", async () => {
       await driver.layoutsSwitchTo("spreadsheet");

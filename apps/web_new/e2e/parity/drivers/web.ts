@@ -11211,12 +11211,17 @@ export class WebDriver implements ParityDriver {
     // The modal has no dedicated close control; Escape dismisses it via
     // the dialog shell. Parity specs never dirty the form first, so no
     // draft prompt intervenes.
-    await this.page.keyboard.press("Escape");
+    // Press Escape on every poll round, not once: an Escape sent before
+    // the dialog shell attaches its key listener is swallowed (observed
+    // on the fast production oracle, where the heading renders first and
+    // the first Escape lands too early while the second closes). Slow
+    // builds close on the first press and exit the loop at once.
     const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
     for (;;) {
+      await this.page.keyboard.press("Escape");
+      await this.page.waitForTimeout(500);
       if (!(await this.layoutsWorkItemModalVisible())) return;
       if (Date.now() >= deadline) throw new Error("[parity] work-item modal never closed.");
-      await this.page.waitForTimeout(500);
     }
   }
 

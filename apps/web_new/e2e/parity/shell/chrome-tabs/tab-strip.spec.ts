@@ -6,9 +6,11 @@
 // in a fixed order, keeps the active tab highlighted through nested routes
 // and work-item detail pages, and persists per-tab default and hide choices
 // per member, with hidden tabs retrievable behind the overflow menu. Bare
-// project addresses do not redirect (bug NEWFRONT-141) and narrow widths
-// never pool trailing tabs (bug NEWFRONT-142), so those two scenarios prove
-// the degenerate behaviors only and must not become parity targets. The
+// project addresses do not redirect (bug NEWFRONT-141), so that scenario
+// proves the degenerate behavior only and must not become a parity target.
+// Narrow widths pool trailing tabs behind the overflow menu on the
+// production oracle (dev-only NEWFRONT-142 clipped without pooling); the
+// pooling scenario is a parity target. The
 // strip only mounts in tabbed mode, so each width-sensitive scenario
 // enables it and every feature flag through the server first and restores
 // both after. Rows: SHELL-075, SHELL-076, SHELL-077, SHELL-078, SHELL-079.
@@ -208,10 +210,8 @@ test(
   }
 );
 
-const BUG_078 = "NEWFRONT-142";
-
 test(
-  specTitle(ROWS_078, `bug: narrow widths clip tabs without pooling them (${BUG_078})`),
+  specTitle(ROWS_078, "narrow widths pool trailing tabs into the overflow menu"),
   { tag: specTags(ROWS_078) },
   async ({ driver, seed }) => {
     await test.step("sign in through the UI", async () => {
@@ -242,17 +242,25 @@ test(
       await expect.poll(() => driver.projectTabs(), { timeout: 60_000 }).not.toEqual([]);
     });
 
-    await test.step("narrow widths clip trailing tabs without pooling them", async () => {
-      // The responsive measurement never recomputes its visible count, so
-      // narrowing the strip clips trailing tabs instead of pooling them
-      // and no overflow trigger ever renders for width pressure.
+    await test.step("narrow widths pool trailing tabs into the overflow menu", async () => {
+      // Production truth (NEWFRONT-246): narrowing the strip pools trailing
+      // tabs behind the overflow trigger. The old bug: scenario asserted the
+      // dev oracle, where the resize measurement never recomputes (StrictMode
+      // double-mount disconnects the tab strip's ResizeObserver), so widths
+      // clipped without pooling there — recorded as dev-only on
+      // NEWFRONT-142. The row and scenario follow production, which is what
+      // users run.
       await driver.openProjectTab(seed.workspaceSlug, seed.projectId, "issues");
       const wide = await driver.projectTabs();
       expect(wide.length).toBeGreaterThan(0);
+      expect(await driver.overflowTriggerPresent()).toBe(false);
       await driver.setViewportSize(500, 800);
       await driver.page.waitForTimeout(2_000);
-      expect(await driver.projectTabs()).toEqual(wide);
-      expect(await driver.overflowTriggerPresent()).toBe(false);
+      await expect.poll(() => driver.overflowTriggerPresent(), { timeout: 30_000 }).toBe(true);
+      await driver.openOverflowMenu();
+      const pooled = await driver.overflowRowNames();
+      expect(pooled.length).toBeGreaterThan(0);
+      expect(pooled).toContain("Schedulers");
       await driver.setViewportSize(1280, 720);
     });
 
