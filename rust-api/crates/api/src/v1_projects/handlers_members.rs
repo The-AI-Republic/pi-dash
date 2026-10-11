@@ -2372,7 +2372,8 @@ async fn inv_detail_patch_inner(
 }
 
 /// `DELETE invitations/<pk>/` (`invite.py:141-154`): accepted and
-/// responded guards, then the instance soft-delete (`deleted_at` only).
+/// responded guards, then the instance soft-delete (`deleted_at` +
+/// `updated_*`, plus the fan-out enqueue).
 async fn inv_detail_delete(
     State(state): State<AppState>,
     Path((slug, pk_raw)): Path<(String, String)>,
@@ -2417,13 +2418,20 @@ async fn inv_detail_delete_inner(
             "code": "INVITE_ALREADY_RESPONDED",
         })));
     }
-    // Instance `.delete()` through the soft-deletion queryset: only
-    // `deleted_at` is stamped (`mixins.py:49-57`).
-    sqlx::query("UPDATE workspace_member_invites SET deleted_at = now() WHERE id = $1")
-        .bind(invite.id)
-        .execute(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    // Instance `delete()` → `save()`: `deleted_at` + `updated_*`
+    // (`mixins.py:72-77`, `base.py:23-44`), then the unconditional
+    // `soft_delete_related_objects.delay(...)` enqueue (`:78`).
+    let now = chrono::Utc::now();
+    sqlx::query(
+        "UPDATE workspace_member_invites SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3",
+    )
+    .bind(now)
+    .bind(actor.id)
+    .bind(invite.id)
+    .execute(&pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    super::handlers_project::enqueue_soft_delete(&pool, "workspacememberinvite", &invite.id).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
