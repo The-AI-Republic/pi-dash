@@ -2638,8 +2638,12 @@ async fn module_destroy(
     // (`db/mixins.py:77-78`) — before the queryset deletes below, which
     // are bulk updates with no job.
     enqueue_soft_delete(&pool, "module", &module_id).await;
+    // The bridge queryset goes through the soft-delete manager, so only
+    // live rows are re-stamped (`mixins.py:48-58`): re-stamping already
+    // deleted rows would collide on unique (issue_id, module_id,
+    // deleted_at) when a pair has two deleted bridges (PIDASHCONV-875).
     sqlx::query(
-        r#"UPDATE module_issues SET deleted_at = now() WHERE module_id = $1 AND project_id = $2"#,
+        r#"UPDATE module_issues SET deleted_at = now() WHERE module_id = $1 AND project_id = $2 AND deleted_at IS NULL"#,
     )
     .bind(module_id)
     .bind(project_id)
