@@ -5212,6 +5212,195 @@ export interface ModulesTimelineRow {
   href: string | null;
   /** Whether a status glyph renders beside the name. */
   statusGlyph: boolean;
+
+  // --- NEWFRONT-317 (pages navigation pane + versions, PAGE-045-054).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. Covers the page-detail canvas host: the slide-over
+  // --- pane shell, the canvas-edge heading preview, the outline/assets/info
+  // --- tabs, and the version timeline with its snapshot overlay, gated
+  // --- restore, and error paths. Editor reads/writes here stay primitive
+  // --- (open, text, type, paste); toolbar and block surfaces belong to the
+  // --- sibling children (PAGE-026-044), which own their own method names.
+
+  /** Open a page detail and wait for the live editor to be ready. */
+  pagesPaneOpenDetail(workspaceSlug: string, projectId: string, pageId: string): Promise<void>;
+  /** Open a page detail with a raw query string (shareable pane/version links). */
+  pagesPaneOpenDetailQuery(workspaceSlug: string, projectId: string, pageId: string, query: string): Promise<void>;
+  /** Open a page detail that renders no editable region (locked pages). */
+  pagesPaneOpenDetailReadOnly(workspaceSlug: string, projectId: string, pageId: string): Promise<void>;
+  /** Visible text of the live editor. */
+  pagesPaneEditorText(): Promise<string>;
+  /** Focus the live editor at its end, ready for typing. */
+  pagesPaneEditorClickEnd(): Promise<void>;
+  /** Type text into the focused live editor. */
+  pagesPaneEditorType(text: string): Promise<void>;
+  /** Press Enter in the live editor. */
+  pagesPaneEditorPressEnter(): Promise<void>;
+  /** Vertical scroll offset of the editor scroll container. */
+  pagesPaneEditorScrollTop(): Promise<number>;
+  /** Paste HTML into the live editor (image-bearing fixtures for the assets tab). */
+  pagesPaneEditorPasteHtml(html: string): Promise<void>;
+  /** Current value of a page query key (pane tab, selected version), or null. */
+  pagesPaneQueryParam(key: string): Promise<string | null>;
+  /** Whether the navigation pane is open (its close control shows). */
+  pagesPaneIsOpen(): Promise<boolean>;
+  /** Open the pane through the toolbar toggle; resolves once it opens. */
+  pagesPaneOpenViaToolbar(): Promise<void>;
+  /** Close the pane through its close control; resolves once it closes. */
+  pagesPaneClose(): Promise<void>;
+  /** Rendered width of the pane shell in CSS pixels. */
+  pagesPaneWidth(): Promise<number>;
+  /** Pane tab labels in display order. */
+  pagesPaneTabNames(): Promise<string[]>;
+  /** Active pane tab key from the URL, or null when the pane is closed. */
+  pagesPaneActiveTab(): Promise<string | null>;
+  /** Select a pane tab; resolves once its panel renders. */
+  pagesPaneSelectTab(name: string): Promise<void>;
+  /** Rendered width of the canvas content column in CSS pixels. */
+  pagesPaneCanvasWidth(): Promise<number>;
+  /** Whether the pane shell carries a slide transition (animated open/close). */
+  pagesPaneSlideTransition(): Promise<boolean>;
+  /** Whether the canvas-edge heading preview shows (pane closed). */
+  pagesPanePreviewVisible(): Promise<boolean>;
+  /** Number of heading bars the collapsed preview renders. */
+  pagesPanePreviewBarCount(): Promise<number>;
+  /** Hover the collapsed preview to expand its heading card. */
+  pagesPanePreviewHover(): Promise<void>;
+  /** Whether the expanded preview heading card shows. */
+  pagesPanePreviewCardVisible(): Promise<boolean>;
+  /** Heading texts in the expanded preview card. */
+  pagesPanePreviewCardHeadings(): Promise<string[]>;
+  /** Click the collapsed preview; resolves once the pane opens. */
+  pagesPanePreviewOpen(): Promise<void>;
+  /** Outline tab headings in display order (level from indentation). */
+  pagesPaneOutlineHeadings(): Promise<PagesPaneOutlineHeading[]>;
+  /** Click an outline heading; the caller polls the editor scroll offset. */
+  pagesPaneOutlineClick(text: string): Promise<void>;
+  /** Whether the outline empty illustration shows. */
+  pagesPaneOutlineEmptyVisible(): Promise<boolean>;
+  /** Asset rows in display order (thumbnail, view/download links). */
+  pagesPaneAssetsRows(): Promise<PagesPaneAssetRow[]>;
+  /** Hover an asset row; whether its download action reveals. */
+  pagesPaneAssetsDownloadVisible(name: string): Promise<boolean>;
+  /** Whether the assets empty illustration shows. */
+  pagesPaneAssetsEmptyVisible(): Promise<boolean>;
+  /** Live document statistics cards (words, characters, paragraphs, read time). */
+  pagesPaneStats(): Promise<PagesPaneStats>;
+  /** Info tab actor rows (last editor + creator with profile links). */
+  pagesPaneActors(): Promise<PagesPaneActor[]>;
+  /** Version timeline entries: the current-version row plus snapshots. */
+  pagesPaneVersionEntries(): Promise<PagesPaneVersionEntry[]>;
+  /** Select a timeline snapshot; resolves once the overlay opens. */
+  pagesPaneSelectVersion(versionId: string): Promise<void>;
+  /** Select the current-version timeline row; resolves once the overlay closes. */
+  pagesPaneSelectCurrentVersion(): Promise<void>;
+  /** Whether the version snapshot overlay is open. */
+  pagesPaneOverlayOpen(): Promise<boolean>;
+  /** Overlay header: snapshot title plus the read-only marker. */
+  pagesPaneOverlayHeader(): Promise<PagesPaneOverlayHeader>;
+  /** Visible text of the overlay snapshot body. */
+  pagesPaneOverlayText(): Promise<string>;
+  /** Whether the overlay shows its loading skeleton. */
+  pagesPaneOverlaySkeletonVisible(): Promise<boolean>;
+  /** Stall the version-detail fetch so the skeleton stays up (test hook). */
+  pagesPaneOverlayStallDetail(): Promise<void>;
+  /** Release a stalled version-detail fetch (test hook). */
+  pagesPaneOverlayReleaseDetail(): Promise<void>;
+  /** Whether the overlay shows its restore control. */
+  pagesPaneRestoreVisible(): Promise<boolean>;
+  /** Click restore; resolves once the overlay closes or a notice lands. */
+  pagesPaneRestore(): Promise<void>;
+  /** Whether the overlay shows its load-error panel. */
+  pagesPaneOverlayErrorVisible(): Promise<boolean>;
+  /** Load-error panel texts (heading, body, retry label). */
+  pagesPaneOverlayErrorTexts(): Promise<{ heading: string | null; body: string | null; retry: string | null }>;
+  /** Click the error panel retry action. */
+  pagesPaneOverlayRetry(): Promise<void>;
+  /** Fail version-detail fetches with HTTP 500 (test hook). */
+  pagesPaneFailVersionDetail(): Promise<void>;
+  /** Stop failing version-detail fetches (test hook). */
+  pagesPaneUnfailVersionDetail(): Promise<void>;
+  /** Version-detail fetches observed since the last fail/stall hook armed. */
+  pagesPaneVersionDetailRequests(): Promise<number>;
+  /** Click the first live-editor block containing the text (for mid-doc edits). */
+  pagesPaneEditorClickText(text: string): Promise<void>;
+  /** Select all live-editor content and delete it. */
+  pagesPaneEditorClear(): Promise<void>;
+  /** Click the live-editor image block, then delete it. */
+  pagesPaneEditorDeleteImage(): Promise<void>;
+  /** Omit a workspace member from member-list answers (deactivated lookalike). */
+  pagesPaneOmitWorkspaceMember(userId: string): Promise<void>;
+  /** Stop omitting workspace members from member-list answers. */
+  pagesPaneRestoreWorkspaceMembers(): Promise<void>;
+  /**
+   * Leave the detail view through the creator profile link and come back,
+   * so the pane's shared editor handle remounts on warm client state.
+   */
+  pagesPaneProfileRoundtrip(): Promise<void>;
+}
+
+/** One outline heading as the pane lists it (NEWFRONT-317, PAGE-047). */
+export interface PagesPaneOutlineHeading {
+  /** Heading level from indentation, or null when unreadable. */
+  level: 1 | 2 | 3 | null;
+  /** Visible heading text. */
+  text: string;
+}
+
+/** One assets-tab row as the pane lists it (NEWFRONT-317, PAGE-048). */
+export interface PagesPaneAssetRow {
+  /** Visible file name. */
+  name: string;
+  /** Whether the row renders a thumbnail. */
+  thumbnail: boolean;
+  /** Row link target (view variant). */
+  viewHref: string;
+  /** Download action target (download variant). */
+  downloadHref: string;
+}
+
+/** Live document statistics cards (NEWFRONT-317, PAGE-049). */
+export interface PagesPaneStats {
+  /** Rendered words count. */
+  words: number;
+  /** Rendered characters count. */
+  characters: number;
+  /** Rendered paragraphs count. */
+  paragraphs: number;
+  /** Rendered estimated reading time. */
+  readTime: string;
+}
+
+/** One info-tab actor row (NEWFRONT-317, PAGE-050). */
+export interface PagesPaneActor {
+  /** Which row this is: the last editor or the creator. */
+  role: "edited" | "created";
+  /** Visible display name (or the deactivated fallback). */
+  name: string;
+  /** Profile link target. */
+  profileHref: string;
+  /** Visible time text (relative for the editor, calendar for the creator). */
+  timeText: string;
+}
+
+/** One version-timeline entry (NEWFRONT-317, PAGE-051). */
+export interface PagesPaneVersionEntry {
+  /** Snapshot id, or null for the current-version row. */
+  id: string | null;
+  /** Visible entry label (row title or snapshot timestamp). */
+  label: string;
+  /** Visible author name, or empty for the current-version row. */
+  author: string;
+  /** Whether the entry shows highlighted as active. */
+  active: boolean;
+}
+
+/** Version-overlay header facts (NEWFRONT-317, PAGE-052). */
+export interface PagesPaneOverlayHeader {
+  /** Visible header title (snapshot timestamp or the loading text). */
+  title: string;
+  /** Whether the read-only marker shows. */
+  viewOnly: boolean;
 }
 
 /** One collaboration socket close as the browser observed it. */

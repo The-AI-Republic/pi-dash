@@ -90,6 +90,12 @@ import type {
   ServedShellMarkers,
   WorkspaceOnboardingView,
   PagesLiveSocketClose,
+  PagesPaneActor,
+  PagesPaneAssetRow,
+  PagesPaneOutlineHeading,
+  PagesPaneOverlayHeader,
+  PagesPaneStats,
+  PagesPaneVersionEntry,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -27743,5 +27749,736 @@ export class WebDriver implements ParityDriver {
     // the committed URL (bounded) instead of reading the blank.
     await popup.waitForFunction(() => window.location.href !== "about:blank", { timeout: 10_000 }).catch(() => {});
     return popup.url();
+  }
+
+  // --- Pages navigation pane + versions (NEWFRONT-317, PAGE-045-054).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. Every selector below was observed on the running
+  // --- old app. Reads scope to the pane aside (tabs never leak live-editor
+  // --- content) and to the canvas scroll column (live-editor reads never
+  // --- leak the snapshot overlay's editor). The two icon-only controls
+  // --- without accessible names (the sticky-toolbar pane toggle, the
+  // --- hover preview card) resolve structurally (icon identity, group
+  // --- position); everything else uses roles, labels, links, and text.
+  private pagesPaneDetailSeen = 0;
+  private pagesPaneDetailMode: "pass" | "stall" | "fail" = "pass";
+  private pagesPaneDetailGates: Array<() => void> = [];
+  private pagesPaneDetailHooked = false;
+  private pagesPaneOmittedMember: string | null = null;
+  private pagesPaneMemberHooked = false;
+
+  /** Install the member-list filter once; the omitted id steers each answer. */
+  private async pagesPaneMemberHook(): Promise<void> {
+    if (this.pagesPaneMemberHooked) return;
+    this.pagesPaneMemberHooked = true;
+    const omit = async (route: Route): Promise<void> => {
+      const omitted = this.pagesPaneOmittedMember;
+      if (route.request().method() !== "GET" || omitted === null) {
+        await route.fallback();
+        return;
+      }
+      const answer = await route.fetch();
+      let payload: unknown;
+      try {
+        payload = await answer.json();
+      } catch {
+        await route.fallback();
+        return;
+      }
+      const rows = Array.isArray(payload) ? payload : (payload as { results?: unknown[] }).results;
+      if (!Array.isArray(rows)) {
+        await route.fallback();
+        return;
+      }
+      const kept = rows.filter((row) => {
+        const rec = row as { member?: { id?: unknown }; id?: unknown };
+        return rec.member?.id !== omitted && rec.id !== omitted;
+      });
+      const body = Array.isArray(payload) ? kept : { ...(payload as Record<string, unknown>), results: kept };
+      await route.fulfill({ status: answer.status(), contentType: "application/json", body: JSON.stringify(body) });
+    };
+    await this.page.route("**/api/workspaces/*/members/", omit);
+    await this.page.route("**/api/workspaces/*/projects/*/members/", omit);
+  }
+
+  /** The pane shell: the aside hosting the close control (always mounted). */
+  private pagesPaneRoot(): Locator {
+    return this.page.locator("aside", {
+      has: this.page.getByRole("button", { name: "Close navigation pane" }),
+    });
+  }
+
+  /** The canvas scroll column: parent of the content container (excludes the overlay). */
+  private pagesPaneLiveScope(): Locator {
+    return this.page.locator("#page-content-container").locator("xpath=..");
+  }
+
+  /**
+   * The live document body editor: the frame renderer's direct editor
+   * container inside the canvas column. The page title is a separate
+   * contenteditable nested in the header block (never a direct editor
+   * container of the frame), and the snapshot overlay's editor sits
+   * outside the canvas column, so this reads the body alone.
+   */
+  private pagesPaneLiveEditor(): Locator {
+    return this.pagesPaneLiveScope().locator('.frame-renderer > .editor-container [contenteditable="true"]');
+  }
+
+  /** The live document body container (for text reads without an editable region). */
+  private pagesPaneLiveBody(): Locator {
+    return this.pagesPaneLiveScope().locator(".frame-renderer > .editor-container");
+  }
+
+  /** The overlay's read-only marker (only rendered while a snapshot loads or shows). */
+  private pagesPaneViewOnly(): Locator {
+    return this.page.getByText("View only", { exact: true });
+  }
+
+  /** The overlay header row, via the read-only marker it always carries. */
+  private pagesPaneOverlayHeaderRow(): Locator {
+    return this.pagesPaneViewOnly().locator("xpath=../..");
+  }
+
+  /** The overlay load-error heading (only rendered on fetch failure). */
+  private pagesPaneOverlayErrorHeading(): Locator {
+    return this.page.getByText("Something went wrong!", { exact: true });
+  }
+
+  private async pagesPaneWaitLiveEditor(): Promise<void> {
+    await this.waitForContent("page live editor", () =>
+      this.pagesPaneLiveEditor().first().waitFor({ timeout: 60_000 })
+    );
+  }
+
+  async pagesPaneOpenDetail(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.pagesPaneWaitLiveEditor();
+  }
+
+  async pagesPaneOpenDetailQuery(
+    workspaceSlug: string,
+    projectId: string,
+    pageId: string,
+    query: string
+  ): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}?${query}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.pagesPaneWaitLiveEditor();
+  }
+
+  async pagesPaneOpenDetailReadOnly(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    // Locked pages render no editable region, so this waits for the body
+    // alone instead of the live editor.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await expect
+      .poll(async () => (await this.pagesPaneLiveBody().count()) > 0, { timeout: WebDriver.WAIT_MS })
+      .toBe(true);
+  }
+
+  async pagesPaneEditorText(): Promise<string> {
+    const editable = this.pagesPaneLiveEditor();
+    if ((await editable.count()) > 0) {
+      return (
+        (await editable
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+    }
+    // Read-only viewers get no editable region; read the rendered body.
+    const rendered = this.pagesPaneLiveBody();
+    if ((await rendered.count()) === 0) return "";
+    return (
+      (await rendered
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async pagesPaneEditorClickEnd(): Promise<void> {
+    const paras = this.pagesPaneLiveEditor().locator("p");
+    if ((await paras.count()) > 0) {
+      await paras.last().click({ timeout: WebDriver.OPEN_MS });
+    } else {
+      await this.pagesPaneLiveEditor().first().click({ timeout: WebDriver.OPEN_MS });
+    }
+    await this.page.keyboard.press("End");
+  }
+
+  async pagesPaneEditorType(text: string): Promise<void> {
+    await this.page.keyboard.type(text);
+  }
+
+  async pagesPaneEditorPressEnter(): Promise<void> {
+    await this.page.keyboard.press("Enter");
+  }
+
+  async pagesPaneEditorScrollTop(): Promise<number> {
+    return this.page.locator("#page-content-container").evaluate((el) => el.parentElement?.scrollTop ?? 0);
+  }
+
+  async pagesPaneEditorPasteHtml(html: string): Promise<void> {
+    // A synthetic paste event carrying text/html: exercises the editor's
+    // real paste handler (headings, images) without clipboard permissions.
+    await this.pagesPaneEditorClickEnd();
+    await this.pagesPaneLiveEditor()
+      .first()
+      .evaluate((el, markup) => {
+        const transfer = new DataTransfer();
+        transfer.setData("text/html", markup);
+        el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
+      }, html);
+  }
+
+  async pagesPaneQueryParam(key: string): Promise<string | null> {
+    return new URL(this.page.url()).searchParams.get(key);
+  }
+
+  async pagesPaneIsOpen(): Promise<boolean> {
+    // The shell slides via a negative right margin (clipping hides it, so
+    // visibility reads lie); the margin itself is the state signal.
+    const margin = await this.pagesPaneRoot().evaluate((el) => getComputedStyle(el).marginRight);
+    return margin === "0px";
+  }
+
+  /** The sticky-toolbar pane toggle: icon-only, identified by its panel icon. */
+  private pagesPaneToolbarToggle(): Locator {
+    return this.page.locator("#page-toolbar-container button:has(svg.lucide-panel-right)");
+  }
+
+  async pagesPaneOpenViaToolbar(): Promise<void> {
+    // The read-only/sticky-off variant carries an accessible name; the
+    // sticky-toolbar variant is icon-only (identified by its panel icon).
+    const labeled = this.page.getByRole("button", { name: "Open navigation pane" });
+    if ((await labeled.count()) > 0) {
+      await labeled.first().click({ timeout: WebDriver.OPEN_MS });
+    } else {
+      await this.pagesPaneToolbarToggle().first().click({ timeout: WebDriver.OPEN_MS });
+    }
+    await expect.poll(() => this.pagesPaneIsOpen(), { timeout: WebDriver.WAIT_MS }).toBe(true);
+  }
+
+  async pagesPaneClose(): Promise<void> {
+    await this.pagesPaneRoot()
+      .getByRole("button", { name: "Close navigation pane" })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.pagesPaneIsOpen(), { timeout: WebDriver.WAIT_MS }).toBe(false);
+  }
+
+  async pagesPaneWidth(): Promise<number> {
+    return this.pagesPaneRoot().evaluate((el) => el.getBoundingClientRect().width);
+  }
+
+  async pagesPaneTabNames(): Promise<string[]> {
+    const names = await this.pagesPaneRoot().getByRole("tab").allInnerTexts();
+    return names.map((name) => name.trim()).filter((name) => name !== "");
+  }
+
+  async pagesPaneActiveTab(): Promise<string | null> {
+    return this.pagesPaneQueryParam("paneTab");
+  }
+
+  async pagesPaneSelectTab(name: string): Promise<void> {
+    const tab = this.pagesPaneRoot().getByRole("tab", { name });
+    await tab.click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => tab.getAttribute("aria-selected"), { timeout: WebDriver.WAIT_MS }).toBe("true");
+  }
+
+  async pagesPaneCanvasWidth(): Promise<number> {
+    const box = await this.page.locator("#page-content-container").boundingBox();
+    if (box === null) throw new Error("[parity] page canvas container has no rendered box.");
+    return box.width;
+  }
+
+  async pagesPaneSlideTransition(): Promise<boolean> {
+    const duration = await this.pagesPaneRoot().evaluate((el) => getComputedStyle(el).transitionDuration);
+    return duration
+      .split(",")
+      .map((part) => Number.parseFloat(part.trim()))
+      .some((seconds) => Number.isFinite(seconds) && seconds > 0);
+  }
+
+  private pagesPanePreviewButton(): Locator {
+    return this.page.getByRole("button", { name: "Open outline" });
+  }
+
+  async pagesPanePreviewVisible(): Promise<boolean> {
+    const preview = this.pagesPanePreviewButton();
+    return (await preview.count()) > 0 && (await preview.first().isVisible());
+  }
+
+  async pagesPanePreviewBarCount(): Promise<number> {
+    const preview = this.pagesPanePreviewButton();
+    if ((await preview.count()) === 0) return 0;
+    return preview.first().locator('div[style*="width"]').count();
+  }
+
+  async pagesPanePreviewHover(): Promise<void> {
+    await this.pagesPanePreviewButton().hover({ timeout: WebDriver.OPEN_MS });
+  }
+
+  /** The hover preview card: the group container's unlabelled child (the labelled child is the bars button itself). */
+  private pagesPanePreviewCard(): Locator {
+    return this.pagesPanePreviewButton().locator("xpath=..").locator(':scope > div:not([role="button"])');
+  }
+
+  async pagesPanePreviewCardVisible(): Promise<boolean> {
+    // The card hides with opacity (a sized box), so Playwright visibility
+    // lies; the computed opacity is the state signal.
+    const card = this.pagesPanePreviewCard();
+    if ((await card.count()) === 0) return false;
+    const opacity = await card
+      .first()
+      .evaluate((el) => getComputedStyle(el).opacity)
+      .catch(() => "0");
+    return Number.parseFloat(opacity) > 0;
+  }
+
+  async pagesPanePreviewCardHeadings(): Promise<string[]> {
+    const card = this.pagesPanePreviewCard();
+    if ((await card.count()) === 0) return [];
+    const names = await card.first().getByRole("button").allInnerTexts();
+    return names.map((name) => name.trim()).filter((name) => name !== "");
+  }
+
+  async pagesPanePreviewOpen(): Promise<void> {
+    await this.pagesPanePreviewButton().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.pagesPaneIsOpen(), { timeout: WebDriver.WAIT_MS }).toBe(true);
+  }
+
+  async pagesPaneOutlineHeadings(): Promise<PagesPaneOutlineHeading[]> {
+    // Tab triggers carry role=tab (never role=button), so the aside's
+    // buttons are the close control plus the heading buttons; hidden
+    // panels (if mounted) filter out by visibility.
+    const buttons = this.pagesPaneRoot().getByRole("button");
+    const total = await buttons.count();
+    const found: Array<{ text: string; px: number }> = [];
+    for (let i = 0; i < total; i++) {
+      const button = buttons.nth(i);
+      if (!(await button.isVisible())) continue;
+      const text = ((await button.innerText().catch(() => "")) ?? "").trim();
+      if (text === "" || text === "Close navigation pane") continue;
+      const padding = await button.evaluate((el) => getComputedStyle(el).paddingLeft);
+      found.push({ text, px: Number.parseFloat(padding) });
+    }
+    // Levels share a 1:2:4 indentation ratio; ranking against the smallest
+    // keeps the read honest under any root font size.
+    const min = found.reduce((least, row) => Math.min(least, row.px), Number.POSITIVE_INFINITY);
+    return found.map((row) => {
+      const ratio = min > 0 && Number.isFinite(row.px) ? row.px / min : Number.NaN;
+      const level: 1 | 2 | 3 | null =
+        Math.abs(ratio - 1) < 0.01 ? 1 : Math.abs(ratio - 2) < 0.01 ? 2 : Math.abs(ratio - 4) < 0.01 ? 3 : null;
+      return { level, text: row.text };
+    });
+  }
+
+  async pagesPaneOutlineClick(text: string): Promise<void> {
+    await this.pagesPaneRoot().getByRole("button", { name: text, exact: true }).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesPaneOutlineEmptyVisible(): Promise<boolean> {
+    const empty = this.pagesPaneRoot().getByText("Missing headings", { exact: true });
+    const art = this.pagesPaneRoot().locator('img[alt="depicts the outline of a page"]');
+    return (
+      (await empty.count()) > 0 &&
+      (await empty.first().isVisible()) &&
+      (await art.count()) > 0 &&
+      (await art.first().isVisible())
+    );
+  }
+
+  async pagesPaneAssetsRows(): Promise<PagesPaneAssetRow[]> {
+    // Row links wrap a name paragraph; the nested download links carry no
+    // paragraph, so the paragraph is the row signal.
+    const links = this.pagesPaneRoot().locator("a");
+    const total = await links.count();
+    const rows: PagesPaneAssetRow[] = [];
+    for (let i = 0; i < total; i++) {
+      const link = links.nth(i);
+      if ((await link.locator("p").count()) === 0) continue;
+      const name = (
+        (await link
+          .locator("p")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (name === "") continue;
+      const download = link.locator('a[target="_blank"]');
+      const thumb = link.locator('div[style*="background-image"]');
+      let thumbnail = false;
+      if ((await thumb.count()) > 0) {
+        const background = await thumb.first().evaluate((el) => getComputedStyle(el).backgroundImage);
+        thumbnail = background.includes("url(");
+      }
+      rows.push({
+        name,
+        thumbnail,
+        viewHref: (await link.getAttribute("href")) ?? "",
+        downloadHref:
+          (await download
+            .first()
+            .getAttribute("href")
+            .catch(() => null)) ?? "",
+      });
+    }
+    return rows;
+  }
+
+  async pagesPaneAssetsDownloadVisible(name: string): Promise<boolean> {
+    const links = this.pagesPaneRoot().locator("a");
+    const total = await links.count();
+    for (let i = 0; i < total; i++) {
+      const link = links.nth(i);
+      if ((await link.locator("p").count()) === 0) continue;
+      const text = (
+        (await link
+          .locator("p")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== name) continue;
+      await link.scrollIntoViewIfNeeded({ timeout: WebDriver.OPEN_MS });
+      await link.hover({ timeout: WebDriver.OPEN_MS });
+      const download = link.locator('a[target="_blank"]');
+      await expect.poll(() => download.isVisible().catch(() => false), { timeout: WebDriver.WAIT_MS }).toBe(true);
+      return true;
+    }
+    return false;
+  }
+
+  async pagesPaneAssetsEmptyVisible(): Promise<boolean> {
+    const empty = this.pagesPaneRoot().getByText("Missing images", { exact: true });
+    const art = this.pagesPaneRoot().locator('img[alt="depicts the assets of a page"]');
+    return (
+      (await empty.count()) > 0 &&
+      (await empty.first().isVisible()) &&
+      (await art.count()) > 0 &&
+      (await art.first().isVisible())
+    );
+  }
+
+  async pagesPaneStats(): Promise<PagesPaneStats> {
+    const readCard = async (label: string): Promise<string> => {
+      const labelEl = this.pagesPaneRoot().getByText(label, { exact: true }).first();
+      const card = labelEl.locator("xpath=..");
+      return (
+        (await card
+          .locator("h6")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+    };
+    const words = Number.parseInt(await readCard("Words"), 10);
+    const characters = Number.parseInt(await readCard("Characters"), 10);
+    const paragraphs = Number.parseInt(await readCard("Paragraphs"), 10);
+    if (!Number.isFinite(words) || !Number.isFinite(characters) || !Number.isFinite(paragraphs)) {
+      throw new Error("[parity] document statistics cards carried non-numeric counts.");
+    }
+    return { words, characters, paragraphs, readTime: await readCard("Read time") };
+  }
+
+  async pagesPaneActors(): Promise<PagesPaneActor[]> {
+    const readRow = async (label: string, role: "edited" | "created"): Promise<PagesPaneActor> => {
+      const labelEl = this.pagesPaneRoot().getByText(label, { exact: true }).first();
+      const row = labelEl.locator("xpath=following-sibling::div[1]");
+      const link = row.getByRole("link").first();
+      return {
+        role,
+        name: ((await link.innerText().catch(() => "")) ?? "").trim(),
+        profileHref: (await link.getAttribute("href")) ?? "",
+        timeText: (
+          (await row
+            .locator("xpath=./span")
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim(),
+      };
+    };
+    return [await readRow("Edited by", "edited"), await readRow("Created by", "created")];
+  }
+
+  private pagesPaneTimelineList(): Locator {
+    const label = this.pagesPaneRoot().getByText("Version history", { exact: true }).first();
+    return label.locator("xpath=..").locator("ul").first();
+  }
+
+  async pagesPaneVersionEntries(): Promise<PagesPaneVersionEntry[]> {
+    // Highlight follows the shareable version key by construction (the
+    // active entry is the one matching the URL, or the current row when
+    // no key is set), so `active` reads that same key per entry.
+    const activeVersion = await this.pagesPaneQueryParam("version");
+    const items = this.pagesPaneTimelineList().locator(":scope > li");
+    const total = await items.count();
+    const entries: PagesPaneVersionEntry[] = [];
+    for (let i = 0; i < total; i++) {
+      const item = items.nth(i);
+      const link = item.getByRole("link").first();
+      const href = (await link.getAttribute("href")) ?? "";
+      let id: string | null = null;
+      try {
+        id = new URL(href, "http://parity.invalid").searchParams.get("version");
+      } catch {
+        id = null;
+      }
+      if (id === null) {
+        entries.push({
+          id: null,
+          label: ((await link.innerText().catch(() => "")) ?? "").trim(),
+          author: "",
+          active: activeVersion === null,
+        });
+      } else {
+        const paras = item.locator("p");
+        entries.push({
+          id,
+          label:
+            (await paras.count()) > 0
+              ? (
+                  (await paras
+                    .first()
+                    .innerText()
+                    .catch(() => "")) ?? ""
+                ).trim()
+              : "",
+          author:
+            (await paras.count()) > 1
+              ? (
+                  (await paras
+                    .nth(1)
+                    .innerText()
+                    .catch(() => "")) ?? ""
+                ).trim()
+              : "",
+          active: activeVersion === id,
+        });
+      }
+    }
+    return entries;
+  }
+
+  async pagesPaneSelectVersion(versionId: string): Promise<void> {
+    await this.pagesPaneRoot().locator(`a[href*="version=${versionId}"]`).first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.pagesPaneOverlayOpen(), { timeout: WebDriver.WAIT_MS }).toBe(true);
+  }
+
+  async pagesPaneSelectCurrentVersion(): Promise<void> {
+    await this.pagesPaneRoot().getByRole("link", { name: "Current version" }).click({ timeout: WebDriver.OPEN_MS });
+    try {
+      await expect.poll(() => this.pagesPaneOverlayOpen(), { timeout: 10_000 }).toBe(false);
+    } catch {
+      // Some viewers render the current row with its key intact, so the
+      // click reselects instead of closing; history back leaves the keyed
+      // entry behind instead.
+      await this.page.goBack();
+      await expect.poll(() => this.pagesPaneOverlayOpen(), { timeout: WebDriver.WAIT_MS }).toBe(false);
+    }
+  }
+
+  /**
+   * The closed shell keeps its content mounted but fully transparent, and
+   * Playwright visibility ignores opacity, so the inherited hit-testing
+   * (toggled with the transparency) is the shown signal for anything the
+   * shell wraps.
+   */
+  private async pagesPaneOverlayShown(target: Locator): Promise<boolean> {
+    if ((await target.count()) === 0) return false;
+    const hit = await target
+      .first()
+      .evaluate((el) => getComputedStyle(el).pointerEvents)
+      .catch(() => "none");
+    return hit !== "none";
+  }
+
+  async pagesPaneOverlayOpen(): Promise<boolean> {
+    if (await this.pagesPaneOverlayShown(this.pagesPaneViewOnly())) return true;
+    return this.pagesPaneOverlayShown(this.pagesPaneOverlayErrorHeading());
+  }
+
+  async pagesPaneOverlayHeader(): Promise<PagesPaneOverlayHeader> {
+    if (await this.pagesPaneOverlayErrorVisible()) return { title: "", viewOnly: false };
+    const row = this.pagesPaneOverlayHeaderRow();
+    const title = (
+      (await row
+        .locator("h6")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return { title, viewOnly: true };
+  }
+
+  private pagesPaneOverlayBody(): Locator {
+    return this.pagesPaneOverlayHeaderRow().locator("xpath=..").locator(":scope > div").nth(1);
+  }
+
+  async pagesPaneOverlayText(): Promise<string> {
+    if (await this.pagesPaneOverlayErrorVisible()) return "";
+    return (
+      (await this.pagesPaneOverlayBody()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async pagesPaneOverlaySkeletonVisible(): Promise<boolean> {
+    if (await this.pagesPaneOverlayErrorVisible()) return false;
+    const main = this.pagesPaneOverlayHeaderRow().locator("xpath=..");
+    return this.pagesPaneOverlayShown(main.locator('[role="status"]'));
+  }
+
+  /** Install the version-detail spy once; the mode flag steers each answer. */
+  private async pagesPaneDetailHook(): Promise<void> {
+    if (this.pagesPaneDetailHooked) return;
+    this.pagesPaneDetailHooked = true;
+    const detailOnly = /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/pages\/[^/]+\/versions\/[^/]+\/$/;
+    await this.page.route(detailOnly, async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.fallback();
+        return;
+      }
+      this.pagesPaneDetailSeen += 1;
+      if (this.pagesPaneDetailMode === "fail") {
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "parity-forced-version-failure" }),
+        });
+        return;
+      }
+      if (this.pagesPaneDetailMode === "stall") {
+        await new Promise<void>((resolve) => {
+          this.pagesPaneDetailGates.push(resolve);
+        });
+      }
+      await route.fallback();
+    });
+  }
+
+  async pagesPaneOverlayStallDetail(): Promise<void> {
+    this.pagesPaneDetailSeen = 0;
+    this.pagesPaneDetailMode = "stall";
+    await this.pagesPaneDetailHook();
+  }
+
+  async pagesPaneOverlayReleaseDetail(): Promise<void> {
+    const gates = this.pagesPaneDetailGates;
+    this.pagesPaneDetailGates = [];
+    this.pagesPaneDetailMode = "pass";
+    gates.forEach((release) => release());
+  }
+
+  async pagesPaneRestoreVisible(): Promise<boolean> {
+    if (!(await this.pagesPaneOverlayOpen()) || (await this.pagesPaneOverlayErrorVisible())) return false;
+    const restore = this.pagesPaneOverlayHeaderRow().getByRole("button", { name: /^Restor(e|ing)$/ });
+    return (await restore.count()) > 0 && (await restore.first().isVisible());
+  }
+
+  async pagesPaneRestore(): Promise<void> {
+    await this.pagesPaneOverlayHeaderRow()
+      .getByRole("button", { name: "Restore", exact: true })
+      .click({ timeout: WebDriver.OPEN_MS });
+    // Settle on whichever outcome the restore takes: the overlay closing
+    // (restored) or a notice landing (failed restores keep it open). 60s:
+    // the editor write plus toast has taken 30s+ under shared-box load.
+    await expect
+      .poll(async () => !(await this.pagesPaneOverlayOpen()) || (await this.rulesLastToast()) !== null, {
+        timeout: 60_000,
+      })
+      .toBe(true);
+  }
+
+  async pagesPaneOverlayErrorVisible(): Promise<boolean> {
+    return this.pagesPaneOverlayShown(this.pagesPaneOverlayErrorHeading());
+  }
+
+  async pagesPaneOverlayErrorTexts(): Promise<{ heading: string | null; body: string | null; retry: string | null }> {
+    if (!(await this.pagesPaneOverlayErrorVisible())) return { heading: null, body: null, retry: null };
+    const heading = this.pagesPaneOverlayErrorHeading().first();
+    const panel = heading.locator("xpath=../..");
+    const body = panel.locator("p").first();
+    const retry = panel.getByRole("button").first();
+    return {
+      heading: ((await heading.innerText().catch(() => "")) ?? "").trim() || null,
+      body: (await body.count()) > 0 ? ((await body.innerText().catch(() => "")) ?? "").trim() || null : null,
+      retry: (await retry.count()) > 0 ? ((await retry.innerText().catch(() => "")) ?? "").trim() || null : null,
+    };
+  }
+
+  async pagesPaneOverlayRetry(): Promise<void> {
+    const heading = this.pagesPaneOverlayErrorHeading().first();
+    await heading.locator("xpath=../..").getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesPaneFailVersionDetail(): Promise<void> {
+    this.pagesPaneDetailSeen = 0;
+    this.pagesPaneDetailMode = "fail";
+    await this.pagesPaneDetailHook();
+  }
+
+  async pagesPaneUnfailVersionDetail(): Promise<void> {
+    this.pagesPaneDetailMode = "pass";
+  }
+
+  async pagesPaneVersionDetailRequests(): Promise<number> {
+    return this.pagesPaneDetailSeen;
+  }
+
+  async pagesPaneEditorClickText(text: string): Promise<void> {
+    await this.pagesPaneLiveBody().getByText(text).first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesPaneEditorClear(): Promise<void> {
+    await this.pagesPaneEditorClickEnd();
+    await this.page.keyboard.press("ControlOrMeta+a");
+    await this.page.keyboard.press("Backspace");
+  }
+
+  async pagesPaneEditorDeleteImage(): Promise<void> {
+    // Select-all spares image blocks, so the removal clicks the block's
+    // error placeholder (the fixture image 404s by design) to select it
+    // before pressing Backspace, as a user deleting an image would.
+    await this.pagesPaneLiveBody()
+      .getByText("Error loading image", { exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press("Backspace");
+  }
+
+  async pagesPaneOmitWorkspaceMember(userId: string): Promise<void> {
+    // Stage the client-side condition a deactivated account produces (the
+    // member lookup misses) without mutating shared seed membership: the
+    // server keeps the member, list answers just stop carrying them.
+    this.pagesPaneOmittedMember = userId;
+    await this.pagesPaneMemberHook();
+  }
+
+  async pagesPaneRestoreWorkspaceMembers(): Promise<void> {
+    this.pagesPaneOmittedMember = null;
+  }
+
+  async pagesPaneProfileRoundtrip(): Promise<void> {
+    const labelEl = this.pagesPaneRoot().getByText("Created by", { exact: true }).first();
+    const row = labelEl.locator("xpath=following-sibling::div[1]");
+    const link = row.getByRole("link").first();
+    await this.page.evaluate(() => {
+      (window as unknown as Record<string, string>).__parityWarmMount = "alive";
+    });
+    await link.click({ timeout: WebDriver.OPEN_MS });
+    await this.page.waitForURL((url) => url.pathname.includes("/profile/"), { timeout: WebDriver.WAIT_MS });
+    await this.page.goBack();
+    await this.pagesPaneWaitLiveEditor();
+    const warm = await this.page
+      .evaluate(() => (window as unknown as Record<string, string>).__parityWarmMount)
+      .catch(() => undefined);
+    if (warm !== "alive") {
+      throw new Error("[parity] the profile roundtrip reloaded the page; the detail view remounted cold.");
+    }
   }
 }

@@ -48,6 +48,15 @@
 	handle /live/* {
 		reverse_proxy {$LIVE_UPSTREAM:live:3001}
 	}
+	# Realtime collaboration (NEWFRONT-317): oracles built with an empty
+	# VITE_LIVE_BASE_URL fall back to <origin>[/live]/collaboration in the
+	# browser (the /live prefix depends on the baked VITE_LIVE_BASE_PATH).
+	# Point LIVE_UPSTREAM at the slot's natively run live server to serve
+	# it; unset keeps the frontend catch-all below (offline fallback
+	# intact), so the runbook is unchanged.
+	handle /collaboration* {
+		reverse_proxy {$LIVE_UPSTREAM:oracle:3000}
+	}
 	# The oracle normally runs in Docker as `oracle:3000`. Point
 	# ORACLE_UPSTREAM at `host.docker.internal:<port>` to serve a natively
 	# run frontend through the same one-origin proxy instead; unset means
