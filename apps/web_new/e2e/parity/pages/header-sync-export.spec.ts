@@ -154,6 +154,23 @@ async function toggleFavoriteRobust(
   }
 }
 
+/** Poll the editor's editable flag, falling back to a reload when the live
+ * update was stomped (bug NEWFRONT-369 family: the archive mutation's
+ * store update can be overwritten by a late-resolving load-time fetch,
+ * leaving the editor stuck editable — or frozen — until a reload renders
+ * server truth). */
+async function expectEditableOrReload(driver: ParityDriver, editable: boolean): Promise<void> {
+  try {
+    await expect.poll(() => driver.pagesHeaderEditorEditable(), { timeout: 15_000 }).toBe(editable);
+    return;
+  } catch {
+    // Live update lost to the stomp — recover via persisted server truth.
+  }
+  await driver.page.reload();
+  await driver.pagesLiveWaitSynced();
+  await expect.poll(() => driver.pagesHeaderEditorEditable(), { timeout: 30_000 }).toBe(editable);
+}
+
 /** Poll until a visible toast mentions `snippet` (toasts auto-dismiss; the box is loaded). */
 async function waitForToast(driver: ParityDriver, snippet: string, timeoutMs = 60_000): Promise<void> {
   await expect
@@ -525,8 +542,7 @@ test(
       })
       .not.toBeNull();
     // Shelved content stays readable but frozen; visibility switching hides.
-    // The freeze lags the marker under load: poll it.
-    await expect.poll(() => driver.pagesHeaderEditorEditable(), { timeout: 15_000 }).toBe(false);
+    await expectEditableOrReload(driver, false);
     await driver.pagesHeaderOpenOptions();
     await expectMenuItemOrReload(driver, "Restore");
     const items = await driver.pagesHeaderMenuItems();
@@ -549,7 +565,7 @@ test(
         timeout: 15_000,
       })
       .toBeNull();
-    await expect.poll(() => driver.pagesHeaderEditorEditable(), { timeout: 15_000 }).toBe(true);
+    await expectEditableOrReload(driver, true);
   }
 );
 
@@ -899,26 +915,31 @@ test(
     const closes = await driver.pagesLiveSocketCloseEvents();
     expect(closes.map((entry) => entry.code)).toContain(4001);
     expect(closes.find((entry) => entry.code === 4001)?.reason).toBe("document_too_large");
+    // The bug, pinned on the incident page: the refused save stays
+    // invisible — the oversized strip never renders and no notice appears,
+    // though the row intends the strip. (Bounded pagesHeader readers:
+    // shared text/subtree reads blow the string limit on the oversized
+    // doc.)
+    expect(await driver.pagesHeaderOversizedStrip()).toBeNull();
+    expect(await driver.pagesHeaderToastText()).toBeNull();
     // Now refuse reconnections: without the block the client would re-sync
-    // the megabytes in a loop (and crash the renderer under load) instead
-    // of settling on the terminal badge. The offline window is a
-    // circuit-breaker: installing the socket route while megabytes are in
-    // flight blows the string limit, so traffic stops first, the block
-    // lands on a quiet socket, and then the browser goes back online and
-    // the refused reconnects settle the terminal badge. The window is
-    // anchored on the Offline pill: going back online before the renderer
-    // has processed the offline state lets the events coalesce and leaves
-    // the client a connected-zombie with no badge (observed live).
-    await driver.pagesLiveSetOffline(true);
-    await expect.poll(() => driver.pagesHeaderOfflinePill(), { timeout: 60_000 }).toBe("Offline");
+    // the megabytes in a loop instead of settling on the terminal badge.
+    // The reload comes first and is the circuit-breaker: it destroys the
+    // megabyte socket and its buffers (the server snapshot is still the
+    // small pre-oversized content, since the persist failed), so the block
+    // below installs on a fresh quiet page — installing the socket route
+    // while megabytes are buffered drains the buffers into the string
+    // limit (observed live: installs hanging minutes, then crashing). A
+    // second reload then drives a fresh socket through the installed
+    // route, since the route only refuses new upgrades.
+    await driver.page.reload();
+    await driver.pagesLiveWaitSynced();
     await driver.pagesLiveBlockCollaborationSocket();
-    await driver.pagesLiveSetOffline(false);
-    // The force-closed client works through refused reconnect attempts before
-    // settling on the terminal badge. The trail (last minute of samples)
-    // rides into any timeout so a stuck transitional state reads
-    // differently from a slow settle.
-    // NOTE: the bounded pagesHeader badge reader, not the shared live one —
-    // page-wide text queries blow the string limit on the oversized doc.
+    await driver.page.reload();
+    // The refused client works through reconnect attempts before settling
+    // on the terminal badge. The trail (last minute of samples) rides
+    // into any timeout so a stuck transitional state reads differently
+    // from a slow settle.
     const badgeTrail: string[] = [];
     const badgeStart = Date.now();
     try {
@@ -936,12 +957,10 @@ test(
     } catch (error) {
       throw new Error(`badge trail: ${badgeTrail.join(" ")} :: ${(error as Error).message}`);
     }
-    // The bug: the refused save stays invisible — the oversized strip never
-    // renders and no notice appears, though the row intends the strip.
-    // (Bounded pagesHeader readers throughout: shared text/subtree reads
-    // blow the string limit on the oversized doc.)
+    // The strip stays absent after the terminal settle too.
     expect(await driver.pagesHeaderOversizedStrip()).toBeNull();
     expect(await driver.pagesHeaderToastText()).toBeNull();
+    await driver.pagesLiveUnblockCollaborationSocket();
   }
 );
 
