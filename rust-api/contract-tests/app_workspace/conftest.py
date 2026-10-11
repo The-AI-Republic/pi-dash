@@ -28,6 +28,30 @@ def db():
 
 @pytest.fixture(autouse=True)
 def clean_db(db):
+    # Sweep rows with FKs into projects that Database.reset() does not
+    # know about (the draft-to-issue convert mints issues + sequences) so
+    # the reset below never hits a foreign key — the auth_session/license
+    # sweep-before-reset precedent. Drafts and favorites go before
+    # projects: both carry a project FK that reset() deletes later.
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            for table in (
+                "issue_sequences",
+                "issue_assignees",
+                "issue_labels",
+                "user_favorites",
+                "issues",
+                "draft_issue_assignees",
+                "draft_issue_cycles",
+                "draft_issue_labels",
+                "draft_issue_modules",
+                "draft_issues",
+                "states",
+                "project_members",
+                "projects",
+            ):
+                cur.execute(f"DELETE FROM {table}")
+        conn.commit()
     db.reset()
     yield
 

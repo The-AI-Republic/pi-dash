@@ -394,6 +394,33 @@ class Database:
             conn.commit()
         return {"id": mid}
 
+    def make_project(self, workspace_id, identifier, *, name=None):
+        pid = str(uuid.uuid4())
+        now = _now()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into projects
+                       (created_at, updated_at, id, name, description, network,
+                        identifier, workspace_id, cycle_view, module_view,
+                        issue_views_view, page_view, intake_view, archive_in,
+                        close_in, logo_props, is_time_tracking_enabled,
+                        is_issue_type_enabled, guest_view_all_features, timezone,
+                        members_can_edit_states, repo_url, base_branch,
+                        agent_default_interval_seconds, agent_default_max_ticks,
+                        agent_ticking_enabled, is_default,
+                        agent_review_default_interval_seconds,
+                        default_agent_executor,
+                        agent_test_default_interval_seconds)
+                       values (%s,%s,%s,%s,'',0,%s,%s,true,true,true,true,true,
+                               365,365,'{}',true,false,false,'UTC',true,'','',
+                               10800,10,true,false,10800,'local_runner',10800)""",
+                    (now, now, pid, name or f"proj-{identifier}",
+                     identifier, workspace_id),
+                )
+            conn.commit()
+        return {"id": pid, "identifier": identifier}
+
 class LazyDatabase:
     """Thin psycopg wrapper. Connections are lazy so ``pytest --collect-only``
     works with no database around; fixtures connect on first use.
