@@ -4408,6 +4408,24 @@ export class WebDriver implements ParityDriver {
     await items.filter({ hasText: action }).first().click({ timeout: WebDriver.OPEN_MS });
   }
 
+  async downloadWidgetRowFile(widget: string, rowName: string): Promise<{ fileName: string; bytes: Buffer }> {
+    // Attachment rows open their file in a new tab, which serves the bytes
+    // as a download while the tab itself stays blank; capture both halves.
+    const popupWait = this.page.waitForEvent("popup", { timeout: WebDriver.OPEN_MS }).catch(() => null);
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: 60_000 }),
+      this.clickWidgetRow(widget, rowName),
+    ]);
+    const popup = await popupWait;
+    if (!popup) throw new Error(`[parity] row ${JSON.stringify(rowName)} downloaded without opening a tab.`);
+    await popup.close().catch(() => undefined);
+    const stream = await download.createReadStream();
+    if (!stream) throw new Error(`[parity] download of ${JSON.stringify(rowName)} produced no bytes.`);
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    return { fileName: download.suggestedFilename(), bytes: Buffer.concat(chunks) };
+  }
+
   /**
    * First app dialog with rendered content, or null. The dialog wrapper
    * itself has a zero box (positioning shell — Playwright calls it

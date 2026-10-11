@@ -1470,6 +1470,9 @@ export class WebNewDriver implements ParityDriver {
   async clickWidgetRowAction(_widget: string, _rowName: string, _action: string): Promise<void> {
     return todo("clickWidgetRowAction");
   }
+  async downloadWidgetRowFile(_widget: string, _rowName: string): Promise<{ fileName: string; bytes: Buffer }> {
+    return todo("downloadWidgetRowFile");
+  }
   async confirmModalTitle(): Promise<string | null> {
     return todo("confirmModalTitle");
   }
