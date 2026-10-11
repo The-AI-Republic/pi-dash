@@ -17,6 +17,12 @@ const checker = join(here, "parity-disk-check.sh");
 
 const DF_STUB = [
   "#!/bin/sh",
+  'if [ "${DF_FAIL:-}" = "${2:-}" ] && [ -n "${DF_FAIL:-}" ]; then exit 1; fi',
+  'if [ "${DF_GARBAGE:-0}" = "1" ]; then',
+  '  echo "Filesystem 1024-blocks Used Available Capacity Mounted on"',
+  '  echo "garbage line without numbers"',
+  "  exit 0",
+  "fi",
   'case "${2:-}" in',
   '  /extra) pct="${DF_EXTRA_PCT:-50}" ;;',
   '  /var/lib/docker) pct="${DF_DOCKER_PCT:-50}" ;;',
@@ -151,5 +157,67 @@ describe("parity disk guard", () => {
     assert.equal(badFlag.status, 2);
     const missingValue = runChecker(bin, { args: ["--path"] });
     assert.equal(missingValue.status, 2);
+  });
+
+  it("prints usage for --help and -h", () => {
+    const bin = stubBin();
+    for (const flag of ["--help", "-h"]) {
+      const result = runChecker(bin, { args: [flag] });
+      assert.equal(result.status, 0);
+      assert.match(result.stdout, /usage: parity-disk-check\.sh/);
+    }
+  });
+
+  it("rejects non-numeric and out-of-range thresholds", () => {
+    const bin = stubBin();
+    const warnNaN = runChecker(bin, {
+      env: { PARITY_DISK_WARN_PCT: "eighty" },
+    });
+    assert.equal(warnNaN.status, 2);
+    assert.match(warnNaN.stderr, /PARITY_DISK_WARN_PCT must be an integer/);
+    for (const value of ["0", "101"]) {
+      const warnRange = runChecker(bin, {
+        env: { PARITY_DISK_WARN_PCT: value },
+      });
+      assert.equal(warnRange.status, 2);
+      assert.match(warnRange.stderr, /integers 1-100/);
+      const maxRange = runChecker(bin, {
+        env: { PARITY_DISK_MAX_USE_PCT: value },
+      });
+      assert.equal(maxRange.status, 2);
+      assert.match(maxRange.stderr, /integers 1-100/);
+    }
+  });
+
+  it("rejects a warn threshold equal to the refuse threshold", () => {
+    const result = runChecker(stubBin(), {
+      env: { PARITY_DISK_WARN_PCT: "90", PARITY_DISK_MAX_USE_PCT: "90" },
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /must be below/);
+  });
+
+  it("treats a docker data-root of / as the same filesystem", () => {
+    const bin = stubBin();
+    const healthy = runChecker(bin, {
+      env: { DF_ROOT_PCT: "50", DOCKER_ROOT_DIR: "/" },
+    });
+    assert.equal(healthy.status, 0);
+    assert.match(healthy.stdout, /same filesystem/);
+    const full = runChecker(bin, {
+      env: { DF_ROOT_PCT: "95", DOCKER_ROOT_DIR: "/" },
+    });
+    assert.equal(full.status, 1);
+    assert.match(full.stdout, /\/ at 95% used/);
+  });
+
+  it("exits 2 when df fails or reports garbage", () => {
+    const bin = stubBin();
+    const failed = runChecker(bin, { env: { DF_FAIL: "/" } });
+    assert.equal(failed.status, 2);
+    assert.match(failed.stderr, /cannot read disk usage/);
+    const garbage = runChecker(bin, { env: { DF_GARBAGE: "1" } });
+    assert.equal(garbage.status, 2);
+    assert.match(garbage.stderr, /cannot read disk usage/);
   });
 });
