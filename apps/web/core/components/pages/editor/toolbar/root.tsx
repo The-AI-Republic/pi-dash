@@ -62,7 +62,6 @@ export const PageEditorToolbarRoot = observer(function PageEditorToolbarRoot(pro
               {!isNavigationPaneOpen && (
                 <button
                   type="button"
-                  data-testid="pages-pane-toggle"
                   className="grid size-6 shrink-0 place-items-center rounded-sm text-secondary transition-colors hover:bg-layer-transparent-hover hover:text-primary"
                   onClick={handleOpenNavigationPane}
                 >
