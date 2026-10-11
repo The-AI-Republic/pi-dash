@@ -140,23 +140,21 @@ Rules:
 
 ## Oracle build: dev or production
 
-By default the oracle is the old app's dev server (`oracle`). It compiles
-pages on demand, so it is the heaviest service in the stack: several hundred
-MB of memory and most of the stack's CPU while a suite runs.
+By default the oracle is the old app as a production build (`oracle-prod`:
+built by `Dockerfile.oracle-prod`, static files behind nginx). It uses a few
+MB and almost no CPU, and Docker reuses its layers until the old app's own
+sources change, so only the first bring-up pays for the build. The suite was
+confirmed green against it (NEWFRONT-246).
 
 ```sh
-PARITY_ORACLE_MODE=prod apps/web_new/e2e/parity/stack/parity-up.sh
+PARITY_ORACLE_MODE=dev apps/web_new/e2e/parity/stack/parity-up.sh
 ```
 
-serves the same code as a production build instead (`oracle-prod`: built by
-`Dockerfile.oracle-prod`, static files behind nginx). It uses a few MB and
-almost no CPU, and Docker reuses its layers until the old app's own sources
-change, so only the first bring-up pays for the build.
-
-The two builds are not identical to drive. The dev server runs React in
-StrictMode and without minification; a few recorded old-app bugs exist only
-there. Scenarios were made green against the dev oracle, so treat `prod` as
-opt-in until the suite has been confirmed against it.
+brings up the dev server instead (`oracle`), which compiles pages on demand:
+several hundred MB of memory and most of the stack's CPU while a suite runs.
+Use it when triaging a failure that only reproduces there — the dev server
+runs React in StrictMode and without minification, and a few recorded
+old-app bugs exist only in that mode.
 
 ## Teardown
 
@@ -195,8 +193,10 @@ The document editor needs the live endpoint to become editable. The
 oracle reads it from `VITE_LIVE_BASE_URL`, which the compose file
 derives from `PARITY_LIVE_PORT` when set (empty otherwise, keeping the
 window-origin fallback): export the slot's live port — e.g.
-`PARITY_LIVE_PORT=13089` — and (re)create the oracle so the dev server
-picks it up. Known wrinkle (NEWFRONT-188): the compose `live` image
+`PARITY_LIVE_PORT=13089` — and (re)create the oracle so it picks it up (the
+dev server reads it at startup; the production build bakes it in at build
+time, so that one keeps the fallback). Known wrinkle (NEWFRONT-188): the
+compose `live` image
 currently fails to build (pre-existing propel DTS error); until that is
 fixed, run live natively — build the workspace packages with
 `tsdown --no-dts`, write an `apps/live/.env` for the slot

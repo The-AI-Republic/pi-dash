@@ -55,15 +55,16 @@ fi
 
 echo "[parity] repo root: $REPO_ROOT"
 echo "[parity] stack project: $PARITY_PROJECT (namespace '${PARITY_NS:-<none>}')"
-# Which build of the old app serves as the oracle. dev (default): the dev
-# server, as before. prod: the production build behind nginx, far lighter on
-# CPU and memory (see oracle-prod in docker-compose.yml).
+# Which build of the old app serves as the oracle. prod (default): the
+# production build behind nginx, far lighter on CPU and memory (see
+# oracle-prod in docker-compose.yml). dev: the dev server, as before.
 export ORACLE_SERVICE
-ORACLE_SERVICE="oracle"
-if [ "${PARITY_ORACLE_MODE:-dev}" = "prod" ]; then
-  ORACLE_SERVICE="oracle-prod"
-  export ORACLE_UPSTREAM
-  ORACLE_UPSTREAM="oracle-prod:3000"
+ORACLE_SERVICE="oracle-prod"
+export ORACLE_UPSTREAM
+ORACLE_UPSTREAM="oracle-prod:3000"
+if [ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]; then
+  ORACLE_SERVICE="oracle"
+  ORACLE_UPSTREAM="oracle:3000"
 fi
 
 # Preflight: this project must not already belong to another checkout,
