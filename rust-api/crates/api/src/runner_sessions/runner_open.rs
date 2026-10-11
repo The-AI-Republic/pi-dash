@@ -241,9 +241,13 @@ fn parse_uuid(raw: &str) -> Result<Uuid, ()> {
 }
 
 /// `timezone.now().isoformat()`: `+00:00` suffix, microseconds iff
-/// nonzero (the `handlers_git_repo` `AutoSi` precedent).
+/// nonzero (the `handlers_git_repo` `AutoSi` precedent). Python
+/// datetimes carry only micros, so sub-microsecond nanos truncate
+/// first (PIDASHCONV-867); `AutoSi` would otherwise emit 9 digits.
 fn django_isoformat(now: DateTime<Utc>) -> String {
-    now.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
+    let truncated =
+        DateTime::from_timestamp_micros(now.timestamp_micros()).expect("micros in range");
+    truncated.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
 }
 
 /// Api-crate-owned Redis client (the `LivePorts` precedent):
@@ -2391,5 +2395,9 @@ mod tests {
         assert_eq!(django_isoformat(whole), "2026-10-02T22:22:34+00:00");
         let frac = whole + chrono::Duration::microseconds(118_933);
         assert_eq!(django_isoformat(frac), "2026-10-02T22:22:34.118933+00:00");
+        // Sub-microsecond nanos truncate to micros (PIDASHCONV-867):
+        // `AutoSi` would otherwise emit 9 digits.
+        let nanos = frac + chrono::Duration::nanoseconds(789);
+        assert_eq!(django_isoformat(nanos), "2026-10-02T22:22:34.118933+00:00");
     }
 }

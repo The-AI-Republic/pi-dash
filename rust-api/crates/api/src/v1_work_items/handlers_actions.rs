@@ -1145,8 +1145,12 @@ pub fn draw_jitter(
 /// Render an aware datetime the way `ticker.next_run_at.isoformat()` /
 /// `timezone.now().isoformat()` render: the stored instant with its offset,
 /// microseconds only when nonzero (the `app_integrations` precedent).
+/// Python datetimes carry only micros, so sub-microsecond nanos truncate
+/// first (PIDASHCONV-867); `AutoSi` would otherwise emit 9 digits.
 fn isoformat(dt: &DateTime<Utc>) -> String {
-    dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
+    let truncated =
+        DateTime::from_timestamp_micros(dt.timestamp_micros()).expect("micros in range");
+    truncated.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
 }
 
 /// `{"granted","reason","run_id"}` plus the ticker keys when a row exists
@@ -1965,6 +1969,22 @@ mod tests {
         ));
         assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
         assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
+    }
+
+    /// `isoformat` truncates sub-microsecond nanos to micros
+    /// (PIDASHCONV-867): Python datetimes carry only micros, so
+    /// `AutoSi` must never emit 9 digits (`yielded_at` stamps
+    /// `Utc::now()` and the archive detail serves it back).
+    #[test]
+    fn isoformat_truncates_sub_micro_nanos() {
+        use chrono::TimeZone;
+        let whole = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 2, 22, 22, 34)
+            .unwrap();
+        assert_eq!(isoformat(&whole), "2026-10-02T22:22:34+00:00");
+        let nanos =
+            whole + chrono::Duration::microseconds(118_933) + chrono::Duration::nanoseconds(789);
+        assert_eq!(isoformat(&nanos), "2026-10-02T22:22:34.118933+00:00");
     }
 
     #[test]
