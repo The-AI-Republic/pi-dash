@@ -2745,6 +2745,21 @@ pub async fn create_project_inner(
         Err(_) => return Err(Denial::ServerError),
     }
     tx.commit().await.map_err(|_| Denial::ServerError)?;
+    // `create_default_pod_for_new_project` (`runner/signals.py:31-66`): the
+    // `post_save` handler fires on `Project.objects.create`, before the
+    // admins/states below. Best-effort + idempotent — never fails creation.
+    crate::runner_runs::signals::create_default_pod_for_new_project(
+        &pre.pool,
+        &crate::runner_runs::signals::NewProject {
+            id: project_id,
+            workspace_id,
+            identifier: identifier.clone(),
+            created: true,
+            project_lead: lead,
+            default_assignee: assignee,
+        },
+    )
+    .await;
     // Creator (+ differing lead) become project admins
     // (`views/project.py:228-238`); each membership stamps its
     // `ProjectUserProperty` row (`db/models/project.py:348-364`).
