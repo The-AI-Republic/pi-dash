@@ -13600,7 +13600,8 @@ export interface ParityPageRecord {
   name: string;
   access: number | null;
   ownedBy: string;
-  updatedBy: string;
+  /** Last updater id, or null on a page nobody has touched yet. */
+  updatedBy: string | null;
   createdAt: string;
   updatedAt: string;
   descriptionHtml: string;
@@ -13723,7 +13724,7 @@ export async function serverPageRecord(
   });
   if (!res.ok) throw new Error(`[parity] page read failed with HTTP ${res.status}.`);
   const rec = (await res.json()) as Record<string, unknown>;
-  for (const key of ["id", "owned_by", "updated_by", "created_at", "updated_at"]) {
+  for (const key of ["id", "owned_by", "created_at", "updated_at"]) {
     if (typeof rec[key] !== "string") throw new Error(`[parity] page record carried no string ${key}.`);
   }
   return {
@@ -13731,7 +13732,7 @@ export async function serverPageRecord(
     name: typeof rec["name"] === "string" ? rec["name"] : "",
     access: typeof rec["access"] === "number" ? rec["access"] : null,
     ownedBy: rec["owned_by"] as string,
-    updatedBy: rec["updated_by"] as string,
+    updatedBy: typeof rec["updated_by"] === "string" ? rec["updated_by"] : null,
     createdAt: rec["created_at"] as string,
     updatedAt: rec["updated_at"] as string,
     descriptionHtml: typeof rec["description_html"] === "string" ? rec["description_html"] : "",
