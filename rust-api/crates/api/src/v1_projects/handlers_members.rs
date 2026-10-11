@@ -2718,8 +2718,9 @@ mod tests {
             ]
         );
         assert_eq!(rendered["responded_at"], Value::Null);
-        // DRF `iso-8601` rendering through the kernel: nanos kept, `Z`.
-        assert_eq!(rendered["created_at"], "2023-11-14T22:13:20.123456789Z");
+        // DRF `iso-8601` rendering through the kernel: sub-micro nanos
+        // truncate to micros, `Z` (PIDASHCONV-867).
+        assert_eq!(rendered["created_at"], "2023-11-14T22:13:20.123456Z");
         assert_eq!(rendered["updated_at"], "2023-11-14T22:13:20Z");
     }
 

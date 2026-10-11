@@ -123,12 +123,15 @@ where
 }
 
 fn render_utc_parts(base: &str, nanos: u32, suffix: &str) -> String {
-    if nanos == 0 {
+    // DRF `DateTimeField` renders Python datetimes, which carry only
+    // microseconds: no fraction when micros == 0, exactly 6 digits
+    // otherwise. Truncate sub-microsecond nanos (e.g. `Utc::now()`
+    // stamps) so HTTP output never carries 9 digits (PIDASHCONV-867).
+    let micros = nanos / 1000;
+    if micros == 0 {
         format!("{base}{suffix}")
-    } else if nanos.is_multiple_of(1000) {
-        format!("{base}.{:06}{suffix}", nanos / 1000)
     } else {
-        format!("{base}.{nanos:09}{suffix}")
+        format!("{base}.{:06}{suffix}", micros)
     }
 }
 
@@ -381,13 +384,23 @@ mod tests {
     }
 
     #[test]
-    fn sub_microsecond_nanos_use_nine_digits() {
+    fn sub_microsecond_nanos_truncate_to_micros() {
+        // PIDASHCONV-867: Python datetimes carry only micros, so DRF
+        // never emits 9 digits; sub-micro nanos truncate.
         let dt = chrono::Utc
             .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
             .unwrap()
             .with_nanosecond(123_456_789)
             .unwrap();
-        assert_eq!(render_datetime(&dt), "2024-01-02T03:04:05.123456789Z");
+        assert_eq!(render_datetime(&dt), "2024-01-02T03:04:05.123456Z");
+        // Sub-micro-only nanos (< 1µs) render with no fraction, like
+        // DRF with microsecond == 0.
+        let tiny = chrono::Utc
+            .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
+            .unwrap()
+            .with_nanosecond(999)
+            .unwrap();
+        assert_eq!(render_datetime(&tiny), "2024-01-02T03:04:05Z");
     }
 
     #[test]
