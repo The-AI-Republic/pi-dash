@@ -543,19 +543,26 @@ fn envelope(
 
 /// Soft-delete fan-out (`db/mixins.py:72-78`): instance `delete()` stamps
 /// `deleted_at` + `save()` (so `updated_at`/`updated_by` move) and posts
-/// `soft_delete_related_objects.delay("db", <model>, <pk>, using=None)`.
-/// Best-effort post-commit enqueue — without it the response still stands.
-async fn enqueue_soft_delete(pool: &PgPool, model: &str, pk: &Uuid) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+/// `soft_delete_related_objects.delay("db", <model>, <pk>, using=None)` —
+/// three positional args, `using` as a null kwarg, exactly as Python's
+/// `.delay(label, name, pk, using=using)` call sends it.
+fn soft_delete_message(model: &str, pk: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
             Value::String(model.to_owned()),
             Value::String(pk.to_string()),
-            Value::Null,
         ],
-        Default::default(),
-    );
+        kwargs,
+    )
+}
+
+/// Best-effort post-commit enqueue — without it the response still stands.
+async fn enqueue_soft_delete(pool: &PgPool, model: &str, pk: &Uuid) {
+    let message = soft_delete_message(model, pk);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),
@@ -4336,6 +4343,26 @@ async fn user_props_patch(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn soft_delete_message_shape() {
+        let id = Uuid::nil();
+        let message = soft_delete_message("workspaceuserlink", &id);
+        assert_eq!(
+            message.task,
+            pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("workspaceuserlink".to_owned()),
+                Value::String(id.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+        assert_eq!(message.kwargs.len(), 1);
+    }
 
     fn fixture_routes() -> Value {
         let path = format!(

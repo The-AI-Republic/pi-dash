@@ -1050,20 +1050,27 @@ fn render_webhook_log(row: &WebhookLog, zone: &chrono_tz::Tz) -> Value {
 // Tasks
 // ---------------------------------------------------------------------------
 
-/// `soft_delete_related_objects.delay("db", "webhook", pk, "default")`
-/// (`db/mixins.py:77-78`): positional args, no kwargs. Best-effort after
-/// commit — without it the response still stands.
-async fn enqueue_soft_delete(pool: &PgPool, webhook_id: &Uuid) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+/// `soft_delete_related_objects.delay("db", "webhook", pk, using=None)`
+/// (`db/mixins.py:78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it.
+fn soft_delete_message(webhook_id: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
             Value::String("webhook".to_owned()),
             Value::String(webhook_id.to_string()),
-            Value::String("default".to_owned()),
         ],
-        Default::default(),
-    );
+        kwargs,
+    )
+}
+
+/// Best-effort after commit — without it the response still stands.
+async fn enqueue_soft_delete(pool: &PgPool, webhook_id: &Uuid) {
+    let message = soft_delete_message(webhook_id);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),
@@ -1077,6 +1084,26 @@ async fn enqueue_soft_delete(pool: &PgPool, webhook_id: &Uuid) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soft_delete_message_shape() {
+        let id = Uuid::nil();
+        let message = soft_delete_message(&id);
+        assert_eq!(
+            message.task,
+            pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("webhook".to_owned()),
+                Value::String(id.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+        assert_eq!(message.kwargs.len(), 1);
+    }
 
     fn body(data: serde_json::Value) -> Map<String, Value> {
         match data {

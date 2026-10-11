@@ -4031,6 +4031,24 @@ pub async fn page_partial_update(
     json_response(StatusCode::OK, render_patch_row(&render, &timezone))
 }
 
+/// `soft_delete_related_objects.delay("db", "page", pk, using=None)`
+/// (`db/mixins.py:78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it.
+fn soft_delete_message(page_id: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
+        pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
+        vec![
+            Value::String("db".to_owned()),
+            Value::String("page".to_owned()),
+            Value::String(page_id.to_string()),
+        ],
+        kwargs,
+    )
+}
+
 /// `DELETE .../pages/<page_id>/` (`PageViewSet.destroy`, `base.py:368-419`).
 pub async fn page_destroy(
     State(state): State<AppState>,
@@ -4136,16 +4154,7 @@ pub async fn page_destroy(
     {
         return Denial::ServerError.into_response();
     }
-    let sweep = pidash_jobs::celery::CeleryTaskMessage::new(
-        pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
-        vec![
-            Value::String("db".to_owned()),
-            Value::String("page".to_owned()),
-            Value::String(page_id.to_string()),
-            Value::Null,
-        ],
-        Default::default(),
-    );
+    let sweep = soft_delete_message(&page_id);
     enqueue_best_effort(
         pool,
         &pidash_jobs::queue::NewJob::new(
@@ -4198,6 +4207,26 @@ mod tests {
         DECODE_FAILED_MESSAGE, HTML_SANITIZE_FAILED_MESSAGE, HTML_TOO_LARGE_MESSAGE,
         INVALID_BINARY_PREFIX,
     };
+
+    #[test]
+    fn soft_delete_message_shape() {
+        let id = uuid::Uuid::nil();
+        let message = soft_delete_message(&id);
+        assert_eq!(
+            message.task,
+            pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("page".to_owned()),
+                Value::String(id.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+        assert_eq!(message.kwargs.len(), 1);
+    }
 
     const F30_02: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),

@@ -527,20 +527,27 @@ enum DataValue<'a> {
     File(&'a str),
 }
 
-/// Best-effort post-delete sweep
-/// (`soft_delete_related_objects.delay("db", "apitoken", pk, None)`,
-/// `db/mixins.py:77-79`): without it the response still stands.
-async fn enqueue_soft_delete(pool: &sqlx::PgPool, pk: &uuid::Uuid) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+/// `soft_delete_related_objects.delay("db", "apitoken", pk, using=None)`
+/// (`db/mixins.py:78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it.
+fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = serde_json::Map::new();
+    kwargs.insert("using".to_owned(), serde_json::Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             serde_json::Value::String("db".to_owned()),
             serde_json::Value::String("apitoken".to_owned()),
             serde_json::Value::String(pk.to_string()),
-            serde_json::Value::Null,
         ],
-        Default::default(),
-    );
+        kwargs,
+    )
+}
+
+/// Best-effort post-delete sweep: without it the response still stands.
+async fn enqueue_soft_delete(pool: &sqlx::PgPool, pk: &uuid::Uuid) {
+    let message = soft_delete_message(pk);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         serde_json::Value::Array(message.args.clone()),
@@ -2463,6 +2470,26 @@ const TIMEZONE_TABLE: [(&str, &str); 120] = [
 mod tests {
     use super::*;
     use crate::v1_cycles_modules::json_cpython::JNum;
+
+    #[test]
+    fn soft_delete_message_shape() {
+        let id = uuid::Uuid::nil();
+        let message = soft_delete_message(&id);
+        assert_eq!(
+            message.task,
+            pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                serde_json::Value::String("db".to_owned()),
+                serde_json::Value::String("apitoken".to_owned()),
+                serde_json::Value::String(id.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&serde_json::Value::Null));
+        assert_eq!(message.kwargs.len(), 1);
+    }
 
     fn jstr(text: &str) -> JVal {
         JVal::Str(JStr::from_clean(text.to_owned()))
