@@ -609,7 +609,7 @@ pub struct IssueRow {
     pub state_group: Option<String>,
 }
 
-async fn fetch_issue(
+pub async fn fetch_issue(
     pool: &PgPool,
     slug: &str,
     project_id: &Uuid,
@@ -794,7 +794,7 @@ pub struct ProjectRow {
     pub default_assignee_id: Option<Uuid>,
 }
 
-async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<ProjectRow>, Denial> {
+pub async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<ProjectRow>, Denial> {
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT "agent_ticking_enabled", "agent_default_max_ticks",
                   "agent_default_interval_seconds", "agent_review_default_interval_seconds",

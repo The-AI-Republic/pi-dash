@@ -28,12 +28,19 @@
 //! * The orchestration `post_save` signal (`orchestration/signals.py`)
 //!   fires on the patch path only (PIDASHCONV-804): `capture_prior_state`
 //!   before the save, `fire_state_transition` after, through the
-//!   `CoreSignalSeam` below (the 677 `MoveSignalSeam` twin — live
-//!   `prior_state_id` + `state`, loud gaps past a dispatching
-//!   transition). It stays response-neutral — a failed handler is
-//!   logged and the save stands — so `resolve_moved_by_run`'s 400s
-//!   still match. Create and delete do not fire yet (same gap,
-//!   follow-up).
+//!   `CoreSignalSeam` below. The transition surface is live
+//!   (PIDASHCONV-856): every read the entries driver reaches, the
+//!   ticker lock/save, the clock policy, and preflight through the
+//!   jobs driver with the actions `LiveMatcher` — so arm, retime,
+//!   disarm, entry queueing and the no-eligible-runner bounce all
+//!   run. What stays a loud gap: the run-creation writers (a
+//!   preflight-pass transition logs `Failed` and the save stands),
+//!   the scheduler/comment/handoff methods (other drivers'),
+//!   and the `user_flags`/`runner` reads (the jobs-side preflight
+//!   and creation paths own them). It stays response-neutral — a
+//!   failed handler is logged and the save stands — so
+//!   `resolve_moved_by_run`'s 400s still match. Create and delete
+//!   do not fire yet (same gap, follow-up).
 //! * `PUT` on detail proxies to Django (see above).
 //! * Non-string `created_at` overrides answer 500, as Django's uncaught
 //!   `TypeError` out of `parse_datetime` does.
@@ -58,21 +65,30 @@ use chrono_tz::Tz;
 use markup5ever_rcdom::{Handle, NodeData};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_auth::permissions::membership::ProjectRoleFacts;
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_db::dispatch::status::AgentRunStatus as EngineRunStatus;
 use pidash_db::orchestration::workpad::AgentUserCollisionError;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_services::dispatch::policy::UserFlags;
-use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
-use pidash_services::orchestration::creation::{
-    AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest,
-    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RenderedTurn, RunView, RunnerView, StateView, STATE_SELECT_SQL,
+use pidash_services::dispatch::{AdmissionCache, LlmProfile};
+use pidash_services::orchestration::clock::{
+    ClockWrite, ProjectClockPolicy, CREATE_TICKER_PARAMS, LOCK_TICKER_PARAMS, SAVE_CLOCK_PARAMS,
+    SAVE_CLOCK_SQL,
 };
+use pidash_services::orchestration::creation::{
+    active_run_sql, latest_prior_run_sql, run_select_sql, AdmissionError, CreationError,
+    CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest, FinalizeAgentRunSeam,
+    IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle, RenderedTurn, RunView,
+    RunnerView, StateView, ASSIGNED_POD_SELECT_SQL, DEFAULT_POD_SELECT_SQL, ISSUE_SELECT_SQL,
+    PROJECT_SELECT_SQL, STATE_SELECT_SQL, TICKER_RESUME_SELECT_SQL,
+};
+use pidash_services::orchestration::dispatch::PROJECT_CLOCK_POLICY_SQL;
 use pidash_services::orchestration::entries::{
     capture_prior_state, fire_state_transition, BindingView, EntriesSeam, FireOutcome, FireRequest,
     NewSchedulerRun, PreflightSeam, SchedulerView, WorkspaceView, PRIOR_STATE_SELECT_SQL,
@@ -85,6 +101,7 @@ use pidash_services::v1_work_items::{filter_fields, python_number_str, FieldSpec
 
 use crate::state::AppState;
 
+use super::handlers_actions::{dispatch_deps, fetch_issue, fetch_project, LiveMatcher};
 use super::perms::{decide, gate_for, resolve_moved_by_run, RunFacts, V1WorkItemsRoute};
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
@@ -7011,8 +7028,12 @@ async fn patch_issue_inner(
         None => current_state,
     };
     fire_after_save(
+        state,
         &pre.pool,
+        slug,
+        &project_id,
         *pk,
+        pre.actor.id,
         prev_state_id,
         current_state_id,
         moved_by_run,
@@ -8657,22 +8678,53 @@ fn patch_fire_request(
 }
 
 /// The post-save fire: a non-transition answers `NoTransition` without
-/// I/O; a failed handler is logged with the verbatim line (the counter
-/// already bumped inside) and the save stands; only a *lookup* storage
-/// failure propagates to the 500 — exactly the `try` placement in
-/// `fire_state_transition` (the D-26 `fire_after_save` shape, plus the
-/// resolved `moved_by_run` only this surface carries).
+/// I/O (the pure early return below, before any dispatch input is
+/// read — a plain PATCH pays zero extra queries); a failed handler is
+/// logged with the verbatim line (the counter already bumped inside)
+/// and the save stands; only a *lookup* storage failure propagates to
+/// the 500 — exactly the `try` placement in `fire_state_transition`
+/// (the D-26 `fire_after_save` shape, plus the resolved `moved_by_run`
+/// only this surface carries).
+#[allow(clippy::too_many_arguments)]
 async fn fire_after_save(
+    state: &AppState,
     pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
     issue_id: Uuid,
+    actor_id: Uuid,
     prev_state_id: Option<Uuid>,
     current_state_id: Option<Uuid>,
     moved_by_run: Option<Uuid>,
     created_by: Option<Uuid>,
     now: DateTime<Utc>,
 ) -> Result<(), Denial> {
+    if prev_state_id == current_state_id {
+        return Ok(());
+    }
     let mut seam = CoreSignalSeam { pool };
-    let mut preflight = CorePreflight;
+    // The actions helpers fail only through their `db_error`
+    // (`ServerError`): lookups of rows the save just wrote, so any
+    // failure is the lookup storage failure the fire contract
+    // propagates to the 500.
+    let issue = fetch_issue(pool, slug, project_id, &issue_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let project = fetch_project(pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let (deps, matcher) = dispatch_deps(state, pool, actor_id, &issue, &project, now.timestamp())
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let mut preflight = CorePreflight {
+        pool: pool.clone(),
+        deps: Some(deps),
+        matcher,
+        now,
+        jitter_secs: 0.0,
+    };
     let request = patch_fire_request(
         issue_id,
         prev_state_id,
@@ -8690,31 +8742,232 @@ async fn fire_after_save(
     Ok(())
 }
 
-/// The 594 [`EntriesSeam`] for the core saves: `state` + `prior_state_id`
-/// are live (they cover the capture and the driver's non-trigger early
-/// return); the ticker/creation surface answers store errors, which the
-/// fire swallows by design (counter + the verbatim log line) while the
-/// save stands. The 677 `MoveSignalSeam` twin for this file.
+/// The live [`EntriesSeam`] for the core saves' transition fire: every
+/// read the entries driver reaches (`issue`, `project`, `state`,
+/// `latest_prior_run`, `active_run_for`, `run`, `assigned_pod`,
+/// `default_pod_for_project`, `resume_parent_run_id`,
+/// `prior_state_id`), the ticker lock/save, and the clock policy —
+/// each one shared L5/L6 SQL text executed pool-direct (one scope per
+/// statement: the save already committed before the fire, and the
+/// driver writes each clock decision straight through, the way
+/// Django's reconcile atomic plus autocommit reads land). The
+/// run-creation writers, the
+/// scheduler/comment/handoff methods, and the jobs-owned
+/// `user_flags`/`runner` reads stay [`core_seam_gap`]s: reaching one
+/// answers `Failed` (logged, save stands), never a silent wrong write.
 struct CoreSignalSeam<'a> {
     pool: &'a PgPool,
 }
 
-/// A creation-runtime method the core saves' fire reached past a
-/// dispatching transition without the D-12 runtime. The fire maps it to
-/// `Failed` (logged); the save stands.
+/// A seam method the patch fire cannot reach on a transition path
+/// (run-creation writers, scheduler/comment/handoff legs, jobs-owned
+/// reads). Reaching one answers `Failed` (logged); the save stands.
+/// Loud by design: a gap firing means the fire outgrew the transition
+/// surface this seam covers.
 fn core_seam_gap<T>(method: &str) -> Result<T, CreationError> {
     Err(CreationError::Db(format!(
-        "v1 core signal seam: {method} needs the D-12 creation runtime"
+        "v1 core signal seam: {method} is not live on the patch fire"
     )))
 }
 
+/// Map one [`ISSUE_SELECT_SQL`] row (the jobs `map_issue` shape over
+/// the same shared text).
+fn map_issue(row: &PgRow) -> Result<IssueView, sqlx::Error> {
+    Ok(IssueView {
+        id: row.try_get("id")?,
+        workspace_id: row.try_get("workspace_id")?,
+        project_id: row.try_get("project_id")?,
+        state_id: row.try_get("state_id")?,
+        parent_id: row.try_get("parent_id")?,
+        created_by_id: row.try_get("created_by_id")?,
+        assigned_pod_id: row.try_get("assigned_pod_id")?,
+        agent_executor: row.try_get("agent_executor")?,
+        git_work_branch: row.try_get("git_work_branch")?,
+        workpad: row.try_get("workpad")?,
+        name: row.try_get("name")?,
+        description_stripped: row.try_get("description_stripped")?,
+        priority: row.try_get("priority")?,
+        sequence_id: row.try_get("sequence_id")?,
+        target_date: row.try_get("target_date")?,
+    })
+}
+
+/// Map one [`PROJECT_SELECT_SQL`] row.
+fn map_project(row: &PgRow) -> Result<ProjectView, sqlx::Error> {
+    let pool: i32 = row.try_get("agent_default_max_ticks")?;
+    let interval_impl: i32 = row.try_get("agent_default_interval_seconds")?;
+    let interval_review: i32 = row.try_get("agent_review_default_interval_seconds")?;
+    let interval_test: i32 = row.try_get("agent_test_default_interval_seconds")?;
+    Ok(ProjectView {
+        id: row.try_get("id")?,
+        workspace_id: row.try_get("workspace_id")?,
+        identifier: row.try_get("identifier")?,
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        repo_url: row.try_get("repo_url")?,
+        base_branch: row.try_get("base_branch")?,
+        default_agent_executor: row.try_get("default_agent_executor")?,
+        project_lead_id: row.try_get("project_lead_id")?,
+        default_assignee_id: row.try_get("default_assignee_id")?,
+        pool: i64::from(pool),
+        interval_impl: i64::from(interval_impl),
+        interval_review: i64::from(interval_review),
+        interval_test: i64::from(interval_test),
+    })
+}
+
+fn decode_error(column: &str, value: &str) -> sqlx::Error {
+    sqlx::Error::Decode(format!("unknown agent_run.{column} {value:?}").into())
+}
+
+fn map_status(value: String) -> Result<EngineRunStatus, sqlx::Error> {
+    EngineRunStatus::from_value(&value).ok_or_else(|| decode_error("status", &value))
+}
+
+fn map_executor(value: String) -> Result<AgentExecutorKind, sqlx::Error> {
+    // Strictness is safe here (unlike the trigger): the
+    // `agent_run_cloud_has_no_local_assignment` check constraint
+    // (`runner/models.py:1065-1075`, migration 0024) admits only the
+    // three members, so an unknown stored value is unreachable.
+    AgentExecutorKind::from_value(&value).ok_or_else(|| decode_error("executor_kind", &value))
+}
+
+/// Map one L6 run row onto the services view. The trigger is carried
+/// through unparsed: Django's `TextChoices` are choices-only (no DB
+/// check), so the stored value may sit outside `AgentRunTrigger`
+/// (migration 0029) and every read path must tolerate it.
+fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
+    let status: String = row.try_get("status")?;
+    let trigger: String = row.try_get("trigger")?;
+    let executor_kind: String = row.try_get("executor_kind")?;
+    Ok(RunView {
+        id: row.try_get("id")?,
+        workspace_id: row.try_get("workspace_id")?,
+        created_by_id: row.try_get("created_by_id")?,
+        pod_id: row.try_get("pod_id")?,
+        runner_id: row.try_get("runner_id")?,
+        pinned_runner_id: row.try_get("pinned_runner_id")?,
+        parent_run_id: row.try_get("parent_run_id")?,
+        work_item_id: row.try_get("work_item_id")?,
+        status: map_status(status)?,
+        trigger,
+        executor_kind: map_executor(executor_kind)?,
+        phase_kind: row.try_get("phase_kind")?,
+        run_config: row.try_get("run_config")?,
+        tool_plan: row.try_get("tool_plan")?,
+        error_code: row.try_get("error_code")?,
+        error: row.try_get("error")?,
+        prompt: row.try_get("prompt")?,
+        prompt_manifest: row.try_get("prompt_manifest")?,
+        ended_at: row.try_get("ended_at")?,
+    })
+}
+
+/// Map one full ticker row (the jobs `map_ticker` shape over the same
+/// shared column list).
+fn map_ticker(row: &PgRow) -> Result<IssueAgentTicker, sqlx::Error> {
+    Ok(IssueAgentTicker {
+        id: row.try_get("id")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        created_by_id: row.try_get("created_by_id")?,
+        updated_by_id: row.try_get("updated_by_id")?,
+        deleted_at: row.try_get("deleted_at")?,
+        issue_id: row.try_get("issue_id")?,
+        used: row.try_get("used")?,
+        granted: row.try_get("granted")?,
+        waited: row.try_get("waited")?,
+        user_disabled: row.try_get("user_disabled")?,
+        next_run_at: row.try_get("next_run_at")?,
+        last_tick_at: row.try_get("last_tick_at")?,
+        enabled: row.try_get("enabled")?,
+        disarm_reason: row.try_get("disarm_reason")?,
+        pending_entry: row.try_get("pending_entry")?,
+        pending_entry_free: row.try_get("pending_entry_free")?,
+        pending_entry_actor_id: row.try_get("pending_entry_actor_id")?,
+        pending_entry_trigger: row.try_get("pending_entry_trigger")?,
+        resume_parent_run_id: row.try_get("resume_parent_run_id")?,
+    })
+}
+
+/// Map one [`PROJECT_CLOCK_POLICY_SQL`] row. The cadence columns are
+/// INT4; the policy widens them to i64 (the jobs `map_policy`
+/// precedent).
+fn map_policy(row: &PgRow) -> Result<ProjectClockPolicy, sqlx::Error> {
+    let interval_impl: Option<i32> = row.try_get("agent_default_interval_seconds")?;
+    let interval_review: Option<i32> = row.try_get("agent_review_default_interval_seconds")?;
+    let interval_test: Option<i32> = row.try_get("agent_test_default_interval_seconds")?;
+    Ok(ProjectClockPolicy {
+        agent_ticking_enabled: row.try_get("agent_ticking_enabled")?,
+        agent_default_max_ticks: row.try_get("agent_default_max_ticks")?,
+        agent_default_interval_seconds: interval_impl.map(i64::from),
+        agent_review_default_interval_seconds: interval_review.map(i64::from),
+        agent_test_default_interval_seconds: interval_test.map(i64::from),
+    })
+}
+
+/// Translate an L5 clock statement's `:name` placeholders to positional
+/// `$n` in `params` order (the documented handler contract in
+/// `services::orchestration::clock`; never a fork — the text still comes
+/// from the L5 consts). Longer names first so `:id` never corrupts
+/// `:issue_id`.
+fn translate_clock_sql(sql: &str, params: &[&str]) -> String {
+    let mut ordered: Vec<(usize, &&str)> = params.iter().enumerate().collect();
+    ordered.sort_by_key(|item| std::cmp::Reverse(item.1.len()));
+    let mut out = sql.to_owned();
+    for (index, name) in ordered {
+        out = out.replace(&format!(":{name}"), &format!("${}", index + 1));
+    }
+    out
+}
+
+fn lock_ticker_by_issue_sql() -> String {
+    translate_clock_sql(
+        &pidash_services::orchestration::clock::lock_ticker_sql(),
+        LOCK_TICKER_PARAMS,
+    )
+}
+
+fn create_ticker_sql() -> String {
+    translate_clock_sql(
+        &pidash_services::orchestration::clock::create_ticker_sql(),
+        CREATE_TICKER_PARAMS,
+    )
+}
+
+fn save_clock_sql() -> String {
+    translate_clock_sql(SAVE_CLOCK_SQL, SAVE_CLOCK_PARAMS)
+}
+
+/// Emit the preflight's collected lines via `tracing` (INFO → `info!`,
+/// WARNING → `warn!`), in Python order — the jobs `emit_logs` shape.
+fn emit_preflight_logs(logs: &[pidash_services::orchestration::dispatch::LogLine]) {
+    for line in logs {
+        if line.level == "WARNING" {
+            tracing::warn!("{}", line.message);
+        } else {
+            tracing::info!("{}", line.message);
+        }
+    }
+}
+
 impl CreationSeam for CoreSignalSeam<'_> {
-    async fn issue(&mut self, _issue_id: Uuid) -> Result<IssueView, CreationError> {
-        core_seam_gap("issue")
+    async fn issue(&mut self, issue_id: Uuid) -> Result<IssueView, CreationError> {
+        let row = sqlx::query(ISSUE_SELECT_SQL)
+            .bind(issue_id)
+            .fetch_one(self.pool)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        map_issue(&row).map_err(|error| CreationError::Db(error.to_string()))
     }
 
-    async fn project(&mut self, _project_id: Uuid) -> Result<ProjectView, CreationError> {
-        core_seam_gap("project")
+    async fn project(&mut self, project_id: Uuid) -> Result<ProjectView, CreationError> {
+        let row = sqlx::query(PROJECT_SELECT_SQL)
+            .bind(project_id)
+            .fetch_one(self.pool)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        map_project(&row).map_err(|error| CreationError::Db(error.to_string()))
     }
 
     async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
@@ -8731,41 +8984,74 @@ impl CreationSeam for CoreSignalSeam<'_> {
             .map(Some)
     }
 
-    async fn latest_prior_run(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        core_seam_gap("latest_prior_run")
+    async fn latest_prior_run(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        let row = sqlx::query(&latest_prior_run_sql())
+            .bind(issue_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        row.map(|row| map_run_view(&row))
+            .transpose()
+            .map_err(|error| CreationError::Db(error.to_string()))
     }
 
-    async fn active_run_for(&mut self, _issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        core_seam_gap("active_run_for")
+    async fn active_run_for(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        let row = sqlx::query(&active_run_sql())
+            .bind(issue_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        row.map(|row| map_run_view(&row))
+            .transpose()
+            .map_err(|error| CreationError::Db(error.to_string()))
     }
 
-    async fn run(&mut self, _run_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        core_seam_gap("run")
+    async fn run(&mut self, run_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        let row = sqlx::query(&run_select_sql())
+            .bind(run_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        row.map(|row| map_run_view(&row))
+            .transpose()
+            .map_err(|error| CreationError::Db(error.to_string()))
     }
 
     async fn runner(&mut self, _runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
         core_seam_gap("runner")
     }
 
-    async fn assigned_pod(&mut self, _pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
-        core_seam_gap("assigned_pod")
+    async fn assigned_pod(&mut self, pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
+        let row: Option<(Uuid, Uuid)> = sqlx::query_as(ASSIGNED_POD_SELECT_SQL)
+            .bind(pod_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        Ok(row.map(|(id, project_id)| PodView { id, project_id }))
     }
 
     async fn default_pod_for_project(
         &mut self,
-        _project_id: Uuid,
+        project_id: Uuid,
     ) -> Result<Option<PodView>, CreationError> {
-        core_seam_gap("default_pod_for_project")
+        let row: Option<(Uuid, Uuid)> = sqlx::query_as(DEFAULT_POD_SELECT_SQL)
+            .bind(project_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        Ok(row.map(|(id, project_id)| PodView { id, project_id }))
     }
 
     async fn resume_parent_run_id(
         &mut self,
-        _issue_id: Uuid,
+        issue_id: Uuid,
     ) -> Result<Option<Uuid>, CreationError> {
-        core_seam_gap("resume_parent_run_id")
+        let row: Option<(Option<Uuid>,)> = sqlx::query_as(TICKER_RESUME_SELECT_SQL)
+            .bind(issue_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        Ok(row.and_then(|row| row.0))
     }
 
     async fn work_item_id_for_run(&mut self, _run_id: Uuid) -> Result<Option<Uuid>, CreationError> {
@@ -8878,26 +9164,89 @@ impl EntriesSeam for CoreSignalSeam<'_> {
 
     async fn lock_ticker(
         &mut self,
-        _issue_id: Uuid,
+        issue_id: Uuid,
     ) -> Result<Option<IssueAgentTicker>, CreationError> {
-        core_seam_gap("lock_ticker")
+        let row: Option<PgRow> = sqlx::query(&lock_ticker_by_issue_sql())
+            .bind(issue_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        row.map(|row| map_ticker(&row))
+            .transpose()
+            .map_err(|error| CreationError::Db(error.to_string()))
     }
 
     async fn save_ticker(
         &mut self,
-        _row: &IssueAgentTicker,
-        _write: ClockWrite,
+        row: &IssueAgentTicker,
+        write: ClockWrite,
     ) -> Result<(), CreationError> {
-        core_seam_gap("save_ticker")
+        match write {
+            ClockWrite::None => Ok(()),
+            ClockWrite::Insert => {
+                // CREATE_TICKER_PARAMS order: now, created_by_id, id,
+                // issue_id, next_run_at, enabled, disarm_reason,
+                // pending_entry, pending_entry_free,
+                // pending_entry_actor_id, pending_entry_trigger,
+                // resume_parent_run_id.
+                sqlx::query(&create_ticker_sql())
+                    .bind(row.created_at)
+                    .bind(row.created_by_id)
+                    .bind(row.id)
+                    .bind(row.issue_id)
+                    .bind(row.next_run_at)
+                    .bind(row.enabled)
+                    .bind(row.disarm_reason.as_str())
+                    .bind(row.pending_entry)
+                    .bind(row.pending_entry_free)
+                    .bind(row.pending_entry_actor_id)
+                    .bind(row.pending_entry_trigger.as_str())
+                    .bind(row.resume_parent_run_id)
+                    .execute(self.pool)
+                    .await
+                    .map_err(|error| CreationError::Db(error.to_string()))?;
+                Ok(())
+            }
+            ClockWrite::Update => {
+                // SAVE_CLOCK_PARAMS order: updated_at, granted,
+                // next_run_at, enabled, disarm_reason, pending_entry,
+                // pending_entry_free, pending_entry_actor_id,
+                // pending_entry_trigger, resume_parent_run_id, id.
+                // `updated_at` stamps here, at save time — Django's
+                // `auto_now` on `_save_clock`, a later `now()` than the
+                // one `reconcile` computed `next_run_at` from.
+                sqlx::query(&save_clock_sql())
+                    .bind(Utc::now())
+                    .bind(row.granted)
+                    .bind(row.next_run_at)
+                    .bind(row.enabled)
+                    .bind(row.disarm_reason.as_str())
+                    .bind(row.pending_entry)
+                    .bind(row.pending_entry_free)
+                    .bind(row.pending_entry_actor_id)
+                    .bind(row.pending_entry_trigger.as_str())
+                    .bind(row.resume_parent_run_id)
+                    .bind(row.id)
+                    .execute(self.pool)
+                    .await
+                    .map_err(|error| CreationError::Db(error.to_string()))?;
+                Ok(())
+            }
+        }
     }
 
     fn set_rollback(&mut self) {}
 
     async fn clock_policy(
         &mut self,
-        _project_id: Uuid,
+        project_id: Uuid,
     ) -> Result<ProjectClockPolicy, CreationError> {
-        core_seam_gap("clock_policy")
+        let row: PgRow = sqlx::query(PROJECT_CLOCK_POLICY_SQL)
+            .bind(project_id)
+            .fetch_one(self.pool)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        map_policy(&row).map_err(|error| CreationError::Db(error.to_string()))
     }
 
     async fn binding(&mut self, _binding_id: Uuid) -> Result<BindingView, CreationError> {
@@ -8968,20 +9317,57 @@ impl EntriesSeam for CoreSignalSeam<'_> {
     }
 }
 
-/// Preflight for the core saves' fire: the L8 eligibility check is unmerged,
-/// so any dispatch decision fails closed (the entry aborts loudly, the
-/// save stands).
-struct CorePreflight;
+/// Preflight for the core saves' fire: the jobs
+/// `preflight_eligibility_or_bounce` driver (its own transaction and
+/// commit, like Django's bounce atomic) over the actions `LiveMatcher`,
+/// with the D-11 deps `fire_after_save` built. The deps travel by
+/// `Option` because the driver takes them by value while the seam only
+/// lends `&mut self`; the driver consults preflight at most once per
+/// fire, so the `None` arm is defensive. A store failure maps to a
+/// handler-style error (logged `Failed`, save stands), exactly as a
+/// preflight raise in Python never crashes the issue save.
+struct CorePreflight<C, H, E, P> {
+    pool: PgPool,
+    deps: Option<pidash_jobs::orchestration::StoreDeps<C, H, E, P>>,
+    matcher: LiveMatcher,
+    now: DateTime<Utc>,
+    jitter_secs: f64,
+}
 
-impl PreflightSeam for CorePreflight {
+impl<C, H, E, P> PreflightSeam for CorePreflight<C, H, E, P>
+where
+    C: AdmissionCache,
+    H: Fn(Uuid) -> bool + Clone + Send + Sync,
+    E: Fn(Uuid) -> bool + Clone + Send + Sync,
+    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+{
     async fn preflight_eligibility_or_bounce(
         &mut self,
-        _issue_id: Uuid,
-        _creator_id: Uuid,
-        _pod_id: Uuid,
-        _triggered_by: &str,
+        issue_id: Uuid,
+        creator_id: Uuid,
+        pod_id: Uuid,
+        triggered_by: &str,
     ) -> Result<bool, CreationError> {
-        core_seam_gap("preflight_eligibility_or_bounce")
+        let Some(deps) = self.deps.take() else {
+            return Err(CreationError::Db(
+                "v1 core signal seam: preflight deps already consumed".to_owned(),
+            ));
+        };
+        let out = pidash_jobs::orchestration::preflight_eligibility_or_bounce(
+            &self.pool,
+            deps,
+            &self.matcher,
+            self.now,
+            self.jitter_secs,
+            issue_id,
+            Some(creator_id),
+            pod_id,
+            triggered_by,
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))?;
+        emit_preflight_logs(&out.outcome.logs);
+        Ok(out.outcome.proceed)
     }
 }
 
@@ -9005,6 +9391,25 @@ mod signal_tests {
 
     fn uid(n: u128) -> Uuid {
         Uuid::from_u128(n)
+    }
+
+    /// Preflight is never consulted on these paths (the driver
+    /// short-circuits, or the state lookup fails first): fail loudly
+    /// if that stops being true.
+    struct UnreachedPreflight;
+
+    impl PreflightSeam for UnreachedPreflight {
+        async fn preflight_eligibility_or_bounce(
+            &mut self,
+            _issue_id: Uuid,
+            _creator_id: Uuid,
+            _pod_id: Uuid,
+            _triggered_by: &str,
+        ) -> Result<bool, CreationError> {
+            Err(CreationError::Db(
+                "signal test: preflight is unreachable on this path".to_owned(),
+            ))
+        }
     }
 
     /// The fixture pins the call: every case's inputs build exactly the
@@ -9101,7 +9506,7 @@ mod signal_tests {
             .connect_lazy("postgresql://127.0.0.1:1/core_probe")
             .expect("lazy pool");
         let mut seam = CoreSignalSeam { pool: &pool };
-        let mut preflight = CorePreflight;
+        let mut preflight = UnreachedPreflight;
         let now = chrono::Utc::now();
         let request = patch_fire_request(
             uid(9),
@@ -9127,7 +9532,7 @@ mod signal_tests {
             .connect_lazy("postgresql://127.0.0.1:1/core_probe")
             .expect("lazy pool");
         let mut seam = CoreSignalSeam { pool: &pool };
-        let mut preflight = CorePreflight;
+        let mut preflight = UnreachedPreflight;
         let now = chrono::Utc::now();
         let request = patch_fire_request(
             uid(9),

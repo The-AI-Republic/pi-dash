@@ -24,4 +24,3 @@ Rules:
 
 ## Suites
 
-- `orchestration`: PIDASHCONV-856 — signal-dispatch/reentrancy divergence: rooms don't retime, ticker doesn't arm/disarm, moves not counted queued
