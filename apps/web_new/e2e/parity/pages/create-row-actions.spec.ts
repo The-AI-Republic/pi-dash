@@ -289,7 +289,7 @@ test(
     const plain = `Plain ${tag}`;
     const starredId = await serverCreatePage(seed.workspaceSlug, projectId, session, starred);
     await serverCreatePage(seed.workspaceSlug, projectId, session, plain);
-    await serverFavoritePage(seed.workspaceSlug, projectId, starredId, session);
+    await serverFavoritePage(seed.workspaceSlug, projectId, starredId, starred, session);
     await driver.openAuthenticated(listUrl(seed, projectId), sessionBrowserCookies(session));
     await driver.pagesRowOpenList(seed.workspaceSlug, projectId);
     expect(await driver.pagesRowTitles()).toEqual(expect.arrayContaining([starred, plain]));
@@ -509,7 +509,7 @@ test(
     const projectId = await scratchProject(seed, session, "shelve");
     const name = `Shelve Me ${stamp()}`;
     const pageId = await serverCreatePage(seed.workspaceSlug, projectId, session, name);
-    await serverFavoritePage(seed.workspaceSlug, projectId, pageId, session);
+    await serverFavoritePage(seed.workspaceSlug, projectId, pageId, name, session);
     await driver.openAuthenticated(listUrl(seed, projectId), sessionBrowserCookies(session));
     await driver.pagesRowOpenList(seed.workspaceSlug, projectId);
 
