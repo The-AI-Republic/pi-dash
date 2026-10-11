@@ -779,6 +779,61 @@ fn django_formatter(
     out.write_str(&text).map_err(minijinja::Error::from)
 }
 
+/// Convert one JSON context value into a minijinja value by hand, never
+/// through serde.
+///
+/// `template.render(&Map<String, serde_json::Value>)` serializes the
+/// context via serde — and the workspace unifies
+/// `serde_json/arbitrary_precision` (from `pidash-api`), under which
+/// `Number::serialize` emits the internal token struct instead of a
+/// u64/i64/f64. minijinja then sees every JSON number as a map:
+/// `|length` counts its keys and `total > 1` compares by kind order
+/// (PIDASHCONV-865 D1: green under `-p pidash-jobs`, red under
+/// `--workspace`, and the shipped worker links the same unified
+/// features). Walking the value here keeps numbers numeric however the
+/// crate graph unifies; rendering takes the converted value, whose own
+/// `Serialize` round-trips through minijinja's value-handle fast path.
+fn mini_value(value: &Value) -> minijinja::value::Value {
+    use minijinja::value::Value as MiniValue;
+    match value {
+        Value::Null => MiniValue::from(()),
+        Value::Bool(flag) => MiniValue::from(*flag),
+        Value::Number(number) => mini_number(number),
+        Value::String(text) => MiniValue::from(text.clone()),
+        Value::Array(items) => items.iter().map(mini_value).collect::<MiniValue>(),
+        Value::Object(map) => map
+            .iter()
+            .map(|(key, item)| (key.clone(), mini_value(item)))
+            .collect::<MiniValue>(),
+    }
+}
+
+/// A JSON number as the narrowest minijinja number. `as_u64`/`as_i64`
+/// parse the stored token, so they stay exact under
+/// `arbitrary_precision`; only an out-of-range integer falls through to
+/// the 128-bit parse and then to its decimal spelling (unreachable in
+/// mail contexts — counts and small ids — but must not panic; as a
+/// display string it still renders the same digits).
+fn mini_number(number: &serde_json::Number) -> minijinja::value::Value {
+    use minijinja::value::Value as MiniValue;
+    if let Some(int) = number.as_u64() {
+        MiniValue::from(int)
+    } else if let Some(int) = number.as_i64() {
+        MiniValue::from(int)
+    } else if number.is_f64() {
+        // Checked above, so the parse cannot fail; `is_f64` (not
+        // `as_f64().is_some()`) keeps out-of-range integers on the exact
+        // 128-bit path instead of a lossy float.
+        MiniValue::from(number.as_f64().expect("is_f64 checked"))
+    } else if let Ok(int) = number.to_string().parse::<u128>() {
+        MiniValue::from(int)
+    } else if let Ok(int) = number.to_string().parse::<i128>() {
+        MiniValue::from(int)
+    } else {
+        MiniValue::from(number.to_string())
+    }
+}
+
 /// Live [`Renderer`]: the real `issue-updates.html` over minijinja with
 /// the Django-compat shims above. The environment is built once (template
 /// drift fails construction, at worker boot) and renders many contexts.
@@ -816,8 +871,9 @@ impl IssueUpdatesRenderer {
         source: &str,
         context: &Map<String, Value>,
     ) -> Result<String, RenderError> {
+        let converted = mini_value(&Value::Object(context.clone()));
         self.env
-            .render_str(source, context)
+            .render_str(source, &converted)
             .map_err(|error| RenderError::Failed(error.to_string()))
     }
 }
@@ -828,8 +884,11 @@ impl Renderer for IssueUpdatesRenderer {
             .env
             .get_template("issue-updates.html")
             .map_err(|error| RenderError::Failed(format!("bad template: {error}")))?;
+        // Convert by hand (see `mini_value`): rendering the JSON map
+        // directly would serialize numbers through serde.
+        let converted = mini_value(&Value::Object(context.clone()));
         template
-            .render(context)
+            .render(&converted)
             .map_err(|error| RenderError::Failed(format!("render failed: {error}")))
     }
 }
@@ -950,6 +1009,34 @@ mod tests {
             .expect("html")
             .to_owned();
         (context, html)
+    }
+
+    #[test]
+    fn json_numbers_convert_to_mini_numbers_not_maps() {
+        // D1: under serde_json/arbitrary_precision (unified workspace-wide
+        // via pidash-api) `Number::serialize` emits the token struct, so a
+        // serde-built context hands minijinja maps instead of numbers
+        // (`{{ x|length }}` renders "1", `total > 1` goes plural). The
+        // manual conversion must produce real numbers however the crate
+        // graph unifies — pin every JSON scalar plus nesting.
+        use minijinja::value::ValueKind;
+        assert_eq!(mini_value(&Value::Null).kind(), ValueKind::None);
+        assert_eq!(mini_value(&json!(true)).kind(), ValueKind::Bool);
+        assert_eq!(mini_value(&json!("5")).kind(), ValueKind::String);
+        for number in [json!(5), json!(-7), json!(1.5), json!(0)] {
+            let converted = mini_value(&number);
+            assert_eq!(converted.kind(), ValueKind::Number, "{number}");
+            assert_eq!(converted.to_string(), number.to_string());
+        }
+        let nested = mini_value(&json!({"n": 5, "items": [1, {"m": 2}]}));
+        assert_eq!(nested.kind(), ValueKind::Map);
+        let renderer = IssueUpdatesRenderer::new().expect("env builds");
+        let mut context = Map::new();
+        context.insert("x".to_owned(), json!(5));
+        assert_eq!(
+            renderer.render_str("{{ x|length }}", &context),
+            Ok("0".to_owned())
+        );
     }
 
     #[test]
