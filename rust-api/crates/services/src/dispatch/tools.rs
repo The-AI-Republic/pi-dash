@@ -808,11 +808,13 @@ pub fn truncate_chars(value: &str, max_chars: usize) -> &str {
     }
 }
 
-/// Whether `ch` is stripped by `str.strip()` with no args: Unicode
-/// whitespace plus U+001C–U+001F, which Python `str.isspace()` accepts
-/// but Rust `char::is_whitespace` (the `White_Space` property) does not.
+/// Whether `ch` is stripped by `str.strip()` with no args:
+/// `char::is_whitespace` plus U+001C–U+001F, which Python `str.isspace()`
+/// accepts but Rust `char::is_whitespace` does not. U+0085 (NEL) is named
+/// explicitly even though `is_whitespace` already covers it, so parity
+/// with `str.strip()` does not hinge on that quirk.
 fn is_py_space(ch: char) -> bool {
-    ch.is_whitespace() || matches!(ch, '\u{1c}' | '\u{1d}' | '\u{1e}' | '\u{1f}')
+    ch.is_whitespace() || matches!(ch, '\u{85}' | '\u{1c}' | '\u{1d}' | '\u{1e}' | '\u{1f}')
 }
 
 /// `value.strip()` (`tools.py:276,347`).
@@ -2770,6 +2772,8 @@ mod tests {
         }
         assert_eq!(py_stripped("  padded  "), "padded");
         assert_eq!(py_stripped("\u{1c}hi\u{1f}"), "hi");
+        assert_eq!(py_stripped("\u{85}AB\u{85}"), "AB");
+        assert_eq!(py_stripped("\u{85}"), "");
         assert_eq!(py_stripped("\u{0}no-strip\u{0}"), "\u{0}no-strip\u{0}");
     }
 
