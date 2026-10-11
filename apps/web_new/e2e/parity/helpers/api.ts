@@ -15757,3 +15757,162 @@ export async function serverModulesDetailLinks(
     createdAt: typeof row["created_at"] === "string" ? row["created_at"] : "",
   }));
 }
+
+// ---------------------------------------------------------------------------
+// Pages detail header actions (NEWFRONT-318, PAGE-055-064 + PAGE-074).
+// Distinctive pagesHeader* prefix; sibling ranges own pagesLive* (319),
+// pagesPane* (317), pagesPrefs*/pagesKeys*/pagesAssist*/pagesCloud*/pagesDesk*/
+// pagesNeg* (320). The detail star writes the generic user-favorites row while
+// the row names the page-scoped endpoint — both converge on the same
+// UserFavorite row (page.is_favorite is an Exists over it), so scenarios
+// assert the record flag plus the user-favorites list. Note: the backend
+// routes only the favorite-pages detail (POST/DELETE); the collection GET
+// some rows name answers 404, so no list helper exists.
+// ---------------------------------------------------------------------------
+
+/** A project page record with the header-asserted fields. */
+export interface PagesHeaderPageRecord {
+  id: string;
+  name: string;
+  /** 0 = open, 1 = restricted (EPageAccess). */
+  access: number;
+  is_favorite: boolean;
+  is_locked: boolean;
+  archived_at: string | null;
+  owned_by: string;
+  description_html: string | null;
+}
+
+/** Read one project page; throws naming the failure. */
+export async function pagesHeaderReadPage(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<PagesHeaderPageRecord> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] page read failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as {
+    id?: unknown;
+    name?: unknown;
+    access?: unknown;
+    is_favorite?: unknown;
+    is_locked?: unknown;
+    archived_at?: unknown;
+    owned_by?: unknown;
+    description_html?: unknown;
+  };
+  if (typeof row.id !== "string" || typeof row.name !== "string" || typeof row.owned_by !== "string") {
+    throw new Error("[parity] page read carried no string id/name/owned_by.");
+  }
+  return {
+    id: row.id,
+    name: row.name,
+    access: typeof row.access === "number" ? row.access : -1,
+    is_favorite: row.is_favorite === true,
+    is_locked: row.is_locked === true,
+    archived_at: typeof row.archived_at === "string" ? row.archived_at : null,
+    owned_by: row.owned_by,
+    description_html: typeof row.description_html === "string" ? row.description_html : null,
+  };
+}
+
+/** List a project's pages (open + restricted; shelved live under their own read). */
+export async function pagesHeaderListPages(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<PagesHeaderPageRecord[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] page list failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { results?: unknown };
+  const rows = Array.isArray(payload.results) ? payload.results : Array.isArray(payload) ? payload : [];
+  return (rows as Array<Record<string, unknown>>)
+    .filter((row) => typeof row["id"] === "string")
+    .map((row) => ({
+      id: row["id"] as string,
+      name: typeof row["name"] === "string" ? row["name"] : "",
+      access: typeof row["access"] === "number" ? row["access"] : -1,
+      is_favorite: row["is_favorite"] === true,
+      is_locked: row["is_locked"] === true,
+      archived_at: typeof row["archived_at"] === "string" ? row["archived_at"] : null,
+      owned_by: typeof row["owned_by"] === "string" ? row["owned_by"] : "",
+      description_html: typeof row["description_html"] === "string" ? row["description_html"] : null,
+    }));
+}
+
+/** Favorite or unfavorite a page through the page-scoped endpoint; throws naming the failure. */
+export async function pagesHeaderSetFavorite(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  favorite: boolean,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    favorite ? "POST" : "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/favorite-pages/${pageId}/`,
+    sessionCookie
+  );
+  if (!res.ok) throw new Error(`[parity] favorite patch failed with HTTP ${res.status}.`);
+}
+
+/** Switch a page between open (0) and restricted (1); throws naming the failure. */
+export async function pagesHeaderSetAccess(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  access: 0 | 1,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/access/`,
+    sessionCookie,
+    { access }
+  );
+  if (!res.ok) throw new Error(`[parity] access patch failed with HTTP ${res.status}.`);
+}
+
+/** Shelve or restore a page; throws naming the failure. */
+export async function pagesHeaderSetArchive(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  archived: boolean,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    archived ? "POST" : "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/archive/`,
+    sessionCookie
+  );
+  if (!res.ok) throw new Error(`[parity] archive patch failed with HTTP ${res.status}.`);
+}
+
+/** Generic user-favorite entities of one type (the detail star writes here). */
+export async function pagesHeaderUserFavoriteEntities(
+  workspaceSlug: string,
+  entityType: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Array<{ entity_identifier: string; entity_type: string }>> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/user-favorites/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] user-favorites read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { results?: unknown };
+  const rows = Array.isArray(payload.results) ? payload.results : Array.isArray(payload) ? payload : [];
+  return (rows as Array<Record<string, unknown>>)
+    .filter((row) => row["entity_type"] === entityType && typeof row["entity_identifier"] === "string")
+    .map((row) => ({ entity_identifier: row["entity_identifier"] as string, entity_type: entityType }));
+}

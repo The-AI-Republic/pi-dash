@@ -90,6 +90,8 @@ import type {
   CyclesHeroTrafficCounts,
   CyclesHeroUpsell,
   WorkspaceOnboardingView,
+  PagesHeaderDownload,
+  PagesHeaderExportForm,
   PagesLiveSocketClose,
   PagesKeysToolbarTooltip,
   PagesPrefsLocalConfig,
@@ -10696,5 +10698,147 @@ export class WebNewDriver implements ParityDriver {
 
   async modulesDetailFailNextLinkWrite(): Promise<void> {
     return todo("modulesDetailFailNextLinkWrite");
+  }
+
+  async pagesHeaderCopyLinkLabel(): Promise<string | null> {
+    return todo("pagesHeaderCopyLinkLabel");
+  }
+  async pagesHeaderClickCopyLink(): Promise<void> {
+    return todo("pagesHeaderClickCopyLink");
+  }
+  async pagesHeaderReadClipboard(): Promise<string> {
+    return todo("pagesHeaderReadClipboard");
+  }
+  async pagesHeaderFavoriteLabel(): Promise<string | null> {
+    return todo("pagesHeaderFavoriteLabel");
+  }
+  async pagesHeaderFavoriteFilled(): Promise<boolean> {
+    return todo("pagesHeaderFavoriteFilled");
+  }
+  async pagesHeaderToggleFavorite(): Promise<void> {
+    return todo("pagesHeaderToggleFavorite");
+  }
+  async pagesHeaderFavoritesExpanded(): Promise<boolean> {
+    return todo("pagesHeaderFavoritesExpanded");
+  }
+  async pagesHeaderFavoritesNames(): Promise<string[]> {
+    return todo("pagesHeaderFavoritesNames");
+  }
+  async pagesHeaderFailFavoriteWrites(): Promise<void> {
+    return todo("pagesHeaderFailFavoriteWrites");
+  }
+  async pagesHeaderUnfailFavoriteWrites(): Promise<void> {
+    return todo("pagesHeaderUnfailFavoriteWrites");
+  }
+  async pagesHeaderOpenOptions(): Promise<void> {
+    return todo("pagesHeaderOpenOptions");
+  }
+  async pagesHeaderMenuItems(): Promise<string[]> {
+    return todo("pagesHeaderMenuItems");
+  }
+  async pagesHeaderChooseMenuItem(_label: string): Promise<void> {
+    return todo("pagesHeaderChooseMenuItem");
+  }
+  async pagesHeaderLockLabel(): Promise<string | null> {
+    return todo("pagesHeaderLockLabel");
+  }
+  async pagesHeaderToggleLock(): Promise<void> {
+    return todo("pagesHeaderToggleLock");
+  }
+  async pagesHeaderEditorEditable(): Promise<boolean> {
+    return todo("pagesHeaderEditorEditable");
+  }
+  async pagesHeaderFailLockWrites(): Promise<void> {
+    return todo("pagesHeaderFailLockWrites");
+  }
+  async pagesHeaderUnfailLockWrites(): Promise<void> {
+    return todo("pagesHeaderUnfailLockWrites");
+  }
+  async pagesHeaderArchivedMarker(): Promise<string | null> {
+    return todo("pagesHeaderArchivedMarker");
+  }
+  async pagesHeaderDeleteDialogVisible(): Promise<boolean> {
+    return todo("pagesHeaderDeleteDialogVisible");
+  }
+  async pagesHeaderDeleteDialogText(): Promise<string> {
+    return todo("pagesHeaderDeleteDialogText");
+  }
+  async pagesHeaderConfirmDelete(): Promise<void> {
+    return todo("pagesHeaderConfirmDelete");
+  }
+  async pagesHeaderCancelDelete(): Promise<void> {
+    return todo("pagesHeaderCancelDelete");
+  }
+  async pagesHeaderCanvasMaxWidth(): Promise<string> {
+    return todo("pagesHeaderCanvasMaxWidth");
+  }
+  async pagesHeaderToolbarVisible(): Promise<boolean> {
+    return todo("pagesHeaderToolbarVisible");
+  }
+  async pagesHeaderPaneTabParam(): Promise<string | null> {
+    return todo("pagesHeaderPaneTabParam");
+  }
+  async pagesHeaderPaneOpen(): Promise<boolean> {
+    return todo("pagesHeaderPaneOpen");
+  }
+  async pagesHeaderSyncBadgeTooltip(): Promise<string | null> {
+    return todo("pagesHeaderSyncBadgeTooltip");
+  }
+  async pagesHeaderOfflinePill(): Promise<string | null> {
+    return todo("pagesHeaderOfflinePill");
+  }
+  async pagesHeaderOversizedStrip(): Promise<string | null> {
+    return todo("pagesHeaderOversizedStrip");
+  }
+  async pagesHeaderSyncBadgeText(): Promise<string | null> {
+    return todo("pagesHeaderSyncBadgeText");
+  }
+  async pagesHeaderToastText(): Promise<string | null> {
+    return todo("pagesHeaderToastText");
+  }
+  async pagesHeaderSpyDescriptionWrites(): Promise<void> {
+    return todo("pagesHeaderSpyDescriptionWrites");
+  }
+  async pagesHeaderDescriptionWriteCount(): Promise<number> {
+    return todo("pagesHeaderDescriptionWriteCount");
+  }
+  async pagesHeaderDescriptionWriteTimes(): Promise<number[]> {
+    return todo("pagesHeaderDescriptionWriteTimes");
+  }
+  async pagesHeaderDescriptionWriteStatuses(): Promise<number[]> {
+    return todo("pagesHeaderDescriptionWriteStatuses");
+  }
+  async pagesHeaderDescriptionWriteKeys(): Promise<string[]> {
+    return todo("pagesHeaderDescriptionWriteKeys");
+  }
+  async pagesHeaderSpyPageWrites(): Promise<void> {
+    return todo("pagesHeaderSpyPageWrites");
+  }
+  async pagesHeaderPageWriteCount(): Promise<number> {
+    return todo("pagesHeaderPageWriteCount");
+  }
+  async pagesHeaderPressSave(): Promise<void> {
+    return todo("pagesHeaderPressSave");
+  }
+  async pagesHeaderExportDialogVisible(): Promise<boolean> {
+    return todo("pagesHeaderExportDialogVisible");
+  }
+  async pagesHeaderExportForm(): Promise<PagesHeaderExportForm> {
+    return todo("pagesHeaderExportForm");
+  }
+  async pagesHeaderExportSetFormat(_label: string): Promise<void> {
+    return todo("pagesHeaderExportSetFormat");
+  }
+  async pagesHeaderExportSetScope(_label: string): Promise<void> {
+    return todo("pagesHeaderExportSetScope");
+  }
+  async pagesHeaderExportSetPageFormat(_label: string): Promise<void> {
+    return todo("pagesHeaderExportSetPageFormat");
+  }
+  async pagesHeaderExportConfirm(): Promise<PagesHeaderDownload> {
+    return todo("pagesHeaderExportConfirm");
+  }
+  async pagesHeaderExportCancel(): Promise<void> {
+    return todo("pagesHeaderExportCancel");
   }
 }

@@ -6745,6 +6745,111 @@ export interface ParityDriver {
   modulesDetailLinkMeta(title: string): Promise<string | null>;
   /** Fail module-links writes on this page (failure-notice proof). */
   modulesDetailFailNextLinkWrite(): Promise<void>;
+
+  // -------------------------------------------------------------------------
+  // Pages detail header actions + sync/save/export (NEWFRONT-318,
+  // PAGE-055-064 + PAGE-074). Sync-badge label/wait, offline emulation,
+  // socket blocks, and frame/close captures come from the pagesLive* range
+  // above; this range owns the header cluster, the options menu, the
+  // offline/oversized indicators, the persistence spies, and the export
+  // dialog. Failure-injection spies are route-based and permanent once
+  // installed; the Unfail call flips the flag back off.
+  // -------------------------------------------------------------------------
+
+  /** Copy-link control state ("Copy link"/"Copied link"), or null when absent. */
+  pagesHeaderCopyLinkLabel(): Promise<string | null>;
+  /** Click the copy-link control. */
+  pagesHeaderClickCopyLink(): Promise<void>;
+  /** Current clipboard text (grants clipboard permissions first). */
+  pagesHeaderReadClipboard(): Promise<string>;
+  /** Star toggle state ("Add to favorites"/"Remove favorite"), or null when hidden. */
+  pagesHeaderFavoriteLabel(): Promise<string | null>;
+  /** Whether the star renders filled (favorited). */
+  pagesHeaderFavoriteFilled(): Promise<boolean>;
+  /** Click the star toggle. */
+  pagesHeaderToggleFavorite(): Promise<void>;
+  /** Whether the sidebar Favorites section is expanded. */
+  pagesHeaderFavoritesExpanded(): Promise<boolean>;
+  /** Page names listed under the sidebar Favorites section. */
+  pagesHeaderFavoritesNames(): Promise<string[]>;
+  /** Refuse favorite writes (500) so the optimistic toggle must roll back. */
+  pagesHeaderFailFavoriteWrites(): Promise<void>;
+  /** Undo pagesHeaderFailFavoriteWrites. */
+  pagesHeaderUnfailFavoriteWrites(): Promise<void>;
+  /** Open the detail options menu; resolves once its items render. */
+  pagesHeaderOpenOptions(): Promise<void>;
+  /** Labels of the open options menu, top to bottom. */
+  pagesHeaderMenuItems(): Promise<string[]>;
+  /** Click the options-menu item whose label contains `label`. */
+  pagesHeaderChooseMenuItem(label: string): Promise<void>;
+  /** Lock control state ("Lock"/"Locked"/"Unlocked"), or null when hidden. */
+  pagesHeaderLockLabel(): Promise<string | null>;
+  /** Click the lock control. */
+  pagesHeaderToggleLock(): Promise<void>;
+  /** Whether the body editor is currently editable. */
+  pagesHeaderEditorEditable(): Promise<boolean>;
+  /** Refuse lock writes (500) so the optimistic toggle must roll back. */
+  pagesHeaderFailLockWrites(): Promise<void>;
+  /** Undo pagesHeaderFailLockWrites. */
+  pagesHeaderUnfailLockWrites(): Promise<void>;
+  /** Shelved marker text ("Archived at ..."), or null when the page is live. */
+  pagesHeaderArchivedMarker(): Promise<string | null>;
+  /** Whether the delete confirmation dialog is open. */
+  pagesHeaderDeleteDialogVisible(): Promise<boolean>;
+  /** Delete confirmation dialog body text. */
+  pagesHeaderDeleteDialogText(): Promise<string>;
+  /** Confirm the delete dialog (busy state, then it closes). */
+  pagesHeaderConfirmDelete(): Promise<void>;
+  /** Cancel the delete dialog. */
+  pagesHeaderCancelDelete(): Promise<void>;
+  /** Canvas max-width the full-width toggle drives ("720px"/"1152px"). */
+  pagesHeaderCanvasMaxWidth(): Promise<string>;
+  /** Whether the editor toolbar is currently visible. */
+  pagesHeaderToolbarVisible(): Promise<boolean>;
+  /** Value of the navigation-pane tab query key, if present. */
+  pagesHeaderPaneTabParam(): Promise<string | null>;
+  /** Whether the navigation pane is currently open. */
+  pagesHeaderPaneOpen(): Promise<boolean>;
+  /** Sync badge tooltip text after hovering it, or null when unhoverable. */
+  pagesHeaderSyncBadgeTooltip(): Promise<string | null>;
+  /** Offline pill text ("Offline"), or null when the pill is hidden. */
+  pagesHeaderOfflinePill(): Promise<string | null>;
+  /** Oversized-content strip text, or null when the strip is hidden. */
+  pagesHeaderOversizedStrip(): Promise<string | null>;
+  /** Sync badge text via a bounded walk (safe on the oversized doc), or null when hidden. */
+  pagesHeaderSyncBadgeText(): Promise<string | null>;
+  /** Visible toast text via a bounded walk (safe on the oversized doc), or null when none shows. */
+  pagesHeaderToastText(): Promise<string | null>;
+  /** Millisecond timestamps of the spied description PATCH writes, in order. */
+  pagesHeaderDescriptionWriteTimes(): Promise<number[]>;
+  /** HTTP statuses of the spied description PATCH writes, in request order. */
+  pagesHeaderDescriptionWriteStatuses(): Promise<number[]>;
+  /** Start counting description PATCH writes (no-op when already spying). */
+  pagesHeaderSpyDescriptionWrites(): Promise<void>;
+  /** Description PATCH writes observed since pagesHeaderSpyDescriptionWrites. */
+  pagesHeaderDescriptionWriteCount(): Promise<number>;
+  /** Top-level keys of the most recent description PATCH body. */
+  pagesHeaderDescriptionWriteKeys(): Promise<string[]>;
+  /** Start counting page-record PATCH writes (title/mark/properties path). */
+  pagesHeaderSpyPageWrites(): Promise<void>;
+  /** Page-record PATCH writes observed since pagesHeaderSpyPageWrites. */
+  pagesHeaderPageWriteCount(): Promise<number>;
+  /** Press the standard save gesture (Mod+S). */
+  pagesHeaderPressSave(): Promise<void>;
+  /** Whether the export dialog is open. */
+  pagesHeaderExportDialogVisible(): Promise<boolean>;
+  /** Current export form state. */
+  pagesHeaderExportForm(): Promise<PagesHeaderExportForm>;
+  /** Set the export format ("PDF"/"Markdown"). */
+  pagesHeaderExportSetFormat(label: string): Promise<void>;
+  /** Set the export content scope ("Everything"/"No images"). */
+  pagesHeaderExportSetScope(label: string): Promise<void>;
+  /** Set the printable page format ("A4"/...; PDF only). */
+  pagesHeaderExportSetPageFormat(label: string): Promise<void>;
+  /** Confirm the export and capture the downloaded file. */
+  pagesHeaderExportConfirm(): Promise<PagesHeaderDownload>;
+  /** Cancel the export dialog. */
+  pagesHeaderExportCancel(): Promise<void>;
 }
 
 /** Pages list tabs as the row-actions scenarios address them (NEWFRONT-313). */
@@ -8081,4 +8186,26 @@ export interface ModulesDetailGroupedOption {
   label: string;
   /** Whether the entry refuses selection. */
   disabled: boolean;
+}
+
+/** Export dialog form state (NEWFRONT-318, PAGE-074). */
+export interface PagesHeaderExportForm {
+  /** Selected export format label ("PDF"/"Markdown"). */
+  format: string;
+  /** Selected content scope label ("Everything"/"No images"). */
+  scope: string;
+  /** Selected printable page format label ("A4"/...). */
+  pageFormat: string;
+  /** Whether the page-format row renders (PDF only). */
+  pageFormatVisible: boolean;
+}
+
+/** A captured export download (NEWFRONT-318, PAGE-074). */
+export interface PagesHeaderDownload {
+  /** Suggested file name the browser download carried. */
+  fileName: string;
+  /** Download byte length. */
+  byteLength: number;
+  /** First bytes as latin1 text (magic + early content probe). */
+  headText: string;
 }
