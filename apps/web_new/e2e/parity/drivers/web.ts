@@ -41,6 +41,7 @@ import type {
   AutomationRow,
   BoardLayoutKey,
   CyclesProgressStatRow,
+  DeskSigninUpdateLink,
   DevMachineInstallCard,
   DevMachineModal,
   DevMachineRow,
@@ -27669,5 +27670,78 @@ export class WebDriver implements ParityDriver {
     if ((await rows.count()) === 0) return false;
     const badges = rows.getByText(/^(in-?app|forms?|e-?mail)$/i);
     return (await badges.count()) > 0;
+  }
+
+  // --- Desktop bare sign-in, deep links, onboarding seam (NEWFRONT-208,
+  // --- DESK-011–015, DESK-027). Appended; existing methods above are
+  // --- untouched per the shared driver contract.
+
+  async deskSigninMarketingFrameVisible(): Promise<boolean> {
+    // The web entry frames the card with a hero block headed by the page's
+    // only top-level heading; the desktop bare screen renders no h1.
+    return this.isShown(this.page.locator("h1").first());
+  }
+
+  async deskSigninOnboardingProgress(): Promise<string | null> {
+    // The header progress bar reports "current/total" through a hover
+    // tooltip; nothing else on the onboarding flow renders that shape. The
+    // tooltip trigger is the fill (leftmost fraction of the track), so
+    // hover it rather than the track center, which misses on early steps.
+    const fill = this.page.locator("div.sticky.top-0.z-10 div.h-1\\.5 div.h-full").first();
+    await fill.hover({ timeout: WebDriver.actionTimeout }).catch(() => undefined);
+    const tip = this.page.getByText(/^\d+\s*\/\s*\d+$/).first();
+    const seen = await tip.waitFor({ state: "visible", timeout: 10_000 }).then(
+      () => true,
+      () => false
+    );
+    if (!seen) return null;
+    return ((await tip.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, "") || null;
+  }
+
+  private deskSigninUpdateDialog(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "What's new?" }).first();
+  }
+
+  private deskSigninUpdateFooter(dialog: Locator): Locator {
+    // The footer bar is static (the body above it is a changelog iframe or
+    // its fallback); its margin pairing marks it structurally.
+    return dialog.locator("div.m-6.mb-4").first();
+  }
+
+  async deskSigninUpdateDialogLinks(): Promise<DeskSigninUpdateLink[]> {
+    const dialog = this.deskSigninUpdateDialog();
+    // The dialog root is a zero-height positioning wrapper even while the
+    // modal shows: wait for mount, then read the visible content.
+    await dialog.waitFor({ state: "attached", timeout: WebDriver.actionTimeout });
+    const anchors = this.deskSigninUpdateFooter(dialog).locator('a[href^="http"], a[href^="mailto:"]');
+    const count = await anchors.count();
+    const links: DeskSigninUpdateLink[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const anchor = anchors.nth(index);
+      const facts = await anchor.evaluate((element) => ({
+        label: (element.textContent ?? "").trim().replace(/\s+/g, " "),
+        tag: element.tagName.toLowerCase(),
+        href: (element as HTMLAnchorElement).href,
+        target: element.getAttribute("target"),
+      }));
+      links.push(facts);
+    }
+    return links;
+  }
+
+  async deskSigninOpenUpdateDialogLink(label: string): Promise<string | null> {
+    const dialog = this.deskSigninUpdateDialog();
+    // Attached, not visible: the dialog root never reports visible (see above).
+    await dialog.waitFor({ state: "attached", timeout: WebDriver.actionTimeout });
+    const link = this.deskSigninUpdateFooter(dialog).getByRole("link", { name: label });
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 15_000 }).catch(() => null),
+      link.click({ timeout: WebDriver.actionTimeout }),
+    ]);
+    if (popup === null) return null;
+    // A fresh popup reports about:blank until its first commit; wait for
+    // the committed URL (bounded) instead of reading the blank.
+    await popup.waitForFunction(() => window.location.href !== "about:blank", { timeout: 10_000 }).catch(() => {});
+    return popup.url();
   }
 }

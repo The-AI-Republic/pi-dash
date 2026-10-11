@@ -33,6 +33,7 @@ import type {
   AutomationRow,
   LayoutsLayoutKey,
   BoardLayoutKey,
+  DeskSigninUpdateLink,
   DevMachineInstallCard,
   DevMachineModal,
   DevMachineRow,
@@ -7931,5 +7932,20 @@ export class WebNewDriver implements ParityDriver {
 
   async intakeXSourceIndicatorVisible(): Promise<boolean> {
     return todo("intakeXSourceIndicatorVisible");
+  }
+
+  // --- Desktop bare sign-in, deep links, onboarding seam (NEWFRONT-208,
+  // --- DESK-011–015, DESK-027). Throwing stubs per the shared driver contract.
+  async deskSigninMarketingFrameVisible(): Promise<boolean> {
+    return todo("deskSigninMarketingFrameVisible");
+  }
+  async deskSigninOnboardingProgress(): Promise<string | null> {
+    return todo("deskSigninOnboardingProgress");
+  }
+  async deskSigninUpdateDialogLinks(): Promise<DeskSigninUpdateLink[]> {
+    return todo("deskSigninUpdateDialogLinks");
+  }
+  async deskSigninOpenUpdateDialogLink(_label: string): Promise<string | null> {
+    return todo("deskSigninOpenUpdateDialogLink");
   }
 }
