@@ -6707,6 +6707,8 @@ export interface ParityDriver {
   modulesDetailProgressEntryClick(title: string): Promise<void>;
   /** Whether a breakdown entry is clickable (detail once the filter instance loads; never in peek). */
   modulesDetailProgressEntryClickable(title: string): Promise<boolean>;
+  /** Whether a breakdown entry shows selected (its filter condition is active). */
+  modulesDetailProgressEntrySelected(title: string): Promise<boolean>;
   /** Whether the links section renders expanded. */
   modulesDetailLinksOpen(): Promise<boolean>;
   /** Toggle the links section; resolves once the click lands. */

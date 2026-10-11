@@ -1168,17 +1168,23 @@ test.describe("module detail on desktop", () => {
             );
           const allNames = expect.arrayContaining([backlogName, todoName, doneName]);
           // A breakdown click that lands while the panel re-renders can
-          // miss (swallowed, no error): re-click until the list shows the
-          // effect. Each miss leaves the list unchanged, so retries converge.
+          // miss (swallowed, no error): re-click until the entry's marker
+          // flips, which proves the click registered, and only then read
+          // the list. Retries never toggle blindly, so they converge.
           const clickUntilList = async (entry: string, expected: unknown) => {
             for (let i = 0; i < 3; i++) {
+              const wasSelected = await driver.modulesDetailProgressEntrySelected(entry);
               await driver.modulesDetailProgressEntryClick(entry);
               try {
-                await expect.poll(listNames, { timeout: 15_000 }).toEqual(expected);
-                return;
+                await expect
+                  .poll(() => driver.modulesDetailProgressEntrySelected(entry), { timeout: 10_000 })
+                  .toBe(!wasSelected);
               } catch {
-                // Missed; click again.
+                // Swallowed; the marker is untouched, so click again.
+                continue;
               }
+              await expect.poll(listNames, { timeout: 30_000 }).toEqual(expected);
+              return;
             }
             await expect.poll(listNames, { timeout: 30_000 }).toEqual(expected);
           };

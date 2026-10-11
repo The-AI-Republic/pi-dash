@@ -10622,6 +10622,10 @@ export class WebNewDriver implements ParityDriver {
     return todo("modulesDetailProgressEntryClickable");
   }
 
+  async modulesDetailProgressEntrySelected(_title: string): Promise<boolean> {
+    return todo("modulesDetailProgressEntrySelected");
+  }
+
   async modulesDetailLinksOpen(): Promise<boolean> {
     return todo("modulesDetailLinksOpen");
   }

@@ -37434,6 +37434,17 @@ export class WebDriver implements ParityDriver {
     return classes.split(/\s+/).includes("cursor-pointer");
   }
 
+  async modulesDetailProgressEntrySelected(title: string): Promise<boolean> {
+    // The shared row highlights itself exactly when its dimension's
+    // condition is active, so the marker flipping proves a click
+    // registered (a swallowed click leaves it untouched).
+    const panel = this.modulesDetailPanel().locator("[role='tabpanel'][data-headlessui-state='selected']");
+    const entry = panel.locator("div.flex.w-full.items-center.justify-between", { hasText: title }).first();
+    if ((await entry.count()) === 0) return false;
+    const classes = (await entry.getAttribute("class").catch(() => "")) ?? "";
+    return classes.split(/\s+/).includes("bg-layer-1");
+  }
+
   async modulesDetailLinksOpen(): Promise<boolean> {
     // The disclosure body mounts only while expanded: rows, the add
     // action, or the no-links notice. All three hide when collapsed.
