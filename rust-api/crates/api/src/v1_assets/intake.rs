@@ -10238,8 +10238,9 @@ async fn default_pod_for_project(
 
 /// `Issue.objects.create(...)` (`views/intake.py:186-194` +
 /// `Issue.save()` adding branch): the advisory lock (a no-op under
-/// autocommit — ported as the same statement), `sequence_id = max+1`
-/// with its `IssueSequence` row, `sort_order = max(project, state) +
+/// autocommit — ported as the same statement), `sequence_id` from the
+/// `issue_sequences` counter (`max+1`, falsy → 1) with its new
+/// `IssueSequence` row, `sort_order = max(project, state) +
 /// 10000` when siblings exist, pod defaulting, tag stripping (as-is —
 /// no `or None` on this path), workspace from the project, crum audit.
 #[allow(clippy::too_many_arguments)]
@@ -10258,14 +10259,23 @@ async fn insert_issue(
         .execute(pool)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let max_sequence: Option<i32> =
-        sqlx::query_scalar(r#"SELECT MAX("sequence_id") FROM "issues" WHERE "project_id" = $1"#)
-            .bind(project.id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-            .flatten();
-    let sequence_id = max_sequence.unwrap_or(0) + 1;
+    let last_sequence: Option<Option<i64>> = sqlx::query_scalar(
+        r#"SELECT MAX("sequence") FROM "issue_sequences" WHERE "project_id" = $1 AND "deleted_at" IS NULL"#,
+    )
+    .bind(project.id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    // `last_sequence + 1 if last_sequence else 1`: `0` and `None` both
+    // restart at 1 (falsy either way).
+    let sequence_id = i32::try_from(
+        last_sequence
+            .flatten()
+            .filter(|last| *last != 0)
+            .map(|last| last + 1)
+            .unwrap_or(1),
+    )
+    .map_err(|_| Denial::ServerError)?;
     let max_sort: Option<f64> = sqlx::query_scalar(
         r#"SELECT MAX("sort_order") FROM "issues"
            WHERE "project_id" = $1 AND "state_id" = $2 AND "deleted_at" IS NULL"#,
