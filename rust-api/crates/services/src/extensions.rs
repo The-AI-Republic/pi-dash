@@ -25,7 +25,7 @@
 //!
 //! | Seam trait | Python source | CE default | Overlay replaces with |
 //! |---|---|---|
-//! | `AssistantModelSeam` | `ee/assistant/model_provider.py` | `ByokAssistantSeam` | platform credentials (OpenHub lane) |
+//! | `AssistantModelSeam` | `ee/assistant/model_provider.py` | api `CeAssistantSeam` | platform credentials (OpenHub lane) |
 //! | `SttSeam` | `ee/assistant/stt_provider.py` | `ByoSttSeam` | OpenHub relay endpoint |
 //! | `CloudAgentModelSeam` | `ee/cloud_agent/model_provider.py` | `CreatorModelSeam` | admission/model routing |
 //! | `CloudAgentToolsetsSeam` | `ee/cloud_agent/toolsets.py` | `NoExtraToolsets` | gateway toolsets |
@@ -36,8 +36,13 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
 
+use pidash_types::assistant::errors::AssistantError;
 use uuid::Uuid;
 
+/// A seam future: boxed so the trait stays object-safe behind the
+/// `Arc<dyn AssistantModelSeam>` the serving state carries (the jobs
+/// registry's `Pin<Box<dyn Future>>` precedent — no new dependency).
+pub type SeamFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Reason codes from `managed_runner/errors.py::ManagedRunnerReason`,
 /// in the values the desktop profile endpoint actually serialises.
 pub mod reason {
@@ -71,6 +76,46 @@ pub struct CredentialUnavailable {
     pub message: String,
 }
 
+/// BYOK title inputs for [`TitleRequest`]: the caller's read of the user's
+/// config row (`None` at the request level when there is no row). Data,
+/// not handles — the caller extracts these exactly like the presence bits
+/// the other methods take.
+#[derive(Debug, Clone)]
+pub struct ByokTitleInputs {
+    pub model_name: String,
+    pub provider_kind: String,
+    pub base_url: String,
+    /// The caller's execution-time SSRF verdict on `base_url`.
+    pub base_url_blocked: bool,
+    /// Raw `api_key_encrypted` bytes; the implementor decrypts.
+    pub api_key_encrypted: Option<Vec<u8>>,
+    /// `cfg is not None and cfg.has_api_key`.
+    pub has_api_key: bool,
+}
+
+/// One title-generation call (`generate_title_for_user`, `ee` seam): who
+/// it is for, what to title, and the BYOK row the CE path runs on.
+#[derive(Debug, Clone)]
+pub struct TitleRequest {
+    pub user_id: Uuid,
+    pub description: String,
+    /// `None` when the user holds no BYOK config row. CE answers
+    /// `llm_config_missing` then; the overlay may route elsewhere.
+    pub byok: Option<ByokTitleInputs>,
+}
+
+/// Title-generation failure: an assistant error rendered with its own
+/// code/detail/status, or an operational failure answering the generic
+/// 500 (the `crypto_failure` split: data problems render, operational
+/// problems propagate). Provider HTTP failures arrive as
+/// [`AssistantError::ProviderUnreachable`], which renders byte-identical
+/// to the view-inline 502.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TitleError {
+    Assistant(AssistantError),
+    ServerError,
+}
+
 /// Overlay seam for `ee/assistant/model_provider.py`.
 ///
 /// CE is BYOK-only: every user brings their own LLM key, and the desktop
@@ -78,43 +123,66 @@ pub struct CredentialUnavailable {
 /// decrypted only inside a server process at the moment of use, so
 /// honouring BYOK on the desktop would mean adding the first endpoint that
 /// returns a stored key to a client).
-pub trait AssistantModelSeam {
+///
+/// The serving state carries one of these (`Arc<dyn AssistantModelSeam>`)
+/// and the non-turn HTTP callers consult it instead of the CE-concrete
+/// free functions, so the private crate implements this trait once and
+/// every caller follows. Turn-time model/toolset/label routing is NOT
+/// here — it stays with the jobs `TurnSeam`, which already covers it.
+/// Methods are async with the user id because the overlay branches on the
+/// user's selected connection, which it reads itself; the CE defaults
+/// ignore the id and delegate to the ported
+/// [`crate::assistant::seams`] logic, so there is exactly one CE
+/// implementation. Title generation has no default: it needs the serving
+/// boundary's transport, which lives in the api crate's `CeAssistantSeam`
+/// (the `title` layering rule), so every implementor spells it out and
+/// the compiler refuses a silent 502.
+pub trait AssistantModelSeam: Send + Sync + std::fmt::Debug {
     /// Cheap presence check for request-time gating. Must not build a
     /// model or decrypt anything; `has_api_key` is the caller's read of
     /// the user's config.
-    fn has_usable_llm_config(&self, has_api_key: bool) -> bool {
-        has_api_key
+    fn has_usable_llm_config(&self, user_id: Uuid, has_api_key: bool) -> SeamFuture<'_, bool> {
+        let _ = user_id;
+        Box::pin(async move { crate::assistant::seams::has_usable_llm_config(has_api_key) })
     }
 
     /// Describe the model endpoint the desktop engine may call. CE has
     /// exactly one lane, BYOK, which the desktop does not serve — so this
     /// is always unavailable; only the reason differs.
-    fn agent_model_profile(&self, has_api_key: bool) -> AgentModelProfile {
-        if has_api_key {
+    fn agent_model_profile(
+        &self,
+        user_id: Uuid,
+        has_api_key: bool,
+    ) -> SeamFuture<'_, AgentModelProfile> {
+        let _ = user_id;
+        Box::pin(async move {
+            let profile = crate::assistant::seams::agent_model_profile_for_user(has_api_key);
             AgentModelProfile {
-                available: false,
-                lane: "byok".to_string(),
-                base_url: String::new(),
-                model: String::new(),
-                reason_code: reason::BYOK_UNSUPPORTED.to_string(),
+                available: profile.available,
+                lane: profile.lane,
+                base_url: profile.base_url,
+                model: profile.model,
+                reason_code: profile.reason_code,
             }
-        } else {
-            AgentModelProfile {
-                available: false,
-                lane: String::new(),
-                base_url: String::new(),
-                model: String::new(),
-                reason_code: reason::LLM_CONFIG_MISSING.to_string(),
-            }
-        }
+        })
     }
 
-    /// Hand out the desktop engine's model credential. CE has no lane the
-    /// desktop can use, so there is nothing to hand out — always an error.
-    fn agent_model_credential(&self) -> Result<(String, String), CredentialUnavailable> {
-        Err(CredentialUnavailable {
-            reason: reason::BYOK_UNSUPPORTED.to_string(),
-            message: "This build has no model lane the desktop agent can use.".to_string(),
+    /// Hand out the desktop engine's model credential for one user. CE has
+    /// no lane the desktop can use, so there is nothing to hand out —
+    /// always an error. The overlay mints the user's own short-lived
+    /// gateway credential here.
+    fn agent_model_credential(
+        &self,
+        user_id: Uuid,
+    ) -> SeamFuture<'_, Result<(String, String), CredentialUnavailable>> {
+        let _ = user_id;
+        Box::pin(async move {
+            crate::assistant::seams::agent_model_credential_for_user().map_err(|unavailable| {
+                CredentialUnavailable {
+                    reason: unavailable.code,
+                    message: unavailable.detail,
+                }
+            })
         })
     }
 
@@ -127,12 +195,13 @@ pub trait AssistantModelSeam {
             String::new()
         }
     }
+
+    /// Single-prompt title for `request.description`, from the same
+    /// provider the user's conversation would use. `Ok` carries the raw
+    /// title (possibly empty — the caller maps empty to
+    /// `generation_failed`, mirroring the view's `if not title`).
+    fn generate_title(&self, request: TitleRequest) -> SeamFuture<'_, Result<String, TitleError>>;
 }
-
-/// CE assistant seam: BYOK only.
-pub struct ByokAssistantSeam;
-
-impl AssistantModelSeam for ByokAssistantSeam {}
 
 /// A ready-to-call transcription endpoint for one user
 /// (`ee/assistant/stt_provider.py::ResolvedSTTProvider`).
@@ -337,38 +406,66 @@ impl CloudAgentToolsetsSeam for NoExtraToolsets {}
 mod tests {
     use super::*;
 
-    #[test]
-    fn byok_presence_is_a_passthrough() {
-        let seam = ByokAssistantSeam;
-        assert!(seam.has_usable_llm_config(true));
-        assert!(!seam.has_usable_llm_config(false));
+    /// The trait defaults with a canned title: the CE behaviour lives in
+    /// the defaults (the api crate's `CeAssistantSeam` only adds the
+    /// title transport), so this pins the default surface.
+    #[derive(Debug)]
+    struct TestSeam;
+
+    impl AssistantModelSeam for TestSeam {
+        fn generate_title(
+            &self,
+            request: TitleRequest,
+        ) -> SeamFuture<'_, Result<String, TitleError>> {
+            let _ = request;
+            Box::pin(async move { Ok("canned".to_owned()) })
+        }
     }
 
-    #[test]
-    fn ce_desktop_profile_is_never_available() {
-        let seam = ByokAssistantSeam;
-        let with_key = seam.agent_model_profile(true);
+    fn user() -> Uuid {
+        Uuid::nil()
+    }
+
+    #[tokio::test]
+    async fn byok_presence_is_a_passthrough() {
+        let seam = TestSeam;
+        assert!(seam.has_usable_llm_config(user(), true).await);
+        assert!(!seam.has_usable_llm_config(user(), false).await);
+    }
+
+    #[tokio::test]
+    async fn ce_desktop_profile_is_never_available() {
+        let seam = TestSeam;
+        let with_key = seam.agent_model_profile(user(), true).await;
         assert!(!with_key.available);
         assert_eq!(with_key.lane, "byok");
+        assert_eq!(with_key.base_url, "");
+        assert_eq!(with_key.model, "");
         assert_eq!(with_key.reason_code, reason::BYOK_UNSUPPORTED);
         assert_eq!(reason::BYOK_UNSUPPORTED, "byok_not_supported_on_desktop");
-        let without_key = seam.agent_model_profile(false);
+        let without_key = seam.agent_model_profile(user(), false).await;
         assert!(!without_key.available);
         assert!(without_key.lane.is_empty());
         assert_eq!(without_key.reason_code, reason::LLM_CONFIG_MISSING);
+        assert_eq!(reason::LLM_CONFIG_MISSING, "llm_config_missing");
     }
 
-    #[test]
-    fn ce_hands_out_no_desktop_credential() {
-        let error = ByokAssistantSeam
-            .agent_model_credential()
+    #[tokio::test]
+    async fn ce_hands_out_no_desktop_credential() {
+        let error = TestSeam
+            .agent_model_credential(user())
+            .await
             .expect_err("CE has no desktop lane");
         assert_eq!(error.reason, reason::BYOK_UNSUPPORTED);
+        assert_eq!(
+            error.message,
+            "This build has no model lane the desktop agent can use."
+        );
     }
 
     #[test]
     fn model_label_is_empty_without_config() {
-        let seam = ByokAssistantSeam;
+        let seam = TestSeam;
         assert_eq!(seam.model_label(true, "gpt-x"), "gpt-x");
         assert!(seam.model_label(false, "gpt-x").is_empty());
     }
@@ -455,14 +552,48 @@ mod tests {
     struct OpenHubLikeSeam;
 
     impl AssistantModelSeam for OpenHubLikeSeam {
-        fn agent_model_profile(&self, _has_api_key: bool) -> AgentModelProfile {
-            AgentModelProfile {
-                available: true,
-                lane: "openhub".to_string(),
-                base_url: "https://gateway.example.com".to_string(),
-                model: "hub-default".to_string(),
-                reason_code: String::new(),
-            }
+        fn has_usable_llm_config(&self, user_id: Uuid, has_api_key: bool) -> SeamFuture<'_, bool> {
+            let _ = (user_id, has_api_key);
+            // The gateway lane counts as configured without a BYOK key.
+            Box::pin(async move { true })
+        }
+
+        fn agent_model_profile(
+            &self,
+            user_id: Uuid,
+            has_api_key: bool,
+        ) -> SeamFuture<'_, AgentModelProfile> {
+            let _ = (user_id, has_api_key);
+            Box::pin(async move {
+                AgentModelProfile {
+                    available: true,
+                    lane: "openhub".to_string(),
+                    base_url: "https://gateway.example.com".to_string(),
+                    model: "hub-default".to_string(),
+                    reason_code: String::new(),
+                }
+            })
+        }
+
+        fn agent_model_credential(
+            &self,
+            user_id: Uuid,
+        ) -> SeamFuture<'_, Result<(String, String), CredentialUnavailable>> {
+            let _ = user_id;
+            Box::pin(async move {
+                Ok((
+                    "gateway-token".to_string(),
+                    "2030-01-01T00:00:00Z".to_string(),
+                ))
+            })
+        }
+
+        fn generate_title(
+            &self,
+            request: TitleRequest,
+        ) -> SeamFuture<'_, Result<String, TitleError>> {
+            let _ = request;
+            Box::pin(async move { Ok("cloud title".to_string()) })
         }
     }
 
@@ -497,12 +628,36 @@ mod tests {
         }
     }
 
+    fn title_request() -> TitleRequest {
+        TitleRequest {
+            user_id: user(),
+            description: "Fix the thing".to_string(),
+            byok: None,
+        }
+    }
+
     #[tokio::test]
     async fn replacement_seam_wins_behind_the_traits() {
         let seam = OpenHubLikeSeam;
-        let profile = seam.agent_model_profile(false);
+        // Keyless yet usable: the gateway lane, not BYOK.
+        assert!(seam.has_usable_llm_config(user(), false).await);
+        let profile = seam.agent_model_profile(user(), false).await;
         assert!(profile.available);
+        assert_eq!(profile.lane, "openhub");
+        assert_eq!(profile.base_url, "https://gateway.example.com");
+        assert_eq!(profile.model, "hub-default");
         assert!(profile.reason_code.is_empty());
+        let (token, expires_at) = seam
+            .agent_model_credential(user())
+            .await
+            .expect("gateway credential");
+        assert_eq!(token, "gateway-token");
+        assert_eq!(expires_at, "2030-01-01T00:00:00Z");
+        let title = seam
+            .generate_title(title_request())
+            .await
+            .expect("cloud title");
+        assert_eq!(title, "cloud title");
         assert!(seam.extra_toolsets_enabled(Uuid::nil()).await);
         let run = ToolsetsRun {
             run_id: Uuid::nil(),

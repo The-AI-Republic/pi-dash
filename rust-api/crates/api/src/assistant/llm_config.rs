@@ -18,14 +18,16 @@
 //! F-A6-08 (title path).
 //!
 //! Layering: field validation reuses
-//! [`pidash_types::assistant::serializers`], the provider gates reuse
-//! [`pidash_services::assistant::llm::resolve_byok_model`], the title
-//! request bodies and response pipeline reuse
-//! [`pidash_services::assistant::title`], and the member gate reuses
-//! [`super::perm::require_member`]. This module owns the HTTP shell
-//! (routes, session auth), the config-row SQL, the DRF error rendering,
-//! and the provider HTTP calls (the `pydantic-ai`/`openai`/`anthropic`
-//! SDK clients stay in Python; the wire behavior is what is ported).
+//! [`pidash_types::assistant::serializers`], the title path (provider
+//! gates, decrypt, provider HTTP) runs through the state-carried
+//! [`pidash_services::extensions::AssistantModelSeam`] (CE:
+//! [`super::model_seam::CeAssistantSeam`], which reuses
+//! [`pidash_services::assistant::llm::resolve_byok_model`] and the
+//! [`pidash_services::assistant::title`] request/response pipeline), and
+//! the member gate reuses [`super::perm::require_member`]. This module
+//! owns the HTTP shell (routes, session auth), the config-row SQL, and
+//! the DRF error rendering (the `pydantic-ai`/`openai`/`anthropic` SDK
+//! clients stay in Python; the wire behavior is what is ported).
 //!
 //! Throttle scopes (`assistant_llm_test` 6/minute,
 //! `assistant_llm_generate_title` 20/minute,
@@ -53,9 +55,7 @@ use axum::Router;
 use serde_json::Value;
 
 use pidash_db::assistant::models::{has_secret, user_llm_config};
-use pidash_services::assistant::llm as llm_service;
-use pidash_services::assistant::title as title_service;
-use pidash_types::assistant::errors::AssistantError;
+use pidash_services::extensions::{ByokTitleInputs, TitleError, TitleRequest};
 use pidash_types::assistant::serializers;
 
 use super::common::{
@@ -748,151 +748,41 @@ async fn post_generate_title(
         Ok(row) => row,
         Err(failure) => return failure.into_response(),
     };
-    let (row, has_key) = match row {
-        Some(row) => {
-            let has_key = has_secret(&row.api_key_encrypted);
-            (row, has_key)
+    // The BYOK row is data for the seam, not a gate: a missing row is a
+    // `None` the CE path answers with `llm_config_missing` while the
+    // overlay may route elsewhere (same provider as the conversation).
+    let byok = row.map(|row| {
+        let has_key = has_secret(&row.api_key_encrypted);
+        let blocked = base_url_blocked(&state, &row.base_url);
+        ByokTitleInputs {
+            model_name: row.model_name,
+            provider_kind: row.provider_kind,
+            base_url: row.base_url,
+            base_url_blocked: blocked,
+            api_key_encrypted: row.api_key_encrypted,
+            has_api_key: has_key,
         }
-        None => {
-            return Failure::assistant_error(&AssistantError::LlmConfigMissing(
-                llm_service::MSG_NO_PROVIDER.to_owned(),
-            ))
-            .into_response();
-        }
+    });
+    let request = TitleRequest {
+        user_id: actor.id,
+        description,
+        byok,
     };
-    // Same three gates as `resolve_byok_model` (`runtime/llm.py:71-84`),
-    // re-checked at execution time so a re-pointed base URL is still
-    // rejected before connecting.
-    let blocked = base_url_blocked(&state, &row.base_url);
-    let model = match llm_service::resolve_byok_model(
-        has_key,
-        &row.model_name,
-        &row.provider_kind,
-        &row.base_url,
-        blocked,
-    ) {
-        Ok(model) => model,
-        Err(err) => return Failure::assistant_error(&err).into_response(),
-    };
-    let config = crypto_config(&state);
-    let api_key =
-        match decrypt_api_key(&config, row.api_key_encrypted.as_deref().unwrap_or(&[])).await {
-            Ok(key) => key,
-            Err(err) => {
-                return super::common::crypto_failure(err, |assistant| {
-                    Failure::assistant_error(assistant).into_response()
-                });
-            }
-        };
-    match run_title_with_key(&model, &row, &api_key, &description).await {
-        TitleOutcome::Title(title) => {
+    match state.assistant_seam().generate_title(request).await {
+        Ok(title) if !title.is_empty() => {
             crate::license::json_response(&serde_json::json!({"title": title}))
         }
-        TitleOutcome::ProviderFailed => Failure::error_body(
-            StatusCode::BAD_GATEWAY,
-            "provider_unreachable",
-            "Could not reach the AI provider.",
-        )
-        .into_response(),
-        TitleOutcome::Empty => Failure::error_body(
+        // `if not title` (`llm_config.py:152`): an empty model reply is
+        // the `generation_failed` 502, whatever the provider.
+        Ok(_) => Failure::error_body(
             StatusCode::BAD_GATEWAY,
             "generation_failed",
             "The AI assistant did not return a usable title.",
         )
         .into_response(),
+        Err(TitleError::Assistant(err)) => Failure::assistant_error(&err).into_response(),
+        Err(TitleError::ServerError) => Failure::server_error().into_response(),
     }
-}
-
-/// Title outcome: the cleaned title, a provider failure (the generic
-/// 502, `llm_config.py:146-150`), or an empty model reply (the
-/// `generation_failed` 502, `:152-156`).
-#[derive(Debug)]
-enum TitleOutcome {
-    Title(String),
-    ProviderFailed,
-    Empty,
-}
-
-async fn run_title_with_key(
-    model: &llm_service::ModelRef,
-    row: &LlmRow,
-    api_key: &str,
-    description: &str,
-) -> TitleOutcome {
-    match run_title(model, &row.base_url, description, api_key).await {
-        Some(title) if !title.is_empty() => TitleOutcome::Title(title),
-        Some(_) => TitleOutcome::Empty,
-        None => TitleOutcome::ProviderFailed,
-    }
-}
-
-/// Run one title request against the resolved provider and return the
-/// cleaned title, or `None` when the provider call fails at any point
-/// (the title path collapses every provider failure into the 502 — no
-/// classification like the test probe). Credentials travel like the
-/// SDKs send them: `x-api-key` for Anthropic, bearer for
-/// OpenAI-compatible.
-async fn run_title(
-    model: &llm_service::ModelRef,
-    base_url: &str,
-    description: &str,
-    api_key: &str,
-) -> Option<String> {
-    // Default redirect policy (follow): the ported SDK clients (`openai`,
-    // `anthropic`) both default `follow_redirects` to true, unlike the
-    // probe paths.
-    let client = reqwest::Client::new();
-    let timeout = std::time::Duration::from_secs_f64(title_service::TITLE_TIMEOUT_SECS);
-    let response = match model {
-        llm_service::ModelRef::Anthropic { model } => {
-            let body = title_service::AnthropicTitleRequest { model, description }.body_json();
-            client
-                .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("Content-Type", "application/json")
-                .body(serde_json::to_string(&body).expect("title body serializes"))
-                .timeout(timeout)
-                .send()
-                .await
-        }
-        llm_service::ModelRef::OpenAICompatible { model, .. } => {
-            let body = title_service::OpenAiTitleRequest {
-                model,
-                base_url,
-                description,
-            }
-            .body_json();
-            client
-                .post(format!(
-                    "{}/chat/completions",
-                    base_url.trim_end_matches('/')
-                ))
-                .bearer_auth(api_key)
-                .header("Content-Type", "application/json")
-                .body(serde_json::to_string(&body).expect("title body serializes"))
-                .timeout(timeout)
-                .send()
-                .await
-        }
-    };
-    let response = response.ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let text = response.text().await.ok()?;
-    let parsed: Value = serde_json::from_str(&text).ok()?;
-    let content = match model {
-        llm_service::ModelRef::Anthropic { .. } => parsed.get("content")?,
-        llm_service::ModelRef::OpenAICompatible { .. } => parsed
-            .get("choices")?
-            .get(0)?
-            .get("message")?
-            .get("content")?,
-    };
-    Some(title_service::clean_title(&title_service::content_to_text(
-        content,
-    )))
 }
 
 #[cfg(test)]
@@ -997,5 +887,252 @@ mod tests {
         assert_eq!(py_description(&serde_json::json!([])), "");
         assert_eq!(py_description(&serde_json::json!(true)), "True");
         assert_eq!(py_description(&serde_json::json!(5)), "5");
+    }
+}
+
+/// Live scratch-DB proof that the title handler consults the state-carried
+/// seam (PIDASHCONV-914), env-gated like the `handlers_members` live
+/// tests: without `DATABASE_URL` these skip. A forged session drives the
+/// handler directly; the spy seam records the request it receives, so the
+/// tests pin both directions — the canned title on the wire, and the
+/// user/description/BYOK inputs the handler passed in. No BYOK row is
+/// seeded: `None` is exactly the case the overlay routes elsewhere while
+/// CE answers `llm_config_missing`.
+#[cfg(test)]
+mod live_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use pidash_services::extensions::{AssistantModelSeam, SeamFuture};
+
+    /// Spy seam: records the title request, answers a canned title.
+    #[derive(Debug, Default)]
+    struct TitleSpy {
+        seen: Mutex<Option<TitleRequest>>,
+    }
+
+    impl AssistantModelSeam for TitleSpy {
+        fn generate_title(
+            &self,
+            request: TitleRequest,
+        ) -> SeamFuture<'_, Result<String, TitleError>> {
+            *self.seen.lock().expect("spy lock") = Some(request);
+            Box::pin(async move { Ok("Canned title".to_owned()) })
+        }
+    }
+
+    async fn live_state(seam: Option<Arc<dyn AssistantModelSeam>>) -> Option<(AppState, String)> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let cfg = pidash_db::config::DbConfig::new(url, 5).expect("db config");
+        let pools = pidash_db::Pools::connect(&cfg, None)
+            .await
+            .expect("connect pools");
+        let settings = pidash_db::config::Settings::test_defaults();
+        let mut state = AppState::with_settings("test", settings).with_pools(pools);
+        if let Some(seam) = seam {
+            state = state.with_assistant_seam(seam);
+        }
+        let secret = state.settings().secret_key.clone();
+        Some((state, secret))
+    }
+
+    /// Seed one active user; returns its id. Column list mirrors the
+    /// contract harness `create_user` (the `handlers_members` precedent).
+    async fn seed_user(pool: &sqlx::PgPool, first: &str) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        let email = format!("seam-{}-{first}@example.com", id.simple());
+        sqlx::query(
+            "INSERT INTO users (id, password, username, email, first_name, last_name,
+                avatar, date_joined, created_at, updated_at, last_location,
+                created_location, is_superuser, is_managed, is_password_expired,
+                is_active, is_staff, is_email_verified, is_password_autoset, token,
+                user_timezone, last_login_ip, last_logout_ip, last_login_medium,
+                last_login_uagent, is_bot, display_name, is_email_valid,
+                is_password_reset_required)
+             VALUES ($1, '!', $2, $2, $3, 'User',
+                '', now(), now(), now(), '',
+                '', false, false, false,
+                true, false, true, false, '',
+                'UTC', '', '', '',
+                '', false, $4, true,
+                false)",
+        )
+        .bind(id)
+        .bind(&email)
+        .bind(first)
+        .bind(format!("{first} User"))
+        .execute(pool)
+        .await
+        .expect("seed user");
+        id
+    }
+
+    /// Seed one workspace with `user_id` as an admin member; returns the
+    /// slug. Column lists mirror the contract harness.
+    async fn seed_membership(pool: &sqlx::PgPool, user_id: uuid::Uuid) -> String {
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let short = tag[..8].to_owned();
+        let ws_id = uuid::Uuid::new_v4();
+        let slug = format!("seam-{short}");
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, slug, owner_id, created_by_id,
+                updated_by_id, timezone, background_color, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $4, $4, 'UTC', '', now(), now())",
+        )
+        .bind(ws_id)
+        .bind(format!("Seam {short}"))
+        .bind(&slug)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO workspace_members (id, workspace_id, member_id, role,
+                is_active, view_props, default_props, issue_props,
+                explored_features, getting_started_checklist, tips,
+                created_at, updated_at)
+             VALUES ($1, $2, $3, 20,
+                true, '{}', '{}', '{}',
+                '{}', '{}', '{}',
+                now(), now())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(ws_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed workspace member");
+        slug
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        out
+    }
+
+    /// `user.get_session_auth_hash()` for the seeded `'!'` password field
+    /// (the `resolve_actor` verification, recomputed, not copied).
+    fn session_hash(secret_key: &str) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::{Digest, Sha256};
+        let key = Sha256::digest(
+            [
+                crate::license::SESSION_AUTH_HASH_SALT.as_bytes(),
+                secret_key.as_bytes(),
+            ]
+            .concat(),
+        );
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
+        mac.update(b"!");
+        hex_encode(&mac.finalize().into_bytes())
+    }
+
+    fn forged_session(
+        user_id: uuid::Uuid,
+        secret_key: &str,
+    ) -> axum::Extension<crate::middleware::SessionHandle> {
+        let mut session = crate::middleware::RequestSession::empty();
+        session.set(
+            "_auth_user_id".to_owned(),
+            Value::String(user_id.to_string()),
+        );
+        session.set(
+            "_auth_user_backend".to_owned(),
+            Value::String(crate::license::MODEL_BACKEND.to_owned()),
+        );
+        session.set(
+            "_auth_user_hash".to_owned(),
+            Value::String(session_hash(secret_key)),
+        );
+        axum::Extension(crate::middleware::SessionHandle::new(session))
+    }
+
+    async fn body_json(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let body: Value = serde_json::from_slice(&bytes).expect("json body");
+        (status, body)
+    }
+
+    fn json_headers() -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            "application/json".parse().expect("content type"),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn title_serves_the_installed_seam() {
+        let spy = Arc::new(TitleSpy::default());
+        let Some((state, secret)) = live_state(Some(spy.clone())).await else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = state.pools().expect("pools").primary().clone();
+        let user_id = seed_user(&pool, "SeamTitle").await;
+        let slug = seed_membership(&pool, user_id).await;
+        let extension = forged_session(user_id, &secret);
+        let body_in = axum::body::Bytes::from_static(br#"{"description":"Fix the thing"}"#);
+        let (status, body) = body_json(
+            post_generate_title(
+                State(state),
+                Path(slug),
+                Some(extension),
+                json_headers(),
+                body_in,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["title"], "Canned title");
+        // And the handler passed the seam exactly this call's inputs.
+        let seen = spy.seen.lock().expect("spy lock").clone().expect("called");
+        assert_eq!(seen.user_id, user_id);
+        assert_eq!(seen.description, "Fix the thing");
+        assert!(seen.byok.is_none(), "no BYOK row was seeded");
+    }
+
+    #[tokio::test]
+    async fn title_without_a_row_answers_like_ce() {
+        // No `with_assistant_seam`: the default CE seam answers a missing
+        // row with the same `llm_config_missing` the handler rendered
+        // before the seam existed.
+        let Some((state, secret)) = live_state(None).await else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = state.pools().expect("pools").primary().clone();
+        let user_id = seed_user(&pool, "SeamTitleCe").await;
+        let slug = seed_membership(&pool, user_id).await;
+        let extension = forged_session(user_id, &secret);
+        let body_in = axum::body::Bytes::from_static(br#"{"description":"Fix the thing"}"#);
+        let (status, body) = body_json(
+            post_generate_title(
+                State(state),
+                Path(slug),
+                Some(extension),
+                json_headers(),
+                body_in,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "llm_config_missing");
+        assert_eq!(
+            body["detail"],
+            "No LLM provider is configured for this user."
+        );
     }
 }

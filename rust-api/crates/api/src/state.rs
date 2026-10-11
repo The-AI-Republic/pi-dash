@@ -27,6 +27,7 @@ pub struct AppState {
     shadow_gate: Option<Arc<ShadowGate>>,
     shadow_config: Option<ShadowConfig>,
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    assistant_seam: Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 }
 
 impl AppState {
@@ -54,20 +55,27 @@ impl AppState {
 
     /// Full constructor: explicit settings and edge. `serve` builds the
     /// state this way from `Settings::from_env` plus `EdgeHandle::from_env`.
+    /// The assistant seam defaults to the CE implementation; the overlay
+    /// binary replaces it with [`AppState::with_assistant_seam`].
     pub fn with_settings_and_edge(
         version: impl Into<String>,
         settings: Settings,
         edge: EdgeHandle,
     ) -> Self {
+        let settings = Arc::new(settings);
+        let assistant_seam = Arc::new(crate::assistant::model_seam::CeAssistantSeam::new(
+            settings.clone(),
+        ));
         Self {
             version: version.into(),
-            settings: Arc::new(settings),
+            settings,
             edge,
             pools: None,
             redis: None,
             shadow_gate: None,
             shadow_config: None,
             toolsets: Arc::new(NoExtraToolsets),
+            assistant_seam,
         }
     }
 
@@ -109,7 +117,24 @@ impl AppState {
             shadow_gate: None,
             shadow_config: None,
             toolsets: self.toolsets.clone(),
+            assistant_seam: self.assistant_seam.clone(),
         }
+    }
+
+    /// Replace the assistant model-provider seam (PIDASHCONV-914). The
+    /// overlay binary installs its own implementation here; tests install
+    /// fakes to prove the callers consult the seam.
+    pub fn with_assistant_seam(
+        mut self,
+        seam: Arc<dyn pidash_services::extensions::AssistantModelSeam>,
+    ) -> Self {
+        self.assistant_seam = seam;
+        self
+    }
+
+    /// The assistant model-provider seam every non-turn caller consults.
+    pub fn assistant_seam(&self) -> &Arc<dyn pidash_services::extensions::AssistantModelSeam> {
+        &self.assistant_seam
     }
 
     /// Attach the F-04 pools. `None` until the binary connects, so unit
