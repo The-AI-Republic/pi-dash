@@ -778,7 +778,9 @@ test(
     const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Hdr061 ${tag}`);
     await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), sessionBrowserCookies(session));
     await driver.pagesLiveWaitSynced();
-    expect(await driver.pagesLiveSyncBadge()).toBeNull();
+    // The badge pulses on background sync activity, so a single read can
+    // catch a transient Syncing between quiet moments: poll for one.
+    await expect.poll(() => driver.pagesLiveSyncBadge(), { timeout: 30_000 }).toBeNull();
 
     // A socket that can never connect drives syncing, then the fault badge.
     await driver.pagesLiveBlockCollaborationSocket();
