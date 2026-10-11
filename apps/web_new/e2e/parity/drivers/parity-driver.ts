@@ -6568,6 +6568,114 @@ export interface ParityDriver {
   /** Refuse whole-system deletes behind the dialog's back (failure-path spy). */
   estimatesEditDeleteFailEstimateDelete(): Promise<void>;
 
+  // --- Pages blocks/embeds/mentions/links (NEWFRONT-316, PAGE-037-044).
+  /** Open a page detail and wait for the live body editor. */
+  pagesBlocksOpenDetail(workspaceSlug: string, projectId: string, pageId: string): Promise<void>;
+  /** Open a page detail with a query string and wait for the live body editor. */
+  pagesBlocksOpenDetailQuery(workspaceSlug: string, projectId: string, pageId: string, query: string): Promise<void>;
+  /** Reload the current page detail and wait for the live body editor. */
+  pagesBlocksReload(): Promise<void>;
+  /** Visible text of the live body editor (title excluded). */
+  pagesBlocksEditorText(): Promise<string>;
+  /** Inner HTML of the live body editor (title excluded). */
+  pagesBlocksEditorHtml(): Promise<string>;
+  /** Click the last body block and move the caret to its end. */
+  pagesBlocksEditorClickEnd(): Promise<void>;
+  /** Type text into the focused body editor. */
+  pagesBlocksEditorType(text: string): Promise<void>;
+  /** Press a key or chord in the body editor (Escape, End, ControlOrMeta+e, ...). */
+  pagesBlocksEditorPressKey(chord: string): Promise<void>;
+  /** Press Enter in the body editor. */
+  pagesBlocksEditorPressEnter(): Promise<void>;
+  /** Press Backspace in the body editor. */
+  pagesBlocksEditorPressBackspace(): Promise<void>;
+  /** Dispatch a synthetic text/html paste into the body editor. */
+  pagesBlocksEditorPasteHtml(html: string): Promise<void>;
+  /** Paste plain text through the real clipboard into the focused editor. */
+  pagesBlocksEditorPasteText(text: string): Promise<void>;
+  /** Select all document content (ControlOrMeta+a). */
+  pagesBlocksEditorSelectAll(): Promise<void>;
+  /** Copy the current selection (ControlOrMeta+c). */
+  pagesBlocksEditorCopy(): Promise<void>;
+  /** Paste the clipboard at the caret (ControlOrMeta+v). */
+  pagesBlocksEditorPaste(): Promise<void>;
+  /** Select the text of the first body paragraph containing `text`. */
+  pagesBlocksParagraphSelectText(text: string): Promise<void>;
+  /** Whether the slash-command palette is currently open. */
+  pagesBlocksSlashOpen(): Promise<boolean>;
+  /** Open the palette on a fresh line and read its entry titles, in order. */
+  pagesBlocksSlashItems(): Promise<string[]>;
+  /** Open the palette below the caret and choose `entry`; `occurrence` picks among duplicate titles. */
+  pagesBlocksSlashChoose(entry: string, occurrence?: number): Promise<void>;
+  /** Dismiss the slash palette if open. */
+  pagesBlocksSlashDismiss(): Promise<void>;
+  /** Open the emoji picker through the slash Emoji entry. */
+  pagesBlocksEmojiOpen(): Promise<void>;
+  /** Visible emoji picker row texts. */
+  pagesBlocksEmojiItems(): Promise<string[]>;
+  /** Choose the emoji picker row at `index`; resolves once inserted. */
+  pagesBlocksEmojiChoose(index: number): Promise<void>;
+  /** Hover the last content block; whether its drag handle shows. */
+  pagesBlocksDragHandleVisible(): Promise<boolean>;
+  /** Open the block menu for the last content block; resolves once open. */
+  pagesBlocksDragOpenMenu(): Promise<void>;
+  /** Visible block-menu item labels, in order. */
+  pagesBlocksDragMenuItems(): Promise<string[]>;
+  /** Choose a block-menu item; resolves once applied. */
+  pagesBlocksDragMenuChoose(label: string): Promise<void>;
+  /** Upload an image through the editor's image slash entry (file bytes). */
+  pagesBlocksUploadImage(file: { name: string; mime: string; bytes: Buffer }): Promise<void>;
+  /** Inline images in the body editor (src + alt). */
+  pagesBlocksInlineImages(): Promise<PagesBlocksInlineImage[]>;
+  /** Navigate to the navigation pane's assets tab. */
+  pagesBlocksAssetsTabOpen(): Promise<void>;
+  /** Asset rows in the assets tab (name + kind). */
+  pagesBlocksAssetsTabRows(): Promise<PagesBlocksAssetRow[]>;
+  /** Whether the assets tab shows its empty state. */
+  pagesBlocksAssetsTabEmptyVisible(): Promise<boolean>;
+  /** Whether a work-item embed node or upgrade card renders in the body. */
+  pagesBlocksEmbedUpgradeVisible(): Promise<boolean>;
+  /** Outbound link of the work-item upgrade card, or null when absent. */
+  pagesBlocksEmbedUpgradeHref(): Promise<string | null>;
+  /** Type a mention query and read the suggestion row texts. */
+  pagesBlocksMentionSuggest(query: string): Promise<string[]>;
+  /** Suggestion section titles above the mention rows. */
+  pagesBlocksMentionSections(): Promise<string[]>;
+  /** Choose the suggestion containing `displayName`; resolves once the chip inserts. */
+  pagesBlocksMentionChoose(displayName: string): Promise<void>;
+  /** Mention chips in the body editor (rendered text). */
+  pagesBlocksMentionChips(): Promise<string[]>;
+  /** Mention chip profile links, in chip order. */
+  pagesBlocksMentionChipHrefs(): Promise<string[]>;
+  /** Select the first body link's text (opens the formatting bubble). */
+  pagesBlocksLinkSelect(): Promise<void>;
+  /** Whether the formatting bubble's Link entry is visible. */
+  pagesBlocksLinkBubbleVisible(): Promise<boolean>;
+  /** Prefilled address of the bubble link input (opens the input). */
+  pagesBlocksLinkPrefill(): Promise<string>;
+  /** Rewrite the selected link's address in place; resolves once applied. */
+  pagesBlocksLinkEdit(href: string): Promise<void>;
+  /** Remove the selected link, keeping its text; resolves once applied. */
+  pagesBlocksLinkRemove(): Promise<void>;
+  /** Href of the first body link, or null when the body has none. */
+  pagesBlocksLinkHref(): Promise<string | null>;
+  /** Click the formatting bubble's icon button at `index` (0-based). */
+  pagesBlocksBubbleFormat(index: number): Promise<void>;
+  /** Open the detail header options menu. */
+  pagesBlocksOptionsOpen(): Promise<void>;
+  /** Options menu item titles, in order (opens and dismisses the menu). */
+  pagesBlocksOptionsItems(): Promise<string[]>;
+  /** Click the Copy-markdown entry; resolves once the toast fires. */
+  pagesBlocksOptionsCopyMarkdown(): Promise<void>;
+  /** Most recent toast text, or null when none is visible. */
+  pagesBlocksToastText(): Promise<string | null>;
+  /** Current clipboard text via a granted clipboard read. */
+  pagesBlocksClipboardText(): Promise<string>;
+  /** Lock then unlock the open page via the header control; leaves it unlocked. */
+  pagesBlocksHeaderLockCycle(): Promise<void>;
+  /** Info-tab document stats (navigates to the tab first). */
+  pagesBlocksInfoStats(): Promise<PagesBlocksInfoStats>;
+
   // --- NEWFRONT-310 (module detail/analytics/links, MOD-029-035).
   // --- Appended; existing methods above are untouched per the shared
   // --- driver contract. Layout switching itself reuses the layouts*
@@ -7166,6 +7274,30 @@ export interface ParityDriver {
    * so the pane's shared editor handle remounts on warm client state.
    */
   pagesPaneProfileRoundtrip(): Promise<void>;
+}
+
+/** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */
+export interface PagesBlocksInlineImage {
+  /** Resolved src attribute. */
+  src: string;
+  /** Alt text, or null when the image carries none. */
+  alt: string | null;
+}
+
+/** Asset-tab row for a page attachment (NEWFRONT-316, PAGE-039). */
+export interface PagesBlocksAssetRow {
+  /** Display name of the asset. */
+  name: string;
+  /** Kind label the tab shows (image, file, ...), or null when absent. */
+  kind: string | null;
+}
+
+/** Info-tab document stats (NEWFRONT-316, PAGE-037). */
+export interface PagesBlocksInfoStats {
+  /** Word count the tab reports, or null when it shows none. */
+  words: number | null;
+  /** Character count the tab reports, or null when it shows none. */
+  characters: number | null;
 }
 
 /** Pages list tabs as the row-actions scenarios address them (NEWFRONT-313). */
