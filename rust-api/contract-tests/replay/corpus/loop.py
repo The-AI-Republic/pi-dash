@@ -108,17 +108,6 @@ SESSIONS = (
                 route="/api/users/me/auto-pm/",
                 json={"enabled": True},
                 auth="member", expect_status=200,
-                # Known divergence (PIDASHCONV-887): the re-toggle is an
-                # update_or_create UPDATE, which persists update_fields
-                # only — the CRUM stamp never reaches the DB on Django,
-                # but Rust's upsert names updated_by_id. Per-request pin
-                # (accumulates): a session pin cannot cover the create
-                # request above, where both sides agree on None.
-                known_cell_diffs=[
-                    ("loop_user_preferences", "PIDASHCONV-887",
-                     {"user_id": "{member}", "job_id": None},
-                     "updated_by_id", None, "{member}"),
-                ],
             ),
             # -- master invalid payloads --
             Request(
@@ -163,13 +152,6 @@ SESSIONS = (
                 route="/api/users/me/auto-pm/jobs/{}/",
                 json={"enabled": True},
                 auth="member", expect_status=200,
-                # Same root cause (PIDASHCONV-887) on the per-job
-                # endpoint: shared upsert_preference.
-                known_cell_diffs=[
-                    ("loop_user_preferences", "PIDASHCONV-887",
-                     {"user_id": "{member}", "job_id": "{rp_tj}"},
-                     "updated_by_id", None, "{member}"),
-                ],
             ),
             Request(
                 "PATCH", _job_url("rp-nope"),
@@ -359,13 +341,6 @@ SESSIONS = (
                 "DELETE", _detail("{rp_dl}"),
                 route="/api/instances/loop/jobs/{}/",
                 auth="admin:admin", expect_status=204,
-                # Known divergence (PIDASHCONV-888): Django enqueues
-                # soft_delete_related_objects; Rust cascades inline
-                # and enqueues nothing.
-                known_absent_jobs={
-                    "pi_dash.bgtasks.deletion_task.soft_delete_related_objects":
-                        "PIDASHCONV-888",
-                },
             ),
             Request(
                 "POST", JOBS,

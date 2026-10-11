@@ -20,7 +20,6 @@ reused across a login; each prime has unique capture names.
 
 from auth_session.tokens import mint_reset_token
 
-from .. import effects
 from ..session import Request, Session
 from ._csrf import csrf as _csrf
 from ._csrf import prime as _prime
@@ -107,70 +106,8 @@ SESSIONS = (
                 ("args/2", "args/3"),
             ],
         },
-        # Known divergence: email sign-up skips the post_save
-        # notification-preferences row (PIDASHCONV-877). Pins the exact
-        # normalised row; fails if it stops appearing Django-only.
-        known_extra_rows=[
-            ("user_notification_preferences", "PIDASHCONV-877", {
-                "comment": True,
-                "created_at": effects.VOLATILE_PLACEHOLDER,
-                "created_by_id": None,
-                "deleted_at": None,
-                "id": effects.VOLATILE_PLACEHOLDER,
-                "issue_completed": True,
-                "mention": True,
-                "project_id": None,
-                "property_change": True,
-                "state_change": True,
-                "updated_at": effects.VOLATILE_PLACEHOLDER,
-                "updated_by_id": None,
-                "user_id": "{{row:users}}",
-                "workspace_id": None,
-            }),
-            # Spaces sign-up skips the adapter's Profile.objects.create
-            # (PIDASHCONV-879). Same exact-row pin discipline.
-            ("profiles", "PIDASHCONV-879", {
-                "background_color": effects.VOLATILE_PLACEHOLDER,
-                "billing_address": None,
-                "billing_address_country": "INDIA",
-                "company_name": "",
-                "created_at": effects.VOLATILE_PLACEHOLDER,
-                "goals": {},
-                "has_billing_address": False,
-                "has_marketing_email_consent": False,
-                "id": effects.VOLATILE_PLACEHOLDER,
-                "is_app_rail_docked": True,
-                "is_mobile_onboarded": False,
-                "is_navigation_tour_completed": False,
-                "is_onboarded": False,
-                "is_smooth_cursor_enabled": False,
-                "is_subscribed_to_changelog": False,
-                "is_tour_completed": False,
-                "language": "en",
-                "last_workspace_id": None,
-                "mobile_onboarding_step": {"profile_complete": False, "workspace_create": False, "workspace_join": False},
-                "mobile_timezone_auto_set": False,
-                "notification_view_mode": "full",
-                "onboarding_step": {"profile_complete": False, "workspace_create": False, "workspace_invite": False, "workspace_join": False},
-                "product_tour": {"cycles": False, "intake": False, "modules": False, "pages": False, "work_items": False},
-                "role": None,
-                "settings": {},
-                "start_of_the_week": 0,
-                "theme": {},
-                "updated_at": effects.VOLATILE_PLACEHOLDER,
-                "use_case": None,
-                "user_id": "{{row:users}}",
-            }),
-        ],
-        # Known divergence: change/set-password re-login leaks the old
-        # session row instead of deleting it like Django login()
-        # (PIDASHCONV-878). Pins the exact normalised row; fails if Rust
-        # stops leaking (fix landed -> remove the pin).
-        known_rust_extra_rows=[
-            ("sessions", "PIDASHCONV-878", {
-                "user_id": "{{created_user}}",
-            }),
-        ],
+        # NOTE (rebase): PIDASHCONV-877/878/879 all landed; the
+        # exact-row pins tripped stale and were removed.
         # Signal-created rows for view-created users (sign-up): the new
         # ids exist on their own side but are capturable only later, so
         # the FKs blank by existence like payload row refs.

@@ -38,37 +38,6 @@ INST_ADMIN_ID = "c7c7c7c7-0000-4000-8000-000000000006"
 
 MISSING_ID = "00000000-0000-0000-0000-000000000000"
 
-_SOFT_DELETE_TASK = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
-
-
-def _token_soft_delete_pin(pk_placeholder: str):
-    """Exact-shape pin for PIDASHCONV-933 (token DELETE legs).
-
-    Django sends ``using`` as a null kwarg (``mixins.py:78``); the
-    token Rust handler sends a null fourth positional. Any byte change
-    on either side fails loudly.
-    """
-    return (
-        _SOFT_DELETE_TASK,
-        "PIDASHCONV-933",
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "apitoken", pk_placeholder],
-            "kwargs": {"using": None},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "apitoken", pk_placeholder, None],
-            "kwargs": {},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-    )
-
 _T = "/api/users/api-tokens"
 _M = "/api/users/me"
 _AC = "/api/users/me/accounts"
@@ -271,10 +240,6 @@ SESSIONS = (
                 "DELETE", _T + "/{tok2}/",
                 route="/api/users/api-tokens/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-933): Rust sends
-                # soft_delete `using` as a null positional,
-                # Django as a null kwarg.
-                known_job_shapes=[_token_soft_delete_pin("{tok2}")],
             ),
             Request(
                 "GET", _T + "/{tok2}/",

@@ -20,37 +20,6 @@ from psycopg.rows import dict_row
 
 from ..session import Request, Session
 
-_SOFT_DELETE_TASK = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
-
-
-def _notification_soft_delete_pin(pk_placeholder: str):
-    """Exact-shape pin for PIDASHCONV-926 (notification DELETE legs).
-
-    Django sends ``using`` as a null kwarg (``mixins.py:78``); the
-    notification Rust handler sends a null fourth positional. Any byte
-    change on either side fails loudly.
-    """
-    return (
-        _SOFT_DELETE_TASK,
-        "PIDASHCONV-926",
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "notification", pk_placeholder],
-            "kwargs": {"using": None},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "notification", pk_placeholder, None],
-            "kwargs": {},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-    )
-
 # Fixed notification ids seeded by _seed_notifications (addressed via
 # static_context).
 N1_ID = "88888888-0000-4000-8000-000000000001"
@@ -255,10 +224,6 @@ SESSIONS = (
                 "DELETE", _N + "/{n3}/",
                 route="/api/workspaces/{slug}/users/notifications/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-926): Rust sends
-                # soft_delete `using` as a null positional,
-                # Django as a null kwarg.
-                known_job_shapes=[_notification_soft_delete_pin("{n3}")],
             ),
             Request(
                 "GET", _N + "/{n3}/",

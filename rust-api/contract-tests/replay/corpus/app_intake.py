@@ -22,70 +22,6 @@ from psycopg.rows import dict_row
 from .. import effects
 from ..session import Request, Session
 
-_SOFT_DELETE_TASK = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
-
-
-def _intake_issue_soft_delete_pins(issue_placeholder: str, bridge_placeholder: str):
-    """Exact-shape pins for PIDASHCONV-913 (intake-issue DELETE legs).
-
-    The destroy emits two soft_delete enqueues (``issue`` + the
-    ``intakeissue`` bridge); Django sends ``using`` as a null kwarg
-    on both, Rust as a null fourth positional.
-    """
-    pins = []
-    for model, pk in (("issue", issue_placeholder),
-                      ("intakeissue", bridge_placeholder)):
-        pins.append((
-            _SOFT_DELETE_TASK,
-            "PIDASHCONV-913",
-            {
-                "task": _SOFT_DELETE_TASK,
-                "args": ["db", model, pk],
-                "kwargs": {"using": None},
-                "eta": None,
-                "retries": 0,
-                "queue": "celery",
-            },
-            {
-                "task": _SOFT_DELETE_TASK,
-                "args": ["db", model, pk, None],
-                "kwargs": {},
-                "eta": None,
-                "retries": 0,
-                "queue": "celery",
-            },
-        ))
-    return pins
-
-
-def _intake_soft_delete_pin(pk_placeholder: str):
-    """Exact-shape pin for PIDASHCONV-910 (intake DELETE legs).
-
-    Django sends ``using`` as a null kwarg (``mixins.py:78``); the
-    intake Rust handler sends a null fourth positional. Any byte
-    change on either side fails loudly.
-    """
-    return (
-        _SOFT_DELETE_TASK,
-        "PIDASHCONV-910",
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "intake", pk_placeholder],
-            "kwargs": {"using": None},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "intake", pk_placeholder, None],
-            "kwargs": {},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-    )
-
 # Fixed intake ids seeded by _seed_intake (addressed via static_context).
 INTAKE_DEFAULT_ID = "44444444-0000-4000-8000-000000000001"
 INTAKE_DISP_ID = "44444444-0000-4000-8000-000000000002"
@@ -255,18 +191,11 @@ SESSIONS = (
                 "DELETE", _I + "/intakes/{disp}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/intakes/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-910): Rust sends
-                # soft_delete `using` as a null positional,
-                # Django as a null kwarg.
-                known_job_shapes=[_intake_soft_delete_pin("{disp}")],
             ),
             Request(
                 "DELETE", _I + "/inboxes/{disp2}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/inboxes/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-910): same null
-                # positional vs null kwarg through the alias.
-                known_job_shapes=[_intake_soft_delete_pin("{disp2}")],
             ),
             Request(
                 "GET", _I + "/intakes/{disp}/",
@@ -386,10 +315,6 @@ SESSIONS = (
                 "DELETE", _I + "/intake-issues/{i1}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-913): Rust sends
-                # soft_delete `using` as a null positional on both
-                # enqueues, Django as a null kwarg.
-                known_job_shapes=_intake_issue_soft_delete_pins("{i1}", "{ii1}"),
             ),
             Request(
                 "GET", _I + "/intake-issues/{i1}/",
@@ -405,9 +330,6 @@ SESSIONS = (
                 "DELETE", _I + "/inbox-issues/{i2}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/inbox-issues/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-913): same double
-                # null-positional vs null-kwarg through the alias.
-                known_job_shapes=_intake_issue_soft_delete_pins("{i2}", "{ii2}"),
             ),
             Request(
                 "DELETE", _I + "/intake-issues/" + MISSING_ID + "/",

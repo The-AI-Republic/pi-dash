@@ -169,34 +169,6 @@ _V2 = "/api/assets/v2/workspaces/{ws}/projects/{project}/issues/{issue_a}/attach
 _SOFT_DELETE_TASK = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
 
 
-def _label_soft_delete_pin(pk_placeholder: str):
-    """Exact-shape pin for PIDASHCONV-891 (one per label DELETE).
-
-    Django sends ``using`` as a null kwarg (``mixins.py:78``); the
-    app_issues Rust handler sends a null fourth positional. Any byte
-    change on either side fails loudly.
-    """
-    return (
-        _SOFT_DELETE_TASK,
-        "PIDASHCONV-891",
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "label", pk_placeholder],
-            "kwargs": {"using": None},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "label", pk_placeholder, None],
-            "kwargs": {},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-    )
-
 SESSIONS = (
     Session(
         name="app_issues_lifecycle",
@@ -411,19 +383,16 @@ SESSIONS = (
                 "DELETE", _F + "/issue-labels/{lb1}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/issue-labels/{pk}/",
                 auth="admin", expect_status=204,
-                known_job_shapes=[_label_soft_delete_pin("{lb1}")],
             ),
             Request(
                 "DELETE", _F + "/issue-labels/{lb2}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/issue-labels/{pk}/",
                 auth="admin", expect_status=204,
-                known_job_shapes=[_label_soft_delete_pin("{lb2}")],
             ),
             Request(
                 "DELETE", _F + "/issue-labels/{label}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/issue-labels/{pk}/",
                 auth="admin", expect_status=204,
-                known_job_shapes=[_label_soft_delete_pin("{label}")],
             ),
             # Relations: two API issues, requires-type-400, relates_to
             # round-trip, blocking-branch round-trip.

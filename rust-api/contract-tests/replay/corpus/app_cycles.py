@@ -27,38 +27,6 @@ def _range(days_ago_start: int, days_ago_end: int) -> tuple[str, str]:
     )
 
 
-_SOFT_DELETE_TASK = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
-
-
-def _soft_delete_pin(model: str, pk_placeholder: str):
-    """Exact-shape pin for PIDASHCONV-872 (one per DELETE request).
-
-    Django sends ``using`` as a null kwarg (``mixins.py:78``); the
-    app_cycles Rust handler sends a positional ``"default"``. Any byte
-    change on either side fails loudly.
-    """
-    return (
-        _SOFT_DELETE_TASK,
-        "PIDASHCONV-872",
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", model, pk_placeholder],
-            "kwargs": {"using": None},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", model, pk_placeholder, "default"],
-            "kwargs": {},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-    )
-
-
 _PAST_START, _PAST_END = _range(90, 80)
 _FIN_START, _FIN_END = _range(30, 1)
 # Yesterday, not today: convert_to_utc stamps start_date == today with
@@ -108,19 +76,6 @@ SESSIONS = (
                 route="/api/workspaces/{slug}/projects/{project_id}/cycles/{pk}/",
                 json={"name": "Renamed cycle"},
                 auth="admin", expect_status=200,
-                # PIDASHCONV-871: Rust renders current_instance from the
-                # fetched row map (extra keys archived_at/assignee_ids/
-                # created_by/version, int sort_order); Django serializes
-                # through CycleSerializer (24 fields, float sort_order).
-                # Exact pinned bytes per side; any change fails loudly.
-                known_job_shapes=[
-                    (
-                        "pi_dash.bgtasks.webhook_task.model_activity",
-                        "PIDASHCONV-871",
-                        {'task': 'pi_dash.bgtasks.webhook_task.model_activity', 'args': [], 'kwargs': {'model_name': 'cycle', 'model_id': '{cycle}', 'requested_data': {'name': 'Renamed cycle'}, 'current_instance': '{{\"cancelled_issues\":0,\"completed_issues\":0,\"description\":\"\",\"end_date\":null,\"external_id\":null,\"external_source\":null,\"id\":\"{cycle}\",\"is_favorite\":false,\"logo_props\":{{}},\"name\":\"Second cycle\",\"owned_by_id\":\"{admin}\",\"progress_snapshot\":{{}},\"project_id\":\"{project}\",\"sort_order\":65535.0,\"start_date\":null,\"status\":\"DRAFT\",\"total_issues\":0,\"view_props\":{{}},\"workspace_id\":\"{ws_id}\"}}', 'actor_id': '{admin}', 'slug': '{ws}', 'origin': 'http://localhost'}, 'eta': None, 'retries': 0, 'queue': 'celery'},
-                        {'task': 'pi_dash.bgtasks.webhook_task.model_activity', 'args': [], 'kwargs': {'slug': '{ws}', 'origin': 'http://localhost', 'actor_id': '{admin}', 'model_id': '{cycle}', 'model_name': 'cycle', 'requested_data': {'name': 'Renamed cycle'}, 'current_instance': '{{\"archived_at\":null,\"assignee_ids\":[],\"cancelled_issues\":0,\"completed_issues\":0,\"created_by\":\"{admin}\",\"description\":\"\",\"end_date\":null,\"external_id\":null,\"external_source\":null,\"id\":\"{cycle}\",\"is_favorite\":false,\"logo_props\":{{}},\"name\":\"Second cycle\",\"owned_by_id\":\"{admin}\",\"progress_snapshot\":{{}},\"project_id\":\"{project}\",\"sort_order\":65535,\"start_date\":null,\"status\":\"DRAFT\",\"total_issues\":0,\"version\":1,\"view_props\":{{}},\"workspace_id\":\"{ws_id}\"}}'}, 'eta': None, 'retries': 0, 'queue': 'celery'},
-                    ),
-                ],
             ),
             Request(
                 "PUT", _CYCLE,
@@ -281,37 +236,31 @@ SESSIONS = (
                 "DELETE", _B + "/cycles/{fin}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/cycles/{pk}/",
                 auth="admin", expect_status=204,
-                known_job_shapes=[_soft_delete_pin("cycle", "{fin}")],
             ),
             Request(
                 "DELETE", _B + "/cycles/{active}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/cycles/{pk}/",
                 auth="admin", expect_status=204,
-                known_job_shapes=[_soft_delete_pin("cycle", "{active}")],
             ),
             Request(
                 "DELETE", _B + "/cycles/{blocker}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/cycles/{pk}/",
                 auth="admin", expect_status=204,
-                known_job_shapes=[_soft_delete_pin("cycle", "{blocker}")],
             ),
             Request(
                 "DELETE", _B + "/cycles/{src}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/cycles/{pk}/",
                 auth="admin", expect_status=204,
-                known_job_shapes=[_soft_delete_pin("cycle", "{src}")],
             ),
             Request(
                 "DELETE", _B + "/cycles/{dst}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/cycles/{pk}/",
                 auth="admin", expect_status=204,
-                known_job_shapes=[_soft_delete_pin("cycle", "{dst}")],
             ),
             Request(
                 "DELETE", _CYCLE,
                 route="/api/workspaces/{slug}/projects/{project_id}/cycles/{pk}/",
                 auth="admin", expect_status=204,
-                known_job_shapes=[_soft_delete_pin("cycle", "{cycle}")],
             ),
             Request(
                 "DELETE", "/api/workspaces/{ws}/projects/{project}/issues/{cissue}/",

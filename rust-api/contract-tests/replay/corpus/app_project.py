@@ -15,7 +15,6 @@ estimate-point endpoints.
 
 from psycopg.rows import dict_row
 
-from .. import effects
 from ..session import Request, Session
 
 # Fixed newcomer id (seeded by _seed_extras, addressed as {newcomer}).
@@ -139,23 +138,8 @@ SESSIONS = (
         auth_users=("admin", "member", "outsider"),
         seed=_seed_extras,
         static_context={"newcomer": NEWCOMER_ID},
-        # Known divergence: project create skips the post_save default
-        # pod (PIDASHCONV-870). Pins the exact normalised row; fails if
-        # the row stops appearing Django-only (fix landed -> remove).
-        known_extra_rows=[
-            ("pod", "PIDASHCONV-870", {
-                "created_at": effects.VOLATILE_PLACEHOLDER,
-                "created_by_id": None,
-                "deleted_at": None,
-                "description": "Auto-created default pod. Add tier pods anytime.",
-                "id": effects.VOLATILE_PLACEHOLDER,
-                "is_default": True,
-                "name": "RPJ2_pod_1",
-                "project_id": "{proj2}",
-                "updated_at": effects.VOLATILE_PLACEHOLDER,
-                "workspace_id": "{ws_id}",
-            }),
-        ],
+        # NOTE (rebase): PIDASHCONV-870 landed (fced7590); the default
+        # pod pin tripped stale and was removed.
         requests=(
             Request(
                 "POST", "/api/workspaces/{ws}/projects/",

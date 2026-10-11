@@ -238,6 +238,10 @@ RESET_TOKEN_KEY_SALT = "django.contrib.auth.tokens.PasswordResetTokenGenerator"
 # this task's payloads; every other field still compares.
 PROCESS_LOGS_TASK = "pi_dash.bgtasks.logger_task.process_logs"
 TOPOLOGY_HOST_RE = re.compile(r"127\.0\.0\.1:\d+")
+# Content-Length *value* inside the headers repr (the key stays: its
+# presence differs on bodyless requests). Single-quote repr form —
+# the payload is Python str(dict), never JSON.
+CONTENT_LENGTH_RE = re.compile(r"('Content-Length': ')[^']*(')")
 
 
 def placeholder_for(value):

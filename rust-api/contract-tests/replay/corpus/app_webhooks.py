@@ -18,38 +18,6 @@ the suite (validated offline, never called).
 
 from ..session import Request, Session
 
-_SOFT_DELETE_TASK = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
-
-
-def _webhook_soft_delete_pin(pk_placeholder: str):
-    """Exact-shape pin for PIDASHCONV-927 (webhook DELETE legs).
-
-    Django sends ``using`` as a null kwarg (``mixins.py:78``); the
-    webhook Rust handler sends ``"default"`` as a fourth positional
-    (the exact 872 misreading). Any byte change on either side fails
-    loudly.
-    """
-    return (
-        _SOFT_DELETE_TASK,
-        "PIDASHCONV-927",
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "webhook", pk_placeholder],
-            "kwargs": {"using": None},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "webhook", pk_placeholder, "default"],
-            "kwargs": {},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-    )
-
 _W = "/api/workspaces/{ws}/webhooks"
 _WH1 = "https://example.com/hook/replay-wh1"
 
@@ -157,10 +125,6 @@ SESSIONS = (
                 "DELETE", _W + "/{wh}/",
                 route="/api/workspaces/{slug}/webhooks/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-927): Rust sends
-                # soft_delete `using` as a "default" positional,
-                # Django as a null kwarg.
-                known_job_shapes=[_webhook_soft_delete_pin("{wh}")],
             ),
             Request(
                 "GET", _W + "/{wh}/",

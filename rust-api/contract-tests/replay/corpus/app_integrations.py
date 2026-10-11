@@ -67,39 +67,6 @@ _D3 = "b6b6b6b6-3333-4333-8333-333333333333"
 _D4 = "b6b6b6b6-4444-4444-8444-444444444444"
 _D5 = "b6b6b6b6-5555-4555-8555-555555555555"
 
-_SOFT_DELETE_TASK = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
-
-
-def _github_soft_delete_pin(model: str, pk_placeholder: str):
-    """Exact-shape pin for PIDASHCONV-931 (project-github DELETE).
-
-    Django sends ``using`` as a null kwarg (``mixins.py:78``); the
-    Rust handler sends ``"default"`` as a fourth positional (the exact
-    872 misreading, predicted by 927's audit note). Any byte change on
-    either side fails loudly.
-    """
-    return (
-        _SOFT_DELETE_TASK,
-        "PIDASHCONV-931",
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", model, pk_placeholder],
-            "kwargs": {"using": None},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", model, pk_placeholder, "default"],
-            "kwargs": {},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-    )
-
-
 _A = "/api/workspaces/{ws}/integrations/git/accounts"
 _R = "/api/workspaces/{ws}/projects/{project}/repository"
 _RX = "/api/workspaces/{ws}/projects/{project2}/repository"
@@ -552,13 +519,6 @@ SESSIONS = (
                 "DELETE", _P + "/",
                 route="/api/workspaces/{slug}/projects/{project_id}/github/",
                 auth="admin", expect_status=200,
-                # Known divergence (PIDASHCONV-931): Rust sends
-                # soft_delete `using` as a "default" positional on
-                # both messages, Django as a null kwarg.
-                known_job_shapes=[
-                    _github_soft_delete_pin("githubrepositorysync", "{sync}"),
-                    _github_soft_delete_pin("gitrepositorybinding", "{bind}"),
-                ],
             ),
             Request(
                 "GET", _P + "/",

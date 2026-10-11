@@ -239,6 +239,42 @@ SESSIONS = (
             ("agent_chat_event", "message_id", "agent_chat_message", ""),
             ("agent_chat_event", "payload", "agent_chat_message", "message_id"),
         ],
+        # process_logs embeds two timezone.now() stamps per backend
+        # (Django micros, Rust seconds): each side mints its own now,
+        # so both blank via the explicit time map.
+        payload_time_paths={
+            "pi_dash.bgtasks.logger_task.process_logs": [
+                "kwargs/mongo_log/created_at",
+                "kwargs/mongo_log/updated_at",
+            ],
+        },
+        # PIDASHCONV-937: mongo user stamps (world admin id vs
+        # null) on the two X-Api-Key runner-registration legs; every
+        # other request emits no process_logs, so these pins skip there.
+        # --- generated PIDASHCONV-920 header-order pins (one exact pair
+        # per emitting request; lengths blanked, {api_token} rendered).
+        payload_value_diffs={
+            "pi_dash.bgtasks.logger_task.process_logs": [
+                ("kwargs/mongo_log/created_by", "PIDASHCONV-937",
+                 "{admin}", None),
+                ("kwargs/mongo_log/updated_by", "PIDASHCONV-937",
+                 "{admin}", None),
+        # req 0 POST /api/v1/runner/runners/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 1 POST /api/v1/runner/runners/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+            ],
+        },
         requests=(
             # -- HTTP runner creates (revoke + delete targets) --
             Request(
@@ -249,7 +285,6 @@ SESSIONS = (
                 auth="api_key", expect_status=201,
                 capture={"rvok_id": "runner_id", "rvok_mt": "machine_token"},
                 body_blank_paths=["access_token_expires_at"],
-                known_absent_jobs={"pi_dash.bgtasks.logger_task.process_logs": "PIDASHCONV-868"},
             ),
             Request(
                 "POST", f"{DAEMON}/runners/",
@@ -259,7 +294,6 @@ SESSIONS = (
                 auth="api_key", expect_status=201,
                 capture={"rdel_id": "runner_id", "rdel_mt": "machine_token"},
                 body_blank_paths=["access_token_expires_at"],
-                known_absent_jobs={"pi_dash.bgtasks.logger_task.process_logs": "PIDASHCONV-868"},
             ),
             # -- black-box approval seeds (daemon endpoints) --
             Request(
@@ -381,18 +415,6 @@ SESSIONS = (
                 "POST", f"{WEB}/chat/sessions/{{s5}}/warm/",
                 route=f"{WEB}/chat/sessions/{{session_id}}/warm/",
                 json={}, auth="admin", expect_status=202,
-                # PIDASHCONV-889: the warm offline-dispatch failure
-                # event payload shape differs (Django {"code":
-                # "dispatch_failed"} vs Rust {"message_id": null,
-                # "reason": "warm_dispatch_failed"}). Exact per-side
-                # pin; any change fails loudly.
-                known_cell_diffs=[
-                    ("agent_chat_event", "PIDASHCONV-889",
-                     {"kind": "chat_warm_failed", "session_id": "{s5}"},
-                     "payload",
-                     {"code": "dispatch_failed"},
-                     {"message_id": None, "reason": "warm_dispatch_failed"}),
-                ],
                 **_csrf("w0"),
             ),
             Request(

@@ -12,29 +12,11 @@ export). Session-cookie auth (admin/member/guest/outsider), like the
 suite — no API-key legs, so no 868 pin.
 """
 
-import copy
 
 from psycopg.rows import dict_row
 
 from ..session import Request, Session
-from .license import SESSIONS as _LICENSE_SESSIONS
 
-
-def _scheduler_886_pins(workspace_placeholder: str):
-    """The PIDASHCONV-886 exact rows, re-anchored to this session.
-
-    The license session owns the canonical pin (django-only builtin
-    scheduler rows on workspace create); the app-level create is the
-    audit clause's 2nd instance. Same rows, only the workspace
-    placeholder differs.
-    """
-    pins = []
-    for table, issue, match in _LICENSE_SESSIONS[0].known_extra_rows or []:
-        row = copy.deepcopy(match)
-        row["workspace_id"] = workspace_placeholder
-        pins.append((table, issue, row))
-    assert len(pins) == 2, "886 pin shape changed — re-check license.py"
-    return pins
 
 # Fixed anchor issue for the extras session (seq 901, clear of
 # API-created sequences — draft-to-issue mints from the same counter
@@ -53,38 +35,6 @@ JR3_ID = "77777777-0000-4000-8000-000000000009"
 _WS = "/api/workspaces/{ws}"
 _ME_JR = "/api/users/me/workspaces/join-requests/"
 _ME_INV = "/api/users/me/workspaces/invitations/"
-
-_SOFT_DELETE_TASK = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
-
-
-def _quicklink_soft_delete_pin(pk_placeholder: str):
-    """Exact-shape pin for PIDASHCONV-905 (quick-link DELETE).
-
-    Django sends ``using`` as a null kwarg (``mixins.py:78``); the
-    quick-link Rust handler sends a null fourth positional. Any byte
-    change on either side fails loudly.
-    """
-    return (
-        _SOFT_DELETE_TASK,
-        "PIDASHCONV-905",
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "workspaceuserlink", pk_placeholder],
-            "kwargs": {"using": None},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "workspaceuserlink", pk_placeholder, None],
-            "kwargs": {},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-    )
-
 
 def _seed_users_and_profiles(cur, emails):
     """Raw-SQL users + profiles (mirrors make_user/make_profile)."""
@@ -310,11 +260,8 @@ SESSIONS = (
             "workspace_member_invites": ["responded_at"],
             "workspace_join_requests": ["responded_at"],
         },
-        # Known divergence (PIDASHCONV-886, 2nd instance — the audit
-        # clause owns the app-level create): the workspace post_save
-        # receiver seeds two builtin scheduler rows; Rust never
-        # ports the signal.
-        known_extra_rows=_scheduler_886_pins("{wsA}"),
+        # NOTE (rebase): PIDASHCONV-886 landed; the builtin
+        # scheduler pins tripped stale and were removed.
         requests=(
             # Join-request creates first (only replay-ws + replay-other
             # exist, so admin-email routes to replay-ws alone):
@@ -864,10 +811,6 @@ SESSIONS = (
                 "DELETE", _WS + "/quick-links/{qid}/",
                 route="/api/workspaces/{slug}/quick-links/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-905): Rust sends
-                # soft_delete `using` as a null positional,
-                # Django as a null kwarg.
-                known_job_shapes=[_quicklink_soft_delete_pin("{qid}")],
             ),
             Request(
                 "GET", _WS + "/quick-links/{qid}/",
@@ -978,31 +921,6 @@ SESSIONS = (
                 "DELETE", _WS + "/stickies/{sid}/",
                 route="/api/workspaces/{slug}/stickies/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-906): Rust sends
-                # soft_delete `using` as a null positional,
-                # Django as a null kwarg.
-                known_job_shapes=[
-                    (
-                        _SOFT_DELETE_TASK,
-                        "PIDASHCONV-906",
-                        {
-                            "task": _SOFT_DELETE_TASK,
-                            "args": ["db", "sticky", "{sid}"],
-                            "kwargs": {"using": None},
-                            "eta": None,
-                            "retries": 0,
-                            "queue": "celery",
-                        },
-                        {
-                            "task": _SOFT_DELETE_TASK,
-                            "args": ["db", "sticky", "{sid}", None],
-                            "kwargs": {},
-                            "eta": None,
-                            "retries": 0,
-                            "queue": "celery",
-                        },
-                    ),
-                ],
             ),
             Request(
                 "GET", _WS + "/stickies/{sid}/",

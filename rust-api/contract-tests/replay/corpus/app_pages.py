@@ -15,37 +15,6 @@ from psycopg.rows import dict_row
 
 from ..session import Request, Session
 
-_SOFT_DELETE_TASK = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
-
-
-def _page_soft_delete_pin(pk_placeholder: str):
-    """Exact-shape pin for PIDASHCONV-909 (page DELETE legs).
-
-    Django sends ``using`` as a null kwarg (``mixins.py:78``); the
-    page Rust handler sends a null fourth positional. Any byte
-    change on either side fails loudly.
-    """
-    return (
-        _SOFT_DELETE_TASK,
-        "PIDASHCONV-909",
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "page", pk_placeholder],
-            "kwargs": {"using": None},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", "page", pk_placeholder, None],
-            "kwargs": {},
-            "eta": None,
-            "retries": 0,
-            "queue": "celery",
-        },
-    )
-
 # Fixed page ids seeded by _seed_pages (addressed via static_context).
 PG_PARENT_ID = "aaaaaaaa-0000-4000-8000-000000000001"
 PG_CHILD_ID = "aaaaaaaa-0000-4000-8000-000000000002"
@@ -312,10 +281,6 @@ SESSIONS = (
                     ("pages", "PIDASHCONV-908", {"name": "Parent"},
                      "description_stripped", "", None),
                 ],
-                # Known divergence (PIDASHCONV-909): Rust sends
-                # soft_delete `using` as a null positional,
-                # Django as a null kwarg.
-                known_job_shapes=[_page_soft_delete_pin("{parent}")],
             ),
             Request(
                 "GET", _P + "/pages/{parent}/",
@@ -360,9 +325,6 @@ SESSIONS = (
                 # No 908 pin here: P1's stripped text was honestly
                 # recomputed to 'hi' by the description PATCH on
                 # both sides, so the DELETE rows agree.
-                # Known divergence (PIDASHCONV-909): null
-                # positional vs null kwarg on this DELETE.
-                known_job_shapes=[_page_soft_delete_pin("{p1}")],
             ),
             Request(
                 "GET", _P + "/pages/{p1}/",

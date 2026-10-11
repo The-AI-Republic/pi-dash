@@ -30,6 +30,7 @@ FAKE_WORLD = {
     "workspaces": {"ws": {"slug": "w", "id": "w"}, "other": {"slug": "o", "id": "o"}},
     "projects": {"main": {"id": "p"}, "other": {"id": "q"}},
     "states": {"backlog": {"id": "s"}, "completed": {"id": "s"}, "cancelled": {"id": "s"}},
+    "api_token": "tok",
 }
 WORLD_KEYS = set(world_seed.template_context(FAKE_WORLD))
 
@@ -185,6 +186,29 @@ def test_corpus_manifests_valid():
                         and re.fullmatch(r"PIDASHCONV-\d+", ref[1])
                         and ref[2] != ref[3]
                     ), f"{sess.name}: bad value diff {ref!r} for {task} ({owner})"
+        # Pin values render as templates: every placeholder must be a
+        # world/static/setup key or a capture this session declares.
+        pin_allowed = (
+            set(WORLD_KEYS)
+            | set(sess.static_context or {})
+            | set(sess.setup_keys or ())
+            | {name for req in sess.requests for name in (req.capture or {})}
+        )
+        for owner, diff_map in value_diff_maps:
+            for task, refs in diff_map.items():
+                for ref in refs:
+                    for side_value in ref[2:4]:
+                        for placeholder in _placeholders(side_value):
+                            # Pin values are matched strings: only
+                            # identifier-shaped {names} count (a headers
+                            # repr's {'Content-Length': ...} keys are not
+                            # placeholders).
+                            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", placeholder):
+                                continue
+                            assert placeholder in pin_allowed, (
+                                f"{sess.name}: value diff {ref!r} for {task} ({owner}) "
+                                f"names unknown {{{placeholder}}}"
+                            )
         for task, refs in (sess.payload_db_values or {}).items():
             assert isinstance(refs, (list, tuple)), f"{sess.name}: bad db values for {task}"
             for ref in refs:
@@ -522,6 +546,119 @@ def test_blank_value_diffs_exact_match_only():
     assert pblanked["plain"] == effects.VOLATILE_PLACEHOLDER
     _, skipped = compare._blank_value_diffs([], {"other": 1}, task, "django", ctx)
     assert skipped == {"other": 1}
+
+
+def test_blank_value_diffs_render_pin_templates():
+    """Pin values render {placeholders}; literals pass through as-is."""
+    from . import compare
+    from . import effects
+
+    task = "pi_dash.bgtasks.logger_task.process_logs"
+    ctx = compare.CompareContext(
+        payload_value_diffs={
+            task: [
+                ("kwargs/mongo_log/created_by", "PIDASHCONV-937", "{admin}", None),
+                ("kwargs/plain", "PIDASHCONV-937", "a{b", "c"),
+            ]
+        },
+        pin_ctx={"admin": "admin-id"},
+    )
+    _, blanked = compare._blank_value_diffs(
+        [], {"mongo_log": {"created_by": "admin-id"}}, task, "django", ctx
+    )
+    assert blanked["mongo_log"]["created_by"] == effects.VOLATILE_PLACEHOLDER
+    # The unrendered literal no longer matches once templates apply.
+    _, kept = compare._blank_value_diffs(
+        [], {"mongo_log": {"created_by": "{admin}"}}, task, "django", ctx
+    )
+    assert kept["mongo_log"]["created_by"] == "{admin}"
+    # A brace literal that is not a template matches as-is.
+    _, lit = compare._blank_value_diffs([], {"plain": "a{b"}, task, "django", ctx)
+    assert lit["plain"] == effects.VOLATILE_PLACEHOLDER
+    # Unknown placeholders never match (the manifest test rejects
+    # them statically; at runtime they compare as literals).
+    ctx2 = compare.CompareContext(
+        payload_value_diffs={task: [("kwargs/plain", "PIDASHCONV-937", "{nope}", "c")]},
+        pin_ctx={"admin": "admin-id"},
+    )
+    _, kept2 = compare._blank_value_diffs([], {"plain": "x"}, task, "django", ctx2)
+    assert kept2 == {"plain": "x"}
+    # A brace-wrapped matched string (a headers repr) substitutes
+    # only the placeholders the context defines.
+    assert compare._render_pin_value(
+        "{'X-Api-Key': '{api_token}', 'X-Other': '{nope}'}",
+        {"api_token": "tok"},
+    ) == "{'X-Api-Key': 'tok', 'X-Other': '{nope}'}"
+
+
+def test_blank_process_logs_echo_mirrors_body_blanks():
+    """The response echo gets the request's body blanks, nothing more."""
+    import json
+
+    from . import compare
+    from . import effects
+
+    body = {"asset_url": "/x/1/", "name": "n", "upload_data": {"fields": {"key": "k"}}}
+    kwargs = {
+        "log_data": {"response_body": json.dumps(body), "path": "/p/"},
+        "mongo_log": {"response_body": json.dumps(body)},
+    }
+    ctx = compare.CompareContext(
+        body_blank_paths=["asset_url", "upload_data/fields/key"],
+    )
+    blanked = compare._blank_process_logs_echo(kwargs, ctx)
+    assert json.loads(blanked["log_data"]["response_body"]) == {
+        "asset_url": effects.VOLATILE_PLACEHOLDER,
+        "name": "n",
+        "upload_data": {"fields": {"key": effects.VOLATILE_PLACEHOLDER}},
+    }
+    assert json.loads(blanked["mongo_log"]["response_body"])["name"] == "n"
+    # Canonical re-serialization (matches the nested-JSON blankers).
+    assert blanked["log_data"]["response_body"] == json.dumps(
+        json.loads(blanked["log_data"]["response_body"]),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    # Siblings survive; the input is not mutated.
+    assert blanked["log_data"]["path"] == "/p/"
+    assert json.loads(kwargs["log_data"]["response_body"])["asset_url"] == "/x/1/"
+    # Non-JSON and missing echoes pass through untouched.
+    other = {"log_data": {"response_body": "<html>500</html>"}, "mongo_log": {}}
+    assert compare._blank_process_logs_echo(other, ctx) == other
+    assert compare._blank_process_logs_echo({"log_data": {}}, ctx) == {"log_data": {}}
+    # skip_body: both echoes blank wholesale.
+    free = compare.CompareContext(echo_free_pass=True)
+    freed = compare._blank_process_logs_echo(kwargs, free)
+    assert freed["log_data"]["response_body"] == effects.VOLATILE_PLACEHOLDER
+    assert freed["mongo_log"]["response_body"] == effects.VOLATILE_PLACEHOLDER
+
+
+def test_sub_header_tokens_only_long_values():
+    """Token captures substitute inside headers reprs; short ones do not."""
+    from . import compare
+    from . import effects
+
+    headers = (
+        "{'Content-Length': '85', 'Host': 'h', "
+        "'X-Api-Key': 'bridge-token-abcdef'}"
+    )
+    flat = {"bridge-token-abcdef": "{bridge}", "short": "{s}", "h": "{host}"}
+    assert compare._sub_header_tokens(headers, flat) == (
+        "{'Content-Length': '85', 'Host': 'h', 'X-Api-Key': '{bridge}'}"
+    )
+    kwargs = {
+        "log_data": {"headers": headers, "path": "/api/x/bridge-token-abcdef/"},
+        "mongo_log": {"other": 1},
+    }
+    subbed = compare._sub_process_logs_scalars(kwargs, flat)
+    # Token substituted, length value blanked, length key kept.
+    assert subbed["log_data"]["headers"] == (
+        "{'Content-Length': '%s', 'Host': 'h', 'X-Api-Key': '{bridge}'}" % effects.VOLATILE_PLACEHOLDER
+    )
+    assert subbed["log_data"]["path"] == "/api/x/{bridge}/"
+    assert subbed["mongo_log"] == {"other": 1}
+    # The input tree is not mutated.
+    assert "bridge-token-abcdef" in kwargs["log_data"]["headers"]
 
 
 def test_blank_db_values_only_blanks_stored():

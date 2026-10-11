@@ -16,35 +16,10 @@ to the Rust clone) while the three board anchors are fixed so the
 comment-disabled and intake-less boards are addressable statically.
 """
 
-from ..effects import VOLATILE_PLACEHOLDER
 from ..session import Request, Session
 
 _SOFT_DELETE_TASK = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
 
-
-def _soft_delete_pin(model: str, pk: str):
-    """Exact-shape pin for the PIDASHCONV-872 family on one DELETE.
-
-    Django sends ``using`` as a null kwarg; the space Rust handlers
-    (``intake.rs:1273``, ``social.rs:667``) send a positional
-    ``"default"``. ``pk`` is a gap-ctx placeholder for the deleted row.
-    """
-    return (
-        _SOFT_DELETE_TASK,
-        "PIDASHCONV-872",
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", model, pk],
-            "kwargs": {"using": None},
-            "eta": None, "retries": 0, "queue": "celery",
-        },
-        {
-            "task": _SOFT_DELETE_TASK,
-            "args": ["db", model, pk, "default"],
-            "kwargs": {},
-            "eta": None, "retries": 0, "queue": "celery",
-        },
-    )
 
 ANCHOR = "replay-anchor"
 ANCHOR_NC = "replay-anchor-nc"
@@ -221,44 +196,6 @@ SESSIONS = (
             "comment_asset", "delete_asset", "nc_issue",
             "anchor", "anchor_nc", "anchor_ni",
         ),
-        # Known divergence: intake-create without a description stores
-        # None instead of "" (PIDASHCONV-882). Pins the exact cell;
-        # fails loudly once Rust stores "".
-        known_cell_diffs=[
-            ("issues", "PIDASHCONV-882", {"name": "Inbox idea"},
-             "description_stripped", "", None),
-            # Known divergence (PIDASHCONV-883): the space comment-create
-            # backfill UPDATE stamps updated_by/updated_at, but Django's
-            # save(update_fields=["description_id"]) touches only the
-            # link column. Matcher is the created row's description link
-            # plus its pre-edit body: the pin blanks only while the row
-            # is still in the created state, because the creator PATCH
-            # later makes both sides agree on updated_by (single-side
-            # blanking past that point would itself diverge). Values
-            # are templates ({member} is seed-random).
-            ("issue_comments", "PIDASHCONV-883",
-             {"description_id": "{comment_desc}",
-              "comment_html": "<p>public note</p>"},
-             "updated_by_id", None, "{member}"),
-            # Known divergence (PIDASHCONV-885): the space reaction
-            # soft-delete is a bare SET deleted_at, but Django's
-            # model delete() saves (stamping updated_by/updated_at).
-            # The matcher names the deleted state explicitly: before
-            # the DELETE both sides agree on updated_by (None), and a
-            # matcher that also hit the live row would blank one side
-            # only. No seeded reaction rows exist, so the matcher is
-            # exact for the one row this session creates.
-            ("issue_reactions", "PIDASHCONV-885",
-             {"reaction": "rocket", "issue_id": "{issue}",
-              "deleted_at": VOLATILE_PLACEHOLDER},
-             "updated_by_id", "{member}", None),
-            # Same root cause (PIDASHCONV-885) on the comment-reaction
-            # destroy: bare SET deleted_at, no updated_by stamp.
-            ("comment_reactions", "PIDASHCONV-885",
-             {"reaction": "eyes", "comment_id": "{seed_comment}",
-              "deleted_at": VOLATILE_PLACEHOLDER},
-             "updated_by_id", "{member}", None),
-        ],
         # issue_activity carries int(timezone.now()) as `epoch`: the two
         # backends' requests can straddle a second boundary (app_issues).
         payload_time_paths={
@@ -301,7 +238,6 @@ SESSIONS = (
                 json={"issue": {"name": "Inbox idea"}},
                 auth="member",
                 capture={"inbox_issue": "id", "bridge1": "issue_intake/0/id"},
-                known_body_diffs=[("description_stripped", "PIDASHCONV-882", "", None)],
                 expect_status=200,
             ),
             Request(
@@ -338,9 +274,6 @@ SESSIONS = (
                 "DELETE", "/api/public/anchor/{anchor}/intakes/{intake}/intake-issues/{bridge}/",
                 route="/api/public/anchor/{}/intakes/{}/intake-issues/{}/",
                 auth="member", expect_status=204,
-                known_job_shapes=[
-                    _soft_delete_pin("intakeissue", "{bridge}"),
-                ],
             ),
             # -- issue comments: create, outsider 404, creator edit, delete --
             Request(
@@ -368,23 +301,11 @@ SESSIONS = (
                 route="/api/public/anchor/{}/issues/{}/comments/{}/",
                 json={"comment_html": "<p>edited</p>"},
                 auth="member", expect_status=200,
-                # PIDASHCONV-884: Rust publishes the pre-save snapshot as
-                # current_instance; Django serializes the same instance
-                # after save(), i.e. the after image. Exact pinned bytes
-                # per side; any change fails loudly.
-                known_job_shapes=[
-                    ("pi_dash.bgtasks.issue_activities_task.issue_activity", "PIDASHCONV-884",
-                     {'task': 'pi_dash.bgtasks.issue_activities_task.issue_activity', 'args': [], 'kwargs': {'type': 'comment.activity.updated', 'requested_data': '{{"comment_html":"<p>edited</p>"}}', 'actor_id': '{member}', 'issue_id': '{issue}', 'project_id': '{project}', 'current_instance': '{{"access":"EXTERNAL","actor":"{member}","actor_detail":{{"avatar":"","avatar_url":null,"display_name":"Replay Member","first_name":"Replay","id":"{member}","is_bot":false,"last_name":"Member"}},"attachments":[],"comment_html":"<p>edited</p>","comment_json":{{}},"comment_reactions":[],"comment_stripped":"edited","created_at":"<replay-volatile>","created_by":"{member}","deleted_at":null,"description":"{comment_desc}","edited_at":null,"external_id":null,"external_source":null,"id":"{comment}","is_synced":false,"issue":"{issue}","issue_detail":{{"complexity_score":0,"description_html":"<p></p>","description_json":{{}},"id":"{issue}","is_draft":false,"name":"Contract issue","priority":"none","sequence_id":1,"sort_order":65535.0,"start_date":null,"target_date":null}},"labels":[],"parent":null,"project":"{project}","project_detail":{{"cover_image":null,"cover_image_url":null,"description":"","id":"{project}","identifier":"RPJ","is_default":true,"logo_props":{{}},"name":"Replay Project"}},"speaker_agent_run_id":null,"speaker_label":"","speaker_type":"human","updated_at":"<replay-volatile>","updated_by":"{member}","workspace":"{ws_id}","workspace_detail":{{"id":"{ws_id}","logo_url":null,"name":"Replay WS","slug":"replay-ws"}}}}', 'epoch': '<replay-volatile>'}, 'eta': None, 'retries': 0, 'queue': 'celery'},
-                     {'task': 'pi_dash.bgtasks.issue_activities_task.issue_activity', 'args': [], 'kwargs': {'type': 'comment.activity.updated', 'epoch': '<replay-volatile>', 'actor_id': '{member}', 'issue_id': '{issue}', 'project_id': '{project}', 'requested_data': '{{"comment_html":"<p>edited</p>"}}', 'current_instance': '{{"access":"EXTERNAL","actor":"{member}","actor_detail":{{"avatar":"","avatar_url":null,"display_name":"Replay Member","first_name":"Replay","id":"{member}","is_bot":false,"last_name":"Member"}},"attachments":[],"comment_html":"<p>public note</p>","comment_json":{{}},"comment_reactions":[],"comment_stripped":"public note","created_at":"<replay-volatile>","created_by":"{member}","deleted_at":null,"description":"{comment_desc}","edited_at":null,"external_id":null,"external_source":null,"id":"{comment}","is_synced":false,"issue":"{issue}","issue_detail":{{"complexity_score":0,"description_html":"<p></p>","description_json":{{}},"id":"{issue}","is_draft":false,"name":"Contract issue","priority":"none","sequence_id":1,"sort_order":65535.0,"start_date":null,"target_date":null}},"labels":[],"parent":null,"project":"{project}","project_detail":{{"cover_image":null,"cover_image_url":null,"description":"","id":"{project}","identifier":"RPJ","is_default":true,"logo_props":{{}},"name":"Replay Project"}},"speaker_agent_run_id":null,"speaker_label":"","speaker_type":"human","updated_at":"<replay-volatile>","updated_by":"{member}","workspace":"{ws_id}","workspace_detail":{{"id":"{ws_id}","logo_url":null,"name":"Replay WS","slug":"replay-ws"}}}}'}, 'eta': None, 'retries': 0, 'queue': 'celery'}),
-                ],
             ),
             Request(
                 "DELETE", "/api/public/anchor/{anchor}/issues/{issue}/comments/{comment}/",
                 route="/api/public/anchor/{}/issues/{}/comments/{}/",
                 auth="member", expect_status=204,
-                known_job_shapes=[
-                    _soft_delete_pin("issuecomment", "{comment}"),
-                ],
             ),
             # -- issue reactions: create + delete --
             Request(
@@ -398,9 +319,6 @@ SESSIONS = (
                 "DELETE", "/api/public/anchor/{anchor}/issues/{issue}/reactions/rocket/",
                 route="/api/public/anchor/{}/issues/{}/reactions/{}/",
                 auth="member", expect_status=204,
-                known_job_shapes=[
-                    _soft_delete_pin("issuereaction", "{ireaction}"),
-                ],
             ),
             # -- issue votes: upsert + delete + delete-again 404 --
             Request(
@@ -413,9 +331,6 @@ SESSIONS = (
                 "DELETE", "/api/public/anchor/{anchor}/issues/{issue}/votes/",
                 route="/api/public/anchor/{}/issues/{}/votes/",
                 auth="member", expect_status=204,
-                known_job_shapes=[
-                    _soft_delete_pin("issuevote", "{{row:issue_votes}}"),
-                ],
             ),
             # -- comment reactions: create + delete (on the live seeded
             # comment; the created comment was edited + deleted above) --
@@ -430,9 +345,6 @@ SESSIONS = (
                 "DELETE", "/api/public/anchor/{anchor}/comments/{seed_comment}/reactions/eyes/",
                 route="/api/public/anchor/{}/comments/{}/reactions/{}/",
                 auth="member", expect_status=204,
-                known_job_shapes=[
-                    _soft_delete_pin("commentreaction", "{creaction}"),
-                ],
             ),
             # -- assets: mint, patch, delete/restore, bulk link --
             Request(

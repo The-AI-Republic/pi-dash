@@ -99,6 +99,16 @@ class CompareContext:
     secret_key: str = ""
     # Raw assistant Fernet keys (ASSISTANT_ENCRYPTION_KEY, comma list).
     assistant_encryption_keys: str = ""
+    # This request's response blank rules, mirrored onto the
+    # process_logs response_body echo (same pointers/patterns as the
+    # HTTP body compare; the echo is a copy of the compared response).
+    body_blank_paths: list = field(default_factory=list)
+    body_regex_blanks: list = field(default_factory=list)
+    # Skip the echo cross-backend compare (the response itself was
+    # compared skip_body, so its copy is equally uncomparable).
+    echo_free_pass: bool = False
+    # Template context for pin values ({world}/{static}/{captures}).
+    pin_ctx: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -1042,18 +1052,40 @@ def _blank_row_refs(args, kwargs, task: str, side: str, ctx: CompareContext):
     return args, kwargs
 
 
+def _render_pin_value(value, pin_ctx: dict):
+    """Substitute known {placeholders} in a pin value.
+
+    Unlike :func:`session.render_template`, only placeholders the
+    context actually defines are substituted; everything else —
+    dict-repr braces, JSON, unknown names — stays literal. Pin
+    values are matched strings (a headers repr *is* braces), so a
+    strict format would misfire; unknown placeholders are rejected
+    statically by the manifest test instead.
+    """
+    if not isinstance(value, str) or "{" not in value:
+        return value
+    for key, replacement in pin_ctx.items():
+        token = "{%s}" % key
+        if token in value:
+            value = value.replace(token, str(replacement))
+    return value
+
+
 def _blank_value_diffs(args, kwargs, task: str, side: str, ctx: CompareContext):
     """Blank pinned known-divergent payload scalars (exact per-side match).
 
     Pointers are multi-segment (``kwargs/a/0/b``) over dicts and lists
     and descend transparently through nested JSON strings, exactly
     like :func:`_blank_row_refs` (same canonical re-serialization, so
-    untouched bytes round-trip exactly). A pointer that does not
-    resolve is skipped: pins are session-level and a task's shape
-    varies per request. A resolved value that does not exactly equal
-    its pinned side value stays in place and fails the job compare
-    loudly (fix landed or behavior changed — remove or update the
-    pin).
+    untouched bytes round-trip exactly). Pinned side values render
+    as templates against ``ctx.pin_ctx`` first, so pins can name
+    seed-minted values ({admin}, {api_token}) instead of literals
+    that only match the seed they were captured from. A pointer
+    that does not resolve is skipped: pins are session-level and a
+    task's shape varies per request. A resolved value that does not
+    exactly equal its pinned side value stays in place and fails
+    the job compare loudly (fix landed or behavior changed —
+    remove or update the pin).
     """
     refs = list(ctx.payload_value_diffs.get("*", ())) + list(
         ctx.payload_value_diffs.get(task or "", ())
@@ -1082,6 +1114,13 @@ def _blank_value_diffs(args, kwargs, task: str, side: str, ctx: CompareContext):
 
     args, kwargs = copy.deepcopy(args), copy.deepcopy(kwargs)
     for pointer, _issue, dj_value, rs_value in refs:
+        # Render {placeholders} against seed/world/capture values; a
+        # value that is not a renderable template is a literal and
+        # matches as-is (an unknown placeholder then simply never
+        # matches, and the manifest test rejects it statically).
+        if ctx.pin_ctx:
+            dj_value = _render_pin_value(dj_value, ctx.pin_ctx)
+            rs_value = _render_pin_value(rs_value, ctx.pin_ctx)
         if pointer.startswith("args/"):
             root, rest = args, pointer[5:]
         elif pointer.startswith("kwargs/"):
@@ -1373,6 +1412,8 @@ def normalise_celery_message(
     args, kwargs = _sub_payload(args, flat), _sub_payload(kwargs, flat)
     if task == effects.PROCESS_LOGS_TASK:
         args, kwargs = _blank_topology_hosts(args), _blank_topology_hosts(kwargs)
+        kwargs = _sub_process_logs_scalars(kwargs, flat)
+        kwargs = _blank_process_logs_echo(kwargs, ctx)
     args, kwargs = _blank_row_refs(args, kwargs, task, side, ctx)
     args, kwargs = _blank_value_diffs(args, kwargs, task, side, ctx)
     args, kwargs = _blank_db_values(args, kwargs, task, side, ctx)
@@ -1406,6 +1447,8 @@ def normalise_queue_row(row: dict, ctx: CompareContext) -> dict:
     args, kwargs = _sub_payload(args, flat), _sub_payload(kwargs, flat)
     if task == effects.PROCESS_LOGS_TASK:
         args, kwargs = _blank_topology_hosts(args), _blank_topology_hosts(kwargs)
+        kwargs = _sub_process_logs_scalars(kwargs, flat)
+        kwargs = _blank_process_logs_echo(kwargs, ctx)
     args, kwargs = _blank_row_refs(args, kwargs, task, "rust", ctx)
     args, kwargs = _blank_value_diffs(args, kwargs, task, "rust", ctx)
     args, kwargs = _blank_db_values(args, kwargs, task, "rust", ctx)
@@ -1430,6 +1473,113 @@ def _blank_topology_hosts(node):
     if isinstance(node, list):
         return [_blank_topology_hosts(v) for v in node]
     return node
+
+
+def _sub_header_tokens(headers: str, flat: dict) -> str:
+    """Substitute capture values inside a process_logs headers string.
+
+    The headers payload is Python's str(dict) repr, not JSON, so the
+    normal whole-value substitution never fires inside it — but the
+    X-Api-Key value is backend-minted (bridge/machine tokens differ
+    per side and per run) and can only be pinned after substitution.
+    Only values long enough to be unambiguous (tokens, uuids) are
+    substituted as substrings; short values keep whole-value
+    semantics everywhere else in the payload.
+    """
+    if not isinstance(headers, str):
+        return headers
+    for value, name in flat.items():
+        if len(value) >= 8 and value in headers:
+            headers = headers.replace(value, name)
+    return headers
+
+
+def _sub_process_logs_scalars(kwargs, flat: dict):
+    """Substitute captures in process_logs plain-string fields.
+
+    Headers, path and query_params are plain strings (never JSON),
+    so the normal whole-value substitution never fires inside them —
+    but they embed backend-minted ids (a {pk} capture in the path,
+    a token in X-Api-Key) that can only be compared after
+    substitution. Copy-on-write; the JSON body/echo fields keep the
+    JSON-aware substitution in :func:`_sub_payload`.
+    """
+    import copy
+
+    if not isinstance(kwargs, dict):
+        return kwargs
+    hit = [
+        (section, field)
+        for section in ("log_data", "mongo_log")
+        if isinstance(kwargs.get(section), dict)
+        for field in ("headers", "path", "query_params")
+        if isinstance(kwargs[section].get(field), str)
+    ]
+    if not hit:
+        return kwargs
+    kwargs = copy.deepcopy(kwargs)
+    for section, field in hit:
+        node = kwargs[section]
+        node[field] = _sub_header_tokens(node[field], flat)
+        if field == "headers":
+            # Content-Length measures the client-rendered request body,
+            # whose per-side values (tokens, uuids) already compare via
+            # substitution: the length itself is backend-minted noise
+            # (variable per run) and blanks, while the key's presence
+            # still compares (Django's phantom content headers on
+            # bodyless requests are PIDASHCONV-920's second facet).
+            node[field] = effects.CONTENT_LENGTH_RE.sub(
+                r"\1" + effects.VOLATILE_PLACEHOLDER + r"\2", node[field]
+            )
+    return kwargs
+
+
+def _blank_process_logs_echo(kwargs, ctx: CompareContext):
+    """Blank backend-minted randoms in the process_logs response echo.
+
+    process_logs embeds a copy of the HTTP response it just sent
+    (``response_body`` in log_data and mongo_log). The response
+    itself was already compared with this request's body_blank_paths
+    and regex blanks; the echo gets exactly the same blanks so the
+    copy does not trip on the same presigned URLs, signatures and
+    generated ids. Everything else in the echo still compares
+    (canonical JSON), so a backend echoing a different response
+    than it sent fails loudly. Under echo_free_pass (skip_body
+    responses) both echoes blank wholesale: the response itself
+    was uncomparable, so its copy is too. A non-JSON echo (empty
+    body, CSV, framework error page) passes through untouched and
+    compares strictly.
+    """
+    import copy
+
+    if not isinstance(kwargs, dict):
+        return kwargs
+    targets = [
+        section
+        for section in ("log_data", "mongo_log")
+        if isinstance(kwargs.get(section), dict) and "response_body" in kwargs[section]
+    ]
+    if not targets:
+        return kwargs
+    kwargs = copy.deepcopy(kwargs)
+    for section in targets:
+        node = kwargs[section]
+        echo = node["response_body"]
+        if ctx.echo_free_pass:
+            node["response_body"] = effects.VOLATILE_PLACEHOLDER
+            continue
+        if not isinstance(echo, str):
+            continue
+        try:
+            parsed = json.loads(echo)
+        except ValueError:
+            continue
+        for pointer in ctx.body_blank_paths or []:
+            _json_pointer_set(parsed, pointer, effects.VOLATILE_PLACEHOLDER)
+        for pattern in ctx.body_regex_blanks or []:
+            parsed, _ = _sub_regex_blanks(parsed, pattern)
+        node["response_body"] = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+    return kwargs
 
 
 def compare_jobs(

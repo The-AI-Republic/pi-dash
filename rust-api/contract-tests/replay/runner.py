@@ -524,6 +524,13 @@ class Runner:
         for task, refs in (req.payload_value_diffs or {}).items():
             merged_value_diffs.setdefault(task, []).extend(refs)
         ctx.payload_value_diffs = merged_value_diffs
+        # This request's response blank rules ride along for the
+        # process_logs echo; pin values render against the same
+        # world/static/capture context as the gap pins.
+        ctx.body_blank_paths = list(req.body_blank_paths or ())
+        ctx.body_regex_blanks = list(req.body_regex_blanks or ())
+        ctx.echo_free_pass = bool(req.skip_body)
+        ctx.pin_ctx = self._gap_ctx(sess, captures)
         from .corpus import world as world_seed
 
         base_ctx = world_seed.template_context(self.world)

@@ -125,13 +125,6 @@ SESSIONS = (
                 route="/auth/magic-generate/",
                 json={"email": GEN_MAX_EMAIL},
                 auth="anonymous", expect_status=400,
-                # Known divergence: the sign-up exhausted 400 echoes
-                # the magic_ Redis key instead of the address
-                # (PIDASHCONV-881). Exact per-side pin; fails loudly
-                # once Rust returns the bare email.
-                known_body_diffs=[
-                    ("email", "PIDASHCONV-881", GEN_MAX_EMAIL, "magic_" + GEN_MAX_EMAIL),
-                ],
             ),
             # Existing-user arc (outsider: member/guest codes stay primed
             # for the sign-in requests below): four mints, then the 400.

@@ -279,14 +279,217 @@ SESSIONS = (
         auth_users=("api_key",),
         seed=_seed_move_target,
         static_context={"target_project": TARGET_PROJECT_ID},
+        # process_logs embeds two timezone.now() stamps per backend
+        # (Django micros, Rust seconds): each side mints its own now,
+        # so both blank via the explicit time map.
         payload_time_paths={
             "pi_dash.bgtasks.issue_activities_task.issue_activity": ["kwargs/epoch"],
+            "pi_dash.bgtasks.logger_task.process_logs": [
+                "kwargs/mongo_log/created_at",
+                "kwargs/mongo_log/updated_at",
+            ],
         },
-        # Known divergence: Rust never enqueues the API-token audit log
-        # (TokenLogLayer sinks to tracing only). Fails if Rust starts
-        # emitting (remove the pin) or Django stops (investigate).
-        known_absent_jobs={
-            "pi_dash.bgtasks.logger_task.process_logs": "PIDASHCONV-868",
+        # NOTE: PIDASHCONV-868 landed as 60c5a28b (Rust now enqueues
+        # process_logs) — known-absent pin removed on rebase; the
+        # order gap is pinned per session (PIDASHCONV-920) and the
+        # user stamps below (PIDASHCONV-937).
+        # PIDASHCONV-937: mongo_log.created_by/updated_by carry the
+        # API-key owner's id on Django, null on Rust (LoggerUserId is
+        # never inserted outside tests). Seed-robust: the owner is
+        # the world admin on every request of this session.
+        payload_value_diffs={
+            "pi_dash.bgtasks.logger_task.process_logs": [
+                ("kwargs/mongo_log/created_by", "PIDASHCONV-937",
+                 "{admin}", None),
+                ("kwargs/mongo_log/updated_by", "PIDASHCONV-937",
+                 "{admin}", None),
+                # --- generated PIDASHCONV-920 header-order pins (one exact
+                # pair per request; lengths blanked, {api_token} rendered;
+                # bodyless requests also pin Django's phantom content
+                # headers — same issue, second facet) ---
+        # req 0 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 1 PATCH /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 2 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 3 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/relations/relate/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 4 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/relations/unrelate/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 5 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/comments/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 6 PATCH /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/comments/{comment_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 7 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/links/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 8 PATCH /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/links/{link_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 9 PATCH /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/workpad/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 10 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/github/pull-requests/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 11 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/github/pull-requests/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 12 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/move/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 13 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/wait/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 14 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/re-tick/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 15 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/run-ai/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 16 POST /api/v1/workspaces/{slug}/projects/{project_id}/labels/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 17 PATCH /api/v1/workspaces/{slug}/projects/{project_id}/labels/{pk}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 18 POST /api/v1/workspaces/{slug}/projects/{project_id}/pages/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 19 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/github/pull-requests/{link_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 20 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/links/{link_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 21 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/comments/{comment_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 22 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/move/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 23 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/labels/{pk}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 24 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 25 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+            ],
         },
         # soft_delete_related_objects("db", "<model>", <row id>): the row
         # id is backend-local (never in a response); each side's value
@@ -482,12 +685,22 @@ SESSIONS = (
             "run1": RUN_ID,
             "run2": RUN2_ID,
         },
+        # process_logs embeds two timezone.now() stamps per backend
+        # (Django micros, Rust seconds): each side mints its own now,
+        # so both blank via the explicit time map.
         payload_time_paths={
             "pi_dash.bgtasks.issue_activities_task.issue_activity": ["kwargs/epoch"],
+            "pi_dash.bgtasks.logger_task.process_logs": [
+                "kwargs/mongo_log/created_at",
+                "kwargs/mongo_log/updated_at",
+            ],
         },
-        known_absent_jobs={
-            "pi_dash.bgtasks.logger_task.process_logs": "PIDASHCONV-868",
-        },
+        # NOTE: PIDASHCONV-868 landed as 60c5a28b (Rust now enqueues
+        # process_logs) — known-absent pin removed on rebase; the
+        # order gap is pinned per session (PIDASHCONV-920) and the
+        # user stamps below (PIDASHCONV-937).
+        # (Stamp pins for this session live in the session
+        # payload_value_diffs below, merged with the 897 pins.)
         payload_row_refs={
             "pi_dash.bgtasks.deletion_task.soft_delete_related_objects": [
                 ("args/2", "issues"),
@@ -500,27 +713,247 @@ SESSIONS = (
                 ("args/2", "intake_issues"),
             ],
         },
-        # The PIDASHCONV-897 wrongly-minted sequence echoes inside
-        # issue_activity payloads (before/after images carry
-        # sequence_id plus the RPJ-<seq> browse url). One pin per
-        # value per path; each blanks only its exact match.
         payload_value_diffs={
-            "pi_dash.bgtasks.issue_activities_task.issue_activity": [
-                ("kwargs/current_instance/sequence_id",
-                 "PIDASHCONV-897", 3, 908),
-                ("kwargs/current_instance/url", "PIDASHCONV-897",
-                 "http://localhost/replay-ws/browse/RPJ-3",
-                 "http://localhost/replay-ws/browse/RPJ-908"),
-                ("kwargs/current_instance/issue_detail/sequence_id",
-                 "PIDASHCONV-897", 3, 908),
-                # Second minted row (the "doomed" create): 4/909.
-                ("kwargs/current_instance/sequence_id",
-                 "PIDASHCONV-897", 4, 909),
-                ("kwargs/current_instance/url", "PIDASHCONV-897",
-                 "http://localhost/replay-ws/browse/RPJ-4",
-                 "http://localhost/replay-ws/browse/RPJ-909"),
-                ("kwargs/current_instance/issue_detail/sequence_id",
-                 "PIDASHCONV-897", 4, 909),
+            "pi_dash.bgtasks.logger_task.process_logs": [
+                ("kwargs/mongo_log/created_by", "PIDASHCONV-937",
+                 "{admin}", None),
+                ("kwargs/mongo_log/updated_by", "PIDASHCONV-937",
+                 "{admin}", None),
+                # --- generated PIDASHCONV-920 header-order pins (one exact
+                # pair per request; lengths blanked, {api_token} rendered;
+                # bodyless requests also pin Django's phantom content
+                # headers — same issue, second facet) ---
+        # req 0 POST /api/v1/workspaces/{slug}/projects/{project_id}/issues/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 1 PATCH /api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 2 POST /api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/comments/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 3 PATCH /api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/comments/{comment_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 4 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/comments/{comment_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 5 POST /api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/issue-attachments/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 6 PATCH /api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/issue-attachments/{attachment_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 7 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/issue-attachments/{attachment_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 8 POST /api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/links/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 9 PATCH /api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/links/{link_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 10 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/links/{link_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 11 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 12 POST /api/v1/workspaces/{slug}/projects/{project_id}/issues/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 13 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/relations/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 14 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 15 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/attachments/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 16 PATCH /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/attachments/{attachment_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 17 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/attachments/{attachment_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 18 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/code-reviews/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 19 POST /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/code-reviews/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 20 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/code-reviews/{review_id}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 21 PATCH /api/v1/workspaces/{slug}/projects/{project_id}/pages/{pk}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 22 POST /api/v1/workspaces/{slug}/projects/{project_id}/pages/{pk}/archive/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Content-Length': '<replay-volatile>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Content-Length': '<replay-volatile>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 23 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/pages/{pk}/archive/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 24 POST /api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 25 POST /api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 26 PATCH /api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 27 PATCH /api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 28 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 29 POST /api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 30 DELETE /api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}"),
+        # req 31 POST /api/v1/workspaces/{slug}/agent-runs/{pk}/yield/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 32 POST /api/v1/workspaces/{slug}/agent-runs/{pk}/yield/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{api_token}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
             ],
         },
         requests=(
@@ -685,26 +1118,6 @@ SESSIONS = (
                 capture={"inta": "id", "inta_issue": "issue",
                          "inta_desc": "issue_detail/description"},
                 expect_status=201,
-                # Known divergence: intake-issue POST mints the issue
-                # sequence from issues.max+1 instead of the
-                # issue_sequences counter (PIDASHCONV-897). Exact
-                # per-side pins; remove when the fix lands.
-                known_body_diffs=[
-                    ("issue_detail/sequence_id", "PIDASHCONV-897", 3, 908),
-                ],
-                known_cell_diffs=[
-                    # Match on stable columns: id cells blank to
-                    # volatile before pins match, so {captures}
-                    # never match there (compare.py normalise).
-                    # Project-only match is safe: the pin blanks
-                    # only rows whose value is exactly (3, 908),
-                    # and later PATCHes rename this row.
-                    ("issues", "PIDASHCONV-897",
-                     {"project_id": "{project}"},
-                     "sequence_id", 3, 908),
-                    ("issue_sequences", "PIDASHCONV-897",
-                     {"project_id": "{project}"}, "sequence", 3, 908),
-                ],
             ),
             Request(
                 "POST", _WS + "/intake-issues/",
@@ -717,33 +1130,12 @@ SESSIONS = (
                 route="/api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/",
                 json={"issue": {"name": "triaged", "priority": "urgent"}},
                 auth="api_key", expect_status=200,
-                known_body_diffs=[
-                    ("issue_detail/sequence_id", "PIDASHCONV-897", 3, 908),
-                ],
-                # PIDASHCONV-898: intake PATCH publishes the pre-save
-                # issue_detail in intake.activity.created. Per-request:
-                # the Django values ("triaged"/...) recur in later
-                # requests' jobs where Rust agrees.
-                payload_value_diffs={
-                    "pi_dash.bgtasks.issue_activities_task.issue_activity": [
-                        ("kwargs/current_instance/issue_detail/name",
-                         "PIDASHCONV-898", "triaged", "triage me"),
-                        ("kwargs/current_instance/issue_detail/priority",
-                         "PIDASHCONV-898", "urgent", "high"),
-                        ("kwargs/current_instance/issue_detail/updated_by",
-                         "PIDASHCONV-898",
-                         "f3c361a8-d936-4bc7-9967-db4acc1fcbfa", None),
-                    ],
-                },
             ),
             Request(
                 "PATCH", _WS + "/intake-issues/{inta_issue}/",
                 route="/api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/",
                 json={"status": 1},
                 auth="api_key", expect_status=200,
-                known_body_diffs=[
-                    ("issue_detail/sequence_id", "PIDASHCONV-897", 3, 908),
-                ],
             ),
             Request(
                 "DELETE", _WS + "/intake-issues/{inta_issue}/",
@@ -758,17 +1150,6 @@ SESSIONS = (
                 capture={"inta2": "id", "inta2_issue": "issue",
                          "inta2_desc": "issue_detail/description"},
                 expect_status=201,
-                # PIDASHCONV-897 again (second minted row: 4/909).
-                known_body_diffs=[
-                    ("issue_detail/sequence_id", "PIDASHCONV-897", 4, 909),
-                ],
-                known_cell_diffs=[
-                    ("issues", "PIDASHCONV-897",
-                     {"project_id": "{project}"},
-                     "sequence_id", 4, 909),
-                    ("issue_sequences", "PIDASHCONV-897",
-                     {"project_id": "{project}"}, "sequence", 4, 909),
-                ],
             ),
             Request(
                 "DELETE", _WS + "/intake-issues/{inta2_issue}/",

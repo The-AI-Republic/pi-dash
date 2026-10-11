@@ -36,8 +36,9 @@ Proxied pairs need no entry: the check verifies them live against
 EXCLUDED = {}
 
 MISSING_FIX = {
-    ('/api/instances/admins/', 'DELETE'): "MISSING parity gap G2 (no Rust route); fix PIDASHCONV-827 (Rust license fix: instance-admin session/auth endpoints)",
-    ('/api/instances/admins/{}/', 'POST'): "MISSING parity gap G2 (no Rust route); fix PIDASHCONV-827 (Rust license fix: instance-admin session/auth endpoints)",
+    # NOTE (rebase): PIDASHCONV-827 landed — the two instance-admin
+    # pairs now exist as proxied routes, so the MISSING entries were
+    # removed (proxied pairs carry the generic PROXIED reason).
 }
 
 OWNED_UNCOVERED = {

@@ -16,15 +16,8 @@ _B = "/api/workspaces/{ws}/projects/{project}"
 _MODULES = _B + "/modules/"
 _MODULE = _B + "/modules/{module}/"
 
-
-def _location_pin(url: str):
-    """Exact-header pin for PIDASHCONV-873 (one per link POST).
-
-    DRF's create sets ``Location`` to the serializer's ``url`` field
-    (the link target); Rust sends no header. Any change on either
-    side fails loudly.
-    """
-    return [("location", "PIDASHCONV-873", url, None)]
+# NOTE (rebase): PIDASHCONV-873 landed; the Location header pins were
+# removed and link POSTs compare headers fully now.
 
 SESSIONS = (
     Session(
@@ -101,9 +94,9 @@ SESSIONS = (
                 route="/api/workspaces/{slug}/projects/{project_id}/modules/{pk}/issues/{issue_id}/",
                 auth="admin", expect_status=204,
             ),
-            # A second issue keeps one bridge per (issue, module) pair:
-            # re-attaching {missue} here would build the two-bridge
-            # state that 500s Rust module DELETE (PIDASHCONV-875).
+            # A second issue keeps one bridge per (issue, module) pair
+            # (PIDASHCONV-875 fixed the two-bridge DELETE 500; the
+            # two-issue shape is retained — it covers both directions).
             Request(
                 "POST", "/api/workspaces/{ws}/projects/{project}/issues/",
                 route="/api/workspaces/{slug}/projects/{project_id}/issues/",
@@ -127,14 +120,12 @@ SESSIONS = (
                 route="/api/workspaces/{slug}/projects/{project_id}/modules/{pk}/module-links/",
                 json={"title": "Specs", "url": "https://example.com/specs"},
                 auth="admin", capture={"mlink": "id"}, expect_status=201,
-                known_headers=_location_pin("https://example.com/specs"),
             ),
             Request(
                 "POST", _MODULE + "module-links/",
                 route="/api/workspaces/{slug}/projects/{project_id}/modules/{pk}/module-links/",
                 json={"title": "Docs", "url": "example.com/docs"},
                 auth="admin", capture={"mlink2": "id"}, expect_status=201,
-                known_headers=_location_pin("http://example.com/docs"),
             ),
             Request(
                 "POST", _MODULE + "module-links/",
@@ -147,7 +138,6 @@ SESSIONS = (
                 route="/api/workspaces/{slug}/projects/{project_id}/modules/{pk}/module-links/",
                 json={"title": "Dup", "url": "http://example.com/dup"},
                 auth="admin", capture={"mlink3": "id"}, expect_status=201,
-                known_headers=_location_pin("http://example.com/dup"),
             ),
             Request(
                 "POST", _MODULE + "module-links/",
@@ -171,11 +161,6 @@ SESSIONS = (
                 "DELETE", _MODULE + "module-links/{mlink}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/modules/{pk}/module-links/{link_id}/",
                 auth="admin", expect_status=204,
-                # PIDASHCONV-874: Rust link_destroy skips the mixin
-                # soft_delete enqueue entirely.
-                known_absent_jobs={
-                    "pi_dash.bgtasks.deletion_task.soft_delete_related_objects": "PIDASHCONV-874",
-                },
             ),
             Request(
                 "POST", _MODULE + "archive/",
@@ -241,11 +226,6 @@ SESSIONS = (
                 "DELETE", _MODULE,
                 route="/api/workspaces/{slug}/projects/{project_id}/modules/{pk}/",
                 auth="admin", expect_status=204,
-                # PIDASHCONV-874: module_destroy also skips the mixin
-                # soft_delete enqueue (second instance of that issue).
-                known_absent_jobs={
-                    "pi_dash.bgtasks.deletion_task.soft_delete_related_objects": "PIDASHCONV-874",
-                },
             ),
             Request(
                 "DELETE", "/api/workspaces/{ws}/projects/{project}/issues/{missue}/",

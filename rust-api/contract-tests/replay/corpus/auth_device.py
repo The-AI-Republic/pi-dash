@@ -61,6 +61,65 @@ SESSIONS = (
             "dev_machine": ["last_seen_at"],
             "machine_token": ["last_used_at", "revoked_at"],
         },
+        # process_logs embeds two timezone.now() stamps per backend
+        # (Django micros, Rust seconds): each side mints its own now,
+        # so both blank via the explicit time map.
+        payload_time_paths={
+            "pi_dash.bgtasks.logger_task.process_logs": [
+                "kwargs/mongo_log/created_at",
+                "kwargs/mongo_log/updated_at",
+            ],
+        },
+        # --- generated PIDASHCONV-920 header-order pins (one exact
+        # pair per emitting request; lengths blanked; {bridge} /
+        # {machine_token} substituted, "bogus" literal; bodyless legs
+        # also pin Django's phantom content headers — same issue) ---
+        payload_value_diffs={
+            "pi_dash.bgtasks.logger_task.process_logs": [
+        # req 4 GET /api/v1/auth/workspaces/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{bridge}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{bridge}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{bridge}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{bridge}'}"),
+        # req 5 POST /api/v1/auth/machine-token/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{bridge}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{bridge}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{bridge}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{bridge}', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 6 GET /api/v1/auth/workspaces/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{machine_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{machine_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{machine_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{machine_token}'}"),
+        # req 7 POST /api/v1/auth/machine-token/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': 'bogus'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': 'bogus', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': 'bogus'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': 'bogus', 'Content-Length': '<replay-volatile>', 'Content-Type': 'application/json'}"),
+        # req 8 POST /api/v1/auth/revoke/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{machine_token}'}",
+         "{'Host': '<replay-host>', 'Content-Length': '<replay-volatile>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{machine_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{machine_token}'}",
+         "{'Host': '<replay-host>', 'Content-Length': '<replay-volatile>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{machine_token}'}"),
+        # req 9 GET /api/v1/auth/workspaces/
+        ("kwargs/log_data/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{machine_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{machine_token}'}"),
+        ("kwargs/mongo_log/headers", "PIDASHCONV-920",
+         "{'Content-Length': '<replay-volatile>', 'Content-Type': 'text/plain', 'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{machine_token}'}",
+         "{'Host': '<replay-host>', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', 'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '{machine_token}'}"),
+            ],
+        },
         requests=(
             # -- start -> pending poll -> approve -> token --
             Request(
@@ -99,8 +158,16 @@ SESSIONS = (
                 route="/api/v1/auth/workspaces/",
                 headers={"X-Api-Key": "{bridge}"},
                 auth="anonymous", expect_status=200,
-                known_absent_jobs={
-                    "pi_dash.bgtasks.logger_task.process_logs": "PIDASHCONV-868",
+                # PIDASHCONV-937: mongo user stamps (the device-flow
+                # member id vs null; the bogus/revoked 403 legs agree on
+                # null and carry no pin).
+                payload_value_diffs={
+                    "pi_dash.bgtasks.logger_task.process_logs": [
+                        ("kwargs/mongo_log/created_by", "PIDASHCONV-937",
+                         "{member}", None),
+                        ("kwargs/mongo_log/updated_by", "PIDASHCONV-937",
+                         "{member}", None),
+                    ],
                 },
             ),
             # -- exchange the bridge for a machine token --
@@ -116,8 +183,16 @@ SESSIONS = (
                 auth="anonymous",
                 capture={"machine_token": "machine_token"},
                 expect_status=201,
-                known_absent_jobs={
-                    "pi_dash.bgtasks.logger_task.process_logs": "PIDASHCONV-868",
+                # PIDASHCONV-937: mongo user stamps (the device-flow
+                # member id vs null; the bogus/revoked 403 legs agree on
+                # null and carry no pin).
+                payload_value_diffs={
+                    "pi_dash.bgtasks.logger_task.process_logs": [
+                        ("kwargs/mongo_log/created_by", "PIDASHCONV-937",
+                         "{member}", None),
+                        ("kwargs/mongo_log/updated_by", "PIDASHCONV-937",
+                         "{member}", None),
+                    ],
                 },
             ),
             Request(
@@ -125,8 +200,16 @@ SESSIONS = (
                 route="/api/v1/auth/workspaces/",
                 headers={"X-Api-Key": "{machine_token}"},
                 auth="anonymous", expect_status=200,
-                known_absent_jobs={
-                    "pi_dash.bgtasks.logger_task.process_logs": "PIDASHCONV-868",
+                # PIDASHCONV-937: mongo user stamps (the device-flow
+                # member id vs null; the bogus/revoked 403 legs agree on
+                # null and carry no pin).
+                payload_value_diffs={
+                    "pi_dash.bgtasks.logger_task.process_logs": [
+                        ("kwargs/mongo_log/created_by", "PIDASHCONV-937",
+                         "{member}", None),
+                        ("kwargs/mongo_log/updated_by", "PIDASHCONV-937",
+                         "{member}", None),
+                    ],
                 },
             ),
             Request(
@@ -139,9 +222,6 @@ SESSIONS = (
                 },
                 headers={"X-Api-Key": "bogus"},
                 auth="anonymous", expect_status=403,
-                known_absent_jobs={
-                    "pi_dash.bgtasks.logger_task.process_logs": "PIDASHCONV-868",
-                },
             ),
             # -- revoke kills the machine token --
             Request(
@@ -149,8 +229,16 @@ SESSIONS = (
                 route="/api/v1/auth/revoke/",
                 headers={"X-Api-Key": "{machine_token}"},
                 auth="anonymous", expect_status=200,
-                known_absent_jobs={
-                    "pi_dash.bgtasks.logger_task.process_logs": "PIDASHCONV-868",
+                # PIDASHCONV-937: mongo user stamps (the device-flow
+                # member id vs null; the bogus/revoked 403 legs agree on
+                # null and carry no pin).
+                payload_value_diffs={
+                    "pi_dash.bgtasks.logger_task.process_logs": [
+                        ("kwargs/mongo_log/created_by", "PIDASHCONV-937",
+                         "{member}", None),
+                        ("kwargs/mongo_log/updated_by", "PIDASHCONV-937",
+                         "{member}", None),
+                    ],
                 },
             ),
             Request(
@@ -158,9 +246,6 @@ SESSIONS = (
                 route="/api/v1/auth/workspaces/",
                 headers={"X-Api-Key": "{machine_token}"},
                 auth="anonymous", expect_status=403,
-                known_absent_jobs={
-                    "pi_dash.bgtasks.logger_task.process_logs": "PIDASHCONV-868",
-                },
             ),
             # -- the consumed grant can never be polled again --
             Request(

@@ -5,9 +5,9 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 | bucket | pairs |
 | --- | --- |
 | covered | 474 |
-| proxied by design | 91 |
+| proxied by design | 93 |
 | debug toolbar (dev-only) | 28 |
-| missing with fix issue | 2 |
+| missing with fix issue | 0 |
 | excluded with reason | 0 |
 | owned, no session yet | 0 |
 
@@ -29,12 +29,12 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 - `DELETE /api/assets/v2/workspaces/{}/{}/` (app) — app_assets_lifecycle (owned)
 - `PATCH /api/assets/v2/workspaces/{}/{}/` (app) — app_assets_lifecycle, app_assets_lifecycle (owned)
 - `PATCH /api/instances/` (license) — license_lifecycle, license_lifecycle, license_lifecycle, license_lifecycle, license_lifecycle (owned)
-- `POST /api/instances/admins/` (license) — license_lifecycle, license_lifecycle, license_lifecycle, license_lifecycle (missing)
-- `POST /api/instances/admins/sign-in/` (license) — license_lifecycle (missing)
-- `POST /api/instances/admins/sign-out/` (license) — license_lifecycle (missing)
+- `POST /api/instances/admins/` (license) — license_lifecycle, license_lifecycle, license_lifecycle, license_lifecycle (owned)
+- `POST /api/instances/admins/sign-in/` (license) — license_lifecycle (owned)
+- `POST /api/instances/admins/sign-out/` (license) — license_lifecycle (owned)
 - `POST /api/instances/admins/sign-up-screen-visited/` (license) — license_lifecycle, license_lifecycle (owned)
-- `POST /api/instances/admins/sign-up/` (license) — license_lifecycle (missing)
-- `DELETE /api/instances/admins/{}/` (license) — license_lifecycle, license_lifecycle (missing)
+- `POST /api/instances/admins/sign-up/` (license) — license_lifecycle (owned)
+- `DELETE /api/instances/admins/{}/` (license) — license_lifecycle, license_lifecycle (owned)
 - `PATCH /api/instances/configurations/` (license) — license_lifecycle, license_lifecycle, license_lifecycle, license_lifecycle, license_lifecycle (owned)
 - `DELETE /api/instances/configurations/disable-email-feature/` (license) — license_lifecycle, license_lifecycle (owned)
 - `POST /api/instances/email-credentials-check/` (license) — license_lifecycle (owned)
@@ -506,6 +506,8 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 - `POST /api/assets/v2/workspaces/{}/projects/{}/issues/{}/attachments/{}/` (app)
 - `POST /api/assets/v2/workspaces/{}/projects/{}/{}/` (app)
 - `POST /api/assets/v2/workspaces/{}/{}/` (app)
+- `DELETE /api/instances/admins/` (license)
+- `POST /api/instances/admins/{}/` (license)
 - `DELETE /api/public/assets/v2/anchor/{}/` (space)
 - `PATCH /api/public/assets/v2/anchor/{}/` (space)
 - `POST /api/public/assets/v2/anchor/{}/{}/` (space)
@@ -615,8 +617,7 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 
 ## Missing with fix issue
 
-- `DELETE /api/instances/admins/` (license) — MISSING parity gap G2 (no Rust route); fix PIDASHCONV-827 (Rust license fix: instance-admin session/auth endpoints)
-- `POST /api/instances/admins/{}/` (license) — MISSING parity gap G2 (no Rust route); fix PIDASHCONV-827 (Rust license fix: instance-admin session/auth endpoints)
+(none)
 
 ## Excluded
 
