@@ -13,7 +13,7 @@
     "DO_NOTHING": "skipped.",
     "SET_NULL": "OneToOne: setattr null + save(update_fields=[field]); else related_queryset.update(**{field: None}).",
     "CASCADE_one_to_one": "getattr obj; if it has deleted_at and unset: stamp timezone.now(), .save() (FULL save), recurse soft_delete_related_objects with (app_label, model_name, pk, using).",
-    "CASCADE_to_many_BUG": "Line 83 executes getattr(instance, related_name)(manager='objects').all() \u2014 a RelatedManager is not callable, so this raises TypeError, caught by 'except Exception' at :97 which prints 'Error handling relation <name>: ...' and CONTINUES. Net effect: to-many CASCADE relations are NEVER soft-deleted by this task. Port as-is.",
+    "CASCADE_to_many": "Line 83 executes getattr(instance, related_name)(manager='objects').all() \u2014 reverse-FK RelatedManagers ARE callable (RelatedManager.__call__ rebuilds with the named manager class), so this is the live-scoped child queryset: every live child with deleted_at is stamped with timezone.now() + full .save() and recursed into (:82-96). (PIDASHCONV-900: the earlier BUG-DEL-1 TypeError claim was wrong; verified against Django 4.2 related_descriptors.py and a live soft_delete_related_objects run.)",
     "self_stamp": "After the walk: instance stamped + full .save() iff it has deleted_at and it is unset.",
     "mixin_wiring": "db/mixins.py:72-78 instance .delete(soft=True) stamps + .save() then soft_delete_related_objects.delay(app_label, model_name, pk)."
   },
