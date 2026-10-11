@@ -67,6 +67,19 @@ def test_create_roundtrip(seed, conn):
     assert pod == {"name": "%s_pod_1" % ident,
                    "description": "Auto-created default pod. Add tier pods anytime.",
                    "is_default": True, "created_by_id": None}
+    # bulk_create bypasses State.save(), so the 8 seeded default states
+    # keep the slug field default '' (db/models/state.py:97,132).
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT name, slug FROM states WHERE project_id = %s ORDER BY sequence",
+            (body["id"],),
+        )
+        seeded = cur.fetchall()
+    assert [name for name, _ in seeded] == [
+        "Backlog", "Todo", "In Progress", "In Review",
+        "In Test", "Done", "Cancelled", "Triage",
+    ]
+    assert [slug for _, slug in seeded] == [""] * 8
     # Creating default states is part of create: the project must be usable.
     states = http.get(seed["keys"]["states"],
                       f"{base(seed)}/{body['id']}/states/").json()
