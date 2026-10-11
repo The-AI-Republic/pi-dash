@@ -77,6 +77,10 @@ class ReplayConfig:
     # when the topology has no AMQP broker (those handlers 500 — see
     # README, this must be set).
     rust_amqp_url: str = ""
+    # Comma-separated raw Fernet key list (ASSISTANT_ENCRYPTION_KEY):
+    # decrypts assistant BYOK ciphertext columns declared with the
+    # "assistant" schedule (compare.encrypted_columns). Empty skips.
+    assistant_encryption_keys: str = ""
 
     @classmethod
     def from_env(cls, env=None) -> "ReplayConfig":
@@ -107,6 +111,7 @@ class ReplayConfig:
             django_redis_url=env.get("REPLAY_DJANGO_REDIS_URL", ""),
             rust_redis_url=env.get("REPLAY_RUST_REDIS_URL", ""),
             rust_amqp_url=env.get("REPLAY_RUST_AMQP_URL", ""),
+            assistant_encryption_keys=env.get("ASSISTANT_ENCRYPTION_KEY", ""),
         )
 
 
@@ -187,6 +192,7 @@ class Runner:
         self.world: dict | None = None
         self.extra_context: dict = {}
         self._cookie_names: dict[str, str] = {}
+        self._cell_pins: list = []
 
     # -- session setup ---------------------------------------------------
 
@@ -327,6 +333,10 @@ class Runner:
         for redis_url in (self.config.django_redis_url, self.config.rust_redis_url):
             if redis_url:
                 _clear_ephemeral_redis(redis_url)
+        # Active cell pins: session-wide pins plus every per-request
+        # pin introduced so far (cell pins accumulate — divergent
+        # state persists, so its pin must too).
+        self._cell_pins = list(sess.known_cell_diffs)
         # Per-run context (read back seeded ids, mint tokens, prime Redis).
         self.extra_context = dict(sess.setup(self.world, self.config)) if sess.setup else {}
         missing = [k for k in (sess.setup_keys or ()) if k not in self.extra_context]
@@ -380,6 +390,7 @@ class Runner:
             django_webhook_base=self.config.django_webhook_base,
             rust_webhook_base=self.config.rust_webhook_base,
             encrypted_columns=dict(sess.encrypted_columns),
+            assistant_encryption_keys=self.config.assistant_encryption_keys,
             payload_time_paths=dict(sess.payload_time_paths),
             payload_row_refs=dict(sess.payload_row_refs),
             db_cell_refs=list(sess.db_cell_refs),
@@ -497,11 +508,11 @@ class Runner:
             side_ctx.update({name: pair[index] for name, pair in captures.items()})
             return side_ctx
 
-        bodies = sum([req.json is not None, req.raw_body is not None, bool(req.form)])
+        bodies = sum([req.json is not None, req.raw_body is not None, bool(req.form), bool(req.files)])
         if bodies > 1:
             raise Divergence(
                 f"session {sess.name} request {index} {req.method} {req.path}: "
-                "corpus bug — set only one of json / raw_body / form"
+                "corpus bug — set only one of json / raw_body / form / files"
             )
         dj_ctx = _side_ctx(0)
         rs_ctx = _side_ctx(1)
@@ -511,6 +522,8 @@ class Runner:
         rs_json = session_model.render_template(req.json, rs_ctx)
         dj_form = session_model.render_template(dict(req.form or {}), dj_ctx) or None
         rs_form = session_model.render_template(dict(req.form or {}), rs_ctx) or None
+        dj_files = session_model.render_template(dict(req.files or {}), dj_ctx) or None
+        rs_files = session_model.render_template(dict(req.files or {}), rs_ctx) or None
         dj_params = session_model.render_template(dict(req.params or {}), dj_ctx)
         rs_params = session_model.render_template(dict(req.params or {}), rs_ctx)
         dj_headers = session_model.render_template(dict(req.headers or {}), dj_ctx)
@@ -532,13 +545,13 @@ class Runner:
         with self._client_for("django", req.auth, creds, captures, dj_cookies) as client:
             dj_resp = client.request(
                 req.method, dj_path, json=dj_json, content=req.raw_body,
-                data=dj_form, params=dj_params, headers=dj_headers,
+                data=dj_form, files=dj_files, params=dj_params, headers=dj_headers,
             )
         dj_msgs = broker_probe.drain_queue("celery", limit=10000)
         with self._client_for("rust", req.auth, creds, captures, rs_cookies) as client:
             rs_resp = client.request(
                 req.method, rs_path, json=rs_json, content=req.raw_body,
-                data=rs_form, params=rs_params, headers=rs_headers,
+                data=rs_form, files=rs_files, params=rs_params, headers=rs_headers,
             )
         rs_queue_rows = _queue_rows_since(self.config.rust_db, queue_before)
         rs_msgs = broker_probe.drain_queue(
@@ -568,6 +581,9 @@ class Runner:
             self._gap_ctx(sess, captures),
             req.known_body_diffs,
             req.body_blank_paths,
+            req.body_regex_blanks,
+            req.skip_body,
+            req.body_contains,
         )
         if error is not None:
             raise Divergence(f"{label}: {error}")
@@ -584,14 +600,16 @@ class Runner:
             captures[name] = (dj_cap[name], rs_cap[name])
         ctx.captures = dict(captures)
         ctx.capture_pointers = {}
-        if sess.known_cell_diffs:
+        if req.known_cell_diffs:
+            self._cell_pins.extend(req.known_cell_diffs)
+        if self._cell_pins:
             # Cell pins are templates over the gap ctx: world/static
             # values render raw (seed-random ids compare literally),
             # captures render as {name} (their normalised form). A pin
             # naming a capture not seen yet cannot match this request.
             gap_ctx = self._gap_ctx(sess, captures)
             rendered_pins = []
-            for pin in sess.known_cell_diffs:
+            for pin in self._cell_pins:
                 table, issue, match, column, dj_value, rs_value = pin
                 try:
                     rendered_pins.append((

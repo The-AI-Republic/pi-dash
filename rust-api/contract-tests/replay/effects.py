@@ -68,6 +68,12 @@ TIMESTAMP_JSON_KEYS = frozenset(
         # Evidence: comment PATCH stamps edited_at=now() on both backends
         # (replay app_issues_lifecycle request 4).
         "edited_at",
+        # Evidence: loop job create defaults dtstart=now() when the
+        # client sends none (admin_views.py:121-122), milliseconds
+        # apart per backend (replay loop_lifecycle request 22). No
+        # corpus sends dtstart explicitly, so every compared value is
+        # server-minted now().
+        "dtstart",
         # Evidence: set-password serializes the user with stamped
         # last_active/last_login_time/token_updated_at, seconds apart
         # (replay auth_session_lifecycle request 24); mirrors the DB map.
@@ -79,6 +85,21 @@ TIMESTAMP_JSON_KEYS = frozenset(
         "updatedAt",
         "dateJoined",
         "lastLogin",
+        # Evidence: the web chat message-accept path writes a
+        # chat_timing event whose JSONB payload nests recorded_at
+        # (replay runner_web_lifecycle request 17); stamped now()
+        # per backend like every other _at key here.
+        "recorded_at",
+        # Evidence: runner detail bodies render enrolled_at, minted
+        # at enroll/create per backend (replay runner_web_lifecycle
+        # request 28). No corpus sends it (DB presence still guarded
+        # by the timestamp_columns map), so every compared value is
+        # server-minted now().
+        "enrolled_at",
+        # Evidence: the runner-revoke body renders the just-stamped
+        # revoked_at (replay runner_web_lifecycle request 32); same
+        # server-minted class, DB-guarded the same way.
+        "revoked_at",
     }
 )
 
@@ -248,6 +269,47 @@ def validate_reset_token(
 
 
 _FERNET_CACHE: dict = {}
+_FERNET_DIRECT_CACHE: dict = {}
+
+
+def fernet_decrypt_direct(value, keys: list[str]) -> str | None:
+    """Decrypt one cell under raw Fernet keys (assistant BYOK schedule).
+
+    Mirrors ``pi_dash/assistant/crypto.py`` ``FernetBackend``: the keys
+    are used directly (MultiFernet — any key decrypts), no PBKDF2.
+    ``value`` is the frozen cell: hex for BinaryField bytes (see
+    ``compare.freeze``), possibly a raw str; returns the plaintext str,
+    or None when undecryptable (callers leave such cells raw so they
+    fail loudly like any other cell).
+    """
+    if not value or not keys:
+        return None
+    try:
+        from cryptography.fernet import Fernet, MultiFernet
+
+        cache_key = "\x00".join(keys)
+        cached = _FERNET_DIRECT_CACHE.get(cache_key)
+        if cached is None:
+            cached = MultiFernet([Fernet(key.encode("utf-8")) for key in keys])
+            _FERNET_DIRECT_CACHE[cache_key] = cached
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            tokens = [bytes(value)]
+        else:
+            text = str(value)
+            tokens = []
+            try:
+                tokens.append(bytes.fromhex(text))
+            except ValueError:
+                pass
+            tokens.append(text.encode())
+        for token in tokens:
+            try:
+                return cached.decrypt(token).decode("utf-8")
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
 
 
 def fernet_decrypt(value: str, secret_key: str) -> str | None:

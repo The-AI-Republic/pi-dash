@@ -36,6 +36,10 @@ class CompareContext:
     # Session tuning (table -> [column]).
     timestamp_columns: dict = field(default_factory=dict)
     generated_columns: dict = field(default_factory=dict)
+    # {table: [column | (column, "assistant")]}. Bare columns use the
+    # license schedule (PBKDF2 over secret_key, rows gated on a true
+    # is_encrypted flag); ("assistant") columns use the raw
+    # assistant_encryption_keys list with no flag gate (NULL stays raw).
     encrypted_columns: dict = field(default_factory=dict)
     # Extra skipped tables: {table: reason}.
     skip_tables: dict = field(default_factory=dict)
@@ -74,6 +78,8 @@ class CompareContext:
     cell_diffs: list = field(default_factory=list)
     # Server SECRET_KEY (validates token HMACs); None skips validation.
     secret_key: str = ""
+    # Raw assistant Fernet keys (ASSISTANT_ENCRYPTION_KEY, comma list).
+    assistant_encryption_keys: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -212,14 +218,25 @@ def normalise_snapshot(snap: dict, side: str, ctx: CompareContext) -> dict:
             continue
         ts_extra = frozenset(ctx.timestamp_columns.get(table, ()))
         gen_extra = frozenset(ctx.generated_columns.get(table, ()))
-        enc_extra = frozenset(ctx.encrypted_columns.get(table, ()))
+        enc_schedules = {}
+        for entry in ctx.encrypted_columns.get(table, ()):
+            if isinstance(entry, (tuple, list)):
+                enc_schedules[entry[0]] = entry[1]
+            else:
+                enc_schedules[entry] = "license"
+        assistant_keys = [k.strip() for k in (ctx.assistant_encryption_keys or "").split(",") if k.strip()]
         pins = [entry for entry in ctx.cell_diffs if entry[0] == table]
         normed = []
         for row in rows:
             new = {}
             for col, val in row.items():
-                if (
-                    col in enc_extra
+                schedule = enc_schedules.get(col)
+                if schedule == "assistant" and val and assistant_keys:
+                    plain = effects.fernet_decrypt_direct(val, assistant_keys)
+                    if plain is not None:
+                        val = plain
+                elif (
+                    schedule == "license"
                     and row.get("is_encrypted") is True
                     and isinstance(val, str)
                     and val
@@ -229,6 +246,12 @@ def normalise_snapshot(snap: dict, side: str, ctx: CompareContext) -> dict:
                     if plain is not None:
                         val = plain
                 cell = effects.normalise_db_value(table, col, val, ts_extra, gen_extra)
+                if isinstance(cell, dict):
+                    # Timestamps nested in JSONB columns (chat_timing
+                    # payload.recorded_at): the same TIMESTAMP_JSON_KEYS
+                    # rule nested job JSON already gets. Nulls still
+                    # compare (a missing stamp is a bug).
+                    cell = _blank_nested_timestamps(cell)
                 if isinstance(cell, str):
                     if (table, col) in effects.WEBHOOK_URL_COLUMNS:
                         cell = _blank_webhook_base(cell, base)
@@ -446,6 +469,27 @@ def _json_pointer_set(body, pointer: str, value) -> bool:
     return _pointer_set(body, pointer, value)
 
 
+def _sub_regex_blanks(node, pattern: str) -> tuple[object, int]:
+    """Substitute every regex match in str leaves; return (node, hits)."""
+    import re
+
+    hits = 0
+
+    def walk(value):
+        nonlocal hits
+        if isinstance(value, str):
+            new, count = re.subn(pattern, effects.VOLATILE_PLACEHOLDER, value)
+            hits += count
+            return new
+        if isinstance(value, dict):
+            return {key: walk(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [walk(item) for item in value]
+        return value
+
+    return walk(node), hits
+
+
 def compare_response(
     dj_resp,
     rs_resp,
@@ -454,6 +498,9 @@ def compare_response(
     gap_ctx: dict | None = None,
     known_body: list | None = None,
     blank_paths: list | None = None,
+    regex_blanks: list | None = None,
+    skip_body: bool = False,
+    body_contains: list | None = None,
 ) -> str | None:
     """Compare status, content-type, location/cookies, and body.
 
@@ -464,7 +511,12 @@ def compare_response(
     per-side JSON subtree values the same way; pinned subtrees must
     match on their side and then blank out of the diff.
     ``blank_paths`` ([json_pointer, ...]) blanks volatile subtrees
-    after asserting they resolve on both sides.
+    after asserting they resolve on both sides. ``regex_blanks``
+    ([pattern, ...]) blanks every regex match in str leaves after
+    asserting at least one match per side. ``skip_body`` skips the
+    content-type and body-bytes compares (framework-rendered error
+    scaffolding) while still enforcing status, location, cookies, and
+    every ``body_contains`` ([(dj_substr, rs_substr)]) presence pin.
     """
     from .session import render_template
 
@@ -505,8 +557,15 @@ def compare_response(
     # sends no content-type on empty 204s while axum's JSON responder
     # keeps the header, and representation metadata on an empty body is
     # unobservable to clients (the contract suites pin status + empty
-    # body for 204s, never the header).
-    if "content-type" not in pinned and (dj_resp.content or rs_resp.content):
+    # body for 204s, never the header). Skipped wholesale under
+    # skip_body: the two frameworks render different representations
+    # (Django's DEBUG HTML page vs the generic JSON 500) for the same
+    # exception, and the media type is part of that scaffolding.
+    if (
+        not skip_body
+        and "content-type" not in pinned
+        and (dj_resp.content or rs_resp.content)
+    ):
         dj_ct = dj_resp.headers.get("content-type", "")
         rs_ct = rs_resp.headers.get("content-type", "")
         if dj_ct != rs_ct:
@@ -526,7 +585,35 @@ def compare_response(
         rs_cookies = _parse_set_cookie(rs_resp.headers)
         if dj_cookies != rs_cookies:
             return f"set-cookie differs: django={dj_cookies!r} rust={rs_cookies!r}"
-    if dj_resp.content == rs_resp.content and not known_body and not blank_paths:
+    if skip_body:
+        for entry in body_contains or []:
+            dj_sub, rs_sub = entry
+            try:
+                dj_sub = render_template(dj_sub, gap_ctx or {})
+                rs_sub = render_template(rs_sub, gap_ctx or {})
+            except KeyError as exc:
+                return f"body-contains pin {entry!r}: unrenderable match: {exc}"
+            if not dj_sub or not rs_sub:
+                return f"body-contains pin {entry!r}: rendered empty (a pin that matches everything excuses everything)"
+            if dj_sub not in dj_resp.text:
+                return (
+                    f"body-contains pin: Django body lacks {dj_sub!r} "
+                    f"(a different failure than the pinned one): "
+                    f"{dj_resp.text[:500]!r}"
+                )
+            if rs_sub not in rs_resp.text:
+                return (
+                    f"body-contains pin: Rust body lacks {rs_sub!r} "
+                    f"(a different failure than the pinned one): "
+                    f"{rs_resp.text[:500]!r}"
+                )
+        return None
+    if (
+        dj_resp.content == rs_resp.content
+        and not known_body
+        and not blank_paths
+        and not regex_blanks
+    ):
         return None
     try:
         dj_json = dj_resp.json()
@@ -537,10 +624,10 @@ def compare_response(
     except ValueError:
         rs_json = None
     if dj_json is None or rs_json is None:
-        if known_body or blank_paths:
+        if known_body or blank_paths or regex_blanks:
             return (
-                "known-body pin / blank path declared but a side has no "
-                "JSON body (pins apply to normalised JSON subtrees)"
+                "known-body pin / blank declared but a side has no JSON "
+                "body (pins apply to normalised JSON subtrees)"
             )
         if dj_resp.content == rs_resp.content:
             return None
@@ -593,6 +680,17 @@ def compare_response(
             )
         _json_pointer_set(dj_norm, pointer, effects.VOLATILE_PLACEHOLDER)
         _json_pointer_set(rs_norm, pointer, effects.VOLATILE_PLACEHOLDER)
+    for pattern in regex_blanks or []:
+        dj_norm, dj_hits = _sub_regex_blanks(dj_norm, pattern)
+        rs_norm, rs_hits = _sub_regex_blanks(rs_norm, pattern)
+        if not dj_hits or not rs_hits:
+            missing = ",".join(
+                [s for s, hits in (("django", dj_hits), ("rust", rs_hits)) if not hits]
+            )
+            return (
+                f"body regex blank {pattern!r}: no match on {missing} "
+                "(the pattern must hit at least once per side)"
+            )
     if dj_norm != rs_norm:
         lines = first_diffs(dj_norm, rs_norm)
         dj_text = json.dumps(dj_norm, sort_keys=True, indent=1, default=str)

@@ -56,34 +56,7 @@ OWNED_UNCOVERED = {
     ('/api/assets/v2/workspaces/{}/restore/{}/', 'POST'): "owned; no corpus session yet — batch 5 (app_assets session)",  # app :: pi_dash.app.views.asset.v2.view
     ('/api/assets/v2/workspaces/{}/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_assets session)",  # app :: pi_dash.app.views.asset.v2.view
     ('/api/assets/v2/workspaces/{}/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_assets session)",  # app :: pi_dash.app.views.asset.v2.view
-    ('/api/instances/loop/jobs/', 'POST'): "owned; no corpus session yet — batch 3 (license session)",  # license :: pi_dash.loop.admin_views.view
-    ('/api/instances/loop/jobs/{}/', 'DELETE'): "owned; no corpus session yet — batch 3 (license session)",  # license :: pi_dash.loop.admin_views.view
-    ('/api/instances/loop/jobs/{}/', 'PATCH'): "owned; no corpus session yet — batch 3 (license session)",  # license :: pi_dash.loop.admin_views.view
     ('/api/integrations/github/app/webhook/', 'POST'): "owned; no corpus session yet — batch 5 (app_integrations session)",  # app :: pi_dash.app.views.integration.github.view
-    ('/api/runners/approvals/{}/decide/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.approvals.view
-    ('/api/runners/chat/approvals/{}/decide/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.chat.view
-    ('/api/runners/chat/sessions/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.chat.view
-    ('/api/runners/chat/sessions/{}/cancel/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.chat.view
-    ('/api/runners/chat/sessions/{}/close/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.chat.view
-    ('/api/runners/chat/sessions/{}/messages/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.chat.view
-    ('/api/runners/chat/sessions/{}/warm/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.chat.view
-    ('/api/runners/dev-machines/{}/', 'DELETE'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.runners.view
-    ('/api/runners/dev-machines/{}/create-runner/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.machine_commands.view
-    ('/api/runners/dev-machines/{}/revoke/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.runners.view
-    ('/api/runners/dev-machines/{}/rotate/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.runners.view
-    ('/api/runners/invites/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.enrollment.view
-    ('/api/runners/machine-tokens/{}/tickets/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.enrollment.view
-    ('/api/runners/pods/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.pods.view
-    ('/api/runners/pods/{}/', 'DELETE'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.pods.view
-    ('/api/runners/pods/{}/', 'PATCH'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.pods.view
-    ('/api/runners/re-tick/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.runs.view
-    ('/api/runners/runs/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.runs.view
-    ('/api/runners/runs/{}/cancel/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.runs.view
-    ('/api/runners/runs/{}/release-pin/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.runs.view
-    ('/api/runners/{}/', 'DELETE'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.runners.view
-    ('/api/runners/{}/', 'PATCH'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.runners.view
-    ('/api/runners/{}/revive/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.enrollment.view
-    ('/api/runners/{}/revoke/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.runners.view
     ('/api/users/api-tokens/', 'POST'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.api.view
     ('/api/users/api-tokens/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.api.view
     ('/api/users/api-tokens/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.api.view
@@ -92,19 +65,6 @@ OWNED_UNCOVERED = {
     ('/api/users/me/', 'DELETE'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.user.base.UserEndpoint
     ('/api/users/me/', 'PATCH'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.user.base.UserEndpoint
     ('/api/users/me/accounts/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.user.base.view
-    ('/api/users/me/ai-assistant/agent-token/', 'POST'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.agent_profile.view
-    ('/api/users/me/ai-assistant/config/', 'DELETE'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.llm_config.view
-    ('/api/users/me/ai-assistant/config/', 'PUT'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.llm_config.view
-    ('/api/users/me/ai-assistant/config/test/', 'POST'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.llm_config.view
-    ('/api/users/me/ai-assistant/mcp-servers/', 'POST'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.mcp_servers.view
-    ('/api/users/me/ai-assistant/mcp-servers/{}/', 'DELETE'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.mcp_servers.view
-    ('/api/users/me/ai-assistant/mcp-servers/{}/', 'PATCH'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.mcp_servers.view
-    ('/api/users/me/ai-assistant/stt-config/', 'DELETE'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.stt_config.view
-    ('/api/users/me/ai-assistant/stt-config/', 'PUT'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.stt_config.view
-    ('/api/users/me/ai-assistant/stt-config/test/', 'POST'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.stt_config.view
-    ('/api/users/me/ai-assistant/transcribe/', 'POST'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.transcribe.view
-    ('/api/users/me/auto-pm/', 'PATCH'): "owned; no corpus session yet — batch 4 (loop/prompting sessions)",  # loop :: pi_dash.loop.views.view
-    ('/api/users/me/auto-pm/jobs/{}/', 'PATCH'): "owned; no corpus session yet — batch 4 (loop/prompting sessions)",  # loop :: pi_dash.loop.views.view
     ('/api/users/me/email/', 'PATCH'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.user.base.UserEndpoint
     ('/api/users/me/email/generate-code/', 'POST'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.user.base.UserEndpoint
     ('/api/users/me/integrations/github/app/install/', 'POST'): "owned; no corpus session yet — batch 5 (app_integrations session)",  # app :: pi_dash.app.views.integration.github.view
@@ -121,39 +81,6 @@ OWNED_UNCOVERED = {
     ('/api/v1/assets/user-assets/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.asset.view
     ('/api/v1/assets/user-assets/{}/server/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.asset.view
     ('/api/v1/assets/user-assets/{}/server/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.asset.view
-    ('/api/v1/runner/chat/sessions/{}/approvals/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.chat.view
-    ('/api/v1/runner/chat/sessions/{}/closed/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.chat.view
-    ('/api/v1/runner/chat/sessions/{}/events/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.chat.view
-    ('/api/v1/runner/chat/sessions/{}/failed/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.chat.view
-    ('/api/v1/runner/chat/sessions/{}/messages/{}/complete/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.chat.view
-    ('/api/v1/runner/chat/sessions/{}/messages/{}/started/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.chat.view
-    ('/api/v1/runner/chat/sessions/{}/started/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.chat.view
-    ('/api/v1/runner/dev-machines/desktop-enroll/', 'DELETE'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.desktop.view
-    ('/api/v1/runner/dev-machines/desktop-enroll/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.desktop.view
-    ('/api/v1/runner/dev-machines/{}/commands/{}/result/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.machine_commands.view
-    ('/api/v1/runner/dev-machines/{}/sessions/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.machine_sessions.view
-    ('/api/v1/runner/dev-machines/{}/sessions/{}/', 'DELETE'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.machine_sessions.view
-    ('/api/v1/runner/dev-machines/{}/sessions/{}/poll', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.machine_sessions.machine_session_poll
-    ('/api/v1/runner/machine-tokens/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.enrollment.view
-    ('/api/v1/runner/runners/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.enrollment.view
-    ('/api/v1/runner/runners/enroll/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.enrollment.view
-    ('/api/v1/runner/runners/{}/', 'DELETE'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.enrollment.view
-    ('/api/v1/runner/runners/{}/refresh/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.enrollment.view
-    ('/api/v1/runner/runners/{}/sessions/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.sessions.view
-    ('/api/v1/runner/runners/{}/sessions/{}/', 'DELETE'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.sessions.view
-    ('/api/v1/runner/runners/{}/sessions/{}/poll', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.sessions.runner_session_poll
-    ('/api/v1/runner/runs/{}/accept/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.run_endpoints.view
-    ('/api/v1/runner/runs/{}/approvals/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.run_endpoints.view
-    ('/api/v1/runner/runs/{}/awaiting-reauth/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.run_endpoints.view
-    ('/api/v1/runner/runs/{}/cancelled/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.run_endpoints.view
-    ('/api/v1/runner/runs/{}/complete/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.run_endpoints.view
-    ('/api/v1/runner/runs/{}/events/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.run_endpoints.view
-    ('/api/v1/runner/runs/{}/fail/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.run_endpoints.view
-    ('/api/v1/runner/runs/{}/pause/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.run_endpoints.view
-    ('/api/v1/runner/runs/{}/queued/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.run_endpoints.view
-    ('/api/v1/runner/runs/{}/resumed/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.run_endpoints.view
-    ('/api/v1/runner/runs/{}/started/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.run_endpoints.view
-    ('/api/v1/runner/runs/{}/stream/upgrade/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.run_endpoints.view
     ('/api/v1/runners/{}/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.runner.view
     ('/api/v1/workspaces/{}/agent-runs/{}/yield/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.issue.view
     ('/api/v1/workspaces/{}/assets/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.asset.view
@@ -224,12 +151,6 @@ OWNED_UNCOVERED = {
     ('/api/workspaces/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_workspace session)",  # app :: pi_dash.app.views.workspace.base.WorkSpaceViewSet
     ('/api/workspaces/{}/', 'PUT'): "owned; no corpus session yet — batch 5 (app_workspace session)",  # app :: pi_dash.app.views.workspace.base.WorkSpaceViewSet
     ('/api/workspaces/{}/ai-assistant/', 'POST'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.external.base.view
-    ('/api/workspaces/{}/ai-assistant/generate-title/', 'POST'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.llm_config.view
-    ('/api/workspaces/{}/ai-assistant/threads/', 'POST'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.threads.view
-    ('/api/workspaces/{}/ai-assistant/threads/{}/', 'DELETE'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.threads.view
-    ('/api/workspaces/{}/ai-assistant/threads/{}/', 'PATCH'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.threads.view
-    ('/api/workspaces/{}/ai-assistant/threads/{}/cancel/', 'POST'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.messages.view
-    ('/api/workspaces/{}/ai-assistant/threads/{}/messages/', 'POST'): "owned; no corpus session yet — batch 4 (assistant session)",  # assistant :: pi_dash.assistant.views.messages.view
     ('/api/workspaces/{}/analytic-view/', 'POST'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.analytic.base.AnalyticViewViewset
     ('/api/workspaces/{}/analytic-view/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.analytic.base.AnalyticViewViewset
     ('/api/workspaces/{}/analytic-view/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.analytic.base.AnalyticViewViewset
@@ -333,9 +254,6 @@ OWNED_UNCOVERED = {
     ('/api/workspaces/{}/projects/{}/views/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.IssueViewViewSet
     ('/api/workspaces/{}/projects/{}/views/{}/', 'PUT'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.IssueViewViewSet
     ('/api/workspaces/{}/projects/{}/work-items/{}/move/', 'POST'): "owned; no corpus session yet — batch 5 (app_issues follow-up: labels/relations/links/move)",  # app :: pi_dash.app.views.issue.move.view
-    ('/api/workspaces/{}/prompt-sections/{}', 'DELETE'): "owned; no corpus session yet — batch 4 (loop/prompting sessions)",  # prompting :: pi_dash.prompting.views.view
-    ('/api/workspaces/{}/prompt-sections/{}', 'PUT'): "owned; no corpus session yet — batch 4 (loop/prompting sessions)",  # prompting :: pi_dash.prompting.views.view
-    ('/api/workspaces/{}/prompts/{}/preview', 'POST'): "owned; no corpus session yet — batch 4 (loop/prompting sessions)",  # prompting :: pi_dash.prompting.views.view
     ('/api/workspaces/{}/quick-links/', 'POST'): "owned; no corpus session yet — batch 5 (app_workspace session)",  # app :: pi_dash.app.views.workspace.quick_link.QuickLinkViewSet
     ('/api/workspaces/{}/quick-links/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_workspace session)",  # app :: pi_dash.app.views.workspace.quick_link.QuickLinkViewSet
     ('/api/workspaces/{}/quick-links/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_workspace session)",  # app :: pi_dash.app.views.workspace.quick_link.QuickLinkViewSet

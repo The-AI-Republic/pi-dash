@@ -72,6 +72,13 @@ jobs:
     env:
       DJANGO_SETTINGS_MODULE: pi_dash.settings.test
       SECRET_KEY: replay-ci-secret
+      # Same Fernet test key as rust-api-contract-tests.yml: the
+      # assistant corpus stores BYOK credentials through it, and the
+      # comparer decrypts both backends' ciphertext with it.
+      ASSISTANT_CRYPTO_BACKEND: fernet
+      ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # Cloud parity like the contract suite: the SSRF cases pin the guard.
+      ASSISTANT_BLOCK_PRIVATE_URLS: "True"
       WEB_URL: http://localhost
       APP_BASE_URL: http://localhost
       API_KEY_RATE_LIMIT: 100000/minute

@@ -93,7 +93,7 @@ def _placeholders(node) -> set[str]:
             for key, item in value.items():
                 walk(key)
                 walk(item)
-        elif isinstance(value, list):
+        elif isinstance(value, (list, tuple)):
             for item in value:
                 walk(item)
 
@@ -145,7 +145,9 @@ def test_corpus_manifests_valid():
                     and isinstance(entry[2], dict)
                     and entry[2]
                 ), f"{sess.name}: bad {field_name} {entry!r}"
-        for entry in sess.known_cell_diffs or []:
+        for entry in list(sess.known_cell_diffs or []) + [
+            pin for req in sess.requests for pin in (req.known_cell_diffs or [])
+        ]:
             assert (
                 isinstance(entry, (list, tuple))
                 and len(entry) == 6
@@ -187,7 +189,8 @@ def test_corpus_manifests_valid():
             assert req.path.startswith("/"), f"{label}: path must be absolute"
             assert req.route_template().startswith("/"), f"{label}: bad route"
             for placeholder in _placeholders(
-                [req.path, req.params, req.headers, req.json, req.form, req.cookies]
+                [req.path, req.params, req.headers, req.json, req.form,
+                 req.cookies, req.files]
             ):
                 assert placeholder in available, (
                     f"{label}: {{{placeholder}}} is neither a world key "
@@ -248,10 +251,28 @@ def test_corpus_manifests_valid():
                     and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
                     and entry[2] != entry[3]
                 ), f"{label}: bad known body diff {entry!r}"
+            for entry in req.body_contains or []:
+                assert (
+                    isinstance(entry, (list, tuple))
+                    and len(entry) == 2
+                    and isinstance(entry[0], str)
+                    and entry[0]
+                    and isinstance(entry[1], str)
+                    and entry[1]
+                ), f"{label}: bad body contains {entry!r}"
+            if req.body_contains:
+                assert req.skip_body, (
+                    f"{label}: body_contains without skip_body never runs"
+                )
+            if req.skip_body:
+                assert not (
+                    req.known_body_diffs or req.body_blank_paths or req.body_regex_blanks
+                ), f"{label}: skip_body with JSON-subtree pins is contradictory"
             bodies = sum(
-                [req.json is not None, req.raw_body is not None, bool(req.form)]
+                [req.json is not None, req.raw_body is not None, bool(req.form),
+                 bool(req.files)]
             )
-            assert bodies <= 1, f"{label}: json, raw_body and form are exclusive"
+            assert bodies <= 1, f"{label}: json, raw_body, form and files are exclusive"
             if req.auth.startswith("admin:"):
                 assert req.auth in sess.auth_users, (
                     f"{label}: {req.auth!r} needs an auth_users entry"
@@ -620,6 +641,66 @@ def test_body_blank_paths_blank_presence_and_fail_on_missing():
     assert error is not None and "key" in error and "rust" in error
 
 
+def test_skip_body_skips_scaffolding_but_enforces_contains():
+    """skip_body excuses framework 500 pages, never a different failure."""
+    from . import compare
+
+    ctx = compare.CompareContext()
+    dj = _fake_response(
+        500,
+        b"<html><title>AttributeError\n at /api/x</title>...18223...</html>",
+        {"content-type": "text/html; charset=utf-8"},
+    )
+    rs = _fake_response(
+        500,
+        b'{"error":"Something went wrong please try again later"}',
+        {"content-type": "application/json"},
+    )
+    # Unskipped, content-type + bytes fail.
+    assert compare.compare_response(dj, rs, ctx) is not None
+    pins = [("<title>AttributeError", "Something went wrong")]
+    assert (
+        compare.compare_response(dj, rs, ctx, skip_body=True, body_contains=pins)
+        is None
+    )
+    # A side that stops failing the pinned way fails loudly.
+    other = _fake_response(
+        500,
+        b'{"error":"Something went wrong please try again later"}',
+        {"content-type": "application/json"},
+    )
+    error = compare.compare_response(
+        other, rs, ctx, skip_body=True, body_contains=pins
+    )
+    assert error is not None and "Django body lacks" in error
+    # Status still compares under the skip.
+    ok = _fake_response(200, b"{}", {"content-type": "application/json"})
+    error = compare.compare_response(ok, rs, ctx, skip_body=True, body_contains=pins)
+    assert error is not None and "status differs" in error
+
+
+def test_db_jsonb_nested_timestamps_blank_but_null_still_compares():
+    """TIMESTAMP_JSON_KEYS apply inside JSONB DB cells (chat_timing)."""
+    from . import compare
+
+    ctx = compare.CompareContext()
+    dj = {"agent_chat_event": [
+        {"id": "a", "payload": {"stage": "x", "recorded_at": "2026-10-11T04:00:00+00:00"}},
+    ]}
+    rs = {"agent_chat_event": [
+        {"id": "a", "payload": {"stage": "x", "recorded_at": "2026-10-11T04:00:01+00:00"}},
+    ]}
+    dj_norm = compare.normalise_snapshot(dj, "django", ctx)
+    rs_norm = compare.normalise_snapshot(rs, "rust", ctx)
+    assert compare.compare_db(dj_norm, rs_norm) == []
+    # A missing stamp (null vs stamped) still fails.
+    rs_null = {"agent_chat_event": [
+        {"id": "a", "payload": {"stage": "x", "recorded_at": None}},
+    ]}
+    rs_null_norm = compare.normalise_snapshot(rs_null, "rust", ctx)
+    assert compare.compare_db(dj_norm, rs_null_norm) != []
+
+
 def test_fernet_decrypt_round_trip_and_rejects_garbage():
     """License ciphertext decrypts under Django's key schedule only."""
     import base64
@@ -642,6 +723,39 @@ def test_fernet_decrypt_round_trip_and_rejects_garbage():
     assert effects.fernet_decrypt("", secret) is None
     assert effects.fernet_decrypt(token, "wrong-secret") is None
     assert effects.fernet_decrypt(token, "") is None
+
+
+def test_fernet_direct_decrypts_frozen_hex_cells():
+    """Assistant-schedule columns decrypt raw-key ciphertext, hex or str."""
+    from cryptography.fernet import Fernet
+
+    from . import compare, effects
+
+    key = Fernet.generate_key().decode()
+    token = Fernet(key.encode()).encrypt(b"test-key-123")
+    assert effects.fernet_decrypt_direct(token.hex(), [key]) == "test-key-123"
+    assert effects.fernet_decrypt_direct(token, [key]) == "test-key-123"
+    assert effects.fernet_decrypt_direct(token.hex(), ["bogus"]) is None
+    assert effects.fernet_decrypt_direct("deadbeef", [key]) is None
+    assert effects.fernet_decrypt_direct(None, [key]) is None
+    # End to end through normalise_snapshot: two encryptions of the
+    # same secret compare equal with no is_encrypted flag involved.
+    other = Fernet(key.encode()).encrypt(b"test-key-123").hex()
+    table = "assistant_llmconfig"
+    tuned = compare.CompareContext(
+        encrypted_columns={table: [("api_key_encrypted", "assistant")]},
+        assistant_encryption_keys=key,
+    )
+    dj = {table: [{"id": "1", "api_key_encrypted": token.hex()}]}
+    rs = {table: [{"id": "1", "api_key_encrypted": other}]}
+    assert token.hex() != other
+    assert (
+        compare.compare_db(
+            compare.normalise_snapshot(dj, "django", tuned),
+            compare.normalise_snapshot(rs, "rust", tuned),
+        )
+        == []
+    )
 
 
 def test_encrypted_columns_decrypt_flagged_rows_only():

@@ -37,8 +37,9 @@ class Request:
     route: str = ""
     # JSON body template (dict/list/str with {placeholders}); None sends
     # no body. Raw-string bodies (non-JSON posts) use raw_body instead;
-    # HTML-form posts use form instead. At most one of json / raw_body /
-    # form may be set (the runner rejects a request that sets two).
+    # HTML-form posts use form instead; multipart uploads use files
+    # instead. At most one of json / raw_body / form / files may be set
+    # (the runner rejects a request that sets two).
     json: object = None
     raw_body: bytes | None = None
     # Form fields template ({placeholders} in values); sent urlencoded.
@@ -46,6 +47,11 @@ class Request:
     # form data, so corpus flows through them need templated fields the
     # same way JSON posts do.
     form: dict = field(default_factory=dict)
+    # Multipart files ({field: (filename, bytes, content_type)},
+    # {placeholders} in filenames); sent as multipart/form-data (the
+    # transcribe endpoint only reads uploads). Bytes pass through
+    # templating untouched.
+    files: dict = field(default_factory=dict)
     # Query params and extra headers (templates in values).
     params: dict = field(default_factory=dict)
     headers: dict = field(default_factory=dict)
@@ -109,6 +115,44 @@ class Request:
     # derive from per-backend randomness — where a capture (exact
     # occurrences of one response value) cannot reach.
     body_blank_paths: list = field(default_factory=list)
+    # Regex blanks over string leaves for THIS request only: [pattern,
+    # ...] (Python ``re``). Each pattern must match at least once on
+    # EACH side (a side with no match fails loudly) and every match
+    # blanks to the volatile placeholder. For server-minted values
+    # embedded inside larger strings — e.g. a per-render run id woven
+    # through a 70 KB prompt — where no JSON pointer can isolate the
+    # value. Anchor patterns to their surrounding context (never a
+    # bare uuid shape) so stable ids in the same text still compare.
+    body_regex_blanks: list = field(default_factory=list)
+    # Skip the response body-bytes (and content-type) compare for THIS
+    # request only. For framework-rendered error scaffolding whose bytes
+    # are environment-defined, not behaviour: Django's DEBUG 500 page
+    # embeds the request host/port, settings (DB names, redis DBs, SMTP
+    # ports, per-process keys) and memory addresses, while the Rust port
+    # answers its generic JSON 500 — the same exception class either
+    # way (production runs DEBUG=False, where Django is generic too).
+    # Status, location, and cookies still compare, and every
+    # body_contains pin must match; DB, jobs, and sinks compare fully.
+    # This mirrors the contract suite, which pins status-only (plus the
+    # persisted DB half) on exactly these endpoints.
+    skip_body: bool = False
+    # Required presence pins when skip_body is set: [(dj_substr,
+    # rs_substr), ...]. Each side's raw body text must contain its
+    # substring (templates over the gap ctx); a missing side fails
+    # loudly. Names the exception kind the skipped page renders (e.g.
+    # "<title>ValidationError"), so a backend that starts failing a
+    # DIFFERENT way still fails the replay.
+    body_contains: list = field(default_factory=list)
+    # Known DB cell divergences introduced BY this request: [(table,
+    # fix_issue, match_dict, column, dj_value, rs_value)] — same shape
+    # as Session.known_cell_diffs. Unlike body/job pins, cell pins
+    # ACCUMULATE: once declared they apply to this request and every
+    # later one, because the divergent state persists like any other
+    # state. Declare the pin on the request that introduces the
+    # divergence; that is the only window a session-wide pin cannot
+    # express (a matcher cannot tell a live row's pre-write state
+    # from its post-write state when no observable column changes).
+    known_cell_diffs: list = field(default_factory=list)
 
     def route_template(self) -> str:
         if self.route:
@@ -135,10 +179,13 @@ class Session:
     # Extra per-table comparison tuning, all explicit: {table: [column]}.
     # timestamp_columns: domain stamp columns beyond TIMESTAMP_COLUMNS.
     # generated_columns: domain minted-value columns beyond {"id"}.
-    # encrypted_columns: Fernet-ciphertext columns whose rows with a
-    # true ``is_encrypted`` flag compare by DECRYPTED plaintext (the IV
-    # is random per encryption, so ciphertext never matches); rows
-    # whose flag is false, and undecryptable cells, compare raw.
+    # encrypted_columns: {table: [column | (column, "assistant")]}.
+    # Fernet-ciphertext columns comparing by DECRYPTED plaintext (the
+    # IV is random per encryption, so ciphertext never matches). Bare
+    # columns use the license schedule (PBKDF2 over SECRET_KEY) gated
+    # on a true row ``is_encrypted`` flag; ("assistant") columns use
+    # the raw ASSISTANT_ENCRYPTION_KEY list with no flag gate. Rows
+    # outside the gate, and undecryptable cells, compare raw.
     timestamp_columns: dict = field(default_factory=dict)
     generated_columns: dict = field(default_factory=dict)
     encrypted_columns: dict = field(default_factory=dict)
@@ -251,6 +298,8 @@ def render_template(node, context: dict[str, str]):
         return {render_template(k, context): render_template(v, context) for k, v in node.items()}
     if isinstance(node, list):
         return [render_template(item, context) for item in node]
+    if isinstance(node, tuple):
+        return tuple(render_template(item, context) for item in node)
     return node
 
 
