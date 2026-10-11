@@ -192,6 +192,9 @@ fn json_response(status: StatusCode, body: String) -> Response {
 /// `HttpResponseRedirect` (`github.py:140-147`): 302 with a `Location`
 /// header and an empty body.
 fn redirect_response(location: String) -> Response {
+    let Some(location) = crate::response_headers::header_value(&location) else {
+        return Denial::ServerError.into_response();
+    };
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)

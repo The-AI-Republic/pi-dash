@@ -53,6 +53,31 @@ def test_create_sets_location_to_link_url(api, tenant_a, project_a, auth_a, modu
     assert r.headers["location"] == r.json()["url"]
 
 
+def test_create_non_latin1_url_location_is_mime_encoded(api, tenant_a, project_a, auth_a, module_a):
+    # Django ResponseHeaders MIME-encodes (RFC 2047) header values past
+    # latin-1 (PIDASHCONV-880). Both encodings are pinned: the shorter URL
+    # picks base64, the longer one ties SHORTEST and picks Q. The output is
+    # pure ASCII, so the string comparison is byte-exact on both backends.
+    cases = [
+        (
+            "https://example.com/\U0001F600",
+            "=?utf-8?b?aHR0cHM6Ly9leGFtcGxlLmNvbS/wn5iA?=",
+        ),
+        (
+            "https://example.com/django9/\U0001F600",
+            "=?utf-8?q?https=3A//example=2Ecom/django9/=F0=9F=98=80?=",
+        ),
+    ]
+    for url, encoded in cases:
+        r = api.post(
+            _links_url(tenant_a, project_a, module_a), headers=auth_a,
+            json={"title": "Emoji", "url": url},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["url"] == url
+        assert r.headers["location"] == encoded, url
+
+
 def test_create_bare_domain_gets_http_prefix(api, tenant_a, project_a, auth_a, module_a):
     r = api.post(
         _links_url(tenant_a, project_a, module_a), headers=auth_a,

@@ -1407,6 +1407,9 @@ async fn workspace_get(
         return server_error();
     };
     // `HttpResponseRedirect`: empty body, default content type.
+    let Some(url) = crate::response_headers::header_value(&url) else {
+        return server_error();
+    };
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, url)
@@ -1485,6 +1488,9 @@ async fn static_get(
         None,
         &Utc::now(),
     ) else {
+        return server_error();
+    };
+    let Some(url) = crate::response_headers::header_value(&url) else {
         return server_error();
     };
     Response::builder()

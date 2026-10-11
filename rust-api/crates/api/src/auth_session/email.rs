@@ -372,6 +372,9 @@ fn csrf_failure_response(root_url: &str) -> Response {
 /// `HttpResponseRedirect`: 302 + `Location`, `Vary: Cookie`, and any
 /// `Set-Cookie` values the branch issued.
 fn redirect_response(location: String, set_cookies: Vec<String>) -> Response {
+    let Some(location) = crate::response_headers::header_value(&location) else {
+        return server_error();
+    };
     let mut builder = Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
