@@ -6,6 +6,7 @@ use pidash_db::config::Settings;
 use pidash_db::redis::RedisHandle;
 use pidash_db::Pools;
 use pidash_services::extensions::{CloudAgentToolsetsSeam, NoExtraToolsets};
+use pidash_services::user_settings::{base_settings_schema, SettingsSchema};
 
 use crate::edge::{EdgeHandle, DEFAULT_UPSTREAM};
 use crate::edge_shadow::{ShadowConfig, ShadowGate};
@@ -28,6 +29,7 @@ pub struct AppState {
     shadow_config: Option<ShadowConfig>,
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn pidash_services::extensions::AssistantModelSeam>,
+    user_settings_schema: Arc<SettingsSchema>,
 }
 
 impl AppState {
@@ -76,6 +78,7 @@ impl AppState {
             shadow_config: None,
             toolsets: Arc::new(NoExtraToolsets),
             assistant_seam,
+            user_settings_schema: Arc::new(base_settings_schema()),
         }
     }
 
@@ -118,6 +121,7 @@ impl AppState {
             shadow_config: None,
             toolsets: self.toolsets.clone(),
             assistant_seam: self.assistant_seam.clone(),
+            user_settings_schema: self.user_settings_schema.clone(),
         }
     }
 
@@ -186,11 +190,31 @@ impl AppState {
     pub fn toolsets(&self) -> &Arc<dyn CloudAgentToolsetsSeam> {
         &self.toolsets
     }
+
+    /// Install the user-settings schema the profile endpoint validates
+    /// `settings` PATCHes against (PIDASHCONV-916). CE keeps the empty
+    /// default, so every `settings` write is rejected; the overlay
+    /// installs `extend_settings_schema(&base_settings_schema(), &own)`
+    /// instead — declaring a key is what makes it writable through the
+    /// profile API.
+    pub fn with_user_settings_schema(mut self, schema: SettingsSchema) -> Self {
+        self.user_settings_schema = Arc::new(schema);
+        self
+    }
+
+    /// The schema the profile endpoint validates `settings` PATCHes
+    /// against: the CE default until the overlay installs its own.
+    pub fn user_settings_schema(&self) -> &SettingsSchema {
+        &self.user_settings_schema
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use pidash_services::user_settings::extend_settings_schema;
 
     #[test]
     fn toolsets_seam_defaults_to_ce_and_installs() {
@@ -210,5 +234,27 @@ mod tests {
         // The shadow clone keeps the installed seam.
         let shadow = state.with_edge_replaced(EdgeHandle::for_tests(DEFAULT_UPSTREAM));
         assert_eq!(shadow.toolsets().schema_tool_name(), "acme_get_tool_schema");
+    }
+
+    #[test]
+    fn settings_schema_defaults_to_empty_ce_schema() {
+        assert!(AppState::new("test").user_settings_schema().is_empty());
+    }
+
+    #[test]
+    fn settings_schema_is_injectable() {
+        let schema = extend_settings_schema(
+            &base_settings_schema(),
+            &BTreeMap::from([(
+                "openhub".to_string(),
+                BTreeMap::from([("apps_enabled".to_string(), serde_json::json!(false))]),
+            )]),
+        )
+        .expect("extend");
+        let state = AppState::new("test").with_user_settings_schema(schema);
+        assert_eq!(
+            state.user_settings_schema()["openhub"]["apps_enabled"],
+            serde_json::json!(false)
+        );
     }
 }
