@@ -14737,10 +14737,12 @@ export function isWorkspaceSeedProject(projectName: string, workspaceName: strin
  * cascade), and so are the bot's workspace-level pages and membership,
  * while the bot user — which has no soft-delete — is hard-deleted (its
  * membership cascades with it). Soft (not hard) deleting the project keeps
- * a mid-flight seed task harmless: its remaining writes still succeed
- * against the hidden row instead of failing. Idempotent: a second run
- * deletes nothing and prints zeros. Built by a function so the unit test
- * can pin the escaping and the printed marker without a stack.
+ * a mid-flight seed task harmless to assertions: the seed task has no
+ * celery retry, so if the drain lands mid-flight the task fails once on
+ * the deleted bot's foreign keys while its partial rows stay hidden with
+ * the soft-deleted project. Idempotent: a second run deletes nothing and
+ * prints zeros. Built by a function so the unit test can pin the escaping
+ * and the printed marker without a stack.
  */
 export function workspaceSeedCleanupPython(slug: string, projectId: string): string {
   return (
@@ -14875,10 +14877,11 @@ export async function awaitWorkspaceSeededProjectWithSession(
  * assertions hold regardless of worker speed. Waits for the seed project to
  * appear, soft-deletes it plus the bot rows through the Django shell (the
  * API refuses to delete the default project at all), then re-runs the
- * cleanup while anything is still being deleted: the seed task may be
- * mid-flight, and its workspace-level page writes can still land one pass
- * later. Finishes by proving over the API that no seed-named project
- * remains listed.
+ * cleanup while anything is still being deleted, catching rows that
+ * committed inside an earlier pass's race window (once the bot user is
+ * gone no further seed writes can succeed, so the passes converge).
+ * Finishes by proving over the API that no seed-named project remains
+ * listed.
  */
 export async function drainWorkspaceSeed(
   session: AuthedSession,
