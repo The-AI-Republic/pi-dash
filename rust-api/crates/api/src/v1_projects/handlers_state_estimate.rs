@@ -2385,9 +2385,13 @@ async fn state_external_exists(
 
 /// Delete a state: default states and non-empty states (any non-soft-deleted
 /// issue points at them — `Issue.objects`, soft-delete scope only) answer 400;
-/// otherwise the row is soft-deleted and the response is an empty 204. The
-/// deferred related-object sweep is a documented no-op (nothing references an
-/// empty state); `updated_by` stamps the actor like `BaseModel.save` does.
+/// otherwise the row is soft-deleted, the deferred related-object sweep is
+/// enqueued, and the response is an empty 204. The sweep is
+/// `soft_delete_related_objects("db", "state", pk, using=None)`, fired
+/// unconditionally by `SoftDeleteModel.delete()` (`db/mixins.py:72-78`); it is
+/// a functional no-op here (nothing references an empty state) but the port
+/// contract is identical enqueued jobs. `updated_by` stamps the actor like
+/// `BaseModel.save` does.
 async fn delete_state(
     AxumState(state): AxumState<AppState>,
     Path((slug, project_raw, state_id)): Path<(String, String, String)>,
@@ -2445,6 +2449,9 @@ async fn delete_state_inner(
         .execute(&pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
+    // Instance `delete()` → `.delay(...)` (`db/mixins.py:77-78`): stamp,
+    // then enqueue — same order as the mixin, shared helper.
+    super::handlers_project::enqueue_soft_delete(&pool, "state", &state_id).await;
     Ok(Response::builder()
         .status(StatusCode::NO_CONTENT)
         .body(axum::body::Body::empty())
