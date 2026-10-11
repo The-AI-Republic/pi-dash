@@ -958,8 +958,6 @@ async fn sign_out(
         urls.app_base_url.as_deref(),
         &urls.admin_base_path,
     )?;
-    let location = axum::http::HeaderValue::from_str(&target).map_err(|_| Denial::ServerError)?;
-
     let outcome: Result<(), Denial> = async {
         let pool = pools(&state)?;
         let actor = actor_user_id(&extension).ok_or(Denial::ServerError)?;
@@ -1005,13 +1003,12 @@ async fn sign_out(
         Ok(())
     }
     .await;
-    // Success AND failure both 302 (`except Exception: … redirect anyway`).
+    // Success AND failure both 302 (`except Exception: … redirect anyway`),
+    // via the shared `HttpResponseRedirect` replay (302 + `Location` +
+    // `Content-Type: text/html` + `Vary: Cookie`; the Vary middleware
+    // dedupes the `Vary` leg).
     let _ = outcome;
-    Ok(Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, location)
-        .body(axum::body::Body::empty())
-        .expect("redirect response"))
+    redirect_response(&target, Vec::new())
 }
 
 // ---------------------------------------------------------------------------
@@ -1641,6 +1638,38 @@ async fn apply_login_stamps(
     Ok(())
 }
 
+/// Request client identity for the login stamps: `get_client_ip` (first
+/// forwarded entry, else the peer) plus the raw `User-Agent`. Either may
+/// be absent; the stamp columns render NULL for `None`.
+fn client_ip_ua(headers: &HeaderMap, peer: Option<&str>) -> (Option<String>, Option<String>) {
+    let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+    let ip = forms::client_ip(forwarded, peer);
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    (ip, user_agent)
+}
+
+/// The `user_logged_in` signal (`update_last_login`): `login()` sets
+/// `last_login = now` on every login. Replayed as an explicit UPDATE —
+/// the same shape as `auth_session::email::stamp_last_login` — and kept
+/// OUT of [`apply_login_stamps`] (the `user.save()` replay) on purpose:
+/// `login()` runs after the admin insert and the instance save, so on the
+/// telemetry-500 path Python has stamped the user but `last_login` stays
+/// NULL (`login()` never runs). This lives in [`finish_login`] (the
+/// `user_login` replay) so both success paths and that failure path
+/// match.
+async fn stamp_last_login(pool: &PgPool, user_id: &Uuid, now: DateTime<Utc>) -> Result<(), Denial> {
+    sqlx::query("UPDATE \"users\" SET \"last_login\" = $1 WHERE \"id\" = $2")
+        .bind(now)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(())
+}
+
 /// `InstanceAdmin.objects.create(user, instance)` (`admin.py:229`): role 20
 /// + unverified (column defaults), NULL audit (anonymous save).
 async fn insert_signup_admin(
@@ -1686,27 +1715,27 @@ async fn apply_instance_setup(
     Ok(())
 }
 
-/// Shared success tail: stamps, `user_login` session issuance, 302.
+/// Shared success tail: the `user_login` replay (`login()` → the session
+/// row) plus the 302. The `user.save()` stamps are NOT applied here: each
+/// caller runs [`apply_login_stamps`] at its Python position (sign-up
+/// stamps before the admin insert, `admin.py:220-229`; sign-in stamps
+/// before `user_login()`, `admin.py:347-356`). `ip`/`user_agent` arrive
+/// precomputed ([`client_ip_ua`]) so stamps and `device_info` share one
+/// reading of the request.
 #[allow(clippy::too_many_arguments)]
 async fn finish_login(
     state: &AppState,
     pool: &PgPool,
     headers: &HeaderMap,
-    peer: Option<String>,
+    ip: Option<String>,
+    user_agent: Option<String>,
     user_id: Uuid,
     password_field: &str,
     base: &str,
     location: &str,
 ) -> Result<Response, Denial> {
     let now = Utc::now();
-    let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
-    let remote = peer;
-    let ip = forms::client_ip(forwarded, remote.as_deref());
-    let user_agent = headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    apply_login_stamps(pool, &user_id, now, ip.as_deref(), user_agent.as_deref()).await?;
+    stamp_last_login(pool, &user_id, now).await?;
     let settings = state.settings();
     let info = forms::device_info(user_agent.as_deref().unwrap_or(""), ip.as_deref(), base);
     let cookie_header = headers
@@ -1808,6 +1837,12 @@ async fn sign_up(State(state): State<AppState>, req: Request) -> Result<Response
     .await?;
     insert_notification_prefs(pool, now, &user_id).await?;
     insert_signup_profile(pool, now, &user_id, &form.company_name).await?;
+    // `user.save()` (`admin.py:220-227`) lands BEFORE the admin insert
+    // (`admin.py:229`): a NULL User-Agent 500s with NO admin row (a retry
+    // then 5180s, not 5150s), and a bad-telemetry 500 leaves a stamped
+    // user — both exactly as in Python.
+    let (ip, user_agent) = client_ip_ua(headers, peer.as_deref());
+    apply_login_stamps(pool, &user_id, now, ip.as_deref(), user_agent.as_deref()).await?;
     let instance_id = instance_id.ok_or(Denial::ServerError)?;
     insert_signup_admin(pool, now, &user_id, &instance_id).await?;
     let forms::TelemetryStored::Bool(telemetry) = forms::coerce_telemetry(&form.telemetry) else {
@@ -1818,7 +1853,8 @@ async fn sign_up(State(state): State<AppState>, req: Request) -> Result<Response
         &state,
         pool,
         headers,
-        peer,
+        ip,
+        user_agent,
         user_id,
         &password_hash,
         &base,
@@ -1889,11 +1925,18 @@ async fn sign_in(State(state): State<AppState>, req: Request) -> Result<Response
         return redirect_response(&outcome.location, Vec::new());
     }
     let (user_id, _, password_field) = lookup.ok_or(Denial::ServerError)?;
+    // `user.save()` (`admin.py:347-353`) lands BEFORE `user_login()`
+    // (`admin.py:356`), as it always did when the stamps lived in
+    // `finish_login`.
+    let now = Utc::now();
+    let (ip, user_agent) = client_ip_ua(headers, peer.as_deref());
+    apply_login_stamps(pool, &user_id, now, ip.as_deref(), user_agent.as_deref()).await?;
     finish_login(
         &state,
         pool,
         headers,
-        peer,
+        ip,
+        user_agent,
         user_id,
         &password_field,
         &base,

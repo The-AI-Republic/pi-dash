@@ -113,18 +113,20 @@ def test_signup_success_creates_admin_and_logs_in(bare_world):
             cur.execute(
                 "SELECT id, email, first_name, last_name, display_name,"
                 " is_password_autoset, token, last_login_time, last_login_ip,"
-                " last_login_uagent FROM users WHERE email = %s;",
+                " last_login_uagent, last_login FROM users WHERE email = %s;",
                 ("fresh@example.com",),
             )
             user = cur.fetchone()
             assert user is not None
-            (uid, email, first, last, display, autoset, token, login_time, login_ip, uagent) = user
+            (uid, email, first, last, display, autoset, token, login_time, login_ip, uagent, last_login) = user
             assert (email, first, last, display) == ("fresh@example.com", "Fresh", "Signup", "fresh")
             assert autoset is False
             assert re.fullmatch(r"[0-9a-f]{64}", token)
             assert login_time is not None
             assert login_ip == "127.0.0.1"
             assert uagent.startswith("python-httpx")
+            # login() fired user_logged_in -> update_last_login.
+            assert last_login is not None
             cur.execute("SELECT company_name, background_color FROM profiles WHERE user_id = %s;", (uid,))
             profile = cur.fetchone()
             assert profile[0] == "Acme"
@@ -259,6 +261,49 @@ def test_signup_bad_telemetry_value_is_500_after_partial_commit(bare_world):
             # The instance row itself was never written (name untouched).
             cur.execute("SELECT instance_name FROM instances;")
             assert cur.fetchone()[0] == "Contract Instance"
+            # Write-order pin: user.save() committed BEFORE the admin insert
+            # and the instance save that raised, so the user row is stamped
+            # — but login() never ran, so the signal stamp stayed NULL.
+            cur.execute(
+                "SELECT last_login_time, last_login_ip, last_login_uagent, last_login"
+                " FROM users WHERE email = %s;",
+                ("tele@example.com",),
+            )
+            login_time, login_ip, uagent, last_login = cur.fetchone()
+            assert login_time is not None
+            assert login_ip == "127.0.0.1"
+            assert uagent.startswith("python-httpx")
+            assert last_login is None
+
+
+def test_signup_missing_user_agent_is_500_with_no_admin_row(bare_world):
+    # last_login_uagent is NOT NULL, so Django's user.save() raises before
+    # the InstanceAdmin insert: the 500 leaves a user+profile but no admin
+    # row — and a retry then reports the taken email (5180), not "admin
+    # exists" (5150). Both backends answer 500 (bodies differ by design:
+    # DEBUG page vs JSON), so this pins status + DB + the retry code.
+    db = bare_world["db"]
+    client = _primed_client()
+    del client.headers["user-agent"]
+    payload = {
+        "email": "noua@example.com",
+        "password": STRONG_PASSWORD,
+        "first_name": "NoUa",
+    }
+    res = client.post("/api/instances/admins/sign-up/", data=payload)
+    assert res.status_code == 500
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM users WHERE email = %s;", ("noua@example.com",))
+            assert cur.fetchone()[0] == 1
+            cur.execute(
+                "SELECT last_login_time FROM users WHERE email = %s;", ("noua@example.com",)
+            )
+            assert cur.fetchone()[0] is None
+            cur.execute("SELECT COUNT(*) FROM instance_admins;")
+            assert cur.fetchone()[0] == 0
+    retry = client.post("/api/instances/admins/sign-up/", data=payload)
+    assert_error_redirect(retry, base=_admin_base(), error_code=5180)
 
 
 def test_signin_success(world):
@@ -274,12 +319,14 @@ def test_signin_success(world):
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT last_login_time, last_login_ip FROM users WHERE email = %s;",
+                "SELECT last_login_time, last_login_ip, last_login FROM users WHERE email = %s;",
                 ("admin@example.com",),
             )
-            login_time, login_ip = cur.fetchone()
+            login_time, login_ip, last_login = cur.fetchone()
             assert login_time is not None
             assert login_ip == "127.0.0.1"
+            # login() fired user_logged_in -> update_last_login.
+            assert last_login is not None
     with admin_client(session_key) as authed:
         body = authed.get("/api/instances/admins/session/").json()
         assert body["is_authenticated"] is True
@@ -375,6 +422,7 @@ def test_signout_with_token_logs_out(world):
     res = client.post("/api/instances/admins/sign-out/", data={})
     assert res.status_code == 302
     assert res.headers["location"] == _admin_base().rstrip("/")
+    assert res.headers["content-type"] == "text/html; charset=utf-8"
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -391,3 +439,4 @@ def test_signout_anonymous_with_token_still_redirects(anon_api):
     res = client.post("/api/instances/admins/sign-out/", data={})
     assert res.status_code == 302
     assert res.headers["location"] == _admin_base().rstrip("/")
+    assert res.headers["content-type"] == "text/html; charset=utf-8"
