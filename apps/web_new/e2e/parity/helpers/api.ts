@@ -14765,7 +14765,11 @@ export function workspaceSeedCleanupPython(slug: string, projectId: string): str
   );
 }
 
-function seedDrainOf(out: string): { projects: number; pages: number; members: number; users: number } {
+/**
+ * Counts from one drain snippet's marker row. Exported for the unit test;
+ * the drain loop below is its only production caller.
+ */
+export function seedDrainOf(out: string): { projects: number; pages: number; members: number; users: number } {
   const line = /^PARITY_SEED_DRAIN:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
   if (line === "") throw new Error("[parity] seed drain produced no marker row.");
   const row = JSON.parse(line) as Record<string, unknown>;
