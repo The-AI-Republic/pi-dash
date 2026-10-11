@@ -14,6 +14,7 @@
 // back to structural reads (icon glyph, header position) proven
 // element-identical on the oracle. Tab reads scope to the nested
 // workspace main so sidebar rows and issue rows never leak in.
+import { readFileSync, statSync } from "node:fs";
 import { expect, type CDPSession, type ElementHandle, type Locator, type Page, type Route } from "@playwright/test";
 import type {
   ArchivesFilterExpression,
@@ -32800,6 +32801,534 @@ export class WebDriver implements ParityDriver {
       .waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS })
       .catch(() => undefined);
     await this.page.waitForTimeout(500);
+  }
+
+  // -----------------------------------------------------------------------
+  // Pages detail header actions + sync/save/export (NEWFRONT-318,
+  // PAGE-055-064 + PAGE-074). Every selector below was observed on the
+  // running old app through the slot proxy (probe dumps in /tmp/probe318
+  // during development): the copy-link button anchors the header action
+  // cluster, the options trigger is its ellipsis button, menu entries are
+  // headless menuitems, and both dialogs are headless dialogs found by
+  // their headings.
+  // -----------------------------------------------------------------------
+
+  /** The detail header action cluster (copy-link always renders for viewers). */
+  private pagesHeaderCluster(): Locator {
+    return this.page
+      .locator("button[aria-label='Copy link'], button[aria-label='Copied link']")
+      .first()
+      .locator("xpath=..");
+  }
+
+  /** Items of the currently open headless menu. */
+  private pagesHeaderMenu(): Locator {
+    return this.page.getByRole("menuitem");
+  }
+
+  /** The export dialog, found by its heading. */
+  private pagesHeaderExportModal(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Export page" }).last();
+  }
+
+  /** The delete confirmation dialog, found by its heading. */
+  private pagesHeaderDeleteModal(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Delete page" }).last();
+  }
+
+  /** A labeled row's select button inside the export dialog. */
+  private pagesHeaderExportRowButton(rowLabel: string): Locator {
+    return this.pagesHeaderExportModal()
+      .getByText(rowLabel, { exact: true })
+      .locator("xpath=..")
+      .locator("button")
+      .first();
+  }
+
+  /** The live document editor body (title is a separate control). */
+  private pagesHeaderLiveEditor(): Locator {
+    return this.page.locator('.frame-renderer > .editor-container [contenteditable="true"]');
+  }
+
+  async pagesHeaderCopyLinkLabel(): Promise<string | null> {
+    const cluster = this.pagesHeaderCluster();
+    if ((await cluster.locator("button[aria-label='Copied link']").count()) > 0) return "Copied link";
+    if ((await cluster.locator("button[aria-label='Copy link']").count()) > 0) return "Copy link";
+    return null;
+  }
+
+  async pagesHeaderClickCopyLink(): Promise<void> {
+    // Headless Chromium denies clipboard writes without the grant, so the
+    // permission must precede the click (the write fires inside it).
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.pagesHeaderCluster()
+      .locator("button[aria-label='Copy link'], button[aria-label='Copied link']")
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesHeaderReadClipboard(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async pagesHeaderFavoriteLabel(): Promise<string | null> {
+    const cluster = this.pagesHeaderCluster();
+    if ((await cluster.locator("button[aria-label='Remove favorite']").count()) > 0) return "Remove favorite";
+    if ((await cluster.locator("button[aria-label='Add to favorites']").count()) > 0) return "Add to favorites";
+    return null;
+  }
+
+  async pagesHeaderFavoriteFilled(): Promise<boolean> {
+    const star = this.pagesHeaderCluster().locator(
+      "button[aria-label='Add to favorites'] svg, button[aria-label='Remove favorite'] svg"
+    );
+    if ((await star.count()) === 0) return false;
+    // Unfilled stars keep fill="none"; the filled state paints the glyph.
+    const fill = await star.first().evaluate((el) => getComputedStyle(el).fill);
+    return fill !== "none";
+  }
+
+  async pagesHeaderToggleFavorite(): Promise<void> {
+    await this.pagesHeaderCluster()
+      .locator("button[aria-label='Add to favorites'], button[aria-label='Remove favorite']")
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesHeaderFavoritesExpanded(): Promise<boolean> {
+    return (
+      (await this.page
+        .locator("button[aria-label='Close favorites menu']")
+        .first()
+        .isVisible()
+        .catch(() => false)) === true
+    );
+  }
+
+  async pagesHeaderFavoritesNames(): Promise<string[]> {
+    const headers = this.page.locator(
+      "button[aria-label='Close favorites menu'], button[aria-label='Open favorites menu']"
+    );
+    const seen = new Set<string>();
+    const count = await headers.count();
+    for (let index = 0; index < count; index += 1) {
+      // Each header button sits two levels under its Disclosure root, which
+      // also holds the favorite links.
+      const links = headers.nth(index).locator("xpath=./../..").locator("a");
+      const linkCount = await links.count();
+      for (let link = 0; link < linkCount; link += 1) {
+        const text = (
+          (await links
+            .nth(link)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .trim()
+          .replace(/\s+/g, " ");
+        if (text !== "") seen.add(text);
+      }
+    }
+    return [...seen];
+  }
+
+  private pagesHeaderFavoriteFailInstalled = false;
+  private pagesHeaderFavoriteFailBlocked = false;
+
+  async pagesHeaderFailFavoriteWrites(): Promise<void> {
+    if (!this.pagesHeaderFavoriteFailInstalled) {
+      this.pagesHeaderFavoriteFailInstalled = true;
+      // Regex, not a glob: Playwright globs with a trailing star after
+      // this path shape never match (probed), while the regex does.
+      await this.page.route(/\/api\/workspaces\/[^/]+\/user-favorites/, async (route) => {
+        const method = route.request().method();
+        if (this.pagesHeaderFavoriteFailBlocked && (method === "POST" || method === "DELETE")) {
+          await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+        } else {
+          await route.continue();
+        }
+      });
+    }
+    this.pagesHeaderFavoriteFailBlocked = true;
+  }
+
+  async pagesHeaderUnfailFavoriteWrites(): Promise<void> {
+    this.pagesHeaderFavoriteFailBlocked = false;
+  }
+
+  async pagesHeaderOpenOptions(): Promise<void> {
+    await this.pagesHeaderCluster().locator("button:has(svg.lucide-ellipsis)").click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesHeaderMenu().first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async pagesHeaderMenuItems(): Promise<string[]> {
+    const items = this.pagesHeaderMenu();
+    const count = await items.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const text = (
+        (await items
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text !== "") labels.push(text);
+    }
+    return labels;
+  }
+
+  async pagesHeaderChooseMenuItem(label: string): Promise<void> {
+    await this.pagesHeaderMenu().filter({ hasText: label }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesHeaderMenu().first().waitFor({ state: "detached", timeout: WebDriver.WAIT_MS });
+  }
+
+  async pagesHeaderLockLabel(): Promise<string | null> {
+    // One roundtrip: the unlocked phase lasts well under a second, so
+    // multi-query sampling would skip over it under load.
+    return this.page.evaluate(() => {
+      const copy = document.querySelector("button[aria-label='Copy link'], button[aria-label='Copied link']");
+      const cluster = copy?.parentElement;
+      if (cluster === null || cluster === undefined) return null;
+      if (cluster.querySelector("[aria-label='Locked']") !== null) return "Locked";
+      if (cluster.querySelector("[aria-label='Unlocked']") !== null) return "Unlocked";
+      if (cluster.querySelector("button[aria-label='Lock']") !== null) return "Lock";
+      return null;
+    });
+  }
+
+  async pagesHeaderToggleLock(): Promise<void> {
+    await this.pagesHeaderCluster()
+      .locator("button[aria-label='Lock'], button[aria-label='Locked']")
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesHeaderEditorEditable(): Promise<boolean> {
+    return (await this.pagesHeaderLiveEditor().count()) > 0;
+  }
+
+  private pagesHeaderLockFailInstalled = false;
+  private pagesHeaderLockFailBlocked = false;
+
+  async pagesHeaderFailLockWrites(): Promise<void> {
+    if (!this.pagesHeaderLockFailInstalled) {
+      this.pagesHeaderLockFailInstalled = true;
+      // Regex, not a glob (see pagesHeaderFailFavoriteWrites).
+      await this.page.route(/\/api\/workspaces\/.+\/pages\/.+\/lock\//, async (route) => {
+        const method = route.request().method();
+        if (this.pagesHeaderLockFailBlocked && (method === "POST" || method === "DELETE")) {
+          await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+        } else {
+          await route.continue();
+        }
+      });
+    }
+    this.pagesHeaderLockFailBlocked = true;
+  }
+
+  async pagesHeaderUnfailLockWrites(): Promise<void> {
+    this.pagesHeaderLockFailBlocked = false;
+  }
+
+  async pagesHeaderArchivedMarker(): Promise<string | null> {
+    const marker = this.pagesHeaderCluster().locator("text=/Archived at/");
+    if ((await marker.count()) === 0) return null;
+    return (
+      (
+        (await marker
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ") || null
+    );
+  }
+
+  async pagesHeaderDeleteDialogVisible(): Promise<boolean> {
+    // Headless dialogs report hidden mid-transition, so presence of the
+    // heading (not Playwright visibility) is the open signal.
+    return (await this.pagesHeaderDeleteModal().count()) > 0;
+  }
+
+  async pagesHeaderDeleteDialogText(): Promise<string> {
+    const modal = this.pagesHeaderDeleteModal();
+    // Attached, not visible: the headless wrapper reports hidden even open.
+    await modal.waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    return ((await modal.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  async pagesHeaderConfirmDelete(): Promise<void> {
+    await this.pagesHeaderDeleteModal()
+      .getByRole("button", { name: "Delete", exact: true })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesHeaderDeleteModal().waitFor({ state: "detached", timeout: WebDriver.WAIT_MS });
+  }
+
+  async pagesHeaderCancelDelete(): Promise<void> {
+    await this.pagesHeaderDeleteModal()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesHeaderDeleteModal().waitFor({ state: "detached", timeout: WebDriver.WAIT_MS });
+  }
+
+  async pagesHeaderCanvasMaxWidth(): Promise<string> {
+    // The canvas block animates width changes, so settle on two agreeing reads.
+    const block = this.page.locator(".page-header-container > div").first();
+    let previous = await block.evaluate((el) => getComputedStyle(el).maxWidth);
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      await this.page.waitForTimeout(100);
+      const current = await block.evaluate((el) => getComputedStyle(el).maxWidth);
+      if (current === previous) return current;
+      previous = current;
+    }
+    return previous;
+  }
+
+  async pagesHeaderToolbarVisible(): Promise<boolean> {
+    const container = this.page.locator("#page-toolbar-container");
+    if ((await container.count()) === 0) return false;
+    return !((await container.getAttribute("class")) ?? "").includes("max-h-0");
+  }
+
+  async pagesHeaderPaneTabParam(): Promise<string | null> {
+    return new URL(this.page.url()).searchParams.get("paneTab");
+  }
+
+  async pagesHeaderPaneOpen(): Promise<boolean> {
+    // The pane shell slides via a negative right margin (clipping hides it,
+    // so visibility reads lie); the margin itself is the state signal.
+    const pane = this.page.locator("aside", { has: this.page.getByRole("button", { name: "Close navigation pane" }) });
+    if ((await pane.count()) === 0) return false;
+    return (await pane.first().evaluate((el) => getComputedStyle(el).marginRight)) === "0px";
+  }
+
+  async pagesHeaderSyncBadgeTooltip(): Promise<string | null> {
+    const badge = this.page
+      .getByText("Syncing...", { exact: true })
+      .or(this.page.getByText("Connection lost", { exact: true }));
+    if ((await badge.count()) === 0) return null;
+    await badge.first().hover({ timeout: WebDriver.OPEN_MS });
+    // The tooltip is a Base UI presentation popup, not role=tooltip.
+    const popup = this.page.locator("[role='presentation']").filter({ hasText: "ync" });
+    await popup.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const text = (
+      (await popup
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
+    return text === "" ? null : text;
+  }
+
+  async pagesHeaderOfflinePill(): Promise<string | null> {
+    const pill = this.pagesHeaderCluster().locator("text=/^Offline$/");
+    if ((await pill.count()) === 0) return null;
+    return (await pill
+      .first()
+      .isVisible()
+      .catch(() => false))
+      ? "Offline"
+      : null;
+  }
+
+  async pagesHeaderOversizedStrip(): Promise<string | null> {
+    // Bounded in-page walk: page-wide text queries blow the string limit
+    // once the oversized doc turns the editor subtree pathological, so
+    // match node-by-node outside the editor canvas and ship at most 200
+    // chars back across the protocol.
+    return this.page.evaluate(() => {
+      const marker = "Content limit reached";
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      let scanned = 0;
+      while (node !== null && scanned < 5000) {
+        scanned += 1;
+        const value = node.nodeValue ?? "";
+        const parent = node.parentElement;
+        if (value.includes(marker) && parent !== null && parent.closest(".frame-renderer") === null) {
+          return value.trim().replace(/\s+/g, " ").slice(0, 200);
+        }
+        node = walker.nextNode();
+      }
+      return null;
+    });
+  }
+
+  async pagesHeaderToastText(): Promise<string | null> {
+    // Same bounded walk as the badge/strip readers: the shared toast
+    // reader's subtree serialization explodes on the oversized doc, so
+    // this one walks the toast region node-by-node with a hard cap.
+    return this.page.evaluate(() => {
+      const roots = document.querySelectorAll("div.absolute.right-3.bottom-3");
+      const parts: string[] = [];
+      roots.forEach((root) => {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        let node = walker.nextNode();
+        let scanned = 0;
+        while (node !== null && scanned < 200) {
+          scanned += 1;
+          const value = (node.nodeValue ?? "").trim();
+          if (value !== "") parts.push(value);
+          node = walker.nextNode();
+        }
+      });
+      const text = parts.join(" ").trim();
+      return text === "" ? null : text.slice(0, 500);
+    });
+  }
+
+  async pagesHeaderSyncBadgeText(): Promise<string | null> {
+    // Same bounded walk as the oversized strip: the shared badge reader's
+    // page-wide text query explodes on the oversized doc, so this one
+    // reads badge text outside the editor canvas instead.
+    return this.page.evaluate(() => {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      let scanned = 0;
+      let syncing: string | null = null;
+      while (node !== null && scanned < 5000) {
+        scanned += 1;
+        const value = node.nodeValue ?? "";
+        const parent = node.parentElement;
+        if (parent !== null && parent.closest(".frame-renderer") === null) {
+          if (value.includes("Connection lost")) return "Connection lost";
+          if (value.includes("Syncing...")) syncing = "Syncing...";
+        }
+        node = walker.nextNode();
+      }
+      return syncing;
+    });
+  }
+
+  private pagesHeaderDescriptionSpyInstalled = false;
+  private pagesHeaderDescriptionWritesSeen = 0;
+  private pagesHeaderDescriptionWriteKeysSeen: string[] = [];
+  private pagesHeaderDescriptionWriteTimesSeen: number[] = [];
+  private pagesHeaderDescriptionWriteStatusesSeen: number[] = [];
+
+  async pagesHeaderSpyDescriptionWrites(): Promise<void> {
+    if (this.pagesHeaderDescriptionSpyInstalled) return;
+    this.pagesHeaderDescriptionSpyInstalled = true;
+    this.page.on("request", (request) => {
+      if (request.method() === "PATCH" && request.url().includes("/description/")) {
+        this.pagesHeaderDescriptionWritesSeen += 1;
+        this.pagesHeaderDescriptionWriteTimesSeen.push(Date.now());
+        try {
+          const body = JSON.parse(request.postData() ?? "{}") as Record<string, unknown>;
+          this.pagesHeaderDescriptionWriteKeysSeen = Object.keys(body);
+        } catch {
+          this.pagesHeaderDescriptionWriteKeysSeen = [];
+        }
+      }
+    });
+    this.page.on("response", (response) => {
+      const request = response.request();
+      if (request.method() === "PATCH" && request.url().includes("/description/")) {
+        this.pagesHeaderDescriptionWriteStatusesSeen.push(response.status());
+      }
+    });
+  }
+
+  async pagesHeaderDescriptionWriteCount(): Promise<number> {
+    return this.pagesHeaderDescriptionWritesSeen;
+  }
+
+  async pagesHeaderDescriptionWriteStatuses(): Promise<number[]> {
+    return [...this.pagesHeaderDescriptionWriteStatusesSeen];
+  }
+
+  async pagesHeaderDescriptionWriteKeys(): Promise<string[]> {
+    return [...this.pagesHeaderDescriptionWriteKeysSeen];
+  }
+
+  async pagesHeaderDescriptionWriteTimes(): Promise<number[]> {
+    return [...this.pagesHeaderDescriptionWriteTimesSeen];
+  }
+
+  private pagesHeaderPageSpyInstalled = false;
+  private pagesHeaderPageWritesSeen = 0;
+
+  async pagesHeaderSpyPageWrites(): Promise<void> {
+    if (this.pagesHeaderPageSpyInstalled) return;
+    this.pagesHeaderPageSpyInstalled = true;
+    this.page.on("request", (request) => {
+      if (request.method() !== "PATCH") return;
+      const url = request.url();
+      // Page-record writes (title/mark/properties) hit the record endpoint;
+      // description writes ride their own sub-path (counted separately).
+      if (/\/pages\/[0-9a-f-]+\/$/.test(url)) this.pagesHeaderPageWritesSeen += 1;
+    });
+  }
+
+  async pagesHeaderPageWriteCount(): Promise<number> {
+    return this.pagesHeaderPageWritesSeen;
+  }
+
+  async pagesHeaderPressSave(): Promise<void> {
+    await this.page.keyboard.press("ControlOrMeta+S");
+  }
+
+  async pagesHeaderExportDialogVisible(): Promise<boolean> {
+    return (await this.pagesHeaderExportModal().count()) > 0;
+  }
+
+  async pagesHeaderExportForm(): Promise<PagesHeaderExportForm> {
+    const modal = this.pagesHeaderExportModal();
+    // Attached, not visible: the headless wrapper reports hidden even open.
+    await modal.waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    const read = async (button: Locator): Promise<string> =>
+      ((await button.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+    const pageFormatRow = modal.getByText("Page format", { exact: true });
+    return {
+      format: await read(this.pagesHeaderExportRowButton("Export format")),
+      scope: await read(this.pagesHeaderExportRowButton("Include content")),
+      pageFormat: (await pageFormatRow.count()) > 0 ? await read(this.pagesHeaderExportRowButton("Page format")) : "",
+      pageFormatVisible: (await pageFormatRow.count()) > 0,
+    };
+  }
+
+  private async pagesHeaderExportChoose(rowLabel: string, label: string): Promise<void> {
+    await this.pagesHeaderExportRowButton(rowLabel).click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option", { name: label, exact: true }).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesHeaderExportSetFormat(label: string): Promise<void> {
+    await this.pagesHeaderExportChoose("Export format", label);
+  }
+
+  async pagesHeaderExportSetScope(label: string): Promise<void> {
+    await this.pagesHeaderExportChoose("Include content", label);
+  }
+
+  async pagesHeaderExportSetPageFormat(label: string): Promise<void> {
+    await this.pagesHeaderExportChoose("Page format", label);
+  }
+
+  async pagesHeaderExportConfirm(): Promise<PagesHeaderDownload> {
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: WebDriver.OPEN_MS }),
+      this.pagesHeaderExportModal()
+        .getByRole("button", { name: "Export", exact: true })
+        .click({ timeout: WebDriver.OPEN_MS }),
+    ]);
+    const fileName = download.suggestedFilename();
+    const localPath = await download.path();
+    if (localPath === null) throw new Error("[parity] export download produced no local file.");
+    const byteLength = statSync(localPath).size;
+    const headText = readFileSync(localPath).subarray(0, 400).toString("latin1");
+    return { fileName, byteLength, headText };
+  }
+
+  async pagesHeaderExportCancel(): Promise<void> {
+    await this.pagesHeaderExportModal()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesHeaderExportModal().waitFor({ state: "detached", timeout: WebDriver.WAIT_MS });
   }
 
   // --- Active-cycle hero and cycles cross-cutting (NEWFRONT-254,
