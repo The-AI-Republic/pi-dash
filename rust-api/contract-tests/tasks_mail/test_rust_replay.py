@@ -6,13 +6,23 @@ hybrid-worker contract for the same tasks:
 
 - ``notifications`` (PIDASHCONV-834), ``stack_email_notification`` and
   ``send_email_notification`` (PIDASHCONV-865) execute LOCALLY: the jobs
-  settle in ``rust_job_queue``, the AMQP broker stays flat, the stack marks
-  ``processed_at`` and fans its sends out into the Rust queue, and the
-  sends deliver into the SMTP sink and mark ``sent_at``.
+  settle in ``rust_job_queue``, no message for the task lands on the AMQP
+  broker, the stack marks ``processed_at`` and fans its sends out into
+  the Rust queue, and the sends deliver into the SMTP sink and mark
+  ``sent_at``.
 - Every other mail task name still publishes but has no local handler, so
   the worker forwards it to the Python plane: the job settles (the forward
-  is the terminal effect) and the broker grows by exactly one message while
-  no local rows change.
+  is the terminal effect) and exactly one message for the task lands on
+  the broker while no local rows change.
+
+The broker pins are per-task (``headers["task"]``), never global depth:
+the worker's scheduler loop forwards its own unregistered beat entries
+over the same broker (``cloud_agent.scan_queued_runs`` every 10s, the
+30s sweeps, ...), so background traffic lands mid-suite and a global
+flat/+1 pin is inherently racy (PIDASHCONV-865 D3). Only messages
+carrying our task name count; background beat traffic is republished
+back untouched (the ticker-suite drains-and-filters precedent, plus
+restore so later tests still observe it).
 
 The broker/redis/database are shared across tests in this module, but every
 payload carries unique ids (fresh projects/issues/receivers per test), so
@@ -23,12 +33,14 @@ import uuid
 
 import pytest
 
-from _harness import broker_probe, redis_cache, rust_queue
+from _harness import redis_cache, rust_queue
 from _harness import seed as seed_helpers
+from _harness.db import diff as _diff
+from _harness.db import snapshot
 
 STACK = "pi_dash.bgtasks.email_notification_task.stack_email_notification"
 SEND = "pi_dash.bgtasks.email_notification_task.send_email_notification"
-NOTIFICATIONS = "pi_dash.bgtasks.notification_task.send_notification"
+NOTIFICATIONS = "pi_dash.bgtasks.notification_task.notifications"
 
 
 def _send_kwargs(receiver_id, issue_id):
@@ -41,37 +53,81 @@ def _send_kwargs(receiver_id, issue_id):
     }
 
 
+def _drain_matching(task_name):
+    """Drain the broker once; return the messages for ``task_name``.
+
+    Settle strictly follows the AMQP publish in the worker's forward path
+    (``worker.rs`` acks the row only after the publish succeeds), so one
+    drain after ``wait_for_settled`` observes exactly what our job sent —
+    no polling. Non-matching messages (background beat traffic — see the
+    module docstring) are republished back with payload and headers
+    intact, so later tests still observe them. Republishing, not
+    ``message.requeue()``: a requeued message is redelivered immediately,
+    which would loop the sweep on the first non-match (probed against
+    RabbitMQ 3.13; the same trap ``collect_matching`` lays — unused
+    here for that reason and because it polls until a match, which an
+    absence pin never finds).
+    """
+    from kombu import Connection
+
+    from _harness import config
+
+    matched = []
+    others = []
+    with Connection(config.required(config.CELERY_BROKER_URL)) as conn:
+        queue_obj = conn.SimpleQueue("celery")
+        try:
+            while True:
+                try:
+                    message = queue_obj.get(block=False)
+                except Exception:
+                    break
+                headers = message.headers or {}
+                if headers.get("task") == task_name:
+                    matched.append((message.headers, message.payload))
+                else:
+                    others.append((dict(headers), message.payload))
+                message.ack()
+            for headers, payload in others:
+                queue_obj.put(payload, headers=headers)
+        finally:
+            queue_obj.close()
+    return matched
+
+
 def _publish_and_observe_forward(task, kwargs):
     """Publish one Rust-queue job and prove it forwards to Python.
 
-    Returns the observation ``(depth_before, depth_after)``; the caller
-    asserts the +1 and the absence of local rows.
+    Returns the job's celery id once the row settles; the caller asserts
+    the absence of local rows. Exactly one message for the task must land
+    on the broker — a per-task pin, not a global depth delta (see the
+    module docstring).
     """
-    depth_before = broker_probe.queue_depth()
     celery_id = rust_queue.publish(task, [], kwargs)
-    rust_queue.wait_for_settled(
-        celery_id, what=f"forwarded mail task settled ({task})"
+    rust_queue.wait_for_settled(celery_id, what=f"forwarded mail task settled ({task})")
+    arrived = _drain_matching(task)
+    assert len(arrived) == 1, (
+        f"{task} did not forward exactly one message ({len(arrived)} arrived)"
     )
-    depth_after = broker_probe.queue_depth()
-    return depth_before, depth_after
+    return celery_id
 
 
 def _publish_and_observe_local(task, kwargs):
     """Publish one Rust-queue job and prove it executes locally.
 
     Returns the job's celery id once the row settles; the caller asserts
-    the task-specific local effects. The broker must stay flat: nothing
-    about a locally owned task may reach the Python plane.
+    the task-specific local effects. No message for the task may land on
+    the broker: nothing about a locally owned task may reach the Python
+    plane (a per-task pin, not global flatness — see the module
+    docstring).
     """
-    depth_before = broker_probe.queue_depth()
     celery_id = rust_queue.publish(task, [], kwargs)
     rust_queue.wait_for_settled(
         celery_id, what=f"locally executed mail task settled ({task})"
     )
-    depth_after = broker_probe.queue_depth()
-    assert depth_after == depth_before, (
-        f"locally owned {task} published to the broker "
-        f"(depth {depth_before} -> {depth_after})"
+    arrived = _drain_matching(task)
+    assert arrived == [], (
+        f"locally owned {task} published to the broker ({len(arrived)} message(s))"
     )
     return celery_id
 
@@ -82,9 +138,9 @@ def _seed_stack(conn, tag):
     receiver = seed_helpers.user(conn, f"contract-rust-replay-{tag}")
     issue_id = str(chain["issue"]["id"])
     log_ids = [
-        seed_helpers.email_log(
-            conn, receiver["id"], chain["owner"]["id"], issue_id
-        )["id"]
+        seed_helpers.email_log(conn, receiver["id"], chain["owner"]["id"], issue_id)[
+            "id"
+        ]
         for _ in range(2)
     ]
     return {
@@ -143,7 +199,7 @@ def test_rust_stack_executes_locally(smtp_sink, db_conn):
     two unprocessed logs for one receiver/actor/issue fan out to a single
     send, which executes on the Rust worker, delivers into the SMTP sink,
     and marks ``sent_at`` on both logs (the receiver-wide batch the port
-    preserves). The broker stays flat throughout.
+    preserves). No message for the tasks lands on the broker throughout.
     """
     seeded = _seed_stack(db_conn, uuid.uuid4().hex[:8])
     _seed_base_api(seeded["issue_id"])
@@ -179,9 +235,7 @@ def test_rust_stack_redelivery_sends_once(smtp_sink, db_conn):
     smtp_sink.wait_for_count(1, what="first stacked mail")
     _publish_and_observe_local(STACK, {})
     rust_queue.wait_for_queue_drain(what="redelivered stack settled")
-    assert len(smtp_sink.snapshot()) == 1, (
-        "redelivered stack sent a duplicate mail"
-    )
+    assert len(smtp_sink.snapshot()) == 1, "redelivered stack sent a duplicate mail"
     for log_id in seeded["ids"]:
         assert _processed_at(db_conn, log_id) is not None
 
@@ -216,8 +270,8 @@ def test_rust_send_skips_soft_deleted_issue(smtp_sink, db_conn):
     Django reads the issue through the soft-deleting default manager, so
     ``Issue.objects.get`` raises ``DoesNotExist`` and the task returns
     silently after releasing the lock. The Rust read must scope the same
-    way: the job settles, the broker stays flat, and the sink stays
-    empty.
+    way: the job settles, no message for the task lands on the broker,
+    and the sink stays empty.
     """
     tag = uuid.uuid4().hex[:8]
     chain = seed_helpers.issue_chain(db_conn, f"maildead{tag}")
@@ -244,14 +298,13 @@ def test_rust_stack_ignores_soft_deleted_logs(smtp_sink, db_conn):
     Django's ``:49`` select runs on the soft-deleting default manager, so
     deleted logs are invisible to the fan-out and stay unmarked by the
     ``:84`` update. The Rust statements must scope the same way: the run
-    settles, the broker stays flat, both logs stay unprocessed, and no
-    mail is sent for them.
+    settles, no message for the task lands on the broker, both logs stay
+    unprocessed, and no mail is sent for them.
     """
     seeded = _seed_stack(db_conn, uuid.uuid4().hex[:8])
     with db_conn.cursor() as cur:
         cur.execute(
-            "UPDATE email_notification_logs SET deleted_at = now() "
-            "WHERE id = ANY(%s)",
+            "UPDATE email_notification_logs SET deleted_at = now() WHERE id = ANY(%s)",
             ([str(log_id) for log_id in seeded["ids"]],),
         )
     _seed_base_api(seeded["issue_id"])
@@ -266,9 +319,9 @@ def test_rust_stack_ignores_soft_deleted_logs(smtp_sink, db_conn):
 
 
 # Every mail task name that is still Python-owned: published, forwarded,
-# settled, broker +1, no local rows. `notifications` (PIDASHCONV-834) and
-# `send`/`stack_email_notification` (PIDASHCONV-865) execute locally and
-# are pinned above instead.
+# settled, exactly one broker message for the task, no local rows.
+# `notifications` (PIDASHCONV-834) and `send`/`stack_email_notification`
+# (PIDASHCONV-865) execute locally and are pinned above instead.
 MAIL_TASKS = [
     "pi_dash.bgtasks.auth_task.send_email_verification",
     "pi_dash.bgtasks.auth_task.send_forgot_password",
@@ -284,35 +337,47 @@ MAIL_TASKS = [
 @pytest.mark.parametrize("task_name", MAIL_TASKS)
 def test_rust_mail_task_forwards_to_python(task_name):
     """Mail tasks without a local handler forward to the Python plane."""
-    depth_before, depth_after = _publish_and_observe_forward(task_name, {})
-    assert depth_after == depth_before + 1, (
-        f"{task_name} did not forward exactly one message "
-        f"(depth {depth_before} -> {depth_after})"
-    )
+    _publish_and_observe_forward(task_name, {})
 
 
 def test_rust_notifications_executes_locally(db_conn):
-    """The notifications task executes locally without touching the broker.
+    """Local parity, Rust side: the owned notifications job never forwards.
 
-    Faithful to the None-activities payload: no input rows, no output rows,
-    broker flat — the job settles because the local handler ran, not
-    because it was forwarded.
+    Restored from PIDASHCONV-834 (the 865 rewrite queried a
+    ``notifications_notification`` table that does not exist and published
+    to a ``send_notification`` task name nothing registers): the
+    ``rust_job_queue`` row must settle (the local handler always
+    acknowledges, mirroring the swallow-everything body) while no message
+    for the task lands on the broker — nothing is forwarded for Python —
+    and none of the four ``notifications`` write tables changes. No local
+    rows is the faithful pin here, not an empty assertion: the oracle
+    payload carries ``issue_activities_created=None``, which dies on
+    ``for … in None`` before any write in both planes
+    (``notification_task.py`` broad ``except``; ``run_notifications``
+    ``None`` arm ahead of the first read).
     """
-    depth_before = broker_probe.queue_depth()
-    with db_conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM notifications_notification")
-        (before,) = cur.fetchone()
-    payload = {
-        "receiver_id": str(uuid.uuid4()),
-        "actor_id": str(uuid.uuid4()),
-        "activities": None,
-    }
-    celery_id = rust_queue.publish(NOTIFICATIONS, [], payload)
-    rust_queue.wait_for_settled(celery_id, what="notifications job settled")
-    assert broker_probe.queue_depth() == depth_before, (
-        "locally owned notifications task published to the broker"
+    args = [
+        "issue.activity.created",
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+        [],
+        None,
+        {},
+        {},
+    ]
+    tables = [
+        "notifications",
+        "email_notification_logs",
+        "issue_mentions",
+        "issue_subscribers",
+    ]
+    before = snapshot(db_conn, tables)
+    celery_id = rust_queue.publish(NOTIFICATIONS, args=args, kwargs={})
+    rust_queue.wait_for_settled(celery_id, what=f"{NOTIFICATIONS} executed")
+    arrived = _drain_matching(NOTIFICATIONS)
+    assert arrived == [], (
+        f"{NOTIFICATIONS} is Rust-owned but {len(arrived)} message(s) "
+        "for it arrived on the broker"
     )
-    with db_conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM notifications_notification")
-        (after,) = cur.fetchone()
-    assert after == before
+    assert _diff(before, snapshot(db_conn, tables)) == {}
