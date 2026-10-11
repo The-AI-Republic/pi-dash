@@ -27,6 +27,9 @@ import type {
   ArchivesPeekReadOnly,
   ArchivesTab,
   ArchivesTrafficCounts,
+  ModulesMenuEntry,
+  ModulesTimelineRow,
+  ModulesToast,
   AssistantApiCounts,
   AssistantBubble,
   AssistantLandingGreeting,
@@ -25985,5 +25988,729 @@ export class WebDriver implements ParityDriver {
 
   async cyclesGrantClipboardAccess(): Promise<void> {
     await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  }
+
+  // --- Modules row actions (NEWFRONT-308, MOD-013-019 + MOD-021).
+  // --- Observed on the running old app: list rows are detail links whose
+  // --- row root carries the inline controls (merged date trigger, status
+  // --- pill, lead slot, star, overflow button); board cards mirror the
+  // --- same controls with a split date trigger; the timeline reuses the
+  // --- shared gantt chart, so bar drag/resize ride the same DOM ids as
+  // --- the issues timeline. Layout and ordering travel through the
+  // --- localStorage display choice (the switcher UIs are MOD-005/MOD-011,
+  // --- owned by sibling issues), so these verbs set that choice and
+  // --- reload instead of driving the header.
+
+  private modulesContent(): Locator {
+    // The app shell nests the content main inside an outer main that also
+    // carries the app sidebars (whose favorite entries mirror row links);
+    // the last main is the content surface.
+    return this.page.locator("main").last();
+  }
+
+  private modulesContentAnchors(): Locator {
+    return this.modulesContent().locator('a[href*="/modules/"]');
+  }
+
+  private modulesRowLink(name: string): Locator {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return this.modulesContentAnchors()
+      .filter({ has: this.page.locator("span.truncate", { hasText: new RegExp(`^${escaped}$`) }) })
+      .first();
+  }
+
+  private modulesRowRoot(name: string): Locator {
+    // Anchor, item container, row, row root.
+    return this.modulesRowLink(name).locator("xpath=../../..");
+  }
+
+  private modulesCardRoot(name: string): Locator {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return this.modulesContent()
+      .locator("div[data-prevent-progress]")
+      .filter({ has: this.page.locator("span.truncate", { hasText: new RegExp(`^${escaped}$`) }) })
+      .first();
+  }
+
+  async modulesOpenList(workspaceSlug: string, projectId: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(`/${workspaceSlug}/projects/${projectId}/modules`, cookies);
+    await this.modulesContent()
+      .locator('a[href*="/modules/"], div[data-prevent-progress]')
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesAwaitRow(name: string): Promise<void> {
+    await this.modulesRowLink(name).waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesCurrentUrl(): Promise<string> {
+    return this.page.url();
+  }
+
+  private modulesProjectIdFromUrl(): string {
+    const match = /\/projects\/([^/]+)/.exec(this.page.url());
+    if (!match || !match[1]) throw new Error("[parity] modules URL carries no project id.");
+    return match[1];
+  }
+
+  private async modulesPatchDisplayFilters(patch: Record<string, string>): Promise<void> {
+    const projectId = this.modulesProjectIdFromUrl();
+    await this.page.evaluate(
+      ({ pid, values }) => {
+        const raw = window.localStorage.getItem("module_display_filters");
+        const parsed = (raw ? JSON.parse(raw) : {}) as Record<string, Record<string, string>>;
+        parsed[pid] = { ...(parsed[pid] ?? {}), ...values };
+        window.localStorage.setItem("module_display_filters", JSON.stringify(parsed));
+      },
+      { pid: projectId, values: patch }
+    );
+  }
+
+  async modulesSetLayout(layout: "list" | "board" | "timeline"): Promise<void> {
+    await this.modulesPatchDisplayFilters({ layout: layout === "timeline" ? "gantt" : layout });
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    // The timeline's first render compiles the gantt chunk on top of the
+    // data fetch, so it gets the long first-wait.
+    const timeout = layout === "timeline" ? 120_000 : WebDriver.WAIT_MS;
+    const marker =
+      layout === "list"
+        ? this.modulesContent().locator('a[href*="/modules/"]').first()
+        : layout === "board"
+          ? this.modulesContent().locator("div[data-prevent-progress]").first()
+          : this.page.locator("#gantt-container");
+    await marker.waitFor({ timeout });
+  }
+
+  async modulesSetSort(label: string): Promise<void> {
+    const key =
+      label === "Manual"
+        ? "sort_order"
+        : label === "Name"
+          ? "name"
+          : label === "Progress"
+            ? "progress"
+            : label === "Number of work items"
+              ? "issues_length"
+              : label === "Due date"
+                ? "target_date"
+                : label === "Created date"
+                  ? "created_at"
+                  : null;
+    if (!key) throw new Error(`[parity] unknown modules sort ${JSON.stringify(label)}.`);
+    await this.modulesPatchDisplayFilters({ order_by: key });
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    await this.modulesContent().first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesSortLabel(): Promise<string> {
+    const projectId = this.modulesProjectIdFromUrl();
+    const key = await this.page.evaluate((pid) => {
+      const raw = window.localStorage.getItem("module_display_filters");
+      const parsed = (raw ? JSON.parse(raw) : {}) as Record<string, Record<string, string>>;
+      return parsed[pid]?.["order_by"] ?? "name";
+    }, projectId);
+    const labels: Record<string, string> = {
+      name: "Name",
+      progress: "Progress",
+      issues_length: "Number of work items",
+      target_date: "Due date",
+      created_at: "Created date",
+      sort_order: "Manual",
+    };
+    return labels[key] ?? key;
+  }
+
+  private modulesDateTrigger(root: Locator): Locator {
+    // The date trigger is the row/card's only button carrying the start/end
+    // placeholders or a merged/split date label; the status pill, star,
+    // info and overflow buttons never do.
+    return root
+      .locator("button:not(:has(button))")
+      .filter({ hasText: /Start date|End date|[A-Z][a-z]{2} \d{1,2}/ })
+      .first();
+  }
+
+  async modulesRowDateText(name: string): Promise<string> {
+    const trigger = this.modulesDateTrigger(this.modulesRowRoot(name));
+    await trigger.waitFor({ timeout: WebDriver.WAIT_MS });
+    return ((await trigger.innerText()) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  private async modulesDateTriggerDisabled(root: Locator): Promise<boolean> {
+    // The trigger nests two buttons; the disabled flag lives on the outer.
+    const leaf = this.modulesDateTrigger(root);
+    await leaf.waitFor({ timeout: WebDriver.WAIT_MS });
+    const outer = leaf.locator("xpath=ancestor::button[1]");
+    if ((await outer.count()) > 0) return outer.first().isDisabled();
+    return leaf.isDisabled();
+  }
+
+  async modulesRowDateDisabled(name: string): Promise<boolean> {
+    return this.modulesDateTriggerDisabled(this.modulesRowRoot(name));
+  }
+
+  async modulesRowOpenDates(name: string): Promise<void> {
+    // The trigger toggles: when a previous step left the calendar open,
+    // the first click shuts it and the second reopens it.
+    const wasVisible = await this.modulesCalendarVisible();
+    const trigger = this.modulesDateTrigger(this.modulesRowRoot(name));
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    if (wasVisible) await trigger.click({ timeout: WebDriver.WAIT_MS });
+    await this.page.locator(".rdp-root").last().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesCalendarVisible(): Promise<boolean> {
+    return (await this.page.locator(".rdp-root").count()) > 0;
+  }
+
+  async modulesCalendarPickDay(day: number): Promise<void> {
+    await this.calendarDay(day).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesCalendarGotoMonth(monthLabel: string, yearLabel: string): Promise<void> {
+    // The caption dropdowns race when set back-to-back under load (the
+    // year change can clobber a still-committing month change), so the
+    // pair is verified and re-applied until both read back.
+    const selects = this.calendar().locator("select");
+    const shown = async (): Promise<[string, string]> => {
+      const month = (
+        (await selects
+          .nth(0)
+          .locator("option:checked")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const year = (
+        (await selects
+          .nth(1)
+          .locator("option:checked")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      return [month, year];
+    };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const [month, year] = await shown();
+      if (month === monthLabel && year === yearLabel) return;
+      if (month !== monthLabel) {
+        await selects.nth(0).selectOption({ label: monthLabel }, { timeout: WebDriver.WAIT_MS });
+      }
+      if (year !== yearLabel) {
+        await selects.nth(1).selectOption({ label: yearLabel }, { timeout: WebDriver.WAIT_MS });
+      }
+      try {
+        await expect.poll(shown, { timeout: 10_000 }).toEqual([monthLabel, yearLabel]);
+        return;
+      } catch {
+        // A clobbered pair reads back wrong; the next pass re-applies it.
+      }
+    }
+    throw new Error(`[parity] range calendar never showed ${monthLabel} ${yearLabel}.`);
+  }
+
+  async modulesCardDateText(name: string): Promise<string> {
+    const trigger = this.modulesDateTrigger(this.modulesCardRoot(name));
+    await trigger.waitFor({ timeout: WebDriver.WAIT_MS });
+    return ((await trigger.innerText()) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  async modulesCardDateDisabled(name: string): Promise<boolean> {
+    return this.modulesDateTriggerDisabled(this.modulesCardRoot(name));
+  }
+
+  async modulesCardOpenDates(name: string): Promise<void> {
+    const trigger = this.modulesDateTrigger(this.modulesCardRoot(name));
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    const wasVisible = await this.modulesCalendarVisible();
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    if (wasVisible) await trigger.click({ timeout: WebDriver.WAIT_MS });
+    await this.page.locator(".rdp-root").last().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesLastToast(): Promise<ModulesToast | null> {
+    const toasts = this.page.locator('[aria-label="Notifications"] [role="dialog"]');
+    const count = await toasts.count();
+    if (count === 0) return null;
+    const text = (
+      (await toasts
+        .nth(count - 1)
+        .innerText()
+        .catch(() => null)) ?? ""
+    ).trim();
+    if (!text) return null;
+    const [title, ...rest] = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (!title) return null;
+    return { title, message: rest.join(" ") };
+  }
+
+  async modulesAwaitToast(text: string): Promise<void> {
+    await expect
+      .poll(async () => this.modulesLastToast(), { timeout: WebDriver.WAIT_MS })
+      .toMatchObject({ message: expect.stringContaining(text) } as Partial<ModulesToast>);
+  }
+
+  private modulesPill(root: Locator): Locator {
+    return root.locator("span.w-20").first();
+  }
+
+  async modulesPillText(name: string): Promise<string> {
+    const pill = this.modulesPill(this.modulesRowRoot(name));
+    await pill.waitFor({ timeout: WebDriver.WAIT_MS });
+    return ((await pill.innerText()) ?? "").trim();
+  }
+
+  async modulesPillColor(name: string): Promise<string> {
+    const pill = this.modulesPill(this.modulesRowRoot(name));
+    await pill.waitFor({ timeout: WebDriver.WAIT_MS });
+    const color = await pill.evaluate((element) => (element as HTMLElement).style.color);
+    return WebDriver.modulesColorToHex(color);
+  }
+
+  private static modulesColorToHex(color: string): string {
+    const hex = /^#([0-9a-fA-F]{6})$/.exec(color.trim());
+    if (hex) return `#${hex[1]?.toLowerCase()}`;
+    const rgb = /^rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(color.trim());
+    if (!rgb) throw new Error(`[parity] unexpected pill color ${JSON.stringify(color)}.`);
+    const toHex = (part: string | undefined): string => (Number(part ?? 0) & 0xff).toString(16).padStart(2, "0");
+    return `#${toHex(rgb[1])}${toHex(rgb[2])}${toHex(rgb[3])}`;
+  }
+
+  async modulesStatusDisabled(name: string): Promise<boolean> {
+    const pill = this.modulesPill(this.modulesRowRoot(name));
+    await pill.waitFor({ timeout: WebDriver.WAIT_MS });
+    // The pill span carries the not-allowed cursor when its select disables.
+    const cursor = await pill.evaluate((element) => getComputedStyle(element as HTMLElement).cursor);
+    return cursor === "not-allowed";
+  }
+
+  async modulesOpenStatus(name: string): Promise<void> {
+    if ((await this.page.getByRole("option").count()) === 0) {
+      await this.modulesPill(this.modulesRowRoot(name)).click({ timeout: WebDriver.WAIT_MS });
+    }
+    await this.page.getByRole("option").first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesStatusOptions(): Promise<string[]> {
+    const options = this.page.getByRole("option");
+    const count = await options.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      labels.push(((await options.nth(index).innerText()) ?? "").trim().replace(/\s+/g, " "));
+    }
+    return labels;
+  }
+
+  async modulesPickStatus(label: string): Promise<void> {
+    await this.page.getByRole("option", { name: label }).click({ timeout: WebDriver.WAIT_MS });
+    await expect
+      .poll(async () => this.page.locator("span.w-20", { hasText: label }).count(), {
+        timeout: WebDriver.WAIT_MS,
+      })
+      .toBeGreaterThan(0);
+  }
+
+  async modulesLeadState(name: string): Promise<"avatar" | "none"> {
+    const root = this.modulesRowRoot(name);
+    await this.modulesRowLink(name).waitFor({ timeout: WebDriver.WAIT_MS });
+    // The lead slot is exhaustive: a no-lead glyph, or the avatar (an img
+    // when a photo exists, else the initial). Only the glyph is asserted
+    // positively; its absence means a lead shows.
+    if ((await root.locator("svg.lucide-square-user").count()) > 0) return "none";
+    return "avatar";
+  }
+
+  private modulesTooltipPopup(): Locator {
+    // Propel tooltips render through Base UI portals; the popup carries
+    // data-open while shown.
+    return this.page.locator("div[data-base-ui-portal] > div[data-open]").last();
+  }
+
+  async modulesLeadTooltip(name: string): Promise<string | null> {
+    const root = this.modulesRowRoot(name);
+    const marker = root.locator("svg.lucide-square-user");
+    if ((await marker.count()) === 0) return null;
+    await this.page.mouse.move(4, 4).catch(() => undefined);
+    await marker.first().hover({ timeout: WebDriver.WAIT_MS });
+    const tip = this.modulesTooltipPopup();
+    await tip.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+    if ((await tip.count()) === 0) return null;
+    return (((await tip.innerText().catch(() => null)) ?? "").trim() || null) as string | null;
+  }
+
+  private modulesStar(root: Locator): Locator {
+    return root.locator("button:has(svg.lucide-star)").first();
+  }
+
+  async modulesStarVisible(name: string): Promise<boolean> {
+    await this.modulesRowLink(name).waitFor({ timeout: WebDriver.WAIT_MS });
+    return (await this.modulesStar(this.modulesRowRoot(name)).count()) > 0;
+  }
+
+  async modulesStarSelected(name: string): Promise<boolean> {
+    const star = this.modulesStar(this.modulesRowRoot(name));
+    await star.waitFor({ timeout: WebDriver.WAIT_MS });
+    const classes = (await star.locator("svg").first().getAttribute("class")) ?? "";
+    return classes.includes("fill-");
+  }
+
+  async modulesToggleStar(name: string): Promise<void> {
+    await this.modulesStar(this.modulesRowRoot(name)).click({ timeout: WebDriver.WAIT_MS });
+    await expect.poll(async () => this.modulesLastToast(), { timeout: WebDriver.WAIT_MS }).not.toBeNull();
+  }
+
+  async modulesFavoritesExpanded(): Promise<boolean> {
+    // The section mounts only once a favorite exists; before the first
+    // favorite there is no toggle at all, which reads as collapsed.
+    const toggle = this.page.getByRole("button", { name: /favorites menu/i }).first();
+    if ((await toggle.count()) === 0) return false;
+    return ((await toggle.getAttribute("aria-label")) ?? "").includes("Close");
+  }
+
+  async modulesOpenRowMenu(name: string): Promise<void> {
+    if ((await this.page.locator('[role="menuitem"]:visible').count()) === 0) {
+      const root = this.modulesRowRoot(name);
+      await root.locator('div[data-main-menu="true"]:visible > button').click({ timeout: WebDriver.WAIT_MS });
+    }
+    await this.page.locator('[role="menuitem"]:visible').first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesMenuItems(): Promise<ModulesMenuEntry[]> {
+    const items = this.page.locator('[role="menuitem"]:visible');
+    const count = await items.count();
+    const entries: ModulesMenuEntry[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const item = items.nth(index);
+      if ((await item.locator("h5").count()) === 0) continue;
+      const title = ((await item.locator("h5").first().innerText()) ?? "").trim();
+      if (title === "") continue;
+      const description =
+        (await item.locator("p").count()) > 0
+          ? ((await item.locator("p").first().innerText()) ?? "").trim() || null
+          : null;
+      // The menuitem div wraps a real button carrying the disabled state.
+      const disabled = await item
+        .locator("button")
+        .first()
+        .isDisabled()
+        .catch(() => false);
+      entries.push({ title, disabled, description });
+    }
+    return entries;
+  }
+
+  async modulesMenuChoose(title: string): Promise<void> {
+    // Copy entries write through the async clipboard API, which headless
+    // Chromium denies without an explicit grant.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const item = this.page
+      .locator('[role="menuitem"]:visible')
+      .filter({ has: this.page.locator("h5", { hasText: new RegExp(`^${escaped}$`) }) })
+      .first();
+    await item.locator("button").first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .locator('[role="menuitem"]:visible')
+      .first()
+      .waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async modulesMenuChooseOpenTab(titlePart: string): Promise<{ url: string; title: string }> {
+    const item = this.page
+      .locator('[role="menuitem"]:visible')
+      .filter({ has: this.page.locator("h5", { hasText: /^Open in new tab$/ }) })
+      .first();
+    const [popup] = await Promise.all([
+      this.page.context().waitForEvent("page", { timeout: WebDriver.WAIT_MS }),
+      item.locator("button").first().click({ timeout: WebDriver.WAIT_MS }),
+    ]);
+    await popup.waitForLoadState("domcontentloaded", { timeout: WebDriver.WAIT_MS });
+    // The module-specific tab title lands after the detail fetch, well
+    // past the generic shell title.
+    await expect.poll(async () => popup.title(), { timeout: WebDriver.WAIT_MS }).toContain(titlePart);
+    const result = { url: popup.url(), title: await popup.title() };
+    await popup.close().catch(() => undefined);
+    return result;
+  }
+
+  async modulesDialogVisible(kind: "edit" | "archive" | "delete"): Promise<boolean> {
+    const heading = kind === "edit" ? "Update module" : kind === "archive" ? /^Archive module/ : "Delete module";
+    return (await this.page.getByRole("heading", { name: heading }).count()) > 0;
+  }
+
+  async modulesDialogHeading(): Promise<string | null> {
+    const headings = this.page.locator('[role="dialog"] h3');
+    if ((await headings.count()) === 0) return null;
+    return (await headings.first().innerText()).trim();
+  }
+
+  async modulesReadClipboard(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async modulesOpenDetail(
+    workspaceSlug: string,
+    projectId: string,
+    moduleId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    await this.openAuthenticated(`/${workspaceSlug}/projects/${projectId}/modules/${moduleId}`, cookies);
+    await this.modulesContent().first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesDetailOpenMenu(): Promise<void> {
+    // The detail header mounts the same overflow menu as rows; the header
+    // renders before the work-item list, so its trigger is the content's
+    // first main-menu button.
+    const trigger = this.modulesContent().locator('div[data-main-menu="true"]:visible > button').first();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    await this.page.locator('[role="menuitem"]:visible').first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesTogglePeek(name: string): Promise<void> {
+    const root = this.modulesRowRoot(name);
+    await root.hover({ timeout: WebDriver.WAIT_MS });
+    await root.locator("button:has(svg.lucide-info)").first().click({ timeout: WebDriver.WAIT_MS });
+    // Opening resolves once the param sets and the fetched panel renders.
+    await this.page.waitForFunction(() => new URL(window.location.href).searchParams.has("peekModule"), null, {
+      timeout: WebDriver.WAIT_MS,
+    });
+    await this.modulesPeekPanel().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  private modulesPeekPanel(): Locator {
+    // The peek panel is the analytics sidebar mounted beside the list; its
+    // name heading only renders while a module is peeked. Scoped to the
+    // peek container: the page carries other h4s (workspace name, ...).
+    return this.modulesContent().locator("div.absolute.right-0 h4.text-18").first();
+  }
+
+  async modulesPeekVisible(): Promise<boolean> {
+    return (await this.modulesPeekPanel().count()) > 0;
+  }
+
+  async modulesPeekName(): Promise<string | null> {
+    if (!(await this.modulesPeekVisible())) return null;
+    return ((await this.modulesPeekPanel().innerText()) ?? "").trim();
+  }
+
+  async modulesClosePeek(): Promise<void> {
+    // The peek panel's sticky header carries the only rounded-full button.
+    const close = this.modulesContent().locator("div.absolute.right-0 button.rounded-full").first();
+    await close.click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForFunction(() => !new URL(window.location.href).searchParams.has("peekModule"), null, {
+      timeout: WebDriver.WAIT_MS,
+    });
+    // The panel unmounts a beat after the param clears.
+    await this.modulesPeekPanel().waitFor({ state: "detached", timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesBoardColumnCount(): Promise<number> {
+    const grid = this.modulesContent().locator("div.grid:has(div[data-prevent-progress])").first();
+    await grid.waitFor({ timeout: WebDriver.WAIT_MS });
+    const columns = await grid.evaluate((element) => getComputedStyle(element).gridTemplateColumns);
+    return columns.split(" ").filter((part) => part.trim().length > 0).length;
+  }
+
+  async modulesClickRow(name: string): Promise<void> {
+    await this.modulesRowLink(name).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  private modulesTimelineLink(name: string): Locator {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return this.ganttSidebar()
+      .locator('a[href*="/modules/"]')
+      .filter({ hasText: new RegExp(escaped) })
+      .first();
+  }
+
+  private async modulesTimelineModuleId(name: string): Promise<string> {
+    const link = this.modulesTimelineLink(name);
+    await link.waitFor({ timeout: WebDriver.WAIT_MS });
+    const href = (await link.getAttribute("href")) ?? "";
+    const match = /\/modules\/([0-9a-fA-F-]{36})/.exec(href);
+    if (!match || !match[1]) throw new Error(`[parity] timeline row has no module href: ${JSON.stringify(href)}.`);
+    return match[1];
+  }
+
+  async modulesTimelineRows(): Promise<ModulesTimelineRow[]> {
+    const links = this.ganttSidebar().locator('a[href*="/modules/"]');
+    const count = await links.count();
+    const rows: ModulesTimelineRow[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const link = links.nth(index);
+      rows.push({
+        name: ((await link.innerText().catch(() => null)) ?? "").trim().replace(/\s+/g, " "),
+        href: await link.getAttribute("href"),
+        statusGlyph: (await link.locator("svg").count()) > 0,
+      });
+    }
+    return rows;
+  }
+
+  async modulesTimelineBarColor(name: string): Promise<string> {
+    const id = await this.modulesTimelineModuleId(name);
+    const bar = this.ganttBar(id);
+    await bar.waitFor({ timeout: WebDriver.WAIT_MS });
+    // The status color lives on the rendered inner block, not the
+    // positioned wrapper.
+    const inner = bar.locator("div[style*='background-color']").first();
+    await inner.waitFor({ timeout: WebDriver.WAIT_MS });
+    const color = await inner.evaluate((element) => (element as HTMLElement).style.backgroundColor);
+    return WebDriver.modulesColorToHex(color);
+  }
+
+  async modulesTimelineHoverBar(name: string): Promise<void> {
+    const id = await this.modulesTimelineModuleId(name);
+    const bar = this.ganttBar(id);
+    await bar.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await bar.hover({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesTimelineTooltip(): Promise<string | null> {
+    // No mouse park here: the bar hover from modulesTimelineHoverBar must
+    // persist while the popup reads.
+    const tip = this.modulesTooltipPopup();
+    await tip.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+    if ((await tip.count()) === 0) return null;
+    return (((await tip.innerText().catch(() => null)) ?? "").trim() || null) as string | null;
+  }
+
+  async modulesTimelineBarExists(name: string): Promise<boolean> {
+    const id = await this.modulesTimelineModuleId(name);
+    const bar = this.ganttBar(id);
+    if ((await bar.count()) === 0) return false;
+    const width = await bar.evaluate((element) => (element as HTMLElement).style.width);
+    const px = /^(-?\d+(?:\.\d+)?)px$/.exec(width ?? "");
+    return !!px && Number(px[1]) > 0;
+  }
+
+  private async modulesTimelineBarSettled(bar: Locator): Promise<void> {
+    // A previous mutation's re-render can replace the bar mid-grab, so
+    // grabs wait for the position style to hold still first.
+    let last = "";
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const current = await bar
+        .evaluate((element) => `${(element as HTMLElement).style.marginLeft} ${(element as HTMLElement).style.width}`)
+        .catch(() => "");
+      if (current !== "" && current === last) return;
+      last = current;
+      await this.page.waitForTimeout(500);
+    }
+    throw new Error("[parity] timeline bar never settled.");
+  }
+
+  async modulesTimelineDragBar(name: string, dayDelta: number): Promise<void> {
+    if (dayDelta === 0) throw new Error("[parity] bar drag needs a nonzero day delta.");
+    const id = await this.modulesTimelineModuleId(name);
+    const bar = this.ganttBar(id);
+    const pxPerDay = await this.ganttDayWidth();
+    await bar.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await this.modulesTimelineBarSettled(bar);
+    const { from, onto } = await this.ganttClearDragSpan(async () => {
+      const box = await bar.boundingBox();
+      if (!box) throw new Error("[parity] timeline bar has no box.");
+      const middle = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      return { fromX: middle.x, ontoX: middle.x + dayDelta * pxPerDay, y: middle.y };
+    });
+    const before = await bar.evaluate((element) => (element as HTMLElement).style.marginLeft);
+    await this.ganttBarDragEngaged(bar, "marginLeft", before, from, onto);
+    await this.boardSettle("module bar move", async () => {
+      const now = await bar.evaluate((element) => (element as HTMLElement).style.marginLeft).catch(() => before);
+      return now !== before;
+    });
+  }
+
+  async modulesTimelineResizeBar(name: string, side: "left" | "right", dayDelta: number): Promise<void> {
+    if (dayDelta === 0) throw new Error("[parity] bar resize needs a nonzero day delta.");
+    const id = await this.modulesTimelineModuleId(name);
+    const bar = this.ganttBar(id);
+    const handle = this.ganttBarHandle(id, side);
+    const pxPerDay = await this.ganttDayWidth();
+    await bar.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await this.modulesTimelineBarSettled(bar);
+    const { from, onto } = await this.ganttClearDragSpan(async () => {
+      const box = await handle.boundingBox();
+      if (!box) throw new Error("[parity] timeline bar handle has no box.");
+      // Press the handle's outer strip: the bar's sticky date overlay
+      // covers the handle's inner half and a press there starts a move.
+      const edgeX = side === "left" ? box.x + 2 : box.x + box.width - 2;
+      return { fromX: edgeX, ontoX: edgeX + dayDelta * pxPerDay, y: box.y + box.height / 2 };
+    });
+    const before = await bar.evaluate((element) => (element as HTMLElement).style.width);
+    await this.ganttBarDragEngaged(bar, "width", before, from, onto);
+    await this.boardSettle("module bar resize", async () => {
+      const now = await bar.evaluate((element) => (element as HTMLElement).style.width).catch(() => before);
+      return now !== before;
+    });
+  }
+
+  async modulesTimelineOrder(): Promise<string[]> {
+    const links = this.ganttSidebar().locator('a[href*="/modules/"]');
+    const count = await links.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      names.push(
+        (
+          (await links
+            .nth(index)
+            .innerText()
+            .catch(() => null)) ?? ""
+        )
+          .trim()
+          .replace(/\s+/g, " ")
+      );
+    }
+    return names;
+  }
+
+  async modulesTimelineDragRowBefore(sourceName: string, targetName: string): Promise<void> {
+    const source = this.modulesTimelineLink(sourceName);
+    const target = this.modulesTimelineLink(targetName);
+    const sourceBox = await source.boundingBox();
+    const targetBox = await target.boundingBox();
+    if (!sourceBox || !targetBox) throw new Error("[parity] timeline row has no box.");
+    const from = WebDriver.boxCenter(sourceBox);
+    const onto = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + 6 };
+    await this.boardMouseDrag([from, onto]);
+    await this.boardSettle("module row reorder", async () => {
+      const order = await this.modulesTimelineOrder();
+      return order.indexOf(sourceName) === order.indexOf(targetName) - 1;
+    });
+  }
+
+  async modulesTimelineAttemptRowBefore(sourceName: string, targetName: string): Promise<void> {
+    const source = this.modulesTimelineLink(sourceName);
+    const target = this.modulesTimelineLink(targetName);
+    const sourceBox = await source.boundingBox();
+    const targetBox = await target.boundingBox();
+    if (!sourceBox || !targetBox) throw new Error("[parity] timeline row has no box.");
+    const from = WebDriver.boxCenter(sourceBox);
+    const onto = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + 6 };
+    await this.boardMouseDrag([from, onto]);
+    await this.page.waitForTimeout(3_000);
+  }
+
+  async modulesTimelineAttemptBarMove(name: string, dayDelta: number): Promise<void> {
+    if (dayDelta === 0) throw new Error("[parity] bar drag needs a nonzero day delta.");
+    const id = await this.modulesTimelineModuleId(name);
+    const bar = this.ganttBar(id);
+    const pxPerDay = await this.ganttDayWidth();
+    await bar.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    const box = await bar.boundingBox();
+    if (!box) throw new Error("[parity] timeline bar has no box.");
+    const from = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    const onto = { x: from.x + dayDelta * pxPerDay, y: from.y };
+    await this.page.mouse.move(from.x, from.y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(onto.x, onto.y, { steps: 6 });
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(3_000);
   }
 }

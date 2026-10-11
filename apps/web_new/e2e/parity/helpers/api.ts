@@ -12428,6 +12428,58 @@ export interface ParityCycleDetailFull {
   endDate: string | null;
 }
 
+/** One module's server-side record as the row-actions scenarios assert it (NEWFRONT-308). */
+export interface ModulesDetail {
+  /** Module name. */
+  name: string;
+  /** Lifecycle status value (backlog, planned, in-progress, paused, completed, cancelled). */
+  status: string;
+  /** Saved start date (YYYY-MM-DD) or null when empty. */
+  startDate: string | null;
+  /** Saved target date (YYYY-MM-DD) or null when empty. */
+  targetDate: string | null;
+  /** Lead user id or null when no lead is set. */
+  leadId: string | null;
+  /** Whether the requesting user favorited the module. */
+  isFavorite: boolean;
+  /** Manual-placement order value. */
+  sortOrder: number;
+  /** Archive timestamp or null when active. */
+  archivedAt: string | null;
+}
+
+/**
+ * Read one module's full record (status, dates, lead, favorite, order).
+ * The modules list payload omits some of these, so row-actions scenarios
+ * read the detail endpoint after every inline edit.
+ */
+export async function modulesFetchModule(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ModulesDetail> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] module read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["name"] !== "string" || typeof rec["status"] !== "string")
+    throw new Error("[parity] module record carried no string name/status.");
+  return {
+    name: rec["name"],
+    status: rec["status"],
+    startDate: typeof rec["start_date"] === "string" ? rec["start_date"] : null,
+    targetDate: typeof rec["target_date"] === "string" ? rec["target_date"] : null,
+    leadId: typeof rec["lead_id"] === "string" ? rec["lead_id"] : null,
+    isFavorite: rec["is_favorite"] === true,
+    sortOrder: typeof rec["sort_order"] === "number" ? rec["sort_order"] : 0,
+    archivedAt: typeof rec["archived_at"] === "string" ? rec["archived_at"] : null,
+  };
+}
+
 /** Read one cycle's full record (description, lead, dates). */
 export async function serverCycleDetailFull(
   workspaceSlug: string,

@@ -4873,6 +4873,153 @@ export interface ParityDriver {
   cyclesArchivedEmptyDetail(): Promise<string | null>;
   /** Grant clipboard read/write so a later copy action lands (call before copying). */
   cyclesGrantClipboardAccess(): Promise<void>;
+
+  // --- Modules row actions (NEWFRONT-308, MOD-013-019 + MOD-021).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+  /** Open the modules list; resolves once rows or the empty state settle. */
+  modulesOpenList(workspaceSlug: string, projectId: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Wait until the named module's list row renders. */
+  modulesAwaitRow(name: string): Promise<void>;
+  /** Current page URL (peek-param and deep-link assertions). */
+  modulesCurrentUrl(): Promise<string>;
+  /** Switch list/board/timeline through the layout control; resolves once applied. */
+  modulesSetLayout(layout: "list" | "board" | "timeline"): Promise<void>;
+  /** Pick an ordering through the order control; resolves once applied. */
+  modulesSetSort(label: string): Promise<void>;
+  /** Ordering the control currently shows. */
+  modulesSortLabel(): Promise<string>;
+  /** Merged date label (or start/end placeholders) on the named row. */
+  modulesRowDateText(name: string): Promise<string>;
+  /** Whether the named row's date control is disabled. */
+  modulesRowDateDisabled(name: string): Promise<boolean>;
+  /** Open the range calendar from the named row's date control. */
+  modulesRowOpenDates(name: string): Promise<void>;
+  /** Whether the range calendar popup is currently open. */
+  modulesCalendarVisible(): Promise<boolean>;
+  /** Click day-of-month `day` in the open range calendar. */
+  modulesCalendarPickDay(day: number): Promise<void>;
+  /** Show `monthLabel`/`yearLabel` in the open range calendar; verified before return. */
+  modulesCalendarGotoMonth(monthLabel: string, yearLabel: string): Promise<void>;
+  /** Split from/to date text on the named board card. */
+  modulesCardDateText(name: string): Promise<string>;
+  /** Whether the named card's date control is disabled. */
+  modulesCardDateDisabled(name: string): Promise<boolean>;
+  /** Open the range calendar from the named card's date control. */
+  modulesCardOpenDates(name: string): Promise<void>;
+  /** Most recent toast still visible, or null when none shows. */
+  modulesLastToast(): Promise<ModulesToast | null>;
+  /** Wait until a toast carrying `text` shows; fails on timeout. */
+  modulesAwaitToast(text: string): Promise<void>;
+  /** Status pill label on the named row. */
+  modulesPillText(name: string): Promise<string>;
+  /** Status pill text color on the named row (hex). */
+  modulesPillColor(name: string): Promise<string>;
+  /** Whether the named row's status control is disabled. */
+  modulesStatusDisabled(name: string): Promise<boolean>;
+  /** Open the named row's status options. */
+  modulesOpenStatus(name: string): Promise<void>;
+  /** Status option labels in display order. */
+  modulesStatusOptions(): Promise<string[]>;
+  /** Pick a status option; resolves once the pill shows it. */
+  modulesPickStatus(label: string): Promise<void>;
+  /** Lead slot on the named row: avatar shown or no-lead marker. */
+  modulesLeadState(name: string): Promise<"avatar" | "none">;
+  /** No-lead explanation tooltip text, or null when a lead shows. */
+  modulesLeadTooltip(name: string): Promise<string | null>;
+  /** Whether the named row offers the favorite star. */
+  modulesStarVisible(name: string): Promise<boolean>;
+  /** Whether the named row's star reads selected. */
+  modulesStarSelected(name: string): Promise<boolean>;
+  /** Toggle the named row's star; resolves once the toast shows. */
+  modulesToggleStar(name: string): Promise<void>;
+  /** Whether the sidebar favorites section reads expanded. */
+  modulesFavoritesExpanded(): Promise<boolean>;
+  /** Open the named row's overflow menu. */
+  modulesOpenRowMenu(name: string): Promise<void>;
+  /** Overflow menu entries in display order with gating state. */
+  modulesMenuItems(): Promise<ModulesMenuEntry[]>;
+  /** Choose an overflow menu entry; resolves once the menu closes. */
+  modulesMenuChoose(title: string): Promise<void>;
+  /** Choose "Open in new tab"; resolves with the popup URL and title once the title shows `titlePart`. */
+  modulesMenuChooseOpenTab(titlePart: string): Promise<{ url: string; title: string }>;
+  /** Whether a module dialog (edit/archive/delete) is currently open. */
+  modulesDialogVisible(kind: "edit" | "archive" | "delete"): Promise<boolean>;
+  /** Heading of the open module dialog, or null when none shows. */
+  modulesDialogHeading(): Promise<string | null>;
+  /** Read the clipboard text (copy-link assertions). */
+  modulesReadClipboard(): Promise<string>;
+  /** Open the module detail page; resolves once it renders. */
+  modulesOpenDetail(
+    workspaceSlug: string,
+    projectId: string,
+    moduleId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void>;
+  /** Open the detail header's overflow menu. */
+  modulesDetailOpenMenu(): Promise<void>;
+  /** Click the info control on the named row (peek toggle). */
+  modulesTogglePeek(name: string): Promise<void>;
+  /** Whether the peek panel is currently open. */
+  modulesPeekVisible(): Promise<boolean>;
+  /** Module name the peek panel shows, or null when closed. */
+  modulesPeekName(): Promise<string | null>;
+  /** Close the peek panel; resolves once the param clears. */
+  modulesClosePeek(): Promise<void>;
+  /** Board grid column count at the current viewport. */
+  modulesBoardColumnCount(): Promise<number>;
+  /** Click the named row itself (archived rows open peek instead). */
+  modulesClickRow(name: string): Promise<void>;
+  /** Timeline sidebar rows in order: name, detail href, status glyph present. */
+  modulesTimelineRows(): Promise<ModulesTimelineRow[]>;
+  /** Timeline bar background color for the named module (hex). */
+  modulesTimelineBarColor(name: string): Promise<string>;
+  /** Hover the named module's timeline bar so its tooltip shows. */
+  modulesTimelineHoverBar(name: string): Promise<void>;
+  /** Timeline bar tooltip text (name + date summary), or null when hidden. */
+  modulesTimelineTooltip(): Promise<string | null>;
+  /** Whether the named module renders a dated timeline bar. */
+  modulesTimelineBarExists(name: string): Promise<boolean>;
+  /** Drag the named bar by dayDelta days; resolves once it settles. */
+  modulesTimelineDragBar(name: string, dayDelta: number): Promise<void>;
+  /** Resize the named bar from one end; resolves once it settles. */
+  modulesTimelineResizeBar(name: string, side: "left" | "right", dayDelta: number): Promise<void>;
+  /** Sidebar row names in timeline order. */
+  modulesTimelineOrder(): Promise<string[]>;
+  /** Drag one timeline sidebar row above another; resolves once it settles. */
+  modulesTimelineDragRowBefore(sourceName: string, targetName: string): Promise<void>;
+  /** Attempt a row reorder the timeline may refuse; fixed wait, no settle. */
+  modulesTimelineAttemptRowBefore(sourceName: string, targetName: string): Promise<void>;
+  /** Attempt a bar move the timeline may refuse; fixed wait, no settle. */
+  modulesTimelineAttemptBarMove(name: string, dayDelta: number): Promise<void>;
+}
+
+/** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */
+export interface ModulesToast {
+  /** Toast title. */
+  title: string;
+  /** Toast message. */
+  message: string;
+}
+
+/** One overflow menu entry with its gating state (NEWFRONT-308, MOD-017). */
+export interface ModulesMenuEntry {
+  /** Entry title. */
+  title: string;
+  /** Whether the entry renders disabled. */
+  disabled: boolean;
+  /** Explanation under the title, or null when none shows. */
+  description: string | null;
+}
+
+/** One timeline sidebar row (NEWFRONT-308, MOD-021). */
+export interface ModulesTimelineRow {
+  /** Module name. */
+  name: string;
+  /** Detail href, or null when the row is not a link. */
+  href: string | null;
+  /** Whether a status glyph renders beside the name. */
+  statusGlyph: boolean;
 }
 
 /** One catalog table row: the user-visible definition facts. */
