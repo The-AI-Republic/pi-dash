@@ -3,7 +3,7 @@
 //! Django password-hash verification (`PBKDF2PasswordHasher`).
 //!
 //! Python reference: `django.contrib.auth.hashers.PBKDF2PasswordHasher`
-//! (Django 6.0). The stored form is
+//! (Django 4.2, the pinned version). The stored form is
 //!
 //! ```text
 //! pbkdf2_sha256$<iterations>$<salt>$<base64(PBKDF2-HMAC-SHA256, 32 bytes)>
@@ -24,8 +24,10 @@ use thiserror::Error as ThisError;
 
 /// Algorithm tag Django writes into the hash string.
 pub const PBKDF2_ALGORITHM: &str = "pbkdf2_sha256";
-/// Iteration count Django 6.0 uses for newly set passwords.
-pub const PBKDF2_DEFAULT_ITERATIONS: u32 = 1_200_000;
+/// Iteration count the pinned Django 4.2 uses for newly set passwords
+/// (`PBKDF2PasswordHasher.iterations = 600000`; Django 6.0 raised it to
+/// 1_200_000, but this project pins Django 4.2.30).
+pub const PBKDF2_DEFAULT_ITERATIONS: u32 = 600_000;
 /// PBKDF2 output length in bytes (Django documents a 64-byte string, but the
 /// hasher requests 32 bytes from the PRF — the stored base64 decodes to 32).
 pub const PBKDF2_DKLEN: usize = 32;
@@ -112,11 +114,11 @@ pub fn needs_update(encoded: &str) -> Result<bool, PasswordError> {
 mod tests {
     use super::*;
 
-    // Hashes produced by Django 6.0.5's PBKDF2PasswordHasher.encode.
+    // Hashes produced by Django 4.2.30's PBKDF2PasswordHasher.encode.
     const DJANGO_LOW: &str =
         "pbkdf2_sha256$26000$f05saltABCDEF1234567890ab$5Yruc/dEr8aU75Iv23Hue6WzOB7d/jOY4VVwoakOiHQ=";
     const DJANGO_DEFAULT: &str =
-        "pbkdf2_sha256$1200000$defaultsalt0123456789abcdef$L8PcI/YkM3HgrvkCRoWMuCH1vp8u0LY9lGKMiVyPYWE=";
+        "pbkdf2_sha256$600000$defaultsalt0123456789abcdef$8Fue9iT8ik6C0dEhPy8cJlFJMLuayJi8LMN3ceyFSn0=";
 
     #[test]
     fn verifies_django_hash() {
@@ -135,6 +137,20 @@ mod tests {
         assert_eq!(
             hash_password("correct-horse", "f05saltABCDEF1234567890ab", 26000),
             DJANGO_LOW
+        );
+    }
+
+    #[test]
+    fn default_iterations_match_django() {
+        // Guards the F-05 bug (PIDASHCONV-855): the default must be the
+        // pinned Django 4.2's 600000, not Django 6.0's 1200000.
+        assert_eq!(
+            hash_password(
+                "s3cr3t-pw",
+                "defaultsalt0123456789abcdef",
+                PBKDF2_DEFAULT_ITERATIONS
+            ),
+            DJANGO_DEFAULT
         );
     }
 
