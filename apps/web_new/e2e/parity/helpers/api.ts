@@ -13790,6 +13790,12 @@ export async function serverEnsureProjectMember(
 // --- Estimates screen shell (NEWFRONT-321, EST-001-003, EST-026-028).
 // --- Appended; existing helpers above are untouched per the shared
 // --- harness contract.
+// --- Estimates permissions matrix + edition split (NEWFRONT-326, EST-024
+// --- + EST-029). serverEstimatesList is reused from the shell child
+// --- (NEWFRONT-321, merged); serverEstimateRaw mirrors the edit
+// --- sibling's probe (NEWFRONT-324, unmerged). Dedup at rebase,
+// --- keeping one.
+
 /** One estimate system as the project list reports it. */
 export interface ParityServerEstimateSystem {
   id: string;
@@ -14267,4 +14273,36 @@ export async function serverProjectTimezone(
   const record = (await res.json()) as { timezone?: unknown };
   if (typeof record.timezone !== "string") throw new Error("[parity] project carried no string timezone.");
   return record.timezone;
+}
+
+/** Raw estimate-endpoint probe: status plus leniently parsed body (never throws on status). */
+export interface ParityEstimateRawProbe {
+  status: number;
+  json: unknown;
+}
+
+/**
+ * Raw request against an estimate path (rule-matrix probes assert the
+ * status themselves). `path` is the URL path below the API base; the
+ * body parses as JSON when it parses at all, else stays null.
+ */
+export async function serverEstimateRaw(
+  method: "GET" | "POST" | "PATCH" | "DELETE" | "PUT",
+  path: string,
+  sessionCookie: string,
+  body?: unknown,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityEstimateRawProbe> {
+  const csrf = csrfFromCookie(sessionCookie);
+  const res = await fetch(`${apiBase}${path}`, {
+    method,
+    headers: {
+      cookie: sessionCookie,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+      ...(csrf === "" ? {} : { "X-CSRFToken": csrf, referer: `${apiBase}${path}` }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const json: unknown = await res.json().catch(() => null);
+  return { status: res.status, json };
 }

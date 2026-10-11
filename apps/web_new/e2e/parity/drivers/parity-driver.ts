@@ -5405,6 +5405,15 @@ export interface ParityDriver {
   // --- Appended; existing methods above are untouched per the shared
   // --- driver contract. This child owns estimatesOpenSettings-style
   // --- navigation; sibling EST children reuse it.
+  // --- Estimates permissions matrix + edition split (NEWFRONT-326,
+  // --- EST-024 + EST-029). Appended; existing methods above are untouched
+  // --- per the shared driver contract. The shell child's navigation
+  // --- (NEWFRONT-321, merged) is reused as-is; estimatesEnableSwitchVisible,
+  // --- estimatesActiveSystemName and estimatesActiveRowButtonCount mirror
+  // --- the enable sibling's (NEWFRONT-322, unmerged); the creation-dialog
+  // --- readers mirror the create sibling's (NEWFRONT-323, unmerged); the
+  // --- delete readers mirror the edit sibling's (NEWFRONT-324, unmerged).
+  // --- Dedup at rebase, keeping one.
   /** Open the project estimates settings screen; settles on the heading or the denial view. */
   estimatesOpenSettings(workspaceSlug: string, projectId: string): Promise<void>;
   /** Whether the settings page shows the not-authorized notice. */
@@ -5886,6 +5895,39 @@ export interface ParityDriver {
   cyclesHeroDetailLayoutOptions(): Promise<string[]>;
   /** Pick a layout in the open detail mobile switcher. */
   cyclesHeroDetailPickLayout(option: string): Promise<void>;
+
+  /** Whether the enable-estimates switch renders on the screen. */
+  estimatesEnableSwitchVisible(): Promise<boolean>;
+  /** Name of the active estimate system, or "" when no active row shows. */
+  estimatesActiveSystemName(): Promise<string>;
+  /** Buttons rendered on the active row (OSS ships delete-only). */
+  estimatesActiveRowButtonCount(): Promise<number>;
+  /** Open the creation dialog from the empty state; resolves once step one shows. */
+  estimatesOpenCreateDialog(): Promise<void>;
+  /** Whether the creation dialog is currently open. */
+  estimatesDialogOpen(): Promise<boolean>;
+  /** Measurement-family radio options in display order. */
+  estimatesFamilyOptions(): Promise<EstimatesFamilyOption[]>;
+  /** Select a measurement family; resolves once its starters show. */
+  estimatesSelectFamily(family: "points" | "categories"): Promise<void>;
+  /** Pick a starter card by title; resolves once step two shows. */
+  estimatesPickStarter(title: string): Promise<void>;
+  /** Submit the dialog; resolves once the write settles (close or error notice). */
+  estimatesSubmit(): Promise<void>;
+  /** Click the active row's delete control. */
+  estimatesActiveRowDeleteClick(): Promise<void>;
+  /** Whether any app dialog is currently open. */
+  estimatesConfirmDialogOpen(): Promise<boolean>;
+  /** Dismiss the open confirmation dialog through its cancel action. */
+  estimatesConfirmDialogCancel(): Promise<void>;
+  /** Heading text of the open confirmation dialog, or "" when none is open. */
+  estimatesEditDeleteConfirmDialogTitle(): Promise<string>;
+  /** Body text of the open confirmation dialog, or "" when none is open. */
+  estimatesEditDeleteConfirmDialogBody(): Promise<string>;
+  /** Confirm the open whole-system delete dialog; resolves once it closes. */
+  estimatesEditDeleteConfirmDialogConfirm(): Promise<void>;
+  /** Whether the active row exposes any edit control (cloud-only; false in OSS). */
+  estimatesEditDeleteActiveRowEditControlVisible(): Promise<boolean>;
 }
 
 /** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */
@@ -6926,4 +6968,16 @@ export interface CyclesHeroTrafficCounts {
   archivedReads: number;
   /** Cycle mutating writes (create, update, delete, transfer). */
   writes: number;
+}
+
+/** One measurement-family radio option (NEWFRONT-326, EST-029; duplicates NEWFRONT-323, unmerged). */
+export interface EstimatesFamilyOption {
+  /** Option value as submitted (points, categories, time on cloud). */
+  value: string;
+  /** Visible option label. */
+  label: string;
+  /** Whether the option renders disabled. */
+  disabled: boolean;
+  /** Whether the option is currently selected. */
+  checked: boolean;
 }

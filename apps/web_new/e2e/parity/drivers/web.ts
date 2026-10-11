@@ -109,6 +109,7 @@ import type {
   IntakeListOrderField,
   IntakeListOrderState,
   IntakeListTooltip,
+  EstimatesFamilyOption,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -32335,5 +32336,234 @@ export class WebDriver implements ParityDriver {
   async cyclesHeroDetailPickLayout(option: string): Promise<void> {
     const item = this.cyclesHeroOpenMenu().locator("div, button", { hasText: option }).first();
     await item.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  // --- Estimates permissions matrix + edition split (NEWFRONT-326,
+  // --- EST-024 + EST-029). Appended; existing methods above are untouched
+  // --- per the shared driver contract. The shell child's navigation
+  // --- (NEWFRONT-321, merged) is reused as-is; the enable (NEWFRONT-322),
+  // --- create (NEWFRONT-323) and edit (NEWFRONT-324) siblings' readers
+  // --- (all unmerged) are mirrored below; dedup at rebase, keeping one.
+
+  private estimatesEnableSwitch(): Locator {
+    return this.estimatesMain().getByRole("switch").first();
+  }
+
+  private estimatesSection(title: "Estimates list" | "Archived estimates"): Locator {
+    // The heading sits two levels inside its section container (heading
+    // block, then the container holding the heading plus the rows).
+    return this.estimatesMain().getByRole("heading", { name: title, exact: true }).first().locator("xpath=../../..");
+  }
+
+  private estimatesSectionRows(section: Locator): Locator {
+    return section.locator("div.rounded-lg h4");
+  }
+
+  private estimatesDialog(): Locator {
+    return this.page.locator('div[role="dialog"][data-headlessui-state="open"]');
+  }
+
+  private estimatesEditDeleteMain(): Locator {
+    return this.page.getByRole("main").last();
+  }
+
+  private estimatesEditDeleteSection(title: "Estimates list" | "Archived estimates"): Locator {
+    // The heading sits inside a heading block nested in the section
+    // container, so climb from the heading to the container.
+    return this.estimatesEditDeleteMain()
+      .getByRole("heading", { name: title, exact: true })
+      .first()
+      .locator("xpath=../../..");
+  }
+
+  private estimatesEditDeleteActiveBox(): Locator {
+    return this.estimatesEditDeleteSection("Estimates list")
+      .locator("div.rounded-lg h4")
+      .first()
+      .locator("xpath=ancestor::div[contains(@class, 'rounded-lg')][1]");
+  }
+
+  async estimatesEnableSwitchVisible(): Promise<boolean> {
+    return this.isShown(this.estimatesEnableSwitch());
+  }
+
+  async estimatesActiveSystemName(): Promise<string> {
+    const section = this.estimatesSection("Estimates list");
+    if (!(await this.isShown(section))) return "";
+    const head = this.estimatesSectionRows(section).first();
+    if ((await head.count()) === 0) return "";
+    return ((await head.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async estimatesActiveRowButtonCount(): Promise<number> {
+    const section = this.estimatesSection("Estimates list");
+    if (!(await this.isShown(section))) return 0;
+    const box = this.estimatesSectionRows(section)
+      .first()
+      .locator("xpath=ancestor::div[contains(@class, 'rounded-lg')][1]");
+    if ((await box.count()) === 0) return 0;
+    return box.getByRole("button").count();
+  }
+
+  async estimatesOpenCreateDialog(): Promise<void> {
+    await this.page.getByRole("button", { name: /add estimate system/i }).click();
+    await this.page
+      .getByText(/new estimate system/i)
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async estimatesDialogOpen(): Promise<boolean> {
+    return (await this.page.getByText(/new estimate system/i).count()) > 0;
+  }
+
+  async estimatesFamilyOptions(): Promise<EstimatesFamilyOption[]> {
+    const inputs = this.estimatesDialog().locator('input[type="radio"]');
+    const count = await inputs.count();
+    const options: EstimatesFamilyOption[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const input = inputs.nth(index);
+      const id = await input.getAttribute("id");
+      const label =
+        id === null
+          ? ""
+          : ((await this.estimatesDialog()
+              .locator(`label[for="${id}"]`)
+              .first()
+              .innerText()
+              .catch(() => "")) ?? "");
+      options.push({
+        value: (await input.getAttribute("value")) ?? "",
+        label: label.trim().replace(/\s+/g, " "),
+        disabled: await input.isDisabled(),
+        checked: await input.isChecked(),
+      });
+    }
+    return options;
+  }
+
+  async estimatesSelectFamily(family: "points" | "categories"): Promise<void> {
+    const label = family === "points" ? "Points" : "Categories";
+    await this.estimatesDialog().getByText(label, { exact: true }).click();
+    await expect(this.estimatesDialog().locator(`input[type="radio"][value="${family}"]`)).toBeChecked({
+      timeout: WebDriver.WAIT_MS,
+    });
+  }
+
+  async estimatesPickStarter(title: string): Promise<void> {
+    const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    await this.estimatesDialog()
+      .getByRole("button", { name: new RegExp(escaped, "i") })
+      .click();
+    await this.page
+      .getByText(/step 2 of 2/i)
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async estimatesSubmit(): Promise<void> {
+    await this.estimatesDialog()
+      .getByRole("button", { name: /create estimate/i })
+      .click();
+    // Three outcomes: the dialog closes (success), an error notice shows
+    // (server refusal), or validation markers stay with no notice (blocked
+    // submit). The success notice paints before the close transition
+    // finishes, so a success toast extends the wait for the close.
+    const blockedDeadline = Date.now() + 5_000;
+    const closeDeadline = Date.now() + 15_000;
+    for (;;) {
+      if (!(await this.estimatesDialogOpen())) return;
+      const toast = await this.toastText();
+      if (toast !== null && /fail|unable|error/i.test(toast)) return;
+      if (toast === null && Date.now() > blockedDeadline) return;
+      if (Date.now() > closeDeadline) return;
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async estimatesEditDeleteActiveRowEditControlVisible(): Promise<boolean> {
+    // Any row button offering an edit. The OSS trash control is
+    // icon-only (no accessible name), so only a cloud edit control
+    // could ever match.
+    const box = this.estimatesEditDeleteActiveBox();
+    if ((await box.count()) === 0) return false;
+    return (await box.getByRole("button", { name: /edit/i }).count()) > 0;
+  }
+
+  async estimatesActiveRowDeleteClick(): Promise<void> {
+    const box = this.estimatesEditDeleteActiveBox();
+    await box.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async estimatesConfirmDialogOpen(): Promise<boolean> {
+    // App dialogs only: toasts share role=dialog under Notifications,
+    // and the delete success toast shows exactly when callers poll the
+    // dialog closed.
+    return (await this.appDialogs().count()) > 0;
+  }
+
+  async estimatesConfirmDialogCancel(): Promise<void> {
+    const dialog = this.page.getByRole("dialog").first();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS }).catch(() => undefined);
+  }
+
+  async estimatesEditDeleteConfirmDialogTitle(): Promise<string> {
+    const dialog = this.appDialogs().first();
+    if ((await dialog.count()) === 0) return "";
+    const raw = (await dialog.innerText().catch(() => "")) ?? "";
+    return (
+      raw
+        .split("\n")
+        .map((line) => line.trim())
+        .find((line) => line !== "") ?? ""
+    );
+  }
+
+  async estimatesEditDeleteConfirmDialogBody(): Promise<string> {
+    const dialog = this.appDialogs().first();
+    if ((await dialog.count()) === 0) return "";
+    return ((await dialog.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async estimatesEditDeleteConfirmDialogConfirm(): Promise<void> {
+    // Settle on whatever the confirm produces first: the delete
+    // round-trip, the refused request failing, or the toast either
+    // outcome raises. Toasts auto-dismiss, so the toast leg must end
+    // the wait the moment one shows — polling for it after a long
+    // settle would miss it. Callers poll the outcome they expect next.
+    // Waiters attach before the click so a fast round-trip cannot slip
+    // past them.
+    const done = Promise.race([
+      this.page
+        .waitForResponse(
+          (response) =>
+            /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/estimates\/[^/]+\/$/.test(response.url()) &&
+            response.request().method() === "DELETE",
+          { timeout: 30_000 }
+        )
+        .then(
+          () => true,
+          () => false
+        ),
+      this.page.waitForEvent("requestfailed", { timeout: 30_000 }).then(
+        () => true,
+        () => false
+      ),
+      this.page
+        .locator('[aria-label="Notifications"]')
+        .getByRole("dialog")
+        .first()
+        .waitFor({ timeout: 30_000 })
+        .then(
+          () => true,
+          () => false
+        ),
+    ]);
+    await this.appDialogs()
+      .first()
+      .getByRole("button", { name: /delete estimate/i })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await done;
   }
 }
