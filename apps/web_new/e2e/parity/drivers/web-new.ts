@@ -101,6 +101,13 @@ import type {
   IntakeListOrderState,
   IntakeListTooltip,
   EstimatesFamilyOption,
+  PagesGatingTab,
+  PagesGatingListVariant,
+  PagesGatingCreateState,
+  PagesGatingErrorPanel,
+  PagesGatingRequest,
+  PagesGatingHeaderCluster,
+  PagesGatingTitleFacts,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -9202,5 +9209,203 @@ export class WebNewDriver implements ParityDriver {
   }
   async estimatesEditDeleteActiveRowEditControlVisible(): Promise<boolean> {
     return todo("estimatesEditDeleteActiveRowEditControlVisible");
+  }
+  // --- Pages gating, list states, URLs, detail shell (NEWFRONT-314,
+  // --- PAGE-018-025,079-080). Throwing stubs per the shared driver contract.
+  async pagesGatingOpenList(
+    _workspaceSlug: string,
+    _projectId: string,
+    _query?: string,
+    _settle?: boolean
+  ): Promise<void> {
+    return todo("pagesGatingOpenList");
+  }
+  async pagesGatingOpenDetail(
+    _workspaceSlug: string,
+    _projectId: string,
+    _pageId: string,
+    _query?: string
+  ): Promise<void> {
+    return todo("pagesGatingOpenDetail");
+  }
+  async pagesGatingCurrentUrl(): Promise<string> {
+    return todo("pagesGatingCurrentUrl");
+  }
+  async pagesGatingQueryParam(_key: string): Promise<string | null> {
+    return todo("pagesGatingQueryParam");
+  }
+  async pagesGatingDocTitle(): Promise<string> {
+    return todo("pagesGatingDocTitle");
+  }
+  async pagesGatingRowTitles(): Promise<string[]> {
+    return todo("pagesGatingRowTitles");
+  }
+  async pagesGatingRowHref(_title: string): Promise<string | null> {
+    return todo("pagesGatingRowHref");
+  }
+  async pagesGatingActiveTab(): Promise<PagesGatingTab> {
+    return todo("pagesGatingActiveTab");
+  }
+  async pagesGatingClickTab(_tab: PagesGatingTab): Promise<void> {
+    return todo("pagesGatingClickTab");
+  }
+  async pagesGatingCreateOffered(): Promise<boolean> {
+    return todo("pagesGatingCreateOffered");
+  }
+  async pagesGatingRowStarOffered(_title: string): Promise<boolean> {
+    return todo("pagesGatingRowStarOffered");
+  }
+  async pagesGatingRowMenuItems(_title: string): Promise<string[]> {
+    return todo("pagesGatingRowMenuItems");
+  }
+  async pagesGatingDetailCluster(): Promise<PagesGatingHeaderCluster> {
+    return todo("pagesGatingDetailCluster");
+  }
+  async pagesGatingDetailMenuItems(): Promise<string[]> {
+    return todo("pagesGatingDetailMenuItems");
+  }
+  async pagesGatingEditableCount(): Promise<number> {
+    return todo("pagesGatingEditableCount");
+  }
+  async pagesGatingErrorPanelVisible(): Promise<boolean> {
+    return todo("pagesGatingErrorPanelVisible");
+  }
+  async pagesGatingErrorPanel(): Promise<PagesGatingErrorPanel> {
+    return todo("pagesGatingErrorPanel");
+  }
+  async pagesGatingListVariant(): Promise<PagesGatingListVariant> {
+    return todo("pagesGatingListVariant");
+  }
+  async pagesGatingSkeletonCount(): Promise<number> {
+    return todo("pagesGatingSkeletonCount");
+  }
+  async pagesGatingEmptyCreateState(): Promise<PagesGatingCreateState> {
+    return todo("pagesGatingEmptyCreateState");
+  }
+  async pagesGatingStallListFetch(): Promise<void> {
+    return todo("pagesGatingStallListFetch");
+  }
+  async pagesGatingReleaseListFetch(): Promise<void> {
+    return todo("pagesGatingReleaseListFetch");
+  }
+  async pagesGatingFailListFetch(): Promise<void> {
+    return todo("pagesGatingFailListFetch");
+  }
+  async pagesGatingUnfailListFetch(): Promise<void> {
+    return todo("pagesGatingUnfailListFetch");
+  }
+  async pagesGatingFailListCreates(): Promise<void> {
+    return todo("pagesGatingFailListCreates");
+  }
+  async pagesGatingUnfailListCreates(): Promise<void> {
+    return todo("pagesGatingUnfailListCreates");
+  }
+  async pagesGatingToastTexts(): Promise<string[]> {
+    return todo("pagesGatingToastTexts");
+  }
+  async pagesGatingStartRequestSpy(): Promise<void> {
+    return todo("pagesGatingStartRequestSpy");
+  }
+  async pagesGatingLoggedRequests(): Promise<PagesGatingRequest[]> {
+    return todo("pagesGatingLoggedRequests");
+  }
+  async pagesGatingResetRequestSpy(): Promise<void> {
+    return todo("pagesGatingResetRequestSpy");
+  }
+  async pagesGatingSearchType(_text: string): Promise<void> {
+    return todo("pagesGatingSearchType");
+  }
+  async pagesGatingSearchValue(): Promise<string | null> {
+    return todo("pagesGatingSearchValue");
+  }
+  async pagesGatingSortLabel(): Promise<string> {
+    return todo("pagesGatingSortLabel");
+  }
+  async pagesGatingSortCycle(): Promise<void> {
+    return todo("pagesGatingSortCycle");
+  }
+  async pagesGatingFilterToggleFavorites(): Promise<void> {
+    return todo("pagesGatingFilterToggleFavorites");
+  }
+  async pagesGatingChips(): Promise<string[]> {
+    return todo("pagesGatingChips");
+  }
+  async pagesGatingQuickCreate(): Promise<string> {
+    return todo("pagesGatingQuickCreate");
+  }
+  async pagesGatingWaitDetailSettled(): Promise<"editor" | "panel"> {
+    return todo("pagesGatingWaitDetailSettled");
+  }
+  async pagesGatingDetailSpinnerVisible(): Promise<boolean> {
+    return todo("pagesGatingDetailSpinnerVisible");
+  }
+  async pagesGatingStallDetailFetch(_pageId: string): Promise<void> {
+    return todo("pagesGatingStallDetailFetch");
+  }
+  async pagesGatingReleaseDetailFetch(): Promise<void> {
+    return todo("pagesGatingReleaseDetailFetch");
+  }
+  async pagesGatingBreadcrumbProject(): Promise<string | null> {
+    return todo("pagesGatingBreadcrumbProject");
+  }
+  async pagesGatingBackLinkHref(): Promise<string | null> {
+    return todo("pagesGatingBackLinkHref");
+  }
+  async pagesGatingSwitcherOptions(): Promise<string[]> {
+    return todo("pagesGatingSwitcherOptions");
+  }
+  async pagesGatingSwitcherSearch(_text: string): Promise<string[]> {
+    return todo("pagesGatingSwitcherSearch");
+  }
+  async pagesGatingSwitcherSelect(_name: string): Promise<void> {
+    return todo("pagesGatingSwitcherSelect");
+  }
+  async pagesGatingTitleFacts(_pageId: string): Promise<PagesGatingTitleFacts> {
+    return todo("pagesGatingTitleFacts");
+  }
+  async pagesGatingBodySkeletonVisible(): Promise<boolean> {
+    return todo("pagesGatingBodySkeletonVisible");
+  }
+  async pagesGatingPaneActiveTab(): Promise<string | null> {
+    return todo("pagesGatingPaneActiveTab");
+  }
+  async pagesGatingClickVersionLink(_versionId: string): Promise<void> {
+    return todo("pagesGatingClickVersionLink");
+  }
+  async pagesGatingOverlayOpen(): Promise<boolean> {
+    return todo("pagesGatingOverlayOpen");
+  }
+  async pagesGatingOverlayTitle(): Promise<string> {
+    return todo("pagesGatingOverlayTitle");
+  }
+  async pagesGatingOverlayText(): Promise<string> {
+    return todo("pagesGatingOverlayText");
+  }
+  async pagesGatingOverlaySkeletonVisible(): Promise<boolean> {
+    return todo("pagesGatingOverlaySkeletonVisible");
+  }
+  async pagesGatingStallVersionDetail(): Promise<void> {
+    return todo("pagesGatingStallVersionDetail");
+  }
+  async pagesGatingReleaseVersionDetail(): Promise<void> {
+    return todo("pagesGatingReleaseVersionDetail");
+  }
+  async pagesGatingClickOptionsItem(_name: string): Promise<void> {
+    return todo("pagesGatingClickOptionsItem");
+  }
+  async pagesGatingCopyLinkText(): Promise<string> {
+    return todo("pagesGatingCopyLinkText");
+  }
+  async pagesGatingSignOut(): Promise<void> {
+    return todo("pagesGatingSignOut");
+  }
+  async pagesGatingClickCreate(): Promise<void> {
+    return todo("pagesGatingClickCreate");
+  }
+  async pagesGatingOpenRow(_title: string): Promise<void> {
+    return todo("pagesGatingOpenRow");
+  }
+  async pagesGatingGoBack(): Promise<void> {
+    return todo("pagesGatingGoBack");
   }
 }

@@ -5978,6 +5978,133 @@ export interface ParityDriver {
   intakeCreateInsertImage(file: { name: string; mime: string; bytes: Buffer }): Promise<void>;
   /** Images currently rendered in the dialog's description editor. */
   intakeCreateEditorImageCount(): Promise<number>;
+  // --- Pages gating, list states, URLs, detail shell (NEWFRONT-314,
+  // --- PAGE-018-025,079-080). Appended; existing methods above are
+  // --- untouched per the shared driver contract.
+  /** Open a project's pages list; settles on a terminal variant unless told to mount only (stall proofs). */
+  pagesGatingOpenList(workspaceSlug: string, projectId: string, query?: string, settle?: boolean): Promise<void>;
+  /** Open one page's detail through its deep link; settles on domcontentloaded only (panel cases never mount an editor). */
+  pagesGatingOpenDetail(workspaceSlug: string, projectId: string, pageId: string, query?: string): Promise<void>;
+  /** Current page URL. */
+  pagesGatingCurrentUrl(): Promise<string>;
+  /** Current value of one URL query key, or null when absent. */
+  pagesGatingQueryParam(key: string): Promise<string | null>;
+  /** Document title. */
+  pagesGatingDocTitle(): Promise<string>;
+  /** Titles of the rendered list rows, in display order. */
+  pagesGatingRowTitles(): Promise<string[]>;
+  /** Href of one row's detail link, or null when the row is absent. */
+  pagesGatingRowHref(title: string): Promise<string | null>;
+  /** Active list tab from the `type` query value (unknown and missing read back public). */
+  pagesGatingActiveTab(): Promise<PagesGatingTab>;
+  /** Click one list tab; resolves once the row set settles. */
+  pagesGatingClickTab(tab: PagesGatingTab): Promise<void>;
+  /** True when the list header offers the quick-create action. */
+  pagesGatingCreateOffered(): Promise<boolean>;
+  /** True when one row offers its favorite star. */
+  pagesGatingRowStarOffered(title: string): Promise<boolean>;
+  /** Labels of one row's overflow menu, in display order. */
+  pagesGatingRowMenuItems(title: string): Promise<string[]>;
+  /** Presence of the detail header action cluster (star, copy-link, menu) plus the sync badge label, if any. */
+  pagesGatingDetailCluster(): Promise<PagesGatingHeaderCluster>;
+  /** Labels of the detail header options menu, in display order. */
+  pagesGatingDetailMenuItems(): Promise<string[]>;
+  /** Count of editable regions on the detail view (title plus body when editable, none when read-only or panelled). */
+  pagesGatingEditableCount(): Promise<number>;
+  /** True when the detail error panel shows instead of the editor. */
+  pagesGatingErrorPanelVisible(): Promise<boolean>;
+  /** Heading, body, and back-link href of the detail error panel. */
+  pagesGatingErrorPanel(): Promise<PagesGatingErrorPanel>;
+  /** Which variant the list content area currently shows. */
+  pagesGatingListVariant(): Promise<PagesGatingListVariant>;
+  /** Count of skeleton blocks in the list content area. */
+  pagesGatingSkeletonCount(): Promise<number>;
+  /** State of the empty-collection create action (absent, enabled, or disabled). */
+  pagesGatingEmptyCreateState(): Promise<PagesGatingCreateState>;
+  /** Hold collection GETs behind a gate until released (skeleton proof). */
+  pagesGatingStallListFetch(): Promise<void>;
+  /** Release held collection GETs. */
+  pagesGatingReleaseListFetch(): Promise<void>;
+  /** Fail collection GETs with 500 until lifted (error fall-through proof). */
+  pagesGatingFailListFetch(): Promise<void>;
+  /** Lift the collection failure. */
+  pagesGatingUnfailListFetch(): Promise<void>;
+  /** Fail page POSTs with 500 until lifted (failed-mutation notice proof). */
+  pagesGatingFailListCreates(): Promise<void>;
+  /** Lift the create failure. */
+  pagesGatingUnfailListCreates(): Promise<void>;
+  /** Visible toast texts (title plus message per toast). */
+  pagesGatingToastTexts(): Promise<string[]>;
+  /** Start logging page-API requests (collection, detail, favorites, shelved). */
+  pagesGatingStartRequestSpy(): Promise<void>;
+  /** Logged requests since the spy started or was last reset. */
+  pagesGatingLoggedRequests(): Promise<PagesGatingRequest[]>;
+  /** Clear the logged requests. */
+  pagesGatingResetRequestSpy(): Promise<void>;
+  /** Type into the list title search (expands the control first); resolves once rows settle. */
+  pagesGatingSearchType(text: string): Promise<void>;
+  /** Current search text, or null when the control is collapsed. */
+  pagesGatingSearchValue(): Promise<string | null>;
+  /** Current sort key label. */
+  pagesGatingSortLabel(): Promise<string>;
+  /** Switch the sort to a different key; resolves once rows settle. */
+  pagesGatingSortCycle(): Promise<void>;
+  /** Toggle the favorites-only structured filter; resolves once rows settle. */
+  pagesGatingFilterToggleFavorites(): Promise<void>;
+  /** Active filter chip texts (empty when no filter applies). */
+  pagesGatingChips(): Promise<string[]>;
+  /** Click quick-create; resolves with the new page id once its detail lands. */
+  pagesGatingQuickCreate(): Promise<string>;
+  /** Wait for the detail terminal state: the editor body or the error panel. */
+  pagesGatingWaitDetailSettled(): Promise<"editor" | "panel">;
+  /** True when the centered full-view spinner shows on the detail view. */
+  pagesGatingDetailSpinnerVisible(): Promise<boolean>;
+  /** Hold one page's detail GETs behind a gate until released (spinner proof). */
+  pagesGatingStallDetailFetch(pageId: string): Promise<void>;
+  /** Release held detail GETs. */
+  pagesGatingReleaseDetailFetch(): Promise<void>;
+  /** Project crumb text of the detail breadcrumb cluster. */
+  pagesGatingBreadcrumbProject(): Promise<string | null>;
+  /** Href of the breadcrumb back-to-list link. */
+  pagesGatingBackLinkHref(): Promise<string | null>;
+  /** Sibling-page switcher option names, in display order (proves the preloaded list). */
+  pagesGatingSwitcherOptions(): Promise<string[]>;
+  /** Switcher option names after filtering by text. */
+  pagesGatingSwitcherSearch(text: string): Promise<string[]>;
+  /** Select one switcher sibling; resolves once its detail lands. */
+  pagesGatingSwitcherSelect(name: string): Promise<void>;
+  /** Title field text, placeholder, and rendered height for one page. */
+  pagesGatingTitleFacts(pageId: string): Promise<PagesGatingTitleFacts>;
+  /** True when body skeleton blocks show in the detail canvas column. */
+  pagesGatingBodySkeletonVisible(): Promise<boolean>;
+  /** Name of the selected navigation-pane tab, or null when the pane is closed. */
+  pagesGatingPaneActiveTab(): Promise<string | null>;
+  /** Click one version-timeline link; resolves once the snapshot overlay opens. */
+  pagesGatingClickVersionLink(versionId: string): Promise<void>;
+  /** True when the snapshot overlay shows (loaded or errored). */
+  pagesGatingOverlayOpen(): Promise<boolean>;
+  /** Snapshot overlay header title. */
+  pagesGatingOverlayTitle(): Promise<string>;
+  /** Snapshot overlay body text. */
+  pagesGatingOverlayText(): Promise<string>;
+  /** True when the overlay shows skeleton blocks while its snapshot loads. */
+  pagesGatingOverlaySkeletonVisible(): Promise<boolean>;
+  /** Hold version-detail GETs behind a gate until released (overlay-skeleton proof). */
+  pagesGatingStallVersionDetail(): Promise<void>;
+  /** Release held version-detail GETs. */
+  pagesGatingReleaseVersionDetail(): Promise<void>;
+  /** Click one detail options-menu item by name. */
+  pagesGatingClickOptionsItem(name: string): Promise<void>;
+  /** Click the header copy-link control; resolves with the clipboard text. */
+  pagesGatingCopyLinkText(): Promise<string>;
+  /** Sign out deterministically by clearing cookies (role-switch aid; follow with openEntry plus sign-in). */
+  pagesGatingSignOut(): Promise<void>;
+  /** Click quick-create without waiting for navigation (failed-mutation proof clicks this, then reads toasts). */
+  pagesGatingClickCreate(): Promise<void>;
+  /** Open one row through its link (client-side navigation; the list cache survives for back-navigation proofs). */
+  pagesGatingOpenRow(title: string): Promise<void>;
+  /** Go back to the list (client-side when the row opened it that way); settles the list. */
+  pagesGatingGoBack(): Promise<void>;
 }
 
 /** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */
@@ -7030,4 +7157,62 @@ export interface EstimatesFamilyOption {
   disabled: boolean;
   /** Whether the option is currently selected. */
   checked: boolean;
+}
+
+/** List tab keys shared through the `type` query value (NEWFRONT-314, PAGE-021). */
+export type PagesGatingTab = "public" | "private" | "archived";
+
+/** Variant the list content area shows (NEWFRONT-314, PAGE-019). */
+export type PagesGatingListVariant =
+  | "rows"
+  | "docs-empty"
+  | "archived-empty"
+  | "no-results"
+  | "gate"
+  | "loading"
+  | "unknown";
+
+/** Empty-collection create action state (NEWFRONT-314, PAGE-018/019). */
+export type PagesGatingCreateState = "absent" | "enabled" | "disabled";
+
+/** Detail error panel facts (NEWFRONT-314, PAGE-023). */
+export interface PagesGatingErrorPanel {
+  /** Panel heading, if any. */
+  heading: string | null;
+  /** Panel body, if any. */
+  body: string | null;
+  /** Back-to-list link href, if any. */
+  backHref: string | null;
+}
+
+/** One logged page-API request (NEWFRONT-314, PAGE-020/022). */
+export interface PagesGatingRequest {
+  /** HTTP method. */
+  method: string;
+  /** Request path without query. */
+  path: string;
+  /** Raw query string without the leading `?`. */
+  query: string;
+}
+
+/** Detail header action cluster presence (NEWFRONT-314, PAGE-018/024). */
+export interface PagesGatingHeaderCluster {
+  /** Favorite star offered. */
+  star: boolean;
+  /** Copy-link control offered. */
+  copyLink: boolean;
+  /** Options menu offered. */
+  menu: boolean;
+  /** Sync badge label, or null when the badge hides (synced). */
+  syncBadge: string | null;
+}
+
+/** Title field facts (NEWFRONT-314, PAGE-079). */
+export interface PagesGatingTitleFacts {
+  /** Rendered title text. */
+  text: string;
+  /** Placeholder the empty field shows, if any. */
+  placeholder: string | null;
+  /** Rendered field height in CSS pixels. */
+  height: number;
 }

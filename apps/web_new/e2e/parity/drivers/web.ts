@@ -110,6 +110,13 @@ import type {
   IntakeListOrderState,
   IntakeListTooltip,
   EstimatesFamilyOption,
+  PagesGatingTab,
+  PagesGatingListVariant,
+  PagesGatingCreateState,
+  PagesGatingErrorPanel,
+  PagesGatingRequest,
+  PagesGatingHeaderCluster,
+  PagesGatingTitleFacts,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -32764,5 +32771,847 @@ export class WebDriver implements ParityDriver {
 
   async intakeCreateEditorImageCount(): Promise<number> {
     return this.intakeForm().locator(".tiptap img").count();
+  }
+
+  // --- Pages gating, list states, URLs, detail shell (NEWFRONT-314,
+  // --- PAGE-018-025,079-080). Appended; existing methods above are
+  // --- untouched per the shared driver contract.
+  private pagesGatingListMode: "pass" | "stall" | "fail" = "pass";
+  private pagesGatingListGates: Array<() => void> = [];
+  private pagesGatingListHooked = false;
+  private pagesGatingCreateMode: "pass" | "fail" = "pass";
+  private pagesGatingCreateHooked = false;
+  private pagesGatingDetailMode: "pass" | "stall" = "pass";
+  private pagesGatingDetailGates: Array<() => void> = [];
+  private pagesGatingDetailStalledId: string | null = null;
+  private pagesGatingDetailHooked = false;
+  private pagesGatingVersionMode: "pass" | "stall" = "pass";
+  private pagesGatingVersionGates: Array<() => void> = [];
+  private pagesGatingVersionHooked = false;
+  private pagesGatingSpyLog: PagesGatingRequest[] = [];
+  private pagesGatingSpyHooked = false;
+
+  /** Pathname of a request URL (route matching ignores the query). */
+  private pagesGatingPathname(url: string): string {
+    try {
+      return new URL(url).pathname;
+    } catch {
+      return url;
+    }
+  }
+
+  /** Bounded inner-text read that survives list remounts. */
+  private async pagesGatingInnerText(fresh: () => Locator): Promise<string | null> {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const locator = fresh().first();
+      if ((await locator.count()) === 0) return null;
+      try {
+        return await locator.innerText({ timeout: 5_000 });
+      } catch {
+        await this.page.waitForTimeout(500);
+      }
+    }
+    return null;
+  }
+
+  /** Bounded attribute read that survives list remounts. */
+  private async pagesGatingAttr(fresh: () => Locator, name: string): Promise<string | null> {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const locator = fresh().first();
+      if ((await locator.count()) === 0) return null;
+      try {
+        return await locator.getAttribute(name, { timeout: 5_000 });
+      } catch {
+        await this.page.waitForTimeout(500);
+      }
+    }
+    return null;
+  }
+
+  /** One list tab's link (Public, Private, Archived). */
+  private pagesGatingTabLink(tab: PagesGatingTab): Locator {
+    const label = tab === "public" ? "Public" : tab === "private" ? "Private" : "Archived";
+    return this.page.getByRole("link", { name: label, exact: true });
+  }
+
+  /** One row's detail link. */
+  private pagesGatingRowLink(title: string): Locator {
+    return this.page.getByRole("link", { name: title, exact: true });
+  }
+
+  /** One row's root (the link's third ancestor carries star, menu, tooltips). */
+  private pagesGatingRowRoot(title: string): Locator {
+    return this.pagesGatingRowLink(title).first().locator("xpath=ancestor::div[3]");
+  }
+
+  /** The detail breadcrumb/action bar (unique h-11 strip inside main). */
+  private pagesGatingBar(): Locator {
+    return this.page.locator("main div.flex.h-11");
+  }
+
+  /** The detail error panel (heading plus back link). */
+  private pagesGatingErrorHeading(): Locator {
+    return this.page.getByRole("heading", { name: "Page not found", exact: true });
+  }
+
+  /** The live document body container (mounted for editor and read-only views alike). */
+  private pagesGatingLiveBody(): Locator {
+    return this.page
+      .locator("#page-content-container")
+      .locator("xpath=..")
+      .locator(".frame-renderer > .editor-container");
+  }
+
+  /** Row titles until two consecutive reads agree (client-side reorder settles). */
+  private async pagesGatingStableTitles(): Promise<string[]> {
+    const deadline = Date.now() + WebDriver.OPEN_MS;
+    let previous: string[] = await this.pagesGatingRowTitles();
+    for (;;) {
+      await this.page.waitForTimeout(500);
+      const current: string[] = await this.pagesGatingRowTitles();
+      if (current.join(" ") === previous.join(" ")) return current;
+      if (Date.now() > deadline) return current;
+      previous = current;
+    }
+  }
+
+  async pagesGatingOpenList(workspaceSlug: string, projectId: string, query?: string, settle = true): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages${query ?? ""}`, {
+      waitUntil: "domcontentloaded",
+    });
+    if (settle) await this.pagesGatingSettleList();
+  }
+
+  /** Settle the list on a terminal variant (rows, an empty, or the gate — never mid-load). */
+  private async pagesGatingSettleList(): Promise<void> {
+    // 60s, not OPEN_MS: on a loaded shared host the collection fetch can
+    // stall well past 30s, and a settle timeout fails the scenario.
+    await expect
+      .poll(
+        async () => {
+          const variant = await this.pagesGatingListVariant();
+          return variant === "loading" || variant === "unknown" ? "pending" : variant;
+        },
+        { timeout: 60_000 }
+      )
+      .not.toBe("pending");
+    await this.pagesGatingStableTitles().catch(() => []);
+  }
+
+  async pagesGatingOpenDetail(workspaceSlug: string, projectId: string, pageId: string, query?: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}${query ?? ""}`, {
+      waitUntil: "domcontentloaded",
+    });
+  }
+
+  async pagesGatingCurrentUrl(): Promise<string> {
+    return this.page.url();
+  }
+
+  async pagesGatingQueryParam(key: string): Promise<string | null> {
+    return new URL(this.page.url()).searchParams.get(key);
+  }
+
+  async pagesGatingDocTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async pagesGatingRowTitles(): Promise<string[]> {
+    // Detail links carry /pages/<id>; tab links carry ?type=. The title
+    // span is the link's only text.
+    const links = this.page.locator('a[href*="/pages/"]');
+    const count = await links.count();
+    const titles: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const href = (await this.pagesGatingAttr(() => links.nth(index), "href")) ?? "";
+      if (!/\/pages\/[0-9a-fA-F-]{8}/.test(href) || href.includes("?type=")) continue;
+      const text = ((await this.pagesGatingInnerText(() => links.nth(index))) ?? "").trim();
+      if (text.length > 0) titles.push(text);
+    }
+    return titles;
+  }
+
+  async pagesGatingRowHref(title: string): Promise<string | null> {
+    const link = this.pagesGatingRowLink(title);
+    if ((await link.count()) === 0) return null;
+    return this.pagesGatingAttr(() => link, "href");
+  }
+
+  async pagesGatingActiveTab(): Promise<PagesGatingTab> {
+    const type = new URL(this.page.url()).searchParams.get("type");
+    if (type === "private") return "private";
+    if (type === "archived") return "archived";
+    return "public";
+  }
+
+  async pagesGatingClickTab(tab: PagesGatingTab): Promise<void> {
+    await this.pagesGatingTabLink(tab).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesGatingStableTitles();
+  }
+
+  async pagesGatingCreateOffered(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Add page", exact: true }).first());
+  }
+
+  async pagesGatingRowStarOffered(title: string): Promise<boolean> {
+    const link = this.pagesGatingRowLink(title);
+    if ((await link.count()) === 0) return false;
+    return (await this.pagesGatingRowRoot(title).locator("button:has(svg.lucide-star)").count()) > 0;
+  }
+
+  async pagesGatingRowMenuItems(title: string): Promise<string[]> {
+    const link = this.pagesGatingRowLink(title).first();
+    await link.waitFor({ timeout: WebDriver.OPEN_MS });
+    const row = this.pagesGatingRowRoot(title);
+    await row.locator("button:has(svg.lucide-ellipsis)").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebDriver.OPEN_MS });
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index++) {
+      labels.push(((await this.pagesGatingInnerText(() => items.nth(index))) ?? "").trim());
+    }
+    await this.page.keyboard.press("Escape");
+    return labels.filter((label) => label.length > 0);
+  }
+
+  async pagesGatingDetailCluster(): Promise<PagesGatingHeaderCluster> {
+    const bar = this.pagesGatingBar().first();
+    await bar.waitFor({ timeout: WebDriver.OPEN_MS });
+    const star = bar.getByRole("button", { name: /favorite/i });
+    const copyLink = bar.getByRole("button", { name: /copy link/i });
+    const menu = bar.locator("button:has(svg.lucide-ellipsis)");
+    const syncing = bar.getByText("Syncing...", { exact: true });
+    const lost = bar.getByText("Connection lost", { exact: true });
+    let syncBadge: string | null = null;
+    if (await this.isShown(syncing.first())) syncBadge = "Syncing...";
+    else if (await this.isShown(lost.first())) syncBadge = "Connection lost";
+    return {
+      star: await this.isShown(star.first()),
+      copyLink: await this.isShown(copyLink.first()),
+      menu: (await menu.count()) > 0,
+      syncBadge,
+    };
+  }
+
+  async pagesGatingDetailMenuItems(): Promise<string[]> {
+    const bar = this.pagesGatingBar().first();
+    await bar.waitFor({ timeout: WebDriver.OPEN_MS });
+    await bar.locator("button:has(svg.lucide-ellipsis)").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebDriver.OPEN_MS });
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index++) {
+      labels.push(((await this.pagesGatingInnerText(() => items.nth(index))) ?? "").trim());
+    }
+    await this.page.keyboard.press("Escape");
+    return labels.filter((label) => label.length > 0);
+  }
+
+  async pagesGatingEditableCount(): Promise<number> {
+    return this.page.locator('[contenteditable="true"]').count();
+  }
+
+  async pagesGatingErrorPanelVisible(): Promise<boolean> {
+    return this.isShown(this.pagesGatingErrorHeading().first());
+  }
+
+  async pagesGatingErrorPanel(): Promise<PagesGatingErrorPanel> {
+    const heading = this.pagesGatingErrorHeading().first();
+    await heading.waitFor({ timeout: WebDriver.OPEN_MS });
+    const panel = heading.locator("xpath=..");
+    const body = ((await this.pagesGatingInnerText(() => panel.locator("p"))) ?? "").trim();
+    const backHref = await this.pagesGatingAttr(() => panel.getByRole("link", { name: "View other Pages" }), "href");
+    return {
+      heading: ((await this.pagesGatingInnerText(() => heading)) ?? "").trim() || null,
+      body: body === "" ? null : body,
+      backHref,
+    };
+  }
+
+  async pagesGatingListVariant(): Promise<PagesGatingListVariant> {
+    if (await this.isShown(this.page.getByRole("button", { name: "Manage features" }).first())) return "gate";
+    if (await this.isShown(this.page.getByText("No matching results.", { exact: true }).first())) return "no-results";
+    if (await this.isShown(this.page.getByText("No archived pages yet", { exact: true }).first()))
+      return "archived-empty";
+    if (await this.isShown(this.page.getByText("Document everything — from notes to PRDs", { exact: true }).first()))
+      return "docs-empty";
+    if ((await this.pagesGatingRowTitles()).length > 0) return "rows";
+    if ((await this.pagesGatingSkeletonCount()) > 0) return "loading";
+    return "unknown";
+  }
+
+  async pagesGatingSkeletonCount(): Promise<number> {
+    return this.page.locator("main div[role='status']").count();
+  }
+
+  async pagesGatingEmptyCreateState(): Promise<PagesGatingCreateState> {
+    const button = this.page.getByRole("button", { name: "Create your first Page" });
+    if ((await button.count()) === 0) return "absent";
+    try {
+      return (await button.first().isDisabled()) ? "disabled" : "enabled";
+    } catch {
+      return "absent";
+    }
+  }
+
+  /** True when the request targets one project's page collection. */
+  private pagesGatingIsCollection(url: string): boolean {
+    return /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/pages\/$/.test(this.pagesGatingPathname(url));
+  }
+
+  /** True when the request targets one page's detail record. */
+  private pagesGatingIsDetail(url: string, pageId: string): boolean {
+    return this.pagesGatingPathname(url).endsWith(`/pages/${pageId}/`);
+  }
+
+  /** True when the request targets one page-version snapshot. */
+  private pagesGatingIsVersionDetail(url: string): boolean {
+    return /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/pages\/[^/]+\/versions\/[^/]+\/$/.test(
+      this.pagesGatingPathname(url)
+    );
+  }
+
+  private async pagesGatingListHook(): Promise<void> {
+    if (this.pagesGatingListHooked) return;
+    this.pagesGatingListHooked = true;
+    await this.page.route(
+      (url) => this.pagesGatingIsCollection(url.href) && url.href.includes("/api/"),
+      async (route) => {
+        if (route.request().method() !== "GET" || this.pagesGatingListMode === "pass") {
+          await route.fallback();
+          return;
+        }
+        if (this.pagesGatingListMode === "fail") {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ detail: "parity-forced-list-failure" }),
+          });
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          this.pagesGatingListGates.push(resolve);
+        });
+        await route.fallback();
+      }
+    );
+  }
+
+  async pagesGatingStallListFetch(): Promise<void> {
+    this.pagesGatingListMode = "stall";
+    await this.pagesGatingListHook();
+  }
+
+  async pagesGatingReleaseListFetch(): Promise<void> {
+    const gates = this.pagesGatingListGates;
+    this.pagesGatingListGates = [];
+    this.pagesGatingListMode = "pass";
+    gates.forEach((release) => release());
+  }
+
+  async pagesGatingFailListFetch(): Promise<void> {
+    this.pagesGatingListMode = "fail";
+    await this.pagesGatingListHook();
+  }
+
+  async pagesGatingUnfailListFetch(): Promise<void> {
+    this.pagesGatingListMode = "pass";
+  }
+
+  private async pagesGatingCreateHook(): Promise<void> {
+    if (this.pagesGatingCreateHooked) return;
+    this.pagesGatingCreateHooked = true;
+    await this.page.route(
+      (url) => this.pagesGatingIsCollection(url.href),
+      async (route) => {
+        if (route.request().method() !== "POST" || this.pagesGatingCreateMode === "pass") {
+          await route.fallback();
+          return;
+        }
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "parity-forced-create-failure" }),
+        });
+      }
+    );
+  }
+
+  async pagesGatingFailListCreates(): Promise<void> {
+    this.pagesGatingCreateMode = "fail";
+    await this.pagesGatingCreateHook();
+  }
+
+  async pagesGatingUnfailListCreates(): Promise<void> {
+    this.pagesGatingCreateMode = "pass";
+  }
+
+  async pagesGatingToastTexts(): Promise<string[]> {
+    const toasts = this.page.locator('[aria-label="Notifications"] [role="dialog"]');
+    const count = await toasts.count();
+    const texts: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const text = ((await this.pagesGatingInnerText(() => toasts.nth(index))) ?? "").trim();
+      if (text.length > 0) texts.push(text.replace(/\s+/g, " "));
+    }
+    return texts;
+  }
+
+  private async pagesGatingSpyHook(): Promise<void> {
+    if (this.pagesGatingSpyHooked) return;
+    this.pagesGatingSpyHooked = true;
+    this.page.on("request", (request) => {
+      const raw = request.url();
+      if (!raw.includes("/api/workspaces/")) return;
+      if (!raw.includes("/pages") && !raw.includes("favorite-pages") && !raw.includes("archived-pages")) return;
+      const [path, query] = raw.split("?", 2);
+      this.pagesGatingSpyLog.push({ method: request.method(), path: path ?? raw, query: query ?? "" });
+    });
+  }
+
+  async pagesGatingStartRequestSpy(): Promise<void> {
+    this.pagesGatingSpyLog = [];
+    await this.pagesGatingSpyHook();
+  }
+
+  async pagesGatingLoggedRequests(): Promise<PagesGatingRequest[]> {
+    return [...this.pagesGatingSpyLog];
+  }
+
+  async pagesGatingResetRequestSpy(): Promise<void> {
+    this.pagesGatingSpyLog = [];
+  }
+
+  /** The list title-search input (stays mounted when collapsed). */
+  private pagesGatingSearchInput(): Locator {
+    return this.page.getByPlaceholder("Search pages");
+  }
+
+  /** True when the search control is expanded (rendered width is the signal). */
+  private async pagesGatingSearchExpanded(): Promise<boolean> {
+    const input = this.pagesGatingSearchInput();
+    if ((await input.count()) === 0) return false;
+    try {
+      const width = await input.first().evaluate((node) => node.getBoundingClientRect().width);
+      return width > 50;
+    } catch {
+      return false;
+    }
+  }
+
+  async pagesGatingSearchType(text: string): Promise<void> {
+    const input = this.pagesGatingSearchInput();
+    await input.first().waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    if (!(await this.pagesGatingSearchExpanded())) {
+      const container = input.locator("xpath=../..");
+      await container.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+      await expect.poll(async () => this.pagesGatingSearchExpanded(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+    }
+    await input.first().fill(text, { timeout: WebDriver.OPEN_MS });
+    await this.pagesGatingStableTitles();
+  }
+
+  async pagesGatingSearchValue(): Promise<string | null> {
+    if (!(await this.pagesGatingSearchExpanded())) return null;
+    const input = this.pagesGatingSearchInput().first();
+    if ((await input.count()) === 0) return null;
+    try {
+      return await input.inputValue({ timeout: 5_000 });
+    } catch {
+      return null;
+    }
+  }
+
+  async pagesGatingSortLabel(): Promise<string> {
+    for (const label of ["Name", "Date created", "Date modified"]) {
+      if (await this.isShown(this.page.getByRole("button", { name: label, exact: true }).first())) return label;
+    }
+    throw new Error("[parity] sort control shows no known key label.");
+  }
+
+  async pagesGatingSortCycle(): Promise<void> {
+    const current = await this.pagesGatingSortLabel();
+    const next = ["Name", "Date created", "Date modified"].find((label) => label !== current) ?? "Name";
+    await this.page.getByRole("button", { name: current, exact: true }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem", { name: "Name" }).first().waitFor({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem", { name: next }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesGatingStableTitles();
+  }
+
+  /** Panel/sidebar Search inputs (exact: the list's "Search pages" must not match). */
+  private pagesGatingSearchBoxes(): Locator {
+    return this.page.getByPlaceholder("Search", { exact: true });
+  }
+
+  /** The open filters panel, scoped off its own Search input (last in DOM order). */
+  private pagesGatingFilterPanel(): Locator {
+    return this.pagesGatingSearchBoxes().last().locator("xpath=ancestor::div[3]");
+  }
+
+  async pagesGatingFilterToggleFavorites(): Promise<void> {
+    // Idempotent open: the Filters button toggles, so never click into a close.
+    if ((await this.pagesGatingSearchBoxes().count()) === 1) {
+      await this.page
+        .getByRole("button", { name: "Filters", exact: true })
+        .first()
+        .click({ timeout: WebDriver.OPEN_MS });
+      await expect.poll(async () => this.pagesGatingSearchBoxes().count(), { timeout: WebDriver.OPEN_MS }).toBe(2);
+    }
+    // Scoped: the sidebar has its own Favorites disclosure.
+    await this.pagesGatingFilterPanel()
+      .getByRole("button", { name: "Favorites", exact: true })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesGatingStableTitles();
+  }
+
+  async pagesGatingChips(): Promise<string[]> {
+    const clear = this.page.getByRole("button", { name: "Clear all" });
+    if ((await clear.count()) === 0) return [];
+    const text = (
+      (await this.pagesGatingInnerText(() => clear.first().locator("xpath=ancestor::div[1]"))) ?? ""
+    ).trim();
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && line !== "Clear all");
+  }
+
+  async pagesGatingQuickCreate(): Promise<string> {
+    await this.page
+      .getByRole("button", { name: "Add page", exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.waitForURL(/\/pages\/[0-9a-fA-F-]{8}/, { timeout: WebDriver.OPEN_MS });
+    const match = /\/pages\/([0-9a-fA-F-]{8}[0-9a-fA-F-]*)/.exec(this.page.url());
+    if (match === null) throw new Error("[parity] quick-create never landed on a page id.");
+    await this.pagesGatingWaitDetailSettled();
+    return match[1] ?? "";
+  }
+
+  async pagesGatingWaitDetailSettled(): Promise<"editor" | "panel"> {
+    await Promise.race([
+      this.pagesGatingLiveBody()
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined),
+      this.pagesGatingErrorHeading()
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined),
+    ]);
+    if (await this.pagesGatingErrorPanelVisible()) return "panel";
+    return "editor";
+  }
+
+  async pagesGatingDetailSpinnerVisible(): Promise<boolean> {
+    const spinner = this.page.locator("main div.grid.size-full.place-items-center svg.animate-pulse");
+    return this.isShown(spinner.first());
+  }
+
+  private async pagesGatingDetailHook(): Promise<void> {
+    if (this.pagesGatingDetailHooked) return;
+    this.pagesGatingDetailHooked = true;
+    await this.page.route(
+      (url) => {
+        const stalled = this.pagesGatingDetailStalledId;
+        return stalled !== null && this.pagesGatingIsDetail(url.href, stalled);
+      },
+      async (route) => {
+        if (route.request().method() !== "GET" || this.pagesGatingDetailMode === "pass") {
+          await route.fallback();
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          this.pagesGatingDetailGates.push(resolve);
+        });
+        await route.fallback();
+      }
+    );
+  }
+
+  async pagesGatingStallDetailFetch(pageId: string): Promise<void> {
+    this.pagesGatingDetailStalledId = pageId;
+    this.pagesGatingDetailMode = "stall";
+    await this.pagesGatingDetailHook();
+  }
+
+  async pagesGatingReleaseDetailFetch(): Promise<void> {
+    const gates = this.pagesGatingDetailGates;
+    this.pagesGatingDetailGates = [];
+    this.pagesGatingDetailMode = "pass";
+    this.pagesGatingDetailStalledId = null;
+    gates.forEach((release) => release());
+  }
+
+  async pagesGatingBreadcrumbProject(): Promise<string | null> {
+    const bar = this.pagesGatingBar().first();
+    await bar.waitFor({ timeout: WebDriver.OPEN_MS });
+    // Breadcrumb order is project, Pages, switcher: the first button is the
+    // project crumb (its collapsed "..." variant hides on wide viewports).
+    const text = ((await this.pagesGatingInnerText(() => bar.getByRole("button"))) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  async pagesGatingBackLinkHref(): Promise<string | null> {
+    const bar = this.pagesGatingBar().first();
+    await bar.waitFor({ timeout: WebDriver.OPEN_MS });
+    return this.pagesGatingAttr(() => bar.getByRole("link", { name: "Pages", exact: true }), "href");
+  }
+
+  /** The sibling switcher trigger (last listbox combobox: the project crumb precedes it). */
+  private pagesGatingSwitcherTrigger(): Locator {
+    return this.pagesGatingBar().first().locator('button[aria-haspopup="listbox"]');
+  }
+
+  private async pagesGatingOpenSwitcher(): Promise<void> {
+    const bar = this.pagesGatingBar().first();
+    await bar.waitFor({ timeout: WebDriver.OPEN_MS });
+    // Settle first: a half-closed dropdown from a previous read would make
+    // this click toggle it shut instead of opening it.
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForTimeout(500);
+    await this.pagesGatingSwitcherTrigger().last().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  private async pagesGatingReadOptions(): Promise<string[]> {
+    const options = this.page.getByRole("option");
+    const count = await options.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const text = ((await this.pagesGatingInnerText(() => options.nth(index))) ?? "").trim().split("\n")[0] ?? "";
+      if (text.trim().length > 0) names.push(text.trim());
+    }
+    return names;
+  }
+
+  async pagesGatingSwitcherOptions(): Promise<string[]> {
+    await this.pagesGatingOpenSwitcher();
+    const names = await this.pagesGatingReadOptions();
+    await this.page.keyboard.press("Escape");
+    return names;
+  }
+
+  async pagesGatingSwitcherSearch(text: string): Promise<string[]> {
+    await this.pagesGatingOpenSwitcher();
+    // The portal search is last in DOM order (sidebar and filters precede it).
+    await this.page.getByPlaceholder("Search", { exact: true }).last().fill(text, { timeout: WebDriver.OPEN_MS });
+    await this.page.waitForTimeout(1000);
+    const names = await this.pagesGatingReadOptions();
+    await this.page.keyboard.press("Escape");
+    return names;
+  }
+
+  async pagesGatingSwitcherSelect(name: string): Promise<void> {
+    const before = this.page.url();
+    await this.pagesGatingOpenSwitcher();
+    await this.page.getByRole("option", { name }).first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(async () => this.page.url(), { timeout: WebDriver.OPEN_MS }).not.toBe(before);
+    await this.pagesGatingWaitDetailSettled();
+  }
+
+  async pagesGatingTitleFacts(pageId: string): Promise<PagesGatingTitleFacts> {
+    const editor = this.page.locator(`[id="${pageId}-title"] [contenteditable="true"]`).first();
+    await editor.waitFor({ timeout: WebDriver.OPEN_MS });
+    const text = ((await editor.innerText().catch(() => null)) ?? "").trim();
+    const box = await editor.boundingBox().catch(() => null);
+    // The TipTap placeholder rides as data-placeholder on the empty node and
+    // renders through its ::before content.
+    const empty = this.page.locator(`[id="${pageId}-title"] .is-empty`).first();
+    let placeholder: string | null = null;
+    if ((await empty.count()) > 0) {
+      placeholder = await empty.getAttribute("data-placeholder").catch(() => null);
+      if (placeholder === null) {
+        const before = await empty.evaluate((node) => getComputedStyle(node, "::before").content).catch(() => null);
+        if (before !== null && before !== "none" && before !== "") placeholder = before.replace(/^"|"$/g, "");
+      }
+    }
+    return { text, placeholder, height: box?.height ?? 0 };
+  }
+
+  async pagesGatingBodySkeletonVisible(): Promise<boolean> {
+    // The canvas column (the version overlay sits outside it).
+    const scope = this.page.locator("#page-content-container").locator("xpath=..");
+    const blocks = scope.locator('[role="status"]');
+    const count = await blocks.count();
+    for (let index = 0; index < count; index++) {
+      if (await this.isShown(blocks.nth(index))) return true;
+    }
+    return false;
+  }
+
+  /** The navigation pane shell (hosts the close control). */
+  private pagesGatingPaneRoot(): Locator {
+    return this.page.locator("aside", {
+      has: this.page.getByRole("button", { name: "Close navigation pane" }),
+    });
+  }
+
+  async pagesGatingPaneActiveTab(): Promise<string | null> {
+    if ((await this.pagesGatingQueryParam("paneTab")) === null) return null;
+    const tabs = this.pagesGatingPaneRoot().getByRole("tab");
+    const count = await tabs.count();
+    for (let index = 0; index < count; index++) {
+      const selected = await tabs
+        .nth(index)
+        .getAttribute("aria-selected")
+        .catch(() => null);
+      if (selected === "true")
+        return (
+          (
+            (await tabs
+              .nth(index)
+              .innerText()
+              .catch(() => null)) ?? ""
+          ).trim() || null
+        );
+    }
+    return null;
+  }
+
+  async pagesGatingClickVersionLink(versionId: string): Promise<void> {
+    await this.pagesGatingPaneRoot()
+      .locator(`a[href*="version=${versionId}"]`)
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(async () => this.pagesGatingOverlayOpen(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  /** The overlay's read-only marker (rendered while a snapshot loads or shows). */
+  private pagesGatingViewOnly(): Locator {
+    return this.page.getByText("View only", { exact: true });
+  }
+
+  /** The overlay load-error heading (rendered on fetch failure only). */
+  private pagesGatingOverlayError(): Locator {
+    return this.page.getByText("Something went wrong!", { exact: true });
+  }
+
+  /** The hidden overlay shell stays mounted; pointer events tell it apart. */
+  private async pagesGatingOverlayShown(target: Locator): Promise<boolean> {
+    if ((await target.count()) === 0) return false;
+    const hit = await target
+      .first()
+      .evaluate((node) => getComputedStyle(node).pointerEvents)
+      .catch(() => "none");
+    return hit !== "none";
+  }
+
+  async pagesGatingOverlayOpen(): Promise<boolean> {
+    if (await this.pagesGatingOverlayShown(this.pagesGatingViewOnly())) return true;
+    return this.pagesGatingOverlayShown(this.pagesGatingOverlayError());
+  }
+
+  /** The overlay header row, via the marker it always carries. */
+  private pagesGatingOverlayHeaderRow(): Locator {
+    return this.pagesGatingViewOnly().locator("xpath=../..");
+  }
+
+  async pagesGatingOverlayTitle(): Promise<string> {
+    if (await this.pagesGatingOverlayShown(this.pagesGatingOverlayError())) return "";
+    const row = this.pagesGatingOverlayHeaderRow();
+    if ((await row.count()) === 0) return "";
+    return (
+      (await row
+        .locator("h6")
+        .first()
+        .innerText()
+        .catch(() => null)) ?? ""
+    ).trim();
+  }
+
+  async pagesGatingOverlayText(): Promise<string> {
+    if (await this.pagesGatingOverlayShown(this.pagesGatingOverlayError())) return "";
+    const body = this.pagesGatingOverlayHeaderRow().locator("xpath=..").locator(":scope > div").nth(1);
+    if ((await body.count()) === 0) return "";
+    return (
+      (await body
+        .first()
+        .innerText()
+        .catch(() => null)) ?? ""
+    ).trim();
+  }
+
+  async pagesGatingOverlaySkeletonVisible(): Promise<boolean> {
+    if (await this.pagesGatingOverlayShown(this.pagesGatingOverlayError())) return false;
+    const main = this.pagesGatingOverlayHeaderRow().locator("xpath=..");
+    return this.pagesGatingOverlayShown(main.locator('[role="status"]'));
+  }
+
+  private async pagesGatingVersionHook(): Promise<void> {
+    if (this.pagesGatingVersionHooked) return;
+    this.pagesGatingVersionHooked = true;
+    await this.page.route(
+      (url) => this.pagesGatingIsVersionDetail(url.href),
+      async (route) => {
+        if (route.request().method() !== "GET" || this.pagesGatingVersionMode === "pass") {
+          await route.fallback();
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          this.pagesGatingVersionGates.push(resolve);
+        });
+        await route.fallback();
+      }
+    );
+  }
+
+  async pagesGatingStallVersionDetail(): Promise<void> {
+    this.pagesGatingVersionMode = "stall";
+    await this.pagesGatingVersionHook();
+  }
+
+  async pagesGatingReleaseVersionDetail(): Promise<void> {
+    const gates = this.pagesGatingVersionGates;
+    this.pagesGatingVersionGates = [];
+    this.pagesGatingVersionMode = "pass";
+    gates.forEach((release) => release());
+  }
+
+  async pagesGatingClickOptionsItem(name: string): Promise<void> {
+    const bar = this.pagesGatingBar().first();
+    await bar.waitFor({ timeout: WebDriver.OPEN_MS });
+    await bar.locator("button:has(svg.lucide-ellipsis)").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem", { name }).first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesGatingCopyLinkText(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const bar = this.pagesGatingBar().first();
+    await bar.waitFor({ timeout: WebDriver.OPEN_MS });
+    await bar
+      .getByRole("button", { name: /copy link/i })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await bar
+      .getByRole("button", { name: /copied link/i })
+      .first()
+      .waitFor({ timeout: WebDriver.OPEN_MS });
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async pagesGatingSignOut(): Promise<void> {
+    await this.page.context().clearCookies();
+  }
+
+  async pagesGatingClickCreate(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: "Add page", exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesGatingOpenRow(title: string): Promise<void> {
+    const before = this.page.url();
+    await this.pagesGatingRowLink(title).first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(async () => this.page.url(), { timeout: WebDriver.OPEN_MS }).not.toBe(before);
+    await this.pagesGatingWaitDetailSettled();
+  }
+
+  async pagesGatingGoBack(): Promise<void> {
+    await this.page.goBack({ timeout: WebDriver.OPEN_MS });
+    await this.pagesGatingSettleList();
   }
 }
