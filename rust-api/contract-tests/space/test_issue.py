@@ -135,6 +135,22 @@ def test_comment_retrieve_patch_delete_owned(user_client, world):
     assert deleted.status_code == 204
 
 
+def test_comment_delete_stamps_deleter(user_client, world, db):
+    # PIDASHCONV-885: destroy goes through the model soft-delete, which
+    # runs a full save() stamping updated_by/updated_at (db/mixins.py:72-77,
+    # db/models/base.py:24-44). Deleted with no prior PATCH so the stamp
+    # must come from the destroy itself, not an earlier write.
+    comment_id = world["comment"]["id"]
+    deleted = user_client.delete(_comments_url(world, comment_id))
+    assert deleted.status_code == 204
+    row = db.fetchone(
+        "SELECT updated_by_id, updated_at, deleted_at FROM issue_comments WHERE id = %s",
+        (comment_id,),
+    )
+    assert row["deleted_at"] is not None
+    assert str(row["updated_by_id"]) == world["owner"]["id"]
+
+
 def test_comment_patch_by_other_user_is_not_found(other_client, world):
     response = other_client.patch(
         _comments_url(world, world["comment"]["id"]), json={"comment_html": "<p>hijack</p>"}
@@ -163,7 +179,7 @@ def test_comment_write_when_disabled_is_400(user_client, world, seeder):
     assert response.json() == {"error": "Comments are not enabled for this project"}
 
 
-def test_issue_reaction_create_and_delete(user_client, world):
+def test_issue_reaction_create_and_delete(user_client, world, db):
     url = f"{BASE}/anchor/{world['anchor']}/issues/{world['issue']['id']}/reactions/"
     created = user_client.post(url, json={"reaction": "rocket"})
     assert created.status_code == 201
@@ -171,6 +187,16 @@ def test_issue_reaction_create_and_delete(user_client, world):
 
     deleted = user_client.delete(url + "rocket/")
     assert deleted.status_code == 204
+    # PIDASHCONV-885: destroy goes through the model soft-delete, which
+    # runs a full save() stamping updated_by/updated_at (db/mixins.py:72-77,
+    # db/models/base.py:24-44) — not a bare SET deleted_at.
+    row = db.fetchone(
+        "SELECT updated_by_id, updated_at, deleted_at FROM issue_reactions"
+        " WHERE issue_id = %s AND reaction = %s AND actor_id = %s",
+        (world["issue"]["id"], "rocket", world["owner"]["id"]),
+    )
+    assert row["deleted_at"] is not None
+    assert str(row["updated_by_id"]) == world["owner"]["id"]
 
 
 def test_issue_reaction_list_requires_auth(anon_client, world):
@@ -188,7 +214,7 @@ def test_issue_reaction_list_shape(user_client, world):
     assert response.json() == []
 
 
-def test_comment_reaction_create_and_delete(user_client, world):
+def test_comment_reaction_create_and_delete(user_client, world, db):
     url = f"{BASE}/anchor/{world['anchor']}/comments/{world['comment']['id']}/reactions/"
     created = user_client.post(url, json={"reaction": "eyes"})
     assert created.status_code == 201
@@ -200,9 +226,17 @@ def test_comment_reaction_create_and_delete(user_client, world):
 
     deleted = user_client.delete(url + "eyes/")
     assert deleted.status_code == 204
+    # PIDASHCONV-885: same soft-delete stamp as issue reactions.
+    row = db.fetchone(
+        "SELECT updated_by_id, updated_at, deleted_at FROM comment_reactions"
+        " WHERE comment_id = %s AND reaction = %s AND actor_id = %s",
+        (world["comment"]["id"], "eyes", world["owner"]["id"]),
+    )
+    assert row["deleted_at"] is not None
+    assert str(row["updated_by_id"]) == world["owner"]["id"]
 
 
-def test_vote_upsert_and_delete(user_client, world):
+def test_vote_upsert_and_delete(user_client, world, db):
     url = f"{BASE}/anchor/{world['anchor']}/issues/{world['issue']['id']}/votes/"
     created = user_client.post(url, json={"vote": 1})
     assert created.status_code == 201
@@ -213,6 +247,15 @@ def test_vote_upsert_and_delete(user_client, world):
 
     deleted = user_client.delete(url)
     assert deleted.status_code == 204
+    # PIDASHCONV-885: same soft-delete stamp (masked in practice — the
+    # create path already stamps updated_by — but pinned regardless).
+    row = db.fetchone(
+        "SELECT updated_by_id, updated_at, deleted_at FROM issue_votes"
+        " WHERE issue_id = %s AND actor_id = %s",
+        (world["issue"]["id"], world["owner"]["id"]),
+    )
+    assert row["deleted_at"] is not None
+    assert str(row["updated_by_id"]) == world["owner"]["id"]
 
 
 def test_vote_list_shape(user_client, world):
