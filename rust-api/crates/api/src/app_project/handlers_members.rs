@@ -2093,13 +2093,13 @@ fn render_gap_echo(naive: &chrono::NaiveDateTime, offset: &chrono::FixedOffset) 
         .unwrap_or_else(|| "+00:00".to_owned());
     let suffix = if suffix == "+00:00" { "Z" } else { &suffix };
     let base = naive.format("%Y-%m-%dT%H:%M:%S").to_string();
-    let nanos = naive.and_utc().timestamp_subsec_nanos();
-    if nanos == 0 {
+    // Python datetimes carry only micros: truncate sub-microsecond
+    // nanos like the serializer kernel (PIDASHCONV-867).
+    let micros = naive.and_utc().timestamp_subsec_nanos() / 1000;
+    if micros == 0 {
         format!("{base}{suffix}")
-    } else if nanos.is_multiple_of(1000) {
-        format!("{base}.{:06}{suffix}", nanos / 1000)
     } else {
-        format!("{base}.{nanos:09}{suffix}")
+        format!("{base}.{:06}{suffix}", micros)
     }
 }
 

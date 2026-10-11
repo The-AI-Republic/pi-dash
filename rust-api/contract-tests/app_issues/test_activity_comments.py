@@ -10,6 +10,8 @@ delete tests at the bottom. The member-created comment in
 superset checks.
 """
 
+from _harness.checks import assert_drf_datetimes
+
 ACTIVITY_KEYS = {
     "id", "actor_detail", "issue_detail", "project_detail",
     "workspace_detail", "source_data", "created_at", "updated_at",
@@ -244,6 +246,14 @@ def test_comment_put_and_patch(clients, seed):
         )
         assert resp.status_code == 200
         assert resp.json()["comment_html"] == "<p>seed comment</p>"
+        # PIDASHCONV-867: the PATCH stamps edited_at in-memory; HTTP
+        # datetimes must carry at most 6 fractional digits (DRF micros,
+        # never nanos) on both backends.
+        assert_drf_datetimes(
+            resp.json(),
+            ("created_at", "updated_at", "deleted_at", "edited_at"),
+            "comment.patch",
+        )
     finally:
         admin.patch(
             f"{_issue(ws, pid, i1)}/comments/{c1}/",

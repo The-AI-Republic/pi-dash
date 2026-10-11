@@ -356,19 +356,17 @@ pub fn tzid_or_utc(tzid: &str) -> String {
 /// Render a UTC instant exactly like `datetime.isoformat()` on a
 /// tz-aware UTC datetime (`occurrences.py:151,187,199`): `+00:00` suffix
 /// (NOT `Z` — this path never goes through DRF rendering), microseconds
-/// as 6 digits only when nonzero. The 9-digit nanos arm mirrors the api
-/// serializer kernel for theoretical sub-microsecond values (Postgres
-/// `timestamptz` and the RRULE engine never produce them; Python
-/// datetimes cannot hold them).
+/// as 6 digits only when nonzero. Sub-microsecond nanos truncate like
+/// the api serializer kernel (PIDASHCONV-867); Python datetimes cannot
+/// hold them, and Postgres `timestamptz` plus the RRULE engine never
+/// produce them.
 pub fn format_dtstart(dt: &DateTime<Utc>) -> String {
     let base = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
-    let nanos = dt.timestamp_subsec_nanos();
-    if nanos == 0 {
+    let micros = dt.timestamp_subsec_nanos() / 1000;
+    if micros == 0 {
         format!("{base}+00:00")
-    } else if nanos.is_multiple_of(1000) {
-        format!("{base}.{:06}+00:00", nanos / 1000)
     } else {
-        format!("{base}.{nanos:09}+00:00")
+        format!("{base}.{:06}+00:00", micros)
     }
 }
 

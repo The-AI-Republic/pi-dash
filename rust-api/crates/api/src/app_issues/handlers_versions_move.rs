@@ -3102,14 +3102,12 @@ mod tests {
         let dt = chrono::DateTime::parse_from_rfc3339("2026-10-04T03:04:05.123456789Z")
             .expect("dt")
             .with_timezone(&Utc);
-        assert_eq!(render_dt(&dt, &utc), "2026-10-04T03:04:05.123456789Z");
-        assert_eq!(render_dt_utc(&dt), "2026-10-04T03:04:05.123456789Z");
+        // Sub-micro nanos truncate to micros like DRF (PIDASHCONV-867).
+        assert_eq!(render_dt(&dt, &utc), "2026-10-04T03:04:05.123456Z");
+        assert_eq!(render_dt_utc(&dt), "2026-10-04T03:04:05.123456Z");
         let kolkata: Tz = "Asia/Kolkata".parse().expect("tz");
-        assert_eq!(
-            render_dt(&dt, &kolkata),
-            "2026-10-04T08:34:05.123456789+05:30"
-        );
-        assert_eq!(render_dt_utc(&dt), "2026-10-04T03:04:05.123456789Z");
+        assert_eq!(render_dt(&dt, &kolkata), "2026-10-04T08:34:05.123456+05:30");
+        assert_eq!(render_dt_utc(&dt), "2026-10-04T03:04:05.123456Z");
         assert_eq!(render_dt_opt(None, &utc), None);
         let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 4).expect("date");
         assert_eq!(render_date(&date), "2026-10-04");
