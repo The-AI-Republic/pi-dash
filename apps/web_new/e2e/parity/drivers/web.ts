@@ -110,7 +110,9 @@ import type {
   IntakeListOrderField,
   IntakeListOrderState,
   IntakeListTooltip,
+  EstimatesActiveRow,
   EstimatesFamilyOption,
+  EstimatesStarterCard,
   PagesGatingTab,
   PagesGatingListVariant,
   PagesGatingCreateState,
@@ -34137,6 +34139,249 @@ export class WebDriver implements ParityDriver {
       .click({ timeout: WebDriver.OPEN_MS });
     await done;
   }
+
+  // --- Estimates creation dialog (NEWFRONT-323, EST-008..013). Appended;
+  // --- sibling methods above are untouched per the shared driver contract.
+  // --- The shell child's navigation (NEWFRONT-321, merged) and the dialog
+  // --- verbs shared with the permissions child (NEWFRONT-326, merged) are
+  // --- reused as-is. Every selector below was observed on the running old
+  // --- app: the dialog wrapper reads hidden while its content shows, so
+  // --- reads wait on the visible heading and step counter instead of the
+  // --- dialog role.
+
+  /** Step-two value preview rows (never the open add/edit forms). */
+  private estimatesValueRows(): Locator {
+    // The add/edit form wrapper shares the rows' spacing class, so rows
+    // are pinned by their drag grip, which forms never render.
+    return this.estimatesDialog()
+      .locator("div.my-1")
+      .filter({ has: this.page.locator("svg.lucide-grip-vertical") });
+  }
+
+  /** Icon controls of one value row: grip, edit, delete when offered. */
+  private estimatesRowControls(index: number): Locator {
+    return this.estimatesValueRows().nth(index).locator("div.cursor-pointer");
+  }
+
+  async estimatesDialogStep(): Promise<"1" | "2" | null> {
+    if (!(await this.estimatesDialogOpen())) return null;
+    const text = await this.estimatesDialog()
+      .getByText(/step \d of 2/i)
+      .first()
+      .textContent({ timeout: WebDriver.WAIT_MS });
+    const match = /step (\d) of 2/i.exec(text ?? "");
+    return match?.[1] === "2" ? "2" : "1";
+  }
+
+  async estimatesDialogBack(): Promise<void> {
+    await this.estimatesDialog().locator("div.cursor-pointer").first().click();
+    await this.page
+      .getByText(/step 1 of 2/i)
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async estimatesBackVisible(): Promise<boolean> {
+    if ((await this.estimatesDialogStep()) !== "2") return false;
+    return (await this.estimatesDialog().locator("div.cursor-pointer").count()) > 0;
+  }
+
+  async estimatesDialogCancel(): Promise<void> {
+    await this.estimatesDialog()
+      .getByRole("button", { name: /^cancel$/i })
+      .click();
+    await this.page
+      .getByText(/new estimate system/i)
+      .first()
+      .waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+  }
+
+  async estimatesStarterCards(): Promise<EstimatesStarterCard[]> {
+    const buttons = this.estimatesDialog().getByRole("button");
+    const count = await buttons.count();
+    const cards: EstimatesStarterCard[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const lines = (
+        (await buttons
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      if (lines.length === 0 || /^cancel$/i.test(lines[0] ?? "")) continue;
+      cards.push({ title: lines[0] ?? "", detail: lines.slice(1).join(" ") });
+    }
+    return cards;
+  }
+
+  async estimatesStepTwoValues(): Promise<string[]> {
+    const rows = this.estimatesValueRows();
+    const count = await rows.count();
+    const values: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      // Explicit timeout: a row without a value cell must fail fast with
+      // a call log instead of hanging to the test timeout.
+      const cell = rows.nth(index).locator("div.w-full").first();
+      values.push(((await cell.textContent({ timeout: WebDriver.WAIT_MS })) ?? "").trim());
+    }
+    return values;
+  }
+
+  async estimatesStepTwoFamily(): Promise<string> {
+    return (
+      (await this.estimatesDialog()
+        .getByText(/^(points|categories|time)$/)
+        .first()
+        .textContent({ timeout: WebDriver.WAIT_MS })) ?? ""
+    ).trim();
+  }
+
+  async estimatesDragValueBefore(sourceIndex: number, targetIndex: number): Promise<void> {
+    const rows = this.estimatesValueRows();
+    const grip = rows.nth(sourceIndex).locator("svg.lucide-grip-vertical");
+    const target = rows.nth(targetIndex);
+    const gripBox = await grip.boundingBox();
+    const targetBox = await target.boundingBox();
+    if (!gripBox || !targetBox) throw new Error("[parity] value row has no box.");
+    const before = await this.estimatesStepTwoValues();
+    await this.page.mouse.move(gripBox.x + gripBox.width / 2, gripBox.y + gripBox.height / 2);
+    await this.page.mouse.down();
+    await this.page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + 4, { steps: 12 });
+    await this.page.mouse.up();
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      const order = await this.estimatesStepTwoValues().catch(() => before);
+      if (order.join("|") !== before.join("|")) return;
+      if (Date.now() > deadline) throw new Error("[parity] value reorder never settled.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async estimatesEditValueStart(index: number, via: "double-click" | "control"): Promise<void> {
+    if (via === "double-click") {
+      await this.estimatesValueRows().nth(index).locator("div.w-full").dblclick();
+    } else {
+      await this.estimatesRowControls(index).nth(1).click();
+    }
+    const input = this.estimatesDialog().locator("input").first();
+    await input.waitFor({ timeout: WebDriver.WAIT_MS });
+    // The edit form opens pre-populated, but the value lands a tick after
+    // the input mounts; returning here lets a caller read "". Settle on a
+    // non-empty value so the open is atomic (rows always carry values).
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await input.inputValue().catch(() => "")).length > 0) return;
+      if (Date.now() > deadline) throw new Error("[parity] edit form value never populated.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async estimatesOpenFormValue(): Promise<string | null> {
+    const inputs = this.estimatesDialog().locator("input");
+    if ((await inputs.count()) === 0) return null;
+    return inputs.first().inputValue({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async estimatesOpenFormSave(value: string): Promise<void> {
+    await this.estimatesOpenFormFill(value);
+    await this.estimatesOpenFormSubmit();
+    // A successful add chains a fresh empty form instead of closing, so
+    // settle on the saved value landing in the rows, then dismiss any
+    // leftover chained form so callers resume with no form open.
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.estimatesStepTwoValues().catch(() => [] as string[])).includes(value)) break;
+      if (Date.now() > deadline) throw new Error("[parity] value save never settled.");
+      await this.page.waitForTimeout(250);
+    }
+    if ((await this.estimatesOpenFormCount()) > 0) await this.estimatesOpenFormCancel();
+  }
+
+  async estimatesOpenFormFill(value: string): Promise<void> {
+    await this.estimatesDialog().locator("input").first().fill(value);
+  }
+
+  async estimatesOpenFormSubmit(): Promise<void> {
+    await this.estimatesDialog().locator('button[type="submit"]').first().click();
+  }
+
+  async estimatesOpenFormCancel(): Promise<void> {
+    await this.estimatesDialog().locator("form").first().locator('button[type="button"]').first().click();
+  }
+
+  async estimatesOpenFormCount(): Promise<number> {
+    return this.estimatesDialog().locator("input").count();
+  }
+
+  async estimatesRemoveValue(index: number): Promise<void> {
+    const before = await this.estimatesValueRows().count();
+    await this.estimatesRowControls(index).nth(2).click();
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.estimatesValueRows().count()) === before - 1) return;
+      if (Date.now() > deadline) throw new Error("[parity] value removal never settled.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async estimatesRemoveVisible(index: number): Promise<boolean> {
+    return (await this.estimatesRowControls(index).count()) >= 3;
+  }
+
+  async estimatesAddOpen(): Promise<void> {
+    await this.estimatesDialog().getByRole("button", { name: /^add /i }).click();
+    await this.estimatesDialog().locator("input").last().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async estimatesAddVisible(): Promise<boolean> {
+    return (await this.estimatesDialog().getByRole("button", { name: /^add /i }).count()) > 0;
+  }
+
+  async estimatesAddType(value: string): Promise<void> {
+    await this.estimatesDialog().locator("input").last().pressSequentially(value, { delay: 20 });
+  }
+
+  async estimatesValueErrors(): Promise<string[]> {
+    // Error markers render an info glyph; the message lives in a
+    // hover-opened portal at the document level (no dialog role).
+    const markers = this.estimatesDialog().locator('[class*="text-danger"]');
+    const count = await markers.count();
+    const messages: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      await markers.nth(index).hover();
+      const tip = this.page.locator("div[data-base-ui-portal] p").last();
+      await tip.waitFor({ timeout: WebDriver.WAIT_MS });
+      const text = ((await tip.textContent()) ?? "").trim().replace(/\s+/g, " ");
+      if (text.length > 0 && !messages.includes(text)) messages.push(text);
+    }
+    return messages;
+  }
+
+  async estimatesValueErrorCount(): Promise<number> {
+    return this.estimatesDialog().locator('[class*="text-danger"]').count();
+  }
+
+  async estimatesActiveRow(): Promise<EstimatesActiveRow | null> {
+    const main = this.page.locator("main");
+    const heading = main.getByText("Estimates list", { exact: true });
+    if ((await heading.count()) === 0) return null;
+    const lines = (
+      (await heading
+        .locator("xpath=ancestor::div[3]")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const at = lines.findIndex((line) => line === "Estimates list");
+    if (at < 0 || at + 2 >= lines.length) return null;
+    return { name: lines[at + 1] ?? "", values: lines[at + 2] ?? "" };
+  }
+
 
   // --- Intake-create dialog oracles (NEWFRONT-257, INT-013–017/033). ---
   // --- Appended; existing methods above are untouched per the shared
