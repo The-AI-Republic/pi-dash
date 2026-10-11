@@ -5184,6 +5184,47 @@ export interface ParityDriver {
   intakeTriageFilterClose(): Promise<void>;
   /** Open a listed request through its sidebar link; resolves once its detail shows. */
   intakeTriageListOpenIssue(name: string): Promise<void>;
+
+  // --- Estimates screen shell (NEWFRONT-321, EST-001-003, EST-026-028).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. This child owns estimatesOpenSettings-style
+  // --- navigation; sibling EST children reuse it.
+  /** Open the project estimates settings screen; settles on the heading or the denial view. */
+  estimatesOpenSettings(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Whether the settings page shows the not-authorized notice. */
+  estimatesNotAuthorized(): Promise<boolean>;
+  /** Whether the main Estimates heading renders. */
+  estimatesHeadingVisible(): Promise<boolean>;
+  /** Breadcrumb trail text on the estimates settings header. */
+  estimatesBreadcrumbText(): Promise<string>;
+  /** Whether the estimates loading skeleton shows. */
+  estimatesSkeletonVisible(): Promise<boolean>;
+  /** Delay every project-estimates list GET by `ms` for the rest of the test. */
+  estimatesDelayListFetch(ms: number): Promise<void>;
+  /** Whether the no-systems empty state (with its add action) shows. */
+  estimatesEmptyVisible(): Promise<boolean>;
+  /** Title of the empty state, or "" when it shows nothing. */
+  estimatesEmptyTitle(): Promise<string>;
+  /** Click the empty state's add action. */
+  estimatesEmptyAddClick(): Promise<void>;
+  /** Whether a creation dialog is open (presence only; contents are the creation child's). */
+  estimatesCreateDialogOpen(): Promise<boolean>;
+  /** Visible text of the settings content area (excludes app chrome). */
+  estimatesScreenText(): Promise<string>;
+  /** Names of the estimate systems listed on the screen. */
+  estimatesListedNames(): Promise<string[]>;
+  /** Browser tab title on the estimates settings screen. */
+  estimatesTabTitle(): Promise<string>;
+  /** Whether any export/import/download control shows on the estimates screen. */
+  estimatesExportImportVisible(): Promise<boolean>;
+  /** Whether any filter/search control shows on the estimates screen. */
+  estimatesFilterSearchVisible(): Promise<boolean>;
+  /** Whether any bulk/multi-select control shows on the estimates screen. */
+  estimatesBulkVisible(): Promise<boolean>;
+  /** Open a guessed per-system address; settles on whatever the app renders for it. */
+  estimatesOpenSystemGuess(workspaceSlug: string, projectId: string, estimateId: string): Promise<void>;
+  /** Whether the app-level not-found surface shows. */
+  estimatesNotFoundVisible(): Promise<boolean>;
 }
 
 /** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */
