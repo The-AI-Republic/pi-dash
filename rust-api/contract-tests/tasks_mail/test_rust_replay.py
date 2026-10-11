@@ -17,12 +17,14 @@ hybrid-worker contract for the same tasks:
 
 The broker pins are per-task (``headers["task"]``), never global depth:
 the worker's scheduler loop forwards its own unregistered beat entries
-over the same broker (``cloud_agent.scan_queued_runs`` every 10s, the
-30s sweeps, ...), so background traffic lands mid-suite and a global
-flat/+1 pin is inherently racy (PIDASHCONV-865 D3). Only messages
-carrying our task name count; background beat traffic is republished
-back untouched (the ticker-suite drains-and-filters precedent, plus
-restore so later tests still observe it).
+over the same broker (when D3 landed, ``cloud_agent.scan_queued_runs``
+fired every 10s; since PIDASHCONV-832 the only Python-owned beat task
+is ``delete_old_s3_link`` on daily crontabs), so background traffic can
+land mid-suite and a global flat/+1 pin is inherently racy
+(PIDASHCONV-865 D3). Only messages carrying our task name count;
+background beat traffic is republished back untouched (the ticker-suite
+drains-and-filters precedent, plus restore so later tests still observe
+it).
 
 The broker/redis/database are shared across tests in this module, but every
 payload carries unique ids (fresh projects/issues/receivers per test), so
