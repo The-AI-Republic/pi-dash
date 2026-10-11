@@ -2,33 +2,76 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""External-API (`/api/v1/`) read-only scheduler endpoints.
+"""External-API (`/api/v1/`) scheduler endpoints.
 
 Mirrors the web app surface in ``pi_dash/app/views/scheduler/`` but for the
-API-key surface the `pidash` CLI and the MCP connector consume, and strictly
-read-only (PDASHOSS01-225). Scoping:
+API-key surface the `pidash` CLI and the MCP connector consume. Reads came
+with PDASHOSS01-225; PDASHOSS01-278 added the two binding writes (edit, run
+now). Scheduler *definitions* stay read-only here. Scoping:
 
 - Workspace list: any workspace member; nested bindings are limited to
   projects the caller is an active member of.
 - Project list / detail / runs: any active member of that project
   (``ProjectEntityPermission`` SAFE_METHODS); non-members get the normal
   permission error.
+- Binding edit / run now: project admins only — the same
+  ``allow_permission`` rule as the web app's binding PATCH.
 """
 
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Prefetch
+from django.utils.dateparse import parse_datetime
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.response import Response
 
 from pi_dash.api.serializers.scheduler import (
     SchedulerAPISerializer,
+    SchedulerBindingAPISerializer,
     SchedulerRunAPISerializer,
 )
 from pi_dash.api.views.base import BaseAPIView
-from pi_dash.app.permissions import ProjectEntityPermission, WorkspaceEntityPermission
+from pi_dash.app.permissions import (
+    ROLE,
+    ProjectEntityPermission,
+    WorkspaceEntityPermission,
+    allow_permission,
+)
+from pi_dash.app.serializers.scheduler import SchedulerBindingSerializer
 from pi_dash.db.models import IssueComment, Scheduler, SchedulerBinding
 from pi_dash.runner.models import AgentRun
+from pi_dash.scheduler.binding_writes import (
+    CADENCE_FIELDS,
+    mark_due_now,
+    run_now_conflict,
+    update_binding,
+)
+
+#: Binding fields an API-key caller may edit. Everything else on the binding
+#: is identity (``scheduler`` / ``project``) or runtime state, and the
+#: definition's own fields (``prompt`` …) are not on the binding at all.
+#: Intersected with the app serializer so a field dropped there stops being
+#: writable here too.
+BINDING_WRITABLE_FIELDS = tuple(
+    f
+    for f in (
+        "extra_context",
+        "enabled",
+        "dtstart",
+        "rrule",
+        "tzid",
+        "rdates",
+        "exdates",
+        "outcome_mode",
+        "pod",
+    )
+    if f in SchedulerBindingSerializer.Meta.fields
+)
+
+#: Optional optimistic-concurrency token in a write's body: the binding's
+#: ``updated_at`` as the caller last read it. Same meaning as ``If-Match``.
+EXPECTED_UPDATED_AT = "expected_updated_at"
 
 
 def _feature_enabled() -> bool:
@@ -267,4 +310,151 @@ class ProjectSchedulerRunsAPIEndpoint(BaseAPIView):
             on_results=_serialize,
             default_per_page=30,
             max_per_page=100,
+        )
+
+
+def _locked_binding(slug, project_id, scheduler_id) -> SchedulerBinding:
+    """The scheduler's install on the project, row-locked for a write."""
+    return get_object_or_404(
+        SchedulerBinding.objects.select_for_update(of=("self",))
+        .filter(deleted_at__isnull=True)
+        .select_related("scheduler"),
+        scheduler_id=scheduler_id,
+        project_id=project_id,
+        workspace__slug=slug,
+    )
+
+
+def _binding_payload(binding: SchedulerBinding, previous: dict) -> dict:
+    """Write response: the binding as reads return it, plus ``previous``.
+
+    ``previous`` holds the pre-write value of every field the write
+    touched, so a bad edit can be reverted by sending it back. The external
+    API request log keeps the response body, which makes that row the audit
+    record of the change.
+    """
+    fresh = _binding_queryset().get(pk=binding.pk)
+    return {**SchedulerBindingAPISerializer(fresh).data, "previous": previous}
+
+
+def _precondition_failure(request, binding: SchedulerBinding):
+    """A 4xx ``Response`` when the caller's concurrency token is stale or
+    unreadable; ``None`` when there is no token or it matches."""
+    raw = request.headers.get("If-Match")
+    if raw is None and isinstance(request.data, dict):
+        raw = request.data.get(EXPECTED_UPDATED_AT)
+    if raw is None:
+        return None
+    raw = str(raw).strip().strip('"')
+    if raw == "*":
+        return None
+    expected = parse_datetime(raw)
+    if expected is None or expected.tzinfo is None:
+        return Response(
+            {
+                "error": "If-Match / expected_updated_at must be the binding's "
+                "updated_at, as an ISO 8601 datetime with an offset"
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if expected != binding.updated_at:
+        return Response(
+            {
+                "error": "The scheduler binding changed since it was read",
+                "updated_at": binding.updated_at.isoformat(),
+            },
+            status=status.HTTP_412_PRECONDITION_FAILED,
+        )
+    return None
+
+
+class ProjectSchedulerBindingAPIEndpoint(BaseAPIView):
+    """PATCH /api/v1/workspaces/<slug>/projects/<project_id>/schedulers/<scheduler_id>/binding/
+
+    Edit the scheduler's install on this project: ``extra_context``,
+    ``enabled``, the cadence, ``outcome_mode`` and ``pod``. Validation and
+    the ``next_run_at`` recompute are the web app's (``update_binding``).
+    """
+
+    model = SchedulerBinding
+    serializer_class = SchedulerBindingAPISerializer
+    permission_classes = [ProjectEntityPermission]
+
+    @allow_permission(allowed_roles=[ROLE.ADMIN], level="PROJECT")
+    def patch(self, request, slug, project_id, scheduler_id):
+        if not _feature_enabled():
+            return _disabled_response()
+        if not isinstance(request.data, dict):
+            return Response(
+                {"error": "The request body must be a JSON object"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        data = {k: v for k, v in request.data.items() if k != EXPECTED_UPDATED_AT}
+        # Reject rather than ignore: a caller sending `prompt` or
+        # `next_run_at` should learn it did nothing, not get a 200.
+        unknown = sorted(k for k in data if k not in BINDING_WRITABLE_FIELDS)
+        if unknown or not data:
+            return Response(
+                {
+                    "error": (
+                        f"Not writable on a scheduler binding: {', '.join(unknown)}"
+                        if unknown
+                        else "No fields to update"
+                    ),
+                    "writable_fields": list(BINDING_WRITABLE_FIELDS),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        with transaction.atomic():
+            binding = _locked_binding(slug, project_id, scheduler_id)
+            stale = _precondition_failure(request, binding)
+            if stale is not None:
+                return stale
+            before = SchedulerBindingAPISerializer(binding).data
+            previous = {k: before[k] for k in data}
+            if any(k in data for k in CADENCE_FIELDS):
+                # A cadence edit moves next_run_at too; record where it was.
+                previous["next_run_at"] = before["next_run_at"]
+            update_binding(binding, data)
+        return Response(
+            _binding_payload(binding, previous), status=status.HTTP_200_OK
+        )
+
+
+class ProjectSchedulerRunNowAPIEndpoint(BaseAPIView):
+    """POST /api/v1/workspaces/<slug>/projects/<project_id>/schedulers/<scheduler_id>/run-now/
+
+    Make the binding due so the scanner fires it on its next tick; the
+    regular schedule resumes afterwards. 409 when that tick could not
+    produce a run (disabled, a run already active, schedule exhausted).
+    """
+
+    model = SchedulerBinding
+    serializer_class = SchedulerBindingAPISerializer
+    permission_classes = [ProjectEntityPermission]
+
+    @allow_permission(allowed_roles=[ROLE.ADMIN], level="PROJECT")
+    def post(self, request, slug, project_id, scheduler_id):
+        if not _feature_enabled():
+            return _disabled_response()
+        with transaction.atomic():
+            binding = _locked_binding(slug, project_id, scheduler_id)
+            stale = _precondition_failure(request, binding)
+            if stale is not None:
+                return stale
+            conflict = run_now_conflict(binding)
+            if conflict is not None:
+                code, message = conflict
+                return Response(
+                    {"error": message, "code": code},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            previous = {
+                "next_run_at": SchedulerBindingAPISerializer(binding).data[
+                    "next_run_at"
+                ]
+            }
+            mark_due_now(binding)
+        return Response(
+            _binding_payload(binding, previous), status=status.HTTP_200_OK
         )

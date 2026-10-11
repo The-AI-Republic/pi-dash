@@ -91,6 +91,8 @@ from .runner import RunnerDeleteEndpoint
 from .scheduler import (
     WorkspaceSchedulerListAPIEndpoint,
     ProjectSchedulerListAPIEndpoint,
+    ProjectSchedulerBindingAPIEndpoint,
     ProjectSchedulerDetailAPIEndpoint,
+    ProjectSchedulerRunNowAPIEndpoint,
     ProjectSchedulerRunsAPIEndpoint,
 )

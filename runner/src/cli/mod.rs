@@ -144,8 +144,9 @@ pub enum Command {
     /// Inspect workflow states on a project.
     State(state::StateArgs),
 
-    /// Read project schedulers (read-only): `scheduler list` /
-    /// `scheduler get <id>` / `scheduler runs <id>`.
+    /// Project schedulers: `scheduler list` / `scheduler get <id>` /
+    /// `scheduler runs <id>`, and for project admins `scheduler update <id>`
+    /// / `scheduler run-now <id>`.
     Scheduler(scheduler::SchedulerArgs),
 
     /// Read or overwrite the coding agent's per-issue workpad.
