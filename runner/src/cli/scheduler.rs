@@ -3,17 +3,18 @@
 // See the LICENSE file for details.
 
 //! `pidash scheduler …` subcommands — visibility into project schedulers
-//! (PDASHOSS01-225) and writes to a project's install of one
-//! (PDASHOSS01-278).
+//! (PDASHOSS01-225) and writes to a project's install of one or to the
+//! definition itself (PDASHOSS01-278).
 //!
 //! Schedulers are workspace-level definitions installed onto projects; a
 //! project install (the *binding*) carries the cadence, the per-project
 //! `extra_context`, and fires agent runs. Reads: list the schedulers a
 //! workspace or project has, read one definition (prompt included), audit
 //! its recent runs. Writes, project admins only: edit the install
-//! (`update`) and fire it on the scanner's next tick (`run-now`). The shared
-//! definition — its prompt — is never writable here, and neither is
-//! installing or uninstalling.
+//! (`update`) and fire it on the scanner's next tick (`run-now`). Workspace
+//! admins can also replace a user-created definition's prompt, name or
+//! description (`update --prompt-file`). Installing and uninstalling are
+//! not writable here.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -66,6 +67,12 @@ pub enum SchedulerCommand {
     /// it is enabled, its cadence, outcome mode or pod. Project admins only.
     /// Prints the updated install plus `previous`, the prior value of each
     /// field changed.
+    ///
+    /// With `--prompt-file`, `--name` or `--description` it edits the
+    /// scheduler definition instead, which every project installing it
+    /// shares. Workspace admins only; built-in schedulers are rejected.
+    /// Prints the definition, `affected_projects` and `previous`. One call
+    /// edits either the definition or the install, not both.
     Update(Box<UpdateArgs>),
     /// Fire a scheduler on a project on the scanner's next tick (within about
     /// a minute); its regular schedule resumes afterwards. Project admins
@@ -160,9 +167,28 @@ pub struct UpdateArgs {
     #[arg(long)]
     pub clear_pod: bool,
 
-    /// Only write if the install is unchanged since you read it: pass the
-    /// `updated_at` from `pidash scheduler get`. A mismatch fails with a 412
-    /// naming the current value, instead of overwriting someone else's edit.
+    /// Replace the scheduler definition's prompt from stdin: the only
+    /// accepted value is `-`. The prompt is never taken inline.
+    #[arg(long, value_name = "-", conflicts_with = "prompt_file")]
+    pub prompt: Option<String>,
+
+    /// Replace the scheduler definition's prompt with a file's contents;
+    /// `-` reads it from stdin. An empty file is an error.
+    #[arg(long = "prompt-file", value_name = "PATH")]
+    pub prompt_file: Option<PathBuf>,
+
+    /// Rename the scheduler definition.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Replace the scheduler definition's description; `""` clears it.
+    #[arg(long)]
+    pub description: Option<String>,
+
+    /// Only write if the install (or, for a definition edit, the scheduler)
+    /// is unchanged since you read it: pass its `updated_at` from
+    /// `pidash scheduler get`. A mismatch fails with a 412 naming the
+    /// current value, instead of overwriting someone else's edit.
     #[arg(long, value_name = "UPDATED_AT")]
     pub if_updated_at: Option<String>,
 }
@@ -255,6 +281,16 @@ async fn cmd_update(
 ) -> Result<(), CliError> {
     // Build the body before any network call so a bad path, an empty stdin
     // or a flagless invocation fails without touching the server.
+    let prompt = load_prompt(&args, std::io::stdin())?;
+    if let Some(body) = definition_body(&args, prompt)? {
+        // The definition is workspace-scoped: no project to resolve.
+        let path = format!(
+            "workspaces/{}/schedulers/{}/",
+            client.env.workspace_slug,
+            args.scheduler_id.trim()
+        );
+        return print_json(client.patch(&path, &body).await?);
+    }
     let extra_context = load_extra_context(&args, std::io::stdin())?;
     let body = update_body(&args, extra_context)?;
     let project = resolve_project_ref(client, paths, args.project.as_deref()).await?;
@@ -288,27 +324,62 @@ async fn cmd_run_now(
 /// given. An inline `--extra-context ""` is passed through (it clears the
 /// text), but an empty file or empty stdin is an error: it almost always
 /// means a failed pipe or a wrong path, not an intent to clear.
-fn load_extra_context(args: &UpdateArgs, mut stdin: impl Read) -> Result<Option<String>, CliError> {
-    let from_stdin = args.extra_context.as_deref() == Some("-")
-        || args.extra_context_file.as_deref() == Some(Path::new("-"));
-    let (body, source) = match (&args.extra_context, &args.extra_context_file) {
+fn load_extra_context(args: &UpdateArgs, stdin: impl Read) -> Result<Option<String>, CliError> {
+    load_text(
+        "extra context",
+        args.extra_context.as_deref(),
+        args.extra_context_file.as_deref(),
+        stdin,
+    )
+}
+
+/// Resolve the definition prompt source: `--prompt-file <path>`, or `-` on
+/// either flag for stdin. Unlike the extra context there is no inline form
+/// — a prompt is long multi-paragraph text that shell quoting mangles — and
+/// no way to clear it.
+fn load_prompt(args: &UpdateArgs, stdin: impl Read) -> Result<Option<String>, CliError> {
+    if args.prompt.as_deref().is_some_and(|p| p != "-") {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "--prompt only accepts `-` (read the prompt from stdin); \
+             use --prompt-file <path> for a file",
+        ));
+    }
+    load_text(
+        "prompt",
+        args.prompt.as_deref(),
+        args.prompt_file.as_deref(),
+        stdin,
+    )
+}
+
+/// Read a long text field from its inline flag or its file flag; `-` on
+/// either reads `stdin`. `what` names the field in errors.
+fn load_text(
+    what: &str,
+    inline: Option<&str>,
+    file: Option<&Path>,
+    mut stdin: impl Read,
+) -> Result<Option<String>, CliError> {
+    let from_stdin = inline == Some("-") || file == Some(Path::new("-"));
+    let (body, source) = match (inline, file) {
         _ if from_stdin => {
             let mut buf = String::new();
             stdin.read_to_string(&mut buf).map_err(|e| {
                 CliError::new(
                     EXIT_UNKNOWN,
-                    format!("failed reading extra context from stdin: {e}"),
+                    format!("failed reading {what} from stdin: {e}"),
                 )
             })?;
             (buf, "stdin".to_string())
         }
-        (Some(body), _) => return Ok(Some(body.clone())),
+        (Some(body), _) => return Ok(Some(body.to_string())),
         (None, None) => return Ok(None),
         (None, Some(path)) => {
             let body = std::fs::read_to_string(path).map_err(|e| {
                 CliError::new(
                     EXIT_INVALID,
-                    format!("failed reading extra context file {}: {e}", path.display()),
+                    format!("failed reading {what} file {}: {e}", path.display()),
                 )
             })?;
             (body, path.display().to_string())
@@ -317,10 +388,62 @@ fn load_extra_context(args: &UpdateArgs, mut stdin: impl Read) -> Result<Option<
     if body.trim().is_empty() {
         return Err(CliError::new(
             EXIT_INVALID,
-            format!("extra context from {source} is empty"),
+            format!("{what} from {source} is empty"),
         ));
     }
     Ok(Some(body))
+}
+
+/// Map the definition flags onto the definition PATCH body. `None` when no
+/// definition flag was given, i.e. the call edits the install. Mixing the
+/// two is an error: they are separate routes with separate permissions, and
+/// a half-applied edit is worse than two commands.
+fn definition_body(
+    args: &UpdateArgs,
+    prompt: Option<String>,
+) -> Result<Option<Map<String, Value>>, CliError> {
+    let mut body = Map::new();
+    if let Some(text) = prompt {
+        body.insert("prompt".into(), json!(text));
+    }
+    if let Some(name) = &args.name {
+        body.insert("name".into(), json!(name.trim()));
+    }
+    if let Some(description) = &args.description {
+        body.insert("description".into(), json!(description));
+    }
+    if body.is_empty() {
+        return Ok(None);
+    }
+    if has_binding_flags(args) {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "--prompt[-file], --name and --description edit the scheduler definition and \
+             cannot be combined with flags that edit its install on a project; run two commands",
+        ));
+    }
+    if let Some(expected) = &args.if_updated_at {
+        body.insert("expected_updated_at".into(), json!(expected.trim()));
+    }
+    Ok(Some(body))
+}
+
+/// Whether any flag that edits the project install was given.
+fn has_binding_flags(args: &UpdateArgs) -> bool {
+    args.extra_context.is_some()
+        || args.extra_context_file.is_some()
+        || args.enable
+        || args.disable
+        || args.rrule.is_some()
+        || args.dtstart.is_some()
+        || args.tzid.is_some()
+        || !args.rdates.is_empty()
+        || args.clear_rdates
+        || !args.exdates.is_empty()
+        || args.clear_exdates
+        || args.outcome_mode.is_some()
+        || args.pod.is_some()
+        || args.clear_pod
 }
 
 /// Map `scheduler update` flags onto the binding PATCH body. Only the flags
@@ -363,7 +486,8 @@ fn update_body(
         return Err(CliError::new(
             EXIT_INVALID,
             "nothing to update: pass at least one of --extra-context[-file], --enable, \
-             --disable, --rrule, --dtstart, --tzid, --rdate, --exdate, --outcome-mode, --pod",
+             --disable, --rrule, --dtstart, --tzid, --rdate, --exdate, --outcome-mode, --pod \
+             (install), or --prompt-file, --name, --description (definition)",
         ));
     }
     // A precondition, not a field: it rides along only when there is
@@ -395,7 +519,10 @@ mod tests {
     use clap::Parser;
     use serde_json::{Value, json};
 
-    use super::{SchedulerCommand, UpdateArgs, load_extra_context, runs_query, update_body};
+    use super::{
+        SchedulerCommand, UpdateArgs, definition_body, load_extra_context, load_prompt, runs_query,
+        update_body,
+    };
     use crate::api_client::EXIT_INVALID;
 
     #[test]
@@ -572,6 +699,108 @@ mod tests {
             load_extra_context(&args, &b"ignored"[..]).expect("ok"),
             None
         );
+    }
+
+    fn definition_body_of(flags: &[&str], stdin: &[u8]) -> Option<Value> {
+        let args = parse_update(flags);
+        let prompt = load_prompt(&args, stdin).expect("prompt");
+        definition_body(&args, prompt)
+            .expect("body")
+            .map(Value::Object)
+    }
+
+    #[test]
+    fn prompt_file_is_read_verbatim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("prompt.md");
+        let text = "## Coordinator\n\nA \"queued\" run is not `stuck`.\n\n- $HOME stays literal\n";
+        std::fs::write(&path, text).expect("write");
+        assert_eq!(
+            definition_body_of(&["--prompt-file", path.to_str().expect("utf-8")], b""),
+            Some(json!({"prompt": text}))
+        );
+    }
+
+    #[test]
+    fn prompt_dash_reads_stdin() {
+        for flags in [&["--prompt", "-"][..], &["--prompt-file", "-"][..]] {
+            assert_eq!(
+                definition_body_of(flags, b"From stdin\n"),
+                Some(json!({"prompt": "From stdin\n"}))
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_is_never_inline() {
+        let args = parse_update(&["--prompt", "Do the thing"]);
+        let err = load_prompt(&args, &b""[..]).expect_err("inline prompt");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("--prompt-file"), "{}", err.message);
+        conflict(&["--prompt", "-", "--prompt-file", "p.md"]);
+    }
+
+    #[test]
+    fn prompt_empty_source_is_invalid() {
+        let args = parse_update(&["--prompt", "-"]);
+        let err = load_prompt(&args, &b" \n"[..]).expect_err("empty stdin");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(
+            err.message.contains("prompt from stdin is empty"),
+            "{}",
+            err.message
+        );
+
+        let args = parse_update(&["--prompt-file", "/nonexistent/prompt.md"]);
+        let err = load_prompt(&args, &b""[..]).expect_err("missing file");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+    }
+
+    #[test]
+    fn definition_maps_every_field() {
+        assert_eq!(
+            definition_body_of(
+                &[
+                    "--prompt",
+                    "-",
+                    "--name",
+                    " Coordinator ",
+                    "--description",
+                    "",
+                    "--if-updated-at",
+                    "2026-10-03T12:00:00.123456Z",
+                ],
+                b"New prompt",
+            ),
+            Some(json!({
+                "prompt": "New prompt",
+                "name": "Coordinator",
+                "description": "",
+                "expected_updated_at": "2026-10-03T12:00:00.123456Z",
+            }))
+        );
+    }
+
+    #[test]
+    fn definition_body_absent_for_an_install_edit() {
+        assert_eq!(definition_body_of(&["--disable"], b"ignored"), None);
+        assert_eq!(definition_body_of(&[], b""), None);
+    }
+
+    #[test]
+    fn definition_and_install_flags_do_not_mix() {
+        for flags in [
+            &["--name", "x", "--disable"][..],
+            &["--prompt", "-", "--extra-context", "y"][..],
+            &["--description", "d", "--clear-pod"][..],
+            &["--name", "x", "--rrule", ""][..],
+        ] {
+            let args = parse_update(flags);
+            let prompt = load_prompt(&args, &b"p"[..]).expect("prompt");
+            let err = definition_body(&args, prompt).expect_err("mixed flags");
+            assert_eq!(err.exit_code, EXIT_INVALID);
+            assert!(err.message.contains("two commands"), "{}", err.message);
+        }
     }
 
     #[test]

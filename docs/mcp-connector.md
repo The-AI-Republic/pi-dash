@@ -56,11 +56,12 @@ issue rather than to the individual comment.
 
 Schedulers — workspace-level scheduler definitions installed onto projects,
 firing agent runs on a cadence — are exposed to MCP clients as three read
-tools and two write tools. They are thin wrappers over the `/api/v1/`
+tools and three write tools. They are thin wrappers over the `/api/v1/`
 scheduler endpoints, scoped by the caller's normal workspace/project
 permissions: a project member can read the schedulers of that project and
 their run history, a project **admin** can also edit the project's install and
-trigger it, and anyone else gets the API's normal permission error.
+trigger it, a workspace **admin** can edit a user-created scheduler's
+definition, and anyone else gets the API's normal permission error.
 
 | Tool                              | REST endpoint it wraps                                                                                                            |
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
@@ -69,10 +70,14 @@ trigger it, and anyone else gets the API's normal permission error.
 | `pidash_list_scheduler_runs`      | `GET /api/v1/workspaces/<slug>/projects/<project>/schedulers/<id>/runs/`                                                          |
 | `pidash_update_scheduler_binding` | `PATCH /api/v1/workspaces/<slug>/projects/<project>/schedulers/<id>/binding/`                                                     |
 | `pidash_run_scheduler_now`        | `POST /api/v1/workspaces/<slug>/projects/<project>/schedulers/<id>/run-now/`                                                      |
+| `pidash_update_scheduler`         | `PATCH /api/v1/workspaces/<slug>/schedulers/<id>/`                                                                                |
 
-`<id>` is always the scheduler's id; the write routes act on that scheduler's
-install (its _binding_) on `<project>`. The `pidash` CLI exposes the same five
-operations as `pidash scheduler list | get | runs | update | run-now`.
+`<id>` is always the scheduler's id. The two project-scoped write routes act
+on that scheduler's install (its _binding_) on `<project>`; the
+workspace-scoped one acts on the shared definition. The `pidash` CLI exposes
+the same operations as `pidash scheduler list | get | runs | update |
+run-now`, where `update` with `--prompt-file`, `--name` or `--description`
+is the definition edit.
 
 ### Shapes
 
@@ -94,9 +99,9 @@ operations as `pidash scheduler list | get | runs | update | run-now`.
   durable audit trail of what a scheduled run touched. `per_page`
   (default 30, max 100) bounds the page.
 
-### Writes
+### Binding writes
 
-Both write tools require project `ADMIN` (or a workspace admin who is a member
+Both binding tools require project `ADMIN` (or a workspace admin who is a member
 of the project) — the same rule as the web app's binding edit. Project
 members, guests and non-members get `403`; a request without an API key gets
 `401`.
@@ -134,14 +139,43 @@ binding changed in between, the write is refused with `412` and the current
 `updated_at`, instead of overwriting the other edit. Without a token the last
 write wins.
 
+### Definition write
+
+`pidash_update_scheduler` edits the scheduler definition itself. It requires
+**workspace** `ADMIN` — the same rule as the web app's scheduler edit, and a
+stricter one than the binding tools, because a definition is shared by every
+project that installs it. A project admin who is not a workspace admin gets
+`403`, as do members, guests and non-members; no API key gets `401`.
+
+- **Fields** — a partial edit of `prompt`, `name` and `description`, validated
+  by the web app's serializer. `prompt` replaces the whole text and cannot be
+  blank. Any other key — `slug`, `color`, `is_enabled`, `source`, binding
+  fields — fails the whole request with `400` and a `writable_fields` list.
+- **Built-in schedulers are rejected** with `409` and
+  `code: "builtin_scheduler"`: their name, description and prompt are
+  overwritten whenever the built-ins are reseeded. Put per-project
+  instructions in the binding's `extra_context` instead. A scheduler is
+  treated as built-in when its `source` is `builtin`. **Known limitation
+  (PDASHOSS01-290):** `source` currently defaults to `builtin` for schedulers
+  created in the web app too, so until that is fixed this check rejects those
+  as well.
+- **Response** — the definition in the read shape, with `bindings` holding
+  every live install, plus `affected_projects` (`id`, `identifier`, `name`,
+  `binding_enabled` for each project the scheduler is installed on — the
+  projects whose next run uses the new text) and `previous`, the pre-write
+  value of every field sent.
+- **Concurrency** — as for bindings, with the _scheduler's_ `updated_at` as
+  the token (`expected_updated_at` or `If-Match`); a stale token gets `412`.
+
+The audit record is the same as for binding writes: the request-log row holds
+the new values and `previous`.
+
 ### Boundaries
 
-- **Definitions are read-only.** A scheduler definition — its `prompt` above
-  all — is shared by every project that installs it, and builtin definitions
-  are reseeded, so it cannot be written here: the definition routes accept
-  only `GET` (`405` otherwise). Per-project behaviour belongs in the
-  binding's `extra_context`. Installing and uninstalling a scheduler are not
-  exposed either.
+- **Not exposed.** Creating, deleting, enabling or disabling a scheduler
+  definition, changing its `slug` or `color`, and installing or uninstalling
+  it on a project remain web-app actions. The project-scoped definition route
+  (`.../projects/<project>/schedulers/<id>/`) accepts only `GET`.
 - **No secrets.** The serializers whitelist fields explicitly; scheduler
   configuration carries no credentials today, and a future credential
   column would not flow through by default.

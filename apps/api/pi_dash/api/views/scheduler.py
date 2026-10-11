@@ -7,7 +7,7 @@
 Mirrors the web app surface in ``pi_dash/app/views/scheduler/`` but for the
 API-key surface the `pidash` CLI and the MCP connector consume. Reads came
 with PDASHOSS01-225; PDASHOSS01-278 added the two binding writes (edit, run
-now). Scheduler *definitions* stay read-only here. Scoping:
+now) and the definition edit (prompt, name, description). Scoping:
 
 - Workspace list: any workspace member; nested bindings are limited to
   projects the caller is an active member of.
@@ -16,6 +16,8 @@ now). Scheduler *definitions* stay read-only here. Scoping:
   permission error.
 - Binding edit / run now: project admins only — the same
   ``allow_permission`` rule as the web app's binding PATCH.
+- Definition edit: workspace admins only — the same rule as the web app's
+  definition PATCH — and never a built-in definition.
 """
 
 from django.conf import settings
@@ -38,7 +40,10 @@ from pi_dash.app.permissions import (
     WorkspaceEntityPermission,
     allow_permission,
 )
-from pi_dash.app.serializers.scheduler import SchedulerBindingSerializer
+from pi_dash.app.serializers.scheduler import (
+    SchedulerBindingSerializer,
+    SchedulerSerializer,
+)
 from pi_dash.db.models import IssueComment, Scheduler, SchedulerBinding
 from pi_dash.runner.models import AgentRun
 from pi_dash.scheduler.binding_writes import (
@@ -47,6 +52,7 @@ from pi_dash.scheduler.binding_writes import (
     run_now_conflict,
     update_binding,
 )
+from pi_dash.scheduler.definition_writes import is_builtin, update_definition
 
 #: Binding fields an API-key caller may edit. Everything else on the binding
 #: is identity (``scheduler`` / ``project``) or runtime state, and the
@@ -69,8 +75,17 @@ BINDING_WRITABLE_FIELDS = tuple(
     if f in SchedulerBindingSerializer.Meta.fields
 )
 
-#: Optional optimistic-concurrency token in a write's body: the binding's
-#: ``updated_at`` as the caller last read it. Same meaning as ``If-Match``.
+#: Definition fields an API-key caller may edit. The app serializer also
+#: takes ``slug``, ``color`` and ``is_enabled``; those stay web-app only.
+DEFINITION_WRITABLE_FIELDS = tuple(
+    f
+    for f in ("prompt", "name", "description")
+    if f in SchedulerSerializer.Meta.fields
+)
+
+#: Optional optimistic-concurrency token in a write's body: the written
+#: row's ``updated_at`` as the caller last read it. Same meaning as
+#: ``If-Match``.
 EXPECTED_UPDATED_AT = "expected_updated_at"
 
 
@@ -325,6 +340,25 @@ def _locked_binding(slug, project_id, scheduler_id) -> SchedulerBinding:
     )
 
 
+def _unwritable_response(data: dict, writable: tuple, noun: str):
+    """A 400 ``Response`` when ``data`` is empty or names a field outside
+    ``writable``; ``None`` when every key may be written."""
+    unknown = sorted(k for k in data if k not in writable)
+    if not unknown and data:
+        return None
+    return Response(
+        {
+            "error": (
+                f"Not writable on {noun}: {', '.join(unknown)}"
+                if unknown
+                else "No fields to update"
+            ),
+            "writable_fields": list(writable),
+        },
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
 def _binding_payload(binding: SchedulerBinding, previous: dict) -> dict:
     """Write response: the binding as reads return it, plus ``previous``.
 
@@ -337,9 +371,10 @@ def _binding_payload(binding: SchedulerBinding, previous: dict) -> dict:
     return {**SchedulerBindingAPISerializer(fresh).data, "previous": previous}
 
 
-def _precondition_failure(request, binding: SchedulerBinding):
+def _precondition_failure(request, row, noun: str = "scheduler binding"):
     """A 4xx ``Response`` when the caller's concurrency token is stale or
-    unreadable; ``None`` when there is no token or it matches."""
+    unreadable; ``None`` when there is no token or it matches. ``row`` is
+    the binding or definition being written, ``noun`` its name in errors."""
     raw = request.headers.get("If-Match")
     if raw is None and isinstance(request.data, dict):
         raw = request.data.get(EXPECTED_UPDATED_AT)
@@ -352,16 +387,16 @@ def _precondition_failure(request, binding: SchedulerBinding):
     if expected is None or expected.tzinfo is None:
         return Response(
             {
-                "error": "If-Match / expected_updated_at must be the binding's "
+                "error": f"If-Match / expected_updated_at must be the {noun}'s "
                 "updated_at, as an ISO 8601 datetime with an offset"
             },
             status=status.HTTP_400_BAD_REQUEST,
         )
-    if expected != binding.updated_at:
+    if expected != row.updated_at:
         return Response(
             {
-                "error": "The scheduler binding changed since it was read",
-                "updated_at": binding.updated_at.isoformat(),
+                "error": f"The {noun} changed since it was read",
+                "updated_at": row.updated_at.isoformat(),
             },
             status=status.HTTP_412_PRECONDITION_FAILED,
         )
@@ -392,19 +427,11 @@ class ProjectSchedulerBindingAPIEndpoint(BaseAPIView):
         data = {k: v for k, v in request.data.items() if k != EXPECTED_UPDATED_AT}
         # Reject rather than ignore: a caller sending `prompt` or
         # `next_run_at` should learn it did nothing, not get a 200.
-        unknown = sorted(k for k in data if k not in BINDING_WRITABLE_FIELDS)
-        if unknown or not data:
-            return Response(
-                {
-                    "error": (
-                        f"Not writable on a scheduler binding: {', '.join(unknown)}"
-                        if unknown
-                        else "No fields to update"
-                    ),
-                    "writable_fields": list(BINDING_WRITABLE_FIELDS),
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        invalid = _unwritable_response(
+            data, BINDING_WRITABLE_FIELDS, "a scheduler binding"
+        )
+        if invalid is not None:
+            return invalid
         with transaction.atomic():
             binding = _locked_binding(slug, project_id, scheduler_id)
             stale = _precondition_failure(request, binding)
@@ -457,4 +484,80 @@ class ProjectSchedulerRunNowAPIEndpoint(BaseAPIView):
             mark_due_now(binding)
         return Response(
             _binding_payload(binding, previous), status=status.HTTP_200_OK
+        )
+
+
+class WorkspaceSchedulerDetailAPIEndpoint(BaseAPIView):
+    """PATCH /api/v1/workspaces/<slug>/schedulers/<scheduler_id>/
+
+    Edit a scheduler definition's ``prompt``, ``name`` or ``description``.
+    Validation is the web app's (``update_definition``). The definition is
+    shared, so the response names every project whose install the edit
+    reaches. Built-in definitions are reseeded and cannot be edited.
+    """
+
+    model = Scheduler
+    serializer_class = SchedulerAPISerializer
+    permission_classes = [WorkspaceEntityPermission]
+
+    @allow_permission(allowed_roles=[ROLE.ADMIN], level="WORKSPACE")
+    def patch(self, request, slug, scheduler_id):
+        if not _feature_enabled():
+            return _disabled_response()
+        if not isinstance(request.data, dict):
+            return Response(
+                {"error": "The request body must be a JSON object"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        data = {k: v for k, v in request.data.items() if k != EXPECTED_UPDATED_AT}
+        invalid = _unwritable_response(
+            data, DEFINITION_WRITABLE_FIELDS, "a scheduler definition"
+        )
+        if invalid is not None:
+            return invalid
+        with transaction.atomic():
+            scheduler = get_object_or_404(
+                Scheduler.objects.select_for_update(),
+                pk=scheduler_id,
+                workspace__slug=slug,
+            )
+            if is_builtin(scheduler):
+                return Response(
+                    {
+                        "error": "Built-in schedulers cannot be edited; put "
+                        "per-project instructions in the binding's "
+                        "extra_context instead.",
+                        "code": "builtin_scheduler",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            stale = _precondition_failure(request, scheduler, "scheduler")
+            if stale is not None:
+                return stale
+            previous = {k: getattr(scheduler, k) for k in data}
+            update_definition(scheduler, data)
+        # Every live install, not only the caller's projects: the caller is
+        # a workspace admin and this is the blast radius of the edit.
+        bindings = list(
+            _binding_queryset()
+            .filter(scheduler=scheduler)
+            .select_related("project")
+            .order_by("project__name")
+        )
+        scheduler.visible_bindings = bindings
+        return Response(
+            {
+                **SchedulerAPISerializer(scheduler).data,
+                "affected_projects": [
+                    {
+                        "id": str(b.project_id),
+                        "identifier": b.project.identifier,
+                        "name": b.project.name,
+                        "binding_enabled": b.enabled,
+                    }
+                    for b in bindings
+                ],
+                "previous": previous,
+            },
+            status=status.HTTP_200_OK,
         )

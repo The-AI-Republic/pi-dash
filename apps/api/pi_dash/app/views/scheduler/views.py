@@ -29,6 +29,7 @@ from pi_dash.app.serializers.scheduler import (
 from pi_dash.app.views.base import BaseAPIView
 from pi_dash.db.models import Project, Scheduler, SchedulerBinding, Workspace
 from pi_dash.scheduler.binding_writes import update_binding
+from pi_dash.scheduler.definition_writes import update_definition
 
 
 def _feature_enabled() -> bool:
@@ -131,9 +132,7 @@ class WorkspaceSchedulerDetailEndpoint(BaseAPIView):
             pk=scheduler_id,
             workspace__slug=slug,
         )
-        serializer = SchedulerSerializer(scheduler, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+        update_definition(scheduler, request.data)
         return Response(
             SchedulerSerializer(scheduler).data,
             status=status.HTTP_200_OK,

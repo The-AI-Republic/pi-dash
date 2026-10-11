@@ -10,7 +10,8 @@ gets the normal permission error.
 
 PDASHOSS01-278: a project admin can edit a scheduler's install on the
 project (the binding) and make it run now. Members, guests and non-members
-get 403; scheduler definitions stay read-only — writes to them 405.
+get 403. A workspace admin can edit a user-created definition's prompt, name
+and description; built-in definitions are rejected.
 """
 
 from datetime import timedelta
@@ -30,8 +31,10 @@ from pi_dash.db.models import (
     Scheduler,
     SchedulerBinding,
     User,
+    Workspace,
     WorkspaceMember,
 )
+from pi_dash.db.models.scheduler import SchedulerSource
 from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod
 
 
@@ -584,9 +587,10 @@ class TestProjectSchedulerBindingUpdate:
 
     @pytest.mark.django_db
     @pytest.mark.parametrize("method", ["patch", "put", "post", "delete"])
-    def test_definition_routes_stay_read_only(
+    def test_project_detail_route_stays_get_only(
         self, api_key_client, workspace, sched_project, scheduler, binding, method
     ):
+        # The definition is written through its workspace-scoped route.
         response = getattr(api_key_client, method)(
             _detail_url(workspace.slug, sched_project.id, scheduler.id),
             {"prompt": "Do something else entirely."},
@@ -850,3 +854,294 @@ class TestSchedulerWritePermissions:
             _detail_url(workspace.slug, sched_project.id, scheduler.id)
         )
         assert response.status_code == http_status.HTTP_200_OK
+
+
+def _definition_url(slug, scheduler_id):
+    return f"{_ws_url(slug)}{scheduler_id}/"
+
+
+@pytest.fixture
+def custom_scheduler(db, scheduler):
+    """``scheduler`` marked as not built-in.
+
+    ``Scheduler.source`` defaults to ``builtin`` even for user-created rows
+    (PDASHOSS01-290), so the editable case has to say so explicitly.
+    """
+    scheduler.source = SchedulerSource.MANIFEST
+    scheduler.save(update_fields=["source"])
+    return scheduler
+
+
+@pytest.fixture
+def project_admin_client(db, workspace, sched_project):
+    """Admin of the project, plain member of the workspace."""
+    client = _project_client(workspace, sched_project, role=15, label="projadmin")
+    ProjectMember.objects.filter(
+        project=sched_project, member__username="sched-projadmin"
+    ).update(role=20)
+    return client
+
+
+@pytest.mark.contract
+class TestWorkspaceSchedulerDefinitionUpdate:
+    @pytest.mark.django_db
+    def test_admin_replaces_prompt(
+        self, api_key_client, workspace, sched_project, custom_scheduler, binding
+    ):
+        new_prompt = "## Coordinator\n\nA queued run is not stuck."
+
+        response = api_key_client.patch(
+            _definition_url(workspace.slug, custom_scheduler.id),
+            {"prompt": new_prompt},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_200_OK
+        assert response.data["prompt"] == new_prompt
+        assert str(response.data["id"]) == str(custom_scheduler.id)
+        # The prior value comes back so a bad edit can be reverted.
+        assert response.data["previous"] == {
+            "prompt": "Scan the project for stalled issues."
+        }
+        # The blast radius: every project the definition is installed on.
+        assert response.data["affected_projects"] == [
+            {
+                "id": str(sched_project.id),
+                "identifier": "SCH",
+                "name": "Scheduler Test Project",
+                "binding_enabled": True,
+            }
+        ]
+
+        # A later read shows the new text...
+        detail = api_key_client.get(
+            _detail_url(workspace.slug, sched_project.id, custom_scheduler.id)
+        )
+        assert detail.data["prompt"] == new_prompt
+        # ...and so does the prompt the next scheduled run is dispatched with.
+        from pi_dash.prompting.context import build_scheduler_task_body
+
+        binding.refresh_from_db()
+        assert "A queued run is not stuck." in build_scheduler_task_body(binding)
+
+    @pytest.mark.django_db
+    def test_affected_projects_lists_every_live_install(
+        self, api_key_client, workspace, sched_project, custom_scheduler, binding,
+        create_user,
+    ):
+        # A project the caller is not a member of still counts, an
+        # uninstalled (soft-deleted) binding does not.
+        with impersonate(create_user):
+            other = Project.objects.create(
+                name="Another Project", identifier="OTH", workspace=workspace
+            )
+            gone = Project.objects.create(
+                name="Uninstalled Project", identifier="GON", workspace=workspace
+            )
+            for project, enabled in ((other, False), (gone, True)):
+                SchedulerBinding.objects.create(
+                    scheduler=custom_scheduler,
+                    project=project,
+                    workspace=workspace,
+                    dtstart=timezone.now() - timedelta(days=1),
+                    rrule="FREQ=DAILY",
+                    tzid="UTC",
+                    enabled=enabled,
+                )
+        ProjectMember.objects.filter(project__in=[other, gone]).delete()
+        SchedulerBinding.objects.filter(project=gone).update(
+            deleted_at=timezone.now()
+        )
+
+        response = api_key_client.patch(
+            _definition_url(workspace.slug, custom_scheduler.id),
+            {"prompt": "New prompt."},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_200_OK
+        assert [
+            (p["identifier"], p["binding_enabled"])
+            for p in response.data["affected_projects"]
+        ] == [("OTH", False), ("SCH", True)]
+
+    @pytest.mark.django_db
+    def test_name_and_description(self, api_key_client, workspace, custom_scheduler):
+        response = api_key_client.patch(
+            _definition_url(workspace.slug, custom_scheduler.id),
+            {"name": "Coordinator", "description": "Keeps the project moving."},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_200_OK
+        assert response.data["name"] == "Coordinator"
+        assert response.data["description"] == "Keeps the project moving."
+        assert response.data["previous"] == {
+            "name": "Contract Test Scheduler",
+            "description": "Reads the project and files issues.",
+        }
+        # Not installed anywhere: nothing is affected.
+        assert response.data["affected_projects"] == []
+        custom_scheduler.refresh_from_db()
+        assert custom_scheduler.prompt == "Scan the project for stalled issues."
+
+    @pytest.mark.django_db
+    def test_builtin_rejected(self, api_key_client, workspace):
+        builtin = Scheduler.objects.get(workspace=workspace, slug="security-audit")
+        assert builtin.source == SchedulerSource.BUILTIN
+        seeded = builtin.prompt
+
+        response = api_key_client.patch(
+            _definition_url(workspace.slug, builtin.id),
+            {"prompt": "Do something else entirely."},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_409_CONFLICT
+        assert response.data["code"] == "builtin_scheduler"
+        builtin.refresh_from_db()
+        assert builtin.prompt == seeded
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"slug": "renamed"},
+            {"prompt": "ok", "is_enabled": False},
+            {"source": "manifest"},
+            {"extra_context": "belongs on the binding"},
+            {},
+        ],
+    )
+    def test_other_fields_rejected(
+        self, api_key_client, workspace, custom_scheduler, payload
+    ):
+        response = api_key_client.patch(
+            _definition_url(workspace.slug, custom_scheduler.id),
+            payload,
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert response.data["writable_fields"] == ["prompt", "name", "description"]
+        custom_scheduler.refresh_from_db()
+        assert custom_scheduler.prompt == "Scan the project for stalled issues."
+        assert custom_scheduler.slug == "contract-test-scheduler"
+        assert custom_scheduler.is_enabled is True
+
+    @pytest.mark.django_db
+    def test_app_serializer_validation_applies(
+        self, api_key_client, workspace, custom_scheduler
+    ):
+        response = api_key_client.patch(
+            _definition_url(workspace.slug, custom_scheduler.id),
+            {"prompt": "   "},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert "prompt" in response.data
+        custom_scheduler.refresh_from_db()
+        assert custom_scheduler.prompt == "Scan the project for stalled issues."
+
+    @pytest.mark.django_db
+    def test_stale_token_is_precondition_failed(
+        self, api_key_client, workspace, custom_scheduler
+    ):
+        url = _definition_url(workspace.slug, custom_scheduler.id)
+        token = custom_scheduler.updated_at.isoformat()
+
+        first = api_key_client.patch(
+            url, {"prompt": "first", "expected_updated_at": token}, format="json"
+        )
+        assert first.status_code == http_status.HTTP_200_OK
+
+        second = api_key_client.patch(
+            url, {"prompt": "second"}, format="json", HTTP_IF_MATCH=token
+        )
+        assert second.status_code == http_status.HTTP_412_PRECONDITION_FAILED
+        custom_scheduler.refresh_from_db()
+        assert custom_scheduler.prompt == "first"
+
+        # The 412 names the current value, which then works.
+        third = api_key_client.patch(
+            url,
+            {"prompt": "third"},
+            format="json",
+            HTTP_IF_MATCH=second.data["updated_at"],
+        )
+        assert third.status_code == http_status.HTTP_200_OK
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "client_fixture",
+        [
+            "project_admin_client",
+            "member_client",
+            "guest_client",
+            "nonmember_client",
+            "outside_client",
+        ],
+    )
+    def test_non_workspace_admins_denied(
+        self, request, workspace, custom_scheduler, binding, client_fixture
+    ):
+        client = request.getfixturevalue(client_fixture)
+
+        response = client.patch(
+            _definition_url(workspace.slug, custom_scheduler.id),
+            {"prompt": "not allowed"},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_403_FORBIDDEN
+        custom_scheduler.refresh_from_db()
+        assert custom_scheduler.prompt == "Scan the project for stalled issues."
+
+    @pytest.mark.django_db
+    def test_unauthenticated_denied(self, workspace, custom_scheduler):
+        response = APIClient().patch(
+            _definition_url(workspace.slug, custom_scheduler.id),
+            {"prompt": "not allowed"},
+            format="json",
+        )
+        assert response.status_code == http_status.HTTP_401_UNAUTHORIZED
+        custom_scheduler.refresh_from_db()
+        assert custom_scheduler.prompt == "Scan the project for stalled issues."
+
+    @pytest.mark.django_db
+    def test_404_for_another_workspaces_scheduler(
+        self, api_key_client, workspace, create_user
+    ):
+        with impersonate(create_user):
+            other_ws = Workspace.objects.create(
+                name="Other Workspace", slug="other-sched-ws", owner=create_user
+            )
+            foreign = Scheduler.objects.create(
+                workspace=other_ws,
+                slug="foreign",
+                name="Foreign",
+                prompt="Theirs.",
+                source=SchedulerSource.MANIFEST,
+            )
+
+        response = api_key_client.patch(
+            _definition_url(workspace.slug, foreign.id),
+            {"prompt": "mine now"},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_404_NOT_FOUND
+        foreign.refresh_from_db()
+        assert foreign.prompt == "Theirs."
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("method", ["put", "post", "delete"])
+    def test_only_patch_is_exposed(
+        self, api_key_client, workspace, custom_scheduler, method
+    ):
+        response = getattr(api_key_client, method)(
+            _definition_url(workspace.slug, custom_scheduler.id), {}, format="json"
+        )
+        assert response.status_code == http_status.HTTP_405_METHOD_NOT_ALLOWED
+        assert Scheduler.objects.filter(pk=custom_scheduler.pk).exists()
