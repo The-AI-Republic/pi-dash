@@ -20,31 +20,19 @@
 //! * `has_usable_llm_config` / `creator_llm_facts`: one mirrored row
 //!   read (`assistant_user_llm_config`, the `get_config` query) plus
 //!   the ported presence gate and SSRF check.
-//! * `invoke_model`: unreachable tripwire. The model runtime
-//!   (pydantic-ai `Agent.run`) has no Rust counterpart, so `worker()`
-//!   overrides the run handler with [`forward_to_python_handler`] and
-//!   only scan/sweep/expire execute here — none of which invoke the
-//!   model. If reached, the override is broken: fail the job closed
-//!   with a loud error (PIDASHCONV-866 tracks true run ownership).
-//!
-//! [`forward_to_python_handler`] replicates `worker::forward` exactly
-//! (same Celery message shape, same degraded no-publisher/no-broker
-//! retry): the registry owns the run name (parity OWNED) while the
-//! Python worker keeps executing runs — today's behavior preserved.
+//! * `invoke_model`: the live model runtime
+//!   ([`model_runtime`][crate::model_runtime], PIDASHCONV-866): the
+//!   pydantic-ai `Agent.run` port over the Anthropic +
+//!   OpenAI-compatible lanes, closing over the [`RunTools`][crate::model_runtime::tools_exec::RunTools]
+//!   executor. The registered run handler executes end to end — no
+//!   forward override.
 
 #![forbid(unsafe_code)]
 
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
 use pidash_jobs::dispatch_execute::{
-    CreatorLlmFacts, ExecuteSeams, FinalizeCall, InvokeError, ModelFailure, ModelInvocation,
-    RawUsage, SeamError,
+    CreatorLlmFacts, ExecuteSeams, FinalizeCall, InvokeError, ModelInvocation, RawUsage, SeamError,
 };
-use pidash_jobs::queue::JobRow;
-use pidash_jobs::worker::{Handler, Verdict};
 use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -53,23 +41,36 @@ use uuid::Uuid;
 ///
 /// `block_private_urls` is `ASSISTANT_BLOCK_PRIVATE_URLS`
 /// (`CloudAgentSettings::block_private_urls`): the SSRF gate input.
+/// `invoke` carries the model runtime's static inputs (tool context +
+/// key resolver).
 #[derive(Clone)]
 pub struct LiveExecuteSeams {
     pool: PgPool,
     block_private_urls: bool,
+    invoke: crate::model_runtime::invoke::InvokeCtx,
 }
 
 impl LiveExecuteSeams {
-    pub fn new(pool: PgPool, block_private_urls: bool) -> Self {
+    pub fn new(
+        pool: PgPool,
+        block_private_urls: bool,
+        invoke: crate::model_runtime::invoke::InvokeCtx,
+    ) -> Self {
         Self {
             pool,
             block_private_urls,
+            invoke,
         }
     }
 
     /// Mirror of `get_config` (`llm.py:67-68`): the creator's BYOK row,
     /// if any. `user_id` is one-to-one, so at most one row exists.
-    async fn llm_row(pool: &PgPool, creator_id: Uuid) -> Result<Option<LlmRow>, sqlx::Error> {
+    /// `pub(crate)` for the model runtime (key resolve + transition
+    /// presence prefetch), which reuses this read without forking it.
+    pub(crate) async fn llm_row(
+        pool: &PgPool,
+        creator_id: Uuid,
+    ) -> Result<Option<LlmRow>, sqlx::Error> {
         sqlx::query_as::<_, LlmRow>(
             "SELECT provider_kind, base_url, model_name, api_key_encrypted \
              FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1",
@@ -83,17 +84,17 @@ impl LiveExecuteSeams {
 /// One `assistant_user_llm_config` row: the `UserLLMConfig` columns
 /// the model resolve consumes (`models.py:238-263`).
 #[derive(Debug, Clone, sqlx::FromRow)]
-struct LlmRow {
-    provider_kind: String,
-    base_url: String,
-    model_name: String,
-    api_key_encrypted: Option<Vec<u8>>,
+pub(crate) struct LlmRow {
+    pub(crate) provider_kind: String,
+    pub(crate) base_url: String,
+    pub(crate) model_name: String,
+    pub(crate) api_key_encrypted: Option<Vec<u8>>,
 }
 
 impl LlmRow {
     /// `has_api_key` (`models.py:261-262`): the key column is set and
     /// non-empty.
-    fn has_api_key(&self) -> bool {
+    pub(crate) fn has_api_key(&self) -> bool {
         self.api_key_encrypted
             .as_ref()
             .is_some_and(|key| !key.is_empty())
@@ -326,100 +327,12 @@ impl ExecuteSeams for LiveExecuteSeams {
         })
     }
 
-    /// Unreachable tripwire (see the module docs): only the run drive
-    /// invokes the model, and `worker()` overrides the run handler
-    /// with [`forward_to_python_handler`]. Fail the job closed with a
-    /// loud error rather than fabricate or drop a model call.
+    /// The live model runtime (PIDASHCONV-866): delegate to the
+    /// `Agent.run` port over the invocation's resolved model.
     async fn invoke_model(
         &self,
-        _invocation: ModelInvocation,
+        invocation: ModelInvocation,
     ) -> Result<(pidash_types::dispatch::CloudAgentOutput, RawUsage), InvokeError> {
-        tracing::error!(
-            "invoke_model reached: the run forward override is broken (PIDASHCONV-866 tracks the model runtime)"
-        );
-        Err(InvokeError::Failed(ModelFailure {
-            code: None,
-            message: "no Rust model runtime: cloud_agent.run_agent_run forwards to Python"
-                .to_owned(),
-        }))
-    }
-}
-
-/// A `worker::forward` replica for the registry-owned run task:
-/// publish the claimed row to Python in Celery protocol, then ack.
-/// Without a publisher (or when the publish fails) return the same
-/// retry text `forward` requeues with. One intentional difference: a
-/// registered handler settles through the worker's retry budget, so a
-/// long broker outage parks the job as failed where `forward` would
-/// requeue forever — like every other owned handler, and parked
-/// offers self-heal (the scan re-offers the still-queued run once its
-/// lease lapses). Compare `crates/jobs/src/worker.rs::forward` line
-/// for line on review.
-pub fn forward_to_python_handler(publisher: Option<pidash_jobs::Publisher>) -> Handler {
-    Arc::new(move |job: JobRow| {
-        let publisher = publisher.clone();
-        let fut: Pin<Box<dyn Future<Output = Result<Verdict, pidash_jobs::HandlerError>> + Send>> =
-            Box::pin(async move {
-                let message = pidash_jobs::CeleryTaskMessage {
-                    id: job.celery_id.clone(),
-                    task: job.task.clone(),
-                    args: match &job.args {
-                        Value::Array(items) => items.clone(),
-                        other => vec![other.clone()],
-                    },
-                    kwargs: match &job.kwargs {
-                        Value::Object(map) => map.clone(),
-                        _ => Map::new(),
-                    },
-                    retries: 0,
-                    eta: None,
-                    expires: None,
-                    timelimit: (None, None),
-                    root_id: None,
-                    parent_id: None,
-                    origin: None,
-                };
-                match publisher {
-                    None => Err("no AMQP publisher configured; requeued".to_owned()),
-                    Some(publisher) => match publisher.publish(&message).await {
-                        Ok(()) => Ok(Verdict::Ack),
-                        Err(error) => Err(format!("AMQP publish failed: {error}")),
-                    },
-                }
-            });
-        fut
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The degraded forward path needs no broker: without a
-    /// publisher the handler errors with `forward`'s retry text, so
-    /// the worker requeues on its default budget instead of dropping.
-    #[tokio::test]
-    async fn forward_handler_without_publisher_requeues() {
-        let handler = forward_to_python_handler(None);
-        let job = JobRow {
-            id: 1,
-            celery_id: "celery-id".to_owned(),
-            task: pidash_jobs::dispatch::RUN_CLOUD_AGENT_TASK.to_owned(),
-            args: Value::Array(vec![Value::String(Uuid::nil().to_string())]),
-            kwargs: Value::Object(Map::new()),
-            queue: "celery".to_owned(),
-            status: "claimed".to_owned(),
-            attempts: 0,
-            max_retries: 3,
-            visible_at: Utc::now(),
-            claimed_at: None,
-            claimed_by: None,
-            created_at: Utc::now(),
-            last_error: None,
-        };
-        let Err(error) = handler(job).await else {
-            panic!("unpublished forward must error");
-        };
-        assert_eq!(error, "no AMQP publisher configured; requeued");
+        crate::model_runtime::invoke::invoke(&self.invoke, invocation).await
     }
 }
