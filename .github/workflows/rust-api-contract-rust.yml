@@ -36,9 +36,13 @@ on:
 permissions:
   contents: read
 
+# Push runs must never cancel each other: merges land every few minutes while
+# the full matrix takes ~45 minutes, so unconditional cancel-in-progress meant
+# no push run on rust-dev ever completed. PRs still cancel superseded runs;
+# pushes queue behind the run in progress instead of killing it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   setup:
