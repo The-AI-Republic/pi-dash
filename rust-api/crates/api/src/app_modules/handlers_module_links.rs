@@ -66,9 +66,9 @@ use pidash_types::{ProjectId, WorkspaceId};
 
 use super::gates;
 use super::handlers_modules::{
-    actor_user_id, check_gate, empty_response, fetch_allow_facts, gate_roles, json_response,
-    json_string, parse_uuid_or_invalid, pool_of, resolve_project_id, shape_link, shift_datetime,
-    HandlerResult,
+    actor_user_id, check_gate, empty_response, enqueue_soft_delete, fetch_allow_facts, gate_roles,
+    json_response, json_string, parse_uuid_or_invalid, pool_of, resolve_project_id, shape_link,
+    shift_datetime, HandlerResult,
 };
 use crate::app_issues::Denial;
 use crate::state::AppState;
@@ -1877,7 +1877,8 @@ async fn link_partial_update(
 
 /// `DELETE` module-link detail: DRF default destroy — instance
 /// `delete()` is a soft delete (`deleted_at` stamp through `save()`, so
-/// `updated_at`/`updated_by` move too). 204 empty.
+/// `updated_at`/`updated_by` move too) and fires the
+/// `soft_delete_related_objects` mixin job (`db/mixins.py:77-78`). 204 empty.
 async fn link_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw, pk_raw)): Path<(String, String, String, String)>,
@@ -1921,6 +1922,10 @@ async fn link_destroy(
     .execute(&pool)
     .await
     .map_err(|_| Denial::ServerError)?;
+    // The instance `delete()` also enqueues
+    // `soft_delete_related_objects("db", "modulelink", pk, using=None)`
+    // (`db/mixins.py:77-78`), after the save.
+    enqueue_soft_delete(&pool, "modulelink", &pk).await;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
 
