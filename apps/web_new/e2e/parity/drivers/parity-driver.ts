@@ -6370,6 +6370,38 @@ export interface ParityDriver {
   pagesRowDetailNotFoundVisible(): Promise<boolean>;
   /** Follow the not-found view's recovery link back to the pages list. */
   pagesRowDetailNotFoundBackToList(): Promise<void>;
+
+  // --- Estimates enable switch, active/archived display, row gating
+  // --- (NEWFRONT-322, EST-004-007). Appended; existing methods above are
+  // --- untouched per the shared driver contract. Navigation reuses the
+  // --- shell child's estimatesOpenSettings/estimatesNotAuthorized
+  // --- (NEWFRONT-321, merged); the switch-visibility, active-name,
+  // --- active-row and confirm-dialog readers reuse the permissions
+  // --- child's mirrors (NEWFRONT-326, merged).
+  /** Whether the enable switch currently shows the on position. */
+  estimatesEnableSwitchOn(): Promise<boolean>;
+  /** Whether the enable switch is disabled for the signed-in viewer. */
+  estimatesEnableSwitchDisabled(): Promise<boolean>;
+  /** Flip the enable switch; resolves once the toggle request settles. */
+  estimatesEnableSwitchToggle(): Promise<void>;
+  /** Abort project PATCH/PUT writes for the rest of the test (the EST-004 failure path). */
+  estimatesFailProjectUpdate(): Promise<void>;
+  /** Joined value preview of the active row, or "" when no active row shows. */
+  estimatesActiveSystemValues(): Promise<string>;
+  /** Whether the archived-estimates section renders. */
+  estimatesArchivedSectionVisible(): Promise<boolean>;
+  /** Names of the systems listed in the archived section, in display order. */
+  estimatesArchivedNames(): Promise<string[]>;
+  /** Explainer text of the archived section, or "" when the section is absent. */
+  estimatesArchivedExplainerText(): Promise<string>;
+  /** Href of the archived section's outbound reference link, or "" when absent. */
+  estimatesArchivedLinkHref(): Promise<string>;
+  /** Target of the archived section's outbound reference link, or "" when absent. */
+  estimatesArchivedLinkTarget(): Promise<string>;
+  /** Click the archived outbound link; resolves with the newly opened page's URL. */
+  estimatesArchivedOpenLinkNewPage(): Promise<string>;
+  /** Buttons rendered on the archived row `name` (read-only rows carry none). */
+  estimatesArchivedRowButtonCount(name: string): Promise<number>;
 }
 
 /** Pages list tabs as the row-actions scenarios address them (NEWFRONT-313). */

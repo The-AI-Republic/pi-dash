@@ -35434,4 +35434,169 @@ export class WebDriver implements ParityDriver {
       .getByRole("link", { name: "View other Pages" })
       .click({ timeout: WebDriver.OPEN_MS });
   }
+
+  // --- Estimates enable switch, active/archived display, row gating
+  // --- (NEWFRONT-322, EST-004-007). Appended; the methods above are
+  // --- untouched per the shared driver contract. Navigation reuses the
+  // --- shell child's estimatesMain/estimatesOpenSettings/
+  // --- estimatesNotAuthorized (NEWFRONT-321, merged) and the section
+  // --- readers reuse the permissions child's estimatesEnableSwitch/
+  // --- estimatesSection/estimatesSectionRows (NEWFRONT-326, merged).
+  private estimatesRowBox(section: Locator, name: string): Locator {
+    const head = section.locator("div.rounded-lg h4", { hasText: name }).first();
+    return head.locator("xpath=ancestor::div[contains(@class, 'rounded-lg')][1]");
+  }
+
+  async estimatesEnableSwitchOn(): Promise<boolean> {
+    const control = this.estimatesEnableSwitch();
+    if (!(await this.isShown(control))) return false;
+    return control.first().isChecked();
+  }
+
+  async estimatesEnableSwitchDisabled(): Promise<boolean> {
+    const control = this.estimatesEnableSwitch();
+    if ((await control.count()) === 0) return false;
+    return control.first().isDisabled();
+  }
+
+  async estimatesEnableSwitchToggle(): Promise<void> {
+    // Settle on the toggle's own round-trip: the switch PATCHes the
+    // project, so wait for that write (or the toast it raises) rather
+    // than an arbitrary sleep. Waiters attach before the click so a
+    // fast round-trip cannot slip past them.
+    const wrote = this.page
+      .waitForResponse(
+        (response) =>
+          /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/$/.test(response.url()) &&
+          (response.request().method() === "PATCH" || response.request().method() === "PUT"),
+        { timeout: 30_000 }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    const toasted = this.page
+      .locator('[aria-label="Notifications"]')
+      .getByRole("dialog")
+      .first()
+      .waitFor({ timeout: 30_000 })
+      .then(
+        () => true,
+        () => false
+      );
+    await this.estimatesEnableSwitch().first().click({ timeout: WebDriver.OPEN_MS });
+    await Promise.race([wrote, toasted]);
+  }
+
+  async estimatesFailProjectUpdate(): Promise<void> {
+    // Refuse every project write so the EST-004 failure path shows: reads
+    // pass through untouched. Context-scoped; the test's end drops it.
+    // The glob's `*` never crosses `/`, so only the bare project detail
+    // URL matches — nested estimate/issue writes are unaffected.
+    await this.page.route("**/api/workspaces/*/projects/*/", async (route: Route) => {
+      if (route.request().method() === "GET") {
+        await route.continue();
+        return;
+      }
+      await route.abort("failed");
+    });
+  }
+
+  async estimatesActiveSystemValues(): Promise<string> {
+    // The value preview is the paragraph beside the row title; whitespace
+    // is collapsed so humanized durations read "1h 30m".
+    const section = this.estimatesSection("Estimates list");
+    if (!(await this.isShown(section))) return "";
+    const box = this.estimatesSectionRows(section)
+      .first()
+      .locator("xpath=ancestor::div[contains(@class, 'rounded-lg')][1]");
+    if ((await box.count()) === 0) return "";
+    const preview = box.locator("p").first();
+    if ((await preview.count()) === 0) return "";
+    return ((await preview.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async estimatesArchivedSectionVisible(): Promise<boolean> {
+    return this.isShown(this.estimatesMain().getByRole("heading", { name: "Archived estimates", exact: true }));
+  }
+
+  async estimatesArchivedNames(): Promise<string[]> {
+    const section = this.estimatesSection("Archived estimates");
+    if (!(await this.isShown(section))) return [];
+    const heads = this.estimatesSectionRows(section);
+    const total = await heads.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await heads
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
+  async estimatesArchivedExplainerText(): Promise<string> {
+    // The explainer is the heading block's own paragraph (above the rows),
+    // not a row preview: read the heading block, then drop the heading.
+    const heading = this.estimatesMain().getByRole("heading", { name: "Archived estimates", exact: true }).first();
+    if ((await heading.count()) === 0) return "";
+    const block = heading.locator("xpath=../..");
+    const text = ((await block.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    const head = ((await heading.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    return text.replace(head, "").trim();
+  }
+
+  private estimatesArchivedLink(): Locator {
+    const heading = this.estimatesMain().getByRole("heading", { name: "Archived estimates", exact: true }).first();
+    return heading.locator("xpath=../../..").getByRole("link").first();
+  }
+
+  async estimatesArchivedLinkHref(): Promise<string> {
+    const link = this.estimatesArchivedLink();
+    if ((await link.count()) === 0) return "";
+    return (
+      (await link
+        .first()
+        .getAttribute("href", { timeout: 5_000 })
+        .catch(() => null)) ?? ""
+    );
+  }
+
+  async estimatesArchivedLinkTarget(): Promise<string> {
+    const link = this.estimatesArchivedLink();
+    if ((await link.count()) === 0) return "";
+    return (
+      (await link
+        .first()
+        .getAttribute("target", { timeout: 5_000 })
+        .catch(() => null)) ?? ""
+    );
+  }
+
+  async estimatesArchivedOpenLinkNewPage(): Promise<string> {
+    // The reference link must leave the app: capture the popup it opens
+    // (creation alone proves the external navigation; the remote page
+    // itself never needs to load).
+    const link = this.estimatesArchivedLink();
+    const [popup] = await Promise.all([
+      this.page.context().waitForEvent("page", { timeout: WebDriver.OPEN_MS }),
+      link.first().click({ timeout: WebDriver.OPEN_MS }),
+    ]);
+    const url = popup.url();
+    await popup.close().catch(() => undefined);
+    return url;
+  }
+
+  async estimatesArchivedRowButtonCount(name: string): Promise<number> {
+    const section = this.estimatesSection("Archived estimates");
+    if (!(await this.isShown(section))) return 0;
+    const box = this.estimatesRowBox(section, name);
+    if ((await box.count()) === 0) return 0;
+    return box.getByRole("button").count();
+  }
 }
