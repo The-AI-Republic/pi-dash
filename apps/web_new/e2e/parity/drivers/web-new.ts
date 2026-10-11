@@ -130,6 +130,10 @@ import type {
   ModulesListRowProgress,
   ModulesListSkeletonResult,
   ModulesListZeroStateCopy,
+  PagesMarkCurrent,
+  PagesToolbarColorCounts,
+  PagesToolbarColorPreview,
+  PagesToolbarTooltip,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -10840,5 +10844,153 @@ export class WebNewDriver implements ParityDriver {
   }
   async pagesHeaderExportCancel(): Promise<void> {
     return todo("pagesHeaderExportCancel");
+  }
+
+  // --- Pages title, mark + formatting toolbar (NEWFRONT-315, PAGE-026-036).
+  // --- Stage 0 oracle stubs; the pages build slice lands them.
+
+  async pagesTitlePressEnter(): Promise<void> {
+    return todo("pagesTitlePressEnter");
+  }
+  async pagesTitleFocusInBody(): Promise<boolean> {
+    return todo("pagesTitleFocusInBody");
+  }
+  async pagesTitleBodyCaretAtTop(): Promise<boolean> {
+    return todo("pagesTitleBodyCaretAtTop");
+  }
+  async pagesTitleEditable(): Promise<boolean> {
+    return todo("pagesTitleEditable");
+  }
+  async pagesTitleEmptyFallback(): Promise<string | null> {
+    return todo("pagesTitleEmptyFallback");
+  }
+  async pagesTitleCountBadge(): Promise<string | null> {
+    return todo("pagesTitleCountBadge");
+  }
+  async pagesTitleFocus(): Promise<void> {
+    return todo("pagesTitleFocus");
+  }
+  async pagesTitleSetTitle(_text: string, _delayMs: number): Promise<void> {
+    return todo("pagesTitleSetTitle");
+  }
+  async pagesTitleIsFocused(): Promise<boolean> {
+    return todo("pagesTitleIsFocused");
+  }
+  async pagesMarkOpenPicker(): Promise<void> {
+    return todo("pagesMarkOpenPicker");
+  }
+  async pagesMarkTabs(): Promise<string[]> {
+    return todo("pagesMarkTabs");
+  }
+  async pagesMarkSelectTab(_name: string): Promise<void> {
+    return todo("pagesMarkSelectTab");
+  }
+  async pagesMarkSearchPick(_emoji: string, _query: string): Promise<void> {
+    return todo("pagesMarkSearchPick");
+  }
+  async pagesMarkPickIcon(_index: number): Promise<void> {
+    return todo("pagesMarkPickIcon");
+  }
+  async pagesMarkCurrent(): Promise<PagesMarkCurrent | null> {
+    return todo("pagesMarkCurrent");
+  }
+  async pagesMarkPickerDisabled(): Promise<boolean> {
+    return todo("pagesMarkPickerDisabled");
+  }
+  async pagesMarkAffordanceOpacity(): Promise<string> {
+    return todo("pagesMarkAffordanceOpacity");
+  }
+  async pagesMarkClearControl(): Promise<boolean> {
+    return todo("pagesMarkClearControl");
+  }
+  async pagesMarkHoverHeader(): Promise<void> {
+    return todo("pagesMarkHoverHeader");
+  }
+  async pagesMarkListGlyph(_workspaceSlug: string, _projectId: string, _pageName: string): Promise<string | null> {
+    return todo("pagesMarkListGlyph");
+  }
+  async pagesMarkBreadcrumbGlyph(_pageName: string): Promise<string | null> {
+    return todo("pagesMarkBreadcrumbGlyph");
+  }
+  async pagesMarkSwitcherGlyph(_pageName: string): Promise<string | null> {
+    return todo("pagesMarkSwitcherGlyph");
+  }
+  async pagesToolbarSettle(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
+    return todo("pagesToolbarSettle");
+  }
+  async pagesToolbarIconCount(): Promise<number> {
+    return todo("pagesToolbarIconCount");
+  }
+  async pagesToolbarClick(_index: number): Promise<void> {
+    return todo("pagesToolbarClick");
+  }
+  async pagesToolbarActive(_index: number): Promise<boolean> {
+    return todo("pagesToolbarActive");
+  }
+  async pagesToolbarTooltip(_index: number): Promise<PagesToolbarTooltip> {
+    return todo("pagesToolbarTooltip");
+  }
+  async pagesToolbarTypography(): Promise<string> {
+    return todo("pagesToolbarTypography");
+  }
+  async pagesToolbarTypographyItems(): Promise<string[]> {
+    return todo("pagesToolbarTypographyItems");
+  }
+  async pagesToolbarTypographyPick(_name: string): Promise<void> {
+    return todo("pagesToolbarTypographyPick");
+  }
+  async pagesToolbarColorOpen(): Promise<void> {
+    return todo("pagesToolbarColorOpen");
+  }
+  async pagesToolbarColorCounts(): Promise<PagesToolbarColorCounts> {
+    return todo("pagesToolbarColorCounts");
+  }
+  async pagesToolbarColorPick(_kind: "text" | "background", _index: number): Promise<void> {
+    return todo("pagesToolbarColorPick");
+  }
+  async pagesToolbarColorClear(_kind: "text" | "background"): Promise<void> {
+    return todo("pagesToolbarColorClear");
+  }
+  async pagesToolbarColorPreview(): Promise<PagesToolbarColorPreview> {
+    return todo("pagesToolbarColorPreview");
+  }
+  async pagesToolbarBodyHtml(): Promise<string> {
+    return todo("pagesToolbarBodyHtml");
+  }
+  async pagesToolbarSelectAll(): Promise<void> {
+    return todo("pagesToolbarSelectAll");
+  }
+  async pagesToolbarTypeText(_text: string): Promise<void> {
+    return todo("pagesToolbarTypeText");
+  }
+  async pagesToolbarSave(): Promise<void> {
+    return todo("pagesToolbarSave");
+  }
+  async pagesToolbarPressKey(_key: string): Promise<void> {
+    return todo("pagesToolbarPressKey");
+  }
+  async pagesToolbarTableDims(): Promise<string | null> {
+    return todo("pagesToolbarTableDims");
+  }
+  async pagesToolbarCaretCell(): Promise<string> {
+    return todo("pagesToolbarCaretCell");
+  }
+  async pagesToolbarImageUpload(_filePath: string): Promise<void> {
+    return todo("pagesToolbarImageUpload");
+  }
+  async pagesToolbarEditorHasImage(): Promise<boolean> {
+    return todo("pagesToolbarEditorHasImage");
+  }
+  async pagesToolbarImageSrc(): Promise<string | null> {
+    return todo("pagesToolbarImageSrc");
+  }
+  async pagesToolbarVisible(): Promise<boolean> {
+    return todo("pagesToolbarVisible");
+  }
+  async pagesToolbarFloatingToggle(): Promise<boolean> {
+    return todo("pagesToolbarFloatingToggle");
+  }
+  async pagesToolbarSeedStickyPref(_value: boolean): Promise<void> {
+    return todo("pagesToolbarSeedStickyPref");
   }
 }

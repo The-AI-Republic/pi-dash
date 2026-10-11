@@ -138,6 +138,10 @@ import type {
   ModulesListRowProgress,
   ModulesListSkeletonResult,
   ModulesListZeroStateCopy,
+  PagesMarkCurrent,
+  PagesToolbarColorCounts,
+  PagesToolbarColorPreview,
+  PagesToolbarTooltip,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -29796,6 +29800,247 @@ export class WebDriver implements ParityDriver {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Pages title, mark + formatting toolbar (NEWFRONT-315, PAGE-026-036).
+  // Appended; sibling methods above are untouched per the shared contract.
+  // -------------------------------------------------------------------------
+
+  /** The live title editor (a single-h1 TipTap editor, not a field). */
+  private pagesTitleTitleEditor(): Locator {
+    return this.page.locator(".page-title-editor .ProseMirror");
+  }
+
+  /** The live body editor (direct-child selector skips the title editor). */
+  private pagesTitleBodyEditor(): Locator {
+    return this.page.locator('.frame-renderer > .editor-container [contenteditable="true"]');
+  }
+
+  /** The 14 icon-only formatting buttons (typography/color/pane-toggle excluded). */
+  private pagesToolbarIconButtons(): Locator {
+    return this.page.locator("#page-toolbar-container button.grid.size-7");
+  }
+
+  /** The detail header block (mark affordance plus current mark). */
+  private pagesMarkHeader(): Locator {
+    return this.page.locator(".page-header-container");
+  }
+
+  async pagesTitlePressEnter(): Promise<void> {
+    const title = this.pagesTitleTitleEditor().first();
+    await title.click({ timeout: WebDriver.OPEN_MS });
+    await title.press("Enter");
+  }
+
+  async pagesTitleFocusInBody(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      const active = document.activeElement;
+      if (!active || active === document.body) return false;
+      if (active.closest(".page-title-editor") !== null) return false;
+      return active.closest(".editor-container") !== null;
+    });
+  }
+
+  async pagesTitleBodyCaretAtTop(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      const active = document.activeElement;
+      if (!active || active.closest(".page-title-editor") !== null) return false;
+      const container = active.closest(".editor-container");
+      if (!container) return false;
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) return false;
+      const firstBlock = container.querySelector("p, h1, h2, h3, h4, h5, h6, li");
+      if (!firstBlock) return selection.anchorOffset === 0;
+      const range = selection.getRangeAt(0);
+      const before = range.cloneRange();
+      before.selectNodeContents(firstBlock);
+      before.setEnd(range.startContainer, range.startOffset);
+      return before.toString() === "";
+    });
+  }
+
+  async pagesTitleEditable(): Promise<boolean> {
+    const attr = await this.readAttr(this.pagesTitleTitleEditor().first(), "contenteditable");
+    return attr === "true";
+  }
+
+  async pagesTitleEmptyFallback(): Promise<string | null> {
+    return this.page.evaluate(() => {
+      const heading = document.querySelector(".page-title-editor h1");
+      if (!heading || (heading.textContent ?? "") !== "") return null;
+      const before = window.getComputedStyle(heading, "::before").getPropertyValue("content");
+      if (before && before !== "none" && before !== '""') return before.replace(/^["']|["']$/g, "");
+      return heading.getAttribute("data-placeholder");
+    });
+  }
+
+  async pagesTitleCountBadge(): Promise<string | null> {
+    const region = this.pagesTitleTitleEditor().first().locator("xpath=ancestor::div[3]");
+    let text: string | null = null;
+    try {
+      text = await region.textContent({ timeout: 5_000 });
+    } catch {
+      return null;
+    }
+    const match = /(\d+\s*\/\s*255)/.exec(text ?? "");
+    return match ? (match[1] ?? null) : null;
+  }
+
+  async pagesTitleFocus(): Promise<void> {
+    await this.pagesTitleTitleEditor().first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesTitleSetTitle(text: string, delayMs: number): Promise<void> {
+    const title = this.pagesTitleTitleEditor().first();
+    await title.click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press("ControlOrMeta+A");
+    await title.pressSequentially(text, { delay: delayMs });
+  }
+
+  async pagesTitleIsFocused(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      const active = document.activeElement;
+      if (!active) return false;
+      return active.closest(".page-title-editor") !== null;
+    });
+  }
+
+  async pagesMarkOpenPicker(): Promise<void> {
+    // The affordance hides at opacity 0 until the header is hovered (or the
+    // title is empty); hover first, then click whichever trigger exists.
+    await this.pagesMarkHeader().first().hover({ timeout: WebDriver.OPEN_MS });
+    const trigger = this.pagesMarkHeader().first().locator("button[aria-haspopup='dialog']").first();
+    await trigger.click({ timeout: WebDriver.OPEN_MS, force: true });
+    await this.page.locator("[role='tablist']").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesMarkTabs(): Promise<string[]> {
+    return this.page
+      .locator("[role='tablist'] [role='tab']")
+      .evaluateAll((els) => els.map((el) => (el.textContent ?? "").trim()).filter((label) => label.length > 0));
+  }
+
+  async pagesMarkSelectTab(name: string): Promise<void> {
+    await this.page.getByRole("tab", { name, exact: true }).first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesMarkSearchPick(emoji: string, query: string): Promise<void> {
+    await this.pagesMarkSelectTab("Emoji");
+    const search = this.page.locator("[data-slot='emoji-picker'] input[placeholder='Search']").first();
+    await search.fill(query, { timeout: WebDriver.OPEN_MS });
+    // Exact match: substring matching would also hit ZWJ sequences that
+    // contain the glyph (e.g. "rocket" offers 🧑‍🚀 alongside 🚀).
+    const pick = this.page
+      .locator("[data-slot='emoji-picker-list-emoji']")
+      .filter({ hasText: new RegExp(`^${emoji}$`) })
+      .first();
+    await pick.waitFor({ timeout: WebDriver.OPEN_MS });
+    await pick.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesMarkPickIcon(index: number): Promise<void> {
+    await this.pagesMarkSelectTab("Icon");
+    const icons = this.page.locator("button.grid.h-9.w-9");
+    await icons.nth(index).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesMarkCurrent(): Promise<PagesMarkCurrent | null> {
+    const box = this.pagesMarkHeader().first().locator("div[class*='size-[56px]']");
+    if ((await box.count()) === 0) return null;
+    const svg = box.locator("svg").first();
+    if ((await svg.count()) > 0) {
+      const cls = (await svg.getAttribute("class").catch(() => null)) ?? "";
+      const token = cls.split(/\s+/).find((part) => part.startsWith("lucide-") && part !== "lucide-");
+      const name = token ? token.slice("lucide-".length) : "";
+      // The empty (markless) box carries no svg at all; a present svg is a mark.
+      if (name) return { kind: "icon", label: name };
+      return { kind: "icon", label: "unknown" };
+    }
+    const text = ((await box.textContent().catch(() => null)) ?? "").trim();
+    if (!text) return null;
+    return { kind: "emoji", label: text };
+  }
+
+  async pagesMarkPickerDisabled(): Promise<boolean> {
+    const trigger = this.pagesMarkHeader().first().locator("button[aria-haspopup='dialog']").first();
+    if ((await trigger.count()) === 0) return true;
+    return trigger.first().isDisabled();
+  }
+
+  async pagesMarkAffordanceOpacity(): Promise<string> {
+    return this.page.evaluate(() => {
+      const header = document.querySelector(".page-header-container");
+      if (!header) return "unknown";
+      const buttons = Array.from(header.querySelectorAll("button"));
+      const affordance = buttons.find((button) => (button.textContent ?? "").trim() === "Icon");
+      if (!affordance) return "selected";
+      let el: HTMLElement | null = affordance;
+      while (el && el !== header) {
+        if (el.className.includes("transition-all")) return window.getComputedStyle(el).opacity;
+        el = el.parentElement;
+      }
+      return "unknown";
+    });
+  }
+
+  async pagesMarkHoverHeader(): Promise<void> {
+    await this.pagesMarkHeader().first().hover({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesMarkClearControl(): Promise<boolean> {
+    const panel = this.page.locator("div[data-prevent-outside-click='true']");
+    if ((await panel.count()) === 0) return false;
+    const text = (
+      (await panel
+        .first()
+        .textContent()
+        .catch(() => null)) ?? ""
+    ).toLowerCase();
+    if (/(^|\s)(remove|clear|none)(\s|$)/.test(text)) return true;
+    const named = panel.first().getByRole("button", { name: /remove|clear/i });
+    return (await named.count()) > 0;
+  }
+
+  async pagesMarkListGlyph(workspaceSlug: string, projectId: string, pageName: string): Promise<string | null> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages`, { waitUntil: "domcontentloaded" });
+    const nameEl = this.page.getByText(pageName, { exact: true }).first();
+    await this.waitForContent("page list row", () => nameEl.waitFor({ timeout: 60_000 }));
+    const row = nameEl.locator("xpath=ancestor::a[1]");
+    const mark = row.locator("span").first();
+    const text = ((await mark.textContent().catch(() => null)) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  /** The page switcher trigger (the breadcrumb also holds a project switcher). */
+  private pagesMarkPageSwitcherTrigger(pageName: string): Locator {
+    return this.page.locator("button[aria-haspopup='listbox']").filter({ hasText: pageName }).first();
+  }
+
+  async pagesMarkBreadcrumbGlyph(pageName: string): Promise<string | null> {
+    return this.readText(this.pagesMarkPageSwitcherTrigger(pageName));
+  }
+
+  async pagesMarkSwitcherGlyph(pageName: string): Promise<string | null> {
+    const trigger = this.pagesMarkPageSwitcherTrigger(pageName);
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
+    const options = this.page.locator("[role='option']");
+    await options.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    const texts = await options.evaluateAll((els) => els.map((el) => (el.textContent ?? "").trim()));
+    return texts.find((text) => text.includes(pageName)) ?? null;
+  }
+
+  /** Wait for socket steady state (badge hidden, or "Connection lost" without the live server). */
+  private async pagesToolbarWaitSteady(timeoutMs: number): Promise<void> {
+    const started = Date.now();
+    for (;;) {
+      const badge = await this.pagesLiveSyncBadge();
+      if (badge === null || badge === "Connection lost") return;
+      if (Date.now() - started > timeoutMs) {
+        throw new Error("[parity] sync badge never settled.");
+      }
+      await this.page.waitForTimeout(1_000);
+    }
+  }
+
   /**
    * The closed shell keeps its content mounted but fully transparent, and
    * Playwright visibility ignores opacity, so the inherited hit-testing
@@ -38151,5 +38396,284 @@ export class WebDriver implements ParityDriver {
         await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
       }
     });
+  }
+
+  /**
+   * Prove toolbar commands reach the live editor (bold on/off round-trip).
+   * Content-preserving: an empty body gets a probe char that is removed
+   * afterwards; existing content survives (bold toggles twice).
+   */
+  private async pagesToolbarVerifyCommands(): Promise<boolean> {
+    try {
+      const selectAll = (): Promise<void> =>
+        this.page.keyboard.press(process.platform === "darwin" ? "Meta+a" : "Control+a");
+      const body = this.pagesTitleBodyEditor().first();
+      await body.click({ timeout: WebDriver.OPEN_MS });
+      const wasEmpty = (await this.pagesLiveBodyText()) === "";
+      if (wasEmpty) await body.pressSequentially("z", { delay: 5 });
+      await selectAll();
+      await this.pagesToolbarIconButtons().nth(0).click({ timeout: WebDriver.OPEN_MS });
+      await expect.poll(() => this.pagesToolbarBodyHtml(), { timeout: 15_000 }).toContain("<strong>");
+      await selectAll();
+      await this.pagesToolbarIconButtons().nth(0).click({ timeout: WebDriver.OPEN_MS });
+      await expect.poll(() => this.pagesToolbarBodyHtml(), { timeout: 15_000 }).not.toContain("<strong>");
+      if (wasEmpty) {
+        await selectAll();
+        await this.page.keyboard.press("Backspace");
+        await expect.poll(() => this.pagesLiveBodyText(), { timeout: 15_000 }).toBe("");
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async pagesToolbarSettle(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    // A load whose page data arrives after the first editor creation binds
+    // the toolbar to the dead instance (the editor recreates on the
+    // `editable` flip; the toolbar never rebinds). Each fresh load races
+    // independently, so reload until a bold round-trip proves the bind.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (attempt > 0) {
+        await this.page.reload({ waitUntil: "domcontentloaded" });
+        await this.waitForContent("page editors", () =>
+          this.page.locator(`#editor-container-${pageId} .tiptap`).first().waitFor({ timeout: 60_000 })
+        );
+      }
+      await this.pagesToolbarWaitSteady(90_000);
+      if (await this.pagesToolbarVerifyCommands()) return;
+    }
+    throw new Error("[parity] toolbar stayed deaf after 4 fresh loads.");
+  }
+
+  async pagesToolbarIconCount(): Promise<number> {
+    return this.pagesToolbarIconButtons().count();
+  }
+
+  async pagesToolbarClick(index: number): Promise<void> {
+    await this.pagesToolbarIconButtons().nth(index).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesToolbarActive(index: number): Promise<boolean> {
+    const cls =
+      (await this.pagesToolbarIconButtons()
+        .nth(index)
+        .getAttribute("class")
+        .catch(() => null)) ?? "";
+    return cls.includes("bg-layer-transparent-selected");
+  }
+
+  async pagesToolbarTooltip(index: number): Promise<PagesToolbarTooltip> {
+    const button = this.pagesToolbarIconButtons().nth(index);
+    await button.hover({ timeout: WebDriver.OPEN_MS });
+    // Stale tooltips from other surfaces (e.g. the app sidebar) can linger
+    // in the portal, so read the tooltip nearest the hovered button rather
+    // than the last one.
+    const tips = this.page.locator("div[role='presentation']:has(span.font-medium)");
+    await tips.first().waitFor({ timeout: 10_000 });
+    await this.page.waitForTimeout(500);
+    const box = await button.boundingBox();
+    const count = await tips.count();
+    let best = 0;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (let candidate = 0; candidate < count; candidate += 1) {
+      const tipBox = await tips
+        .nth(candidate)
+        .boundingBox()
+        .catch(() => null);
+      if (!tipBox || !box) continue;
+      const dx = tipBox.x + tipBox.width / 2 - (box.x + box.width / 2);
+      const dy = tipBox.y + tipBox.height / 2 - (box.y + box.height / 2);
+      const dist = Math.abs(dx) + Math.abs(dy);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = candidate;
+      }
+    }
+    const tip = tips.nth(best);
+    const name = (
+      (await tip
+        .locator("span.font-medium")
+        .first()
+        .textContent()
+        .catch(() => null)) ?? ""
+    ).trim();
+    const kbd = tip.locator("kbd").first();
+    const hint = (await kbd.count()) > 0 ? ((await kbd.textContent().catch(() => null)) ?? "").trim() || null : null;
+    return { name, hint };
+  }
+
+  async pagesToolbarTypography(): Promise<string> {
+    const label = this.page.locator("#page-toolbar-container button").first();
+    return ((await label.textContent({ timeout: WebDriver.OPEN_MS }).catch(() => null)) ?? "").trim();
+  }
+
+  async pagesToolbarTypographyItems(): Promise<string[]> {
+    await this.page.locator("#page-toolbar-container button").first().click({ timeout: WebDriver.OPEN_MS });
+    const items = this.page.getByRole("menuitem");
+    await items.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    const labels = await items.evaluateAll((els) => els.map((el) => (el.textContent ?? "").trim()));
+    await this.page.keyboard.press("Escape");
+    return labels;
+  }
+
+  async pagesToolbarTypographyPick(name: string): Promise<void> {
+    await this.page.locator("#page-toolbar-container button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem", { name }).first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesToolbarColorOpen(): Promise<void> {
+    await this.page
+      .locator("#page-toolbar-container")
+      .getByText("Color", { exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.locator("#page-toolbar-container div.fixed").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  /** One color row section (text first, background second). */
+  private pagesToolbarColorRow(kind: "text" | "background"): Locator {
+    return this.page.locator("#page-toolbar-container div.fixed > div").nth(kind === "text" ? 0 : 1);
+  }
+
+  async pagesToolbarColorCounts(): Promise<PagesToolbarColorCounts> {
+    const swatches = async (kind: "text" | "background"): Promise<{ count: number; clear: boolean }> => {
+      const row = this.pagesToolbarColorRow(kind);
+      const buttons = row.locator("button");
+      const total = await buttons.count();
+      let clear = false;
+      let count = 0;
+      for (let index = 0; index < total; index += 1) {
+        const hasBan = (await buttons.nth(index).locator("svg.lucide-ban").count()) > 0;
+        if (hasBan) clear = true;
+        else count += 1;
+      }
+      return { count, clear };
+    };
+    const text = await swatches("text");
+    const background = await swatches("background");
+    return { text: text.count, textClear: text.clear, background: background.count, backgroundClear: background.clear };
+  }
+
+  async pagesToolbarColorPick(kind: "text" | "background", index: number): Promise<void> {
+    const swatch = this.pagesToolbarColorRow(kind).locator("button:not(:has(svg.lucide-ban))").nth(index);
+    await swatch.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesToolbarColorClear(kind: "text" | "background"): Promise<void> {
+    const clear = this.pagesToolbarColorRow(kind).locator("button:has(svg.lucide-ban)").first();
+    await clear.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesToolbarColorPreview(): Promise<PagesToolbarColorPreview> {
+    // getByText("Color") resolves to the trigger <button> itself (its only text
+    // node); its single <span> child is the wash swatch holding the letter-glyph svg.
+    const button = this.page.locator("#page-toolbar-container").getByText("Color", { exact: true }).first();
+    const preview = button.locator("span").first();
+    const background = await preview
+      .evaluate((el) => (el as HTMLElement).style.backgroundColor, undefined, { timeout: 15_000 })
+      .catch(() => "");
+    const glyph = preview.locator("svg").first();
+    const text = await glyph
+      .evaluate((el) => (el as unknown as HTMLElement).style.color, undefined, { timeout: 15_000 })
+      .catch(() => "");
+    const normalize = (value: string): string | null => {
+      const clean = value.trim().toLowerCase();
+      if (!clean || clean === "inherit" || clean === "transparent" || clean === "rgba(0, 0, 0, 0)") return null;
+      return value.trim();
+    };
+    return { text: normalize(text), background: normalize(background) };
+  }
+
+  async pagesToolbarBodyHtml(): Promise<string> {
+    const body = this.pagesTitleBodyEditor().first();
+    return (await body.evaluate((el) => el.innerHTML).catch(() => "")) ?? "";
+  }
+
+  async pagesToolbarSelectAll(): Promise<void> {
+    await this.pagesTitleBodyEditor().first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press(process.platform === "darwin" ? "Meta+a" : "Control+a");
+  }
+
+  async pagesToolbarTypeText(text: string): Promise<void> {
+    await this.pagesTitleBodyEditor().first().pressSequentially(text, { delay: 5 });
+  }
+
+  async pagesToolbarSave(): Promise<void> {
+    await this.page.keyboard.press(process.platform === "darwin" ? "Meta+s" : "Control+s");
+  }
+
+  async pagesToolbarPressKey(key: string): Promise<void> {
+    await this.page.keyboard.press(key);
+  }
+
+  async pagesToolbarTableDims(): Promise<string | null> {
+    return this.page.evaluate(() => {
+      const editor = document.querySelector('.frame-renderer > .editor-container [contenteditable="true"]');
+      const table = editor?.querySelector("table");
+      if (!table) return null;
+      const rows = table.querySelectorAll("tr").length;
+      const cols = table.querySelector("tr")?.children.length ?? 0;
+      return `${rows}x${cols}`;
+    });
+  }
+
+  async pagesToolbarCaretCell(): Promise<string> {
+    return this.page.evaluate(() => {
+      const selection = window.getSelection();
+      let node: Node | null = selection?.anchorNode ?? null;
+      let cell: HTMLTableCellElement | null = null;
+      let row: HTMLTableRowElement | null = null;
+      while (node) {
+        const name = node.nodeName;
+        if (name === "TD" || name === "TH") cell = node as HTMLTableCellElement;
+        if (name === "TR") {
+          row = node as HTMLTableRowElement;
+          break;
+        }
+        node = node.parentNode;
+      }
+      if (!cell || !row?.parentNode) return "outside";
+      return `r${Array.prototype.indexOf.call(row.parentNode.children, row)}c${cell.cellIndex}`;
+    });
+  }
+
+  async pagesToolbarImageUpload(filePath: string): Promise<void> {
+    const [chooser] = await Promise.all([
+      this.page.waitForEvent("filechooser", { timeout: WebDriver.OPEN_MS }),
+      this.pagesToolbarIconButtons().nth(13).click({ timeout: WebDriver.OPEN_MS }),
+    ]);
+    await chooser.setFiles(filePath, { timeout: WebDriver.OPEN_MS });
+    await this.page.locator(".node-imageComponent img[src*='/api/assets/']").first().waitFor({ timeout: 120_000 });
+  }
+
+  async pagesToolbarEditorHasImage(): Promise<boolean> {
+    return this.isShown(this.page.locator(".node-imageComponent img[src*='/api/assets/']").first());
+  }
+
+  async pagesToolbarImageSrc(): Promise<string | null> {
+    return this.readAttr(this.page.locator(".node-imageComponent img").first(), "src");
+  }
+
+  async pagesToolbarVisible(): Promise<boolean> {
+    const box = await this.page
+      .locator("#page-toolbar-container")
+      .first()
+      .boundingBox()
+      .catch(() => null);
+    return (box?.height ?? 0) > 0;
+  }
+
+  async pagesToolbarFloatingToggle(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Open navigation pane" }));
+  }
+
+  async pagesToolbarSeedStickyPref(value: boolean): Promise<void> {
+    await this.page.context().addInitScript((sticky: boolean) => {
+      window.localStorage.setItem(
+        "pages_config",
+        JSON.stringify({ full_width: false, font_size: "large-font", font_style: "sans-serif", sticky_toolbar: sticky })
+      );
+    }, value);
   }
 }

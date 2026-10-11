@@ -15916,3 +15916,178 @@ export async function pagesHeaderUserFavoriteEntities(
     .filter((row) => row["entity_type"] === entityType && typeof row["entity_identifier"] === "string")
     .map((row) => ({ entity_identifier: row["entity_identifier"] as string, entity_type: entityType }));
 }
+
+// --- Pages title, mark + formatting toolbar (NEWFRONT-315, PAGE-026-036).
+// --- Appended; existing helpers above are untouched per the shared driver
+// --- contract. Distinctive pagesTitle*/pagesToolbar* names stay clear of
+// --- the sibling serverPage* helpers (NEWFRONT-317/320).
+
+/** A project page record as the detail endpoint reports it. */
+export interface PagesTitleRecord {
+  id: string;
+  name: string;
+  logoProps: unknown;
+  isLocked: boolean;
+  access: number | null;
+  descriptionHtml: string;
+}
+
+/** Read one project page; throws naming the failure. */
+export async function pagesTitleReadRecord(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<PagesTitleRecord> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] page read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string") throw new Error("[parity] page record carried no string id.");
+  return {
+    id: rec["id"],
+    name: typeof rec["name"] === "string" ? rec["name"] : "",
+    logoProps: rec["logo_props"] ?? null,
+    isLocked: rec["is_locked"] === true,
+    access: typeof rec["access"] === "number" ? rec["access"] : null,
+    descriptionHtml: typeof rec["description_html"] === "string" ? rec["description_html"] : "",
+  };
+}
+
+/** PATCH a page record (title/mark fixtures); throws naming the failure. */
+export async function pagesTitlePatchRecord(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/`, {
+    method: "PATCH",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok)
+    throw new Error(`[parity] page patch failed with HTTP ${res.status}: ${(await res.text()).slice(0, 300)}.`);
+}
+
+/**
+ * PATCH a page record without throwing, for refusal assertions (the status
+ * IS the expectation). Resolves with status + body.
+ */
+export async function pagesTitlePatchRecordLenient(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; bodyText: string }> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/`, {
+    method: "PATCH",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, bodyText: (await res.text()).slice(0, 500) };
+}
+
+/** Overwrite a page's live description (body fixtures). */
+export async function pagesToolbarWriteDescription(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  html: string | null,
+  jsonText: string | null = null,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const body: Record<string, unknown> = {};
+  if (html !== null) body["description_html"] = html;
+  if (jsonText !== null) body["description_json"] = JSON.parse(jsonText) as unknown;
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/description/`,
+    {
+      method: "PATCH",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] page description write failed with HTTP ${res.status}: ${await res.text()}.`);
+}
+
+/**
+ * Poll the record until description_html contains `needle` (the fallback
+ * save path is async). Resolves with the final html; throws on timeout.
+ */
+export async function pagesToolbarPollDescriptionHtml(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  needle: string,
+  timeoutMs = 180_000,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const started = Date.now();
+  for (;;) {
+    const record = await pagesTitleReadRecord(workspaceSlug, projectId, pageId, sessionCookie, apiBase);
+    if (record.descriptionHtml.includes(needle)) return record.descriptionHtml;
+    if (Date.now() - started > timeoutMs) {
+      throw new Error(
+        `[parity] description never contained ${JSON.stringify(needle)} (len ${record.descriptionHtml.length}).`
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+  }
+}
+
+/** Poll the record until name equals `want`; resolves with the name. */
+export async function pagesTitlePollName(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  want: string,
+  timeoutMs = 60_000,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const started = Date.now();
+  for (;;) {
+    const record = await pagesTitleReadRecord(workspaceSlug, projectId, pageId, sessionCookie, apiBase);
+    if (record.name === want) return record.name;
+    if (Date.now() - started > timeoutMs) {
+      throw new Error(`[parity] page name stuck at ${JSON.stringify(record.name)}, wanted ${JSON.stringify(want)}.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+}
+
+/** File-asset bytes behind an editor image (upload-registration asserts). */
+export interface PagesToolbarAssetBytes {
+  status: number;
+  byteLength: number;
+  contentType: string;
+}
+
+/**
+ * Follow an editor image src (the asset endpoint redirects to presigned
+ * object bytes) and report what arrived. The first hop needs the session;
+ * the signed redirect carries its own auth.
+ */
+export async function pagesToolbarAssetBytes(
+  assetSrc: string,
+  sessionCookie: string,
+  oracleBase: string = pagesLiveOracleBase()
+): Promise<PagesToolbarAssetBytes> {
+  const url = assetSrc.startsWith("http") ? assetSrc : `${oracleBase}${assetSrc.startsWith("/") ? "" : "/"}${assetSrc}`;
+  const res = await fetchTolerant(url, { headers: { cookie: sessionCookie } });
+  const buffer = Buffer.from(await res.arrayBuffer());
+  return {
+    status: res.status,
+    byteLength: buffer.length,
+    contentType: res.headers.get("content-type") ?? "",
+  };
+}
