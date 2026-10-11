@@ -10,6 +10,8 @@ project's default state. Deleting a pending/rejected/snoozed/duplicate item
 also deletes the underlying issue.
 """
 
+import uuid
+
 from . import seed_d21
 
 INTAKE_KEYS = {
@@ -99,6 +101,37 @@ def test_intake_create_when_intake_disabled_400(org):
     }
     r = org.request("GET", _base(org), "admin")
     assert r.json()["total_count"] == 0
+
+
+def test_intake_create_mints_sequence_from_counter(org):
+    """PIDASHCONV-897: the minted sequence_id follows the issue_sequences
+    counter (Django Issue.save), not MAX(issues.sequence_id). An anchor row
+    inserted straight via SQL — fixed high sequence_id, no counter row,
+    same as migration-created data — must not shift the minted value."""
+    backlog = seed_d21.create_state(
+        org.conn, workspace_id=org.workspace["id"], project_id=org.project["id"],
+        name="Backlog", group="backlog",
+    )
+    org.conn.execute(
+        """INSERT INTO issues (id, created_at, updated_at, name, description_json,
+               priority, sequence_id, project_id, state_id,
+               workspace_id, description_html, sort_order,
+               is_draft, git_work_branch, workpad, complexity_score)
+           VALUES (%s, now(), now(), 'SQL anchor', '{}', 'high', 900,
+               %s, %s, %s, '', 65535, false, '', '', 0)""",
+        (str(uuid.uuid4()), org.project["id"], backlog["id"], org.workspace["id"]),
+    )
+    body = org.create_intake_issue(name="counter minted")
+    assert body["issue_detail"]["sequence_id"] == 1
+    row = org.conn.execute(
+        "SELECT sequence_id FROM issues WHERE id = %s", (body["issue"],)
+    ).fetchone()
+    assert row[0] == 1
+    counter = org.conn.execute(
+        "SELECT sequence FROM issue_sequences WHERE issue_id = %s AND deleted_at IS NULL",
+        (body["issue"],),
+    ).fetchone()
+    assert counter[0] == 1
 
 
 def test_intake_retrieve_shape(org):
