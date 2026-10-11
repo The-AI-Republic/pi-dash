@@ -243,6 +243,9 @@ fn no_content() -> Response {
 
 fn redirect(location: String) -> Response {
     // `HttpResponseRedirect`: empty body, default content type.
+    let Some(location) = crate::response_headers::header_value(&location) else {
+        return server_error();
+    };
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)

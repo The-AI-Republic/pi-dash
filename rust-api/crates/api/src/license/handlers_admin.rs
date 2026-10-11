@@ -1169,7 +1169,8 @@ fn csrf_failure_response(state: &AppState) -> Response {
 /// `HttpResponseRedirect`: 302 + `Location`, `Vary: Cookie`, and any
 /// `Set-Cookie` values the branch issued.
 fn redirect_response(location: &str, set_cookies: Vec<String>) -> Result<Response, Denial> {
-    let location = axum::http::HeaderValue::from_str(location).map_err(|_| Denial::ServerError)?;
+    let location =
+        crate::response_headers::header_value(location).ok_or(Denial::ServerError)?;
     let mut builder = Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)

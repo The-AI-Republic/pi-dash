@@ -4779,6 +4779,7 @@ async fn attachment_get_inner(
         return Err(Denial::ServerError);
     };
     // `HttpResponseRedirect`: 302, `Location`, `text/html`, empty body.
+    let location = crate::response_headers::header_value(&location).ok_or(Denial::ServerError)?;
     Ok(Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)

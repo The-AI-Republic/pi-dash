@@ -172,6 +172,9 @@ fn json_400(code: i32, message: &str, payload: &[(&str, ParamValue)]) -> Respons
 
 /// `HttpResponseRedirect(url)`: 302 with `Location`, empty body.
 fn redirect_302(location: String) -> Response {
+    let Some(location) = crate::response_headers::header_value(&location) else {
+        return server_error();
+    };
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)

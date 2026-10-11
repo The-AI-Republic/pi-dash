@@ -210,16 +210,11 @@ pub const PASSWORD_HASH_ITERATIONS: u32 = 600_000;
 
 /// 302 with a `Location`, mirroring `HttpResponseRedirect(url)`.
 pub fn redirect_response(location: &str) -> Response {
+    let Some(value) = crate::response_headers::header_value(location) else {
+        return server_error();
+    };
     let mut response = StatusCode::FOUND.into_response();
-    response.headers_mut().insert(
-        header::LOCATION,
-        header::HeaderValue::from_str(location).unwrap_or_else(|_| {
-            // `HeaderValue` rejects non-ASCII bytes; every URL this module
-            // builds is ASCII (urlencode output + validated paths), so this
-            // arm is unreachable — fail closed rather than panic.
-            header::HeaderValue::from_static("/")
-        }),
-    );
+    response.headers_mut().insert(header::LOCATION, value);
     response
 }
 

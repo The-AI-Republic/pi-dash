@@ -2156,6 +2156,9 @@ fn no_content() -> Response {
 
 fn redirect(location: String) -> Response {
     // `HttpResponseRedirect`: 302 + `Location`, `text/html`, empty body.
+    let Some(location) = crate::response_headers::header_value(&location) else {
+        return Denial::ServerError.into_response();
+    };
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)

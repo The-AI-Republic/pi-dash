@@ -409,9 +409,10 @@ impl Denial {
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
         match self {
-            Denial::Redirect(location) => {
-                (StatusCode::FOUND, [(header::LOCATION, location)]).into_response()
-            }
+            Denial::Redirect(location) => match crate::response_headers::header_value(&location) {
+                Some(value) => (StatusCode::FOUND, [(header::LOCATION, value)]).into_response(),
+                None => Denial::ServerError.into_response(),
+            },
             denial => {
                 let (status, body) = denial.status_and_body();
                 (status, body.unwrap_or_default()).into_response()
@@ -422,7 +423,10 @@ impl IntoResponse for Denial {
 
 /// 302 `Location` response.
 pub fn redirect(location: String) -> Response {
-    (StatusCode::FOUND, [(header::LOCATION, location)]).into_response()
+    match crate::response_headers::header_value(&location) {
+        Some(value) => (StatusCode::FOUND, [(header::LOCATION, value)]).into_response(),
+        None => Denial::ServerError.into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------

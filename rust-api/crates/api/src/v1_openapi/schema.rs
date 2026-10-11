@@ -25,7 +25,7 @@
 
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 
 use crate::state::AppState;
 
@@ -215,6 +215,11 @@ pub async fn slashless_redirect(State(state): State<AppState>, req: Request) -> 
         location.push('?');
         location.push_str(query);
     }
+    let Some(location) = crate::response_headers::header_value(&location) else {
+        // Unreachable in practice (hyper rejects raw controls in the
+        // request target before this runs); Django 500s such values.
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
     Response::builder()
         .status(StatusCode::MOVED_PERMANENTLY)
         .header(header::LOCATION, location)

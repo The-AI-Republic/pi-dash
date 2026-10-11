@@ -149,6 +149,9 @@ fn json_400(pairs: &[(String, Value)]) -> Response {
 }
 
 fn redirect_302(location: String) -> Response {
+    let Some(location) = crate::response_headers::header_value(&location) else {
+        return server_error();
+    };
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)

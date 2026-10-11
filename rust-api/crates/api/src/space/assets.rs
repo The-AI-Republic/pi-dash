@@ -549,6 +549,9 @@ async fn get_asset(
         return server_error();
     };
     // `HttpResponseRedirect`: empty body, default content type.
+    let Some(url) = crate::response_headers::header_value(&url) else {
+        return server_error();
+    };
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, url)
