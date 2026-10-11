@@ -40,15 +40,19 @@ backend-independent — they assert on Django source text and the
 in-process wire builder, so they already pass with no worker at all.
 Only the live worker tests have a replay form.
 
-Ownership split (mirrors the worker registry on rust-dev): 10 of the
+Ownership split (mirrors the worker registry on rust-dev): 9 of the
 11 D-08 task names are Python-owned — the ``pidash-api`` binary
-registers exactly one ``tasks_webhooks`` handler, ``process_logs``
+registers exactly two ``tasks_webhooks`` handlers, ``process_logs``
 (``bin/pidash-api/src/main.rs`` wires cleanup + integrations +
-``PROCESS_LOGS_TASK``), and ``crates/jobs/src/tasks_webhooks/mod.rs``
+``PROCESS_LOGS_TASK``) and ``archive_and_close_old_issues``
+(PIDASHCONV-837 wires ``register_automation_handlers`` in
+``worker()``), and ``crates/jobs/src/tasks_webhooks/mod.rs``
 keeps the webhook send/fan-out path Python-owned deliberately
 (registering a local send handler would steal live traffic while the
 webhook-row fetch, HTTP send and SMTP send still live on Python).
-Every test below except ``test_rust_process_logs_executes_locally``
+Every test below except the two owned-cases
+(``test_rust_process_logs_executes_locally`` and
+``test_rust_archive_and_close_executes_locally``)
 therefore asserts observable AMQP forwarding — the
 ``rust_job_queue`` row is acked AND the broker ``celery`` queue grows
 while the Django worker is stopped — instead of local DB effects, plus
@@ -70,10 +74,12 @@ there is no replay form.
 """
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from _harness import broker_probe, rust_queue
 from _harness import seed as seed_helpers
 from _harness.db import diff as _diff
+from _harness.db import insert_row
 from _harness.db import snapshot, wait_for_condition as wait_for
 
 M = "pi_dash.bgtasks"
@@ -330,6 +336,112 @@ def test_rust_process_logs_executes_locally(db_conn, broker_url):
     assert after[0]["path"] == "/contract/probe"
 
 
+def _seed_automation_project(db_conn):
+    """Project with both automation windows on, plus stale issues.
+
+    One stale closed issue (archive phase stamps ``archived_at``) and
+    one stale open issue (close phase moves it to the project's
+    default state). ``updated_at`` 60 days back against a 1-month
+    window (30 days, QUIRK-1) leaves a wide margin either side of the
+    worker's cutoff; no cycle/module/intake links, so the guards pass.
+    """
+    owner = seed_helpers.user(db_conn, "rust-replay-arch-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplayarch", owner["id"])
+    project = seed_helpers.project(
+        db_conn, workspace["id"], archive_in=1, close_in=1
+    )
+    closed_state = seed_helpers.state(
+        db_conn, project["id"], workspace["id"], group="completed"
+    )
+    open_state = seed_helpers.state(
+        db_conn, project["id"], workspace["id"], group="backlog"
+    )
+    close_target = seed_helpers.state(
+        db_conn, project["id"], workspace["id"], group="cancelled"
+    )
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET default_state_id = %s WHERE id = %s",
+            (str(close_target["id"]), str(project["id"])),
+        )
+    stale = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+    base_issue = {
+        "workspace_id": str(workspace["id"]),
+        "project_id": str(project["id"]),
+        "name": "rust replay automation probe",
+        "description_json": {},
+        "description_html": "<p></p>",
+        "priority": "none",
+        "complexity_score": 0,
+        "is_draft": False,
+        "sort_order": 65535,
+        "git_work_branch": "",
+        "workpad": "",
+        "updated_at": stale,
+    }
+    closed_issue = insert_row(
+        db_conn,
+        "issues",
+        {**base_issue, "state_id": str(closed_state["id"]), "sequence_id": 1},
+    )
+    open_issue = insert_row(
+        db_conn,
+        "issues",
+        {**base_issue, "state_id": str(open_state["id"]), "sequence_id": 2},
+    )
+    return {
+        "project": project,
+        "close_target": close_target,
+        "closed_issue": closed_issue,
+        "open_issue": open_issue,
+    }
+
+
+def _issue_snapshot_row(conn, issue_id):
+    return snapshot(conn, ["issues"])["issues"].get(str(issue_id))
+
+
+def test_rust_archive_and_close_executes_locally(db_conn, broker_url):
+    """archive_and_close, Rust side: EXECUTE locally (PIDASHCONV-837).
+
+    Revisits the ``ARCHIVE_AND_CLOSE`` forward case: 837 wired
+    ``register_automation_handlers`` in ``worker()``, so the Rust
+    worker owns ``ARCHIVE_AND_CLOSE_TASK`` and runs both phases
+    itself. Mirrors the Django entry
+    (``issue_automation_task.py:23-26``): the stale closed issue gets
+    ``archived_at`` stamped to today, the stale open issue moves to
+    the project's default state. Settlement of the ``rust_job_queue``
+    row plus the two diffs is the proof: with the Django worker
+    stopped, a forward could never produce local row changes. No
+    broker-depth assertion: the scheduler loop forwards other
+    domains' entries over the same broker, so only the row diffs are
+    attributable to this job.
+    """
+    seeded = _seed_automation_project(db_conn)
+    closed_id = str(seeded["closed_issue"]["id"])
+    open_id = str(seeded["open_issue"]["id"])
+    # Midnight-UTC guard: the worker stamps its own today; bound it
+    # instead of asserting one exact date.
+    earliest = datetime.now(timezone.utc).date()
+    celery_id = rust_queue.publish(ARCHIVE_AND_CLOSE, args=[], kwargs={})
+    rust_queue.wait_for_settled(celery_id, what=f"{ARCHIVE_AND_CLOSE} executed")
+
+    def _stamped():
+        row = _issue_snapshot_row(db_conn, closed_id)
+        return row if row and row["archived_at"] is not None else None
+
+    archived = wait_for(_stamped, what="archived_at stamp")
+    assert earliest <= archived["archived_at"] <= datetime.now(timezone.utc).date()
+
+    def _moved():
+        row = _issue_snapshot_row(db_conn, open_id)
+        return row if row and row["state_id"] != open_state_id else None
+
+    open_state_id = str(seeded["open_issue"]["state_id"])
+    moved = wait_for(_moved, what="close state move")
+    assert moved["state_id"] == str(seeded["close_target"]["id"])
+
+
 def test_rust_track_event_forwarded_without_crash(db_conn, broker_url):
     """No PostHog configured → early return on Python; job still forwards.
 
@@ -346,10 +458,12 @@ def test_rust_light_tasks_forwarded_without_crash(db_conn, broker_url):
     """Execution parity: remaining D-08 tasks forward for the Python plane.
 
     Mirrors ``test_light_tasks_consumed_without_crash`` (same probe
-    payloads, same set): archive, page_transaction, recent_visited.
+    payloads): page_transaction, recent_visited. archive_and_close
+    moved to the owned-cases — PIDASHCONV-837 wires its handler in
+    ``worker()``, so ``test_rust_archive_and_close_executes_locally``
+    pins local execution instead of forwarding.
     """
     cases = [
-        (ARCHIVE_AND_CLOSE, [], {}),
         (
             PAGE_TRANSACTION,
             ["<p>new</p>", "<p>old</p>", str(uuid.uuid4())],
