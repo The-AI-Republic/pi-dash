@@ -289,17 +289,13 @@ pub fn create_payload(
 // (`:152-306`). Built on the part-1 helpers above (`remove_unwanted_characters`,
 // `acquire_lock`/`release_lock`, `create_payload`, `RedisLock`).
 //
-// Dependency note: the workspace has no HTML parser, template engine,
-// Redis client or SMTP client (offline environment; none of `scraper`,
-// `minijinja`, `lettre`, `redis` are in `rust-api/Cargo.lock`), so I/O
-// that needs one lives behind domain-local traits that record the exact
-// call shapes Python makes — the same status as part 1's `RedisLock`
-// ("the task layer supplies the client"). The pure decision logic, the
-// builders and the wire constructors below are complete and unit-pinned
-// against `F-STACK`/`F-SEND`/`F-WIRE-MAIL`/`F-COMMON`. Flipping live
-// traffic to these handlers is the domain gate's call (PIDASHCONV-218,
-// after the PIDASHCONV-21 proxy pass); until then every D-07 name routes
-// to `PythonOwned` (see `super::assert_python_owned`).
+// Dependency note: I/O that needs a template engine, Redis client or SMTP
+// client lives behind domain-local traits that record the exact call
+// shapes Python makes — the same status as part 1's `RedisLock` ("the
+// task layer supplies the client"). The pure decision logic, the builders
+// and the wire constructors below are complete and unit-pinned against
+// `F-STACK`/`F-SEND`/`F-WIRE-MAIL`/`F-COMMON`; the live clients live in
+// `super::live` (PIDASHCONV-865) and the worker owns both task names.
 
 /// Log line when a send lock is already held
 /// (`email_notification_task.py:300`).
@@ -322,6 +318,9 @@ pub const ISSUE_UPDATES_TEMPLATE: &str = "emails/notifications/issue-updates.htm
 pub enum MentionLookupError {
     /// `User.DoesNotExist` for this id.
     NotFound(String),
+    /// `ValidationError` (the id is not a UUID) or any store failure —
+    /// the generic `except`, never the silent path.
+    Db(String),
 }
 
 /// Every way `process_mention` can fail. Both variants propagate to the
@@ -781,8 +780,10 @@ pub trait StackStore: Send + Sync {
 }
 
 /// The stack task's fan-out surface: `send_email_notification.delay(…)`
-/// (`:75-81`). The live implementation publishes over AMQP
-/// ([`AmqpStackOutbox`]); tests use a recording fake.
+/// (`:75-81`). [`AmqpStackOutbox`] publishes over AMQP (coexistence: the
+/// Python workers execute the sends); [`super::live::QueueStackOutbox`]
+/// enqueues into `rust_job_queue` (post-switchover: the Rust worker
+/// executes them); tests use a recording fake.
 pub trait StackOutbox: Send + Sync {
     fn delay_send(
         &self,
@@ -794,16 +795,18 @@ pub trait StackOutbox: Send + Sync {
 /// FROM email_notification_logs WHERE processed_at IS NULL ORDER BY
 /// receiver_id` — the `:49` ORM chain as SQL (`email_notification_logs`
 /// per `db/models/notification.py:121-148`; `ORDER BY "receiver"` is the
-/// `receiver_id` column). Only the consumed columns are selected: the
-/// row's other columns are never read downstream, so they are
-/// unobservable.
-pub const STACK_SELECT_SQL: &str = "SELECT id, receiver_id, triggered_by_id, entity_identifier, data FROM email_notification_logs WHERE processed_at IS NULL ORDER BY receiver_id";
+/// `receiver_id` column), scoped to live rows (`SoftDeletionManager` —
+/// soft-deleted logs never fan out). Only the consumed columns are
+/// selected: the row's other columns are never read downstream, so they
+/// are unobservable.
+pub const STACK_SELECT_SQL: &str = "SELECT id, receiver_id, triggered_by_id, entity_identifier, data FROM email_notification_logs WHERE processed_at IS NULL AND deleted_at IS NULL ORDER BY receiver_id";
 
 /// `UPDATE email_notification_logs SET processed_at = now() WHERE id =
 /// ANY($1)` — the `:84` update as SQL (a no-op for an empty id list,
-/// exactly like the ORM call).
+/// exactly like the ORM call; soft-deleted rows stay unmarked, like the
+/// manager-scoped queryset).
 pub const STACK_MARK_PROCESSED_SQL: &str =
-    "UPDATE email_notification_logs SET processed_at = now() WHERE id = ANY($1)";
+    "UPDATE email_notification_logs SET processed_at = now() WHERE id = ANY($1) AND deleted_at IS NULL";
 
 /// Live [`StackStore`] over the primary pool. Reads go to the primary:
 /// a background task has no request context to opt into the replica,
@@ -814,10 +817,8 @@ pub struct SqlStackStore {
 
 impl SqlStackStore {
     /// Borrow the primary pool handle (cloned — `PgPool` is cheap to clone).
-    pub fn new(pools: &pidash_db::Pools) -> Self {
-        Self {
-            pool: pools.primary().clone(),
-        }
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self { pool }
     }
 }
 
@@ -1303,6 +1304,11 @@ pub enum SendError {
     /// `entity_identifier` (`KeyError`, `:135`) or a bad content shape.
     #[error("mention error: {0}")]
     Mention(#[from] MentionError),
+    /// A per-mention display-name lookup failed with a non-`DoesNotExist`
+    /// error: a garbage id (`ValidationError`) or a store failure. The
+    /// generic `except`: `log_exception` + release + return.
+    #[error("mention lookup failed: {0}")]
+    MentionDb(String),
     /// Defensive only: [`run_send`] pre-fetches every actor in the
     /// payload, so the plan always finds its actors. Unreachable unless
     /// the payload is mutated between the two steps.
@@ -1421,7 +1427,10 @@ async fn rewrite_html(html: &str, mentions: &impl MentionSource) -> Result<Strin
         let name = mentions
             .display_name(&span.entity_id)
             .await
-            .map_err(|_| SendError::UserNotFound(span.entity_id.clone()))?;
+            .map_err(|error| match error {
+                MentionLookupError::NotFound(_) => SendError::UserNotFound(span.entity_id.clone()),
+                MentionLookupError::Db(detail) => SendError::MentionDb(detail),
+            })?;
         names.push(name);
     }
     Ok(splice_mentions(html, &spans, &names))
@@ -1616,6 +1625,7 @@ impl From<MentionLookupError> for MailDbError {
     fn from(error: MentionLookupError) -> Self {
         match error {
             MentionLookupError::NotFound(id) => MailDbError::NotFound(id),
+            MentionLookupError::Db(detail) => MailDbError::Db(detail),
         }
     }
 }
@@ -1634,9 +1644,9 @@ impl From<MentionLookupError> for MailDbError {
 ///   receiver-wide id list — the same PORT BUG as the fan-out
 ///   (`:72-80`).
 ///
-/// The concrete `sqlx` implementation lands with the domain gate
-/// (PIDASHCONV-218); until then this trait records the exact read
-/// shapes, and the orchestration below is pinned by fakes.
+/// The concrete `sqlx` implementation is [`super::live::SqlMailDb`];
+/// this trait records the exact read shapes, and the orchestration below
+/// is pinned by fakes.
 pub trait MailDb: MentionSource {
     /// `User.objects.get(pk=receiver_id)` projected to the only field
     /// the send reads: `receiver.email` (`:251`, `:280`).
@@ -1679,13 +1689,15 @@ pub trait RedisMail: RedisLock + Send + Sync {
 }
 
 /// Template rendering: `render_to_string(
-/// "emails/notifications/issue-updates.html", context)` (`:263`) with
-/// `minijinja` strict-undefined semantics (Porting guide): a missing
-/// key raises instead of rendering empty — the Django `string_if_invalid`
-/// default renders `''` for the never-sent `current_site` /
-/// `total_updates` / `total_comments` keys (`PORT_NOTE_template` in
-/// `F-SEND`, proven by the rendered golden), which the strict port
-/// reproduces by rendering those three as `""`.
+/// "emails/notifications/issue-updates.html", context)` (`:263`). The live
+/// implementation ([`super::live::IssueUpdatesRenderer`]) is minijinja with
+/// `Chainable` undefined handling — not strict: `Strict` fails the
+/// `{% if update.changes.* %}` guards on partial updates, and injecting the
+/// never-sent `current_site` / `total_updates` / `total_comments` keys
+/// (`PORT_NOTE_template` in `F-SEND`) as `""` would flip `"" > 1` to true
+/// (minijinja orders `String` above `Number`). `Chainable` reproduces
+/// Django's missing-variable rules exactly (print `""`, `{% if %}` false,
+/// conditions false), probe-verified byte-for-byte.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RenderError {
     /// The template or context failed to render.
@@ -1694,7 +1706,7 @@ pub enum RenderError {
 }
 
 /// Render `issue-updates.html` over the [`build_context`] map.
-/// The `minijinja` implementation lands with the domain gate; this
+/// The live implementation is [`super::live::IssueUpdatesRenderer`]; this
 /// trait records the exact input (full context map) and output (HTML).
 pub trait Renderer: Send + Sync {
     /// `render_to_string(ISSUE_UPDATES_TEMPLATE, context)`.
@@ -1710,8 +1722,10 @@ pub enum MailError {
 }
 
 /// `get_connection(…)` + `EmailMultiAlternatives(…).send()` over one
-/// [`SmtpEnvelope`]. The `lettre` implementation lands with the domain
-/// gate; this trait records the exact call shapes.
+/// [`SmtpEnvelope`]. The live implementation is
+/// [`super::live::SmtpMailer`] (over the shared `mail_send::smtp_send`
+/// conversation — no `lettre`; the workspace speaks SMTP directly); this
+/// trait records the exact call shapes.
 pub trait Mailer: Send + Sync {
     /// Connect, build, attach and send one message.
     fn send(&self, envelope: &SmtpEnvelope) -> Result<(), MailError>;
@@ -2057,12 +2071,9 @@ pub fn send_handler<
 
 /// Register both email-notification handlers
 /// ([`super::STACK_EMAIL_NOTIFICATION_TASK`],
-/// [`super::SEND_EMAIL_NOTIFICATION_TASK`]).
-///
-/// Building the table only (the `register_deletion_tasks` precedent):
-/// the worker binary calls this when the domain gate flips ownership
-/// (PIDASHCONV-218, after the PIDASHCONV-21 proxy pass). Until then
-/// both names stay `PythonOwned` (see `super::assert_python_owned`).
+/// [`super::SEND_EMAIL_NOTIFICATION_TASK`]) over the live seams in
+/// [`super::live`] (PIDASHCONV-865): the worker binary calls this, and
+/// both names are Rust-owned.
 pub fn register_email_notification_tasks(registry: &mut Registry, stack: Handler, send: Handler) {
     registry.register(super::STACK_EMAIL_NOTIFICATION_TASK, stack);
     registry.register(super::SEND_EMAIL_NOTIFICATION_TASK, send);
@@ -2108,6 +2119,19 @@ mod tests {
 
         fn del(&self, key: &str) {
             self.dels.borrow_mut().push(key.to_owned());
+        }
+    }
+
+    #[test]
+    fn stack_statements_scope_soft_deleted_rows() {
+        // `:49`/`:84` run on the soft-deleting default manager: deleted
+        // logs never fan out and stay unmarked (the `pg_notify` pin
+        // precedent in `queue.rs`).
+        for sql in [STACK_SELECT_SQL, STACK_MARK_PROCESSED_SQL] {
+            assert!(
+                sql.contains("deleted_at IS NULL"),
+                "unscoped soft-deletable statement: {sql}"
+            );
         }
     }
 
@@ -2841,6 +2865,41 @@ mod part2_tests {
         assert_eq!(
             plan_send_actors(data, &actors, &issue(), "http://b", &mentions).await,
             Err(SendError::MissingActivityTime("act-1".to_owned()))
+        );
+    }
+
+    /// A display-name source whose lookups fail below `DoesNotExist`
+    /// (garbage id, store down).
+    struct DbMentions;
+
+    impl MentionSource for DbMentions {
+        async fn display_name(&self, _user_id: &str) -> Result<String, MentionLookupError> {
+            Err(MentionLookupError::Db("store down".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_maps_mention_db_error_to_logged_release() {
+        // Same shape as `plan_splits_comments_mentions_and_rows`, but the
+        // lookup fails: the plan reports `MentionDb` (the generic `except`
+        // — `run_send` takes the `log_exception` + release + return path),
+        // never the silent `UserNotFound`.
+        let mut data = Map::new();
+        data.insert(
+            "act-1".to_owned(),
+            serde_json::json!({
+                "mention": {
+                    "old_value": ["<p>ping <mention-component entity_identifier=\"u9\">X</mention-component></p>"],
+                    "new_value": []
+                },
+                "activity_time": "2026-09-01 11:00:00"
+            }),
+        );
+        let mut actors = HashMap::new();
+        actors.insert("act-1".to_owned(), actor());
+        assert_eq!(
+            plan_send_actors(data, &actors, &issue(), "http://b", &DbMentions).await,
+            Err(SendError::MentionDb("store down".to_owned()))
         );
     }
 
