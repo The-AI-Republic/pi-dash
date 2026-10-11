@@ -75,6 +75,9 @@ echo "[parity] preflight: checking ownership and published ports for project $PA
 "$STACK_DIR/parity-guard.sh" "$PARITY_PROJECT" "$STACK_DIR" \
   --ports "$PARITY_PG_PORT,$PARITY_REDIS_PORT,$PARITY_API_PORT,$PARITY_ORACLE_PORT,$PARITY_MINIO_PORT"
 
+echo "[parity] checking host disk before the build"
+"$STACK_DIR/parity-disk-check.sh"
+
 if [ "$PARITY_REBUILD" = "1" ]; then
   echo "[parity] rebuilding scratch images from zero (parity19-api, $ORACLE_SERVICE)"
   docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build --no-cache api "$ORACLE_SERVICE"
