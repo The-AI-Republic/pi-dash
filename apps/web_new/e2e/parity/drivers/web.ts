@@ -29506,13 +29506,6 @@ export class WebDriver implements ParityDriver {
     return (await this.modulesDialogRoot().locator('input[name="name"]').count()) > 0;
   }
 
-  async modulesDialogHeading(): Promise<string | null> {
-    const heading = this.modulesDialogRoot().locator("h3").first();
-    if ((await heading.count()) === 0) return null;
-    const text = (await heading.innerText().catch(() => "")).trim();
-    return text === "" ? null : text;
-  }
-
   /** The project picker lives beside the heading (creation only). */
   private modulesProjectPicker(): Locator {
     return this.modulesDialogRoot().locator("h3").locator("xpath=../div[contains(@class,'h-7')]").first();

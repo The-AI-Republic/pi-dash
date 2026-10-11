@@ -5373,8 +5373,6 @@ export interface ParityDriver {
   modulesOpenCreateFromEmpty(): Promise<void>;
   /** Whether the create/edit dialog currently holds the title field. */
   modulesDialogOpen(): Promise<boolean>;
-  /** Dialog heading text ("Create module" / "Update module"), or null. */
-  modulesDialogHeading(): Promise<string | null>;
   /** Whether the dialog shows the project picker (creation only). */
   modulesDialogHasProjectPicker(): Promise<boolean>;
   /** Project picker option names in display order (opened read-only). */

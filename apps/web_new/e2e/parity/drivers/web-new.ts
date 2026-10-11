@@ -8309,10 +8309,6 @@ export class WebNewDriver implements ParityDriver {
     return todo("modulesDialogOpen");
   }
 
-  async modulesDialogHeading(): Promise<string | null> {
-    return todo("modulesDialogHeading");
-  }
-
   async modulesDialogHasProjectPicker(): Promise<boolean> {
     return todo("modulesDialogHasProjectPicker");
   }
