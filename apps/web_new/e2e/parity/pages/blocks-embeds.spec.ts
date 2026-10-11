@@ -416,6 +416,7 @@ test(
         null
       );
       await driver.pagesBlocksOpenDetail(seed.workspaceSlug, projectId, pageId);
+      await waitEditorContains(driver, ["drag first", "drag last"]);
 
       await test.step("the handle shows on hover with delete and duplicate actions", async () => {
         expect(await driver.pagesBlocksDragHandleVisible()).toBe(true);
@@ -514,6 +515,7 @@ test(
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await serverUpdatePageDescription(seed.workspaceSlug, projectId, pageId, session, "<p>abcde</p>", null);
       await driver.pagesBlocksOpenDetail(seed.workspaceSlug, projectId, pageId);
+      await waitEditorContains(driver, ["abcde"]);
 
       const before = await driver.pagesBlocksInfoStats();
       expect(before.characters).toBe(5);
@@ -549,6 +551,7 @@ test(
         null
       );
       await driver.pagesBlocksOpenDetail(seed.workspaceSlug, projectId, pageId);
+      await waitEditorContains(driver, ["run printf daily"]);
       await driver.pagesBlocksEditorClickEnd();
 
       await test.step("a fenced code block inserts", async () => {
@@ -713,6 +716,7 @@ test(
 
       await test.step("the community renders no embed slot or upgrade prompt", async () => {
         await driver.pagesBlocksOpenDetail(seed.workspaceSlug, projectId, pageId);
+        await waitEditorContains(driver, ["before embed"]);
         // Intended: an upgrade prompt with an outbound link (NEWFRONT-352). Observed: nothing renders.
         expect(await driver.pagesBlocksEmbedUpgradeVisible()).toBe(false);
         expect(await driver.pagesBlocksEmbedUpgradeHref()).toBe(null);
