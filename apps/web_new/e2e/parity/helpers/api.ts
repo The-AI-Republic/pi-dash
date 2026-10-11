@@ -13490,3 +13490,77 @@ export async function modulesXIssueModuleIds(
     throw new Error("[parity] issue row carried no string-array module_ids.");
   return ids as string[];
 }
+
+// --- Modules dialogs/archived oracles (NEWFRONT-309, MOD-022..028).
+// --- Appended; existing helpers above are untouched per the shared
+// --- contract. Archive/restore writes reuse the merged archives*
+// --- helpers read-only (live paths proved by NEWFRONT-225).
+
+/** One module's full detail record (what the edit dialog prefills from). */
+export interface ParityModuleDetail {
+  id: string;
+  name: string;
+  description: string;
+  status: string;
+  leadId: string | null;
+  memberIds: string[];
+  startDate: string | null;
+  targetDate: string | null;
+  archivedAt: string | null;
+}
+
+/** Read one module's full record through the live detail endpoint. */
+export async function modulesModuleDetail(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityModuleDetail> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/`,
+    {
+      headers: { cookie: sessionCookie },
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] module read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string" || typeof rec["name"] !== "string")
+    throw new Error("[parity] module record carried no string id/name.");
+  const rawMembers = rec["member_ids"];
+  const memberIds = Array.isArray(rawMembers) ? rawMembers.filter((id): id is string => typeof id === "string") : [];
+  return {
+    id: rec["id"],
+    name: rec["name"],
+    description: typeof rec["description"] === "string" ? rec["description"] : "",
+    status: typeof rec["status"] === "string" ? rec["status"] : "",
+    leadId: typeof rec["lead_id"] === "string" ? rec["lead_id"] : null,
+    memberIds,
+    startDate: typeof rec["start_date"] === "string" ? rec["start_date"] : null,
+    targetDate: typeof rec["target_date"] === "string" ? rec["target_date"] : null,
+    archivedAt: typeof rec["archived_at"] === "string" ? rec["archived_at"] : null,
+  };
+}
+
+/**
+ * Whether a module is gone entirely: the live read 404s AND the archived
+ * list carries no such row (a 404 alone also reads for archived modules).
+ */
+export async function modulesModuleGone(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/`,
+    {
+      headers: { cookie: sessionCookie },
+    }
+  );
+  if (res.ok) return false;
+  if (res.status !== 404) throw new Error(`[parity] module read failed with HTTP ${res.status}.`);
+  const archived = await archivesArchivedModules(workspaceSlug, projectId, sessionCookie, apiBase);
+  return !archived.some((row) => row.id === moduleId);
+}

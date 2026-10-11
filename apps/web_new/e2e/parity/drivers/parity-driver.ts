@@ -5354,6 +5354,91 @@ export interface ParityDriver {
   modulesXLinksSectionVisible(): Promise<boolean>;
   /** Whether edition/desktop gate markers show on the named surface. */
   modulesXEditionGateMarkersPresent(scope: "list" | "detail"): Promise<boolean>;
+
+  // ---------------------------------------------------------------------------
+  // Modules dialogs, archive and archived screen (NEWFRONT-309, MOD-022..028).
+  // Observed on apps/web: the create/edit form (project picker on create
+  // only, required 255-capped title, free-text description, date range,
+  // required status, single lead, multiple members), the delete confirm
+  // (names the module, permanence warning, list navigation from detail),
+  // and the archived screen under the archives tab strip. Row-menu,
+  // archive-dialog and archived-chrome reads reuse the merged archives*
+  // drivers (NEWFRONT-225); only dialog reads/writes are new here.
+  // Appended; existing entries above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Open the create dialog through the list header Add control. */
+  modulesOpenCreateFromHeader(): Promise<void>;
+  /** Open the create dialog through the zero-modules empty-state action. */
+  modulesOpenCreateFromEmpty(): Promise<void>;
+  /** Whether the create/edit dialog currently holds the title field. */
+  modulesDialogOpen(): Promise<boolean>;
+  /** Whether the dialog shows the project picker (creation only). */
+  modulesDialogHasProjectPicker(): Promise<boolean>;
+  /** Project picker option names in display order (opened read-only). */
+  modulesDialogProjectOptions(): Promise<string[]>;
+  /** Pick a project in the creation picker; resolves once it shows. */
+  modulesDialogPickProject(name: string): Promise<void>;
+  /** Current title field value. */
+  modulesDialogTitle(): Promise<string>;
+  /** Fill the title field. */
+  modulesDialogFillTitle(text: string): Promise<void>;
+  /** Inline title error text, or null when none shows. */
+  modulesDialogTitleError(): Promise<string | null>;
+  /** Current description field value. */
+  modulesDialogDescription(): Promise<string>;
+  /** Fill the description field. */
+  modulesDialogFillDescription(text: string): Promise<void>;
+  /** Status the dialog currently shows. */
+  modulesDialogStatus(): Promise<string>;
+  /** Pick a status; resolves once the dialog shows it. */
+  modulesDialogPickStatus(label: string): Promise<void>;
+  /** Lead control text (placeholder while unset). */
+  modulesDialogLead(): Promise<string>;
+  /** Lead picker option names in display order (opened read-only). */
+  modulesDialogLeadOptions(): Promise<string[]>;
+  /** Pick a lead; resolves once the dialog shows them. */
+  modulesDialogPickLead(label: string): Promise<void>;
+  /** Members control text (placeholder while empty). */
+  modulesDialogMembers(): Promise<string>;
+  /** Toggle members by option label; resolves once each applies. */
+  modulesDialogPickMembers(labels: string[]): Promise<void>;
+  /** Date-range control text (placeholders while unset). */
+  modulesDialogDateRange(): Promise<string>;
+  /** Pick a start/end range through the calendar; resolves once applied. */
+  modulesDialogPickDateRange(startISO: string, endISO: string): Promise<void>;
+  /** Tab indices of title, description, dates, status, lead, members, cancel, submit (null when unset). */
+  modulesDialogTabOrder(): Promise<(number | null)[]>;
+  /** Tab index of the project picker, or null when absent/unset. */
+  modulesDialogProjectPickerTabIndex(): Promise<number | null>;
+  /** Cancel the dialog; resolves once it unmounts. */
+  modulesDialogCancel(): Promise<void>;
+  /** Press Escape; resolves once the dialog unmounts. */
+  modulesDialogEscape(): Promise<void>;
+  /** Submit creation; settles on close, toast, or inline title error. */
+  modulesDialogSubmitCreate(): Promise<void>;
+  /** Submit the edit; settles on close, toast, or inline title error. */
+  modulesDialogSubmitUpdate(): Promise<void>;
+  /** Abort the next module-create write once (failure shaping). */
+  modulesFailNextCreate(): Promise<void>;
+  /** Abort the next module-update write once (failure shaping). */
+  modulesFailNextUpdate(): Promise<void>;
+  /** Open the detail header quick-actions menu (Delete lives there). */
+  modulesOpenDetailMenu(): Promise<void>;
+  /** Pick a detail-menu entry by title; resolves once it fires. */
+  modulesChooseDetailMenuEntry(title: string): Promise<void>;
+  /** The open delete dialog's copy, or null when none is open. */
+  modulesDeleteDialog(): Promise<ModulesDeleteDialog | null>;
+  /** Confirm deletion; resolves once the DELETE write lands. */
+  modulesDeleteConfirm(): Promise<void>;
+  /** Cancel the delete dialog; resolves once it unmounts. */
+  modulesDeleteCancel(): Promise<void>;
+  /** Refuse the next module DELETE with the server's permission shape. */
+  modulesFailDeletePermission(): Promise<void>;
+  /** Fail the next module DELETE with a generic server error. */
+  modulesFailNextDelete(): Promise<void>;
+  /** Row facts on the showing modules list (name link plus peek trigger). */
+  modulesRowFacts(name: string): Promise<ModulesRowFacts>;
 }
 
 /** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */
@@ -6291,4 +6376,20 @@ export interface ModulesXPaletteMenuItem {
   hasIcon: boolean;
   /** Whether the entry shows the selected check mark. */
   hasCheck: boolean;
+}
+
+/** The open delete-module confirmation (NEWFRONT-309, MOD-025). */
+export interface ModulesDeleteDialog {
+  /** Dialog heading ("Delete module"). */
+  heading: string;
+  /** Whole confirmation copy (names the module, warns of permanence). */
+  body: string;
+}
+
+/** Identity facts of one modules-list row (NEWFRONT-309, MOD-027). */
+export interface ModulesRowFacts {
+  /** Href of the module-name link, or null when the row carries none. */
+  nameHref: string | null;
+  /** Whether the row offers the peek/info trigger. */
+  hasPeek: boolean;
 }

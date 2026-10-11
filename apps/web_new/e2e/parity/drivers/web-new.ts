@@ -8,6 +8,8 @@
 import type { Page } from "@playwright/test";
 import type {
   ArchivesArchiveDialog,
+  ModulesDeleteDialog,
+  ModulesRowFacts,
   ArchivesFilterExpression,
   ArchivesListQuery,
   ArchivesMenuEntry,
@@ -8290,5 +8292,152 @@ export class WebNewDriver implements ParityDriver {
   }
   async estimatesAnalyticsTableRows(): Promise<string[][]> {
     return todo("estimatesAnalyticsTableRows");
+  }
+
+  // Modules dialogs, archive and archived screen (NEWFRONT-309, MOD-022..028).
+  // Oracle-only drivers; the new app has no modules surface yet.
+
+  async modulesOpenCreateFromHeader(): Promise<void> {
+    return todo("modulesOpenCreateFromHeader");
+  }
+
+  async modulesOpenCreateFromEmpty(): Promise<void> {
+    return todo("modulesOpenCreateFromEmpty");
+  }
+
+  async modulesDialogOpen(): Promise<boolean> {
+    return todo("modulesDialogOpen");
+  }
+
+  async modulesDialogHasProjectPicker(): Promise<boolean> {
+    return todo("modulesDialogHasProjectPicker");
+  }
+
+  async modulesDialogProjectOptions(): Promise<string[]> {
+    return todo("modulesDialogProjectOptions");
+  }
+
+  async modulesDialogPickProject(_name: string): Promise<void> {
+    return todo("modulesDialogPickProject");
+  }
+
+  async modulesDialogTitle(): Promise<string> {
+    return todo("modulesDialogTitle");
+  }
+
+  async modulesDialogFillTitle(_text: string): Promise<void> {
+    return todo("modulesDialogFillTitle");
+  }
+
+  async modulesDialogTitleError(): Promise<string | null> {
+    return todo("modulesDialogTitleError");
+  }
+
+  async modulesDialogDescription(): Promise<string> {
+    return todo("modulesDialogDescription");
+  }
+
+  async modulesDialogFillDescription(_text: string): Promise<void> {
+    return todo("modulesDialogFillDescription");
+  }
+
+  async modulesDialogStatus(): Promise<string> {
+    return todo("modulesDialogStatus");
+  }
+
+  async modulesDialogPickStatus(_label: string): Promise<void> {
+    return todo("modulesDialogPickStatus");
+  }
+
+  async modulesDialogLead(): Promise<string> {
+    return todo("modulesDialogLead");
+  }
+
+  async modulesDialogLeadOptions(): Promise<string[]> {
+    return todo("modulesDialogLeadOptions");
+  }
+
+  async modulesDialogPickLead(_label: string): Promise<void> {
+    return todo("modulesDialogPickLead");
+  }
+
+  async modulesDialogMembers(): Promise<string> {
+    return todo("modulesDialogMembers");
+  }
+
+  async modulesDialogPickMembers(_labels: string[]): Promise<void> {
+    return todo("modulesDialogPickMembers");
+  }
+
+  async modulesDialogDateRange(): Promise<string> {
+    return todo("modulesDialogDateRange");
+  }
+
+  async modulesDialogPickDateRange(_startISO: string, _endISO: string): Promise<void> {
+    return todo("modulesDialogPickDateRange");
+  }
+
+  async modulesDialogTabOrder(): Promise<(number | null)[]> {
+    return todo("modulesDialogTabOrder");
+  }
+
+  async modulesDialogProjectPickerTabIndex(): Promise<number | null> {
+    return todo("modulesDialogProjectPickerTabIndex");
+  }
+
+  async modulesDialogCancel(): Promise<void> {
+    return todo("modulesDialogCancel");
+  }
+
+  async modulesDialogEscape(): Promise<void> {
+    return todo("modulesDialogEscape");
+  }
+
+  async modulesDialogSubmitCreate(): Promise<void> {
+    return todo("modulesDialogSubmitCreate");
+  }
+
+  async modulesDialogSubmitUpdate(): Promise<void> {
+    return todo("modulesDialogSubmitUpdate");
+  }
+
+  async modulesFailNextCreate(): Promise<void> {
+    return todo("modulesFailNextCreate");
+  }
+
+  async modulesFailNextUpdate(): Promise<void> {
+    return todo("modulesFailNextUpdate");
+  }
+
+  async modulesOpenDetailMenu(): Promise<void> {
+    return todo("modulesOpenDetailMenu");
+  }
+
+  async modulesChooseDetailMenuEntry(_title: string): Promise<void> {
+    return todo("modulesChooseDetailMenuEntry");
+  }
+
+  async modulesDeleteDialog(): Promise<ModulesDeleteDialog | null> {
+    return todo("modulesDeleteDialog");
+  }
+
+  async modulesDeleteConfirm(): Promise<void> {
+    return todo("modulesDeleteConfirm");
+  }
+
+  async modulesDeleteCancel(): Promise<void> {
+    return todo("modulesDeleteCancel");
+  }
+
+  async modulesFailDeletePermission(): Promise<void> {
+    return todo("modulesFailDeletePermission");
+  }
+
+  async modulesFailNextDelete(): Promise<void> {
+    return todo("modulesFailNextDelete");
+  }
+
+  async modulesRowFacts(_name: string): Promise<ModulesRowFacts> {
+    return todo("modulesRowFacts");
   }
 }

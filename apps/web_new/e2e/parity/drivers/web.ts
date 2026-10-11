@@ -18,6 +18,8 @@ import { expect, type CDPSession, type ElementHandle, type Locator, type Page, t
 import type {
   ArchivesFilterExpression,
   ArchivesListQuery,
+  ModulesDeleteDialog,
+  ModulesRowFacts,
   AddRunnerFormState,
   AddRunnerRemotePhase,
   ArchivesArchiveDialog,
@@ -29462,5 +29464,486 @@ export class WebDriver implements ParityDriver {
       if (await this.isShown(root.getByRole("heading", { name: heading }).first())) return true;
     }
     return false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Modules dialogs, archive and archived screen (NEWFRONT-309, MOD-022..028).
+  // Same create/edit form for both modes (the project picker renders on
+  // creation only); row-menu, archive-dialog and archived-chrome reads stay
+  // on the merged archives* drivers. Observed on apps/web, never copied.
+  // ---------------------------------------------------------------------------
+
+  /** The create/edit dialog: the toast viewport also carries role="dialog". */
+  private modulesDialogRoot(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.locator('input[name="name"]') })
+      .first();
+  }
+
+  private async modulesAwaitDialog(): Promise<void> {
+    // Wait for dialog CONTENT: the root keeps a zero-size box for a while
+    // under load, so a visibility wait on the root lies.
+    await this.modulesDialogRoot().locator('input[name="name"]').waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesOpenCreateFromHeader(): Promise<void> {
+    await this.page.getByRole("button", { name: "Add Module" }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.modulesAwaitDialog();
+  }
+
+  async modulesOpenCreateFromEmpty(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: "Set your first module" })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.modulesAwaitDialog();
+  }
+
+  async modulesDialogOpen(): Promise<boolean> {
+    // Attachment, not visibility: closed dialogs unmount, while an open
+    // dialog keeps a zero-size box under load, so isVisible lies.
+    return (await this.modulesDialogRoot().locator('input[name="name"]').count()) > 0;
+  }
+
+  /** The project picker lives beside the heading (creation only). */
+  private modulesProjectPicker(): Locator {
+    return this.modulesDialogRoot().locator("h3").locator("xpath=../div[contains(@class,'h-7')]").first();
+  }
+
+  async modulesDialogHasProjectPicker(): Promise<boolean> {
+    return (await this.modulesProjectPicker().count()) > 0;
+  }
+
+  async modulesDialogProjectOptions(): Promise<string[]> {
+    await this.modulesProjectPicker().getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    const options = this.page.getByRole("option");
+    await options.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    const names = (await options.allInnerTexts()).map((text) => text.trim()).filter((text) => text.length > 0);
+    await this.page.keyboard.press("Escape");
+    return names;
+  }
+
+  async modulesDialogPickProject(name: string): Promise<void> {
+    await this.modulesProjectPicker().getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option", { name }).first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.modulesProjectPicker().innerText(), { timeout: WebDriver.OPEN_MS }).toContain(name);
+  }
+
+  async modulesDialogTitle(): Promise<string> {
+    return this.modulesDialogRoot().locator('input[name="name"]').inputValue();
+  }
+
+  async modulesDialogFillTitle(text: string): Promise<void> {
+    await this.modulesDialogRoot().locator('input[name="name"]').fill(text);
+  }
+
+  async modulesDialogTitleError(): Promise<string | null> {
+    const error = this.modulesDialogRoot().locator("span.text-danger-primary").first();
+    if ((await error.count()) === 0) return null;
+    const text = (await error.innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async modulesDialogDescription(): Promise<string> {
+    return this.modulesDialogRoot().locator('textarea[name="description"]').inputValue();
+  }
+
+  async modulesDialogFillDescription(text: string): Promise<void> {
+    await this.modulesDialogRoot().locator('textarea[name="description"]').fill(text);
+  }
+
+  /** The four inline controls (dates, status, lead, members) in DOM order. */
+  private modulesInlineControls(): Locator {
+    return this.modulesDialogRoot().locator("div.flex.flex-wrap.items-center.gap-2 > *");
+  }
+
+  async modulesDialogStatus(): Promise<string> {
+    return (await this.modulesInlineControls().nth(1).innerText({ timeout: WebDriver.OPEN_MS })).trim();
+  }
+
+  async modulesDialogPickStatus(label: string): Promise<void> {
+    await this.modulesInlineControls().nth(1).getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option", { name: label }).first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.modulesDialogStatus(), { timeout: WebDriver.OPEN_MS }).toContain(label);
+  }
+
+  /** Member options render in a portal; exactly one picker opens at a time. */
+  private modulesMemberOptions(): Locator {
+    return this.page.getByRole("option");
+  }
+
+  private async modulesOpenLeadPicker(): Promise<void> {
+    await this.modulesInlineControls().nth(2).getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.modulesMemberOptions().first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  // Innermost option label: Headless wraps the option content in an
+  // outer span.truncate (avatar plus label), so the first match reads
+  // "PYou" instead of "You"; the last match is the label itself. The
+  // evaluates below inline this (they cannot close over statics).
+  private static modulesEscapeRegExp(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  /** Options whose inner label reads exactly `label`. */
+  private modulesMemberOption(label: string): Locator {
+    const exact = new RegExp(`^${WebDriver.modulesEscapeRegExp(label)}$`);
+    return this.modulesMemberOptions().filter({ has: this.page.locator("span.truncate", { hasText: exact }) });
+  }
+
+  async modulesDialogLead(): Promise<string> {
+    await this.modulesOpenLeadPicker();
+    const labels = await this.page.evaluate(() => {
+      const picked: string[] = [];
+      document.querySelectorAll('[role="option"][aria-selected="true"]').forEach((option) => {
+        const spans = option.querySelectorAll("span.truncate");
+        const text = spans[spans.length - 1]?.textContent?.trim() ?? option.textContent?.trim() ?? "";
+        if (text !== "") picked.push(text);
+      });
+      return picked;
+    });
+    await this.page.keyboard.press("Escape");
+    return labels[0] ?? "Lead";
+  }
+
+  async modulesDialogLeadOptions(): Promise<string[]> {
+    await this.modulesOpenLeadPicker();
+    const names = await this.modulesMemberOptions().evaluateAll((options) =>
+      options.map((option) => {
+        const spans = option.querySelectorAll("span.truncate");
+        return spans[spans.length - 1]?.textContent?.trim() ?? option.textContent?.trim() ?? "";
+      })
+    );
+    await this.page.keyboard.press("Escape");
+    return names.filter((name) => name.length > 0);
+  }
+
+  async modulesDialogPickLead(label: string): Promise<void> {
+    await this.modulesOpenLeadPicker();
+    await this.modulesMemberOption(label).first().click({ timeout: WebDriver.OPEN_MS });
+    // Single-select closes on pick; the portal detaches with it.
+    await this.modulesMemberOptions()
+      .first()
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS })
+      .catch(() => undefined);
+  }
+
+  private async modulesOpenMembersPicker(): Promise<void> {
+    await this.modulesInlineControls().nth(3).getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.modulesMemberOptions().first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDialogMembers(): Promise<string> {
+    await this.modulesOpenMembersPicker();
+    const labels = await this.page.evaluate(() => {
+      const picked: string[] = [];
+      document.querySelectorAll('[role="option"][aria-selected="true"]').forEach((option) => {
+        const spans = option.querySelectorAll("span.truncate");
+        const text = spans[spans.length - 1]?.textContent?.trim() ?? option.textContent?.trim() ?? "";
+        if (text !== "") picked.push(text);
+      });
+      return picked;
+    });
+    await this.page.keyboard.press("Escape");
+    return labels.length > 0 ? labels.join(", ") : "Members";
+  }
+
+  async modulesDialogPickMembers(labels: string[]): Promise<void> {
+    await this.modulesOpenMembersPicker();
+    for (const label of labels) {
+      await this.modulesMemberOption(label).first().click({ timeout: WebDriver.OPEN_MS });
+    }
+    // Multiple-select stays open; Escape applies and dismisses.
+    await this.page.keyboard.press("Escape");
+    await this.modulesMemberOptions()
+      .first()
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS })
+      .catch(() => undefined);
+  }
+
+  async modulesDialogDateRange(): Promise<string> {
+    return (await this.modulesInlineControls().nth(0).innerText({ timeout: WebDriver.OPEN_MS })).trim();
+  }
+
+  /** Day-picker accessible name for a date ("Wednesday, October 7th, 2026"). */
+  private static modulesDayLabel(date: Date): string {
+    const weekday = date.toLocaleString("en-US", { weekday: "long" });
+    const month = date.toLocaleString("en-US", { month: "long" });
+    const day = date.getDate();
+    const tens = day % 100;
+    const suffix =
+      tens >= 11 && tens <= 13 ? "th" : day % 10 === 1 ? "st" : day % 10 === 2 ? "nd" : day % 10 === 3 ? "rd" : "th";
+    return `${weekday}, ${month} ${day}${suffix}, ${date.getFullYear()}`;
+  }
+
+  async modulesDialogPickDateRange(startISO: string, endISO: string): Promise<void> {
+    await this.modulesInlineControls().nth(0).getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    for (const iso of [startISO, endISO]) {
+      const target = new Date(`${iso}T12:00:00`);
+      const calendar = this.page.locator("div.rdp-root").first();
+      await calendar.waitFor({ timeout: WebDriver.OPEN_MS });
+      await calendar
+        .locator('select[aria-label="Choose the Month"]')
+        .selectOption({ label: target.toLocaleString("en-US", { month: "long" }) });
+      await calendar
+        .locator('select[aria-label="Choose the Year"]')
+        .selectOption({ label: String(target.getFullYear()) });
+      await calendar
+        .getByRole("button", { name: WebDriver.modulesDayLabel(target), exact: true })
+        .click({ timeout: WebDriver.OPEN_MS });
+    }
+    await this.page.keyboard.press("Escape");
+  }
+
+  async modulesDialogTabOrder(): Promise<(number | null)[]> {
+    return this.modulesDialogRoot().evaluate((dialog) => {
+      const asInt = (raw: string | null | undefined): number | null => {
+        if (raw === null || raw === undefined) return null;
+        const parsed = Number.parseInt(raw, 10);
+        return Number.isNaN(parsed) ? null : parsed;
+      };
+      const at = (selector: string): number | null => asInt(dialog.querySelector(selector)?.getAttribute("tabindex"));
+      const controls = [...dialog.querySelectorAll("div.flex.flex-wrap.items-center.gap-2 > *")];
+      const controlTab = (index: number): number | null => {
+        // The status control carries its tab index on a wrapper, the
+        // others on their trigger buttons. Inner tabindex="-1"
+        // scaffolding never takes sequential focus, so it is skipped:
+        // first non-negative tabindex wins, else null.
+        const tagged = [...(controls[index]?.querySelectorAll("[tabindex]") ?? [])];
+        for (const element of tagged) {
+          const value = asInt(element.getAttribute("tabindex"));
+          if (value !== null && value >= 0) return value;
+        }
+        return null;
+      };
+      const cancel = [...dialog.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Cancel");
+      const submit = [...dialog.querySelectorAll('button[type="submit"]')][0];
+      return [
+        at('input[name="name"]'),
+        at('textarea[name="description"]'),
+        controlTab(0),
+        controlTab(1),
+        controlTab(2),
+        controlTab(3),
+        asInt(cancel?.getAttribute("tabindex")),
+        asInt(submit?.getAttribute("tabindex")),
+      ];
+    });
+  }
+
+  async modulesDialogProjectPickerTabIndex(): Promise<number | null> {
+    const raw = await this.modulesProjectPicker()
+      .getByRole("button")
+      .first()
+      .getAttribute("tabindex")
+      .catch(() => null);
+    if (raw === null) return null;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
+  async modulesDialogCancel(): Promise<void> {
+    await this.modulesDialogRoot().getByRole("button", { name: "Cancel" }).click({ timeout: WebDriver.OPEN_MS });
+    await this.modulesDialogRoot().waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDialogEscape(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.modulesDialogRoot().waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  private async modulesSubmit(label: "Create Module" | "Update Module"): Promise<void> {
+    await this.modulesDialogRoot().getByRole("button", { name: label }).click({ timeout: WebDriver.OPEN_MS });
+    // Settle on whichever outcome the submit takes: the dialog closing
+    // (saved), a toast (saved or the write refused), or an inline title
+    // error (client-side validation refused).
+    await expect
+      .poll(
+        async () =>
+          !(await this.modulesDialogOpen()) ||
+          (await this.rulesLastToast()) !== null ||
+          (await this.modulesDialogTitleError()) !== null,
+        { timeout: 60_000 }
+      )
+      .toBe(true);
+  }
+
+  async modulesDialogSubmitCreate(): Promise<void> {
+    await this.modulesSubmit("Create Module");
+  }
+
+  async modulesDialogSubmitUpdate(): Promise<void> {
+    await this.modulesSubmit("Update Module");
+  }
+
+  async modulesFailNextCreate(): Promise<void> {
+    // Closure-armed, not times:1: the list GETs share this path, and a
+    // pass-through read would consume a times budget meant for the write.
+    let armed = true;
+    await this.page.route(
+      (url) => url.pathname.endsWith("/modules/") && url.pathname.includes("/projects/"),
+      (route) => {
+        if (armed && route.request().method() === "POST") {
+          armed = false;
+          return route.abort();
+        }
+        return route.continue();
+      }
+    );
+  }
+
+  async modulesFailNextUpdate(): Promise<void> {
+    // Closure-armed: detail GETs share this path (see above).
+    let armed = true;
+    await this.page.route(
+      (url) => /\/modules\/[0-9a-fA-F-]{36}\/$/.test(url.pathname),
+      (route) => {
+        const write = route.request().method() === "PATCH" || route.request().method() === "PUT";
+        if (armed && write) {
+          armed = false;
+          return route.abort();
+        }
+        return route.continue();
+      }
+    );
+  }
+
+  async modulesOpenDetailMenu(): Promise<void> {
+    // The detail header holds several dropdown triggers; only the module
+    // quick-actions menu carries Delete plus the archive/restore entry,
+    // so open each visible trigger in reverse DOM order (quick actions
+    // sits last) until those entries show.
+    const triggers = this.page.locator('div[data-main-menu="true"] > button');
+    await triggers.first().waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    const total = await triggers.count();
+    for (let index = total - 1; index >= 0; index -= 1) {
+      const trigger = triggers.nth(index);
+      if (!(await trigger.isVisible().catch(() => false))) continue;
+      await trigger.click({ timeout: WebDriver.OPEN_MS });
+      const items = this.page.getByRole("menuitem");
+      const opened = await items
+        .first()
+        .waitFor({ state: "visible", timeout: 3_000 })
+        .then(
+          () => true,
+          () => false
+        );
+      if (opened) {
+        const titles = await items
+          .locator("h5")
+          .allInnerTexts()
+          .catch(() => [] as string[]);
+        const names = titles.map((title) => title.trim());
+        if (names.includes("Delete") && (names.includes("Archive") || names.includes("Restore"))) return;
+      }
+      await this.page.keyboard.press("Escape");
+    }
+    throw new Error("[parity] module detail menu with a Delete entry not found.");
+  }
+
+  async modulesChooseDetailMenuEntry(title: string): Promise<void> {
+    const item = this.page.locator('[role="menuitem"]:visible', { has: this.page.locator("h5", { hasText: title }) });
+    await item.waitFor({ timeout: WebDriver.OPEN_MS });
+    if ((await item.locator("button").count()) > 0) {
+      await item.locator("button").click({ timeout: WebDriver.OPEN_MS });
+    } else {
+      await item.click({ timeout: WebDriver.OPEN_MS });
+    }
+  }
+
+  private modulesDeleteDialogRoot(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Delete module" }).first();
+  }
+
+  async modulesDeleteDialog(): Promise<ModulesDeleteDialog | null> {
+    const dialog = this.modulesDeleteDialogRoot();
+    // The modal mounts a beat after the menu click; wait briefly so a
+    // genuine dialog is never missed, then report absence honestly.
+    await dialog.waitFor({ timeout: 3000 }).catch(() => undefined);
+    if ((await dialog.count()) === 0) return null;
+    const heading = (
+      ((await dialog
+        .locator("h3")
+        .first()
+        .textContent()
+        .catch(() => "")) ?? "") as string
+    ).trim();
+    if (heading === "") return null;
+    const body = (
+      ((await dialog
+        .locator("xpath=.//h3/following-sibling::div[1]")
+        .textContent()
+        .catch(() => "")) ?? "") as string
+    ).trim();
+    return { heading, body };
+  }
+
+  async modulesDeleteConfirm(): Promise<void> {
+    const dialog = this.modulesDeleteDialogRoot();
+    // Attach before clicking: an instantly-fulfilled write (failure
+    // shaping) would otherwise complete before the wait exists. Returns
+    // once the write lands; callers read the toast immediately.
+    const responded = this.page
+      .waitForResponse((response) => response.request().method() === "DELETE" && response.url().includes("/modules/"), {
+        timeout: WebDriver.OPEN_MS,
+      })
+      .catch(() => null);
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    await responded;
+  }
+
+  async modulesDeleteCancel(): Promise<void> {
+    const dialog = this.modulesDeleteDialogRoot();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesFailDeletePermission(): Promise<void> {
+    // Page-scoped: fulfills the permission refusal the server returns for
+    // forbidden deletes, passing every other request through untouched.
+    await this.page.route("**/modules/*/", async (route) => {
+      if (route.request().method() === "DELETE") {
+        await route.fulfill({
+          status: 403,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "You don't have the required permissions." }),
+        });
+      } else {
+        await route.continue();
+      }
+    });
+  }
+
+  async modulesFailNextDelete(): Promise<void> {
+    // Closure-armed: detail GETs share this path (see above).
+    let armed = true;
+    await this.page.route(
+      (url) => /\/modules\/[0-9a-fA-F-]{36}\/$/.test(url.pathname),
+      (route) => {
+        if (armed && route.request().method() === "DELETE") {
+          armed = false;
+          return route.abort();
+        }
+        return route.continue();
+      }
+    );
+  }
+
+  async modulesRowFacts(name: string): Promise<ModulesRowFacts> {
+    const facts = await this.page.evaluate((rowName: string) => {
+      const main = document.querySelector("main");
+      const anchors = [...(main?.querySelectorAll('a[href*="/modules/"]') ?? [])];
+      for (const anchor of anchors) {
+        const href = anchor.getAttribute("href") ?? "";
+        if (!/\/modules\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(href)) continue;
+        if ((anchor.querySelector("span.truncate")?.textContent?.trim() ?? "") !== rowName) continue;
+        const row = anchor.closest("div.group") ?? anchor.parentElement;
+        return { href, hasPeek: row?.querySelector("button") !== null };
+      }
+      return null;
+    }, name);
+    if (facts === null) throw new Error(`[parity] module row never rendered ${JSON.stringify(name)}.`);
+    return { nameHref: facts.href, hasPeek: facts.hasPeek };
   }
 }
