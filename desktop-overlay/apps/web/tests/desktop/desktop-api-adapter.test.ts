@@ -1,6 +1,6 @@
 import axios from "axios";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getDesktopApiAdapter } from "../../../../packages/services/src/desktop-api-adapter";
+import { DesktopTransportError, getDesktopApiAdapter } from "../../../../packages/services/src/desktop-api-adapter";
 
 const api = "https://api.example.test";
 const invoke = vi.fn();
@@ -38,8 +38,21 @@ beforeEach(() => {
 });
 afterEach(() => {
   delete (window as any).__PIDASH_NATIVE_HTTP__;
+  delete (window as any).__PIDASH_NATIVE_SESSION__;
   delete (window as any).__TAURI__;
 });
+
+// Runs `run` with the webview's own adapter replaced by a spy.
+async function withBrowserAdapter(run: (browser: ReturnType<typeof vi.fn>) => Promise<void>) {
+  const browser = vi.fn(async (config) => ({ data: "browser", status: 200, statusText: "OK", headers: {}, config }));
+  const previous = axios.defaults.adapter;
+  axios.defaults.adapter = browser;
+  try {
+    await run(browser);
+  } finally {
+    axios.defaults.adapter = previous;
+  }
+}
 
 describe("desktop API cookie transport", () => {
   it("leaves browsers and older desktop binaries on their normal adapter", () => {
@@ -84,7 +97,7 @@ describe("desktop API cookie transport", () => {
     expect(sent().body).toHaveLength(0);
   });
 
-  it("rejects HTTP auth errors so existing refresh interceptors can replay requests", async () => {
+  it("rejects HTTP auth errors with their response", async () => {
     invoke.mockResolvedValueOnce(response(401, { detail: "expired" }));
     await expect(client().get("/api/users/me/")).rejects.toMatchObject({
       isAxiosError: true,
@@ -140,12 +153,92 @@ describe("desktop API cookie transport", () => {
     expect(sent().request.timeoutMs).toBe(5000);
   });
 
+  describe("in the bundled app", () => {
+    beforeEach(() => {
+      (window as any).__PIDASH_NATIVE_SESSION__ = { refresh: false, strict: true };
+    });
+
+    // PIDESKAPP-7: the bundle was baked against one server and the binary
+    // compiled for another, so no API request matches the native allowlist.
+    it("fails a credentialed request to another origin instead of sending it without cookies", async () => {
+      await withBrowserAdapter(async (browser) => {
+        const baked = axios.create({
+          baseURL: "http://localhost:8000",
+          withCredentials: true,
+          adapter: getDesktopApiAdapter(),
+        });
+        const error = await baked.get("/api/users/me/", { params: { code: "secret" } }).catch((caught) => caught);
+        expect(error).toBeInstanceOf(DesktopTransportError);
+        expect(error.name).toBe("DesktopTransportError");
+        expect(error.requestOrigin).toBe("http://localhost:8000");
+        expect(error.apiOrigin).toBe(api);
+        expect(error.message).toContain("http://localhost:8000/api/users/me/");
+        expect(error.message).toContain(`configured API origin: ${api}`);
+        expect(error.message).not.toContain("secret");
+        expect(browser).not.toHaveBeenCalled();
+        expect(invoke).not.toHaveBeenCalled();
+      });
+    });
+
+    it("fails a credentialed request to a path the native transport does not serve", async () => {
+      await withBrowserAdapter(async (browser) => {
+        const credentialed = axios.create({ baseURL: api, withCredentials: true, adapter: getDesktopApiAdapter() });
+        await expect(credentialed.get("/uploads/file.png")).rejects.toBeInstanceOf(DesktopTransportError);
+        expect(browser).not.toHaveBeenCalled();
+      });
+    });
+
+    it("still sends uploads and other uncredentialed requests through the webview", async () => {
+      await withBrowserAdapter(async (browser) => {
+        const credentialed = axios.create({ baseURL: api, withCredentials: true, adapter: getDesktopApiAdapter() });
+        await credentialed.post("https://storage.example.test/upload", "file", { withCredentials: false });
+        await credentialed.post(`${api}/uploads`, "file", { withCredentials: false });
+        await axios.create({ adapter: getDesktopApiAdapter() }).get("https://cdn.example.test/emoji.json");
+        expect(browser).toHaveBeenCalledTimes(3);
+        expect(invoke).not.toHaveBeenCalled();
+      });
+    });
+
+    it("still sends API requests natively", async () => {
+      const credentialed = axios.create({ baseURL: api, withCredentials: true, adapter: getDesktopApiAdapter() });
+      await expect(credentialed.get("/api/users/me/")).resolves.toMatchObject({ data: { id: "user-1" } });
+      expect(sent().request.url).toBe(`${api}/api/users/me/`);
+    });
+  });
+
+  // Hot-reload: the page is served by the server host, so the webview's own
+  // networking is first-party there and stays available.
+  it("keeps the webview fallback for credentialed requests outside the bundled app", async () => {
+    (window as any).__PIDASH_NATIVE_SESSION__ = { refresh: false, strict: false };
+    await withBrowserAdapter(async (browser) => {
+      const dev = axios.create({
+        baseURL: "http://localhost:8000",
+        withCredentials: true,
+        adapter: getDesktopApiAdapter(),
+      });
+      await expect(dev.get("/api/users/me/")).resolves.toMatchObject({ data: "browser" });
+      expect(browser).toHaveBeenCalledOnce();
+    });
+  });
+
   it("treats transport failures as network errors, without inventing a 401", async () => {
     invoke.mockRejectedValue("API request failed");
     const error = await client()
       .get("/api/users/me/")
       .catch((caught) => caught);
     expect(error.code).toBe("ERR_NETWORK");
+    expect(error.response).toBeUndefined();
+  });
+
+  // What the transport reports when its own session refresh fails for a
+  // transient reason: an error with no status, so nothing reads it as a 401.
+  it("reports a failed native session refresh as a network error", async () => {
+    invoke.mockRejectedValue("session refresh failed");
+    const error = await client()
+      .get("/api/users/me/")
+      .catch((caught) => caught);
+    expect(error.code).toBe("ERR_NETWORK");
+    expect(error.message).toBe("session refresh failed");
     expect(error.response).toBeUndefined();
   });
 });

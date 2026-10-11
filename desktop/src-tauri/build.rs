@@ -8,6 +8,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=VITE_WEB_BASE_URL");
     println!("cargo:rerun-if-env-changed=PI_DASH_OSS_SHA");
     println!("cargo:rerun-if-env-changed=PIDASH_DESKTOP_EXTERNAL_SIGNIN");
+    println!("cargo:rerun-if-env-changed=PIDASH_DESKTOP_SESSION_REFRESH_PATH");
+    // Read by main.rs via option_env!, like PIDASH_DESKTOP_HOT_RELOAD below.
+    println!("cargo:rerun-if-env-changed=PIDASH_DESKTOP_CSP_CONNECT_SRC");
     // PIDASH_DESKTOP_HOT_RELOAD is read by main.rs via option_env! at
     // compile time, not by build.rs. Re-declaring it here makes Cargo
     // invalidate the crate (not just build.rs) when the env toggles, so
@@ -22,6 +25,16 @@ fn main() {
         && url::Url::parse(&url).is_err()
     {
         panic!("PI_DASH_URL is set but is not a valid absolute URL: {url}");
+    }
+
+    // main.rs reads this with option_env! and hands it to the native API
+    // transport, which only talks to /api/ and /auth/ on the API origin.
+    if let Ok(path) = std::env::var("PIDASH_DESKTOP_SESSION_REFRESH_PATH")
+        && !(path.is_empty() || path.starts_with("/api/") || path.starts_with("/auth/"))
+    {
+        panic!(
+            "PIDASH_DESKTOP_SESSION_REFRESH_PATH must be a path under /api/ or /auth/, got {path:?}"
+        );
     }
 
     // Embed a yes/no flag for main.rs: is dist/ a real SPA bundle, or
