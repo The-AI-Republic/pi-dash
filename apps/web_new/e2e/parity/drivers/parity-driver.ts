@@ -6567,6 +6567,184 @@ export interface ParityDriver {
 
   /** Refuse whole-system deletes behind the dialog's back (failure-path spy). */
   estimatesEditDeleteFailEstimateDelete(): Promise<void>;
+
+  // --- NEWFRONT-310 (module detail/analytics/links, MOD-029-035).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. Layout switching itself reuses the layouts*
+  // --- methods (Issues area), empty states reuse layoutsEmpty* plus
+  // --- the add-existing picker methods, and the peek entry reuses
+  // --- archivesOpenLiveModulePeek; these cover the module-detail host:
+  // --- breadcrumb plus switcher, badge, header actions, the analytics
+  // --- sidebar (fields, progress, links) wherever it renders.
+
+  /** Module name shown in the analytics sidebar, or null when absent. */
+  modulesDetailSidebarName(): Promise<string | null>;
+  /** Header work-item count badge text, or null when no badge renders. */
+  modulesDetailBadgeText(): Promise<string | null>;
+  /** Explanatory tooltip of the count badge, or null when none shows. */
+  modulesDetailBadgeTooltip(): Promise<string | null>;
+  /** Browser tab title of the module detail page. */
+  modulesDetailPageTitle(): Promise<string>;
+  /** Breadcrumb labels in display order (project, Modules, switcher). */
+  modulesDetailCrumbs(): Promise<string[]>;
+  /** Follow the Modules crumb; the caller polls the address. */
+  modulesDetailClickModulesCrumb(): Promise<void>;
+  /** Follow the project crumb; the caller polls the address. */
+  modulesDetailClickProjectCrumb(projectName: string): Promise<void>;
+  /** Open the header module switcher; resolves once options render. */
+  modulesDetailSwitcherOpen(): Promise<void>;
+  /** Module names the open switcher offers, in display order. */
+  modulesDetailSwitcherOptions(): Promise<string[]>;
+  /** Search the open switcher; resolves once options settle. */
+  modulesDetailSwitcherSearch(text: string): Promise<void>;
+  /** Pick a module in the open switcher; resolves once the header shows it. */
+  modulesDetailSwitcherPick(name: string): Promise<void>;
+  /** Unknown-module empty-state title, or null when the page renders. */
+  modulesDetailUnknownTitle(): Promise<string | null>;
+  /** Follow the unknown-module empty state back to the modules list. */
+  modulesDetailUnknownBack(): Promise<void>;
+  /**
+   * Switch layouts through the desktop header switcher; resolves once
+   * the header marker shows the layout (marker wait: the sidebar's own
+   * labels trip the shared container heuristics, same as cycles).
+   */
+  modulesDetailSwitchLayout(layout: LayoutsLayoutKey): Promise<void>;
+  /** Whether the work-item filter toggle renders in the header. */
+  modulesDetailFilterToggleVisible(): Promise<boolean>;
+  /** Group-by entries of the open Display panel with disabled states. */
+  modulesDetailDisplayGroupedOptions(): Promise<ModulesDetailGroupedOption[]>;
+  /** Layout keys the small-screen layout menu offers, in display order. */
+  modulesDetailMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]>;
+  /** Switch layout through the small-screen menu; resolves once applied. */
+  modulesDetailMobileSwitchTo(layout: LayoutsLayoutKey): Promise<void>;
+  /** Whether the small-screen bar offers Display. */
+  modulesDetailMobileDisplayVisible(): Promise<boolean>;
+  /** Whether the small-screen bar offers a filter toggle. */
+  modulesDetailMobileFilterToggleVisible(): Promise<boolean>;
+  /** Whether the header work-item creation button is visible. */
+  modulesDetailHeaderAddVisible(): Promise<boolean>;
+  /** Click the header work-item creation button. */
+  modulesDetailHeaderAddClick(): Promise<void>;
+  /** Fail module-issues add writes on this page (failure-notice proof). */
+  modulesDetailFailNextIssuesAdd(): Promise<void>;
+  /** Search the open add-existing picker; resolves once options settle. */
+  modulesDetailPickerSearch(text: string): Promise<void>;
+  /** Whether the header Analytics shortcut is visible. */
+  modulesDetailAnalyticsVisible(): Promise<boolean>;
+  /** Open the Analytics dialog; resolves once it renders. */
+  modulesDetailOpenAnalytics(): Promise<void>;
+  /** Whether the Analytics dialog is currently rendered. */
+  modulesDetailAnalyticsDialogVisible(): Promise<boolean>;
+  /** Dismiss the Analytics dialog; resolves once it detaches. */
+  modulesDetailDismissAnalytics(): Promise<void>;
+  /** Click the header sidebar toggle; resolves once the click lands. */
+  modulesDetailToggleSidebar(): Promise<void>;
+  /** Whether the analytics sidebar currently renders. */
+  modulesDetailSidebarVisible(): Promise<boolean>;
+  /** Stored sidebar-collapsed flag for this browser (persistence proof). */
+  modulesDetailSidebarCollapsedStored(): Promise<boolean>;
+  /** Click the sidebar's own close control; resolves once the click lands. */
+  modulesDetailCloseSidebarViaPanel(): Promise<void>;
+  /** Open Analytics from the small-screen bar; resolves once it renders. */
+  modulesDetailMobileOpenAnalytics(): Promise<void>;
+  /** Sidebar status pill text, or null when the sidebar is absent. */
+  modulesDetailSidebarStatus(): Promise<string | null>;
+  /** Pick a sidebar status; resolves once the pill shows it. */
+  modulesDetailSidebarSetStatus(status: string): Promise<void>;
+  /** Sidebar description text, or null when none renders. */
+  modulesDetailSidebarDescription(): Promise<string | null>;
+  /** Sidebar date control text (the rendered range). */
+  modulesDetailSidebarDateText(): Promise<string>;
+  /** Whether the sidebar date control refuses edits. */
+  modulesDetailSidebarDateDisabled(): Promise<boolean>;
+  /** Open the sidebar date picker; resolves once the calendar renders. */
+  modulesDetailSidebarOpenDatePicker(): Promise<void>;
+  /** Pick one calendar day by its accessible date label. */
+  modulesDetailPickDateDay(label: string): Promise<void>;
+  /** Dismiss the sidebar date picker; resolves once it detaches. */
+  modulesDetailDismissDatePicker(): Promise<void>;
+  /** Sidebar lead row value (live: avatar initial plus placeholder), or null when none renders. */
+  modulesDetailSidebarLead(): Promise<string | null>;
+  /** Pick the sidebar lead; resolves once the row shows them. */
+  modulesDetailSidebarSetLead(name: string): Promise<void>;
+  /** Sidebar member avatar initials in display order (live shows no names). */
+  modulesDetailSidebarMembers(): Promise<string[]>;
+  /** Add one sidebar member; resolves once the row shows them. */
+  modulesDetailSidebarAddMember(name: string): Promise<void>;
+  /** Whether the sidebar status control refuses edits. */
+  modulesDetailSidebarStatusDisabled(): Promise<boolean>;
+  /** Whether the sidebar lead control refuses edits. */
+  modulesDetailSidebarLeadDisabled(): Promise<boolean>;
+  /** Whether the sidebar members control refuses edits. */
+  modulesDetailSidebarMembersDisabled(): Promise<boolean>;
+  /** Sidebar Work-items count text (e.g. "0/3", "0 work items"). */
+  modulesDetailSidebarWorkItemsText(): Promise<string>;
+  /** Sidebar Points count text, or null when the row is absent. */
+  modulesDetailSidebarPointsText(): Promise<string | null>;
+  /** Reload with the detail fetch delayed; true when the loader shows. */
+  modulesDetailSlowFetchShowsLoader(): Promise<boolean>;
+  /** Whether the progress section renders expanded. */
+  modulesDetailProgressOpen(): Promise<boolean>;
+  /** Progress header percent, or null when no badge renders. */
+  modulesDetailProgressHeaderPercent(): Promise<number | null>;
+  /** Progress inactive/invalid notice, or null when the chart branch renders. */
+  modulesDetailProgressNotice(): Promise<string | null>;
+  /** Whether the sidebar progress chart renders. */
+  modulesDetailProgressChartVisible(): Promise<boolean>;
+  /** Current plot-measure label, or null when the dropdown is absent. */
+  modulesDetailProgressMeasureValue(): Promise<string | null>;
+  /** Plot-measure options in display order (absent dropdown reads empty). */
+  modulesDetailProgressMeasureOptions(): Promise<string[]>;
+  /** Pick a plot measure; resolves with the module detail GETs it fired. */
+  modulesDetailMeasureSwitchGetCount(label: string): Promise<number>;
+  /** Open a progress breakdown tab; resolves once it selects. */
+  modulesDetailProgressStatsTab(tab: "States" | "Assignees" | "Labels"): Promise<void>;
+  /** Title of the currently selected breakdown tab. */
+  modulesDetailActiveStatsTab(): Promise<string>;
+  /** Rows of the selected breakdown tab (title, percent, total). */
+  modulesDetailProgressStatsRows(): Promise<ModulesDetailStatRow[]>;
+  /** Click a breakdown entry; the caller polls the narrowed list. */
+  modulesDetailProgressEntryClick(title: string): Promise<void>;
+  /** Whether a breakdown entry is clickable (detail once the filter instance loads; never in peek). */
+  modulesDetailProgressEntryClickable(title: string): Promise<boolean>;
+  /** Whether a breakdown entry shows selected (its filter condition is active). */
+  modulesDetailProgressEntrySelected(title: string): Promise<boolean>;
+  /** Whether the links section renders expanded. */
+  modulesDetailLinksOpen(): Promise<boolean>;
+  /** Toggle the links section; resolves once the click lands. */
+  modulesDetailLinksToggle(): Promise<void>;
+  /** Links no-links notice, or null when link rows render. */
+  modulesDetailLinksEmptyNotice(): Promise<string | null>;
+  /** Whether the links add action is visible. */
+  modulesDetailLinksAddVisible(): Promise<boolean>;
+  /** Click the links add action; resolves once the dialog renders. */
+  modulesDetailLinksAddClick(): Promise<void>;
+  /** Link rows in display order (title, url, target). */
+  modulesDetailLinksRows(): Promise<ModulesDetailLinkRow[]>;
+  /** Whether the add/update link dialog is currently rendered. */
+  modulesDetailLinkDialogOpen(): Promise<boolean>;
+  /** Add/update link dialog heading, or null when no dialog renders. */
+  modulesDetailLinkDialogTitle(): Promise<string | null>;
+  /** Fill the link dialog URL field. */
+  modulesDetailLinkFillUrl(url: string): Promise<void>;
+  /** Fill the link dialog display-title field. */
+  modulesDetailLinkFillTitle(title: string): Promise<void>;
+  /** Submit the link dialog; resolves once the click lands. */
+  modulesDetailLinkSubmit(): Promise<void>;
+  /** Whether the link-dialog URL field shows invalid (failed required check). */
+  modulesDetailLinkUrlInvalid(): Promise<boolean>;
+  /** Cancel the link dialog; resolves once it detaches. */
+  modulesDetailLinkCancel(): Promise<void>;
+  /** Copy the named link's URL; resolves once the click lands. */
+  modulesDetailLinkCopy(title: string): Promise<void>;
+  /** Open the named link for editing; resolves once the dialog renders. */
+  modulesDetailLinkEdit(title: string): Promise<void>;
+  /** Delete the named link; resolves once the click lands. */
+  modulesDetailLinkDelete(title: string): Promise<void>;
+  /** Relative-age line of the named link, or null when it is absent. */
+  modulesDetailLinkMeta(title: string): Promise<string | null>;
+  /** Fail module-links writes on this page (failure-notice proof). */
+  modulesDetailFailNextLinkWrite(): Promise<void>;
 }
 
 /** Pages list tabs as the row-actions scenarios address them (NEWFRONT-313). */
@@ -7875,4 +8053,32 @@ export interface EstimatesActiveRow {
   name: string;
   /** Joined value preview as rendered. */
   values: string;
+}
+
+/** One selected progress-breakdown row (NEWFRONT-310, MOD-034). */
+export interface ModulesDetailStatRow {
+  /** Row title (state group, assignee, or label). */
+  title: string;
+  /** Whole percent the row shows. */
+  percent: number;
+  /** Denominator the row shows ("of N"). */
+  total: number;
+}
+
+/** One module link row (NEWFRONT-310, MOD-035). */
+export interface ModulesDetailLinkRow {
+  /** Rendered title (display title, or the URL when untitled). */
+  title: string;
+  /** Link target URL. */
+  url: string;
+  /** Anchor target attribute (new-tab proof). */
+  target: string;
+}
+
+/** One Display-panel group-by entry (NEWFRONT-310, MOD-030). */
+export interface ModulesDetailGroupedOption {
+  /** Entry label as rendered. */
+  label: string;
+  /** Whether the entry refuses selection. */
+  disabled: boolean;
 }

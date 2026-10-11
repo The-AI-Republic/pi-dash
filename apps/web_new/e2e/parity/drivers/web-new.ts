@@ -18,6 +18,9 @@ import type {
   ArchivesPeekReadOnly,
   ArchivesTab,
   ArchivesTrafficCounts,
+  ModulesDetailGroupedOption,
+  ModulesDetailLinkRow,
+  ModulesDetailStatRow,
   ModulesMenuEntry,
   ModulesTimelineRow,
   ModulesToast,
@@ -10363,5 +10366,335 @@ export class WebNewDriver implements ParityDriver {
 
   async estimatesEditDeleteFailEstimateDelete(): Promise<void> {
     return todo("estimatesEditDeleteFailEstimateDelete");
+  }
+
+  // --- Module detail/analytics/links (NEWFRONT-310, MOD-029-035). Appended stubs.
+
+  async modulesDetailSidebarName(): Promise<string | null> {
+    return todo("modulesDetailSidebarName");
+  }
+
+  async modulesDetailBadgeText(): Promise<string | null> {
+    return todo("modulesDetailBadgeText");
+  }
+
+  async modulesDetailBadgeTooltip(): Promise<string | null> {
+    return todo("modulesDetailBadgeTooltip");
+  }
+
+  async modulesDetailPageTitle(): Promise<string> {
+    return todo("modulesDetailPageTitle");
+  }
+
+  async modulesDetailCrumbs(): Promise<string[]> {
+    return todo("modulesDetailCrumbs");
+  }
+
+  async modulesDetailClickModulesCrumb(): Promise<void> {
+    return todo("modulesDetailClickModulesCrumb");
+  }
+
+  async modulesDetailClickProjectCrumb(_projectName: string): Promise<void> {
+    return todo("modulesDetailClickProjectCrumb");
+  }
+
+  async modulesDetailSwitcherOpen(): Promise<void> {
+    return todo("modulesDetailSwitcherOpen");
+  }
+
+  async modulesDetailSwitcherOptions(): Promise<string[]> {
+    return todo("modulesDetailSwitcherOptions");
+  }
+
+  async modulesDetailSwitcherSearch(_text: string): Promise<void> {
+    return todo("modulesDetailSwitcherSearch");
+  }
+
+  async modulesDetailSwitcherPick(_name: string): Promise<void> {
+    return todo("modulesDetailSwitcherPick");
+  }
+
+  async modulesDetailUnknownTitle(): Promise<string | null> {
+    return todo("modulesDetailUnknownTitle");
+  }
+
+  async modulesDetailUnknownBack(): Promise<void> {
+    return todo("modulesDetailUnknownBack");
+  }
+
+  async modulesDetailSwitchLayout(_layout: LayoutsLayoutKey): Promise<void> {
+    return todo("modulesDetailSwitchLayout");
+  }
+
+  async modulesDetailFilterToggleVisible(): Promise<boolean> {
+    return todo("modulesDetailFilterToggleVisible");
+  }
+
+  async modulesDetailDisplayGroupedOptions(): Promise<ModulesDetailGroupedOption[]> {
+    return todo("modulesDetailDisplayGroupedOptions");
+  }
+
+  async modulesDetailMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
+    return todo("modulesDetailMobileOfferedLayouts");
+  }
+
+  async modulesDetailMobileSwitchTo(_layout: LayoutsLayoutKey): Promise<void> {
+    return todo("modulesDetailMobileSwitchTo");
+  }
+
+  async modulesDetailMobileDisplayVisible(): Promise<boolean> {
+    return todo("modulesDetailMobileDisplayVisible");
+  }
+
+  async modulesDetailMobileFilterToggleVisible(): Promise<boolean> {
+    return todo("modulesDetailMobileFilterToggleVisible");
+  }
+
+  async modulesDetailHeaderAddVisible(): Promise<boolean> {
+    return todo("modulesDetailHeaderAddVisible");
+  }
+
+  async modulesDetailHeaderAddClick(): Promise<void> {
+    return todo("modulesDetailHeaderAddClick");
+  }
+
+  async modulesDetailFailNextIssuesAdd(): Promise<void> {
+    return todo("modulesDetailFailNextIssuesAdd");
+  }
+
+  async modulesDetailPickerSearch(_text: string): Promise<void> {
+    return todo("modulesDetailPickerSearch");
+  }
+
+  async modulesDetailAnalyticsVisible(): Promise<boolean> {
+    return todo("modulesDetailAnalyticsVisible");
+  }
+
+  async modulesDetailOpenAnalytics(): Promise<void> {
+    return todo("modulesDetailOpenAnalytics");
+  }
+
+  async modulesDetailAnalyticsDialogVisible(): Promise<boolean> {
+    return todo("modulesDetailAnalyticsDialogVisible");
+  }
+
+  async modulesDetailDismissAnalytics(): Promise<void> {
+    return todo("modulesDetailDismissAnalytics");
+  }
+
+  async modulesDetailToggleSidebar(): Promise<void> {
+    return todo("modulesDetailToggleSidebar");
+  }
+
+  async modulesDetailSidebarVisible(): Promise<boolean> {
+    return todo("modulesDetailSidebarVisible");
+  }
+
+  async modulesDetailSidebarCollapsedStored(): Promise<boolean> {
+    return todo("modulesDetailSidebarCollapsedStored");
+  }
+
+  async modulesDetailCloseSidebarViaPanel(): Promise<void> {
+    return todo("modulesDetailCloseSidebarViaPanel");
+  }
+
+  async modulesDetailMobileOpenAnalytics(): Promise<void> {
+    return todo("modulesDetailMobileOpenAnalytics");
+  }
+
+  async modulesDetailSidebarStatus(): Promise<string | null> {
+    return todo("modulesDetailSidebarStatus");
+  }
+
+  async modulesDetailSidebarSetStatus(_status: string): Promise<void> {
+    return todo("modulesDetailSidebarSetStatus");
+  }
+
+  async modulesDetailSidebarDescription(): Promise<string | null> {
+    return todo("modulesDetailSidebarDescription");
+  }
+
+  async modulesDetailSidebarDateText(): Promise<string> {
+    return todo("modulesDetailSidebarDateText");
+  }
+
+  async modulesDetailSidebarDateDisabled(): Promise<boolean> {
+    return todo("modulesDetailSidebarDateDisabled");
+  }
+
+  async modulesDetailSidebarOpenDatePicker(): Promise<void> {
+    return todo("modulesDetailSidebarOpenDatePicker");
+  }
+
+  async modulesDetailPickDateDay(_label: string): Promise<void> {
+    return todo("modulesDetailPickDateDay");
+  }
+
+  async modulesDetailDismissDatePicker(): Promise<void> {
+    return todo("modulesDetailDismissDatePicker");
+  }
+
+  async modulesDetailSidebarLead(): Promise<string | null> {
+    return todo("modulesDetailSidebarLead");
+  }
+
+  async modulesDetailSidebarSetLead(_name: string): Promise<void> {
+    return todo("modulesDetailSidebarSetLead");
+  }
+
+  async modulesDetailSidebarMembers(): Promise<string[]> {
+    return todo("modulesDetailSidebarMembers");
+  }
+
+  async modulesDetailSidebarAddMember(_name: string): Promise<void> {
+    return todo("modulesDetailSidebarAddMember");
+  }
+
+  async modulesDetailSidebarStatusDisabled(): Promise<boolean> {
+    return todo("modulesDetailSidebarStatusDisabled");
+  }
+
+  async modulesDetailSidebarLeadDisabled(): Promise<boolean> {
+    return todo("modulesDetailSidebarLeadDisabled");
+  }
+
+  async modulesDetailSidebarMembersDisabled(): Promise<boolean> {
+    return todo("modulesDetailSidebarMembersDisabled");
+  }
+
+  async modulesDetailSidebarWorkItemsText(): Promise<string> {
+    return todo("modulesDetailSidebarWorkItemsText");
+  }
+
+  async modulesDetailSidebarPointsText(): Promise<string | null> {
+    return todo("modulesDetailSidebarPointsText");
+  }
+
+  async modulesDetailSlowFetchShowsLoader(): Promise<boolean> {
+    return todo("modulesDetailSlowFetchShowsLoader");
+  }
+
+  async modulesDetailProgressOpen(): Promise<boolean> {
+    return todo("modulesDetailProgressOpen");
+  }
+
+  async modulesDetailProgressHeaderPercent(): Promise<number | null> {
+    return todo("modulesDetailProgressHeaderPercent");
+  }
+
+  async modulesDetailProgressNotice(): Promise<string | null> {
+    return todo("modulesDetailProgressNotice");
+  }
+
+  async modulesDetailProgressChartVisible(): Promise<boolean> {
+    return todo("modulesDetailProgressChartVisible");
+  }
+
+  async modulesDetailProgressMeasureValue(): Promise<string | null> {
+    return todo("modulesDetailProgressMeasureValue");
+  }
+
+  async modulesDetailProgressMeasureOptions(): Promise<string[]> {
+    return todo("modulesDetailProgressMeasureOptions");
+  }
+
+  async modulesDetailMeasureSwitchGetCount(_label: string): Promise<number> {
+    return todo("modulesDetailMeasureSwitchGetCount");
+  }
+
+  async modulesDetailProgressStatsTab(_tab: "States" | "Assignees" | "Labels"): Promise<void> {
+    return todo("modulesDetailProgressStatsTab");
+  }
+
+  async modulesDetailActiveStatsTab(): Promise<string> {
+    return todo("modulesDetailActiveStatsTab");
+  }
+
+  async modulesDetailProgressStatsRows(): Promise<ModulesDetailStatRow[]> {
+    return todo("modulesDetailProgressStatsRows");
+  }
+
+  async modulesDetailProgressEntryClick(_title: string): Promise<void> {
+    return todo("modulesDetailProgressEntryClick");
+  }
+
+  async modulesDetailProgressEntryClickable(_title: string): Promise<boolean> {
+    return todo("modulesDetailProgressEntryClickable");
+  }
+
+  async modulesDetailProgressEntrySelected(_title: string): Promise<boolean> {
+    return todo("modulesDetailProgressEntrySelected");
+  }
+
+  async modulesDetailLinksOpen(): Promise<boolean> {
+    return todo("modulesDetailLinksOpen");
+  }
+
+  async modulesDetailLinksToggle(): Promise<void> {
+    return todo("modulesDetailLinksToggle");
+  }
+
+  async modulesDetailLinksEmptyNotice(): Promise<string | null> {
+    return todo("modulesDetailLinksEmptyNotice");
+  }
+
+  async modulesDetailLinksAddVisible(): Promise<boolean> {
+    return todo("modulesDetailLinksAddVisible");
+  }
+
+  async modulesDetailLinksAddClick(): Promise<void> {
+    return todo("modulesDetailLinksAddClick");
+  }
+
+  async modulesDetailLinksRows(): Promise<ModulesDetailLinkRow[]> {
+    return todo("modulesDetailLinksRows");
+  }
+
+  async modulesDetailLinkDialogOpen(): Promise<boolean> {
+    return todo("modulesDetailLinkDialogOpen");
+  }
+
+  async modulesDetailLinkDialogTitle(): Promise<string | null> {
+    return todo("modulesDetailLinkDialogTitle");
+  }
+
+  async modulesDetailLinkFillUrl(_url: string): Promise<void> {
+    return todo("modulesDetailLinkFillUrl");
+  }
+
+  async modulesDetailLinkFillTitle(_title: string): Promise<void> {
+    return todo("modulesDetailLinkFillTitle");
+  }
+
+  async modulesDetailLinkSubmit(): Promise<void> {
+    return todo("modulesDetailLinkSubmit");
+  }
+
+  async modulesDetailLinkUrlInvalid(): Promise<boolean> {
+    return todo("modulesDetailLinkUrlInvalid");
+  }
+
+  async modulesDetailLinkCancel(): Promise<void> {
+    return todo("modulesDetailLinkCancel");
+  }
+
+  async modulesDetailLinkCopy(_title: string): Promise<void> {
+    return todo("modulesDetailLinkCopy");
+  }
+
+  async modulesDetailLinkEdit(_title: string): Promise<void> {
+    return todo("modulesDetailLinkEdit");
+  }
+
+  async modulesDetailLinkDelete(_title: string): Promise<void> {
+    return todo("modulesDetailLinkDelete");
+  }
+
+  async modulesDetailLinkMeta(_title: string): Promise<string | null> {
+    return todo("modulesDetailLinkMeta");
+  }
+
+  async modulesDetailFailNextLinkWrite(): Promise<void> {
+    return todo("modulesDetailFailNextLinkWrite");
   }
 }
