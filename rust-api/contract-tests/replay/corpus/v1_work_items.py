@@ -7,7 +7,11 @@
 Built from the ``v1_work_items`` contract suite (PIDASHCONV-76):
 test_work_items.py (CRUD), test_subresources.py (links, comments,
 relations, workpad, PR links), test_labels_pages.py (labels, pages),
-test_actions.py (move, re-tick, wait, run-ai).
+test_actions.py (move, re-tick, wait, run-ai). The follow-up session
+below covers the legs the lifecycle session skipped: the deprecated
+``issues/*`` twins, work-item attachments, code-review links, the base
+relations POST, intake issues, page patch/archive, and the agent-run
+yield.
 """
 
 from psycopg.rows import dict_row
@@ -18,9 +22,24 @@ from ..session import Request, Session
 # as {target_project} in request templates).
 TARGET_PROJECT_ID = "aaaaaaaa-0000-4000-8000-000000000001"
 
+# Fixed ids for the follow-up session (anchor issue, assets, page,
+# triage state, intake, pod + agent run).
+ISS_B_ID = "ffffffff-0000-4000-8000-000000000001"
+ISS_C_ID = "ffffffff-0000-4000-8000-00000000000b"
+ATT_WI_ID = "ffffffff-0000-4000-8000-000000000002"
+ATT_IS_ID = "ffffffff-0000-4000-8000-000000000003"
+PAGE_ID = "ffffffff-0000-4000-8000-000000000004"
+TRIAGE_ID = "ffffffff-0000-4000-8000-000000000005"
+INTAKE_ID = "ffffffff-0000-4000-8000-000000000006"
+POD_ID = "ffffffff-0000-4000-8000-000000000007"
+RUN_ID = "ffffffff-0000-4000-8000-000000000008"
+RUN2_ID = "ffffffff-0000-4000-8000-000000000009"
+
 _WS = "/api/v1/workspaces/{ws}/projects/{project}"
 _WI = _WS + "/work-items/{wi}/"
 _WI_NEW = _WS + "/work-items/{newwi}/"
+_IS = "/api/v1/workspaces/{ws}/projects/{project}/issues"
+_WB = "/api/v1/workspaces/{ws}/projects/{project}/work-items/{is_b}"
 
 
 def _seed_move_target(conn) -> None:
@@ -88,6 +107,168 @@ PR_PAYLOAD = {
     "merged": False,
     "draft": False,
 }
+
+CR_PAYLOAD = {
+    "provider": "github",
+    "host_url": "https://github.com",
+    "namespace": "acme",
+    "repo_name": "web",
+    "repo_external_id": "",
+    "external_id": "mr-424243",
+    "external_iid": "424243",
+    "url": "https://github.com/acme/web/pull/424243",
+    "title": "Review me",
+    "state": "open",
+    "merged": False,
+    "draft": False,
+}
+
+
+def _seed_followup(conn) -> None:
+    """Anchor rows the follow-up session addresses by fixed id.
+
+    Mirrors the contract seeders (same columns): an anchor issue on
+    RPJ's backlog (seq 906, clear of API-created sequences), two
+    uploaded file assets (``_harness.seed.create_issue_attachment``
+    columns), a page + project link (``create_page`` /
+    ``link_page_to_project``), a triage state + intake row
+    (``seed_d21`` columns — intake creation mints into triage), and a
+    pod + running agent run (``create_pod`` / ``create_agent_run``)
+    for the yield legs.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT id FROM workspaces WHERE slug = 'replay-ws'")
+        ws_id = str(cur.fetchone()["id"])
+        cur.execute("SELECT id FROM projects WHERE identifier = 'RPJ'")
+        project_id = str(cur.fetchone()["id"])
+        cur.execute(
+            "SELECT id FROM states WHERE workspace_id = %s AND \"group\" = 'backlog'",
+            (ws_id,),
+        )
+        backlog_id = str(cur.fetchone()["id"])
+        cur.execute(
+            "SELECT id FROM users WHERE email = 'replay-admin@example.com'"
+        )
+        admin_id = str(cur.fetchone()["id"])
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO issues (id, created_at, updated_at, name, description_json,
+                priority, sequence_id, project_id, state_id,
+                workspace_id, description_html, sort_order,
+                is_draft, git_work_branch, workpad, complexity_score)
+            VALUES (%s, now(), now(), 'Replay v1 anchor', '{}', 'high', 906,
+                %s, %s, %s, '', 65535, false, '', '', 0)
+            """,
+            (ISS_B_ID, project_id, backlog_id, ws_id),
+        )
+        # Second anchor: agent_run_one_active_per_work_item allows one
+        # running run per issue, and the missing-outcome 400 leg needs
+        # its own fresh running run.
+        cur.execute(
+            """
+            INSERT INTO issues (id, created_at, updated_at, name, description_json,
+                priority, sequence_id, project_id, state_id,
+                workspace_id, description_html, sort_order,
+                is_draft, git_work_branch, workpad, complexity_score)
+            VALUES (%s, now(), now(), 'Replay v1 anchor C', '{}', 'high', 907,
+                %s, %s, %s, '', 65535, false, '', '', 0)
+            """,
+            (ISS_C_ID, project_id, backlog_id, ws_id),
+        )
+        for asset_id, asset in (
+            (ATT_WI_ID, "replay-wi-asset"),
+            (ATT_IS_ID, "replay-is-asset"),
+        ):
+            cur.execute(
+                """
+                INSERT INTO file_assets
+                   (id, attributes, asset, entity_type, is_deleted, is_archived,
+                    is_uploaded, issue_id, project_id, workspace_id, size,
+                    created_at, updated_at)
+                VALUES (%s,'{}',%s,'ISSUE_ATTACHMENT',false,false,true,%s,%s,%s,10,now(),now())
+                """,
+                (asset_id, asset, ISS_B_ID, project_id, ws_id),
+            )
+        cur.execute(
+            """
+            INSERT INTO pages
+               (id, name, description_json, description_binary, description_html,
+                owned_by_id, access, workspace_id, color, parent_id, archived_at,
+                is_locked, view_props, logo_props, is_global, sort_order,
+                created_by_id, created_at, updated_at)
+            VALUES (%s,'Replay v1 page','{}',NULL,'<p></p>',%s,0,%s,'',NULL,NULL,
+                    false,'{"full_width": false}','{}',false,65535,%s,now(),now())
+            """,
+            (PAGE_ID, admin_id, ws_id, admin_id),
+        )
+        cur.execute(
+            """
+            INSERT INTO project_pages
+               (id, page_id, project_id, workspace_id, created_at, updated_at)
+            VALUES (gen_random_uuid(),%s,%s,%s,now(),now())
+            """,
+            (PAGE_ID, project_id, ws_id),
+        )
+        cur.execute(
+            """
+            INSERT INTO states (created_at, updated_at, id, name, description,
+                color, slug, project_id, workspace_id, sequence, "group",
+                "default", is_triage)
+            VALUES (now(), now(), %s, 'Triage', '', '#4E5355',
+                'triage', %s, %s, 65000.0, 'triage', false, true)
+            """,
+            (TRIAGE_ID, project_id, ws_id),
+        )
+        cur.execute(
+            """
+            INSERT INTO intakes (id, name, description, is_default, view_props,
+                logo_props, created_by_id, project_id, workspace_id, created_at, updated_at)
+            VALUES (%s,'Replay intake','Seeded for write-replay',true,'{}','{}',%s,%s,%s,now(),now())
+            """,
+            (INTAKE_ID, admin_id, project_id, ws_id),
+        )
+        cur.execute(
+            """
+            INSERT INTO pod
+               (id, name, description, is_default, workspace_id, project_id,
+                created_at, updated_at)
+            VALUES (%s,'Replay v1 pod','',false,%s,%s,now(),now())
+            """,
+            (POD_ID, ws_id, project_id),
+        )
+        cur.execute(
+            """
+            INSERT INTO agent_run
+               (id, status, prompt, run_config, required_capabilities, thread_id,
+                error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                refusal_category, trigger, executor_kind, dispatch_attempts,
+                cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,
+                usage, created_at)
+            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','',
+                    %s,%s,%s,%s,'contract-model','', 'human', 'local_runner', 0,
+                    '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())
+            """,
+            (RUN_ID, ws_id, ISS_B_ID, POD_ID, admin_id),
+        )
+        # Second running run: the missing-outcome 400 leg runs against
+        # a fresh run exactly like the suite (the first run is done by
+        # then, and yield-on-done may answer differently).
+        cur.execute(
+            """
+            INSERT INTO agent_run
+               (id, status, prompt, run_config, required_capabilities, thread_id,
+                error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                refusal_category, trigger, executor_kind, dispatch_attempts,
+                cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,
+                usage, created_at)
+            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','',
+                    %s,%s,%s,%s,'contract-model','', 'human', 'local_runner', 0,
+                    '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())
+            """,
+            (RUN2_ID, ws_id, ISS_C_ID, POD_ID, admin_id),
+        )
+    conn.commit()
 
 SESSIONS = (
     Session(
@@ -278,6 +459,334 @@ SESSIONS = (
                 "/api/v1/workspaces/{ws}/projects/{target_project}/work-items/{wi}/",
                 route="/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/",
                 auth="api_key", expect_status=204,
+            ),
+        ),
+    ),
+    Session(
+        name="v1_work_items_followup",
+        domain="v1_work_items",
+        source="v1_work_items/test_work_items.py (issues twins), "
+        "test_subresources.py (attachments, code-reviews, relations), "
+        "test_labels_pages.py (pages), test_actions.py (yield), "
+        "api_assets_stickies_intake/test_intake.py (intake)",
+        auth_users=("api_key",),
+        seed=_seed_followup,
+        static_context={
+            "is_b": ISS_B_ID,
+            "att_wi": ATT_WI_ID,
+            "att_is": ATT_IS_ID,
+            "pg1": PAGE_ID,
+            "triage": TRIAGE_ID,
+            "intake": INTAKE_ID,
+            "pod1": POD_ID,
+            "run1": RUN_ID,
+            "run2": RUN2_ID,
+        },
+        payload_time_paths={
+            "pi_dash.bgtasks.issue_activities_task.issue_activity": ["kwargs/epoch"],
+        },
+        known_absent_jobs={
+            "pi_dash.bgtasks.logger_task.process_logs": "PIDASHCONV-868",
+        },
+        payload_row_refs={
+            "pi_dash.bgtasks.deletion_task.soft_delete_related_objects": [
+                ("args/2", "issues"),
+                ("args/2", "issue_comments"),
+                ("args/2", "issue_links"),
+                ("args/2", "issue_relations"),
+                ("args/2", "file_assets"),
+                ("args/2", "git_code_review_links"),
+                ("args/2", "github_pull_request_links"),
+                ("args/2", "intake_issues"),
+            ],
+        },
+        # The PIDASHCONV-897 wrongly-minted sequence echoes inside
+        # issue_activity payloads (before/after images carry
+        # sequence_id plus the RPJ-<seq> browse url). One pin per
+        # value per path; each blanks only its exact match.
+        payload_value_diffs={
+            "pi_dash.bgtasks.issue_activities_task.issue_activity": [
+                ("kwargs/current_instance/sequence_id",
+                 "PIDASHCONV-897", 3, 908),
+                ("kwargs/current_instance/url", "PIDASHCONV-897",
+                 "http://localhost/replay-ws/browse/RPJ-3",
+                 "http://localhost/replay-ws/browse/RPJ-908"),
+                ("kwargs/current_instance/issue_detail/sequence_id",
+                 "PIDASHCONV-897", 3, 908),
+                # Second minted row (the "doomed" create): 4/909.
+                ("kwargs/current_instance/sequence_id",
+                 "PIDASHCONV-897", 4, 909),
+                ("kwargs/current_instance/url", "PIDASHCONV-897",
+                 "http://localhost/replay-ws/browse/RPJ-4",
+                 "http://localhost/replay-ws/browse/RPJ-909"),
+                ("kwargs/current_instance/issue_detail/sequence_id",
+                 "PIDASHCONV-897", 4, 909),
+            ],
+        },
+        requests=(
+            # issues/* twins: create -> patch -> comment round-trip ->
+            # attachment 400-POST + patch + delete -> link round-trip
+            # -> delete.
+            Request(
+                "POST", _IS + "/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/",
+                json={"name": "Replay twin"},
+                auth="api_key", capture={"is_a": "id"}, expect_status=201,
+            ),
+            Request(
+                "PATCH", _IS + "/{is_a}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/",
+                json={"name": "Replay twin v2"},
+                auth="api_key", expect_status=200,
+            ),
+            Request(
+                "POST", _IS + "/{is_b}/comments/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/comments/",
+                json={"comment_html": "<p>twin hello</p>", "access": "EXTERNAL"},
+                auth="api_key",
+                capture={"isc": "id", "isc_desc": "description"},
+                expect_status=201,
+            ),
+            Request(
+                "PATCH", _IS + "/{is_b}/comments/{isc}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/comments/{comment_id}/",
+                json={"comment_html": "<p>twin v2</p>"},
+                auth="api_key", expect_status=200,
+            ),
+            Request(
+                "DELETE", _IS + "/{is_b}/comments/{isc}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/comments/{comment_id}/",
+                auth="api_key", expect_status=204,
+            ),
+            Request(
+                "POST", _IS + "/{is_b}/issue-attachments/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/issue-attachments/",
+                json={"name": "x.exe", "type": "application/x-msdownload", "size": 10},
+                auth="api_key", expect_status=400,
+            ),
+            Request(
+                "PATCH", _IS + "/{is_b}/issue-attachments/{att_is}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/issue-attachments/{attachment_id}/",
+                json={},
+                auth="api_key", expect_status=204,
+            ),
+            Request(
+                "DELETE", _IS + "/{is_b}/issue-attachments/{att_is}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/issue-attachments/{attachment_id}/",
+                auth="api_key", expect_status=204,
+            ),
+            Request(
+                "POST", _IS + "/{is_b}/links/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/links/",
+                json={"title": "twin docs", "url": "https://example.com/twin"},
+                auth="api_key", capture={"islink": "id"}, expect_status=201,
+            ),
+            Request(
+                "PATCH", _IS + "/{is_b}/links/{islink}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/links/{link_id}/",
+                json={"title": "twin docs v2"},
+                auth="api_key", expect_status=200,
+            ),
+            Request(
+                "DELETE", _IS + "/{is_b}/links/{islink}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/links/{link_id}/",
+                auth="api_key", expect_status=204,
+            ),
+            Request(
+                "DELETE", _IS + "/{is_a}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/",
+                auth="api_key", expect_status=204,
+            ),
+            # Base relations POST (the grouped relate twin): is_b
+            # relates to a live sibling (created + deleted around it).
+            Request(
+                "POST", _IS + "/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/",
+                json={"name": "Replay rel sib"},
+                auth="api_key", capture={"is_sib": "id"}, expect_status=201,
+            ),
+            Request(
+                "POST", _WB + "/relations/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/relations/",
+                json={"relation_type": "relates_to", "issues": ["{is_sib}"]},
+                auth="api_key", expect_status=201,
+            ),
+            Request(
+                "DELETE", _IS + "/{is_sib}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/",
+                auth="api_key", expect_status=204,
+            ),
+            # Work-item attachments: 400-POST covers the create pair
+            # (valid types need a bucket to presign against), PATCH on
+            # the seeded row, DELETE soft-deletes.
+            Request(
+                "POST", _WB + "/attachments/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/attachments/",
+                json={"name": "x.exe", "type": "application/x-msdownload", "size": 10},
+                auth="api_key", expect_status=400,
+            ),
+            Request(
+                "PATCH", _WB + "/attachments/{att_wi}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/attachments/{attachment_id}/",
+                json={},
+                auth="api_key", expect_status=204,
+            ),
+            Request(
+                "DELETE", _WB + "/attachments/{att_wi}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/attachments/{attachment_id}/",
+                auth="api_key", expect_status=204,
+            ),
+            # Code-review links: attach 201, idempotent relink 200,
+            # delete.
+            Request(
+                "POST", _WB + "/code-reviews/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/code-reviews/",
+                json=CR_PAYLOAD,
+                auth="api_key", capture={"cr": "id"}, expect_status=201,
+            ),
+            Request(
+                "POST", _WB + "/code-reviews/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/code-reviews/",
+                json=CR_PAYLOAD,
+                auth="api_key", expect_status=200,
+            ),
+            Request(
+                "DELETE", _WB + "/code-reviews/{cr}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/code-reviews/{review_id}/",
+                auth="api_key", expect_status=204,
+            ),
+            # Pages: patch without a doc service is a 503 both sides;
+            # archive + unarchive round-trip.
+            Request(
+                "PATCH", _WS + "/pages/{pg1}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/pages/{pk}/",
+                json={"description_markdown": "# edit"},
+                auth="api_key", expect_status=503,
+            ),
+            Request(
+                "POST", _WS + "/pages/{pg1}/archive/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/pages/{pk}/archive/",
+                auth="api_key", expect_status=200,
+            ),
+            Request(
+                "DELETE", _WS + "/pages/{pg1}/archive/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/pages/{pk}/archive/",
+                auth="api_key", expect_status=200,
+            ),
+            # Intake: create (mints into triage) -> missing-name 400
+            # -> patch issue fields -> accept to the default backlog
+            # -> delete the accepted item (issue survives) ->
+            # create + delete a pending item (issue soft-deleted).
+            Request(
+                "POST", _WS + "/intake-issues/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/",
+                json={"issue": {"name": "triage me", "priority": "high"}},
+                auth="api_key",
+                capture={"inta": "id", "inta_issue": "issue",
+                         "inta_desc": "issue_detail/description"},
+                expect_status=201,
+                # Known divergence: intake-issue POST mints the issue
+                # sequence from issues.max+1 instead of the
+                # issue_sequences counter (PIDASHCONV-897). Exact
+                # per-side pins; remove when the fix lands.
+                known_body_diffs=[
+                    ("issue_detail/sequence_id", "PIDASHCONV-897", 3, 908),
+                ],
+                known_cell_diffs=[
+                    # Match on stable columns: id cells blank to
+                    # volatile before pins match, so {captures}
+                    # never match there (compare.py normalise).
+                    # Project-only match is safe: the pin blanks
+                    # only rows whose value is exactly (3, 908),
+                    # and later PATCHes rename this row.
+                    ("issues", "PIDASHCONV-897",
+                     {"project_id": "{project}"},
+                     "sequence_id", 3, 908),
+                    ("issue_sequences", "PIDASHCONV-897",
+                     {"project_id": "{project}"}, "sequence", 3, 908),
+                ],
+            ),
+            Request(
+                "POST", _WS + "/intake-issues/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/",
+                json={"issue": {"priority": "low"}},
+                auth="api_key", expect_status=400,
+            ),
+            Request(
+                "PATCH", _WS + "/intake-issues/{inta_issue}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/",
+                json={"issue": {"name": "triaged", "priority": "urgent"}},
+                auth="api_key", expect_status=200,
+                known_body_diffs=[
+                    ("issue_detail/sequence_id", "PIDASHCONV-897", 3, 908),
+                ],
+                # PIDASHCONV-898: intake PATCH publishes the pre-save
+                # issue_detail in intake.activity.created. Per-request:
+                # the Django values ("triaged"/...) recur in later
+                # requests' jobs where Rust agrees.
+                payload_value_diffs={
+                    "pi_dash.bgtasks.issue_activities_task.issue_activity": [
+                        ("kwargs/current_instance/issue_detail/name",
+                         "PIDASHCONV-898", "triaged", "triage me"),
+                        ("kwargs/current_instance/issue_detail/priority",
+                         "PIDASHCONV-898", "urgent", "high"),
+                        ("kwargs/current_instance/issue_detail/updated_by",
+                         "PIDASHCONV-898",
+                         "f3c361a8-d936-4bc7-9967-db4acc1fcbfa", None),
+                    ],
+                },
+            ),
+            Request(
+                "PATCH", _WS + "/intake-issues/{inta_issue}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/",
+                json={"status": 1},
+                auth="api_key", expect_status=200,
+                known_body_diffs=[
+                    ("issue_detail/sequence_id", "PIDASHCONV-897", 3, 908),
+                ],
+            ),
+            Request(
+                "DELETE", _WS + "/intake-issues/{inta_issue}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/",
+                auth="api_key", expect_status=204,
+            ),
+            Request(
+                "POST", _WS + "/intake-issues/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/",
+                json={"issue": {"name": "doomed"}},
+                auth="api_key",
+                capture={"inta2": "id", "inta2_issue": "issue",
+                         "inta2_desc": "issue_detail/description"},
+                expect_status=201,
+                # PIDASHCONV-897 again (second minted row: 4/909).
+                known_body_diffs=[
+                    ("issue_detail/sequence_id", "PIDASHCONV-897", 4, 909),
+                ],
+                known_cell_diffs=[
+                    ("issues", "PIDASHCONV-897",
+                     {"project_id": "{project}"},
+                     "sequence_id", 4, 909),
+                    ("issue_sequences", "PIDASHCONV-897",
+                     {"project_id": "{project}"}, "sequence", 4, 909),
+                ],
+            ),
+            Request(
+                "DELETE", _WS + "/intake-issues/{inta2_issue}/",
+                route="/api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/",
+                auth="api_key", expect_status=204,
+            ),
+            # Agent-run yield: happy path then missing-outcome 400.
+            Request(
+                "POST", "/api/v1/workspaces/{ws}/agent-runs/{run1}/yield/",
+                route="/api/v1/workspaces/{slug}/agent-runs/{pk}/yield/",
+                json={"outcome": "done", "note": "finished"},
+                auth="api_key", expect_status=200,
+            ),
+            Request(
+                "POST", "/api/v1/workspaces/{ws}/agent-runs/{run2}/yield/",
+                route="/api/v1/workspaces/{slug}/agent-runs/{pk}/yield/",
+                json={},
+                auth="api_key", expect_status=400,
             ),
         ),
     ),

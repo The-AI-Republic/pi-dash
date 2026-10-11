@@ -168,6 +168,23 @@ def test_corpus_manifests_valid():
                     and (ref[0].startswith("args/") or ref[0].startswith("kwargs/"))
                     and re.fullmatch(r"[a-z_]+", ref[1])
                 ), f"{sess.name}: bad row ref {ref!r} for {task}"
+        value_diff_maps = [("session", sess.payload_value_diffs or {})]
+        for index, req in enumerate(sess.requests):
+            if req.payload_value_diffs:
+                value_diff_maps.append((f"request {index}", req.payload_value_diffs))
+        for owner, diff_map in value_diff_maps:
+            for task, refs in diff_map.items():
+                assert isinstance(refs, (list, tuple)), (
+                    f"{sess.name}: bad value diffs for {task} ({owner})"
+                )
+                for ref in refs:
+                    assert (
+                        isinstance(ref, (list, tuple))
+                        and len(ref) == 4
+                        and (ref[0].startswith("args/") or ref[0].startswith("kwargs/"))
+                        and re.fullmatch(r"PIDASHCONV-\d+", ref[1])
+                        and ref[2] != ref[3]
+                    ), f"{sess.name}: bad value diff {ref!r} for {task} ({owner})"
         for field_name in ("payload_reset_tokens", "payload_magic_codes"):
             for task, refs in (getattr(sess, field_name) or {}).items():
                 assert isinstance(refs, (list, tuple)), (
@@ -439,6 +456,50 @@ def test_blank_valid_tokens_only_blanks_valid():
         ["N", "u@example.com", uid, other, "http://localhost"], {}, task, "django", ctx
     )
     assert kept[3] == other
+
+
+def test_blank_value_diffs_exact_match_only():
+    """Pinned payload scalars blank only on exact per-side match."""
+    import json
+
+    from . import compare
+    from . import effects
+
+    task = "pi_dash.bgtasks.issue_activities_task.issue_activity"
+    ctx = compare.CompareContext(
+        payload_value_diffs={
+            task: [
+                ("kwargs/current_instance/sequence_id", "PIDASHCONV-897", 3, 908),
+                ("kwargs/plain", "PIDASHCONV-897", "a", "b"),
+            ]
+        },
+    )
+    # Nested-JSON descent: the int blanks, siblings survive, and the
+    # re-serialized string stays canonical (sort_keys, compact).
+    kwargs = {"current_instance": json.dumps({"sequence_id": 3, "name": "t"})}
+    _, blanked = compare._blank_value_diffs([], dict(kwargs), task, "django", ctx)
+    assert json.loads(blanked["current_instance"]) == {
+        "sequence_id": effects.VOLATILE_PLACEHOLDER,
+        "name": "t",
+    }
+    assert blanked["current_instance"] == json.dumps(
+        json.loads(blanked["current_instance"]), sort_keys=True, separators=(",", ":")
+    )
+    # Wrong side value stays put (fails the compare loudly).
+    kwargs = {"current_instance": json.dumps({"sequence_id": 4, "name": "t"})}
+    _, kept = compare._blank_value_diffs([], dict(kwargs), task, "django", ctx)
+    assert json.loads(kept["current_instance"])["sequence_id"] == 4
+    # Rust side blanks its own pinned value only.
+    kwargs = {"current_instance": json.dumps({"sequence_id": 908, "name": "t"})}
+    _, rblanked = compare._blank_value_diffs([], dict(kwargs), task, "rust", ctx)
+    assert json.loads(rblanked["current_instance"])["sequence_id"] == (
+        effects.VOLATILE_PLACEHOLDER
+    )
+    # Plain (non-nested) pointer, and an unresolved pointer skips.
+    _, pblanked = compare._blank_value_diffs([], {"plain": "a"}, task, "django", ctx)
+    assert pblanked["plain"] == effects.VOLATILE_PLACEHOLDER
+    _, skipped = compare._blank_value_diffs([], {"other": 1}, task, "django", ctx)
+    assert skipped == {"other": 1}
 
 
 def test_blank_valid_magic_only_blanks_matching():

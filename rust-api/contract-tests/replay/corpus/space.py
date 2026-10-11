@@ -449,18 +449,24 @@ SESSIONS = (
                 # it returns.
                 capture={"asset_id": "asset_id",
                          "asset_key": "upload_data/fields/key"},
-                # The mint response embeds per-backend randomness in four
+                # The mint response embeds per-backend randomness in six
                 # leaves: asset_url's trailing id, the presigned key
                 # (an independent random uuid, dashless, plus filename),
-                # and the policy + signature derived from that key.
+                # the policy + signature derived from that key, and the
+                # SigV4 mint instant (x-amz-date is per-second — mints
+                # straddling a second boundary flaked the v1_assets
+                # session's exact compare — while x-amz-credential
+                # embeds the date, a UTC-midnight flake).
                 # Presence-asserted, values blanked; every other leaf
-                # (Content-Type, algorithm, credential, date, url, the
-                # asset_id capture itself) still compares exactly.
+                # (Content-Type, algorithm, url, the asset_id capture
+                # itself) still compares exactly.
                 body_blank_paths=[
                     "asset_url",
                     "upload_data/fields/key",
                     "upload_data/fields/policy",
                     "upload_data/fields/x-amz-signature",
+                    "upload_data/fields/x-amz-date",
+                    "upload_data/fields/x-amz-credential",
                 ],
                 expect_status=200,
             ),

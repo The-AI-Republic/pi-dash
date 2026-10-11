@@ -393,6 +393,7 @@ class Runner:
             assistant_encryption_keys=self.config.assistant_encryption_keys,
             payload_time_paths=dict(sess.payload_time_paths),
             payload_row_refs=dict(sess.payload_row_refs),
+            payload_value_diffs=dict(sess.payload_value_diffs),
             db_cell_refs=list(sess.db_cell_refs),
             row_exists=_row_exists,
             payload_reset_tokens=dict(sess.payload_reset_tokens),
@@ -497,6 +498,14 @@ class Runner:
 
     def _run_request(self, sess, req, index, captures, creds, ctx, gap_tracker) -> RequestResult:
         ctx.captures = dict(captures)
+        # Per-request payload pins join the session pins for this
+        # request only (rebuilt every request, so nothing leaks).
+        merged_value_diffs = {
+            task: list(refs) for task, refs in (sess.payload_value_diffs or {}).items()
+        }
+        for task, refs in (req.payload_value_diffs or {}).items():
+            merged_value_diffs.setdefault(task, []).extend(refs)
+        ctx.payload_value_diffs = merged_value_diffs
         from .corpus import world as world_seed
 
         base_ctx = world_seed.template_context(self.world)

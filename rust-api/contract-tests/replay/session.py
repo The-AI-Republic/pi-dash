@@ -153,6 +153,14 @@ class Request:
     # express (a matcher cannot tell a live row's pre-write state
     # from its post-write state when no observable column changes).
     known_cell_diffs: list = field(default_factory=list)
+    # Known job-payload value divergences for THIS request only:
+    # {task_name_or_"*": [(pointer, fix_issue, dj_value, rs_value)]} —
+    # same shape as Session.payload_value_diffs, but scoped to one
+    # request. For values that collide with agreed states elsewhere
+    # in the session (a before-image pin whose Django value another
+    # request's jobs also carry while Rust agrees): a session-wide
+    # pin would blank one side and manufacture a divergence.
+    payload_value_diffs: dict = field(default_factory=dict)
 
     def route_template(self) -> str:
         if self.route:
@@ -233,6 +241,17 @@ class Session:
     # multi-segment over dicts/lists and descend through nested JSON
     # strings (kwargs/current_instance/created_x/0/pk).
     payload_row_refs: dict = field(default_factory=dict)
+    # Job payload known-value divergences: {task_name_or_"*":
+    # [(pointer, fix_issue, dj_value, rs_value)]}. Values at these
+    # pointers are backend-local scalars a filed divergence explains
+    # (a wrongly-minted counter echoed inside current_instance — not
+    # row ids, those are payload_row_refs). Each side's value blanks
+    # only when it exactly equals its pinned literal; anything else
+    # stays and fails loudly. Pointers descend through nested JSON
+    # strings like payload_row_refs. Session-level: when several rows
+    # diverge with different values, declare one pin per value — each
+    # blanks only its exact match, so pins coexist safely.
+    payload_value_diffs: dict = field(default_factory=dict)
     # Database cell row references: [(table, column, ref_table, pointer)].
     # Same existence-checked blanking for DB cells: scalar FK-like
     # generated values (pointer "") or values nested in a JSONB column

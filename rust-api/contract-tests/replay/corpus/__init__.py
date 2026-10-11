@@ -19,6 +19,9 @@ from . import (
     runner,
     runner_web,
     space,
+    v1_assets,
+    v1_cycles_modules,
+    v1_projects,
     v1_work_items,
 )
 
@@ -37,6 +40,9 @@ ALL_SESSIONS = [
     *runner.SESSIONS,
     *runner_web.SESSIONS,
     *space.SESSIONS,
+    *v1_assets.SESSIONS,
+    *v1_cycles_modules.SESSIONS,
+    *v1_projects.SESSIONS,
     *v1_work_items.SESSIONS,
 ]
 

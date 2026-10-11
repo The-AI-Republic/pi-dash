@@ -52,6 +52,13 @@ class CompareContext:
     payload_time_paths: dict = field(default_factory=dict)
     # Job payload row references: {task_or_"*": [(pointer, table), ...]}.
     payload_row_refs: dict = field(default_factory=dict)
+    # Job payload known-value divergences: {task_or_"*":
+    # [(pointer, fix_issue, dj_value, rs_value), ...]}. Values at these
+    # pointers are backend-local scalars a filed divergence explains
+    # (never row ids — those are payload_row_refs). Each side's value
+    # blanks only when it exactly equals its pinned value; anything
+    # else stays and fails loudly.
+    payload_value_diffs: dict = field(default_factory=dict)
     # DB cell row references: [(table, column, ref_table, pointer), ...].
     db_cell_refs: list = field(default_factory=list)
     # Existence check for row refs: fn(side, table, value) -> bool.
@@ -944,6 +951,93 @@ def _blank_row_refs(args, kwargs, task: str, side: str, ctx: CompareContext):
     return args, kwargs
 
 
+def _blank_value_diffs(args, kwargs, task: str, side: str, ctx: CompareContext):
+    """Blank pinned known-divergent payload scalars (exact per-side match).
+
+    Pointers are multi-segment (``kwargs/a/0/b``) over dicts and lists
+    and descend transparently through nested JSON strings, exactly
+    like :func:`_blank_row_refs` (same canonical re-serialization, so
+    untouched bytes round-trip exactly). A pointer that does not
+    resolve is skipped: pins are session-level and a task's shape
+    varies per request. A resolved value that does not exactly equal
+    its pinned side value stays in place and fails the job compare
+    loudly (fix landed or behavior changed — remove or update the
+    pin).
+    """
+    refs = list(ctx.payload_value_diffs.get("*", ())) + list(
+        ctx.payload_value_diffs.get(task or "", ())
+    )
+    if not refs:
+        return args, kwargs
+    import copy
+
+    _MISSING = object()
+
+    def _child(node, part):
+        try:
+            if isinstance(node, list):
+                return node[int(part)]
+            if isinstance(node, dict):
+                return node.get(part, _MISSING)
+        except (IndexError, ValueError, TypeError):
+            pass
+        return _MISSING
+
+    def _set_child(node, part, value):
+        if isinstance(node, list):
+            node[int(part)] = value
+        else:
+            node[part] = value
+
+    args, kwargs = copy.deepcopy(args), copy.deepcopy(kwargs)
+    for pointer, _issue, dj_value, rs_value in refs:
+        if pointer.startswith("args/"):
+            root, rest = args, pointer[5:]
+        elif pointer.startswith("kwargs/"):
+            root, rest = kwargs, pointer[7:]
+        else:
+            continue
+        parts = rest.split("/")
+        node = root
+        stack: list[tuple] = []
+        resolved = True
+        for part in parts[:-1]:
+            child = _child(node, part)
+            if child is _MISSING:
+                resolved = False
+                break
+            if isinstance(child, str):
+                try:
+                    parsed = json.loads(child)
+                except ValueError:
+                    resolved = False
+                    break
+                if not isinstance(parsed, (dict, list)):
+                    resolved = False
+                    break
+                stack.append((node, part, parsed))
+                node = parsed
+            else:
+                node = child
+        if not resolved:
+            continue
+        value = _child(node, parts[-1])
+        if value is _MISSING:
+            continue
+        want = dj_value if side == "django" else rs_value
+        if value != want:
+            continue
+        _set_child(node, parts[-1], effects.VOLATILE_PLACEHOLDER)
+        while stack:
+            parent, part, parsed = stack.pop()
+            _set_child(
+                parent,
+                part,
+                json.dumps(parsed, sort_keys=True, separators=(",", ":")),
+            )
+    return args, kwargs
+
+
 def _pointer_get(root, pointer: str):
     """Value at an args/... or kwargs/...-rooted pointer, else None."""
     node = root
@@ -1101,6 +1195,7 @@ def normalise_celery_message(
     if task == effects.PROCESS_LOGS_TASK:
         args, kwargs = _blank_topology_hosts(args), _blank_topology_hosts(kwargs)
     args, kwargs = _blank_row_refs(args, kwargs, task, side, ctx)
+    args, kwargs = _blank_value_diffs(args, kwargs, task, side, ctx)
     args, kwargs = _blank_valid_tokens(args, kwargs, task, side, ctx)
     args, kwargs = _blank_valid_magic(args, kwargs, task, side, ctx)
     return {
@@ -1132,6 +1227,7 @@ def normalise_queue_row(row: dict, ctx: CompareContext) -> dict:
     if task == effects.PROCESS_LOGS_TASK:
         args, kwargs = _blank_topology_hosts(args), _blank_topology_hosts(kwargs)
     args, kwargs = _blank_row_refs(args, kwargs, task, "rust", ctx)
+    args, kwargs = _blank_value_diffs(args, kwargs, task, "rust", ctx)
     args, kwargs = _blank_valid_tokens(args, kwargs, task, "rust", ctx)
     args, kwargs = _blank_valid_magic(args, kwargs, task, "rust", ctx)
     return {
