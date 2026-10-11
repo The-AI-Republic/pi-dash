@@ -869,9 +869,48 @@ pub async fn scheduler_patch(
     (StatusCode::OK, Json(rendered)).into_response()
 }
 
+/// `soft_delete_related_objects.delay("db", <model>, pk, using=None)`
+/// (`db/mixins.py:77-78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it with `using=None`. Fires on every instance `.delete()`
+/// in these views (`Scheduler` lives in the `db` app,
+/// `db/models/scheduler.py:107`).
+pub(crate) fn soft_delete_message(
+    model: &str,
+    pk: &uuid::Uuid,
+) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
+        pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
+        vec![
+            Value::String("db".to_owned()),
+            Value::String(model.to_owned()),
+            Value::String(pk.to_string()),
+        ],
+        kwargs,
+    )
+}
+
+/// Best-effort publish of [`soft_delete_message`]: without the queue
+/// the response still stands.
+pub(crate) async fn enqueue_soft_delete(pool: &PgPool, model: &str, pk: &uuid::Uuid) {
+    let message = soft_delete_message(model, pk);
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        Value::Array(message.args.clone()),
+        Value::Object(message.kwargs.clone()),
+    );
+    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
+        tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
+    }
+}
+
 /// `DELETE /api/workspaces/<slug>/schedulers/<uuid>/`
 /// (`views.py:136-157`): one transaction soft-deletes the still-active
-/// bindings inline and then the scheduler; 204 with an empty body.
+/// bindings inline and then the scheduler; the instance `delete()` then
+/// enqueues `soft_delete_related_objects("db", "scheduler", pk,
+/// using=None)` (`db/mixins.py:77-78`); 204 with an empty body.
 pub async fn scheduler_delete(
     State(state): State<AppState>,
     Path((slug, scheduler_raw)): Path<(String, String)>,
@@ -950,6 +989,9 @@ pub async fn scheduler_delete(
     if tx.commit().await.is_err() {
         return Denial::ServerError.into_response();
     }
+    // Instance `delete()` → `.delay(...)` (`db/mixins.py:77-78`): stamp,
+    // then enqueue — same order as the mixin.
+    enqueue_soft_delete(pool, "scheduler", &scheduler_id).await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1659,5 +1701,28 @@ mod tests {
         let eastern: Tz = "America/New_York".parse().expect("tz");
         let rendered = render_scheduler_row(&sample_row(), 0, &eastern);
         assert_eq!(rendered["created_at"], json!("2024-05-06T03:08:09-04:00"));
+    }
+
+    #[test]
+    fn soft_delete_message_matches_the_mixin_call() {
+        // `db/mixins.py:77-78`: `.delay(label, name, pk, using=using)`
+        // with `using=None` — three positional args, `using` stays a
+        // null kwarg (never a positional `"default"`).
+        let pk = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
+        let message = soft_delete_message("scheduler", &pk);
+        assert_eq!(
+            message.task,
+            "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("scheduler".to_owned()),
+                Value::String(pk.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.len(), 1);
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
     }
 }
