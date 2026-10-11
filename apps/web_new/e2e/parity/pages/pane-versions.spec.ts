@@ -237,13 +237,20 @@ test(
       });
 
       await test.step("opening and closing reflows the canvas", async () => {
+        // The shell slides (PAGE-045 pins the transition), so a width read
+        // right after open/close can land mid-flight under load; poll for
+        // the settled layout instead of asserting the first frame.
+        await expect
+          .poll(async () => canvasClosed - (await driver.pagesPaneCanvasWidth()), { timeout: 30_000 })
+          .toBeGreaterThan(270);
         const canvasOpen = await driver.pagesPaneCanvasWidth();
-        expect(canvasClosed - canvasOpen).toBeGreaterThan(270);
         expect(canvasClosed - canvasOpen).toBeLessThan(318);
         await driver.pagesPaneClose();
         expect(await driver.pagesPaneIsOpen()).toBe(false);
         expect(await driver.pagesPaneQueryParam("paneTab")).toBe(null);
-        expect(Math.abs((await driver.pagesPaneCanvasWidth()) - canvasClosed)).toBeLessThan(24);
+        await expect
+          .poll(async () => Math.abs((await driver.pagesPaneCanvasWidth()) - canvasClosed), { timeout: 30_000 })
+          .toBeLessThan(24);
       });
 
       await test.step("the active tab is shareable by URL", async () => {
