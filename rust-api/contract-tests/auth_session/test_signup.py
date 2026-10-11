@@ -13,6 +13,24 @@ from _harness.settings import database_url
 from .conftest import _unique_email
 
 
+def _assert_prefs_row(email):
+    """`create_user_notification` post_save receiver: one prefs row, all flags true."""
+    with psycopg.connect(database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+            row = cur.fetchone()
+            assert row is not None
+            cur.execute(
+                "SELECT property_change, state_change, comment, mention, issue_completed,"
+                " workspace_id, project_id FROM user_notification_preferences"
+                " WHERE user_id = %s",
+                (row[0],),
+            )
+            prefs = cur.fetchall()
+            assert len(prefs) == 1
+            assert prefs[0] == (True, True, True, True, True, None, None)
+
+
 def test_success_creates_user_and_signs_in(browser, base, db):
     email = _unique_email()
     res = browser().post("/auth/sign-up/", data={"email": email, "password": "Fresh-Strong-Pass-9!x"})
@@ -20,10 +38,7 @@ def test_success_creates_user_and_signs_in(browser, base, db):
     assert any(
         c.startswith(SESSION_COOKIE_NAME + "=") for c in res.headers.get_list("set-cookie")
     )
-    with psycopg.connect(database_url()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
-            assert cur.fetchone() is not None
+    _assert_prefs_row(email)
 
 
 def test_existing_user_redirects_with_error_code(browser, base, user):
@@ -41,13 +56,14 @@ def test_invalid_email_redirects_with_error_code(browser, base):
     assert_error_redirect(res, base=base, error_code=5045)
 
 
-def test_space_success_redirects_to_space_base(browser, space_base):
+def test_space_success_redirects_to_space_base(browser, space_base, db):
     email = _unique_email()
     res = browser().post("/auth/spaces/sign-up/", data={"email": email, "password": "Fresh-Strong-Pass-9!x"})
     assert location_of(res) == space_base
     assert any(
         c.startswith(SESSION_COOKIE_NAME + "=") for c in res.headers.get_list("set-cookie")
     )
+    _assert_prefs_row(email)
 
 
 def test_space_existing_user_redirects_with_error_code(browser, space_base, user):
