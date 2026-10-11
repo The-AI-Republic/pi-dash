@@ -2047,8 +2047,8 @@ pub async fn apply_intake_update(
             _ => None,
         };
         sqlx::query(
-            r#"UPDATE issues SET state_id = $2, completed_at = $3,
-                 updated_at = $4, updated_by_id = $5 WHERE id = $6"#,
+            r#"UPDATE issues SET state_id = $1, completed_at = $2,
+                 updated_at = $3, updated_by_id = $4 WHERE id = $5"#,
         )
         .bind(state_id)
         .bind(completed_at)

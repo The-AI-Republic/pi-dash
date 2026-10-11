@@ -173,6 +173,40 @@ def test_patch_accept_without_default_400(admin):
     }
 
 
+def test_patch_accept_moves_to_default_state(make_tenant):
+    """PIDASHCONV-912: accept on a project WITH a default state 200s and
+    moves the issue from Triage to the default state (Django parity).
+
+    Uses a fresh tenant: flipping the shared admin tenant's state to
+    default would break test_patch_accept_without_default_400."""
+    tenant = make_tenant()
+    urls = intake_urls(tenant)
+    tenant["_database"].execute(
+        'UPDATE states SET "default" = true WHERE project_id = %s',
+        (tenant["project"]["id"],),
+    )
+    default_id = tenant["_database"].fetchval(
+        'SELECT id::text FROM states WHERE project_id = %s AND "default" LIMIT 1',
+        (tenant["project"]["id"],),
+    )
+    created = create_intake_issue(
+        tenant["client"], urls["intake_issues"], name="II3"
+    )
+    issue_id = created["issue"]["id"]
+    response = tenant["client"].patch(
+        f"{urls['intake_issues']}{issue_id}/", json={"status": 1}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    require_keys(body, INTAKE_ISSUE_DETAIL_KEYS, "PATCH accept intake-issues/<pk>/")
+    assert body["status"] == 1
+    assert body["issue"]["state_id"] == default_id
+    assert body["issue"]["updated_by"] is not None
+    again = tenant["client"].get(f"{urls['intake_issues']}{issue_id}/")
+    assert again.status_code == 200, again.text
+    assert again.json()["issue"]["state_id"] == default_id
+
+
 def test_patch_triage_duplicate_rejected(admin):
     """`duplicate_to` is an auto FK field, so it binds the triage-hiding
     default manager: another triage intake issue is not a valid target."""
