@@ -13284,6 +13284,48 @@ export async function serverIntakeTriageSearchIssues(
   });
 }
 
+// --- Pages prefs/assistant/cloud-stubs/desktop/negatives (NEWFRONT-320,
+// --- PAGE-072-073, PAGE-075-078, PAGE-081-083). Appended; existing
+// --- helpers above are untouched per the shared contract.
+// --- serverPageRecord + serverUpdatePageDescription come from the sibling
+// --- NEWFRONT-317 canonical copies (deduped at rebase per this block's
+// --- original note); only the endpoint probes below are this area's own.
+
+/**
+ * Probe the workspace-scoped editor-task endpoint the assistant menu
+ * would call. Resolves with the raw HTTP status the stack answers —
+ * the oracle pins reachability, never invents a model reply.
+ */
+export async function pagesProbeEditorTask(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/rephrase-grammar/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ task: "ASK_ANYTHING", text_input: "parity probe" }),
+  });
+  return res.status;
+}
+
+/**
+ * Probe the workspace AI-assistant root the conversational task would
+ * call. Resolves with the raw HTTP status the stack answers.
+ */
+export async function pagesProbeAssistantRoot(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/ai-assistant/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "parity probe", task: "ASK_ANYTHING" }),
+  });
+  return res.status;
+}
+
 // --- Intake cross-cutting (NEWFRONT-260, INT-018/030/031/032/034). Appended;
 // --- existing helpers above are untouched per the shared parity contract.
 // --- The retrieve endpoint takes the nested issue id; issue fields patch
@@ -13558,7 +13600,8 @@ export interface ParityPageRecord {
   name: string;
   access: number | null;
   ownedBy: string;
-  updatedBy: string;
+  /** Last updater id, or null on a page nobody has touched yet. */
+  updatedBy: string | null;
   createdAt: string;
   updatedAt: string;
   descriptionHtml: string;
@@ -13681,7 +13724,7 @@ export async function serverPageRecord(
   });
   if (!res.ok) throw new Error(`[parity] page read failed with HTTP ${res.status}.`);
   const rec = (await res.json()) as Record<string, unknown>;
-  for (const key of ["id", "owned_by", "updated_by", "created_at", "updated_at"]) {
+  for (const key of ["id", "owned_by", "created_at", "updated_at"]) {
     if (typeof rec[key] !== "string") throw new Error(`[parity] page record carried no string ${key}.`);
   }
   return {
@@ -13689,7 +13732,7 @@ export async function serverPageRecord(
     name: typeof rec["name"] === "string" ? rec["name"] : "",
     access: typeof rec["access"] === "number" ? rec["access"] : null,
     ownedBy: rec["owned_by"] as string,
-    updatedBy: rec["updated_by"] as string,
+    updatedBy: typeof rec["updated_by"] === "string" ? rec["updated_by"] : null,
     createdAt: rec["created_at"] as string,
     updatedAt: rec["updated_at"] as string,
     descriptionHtml: typeof rec["description_html"] === "string" ? rec["description_html"] : "",

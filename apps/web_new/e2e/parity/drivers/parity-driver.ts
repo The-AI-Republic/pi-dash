@@ -5141,6 +5141,113 @@ export interface ParityDriver {
   /** Whether the sync loader skeleton is currently showing. */
   pagesLiveSyncLoaderVisible(): Promise<boolean>;
 
+  // --- Pages prefs, key map, assistant, cloud stubs, desktop, negatives
+  // --- (NEWFRONT-320, PAGE-072-073, PAGE-075-078, PAGE-081-083).
+  // --- Distinctive pages* names; siblings own pagesPane* (317) and the
+  // --- other PAGE ranges. Nav/editor primitives live under pagesPrefs*
+  // --- and are reused by every scenario in prefs-cloud-misc.spec.ts.
+
+  /** Open the project pages list; resolves once rows or an empty state render. */
+  pagesPrefsOpenList(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Open one page's detail; resolves once the live editor renders. */
+  pagesPrefsOpenDetail(workspaceSlug: string, projectId: string, pageId: string): Promise<void>;
+  /** Reload the current page route; resolves once list or detail renders again. */
+  pagesPrefsReload(): Promise<void>;
+  /** Inner HTML of the live editor body. */
+  pagesPrefsEditorHtml(): Promise<string>;
+  /** Visible text of the live editor body. */
+  pagesPrefsEditorText(): Promise<string>;
+  /** Click at the end of the live editor body. */
+  pagesPrefsEditorClickEnd(): Promise<void>;
+  /** Type text into the live editor (caller focuses first). */
+  pagesPrefsEditorType(text: string): Promise<void>;
+  /** Select-all in the live editor and delete, leaving an empty document. */
+  pagesPrefsEditorClear(): Promise<void>;
+  /** Select all text in the live editor (keeps the selection). */
+  pagesPrefsEditorSelectAll(): Promise<void>;
+  /** Current value of the detail title control. */
+  pagesPrefsTitleValue(): Promise<string>;
+  /** Fill the detail title control. */
+  pagesPrefsTitleFill(text: string): Promise<void>;
+  /** Focus the detail title control. */
+  pagesPrefsTitleFocus(): Promise<void>;
+  /** Press Enter while the title control is focused. */
+  pagesPrefsTitlePressEnter(): Promise<void>;
+  /** Class attribute of the title control (carries the type-size class). */
+  pagesPrefsTitleClass(): Promise<string>;
+  /** Which region holds DOM focus: title, editor body, or elsewhere. */
+  pagesPrefsFocusedRegion(): Promise<"title" | "body" | "other">;
+  /** Open the detail header options menu; resolves once its items render. */
+  pagesPrefsOptionsOpen(): Promise<void>;
+  /** Visible item labels of the open options menu, in display order. */
+  pagesPrefsOptionsItems(): Promise<string[]>;
+  /** Click the options-menu item `label`; resolves once the menu closes. */
+  pagesPrefsOptionsToggle(label: string): Promise<void>;
+  /** Display prefs as the app persisted them locally, or null when absent. */
+  pagesPrefsLocalConfig(): Promise<PagesPrefsLocalConfig | null>;
+  /** Overwrite the locally persisted display prefs (caller reloads after). */
+  pagesPrefsSeedLocalConfig(config: PagesPrefsLocalConfig): Promise<void>;
+  /** Whether the sticky toolbar container is currently expanded. */
+  pagesPrefsToolbarVisible(): Promise<boolean>;
+  /** Whether the toolbar content carries the full-width layout marker. */
+  pagesPrefsToolbarWide(): Promise<boolean>;
+  /** Computed max-width of the detail header block (full-width reflow read). */
+  pagesPrefsCanvasMaxWidth(): Promise<string>;
+  /** Class attribute of the live editor container (carries font markers). */
+  pagesPrefsEditorClass(): Promise<string>;
+  /** Start counting page-endpoint writes (POST/PATCH/PUT/DELETE). */
+  pagesPrefsSpyPageWrites(): Promise<void>;
+  /** Page-endpoint writes observed since pagesPrefsSpyPageWrites. */
+  pagesPrefsPageWriteCount(): Promise<number>;
+  /** Request bodies of the writes observed since pagesPrefsSpyPageWrites. */
+  pagesPrefsPageWritePayloads(): Promise<string[]>;
+  /** Toolbar buttons with the tooltip each advertises, in display order. */
+  pagesKeysToolbarTooltips(): Promise<PagesKeysToolbarTooltip[]>;
+  /** Press one Playwright key chord (e.g. "Control+b") into the focused editor. */
+  pagesKeysPress(chord: string): Promise<void>;
+  /** Open the collapsed list search control. */
+  pagesKeysSearchOpen(): Promise<void>;
+  /** Fill the list search box. */
+  pagesKeysSearchFill(text: string): Promise<void>;
+  /** Current value of the list search box. */
+  pagesKeysSearchValue(): Promise<string>;
+  /** Press Escape while the list search box is focused. */
+  pagesKeysSearchPressEscape(): Promise<void>;
+  /** Whether the list search box is currently expanded. */
+  pagesKeysSearchExpanded(): Promise<boolean>;
+  /** List row titles currently rendered, in display order. */
+  pagesKeysListRowTitles(): Promise<string[]>;
+  /** Whether any global shortcut reference or cheat sheet renders. */
+  pagesKeysShortcutReferenceVisible(): Promise<boolean>;
+  /** Whether the editor side menu shows its AI handle. */
+  pagesAssistAiHandleVisible(): Promise<boolean>;
+  /** Whether any AI assistant menu or panel renders on the detail view. */
+  pagesAssistAiMenuVisible(): Promise<boolean>;
+  /** Accessible names of the detail header action controls, in order. */
+  pagesCloudHeaderActionNames(): Promise<string[]>;
+  /** Accessible names of the toolbar-end cluster buttons, in order. */
+  pagesCloudToolbarEndNames(): Promise<string[]>;
+  /** Open the navigation pane; resolves once its tabs render. */
+  pagesCloudPaneOpen(): Promise<void>;
+  /** Navigation pane tab labels in display order (empty when closed). */
+  pagesCloudPaneTabNames(): Promise<string[]>;
+  /** Top-level slash-menu entries, in display order (closes the menu after). */
+  pagesCloudSlashEntries(): Promise<string[]>;
+  /** Whether the current UA reads as mobile under the app's own rule. */
+  pagesDeskIsMobile(): Promise<boolean>;
+  /** Platform label under the app's own UA rule (Windows/MacOS/Linux/Unknown). */
+  pagesDeskPlatform(): Promise<string>;
+  /** List visibility tab labels in display order. */
+  pagesNegListTabNames(): Promise<string[]>;
+  /** Row menu item labels for the row `title`, in display order. */
+  pagesNegRowMenuItems(title: string): Promise<string[]>;
+  /** Whether any cover affordance renders in list or detail scope. */
+  pagesNegCoverPresent(): Promise<boolean>;
+  /** Whether any merge-conflict dialog renders. */
+  pagesNegConflictDialogVisible(): Promise<boolean>;
+  /** Whether the detail header shows the page mark control. */
+  pagesNegMarkPresent(): Promise<boolean>;
+
   // --- Desktop bare sign-in, deep links, onboarding seam (NEWFRONT-208,
   // --- DESK-011–015, DESK-027). Appended; existing methods above are
   // --- untouched per the shared driver contract.
@@ -6462,6 +6569,26 @@ export interface ArchivesTrafficCounts {
   detailReads: number;
   /** POST/DELETE archive and restore writes. */
   writes: number;
+}
+
+/** Locally persisted pages display prefs (NEWFRONT-320, PAGE-072). */
+export interface PagesPrefsLocalConfig {
+  /** Full-width canvas on/off. */
+  fullWidth: boolean;
+  /** Editor type size key. */
+  fontSize: string;
+  /** Editor typeface key. */
+  fontStyle: string;
+  /** Sticky toolbar on/off. */
+  stickyToolbar: boolean;
+}
+
+/** One toolbar button with its advertised tooltip (NEWFRONT-320, PAGE-073). */
+export interface PagesKeysToolbarTooltip {
+  /** Button label as the tooltip names it. */
+  label: string;
+  /** Advertised key combination text, or empty when the tooltip names none. */
+  keys: string;
 }
 
 /** Intake tab keys (NEWFRONT-260, INT-031). */

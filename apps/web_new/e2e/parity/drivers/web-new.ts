@@ -84,6 +84,8 @@ import type {
   ServedShellMarkers,
   WorkspaceOnboardingView,
   PagesLiveSocketClose,
+  PagesKeysToolbarTooltip,
+  PagesPrefsLocalConfig,
   PagesPaneActor,
   PagesPaneAssetRow,
   PagesPaneOutlineHeading,
@@ -7860,6 +7862,160 @@ export class WebNewDriver implements ParityDriver {
 
   async intakeTriageListOpenIssue(_name: string): Promise<void> {
     return todo("intakeTriageListOpenIssue");
+  }
+
+  // --- Pages prefs, key map, assistant, cloud stubs, desktop, negatives
+  // --- (NEWFRONT-320, PAGE-072-073, PAGE-075-078, PAGE-081-083).
+  // --- Stage 0 oracle convention: stubs until the area lands.
+  async pagesPrefsOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("pagesPrefsOpenList");
+  }
+  async pagesPrefsOpenDetail(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
+    return todo("pagesPrefsOpenDetail");
+  }
+  async pagesPrefsReload(): Promise<void> {
+    return todo("pagesPrefsReload");
+  }
+  async pagesPrefsEditorHtml(): Promise<string> {
+    return todo("pagesPrefsEditorHtml");
+  }
+  async pagesPrefsEditorText(): Promise<string> {
+    return todo("pagesPrefsEditorText");
+  }
+  async pagesPrefsEditorClickEnd(): Promise<void> {
+    return todo("pagesPrefsEditorClickEnd");
+  }
+  async pagesPrefsEditorType(_text: string): Promise<void> {
+    return todo("pagesPrefsEditorType");
+  }
+  async pagesPrefsEditorClear(): Promise<void> {
+    return todo("pagesPrefsEditorClear");
+  }
+  async pagesPrefsEditorSelectAll(): Promise<void> {
+    return todo("pagesPrefsEditorSelectAll");
+  }
+  async pagesPrefsTitleValue(): Promise<string> {
+    return todo("pagesPrefsTitleValue");
+  }
+  async pagesPrefsTitleFill(_text: string): Promise<void> {
+    return todo("pagesPrefsTitleFill");
+  }
+  async pagesPrefsTitleFocus(): Promise<void> {
+    return todo("pagesPrefsTitleFocus");
+  }
+  async pagesPrefsTitlePressEnter(): Promise<void> {
+    return todo("pagesPrefsTitlePressEnter");
+  }
+  async pagesPrefsTitleClass(): Promise<string> {
+    return todo("pagesPrefsTitleClass");
+  }
+  async pagesPrefsFocusedRegion(): Promise<"title" | "body" | "other"> {
+    return todo("pagesPrefsFocusedRegion");
+  }
+  async pagesPrefsOptionsOpen(): Promise<void> {
+    return todo("pagesPrefsOptionsOpen");
+  }
+  async pagesPrefsOptionsItems(): Promise<string[]> {
+    return todo("pagesPrefsOptionsItems");
+  }
+  async pagesPrefsOptionsToggle(_label: string): Promise<void> {
+    return todo("pagesPrefsOptionsToggle");
+  }
+  async pagesPrefsLocalConfig(): Promise<PagesPrefsLocalConfig | null> {
+    return todo("pagesPrefsLocalConfig");
+  }
+  async pagesPrefsSeedLocalConfig(_config: PagesPrefsLocalConfig): Promise<void> {
+    return todo("pagesPrefsSeedLocalConfig");
+  }
+  async pagesPrefsToolbarVisible(): Promise<boolean> {
+    return todo("pagesPrefsToolbarVisible");
+  }
+  async pagesPrefsToolbarWide(): Promise<boolean> {
+    return todo("pagesPrefsToolbarWide");
+  }
+  async pagesPrefsCanvasMaxWidth(): Promise<string> {
+    return todo("pagesPrefsCanvasMaxWidth");
+  }
+  async pagesPrefsEditorClass(): Promise<string> {
+    return todo("pagesPrefsEditorClass");
+  }
+  async pagesPrefsSpyPageWrites(): Promise<void> {
+    return todo("pagesPrefsSpyPageWrites");
+  }
+  async pagesPrefsPageWriteCount(): Promise<number> {
+    return todo("pagesPrefsPageWriteCount");
+  }
+  async pagesPrefsPageWritePayloads(): Promise<string[]> {
+    return todo("pagesPrefsPageWritePayloads");
+  }
+  async pagesKeysToolbarTooltips(): Promise<PagesKeysToolbarTooltip[]> {
+    return todo("pagesKeysToolbarTooltips");
+  }
+  async pagesKeysPress(_chord: string): Promise<void> {
+    return todo("pagesKeysPress");
+  }
+  async pagesKeysSearchOpen(): Promise<void> {
+    return todo("pagesKeysSearchOpen");
+  }
+  async pagesKeysSearchFill(_text: string): Promise<void> {
+    return todo("pagesKeysSearchFill");
+  }
+  async pagesKeysSearchValue(): Promise<string> {
+    return todo("pagesKeysSearchValue");
+  }
+  async pagesKeysSearchPressEscape(): Promise<void> {
+    return todo("pagesKeysSearchPressEscape");
+  }
+  async pagesKeysSearchExpanded(): Promise<boolean> {
+    return todo("pagesKeysSearchExpanded");
+  }
+  async pagesKeysListRowTitles(): Promise<string[]> {
+    return todo("pagesKeysListRowTitles");
+  }
+  async pagesKeysShortcutReferenceVisible(): Promise<boolean> {
+    return todo("pagesKeysShortcutReferenceVisible");
+  }
+  async pagesAssistAiHandleVisible(): Promise<boolean> {
+    return todo("pagesAssistAiHandleVisible");
+  }
+  async pagesAssistAiMenuVisible(): Promise<boolean> {
+    return todo("pagesAssistAiMenuVisible");
+  }
+  async pagesCloudHeaderActionNames(): Promise<string[]> {
+    return todo("pagesCloudHeaderActionNames");
+  }
+  async pagesCloudToolbarEndNames(): Promise<string[]> {
+    return todo("pagesCloudToolbarEndNames");
+  }
+  async pagesCloudPaneOpen(): Promise<void> {
+    return todo("pagesCloudPaneOpen");
+  }
+  async pagesCloudPaneTabNames(): Promise<string[]> {
+    return todo("pagesCloudPaneTabNames");
+  }
+  async pagesCloudSlashEntries(): Promise<string[]> {
+    return todo("pagesCloudSlashEntries");
+  }
+  async pagesDeskIsMobile(): Promise<boolean> {
+    return todo("pagesDeskIsMobile");
+  }
+  async pagesDeskPlatform(): Promise<string> {
+    return todo("pagesDeskPlatform");
+  }
+  async pagesNegListTabNames(): Promise<string[]> {
+    return todo("pagesNegListTabNames");
+  }
+  async pagesNegRowMenuItems(_title: string): Promise<string[]> {
+    return todo("pagesNegRowMenuItems");
+  }
+  async pagesNegCoverPresent(): Promise<boolean> {
+    return todo("pagesNegCoverPresent");
+  }
+  async pagesNegConflictDialogVisible(): Promise<boolean> {
+    return todo("pagesNegConflictDialogVisible");
+  }
+  async pagesNegMarkPresent(): Promise<boolean> {
+    return todo("pagesNegMarkPresent");
   }
 
   // --- Intake cross-cutting (NEWFRONT-260, INT-018/030/031/032/034).
