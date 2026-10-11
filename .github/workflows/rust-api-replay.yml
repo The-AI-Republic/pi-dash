@@ -112,6 +112,18 @@ jobs:
       # AI-assistant task legs reach the provider-error envelope (500)
       # instead of the missing-key 400.
       LLM_API_KEY: dummy-contract-key
+      # Object-store credentials for offline SigV4 presigning (same
+      # block as rust-api-contract-rust.yml): Django's S3Storage
+      # reads AWS_S3_BUCKET_NAME and presigned-POST mints 500
+      # without it. Deliberately NO endpoint URL and no LocalStack:
+      # the corpus only mints presigned URLs (blanked at compare),
+      # never performs live S3 I/O, and both backends presign
+      # offline from these same values.
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_S3_BUCKET_NAME: pi-dash-contract
+      AWS_STORAGE_BUCKET_NAME: pi-dash-contract
+      AWS_REGION: us-east-1
     steps:
       - uses: actions/checkout@v6
 

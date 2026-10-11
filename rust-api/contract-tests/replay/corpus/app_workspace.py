@@ -926,14 +926,8 @@ SESSIONS = (
                 "GET", _WS + "/stickies/{sid}/",
                 route="/api/workspaces/{slug}/stickies/{pk}/",
                 auth="admin", expect_status=404,
-                # Known divergence (PIDASHCONV-907): different key
-                # case AND different text (Django lowercase detail
-                # + model message, Rust capital Detail + bare
-                # Http404 text). Raw bytes verified, not eyeballed.
-                known_body_aliases=[
-                    ("detail", "Detail", "PIDASHCONV-907",
-                     "No Sticky matches the given query.", "Not found."),
-                ],
+                # PIDASHCONV-907 is Done (bfc6e8b0): Rust renders
+                # Django's lowercase detail + model message here.
             ),
         ),
     ),

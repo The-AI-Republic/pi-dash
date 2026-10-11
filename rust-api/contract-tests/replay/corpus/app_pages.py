@@ -273,14 +273,9 @@ SESSIONS = (
                 "DELETE", _P + "/pages/{parent}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/pages/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-908): Django's
-                # soft-delete re-saves through Page.save(), which
-                # recomputes description_stripped; Rust leaves the
-                # seeded NULL.
-                known_cell_diffs=[
-                    ("pages", "PIDASHCONV-908", {"name": "Parent"},
-                     "description_stripped", "", None),
-                ],
+                # PIDASHCONV-908 is Done (7cc7e1dd): Rust's
+                # soft-delete recomputes description_stripped
+                # like Page.save(), so both sides agree here.
             ),
             Request(
                 "GET", _P + "/pages/{parent}/",

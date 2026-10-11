@@ -19,7 +19,6 @@ ported perform_create bug the suite pins byte for byte).
 
 from psycopg.rows import dict_row
 
-from .. import effects
 from ..session import Request, Session
 
 # Fixed intake ids seeded by _seed_intake (addressed via static_context).
@@ -75,73 +74,12 @@ SESSIONS = (
             "disp": INTAKE_DISP_ID,
             "disp2": INTAKE_DISP2_ID,
         },
-        # The Rust-only sync version row stamps last_saved_at =
-        # now() (PIDASHCONV-911); blanked so the exact-row pins
-        # below can match.
-        timestamp_columns={
-            "issue_description_versions": ["last_saved_at"],
-        },
         payload_time_paths={
             "pi_dash.bgtasks.issue_activities_task.issue_activity": ["kwargs/epoch"],
         },
-        # Known divergence (PIDASHCONV-911): Rust's intake-issue
-        # create writes a sync issue_description_versions row
-        # Django leaves to the async worker. One exact-row
-        # declaration per created issue; each must match >= once
-        # and any unmatched row still fails.
-        known_rust_extra_rows=[
-            ("issue_description_versions", "PIDASHCONV-911", {
-                "created_at": effects.VOLATILE_PLACEHOLDER,
-                "created_by_id": "{admin}",
-                "deleted_at": None,
-                "description_binary": None,
-                "description_html": "<p></p>",
-                "description_json": {},
-                "description_stripped": "",
-                "id": effects.VOLATILE_PLACEHOLDER,
-                "issue_id": "{i1}",
-                "last_saved_at": effects.VOLATILE_PLACEHOLDER,
-                "owned_by_id": "{admin}",
-                "project_id": "{project}",
-                "updated_at": effects.VOLATILE_PLACEHOLDER,
-                "updated_by_id": None,
-                "workspace_id": "{ws_id}",
-            }),
-            ("issue_description_versions", "PIDASHCONV-911", {
-                "created_at": effects.VOLATILE_PLACEHOLDER,
-                "created_by_id": "{admin}",
-                "deleted_at": None,
-                "description_binary": None,
-                "description_html": "<p></p>",
-                "description_json": {},
-                "description_stripped": "",
-                "id": effects.VOLATILE_PLACEHOLDER,
-                "issue_id": "{i2}",
-                "last_saved_at": effects.VOLATILE_PLACEHOLDER,
-                "owned_by_id": "{admin}",
-                "project_id": "{project}",
-                "updated_at": effects.VOLATILE_PLACEHOLDER,
-                "updated_by_id": None,
-                "workspace_id": "{ws_id}",
-            }),
-            ("issue_description_versions", "PIDASHCONV-911", {
-                "created_at": effects.VOLATILE_PLACEHOLDER,
-                "created_by_id": "{admin}",
-                "deleted_at": None,
-                "description_binary": None,
-                "description_html": "<p></p>",
-                "description_json": {},
-                "description_stripped": "",
-                "id": effects.VOLATILE_PLACEHOLDER,
-                "issue_id": "{i3}",
-                "last_saved_at": effects.VOLATILE_PLACEHOLDER,
-                "owned_by_id": "{admin}",
-                "project_id": "{project}",
-                "updated_at": effects.VOLATILE_PLACEHOLDER,
-                "updated_by_id": None,
-                "workspace_id": "{ws_id}",
-            }),
-        ],
+        # PIDASHCONV-911 is Done (605c0fa3): Rust no longer
+        # writes the sync issue_description_versions row on
+        # intake-issue create, so no extra-row pins remain.
         requests=(
             # Intakes: read -> create-500 (ported bug, pinned
             # byte-for-byte both sides) -> inbox-create-500 ->
