@@ -47,6 +47,7 @@ import {
   signInSessionRetry,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
+import { parityOracleUrl } from "../helpers/parity-env";
 import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
 
 /** Seed guest credentials, or a thrown error naming the missing seed step. */
@@ -347,7 +348,7 @@ test(
 
 /** Work-item link shape the copy action must place on the clipboard. */
 function workItemLinkPattern(seed: ParitySeedFacts, identifier: string): RegExp {
-  const oracleBase = (process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000").replace(/\/+$/, "");
+  const oracleBase = parityOracleUrl(process.env).replace(/\/+$/, "");
   const escapedBase = oracleBase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const escapedSlug = seed.workspaceSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^${escapedBase}/${escapedSlug}/browse/${identifier}-\\d+/$`);
