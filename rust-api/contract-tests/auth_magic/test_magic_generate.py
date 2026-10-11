@@ -71,6 +71,7 @@ class TestMagicGenerate:
         assert set(body) == {"error_code", "error_message", "email"}
         assert body["error_code"] == 5102
         assert body["error_message"] == "EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_UP"
+        assert body["email"] == email
 
     def test_generate_max_attempts_400_for_existing_user(self, path, rdb, seed):
         user = seed.user(email=fresh_email())
@@ -83,8 +84,10 @@ class TestMagicGenerate:
 
         assert resp.status_code == 400, resp.text
         body = resp.json()
+        assert set(body) == {"error_code", "error_message", "email"}
         assert body["error_code"] == 5100
         assert body["error_message"] == "EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_IN"
+        assert body["email"] == user["email"]
 
     def test_generate_instance_not_configured(self, path, db):
         client = csrf_client()
