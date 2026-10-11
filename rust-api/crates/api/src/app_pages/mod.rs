@@ -4140,13 +4140,17 @@ pub async fn page_destroy(
         return Denial::ServerError.into_response();
     }
     // `page.delete()` (`:404`): the soft delete — `deleted_at` plus the
-    // full-save `updated_at`/`updated_by` (`BaseModel.save` via crum); the
-    // related-objects sweep enqueues best-effort below.
+    // full-save `updated_at`/`updated_by` (`BaseModel.save` via crum) and
+    // the `Page.save()` `description_stripped` recompute
+    // (`db/models/page.py:70-77`: `SoftDeleteModel.delete` re-saves through
+    // `Page.save()`); the related-objects sweep enqueues best-effort below.
+    let destroyed_stripped = stripped_of(page.description_html.as_str());
     if sqlx::query(
-        r#"UPDATE pages SET deleted_at = now(), updated_at = now(), updated_by_id = $1
-           WHERE id = $2"#,
+        r#"UPDATE pages SET deleted_at = now(), updated_at = now(), updated_by_id = $1,
+           description_stripped = $2 WHERE id = $3"#,
     )
     .bind(user_id)
+    .bind(destroyed_stripped)
     .bind(page_id)
     .execute(pool)
     .await
