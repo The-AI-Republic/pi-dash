@@ -3419,7 +3419,7 @@ fn detail_not_found_response(model: &str) -> Response {
 /// One `soft_delete_related_objects.delay(app_label, model_name, pk,
 /// using=None)` enqueue (`db/mixins.py:78`): positional triple plus the
 /// explicit null `using` kwarg, exactly as `.delay()` serializes it.
-async fn enqueue_soft_delete_related(
+pub(crate) async fn enqueue_soft_delete_related(
     pool: &sqlx::PgPool,
     app_label: &str,
     model_name: &str,
