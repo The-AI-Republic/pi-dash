@@ -686,6 +686,29 @@ async fn create_user(
     Ok(id)
 }
 
+/// `post_save` receiver `create_user_notification` (`user.py:307-321`):
+/// a preferences row on every non-bot create (all five flags true).
+/// Same insert as the magic sign-up path (`magic.rs`).
+async fn insert_notification_prefs(
+    pool: &sqlx::PgPool,
+    now: chrono::DateTime<chrono::Utc>,
+    user_id: &uuid::Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO \"user_notification_preferences\" (\"id\", \"created_at\", \"updated_at\", \
+         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"user_id\", \"workspace_id\", \
+         \"project_id\", \"property_change\", \"state_change\", \"comment\", \"mention\", \
+         \"issue_completed\") \
+         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(now)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// `save_user_data` (`base.py:220-234`): the login stamps plus the
 /// activation branch. Returns whether the activation mail must be
 /// published (`not user.is_active` before the write).
@@ -1610,6 +1633,14 @@ async fn serve_email_form(state: &AppState, req: &EmailRequest, current_site: &s
                     }
                     Err(_) => return server_error(),
                 };
+            // `post_save` fires on the first `save()` (`user.py:307`),
+            // before the authenticated tail below.
+            if insert_notification_prefs(pool, now, &user_id)
+                .await
+                .is_err()
+            {
+                return server_error();
+            }
             run_authenticated(
                 pool,
                 state,
