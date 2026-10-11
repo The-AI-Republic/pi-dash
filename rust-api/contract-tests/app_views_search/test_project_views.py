@@ -207,7 +207,7 @@ def test_update_by_non_owner_rejected(api, seed, tenant_a, project_a, auth_a):
     assert r.json() == {"error": "Only the owner of the view can update the view"}
 
 
-def test_destroy_owner(api, seed, tenant_a, project_a, auth_a):
+def test_destroy_owner(api, seed, db, tenant_a, project_a, auth_a):
     view_id = seed.issue_view(
         tenant_a["workspace"]["id"], tenant_a["user"]["id"],
         project_id=project_a, name="Doomed",
@@ -217,6 +217,16 @@ def test_destroy_owner(api, seed, tenant_a, project_a, auth_a):
     r = api.get(_views_url(tenant_a, project_a), headers=auth_a)
     assert r.status_code == 200, r.text
     assert all(v["id"] != view_id for v in r.json())
+    # PIDASHCONV-925: project destroy stamps updated_by/updated_at through
+    # the same model soft-delete as the global destroy (db/mixins.py:72-78).
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT updated_by_id, deleted_at FROM issue_views WHERE id = %s",
+            (view_id,),
+        )
+        row = cur.fetchone()
+    assert row[1] is not None
+    assert str(row[0]) == tenant_a["user"]["id"]
 
 
 def test_destroy_denied_for_member_non_owner(api, seed, tenant_a, project_a, auth_a):

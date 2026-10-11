@@ -109,7 +109,7 @@ def test_global_partial_update(api, seed, tenant_a, auth_a):
     assert r.json()["name"] == "G-after"
 
 
-def test_global_destroy_by_owner_member(api, seed, tenant_a, auth_a):
+def test_global_destroy_by_owner_member(api, seed, db, tenant_a, auth_a):
     """A workspace member (not admin) deletes their own global view: the
     creator gate passes and owned_by matches → 204."""
     member = seed.user()
@@ -122,6 +122,18 @@ def test_global_destroy_by_owner_member(api, seed, tenant_a, auth_a):
     )
     r = api.delete(f"{_global_url(tenant_a)}{view_id}/", headers=member_headers)
     assert r.status_code == 204, r.text
+    # PIDASHCONV-925: destroy goes through the model soft-delete, which
+    # runs a full save() stamping updated_by/updated_at (db/mixins.py:72-78,
+    # db/models/base.py:24-44) — not a bare SET deleted_at. The seeded row
+    # was never updated, so the stamp must come from the destroy itself.
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT updated_by_id, deleted_at FROM issue_views WHERE id = %s",
+            (view_id,),
+        )
+        row = cur.fetchone()
+    assert row[1] is not None
+    assert str(row[0]) == member["id"]
 
 
 def test_global_destroy_denied_for_member_non_owner(api, seed, tenant_a, auth_a):
