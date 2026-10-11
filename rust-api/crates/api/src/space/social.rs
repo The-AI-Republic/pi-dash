@@ -2192,7 +2192,7 @@ async fn fetch_comment_by_id(
 /// `IssueCommentPublicViewSet.partial_update` (`views/issue.py:296-318`):
 /// actor-scoped get (a foreign comment is a 404, not a 403); the synced
 /// lock rejects changed locked fields; the activity carries the raw input
-/// dump plus the pre-save snapshot.
+/// dump plus the after image (`save()` mutates the serialized instance).
 async fn comment_partial_update(
     State(state): State<AppState>,
     Path((anchor, issue_id, pk)): Path<(String, String, String)>,
