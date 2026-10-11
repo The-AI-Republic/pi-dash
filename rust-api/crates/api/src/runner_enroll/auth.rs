@@ -961,6 +961,9 @@ async fn authenticate_api_key_machine(
     bump_machine_token_last_used(pool, token.id)
         .await
         .map_err(|_| server_error())?;
+    // The token loggers stamp this id on the `process_logs` payload
+    // (Django reads `request.user` post-view; PIDASHCONV-937).
+    crate::middleware::publish_logger_user_id(&token.user_id.to_string());
     Ok(ApiKeyOutcome::Authenticated(Box::new(ApiKeyAuth {
         user_id: token.user_id,
         auth_token: raw.to_owned(),
@@ -1018,6 +1021,9 @@ async fn authenticate_api_key_token(
         .execute(pool)
         .await
         .map_err(|_| server_error())?;
+    // The token loggers stamp this id on the `process_logs` payload
+    // (Django reads `request.user` post-view; PIDASHCONV-937).
+    crate::middleware::publish_logger_user_id(&user_id.to_string());
     Ok(ApiKeyOutcome::Authenticated(Box::new(ApiKeyAuth {
         user_id,
         auth_token: token,

@@ -58,8 +58,51 @@ pub const API_KEY_HEADER: &str = "x-api-key";
 /// Extension key carrying the authenticated user's id for the loggers.
 /// Auth layers insert `Some(id)` once sessions land; absence means
 /// anonymous, exactly like `request.user.is_authenticated == False`.
+/// Handlers authenticate after the loggers snapshot the request, so the
+/// API-key auth resolvers publish through [`publish_logger_user_id`]
+/// instead, and the loggers read the published id after the inner
+/// service answers — Django reads `request.user` post-view the same way.
 #[derive(Debug, Clone)]
 pub struct LoggerUserId(pub Option<String>);
+
+tokio::task_local! {
+    /// Per-request slot for the authenticated user id, scoped by
+    /// [`TokenLogService`] around the inner service (the `replica_scope`
+    /// precedent in `pidash_db::pool`: ambient per-task state with no
+    /// signature threading). The `Arc` is shared so the read side needs
+    /// no borrow of the scoped future.
+    static LOGGER_USER_SLOT: std::sync::Arc<std::sync::Mutex<Option<String>>>;
+}
+
+/// Publish the authenticated user id for this request's log lines.
+///
+/// API-key auth resolvers call this with the token owner's id on success;
+/// the logging layers stamp it on the `process_logs` payload (and the
+/// request line) once the inner service answers. Django sets
+/// `request.user` during view authentication and the middlewares read it
+/// afterwards — including on denied and failed responses, and including
+/// the revoke leg, where the token dies after auth but the stamp keeps
+/// the auth-time user. Publishing only on success reproduces exactly
+/// that: failed auth leaves the slot empty and the stamps null.
+/// Outside a [`TokenLogService`] scope (unit tests driving handlers
+/// directly) this is a silent no-op; a poisoned or contended lock degrades
+/// to unstamped rather than failing the request.
+pub fn publish_logger_user_id(user_id: &str) {
+    let _ = LOGGER_USER_SLOT.try_with(|slot| {
+        if let Ok(mut guard) = slot.lock() {
+            *guard = Some(user_id.to_owned());
+        }
+    });
+}
+
+/// The user id published for this request, if any. `None` outside a
+/// [`TokenLogService`] scope or when auth failed or never ran.
+fn current_logger_user_id() -> Option<String> {
+    LOGGER_USER_SLOT
+        .try_with(|slot| slot.lock().ok().and_then(|guard| guard.clone()))
+        .ok()
+        .flatten()
+}
 
 /// One `RequestLoggerMiddleware` line, before rendering.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -508,7 +551,10 @@ where
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         // Stash every log input before the request moves: the logger reads
-        // the request, never the response, except for the status code.
+        // the request, never the response, except for the status code — and
+        // the user id, which handlers publish after authenticating (Django
+        // reads `request.user` post-view), so the pre-inner extension read
+        // is only the fallback.
         let method = req.method().to_string();
         let path = req.uri().path().to_string();
         let full_path = req
@@ -518,7 +564,7 @@ where
             .unwrap_or_else(|| path.clone());
         let remote_addr = client_ip(req.headers(), peer_addr(&req));
         let agent = user_agent(req.headers(), "");
-        let user_id = logger_user_id(&req);
+        let pre_user_id = logger_user_id(&req);
         let log = should_log_request(&method, &path);
         let config = self.config.clone();
         let sink = self.sink.clone();
@@ -536,7 +582,7 @@ where
                     duration_ms: start.elapsed().as_millis() as u64,
                     remote_addr,
                     user_agent: agent,
-                    user_id,
+                    user_id: current_logger_user_id().or(pre_user_id),
                 });
             }
             Ok(response)
@@ -650,63 +696,97 @@ where
         std::mem::swap(&mut self.inner, &mut inner);
         let config = self.config.clone();
         let sink = self.sink.clone();
+        // The user-id slot lives for the whole inner call so handlers can
+        // publish the authenticated identity and both this layer and the
+        // inner request logger can read it once the response is back —
+        // Django's middlewares likewise read `request.user` post-view.
+        // Scoped even without an API key so the inner logger reads one
+        // way; an unpublished slot simply reads `None`.
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
         Box::pin(async move {
-            let Some(api_key) = api_key else {
-                return inner.call(req).await;
-            };
-            // Buffer the request body so it can be logged AND forwarded —
-            // Django reads `request.body` up front the same way. An
-            // unreadable body fails closed (502), like the other layers.
-            // The peer is snapshotted first: `get_client_ip` falls back to
-            // `REMOTE_ADDR` (the connection peer) when `X-Forwarded-For` is
-            // absent, so the token log carries it like the request log.
-            let peer = peer_addr(&req);
-            let (parts, body) = req.into_parts();
-            let request_bytes = match http_body_util::BodyExt::collect(body).await {
-                Ok(collected) => collected.to_bytes(),
-                Err(_) => return Ok(crate::middleware::truncated_body()),
-            };
-            let method = parts.method.to_string();
-            let path = parts.uri.path().to_string();
-            let query_params = parts.uri.query().unwrap_or("").to_string();
-            let headers_rendered = render_headers(&parts.headers);
-            let ip_address = client_ip(&parts.headers, peer);
-            let agent = parts
-                .headers
-                .get(header::USER_AGENT)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let req = Request::from_parts(parts, Body::from(request_bytes.clone()));
-            let user_id = logger_user_id(&req);
-            let response = inner.call(req).await?;
-            let (resp_parts, resp_body) = response.into_parts();
-            let response_bytes = match http_body_util::BodyExt::collect(resp_body).await {
-                Ok(collected) => collected.to_bytes(),
-                Err(_) => return Ok(crate::middleware::truncated_body()),
-            };
-            if config.enabled {
-                let now = utc_now_iso();
-                let record = ApiTokenLogRecord {
-                    token_identifier: api_key,
-                    path,
-                    method,
-                    query_params,
-                    headers: headers_rendered,
-                    body: safe_decode_body(Some(&request_bytes)),
-                    response_body: safe_decode_body(Some(&response_bytes)),
-                    response_code: resp_parts.status.as_u16(),
-                    ip_address,
-                    user_agent: agent,
-                    created_at: now.clone(),
-                    updated_at: now,
-                    created_by: user_id.clone(),
-                    updated_by: user_id,
-                };
-                sink.token(&record).await;
-            }
-            Ok(Response::from_parts(resp_parts, Body::from(response_bytes)))
+            LOGGER_USER_SLOT
+                .scope(slot, async move {
+                    token_log_inner(inner, config, sink, api_key, req).await
+                })
+                .await
         })
     }
+}
+
+/// The [`TokenLogService`] request body, run inside the logger-user scope.
+async fn token_log_inner<S, K>(
+    mut inner: S,
+    config: LoggingConfig,
+    sink: K,
+    api_key: Option<String>,
+    req: Request<Body>,
+) -> Result<Response<Body>, Infallible>
+where
+    S: Service<Request<Body>, Response = Response<Body>, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    K: LogSink,
+{
+    let Some(api_key) = api_key else {
+        return inner.call(req).await;
+    };
+    // Buffer the request body so it can be logged AND forwarded —
+    // Django reads `request.body` up front the same way. An
+    // unreadable body fails closed (502), like the other layers.
+    // The peer is snapshotted first: `get_client_ip` falls back to
+    // `REMOTE_ADDR` (the connection peer) when `X-Forwarded-For` is
+    // absent, so the token log carries it like the request log.
+    let peer = peer_addr(&req);
+    let (parts, body) = req.into_parts();
+    let request_bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return Ok(crate::middleware::truncated_body()),
+    };
+    let method = parts.method.to_string();
+    let path = parts.uri.path().to_string();
+    let query_params = parts.uri.query().unwrap_or("").to_string();
+    let headers_rendered = render_headers(&parts.headers);
+    let ip_address = client_ip(&parts.headers, peer);
+    let agent = parts
+        .headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let req = Request::from_parts(parts, Body::from(request_bytes.clone()));
+    // The extension read is only the fallback: handlers publish
+    // the authenticated id during the inner call, and Django
+    // likewise reads `request.user` after the view answered.
+    let pre_user_id = logger_user_id(&req);
+    let response = inner.call(req).await?;
+    let user_id = current_logger_user_id().or(pre_user_id);
+    let (resp_parts, resp_body) = response.into_parts();
+    let response_bytes = match http_body_util::BodyExt::collect(resp_body).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return Ok(crate::middleware::truncated_body()),
+    };
+    if config.enabled {
+        let now = utc_now_iso();
+        let record = ApiTokenLogRecord {
+            token_identifier: api_key,
+            path,
+            method,
+            query_params,
+            headers: headers_rendered,
+            body: safe_decode_body(Some(&request_bytes)),
+            response_body: safe_decode_body(Some(&response_bytes)),
+            response_code: resp_parts.status.as_u16(),
+            ip_address,
+            user_agent: agent,
+            created_at: now.clone(),
+            updated_at: now,
+            created_by: user_id.clone(),
+            updated_by: user_id,
+        };
+        sink.token(&record).await;
+    }
+    Ok(Response::from_parts(resp_parts, Body::from(response_bytes)))
 }
 
 #[cfg(test)]
@@ -1010,6 +1090,105 @@ mod tests {
         assert_eq!(record.updated_by.as_deref(), Some("user-9"));
         assert!(record.created_at.ends_with("+00:00"));
         assert_eq!(record.created_at, record.updated_at);
+    }
+
+    /// Inner service whose handler publishes the authenticated id, like
+    /// the API-key auth resolvers do once the token validates.
+    fn publishing_router(user_id: &'static str) -> axum::Router {
+        axum::Router::new().route(
+            "/api/x/",
+            axum::routing::any(move || async move {
+                publish_logger_user_id(user_id);
+                "done"
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn token_log_stamps_published_user_id() {
+        // PIDASHCONV-937: the stamp comes from the handler's auth outcome
+        // (read post-inner, like Django reads `request.user` post-view),
+        // not from a request extension nothing inserts.
+        let sink = VecSink::default();
+        let response = TokenLogLayer::new(LoggingConfig::enabled(), sink.clone())
+            .layer(publishing_router("user-42"))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/x/?a=1")
+                    .header("x-api-key", "sekret")
+                    .body(Body::from("{\"k\": 1}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        let records = sink.take();
+        assert_eq!(records.len(), 1);
+        let Record::Token(record) = &records[0] else {
+            panic!("expected a token record");
+        };
+        assert_eq!(record.created_by.as_deref(), Some("user-42"));
+        assert_eq!(record.updated_by.as_deref(), Some("user-42"));
+    }
+
+    #[tokio::test]
+    async fn token_log_prefers_published_id_over_extension() {
+        // The post-inner auth outcome wins over the pre-inner extension
+        // snapshot (Django likewise trusts post-view `request.user`).
+        let sink = VecSink::default();
+        let response = TokenLogLayer::new(LoggingConfig::enabled(), sink.clone())
+            .layer(publishing_router("user-post"))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/x/")
+                    .header("x-api-key", "sekret")
+                    .extension(LoggerUserId(Some("user-pre".to_string())))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        let records = sink.take();
+        assert_eq!(records.len(), 1);
+        let Record::Token(record) = &records[0] else {
+            panic!("expected a token record");
+        };
+        assert_eq!(record.created_by.as_deref(), Some("user-post"));
+        assert_eq!(record.updated_by.as_deref(), Some("user-post"));
+    }
+
+    #[tokio::test]
+    async fn request_logger_stamps_published_user_id() {
+        // The inner request logger reads the same scope: layers stacked
+        // as in `middleware::stack` (token log outside, request logger
+        // inside), so one publish stamps both lines.
+        let sink = VecSink::default();
+        let inner = RequestLoggerLayer::new(LoggingConfig::enabled(), sink.clone())
+            .layer(publishing_router("user-7"));
+        let response = TokenLogLayer::new(LoggingConfig::enabled(), sink.clone())
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/x/?a=1")
+                    .header("x-api-key", "sekret")
+                    .body(Body::from("hi"))
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        let records = sink.take();
+        assert_eq!(records.len(), 2);
+        let request = records.iter().find_map(|record| match record {
+            Record::Request(record) => Some(record),
+            Record::Token(_) => None,
+        });
+        let record = request.expect("a request record");
+        assert_eq!(record.user_id.as_deref(), Some("user-7"));
     }
 
     #[tokio::test]

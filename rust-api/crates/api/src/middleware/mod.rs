@@ -40,8 +40,8 @@ pub use body_limit::{BodyLimitLayer, BODY_TOO_LARGE_JSON, DEFAULT_BODY_LIMIT_BYT
 pub use cors::{CorsConfig, CorsLayer, DEFAULT_HEADERS, DEFAULT_METHODS};
 pub use gzip::{GzipLayer, MIN_COMPRESS_BYTES};
 pub use logging::{
-    ApiTokenLogRecord, LogSink, LoggerUserId, LoggingConfig, QueueSink, RequestLogRecord,
-    RequestLoggerLayer, TokenLogLayer, TracingSink, REQUEST_LOGGER_TARGET,
+    publish_logger_user_id, ApiTokenLogRecord, LogSink, LoggerUserId, LoggingConfig, QueueSink,
+    RequestLogRecord, RequestLoggerLayer, TokenLogLayer, TracingSink, REQUEST_LOGGER_TARGET,
 };
 pub use security::{SecurityConfig, SecurityLayer};
 pub use session::{

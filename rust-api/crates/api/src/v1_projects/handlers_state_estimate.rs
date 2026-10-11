@@ -547,10 +547,16 @@ async fn load_identity(pool: &sqlx::PgPool, user_id: Uuid) -> Result<Identity, H
             .await
             .map_err(|_| HandlerError::ServerError)?;
     match row {
-        Some((timezone,)) => Ok(Identity {
-            id: user_id,
-            timezone,
-        }),
+        Some((timezone,)) => {
+            // The token loggers stamp this id on the `process_logs`
+            // payload (Django reads `request.user` post-view;
+            // PIDASHCONV-937).
+            crate::middleware::publish_logger_user_id(&user_id.to_string());
+            Ok(Identity {
+                id: user_id,
+                timezone,
+            })
+        }
         None => Err(HandlerError::Unauthorized),
     }
 }
