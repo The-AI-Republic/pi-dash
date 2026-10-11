@@ -55,7 +55,7 @@
 //! * BUG-admin-admits-member (`permissions/workspace.py:61-71`): despite the
 //!   name, the "admin" gate admits `Member` (15) too.
 //! * Owner-vs-member 404 split: inherited `retrieve` 404s through DRF's
-//!   `Http404` (`{"Detail": "No <Model> matches the given query."}`) while
+//!   `Http404` (`{"detail": "No <Model> matches the given query."}`) while
 //!   the custom `destroy` and the join `get`/`post` 404 through the
 //!   base-view `ObjectDoesNotExist` branch
 //!   (`{"error": "The required object does not exist."}`).
@@ -133,12 +133,14 @@ pub const ALREADY_RESPONDED_REQUEST_BODY: &str =
     r#"{"error":"This request has already been responded to"}"#;
 /// Inherited `retrieve` miss (404): DRF renders the `get_object_or_404`
 /// `Http404("No <Model> matches the given query.")` through
-/// `exception_handler` (`{'Detail': ...}`), verified live against DRF 3.15.2.
+/// `exception_handler` (`{'detail': ...}`, lowercase), byte-verified
+/// against live Django (PIDASHCONV-901).
 pub const INVITE_NOT_FOUND_BODY: &str =
-    r#"{"Detail":"No WorkspaceMemberInvite matches the given query."}"#;
-/// Approve/deny fetch miss (404, `join_request.py:188,242`).
+    r#"{"detail":"No WorkspaceMemberInvite matches the given query."}"#;
+/// Approve/deny fetch miss (404, `join_request.py:188,242`): same lowercase
+/// DRF `exception_handler` shape as [`INVITE_NOT_FOUND_BODY`].
 pub const JOIN_REQUEST_NOT_FOUND_BODY: &str =
-    r#"{"Detail":"No WorkspaceJoinRequest matches the given query."}"#;
+    r#"{"detail":"No WorkspaceJoinRequest matches the given query."}"#;
 /// Bare `.get()` miss (404, `app/views/base.py:232-236`): custom `destroy`
 /// and both join actions.
 pub const MISSING_OBJECT_BODY: &str = r#"{"error":"The required object does not exist."}"#;
@@ -180,15 +182,15 @@ pub enum Denial {
     ForbiddenClass,
     /// Join token mismatch: 403 [`JOIN_FORBIDDEN_BODY`].
     JoinForbidden,
-    /// Inherited retrieve miss: 404 `Detail` body.
+    /// Inherited retrieve miss: 404 `detail` body.
     InviteNotFound,
-    /// Approve/deny fetch miss: 404 `Detail` body.
+    /// Approve/deny fetch miss: 404 `detail` body.
     JoinRequestNotFound,
     /// Bare `.get()` miss: 404 `error` body.
     MissingObject,
     /// 400, `{"error": ...}`.
     BadError(String),
-    /// 400, `{"Detail": ...}` (body parse errors).
+    /// 400, `{"detail": ...}` (body parse errors, DRF `ParseError` shape).
     BadDetail(String),
     /// 400, pre-rendered serializer-errors body (`{"field": [...]}`).
     BadJson(Value),
@@ -196,10 +198,11 @@ pub enum Denial {
     ServerError,
 }
 
-/// `{"Detail": message}` envelope (DRF `exception_handler` shape).
+/// `{"detail": message}` envelope (DRF `exception_handler` shape, lowercase —
+/// byte-verified against live Django, PIDASHCONV-901).
 fn detail_envelope(message: String) -> Value {
     let mut body = Map::new();
-    body.insert("Detail".to_owned(), Value::String(message));
+    body.insert("detail".to_owned(), Value::String(message));
     Value::Object(body)
 }
 
@@ -4431,14 +4434,15 @@ mod tests {
 
     #[test]
     fn not_found_bodies_match_drf_conventions() {
-        // Inherited `retrieve` / `get_object_or_404` (`Detail`) vs bare
-        // `.get` (`error`) — the two 404 shapes this file serves.
+        // Inherited `retrieve` / `get_object_or_404` (`detail`, lowercase —
+        // DRF `exception_handler` shape, byte-verified against live Django)
+        // vs bare `.get` (`error`) — the two 404 shapes this file serves.
         assert_eq!(
-            serde_json::from_str::<Value>(INVITE_NOT_FOUND_BODY).expect("json")["Detail"],
+            serde_json::from_str::<Value>(INVITE_NOT_FOUND_BODY).expect("json")["detail"],
             "No WorkspaceMemberInvite matches the given query."
         );
         assert_eq!(
-            serde_json::from_str::<Value>(JOIN_REQUEST_NOT_FOUND_BODY).expect("json")["Detail"],
+            serde_json::from_str::<Value>(JOIN_REQUEST_NOT_FOUND_BODY).expect("json")["detail"],
             "No WorkspaceJoinRequest matches the given query."
         );
         assert_error_pinned_invite_missing_object();
