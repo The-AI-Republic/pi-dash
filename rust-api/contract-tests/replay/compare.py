@@ -59,6 +59,18 @@ class CompareContext:
     # blanks only when it exactly equals its pinned value; anything
     # else stays and fails loudly.
     payload_value_diffs: dict = field(default_factory=dict)
+    # Job payload stored values: {task_or_"*": [(pointer, table,
+    # column), ...]}. Values at these pointers are backend-minted
+    # secrets echoed into a job (an invite token the worker mails):
+    # each side's value must EXIST in that table column in its own
+    # database (checked live); existing values blank, anything else
+    # stays and fails loudly (a backend queuing a token it never
+    # stored, or storing one it never queued, both fail).
+    payload_db_values: dict = field(default_factory=dict)
+    # Column-membership check for stored values: fn(side, table,
+    # column, value) -> bool. None leaves values untouched (they
+    # fail loudly in comparison).
+    db_value_exists: object = None
     # DB cell row references: [(table, column, ref_table, pointer), ...].
     db_cell_refs: list = field(default_factory=list)
     # Existence check for row refs: fn(side, table, value) -> bool.
@@ -476,6 +488,25 @@ def _json_pointer_set(body, pointer: str, value) -> bool:
     return _pointer_set(body, pointer, value)
 
 
+def _json_pointer_del(body, pointer: str) -> bool:
+    """Delete the leaf at a pointer; False when it does not resolve."""
+    node = body
+    parts = pointer.split("/")
+    try:
+        for part in parts[:-1]:
+            node = node[int(part)] if isinstance(node, list) else node[part]
+        last = parts[-1]
+        if isinstance(node, list):
+            del node[int(last)]
+        elif isinstance(node, dict) and last in node:
+            del node[last]
+        else:
+            return False
+    except (KeyError, IndexError, ValueError, TypeError):
+        return False
+    return True
+
+
 def _sub_regex_blanks(node, pattern: str) -> tuple[object, int]:
     """Substitute every regex match in str leaves; return (node, hits)."""
     import re
@@ -508,6 +539,7 @@ def compare_response(
     regex_blanks: list | None = None,
     skip_body: bool = False,
     body_contains: list | None = None,
+    known_body_aliases: list | None = None,
 ) -> str | None:
     """Compare status, content-type, location/cookies, and body.
 
@@ -517,6 +549,10 @@ def compare_response(
     ([(json_pointer, fix_issue, dj_value, rs_value)]) pins exact
     per-side JSON subtree values the same way; pinned subtrees must
     match on their side and then blank out of the diff.
+    ``known_body_aliases`` ([(dj_pointer, rs_pointer, fix_issue,
+    value)]) is the key-mismatch counterpart: the same value under
+    a different key per side; both pointers must resolve to the
+    pinned value, then both blank out of the diff.
     ``blank_paths`` ([json_pointer, ...]) blanks volatile subtrees
     after asserting they resolve on both sides. ``regex_blanks``
     ([pattern, ...]) blanks every regex match in str leaves after
@@ -620,6 +656,7 @@ def compare_response(
         and not known_body
         and not blank_paths
         and not regex_blanks
+        and not known_body_aliases
     ):
         return None
     try:
@@ -674,6 +711,38 @@ def compare_response(
             )
         _json_pointer_set(dj_norm, pointer, effects.VOLATILE_PLACEHOLDER)
         _json_pointer_set(rs_norm, pointer, effects.VOLATILE_PLACEHOLDER)
+    for entry in known_body_aliases or []:
+        # 4-tuple asserts the same value under both keys
+        # (PIDASHCONV-901); the optional 5th element pins a
+        # different Rust-side value (PIDASHCONV-907: the keys
+        # differ in case AND the texts differ).
+        if len(entry) == 4:
+            dj_pointer, rs_pointer, issue, dj_value = entry
+            rs_value = dj_value
+        else:
+            dj_pointer, rs_pointer, issue, dj_value, rs_value = entry
+        try:
+            dj_value = render_template(dj_value, gap_ctx or {})
+            rs_value = render_template(rs_value, gap_ctx or {})
+        except KeyError as exc:
+            return f"known-body alias {dj_pointer}/{rs_pointer} ({issue}): unrenderable: {exc}"
+        dj_found, dj_have = _json_pointer_get(dj_norm, dj_pointer)
+        rs_found, rs_have = _json_pointer_get(rs_norm, rs_pointer)
+        if not dj_found or dj_have != dj_value:
+            return (
+                f"known-body alias {dj_pointer}/{rs_pointer} ({issue}): Django changed — "
+                f"got {dj_have!r}, want {dj_value!r}"
+            )
+        if not rs_found or rs_have != rs_value:
+            return (
+                f"known-body alias {dj_pointer}/{rs_pointer} ({issue}): Rust changed — "
+                "fix landed or behavior changed; remove or update the pin. "
+                f"got {rs_have!r}, want {rs_value!r}"
+            )
+        # Delete (not blank): the keys themselves differ, so
+        # blanked values would still report missing keys.
+        _json_pointer_del(dj_norm, dj_pointer)
+        _json_pointer_del(rs_norm, rs_pointer)
     for pointer in blank_paths or []:
         dj_found, _ = _json_pointer_get(dj_norm, pointer)
         rs_found, _ = _json_pointer_get(rs_norm, pointer)
@@ -1038,6 +1107,94 @@ def _blank_value_diffs(args, kwargs, task: str, side: str, ctx: CompareContext):
     return args, kwargs
 
 
+def _blank_db_values(args, kwargs, task: str, side: str, ctx: CompareContext):
+    """Blank queued secrets that exist in their table column, nothing else.
+
+    Pointers are multi-segment (``args/2``, ``kwargs/a/0/b``) over
+    dicts and lists and descend transparently through nested JSON
+    strings, exactly like :func:`_blank_row_refs` (same canonical
+    re-serialization). A pointer that does not resolve is skipped.
+    A resolved value blanks only when a row carrying it exists in
+    the declared table column on that side; anything else stays in
+    place and fails the job compare loudly.
+    """
+    refs = list(ctx.payload_db_values.get("*", ())) + list(
+        ctx.payload_db_values.get(task or "", ())
+    )
+    if not refs or ctx.db_value_exists is None:
+        return args, kwargs
+    import copy
+
+    _MISSING = object()
+
+    def _child(node, part):
+        try:
+            if isinstance(node, list):
+                return node[int(part)]
+            if isinstance(node, dict):
+                return node.get(part, _MISSING)
+        except (IndexError, ValueError, TypeError):
+            pass
+        return _MISSING
+
+    def _set_child(node, part, value):
+        if isinstance(node, list):
+            node[int(part)] = value
+        else:
+            node[part] = value
+
+    args, kwargs = copy.deepcopy(args), copy.deepcopy(kwargs)
+    for pointer, table, column in refs:
+        if pointer.startswith("args/"):
+            root, rest = args, pointer[5:]
+        elif pointer.startswith("kwargs/"):
+            root, rest = kwargs, pointer[7:]
+        else:
+            continue
+        parts = rest.split("/")
+        node = root
+        stack: list[tuple] = []
+        resolved = True
+        for part in parts[:-1]:
+            child = _child(node, part)
+            if child is _MISSING:
+                resolved = False
+                break
+            if isinstance(child, str):
+                try:
+                    parsed = json.loads(child)
+                except ValueError:
+                    resolved = False
+                    break
+                if not isinstance(parsed, (dict, list)):
+                    resolved = False
+                    break
+                stack.append((node, part, parsed))
+                node = parsed
+            else:
+                node = child
+        if not resolved:
+            continue
+        value = _child(node, parts[-1])
+        if value is _MISSING:
+            continue
+        try:
+            exists = ctx.db_value_exists(side, table, column, value)
+        except Exception:
+            exists = False
+        if not exists:
+            continue
+        _set_child(node, parts[-1], effects.VOLATILE_PLACEHOLDER)
+        while stack:
+            parent, part, parsed = stack.pop()
+            _set_child(
+                parent,
+                part,
+                json.dumps(parsed, sort_keys=True, separators=(",", ":")),
+            )
+    return args, kwargs
+
+
 def _pointer_get(root, pointer: str):
     """Value at an args/... or kwargs/...-rooted pointer, else None."""
     node = root
@@ -1196,6 +1353,7 @@ def normalise_celery_message(
         args, kwargs = _blank_topology_hosts(args), _blank_topology_hosts(kwargs)
     args, kwargs = _blank_row_refs(args, kwargs, task, side, ctx)
     args, kwargs = _blank_value_diffs(args, kwargs, task, side, ctx)
+    args, kwargs = _blank_db_values(args, kwargs, task, side, ctx)
     args, kwargs = _blank_valid_tokens(args, kwargs, task, side, ctx)
     args, kwargs = _blank_valid_magic(args, kwargs, task, side, ctx)
     return {
@@ -1228,6 +1386,7 @@ def normalise_queue_row(row: dict, ctx: CompareContext) -> dict:
         args, kwargs = _blank_topology_hosts(args), _blank_topology_hosts(kwargs)
     args, kwargs = _blank_row_refs(args, kwargs, task, "rust", ctx)
     args, kwargs = _blank_value_diffs(args, kwargs, task, "rust", ctx)
+    args, kwargs = _blank_db_values(args, kwargs, task, "rust", ctx)
     args, kwargs = _blank_valid_tokens(args, kwargs, task, "rust", ctx)
     args, kwargs = _blank_valid_magic(args, kwargs, task, "rust", ctx)
     return {
@@ -1264,9 +1423,12 @@ def compare_jobs(
     pinned task must be Django-present and Rust-absent, and is excluded
     from the multiset compare. ``known_shapes`` ([(task, fix_issue,
     dj_match, rs_match)]) pins exact normalised bytes per side for a
-    task whose content diverges on this request: both sides must emit
-    it and match byte for byte, else the pin fails loudly (fix landed
-    or behavior changed — remove or update the pin).
+    task whose content diverges on this request: each pin consumes
+    one exactly-matching job per side, else it fails loudly (fix
+    landed or behavior changed — remove or update the pin).
+    Several pins may share a task name (PIDASHCONV-913: one destroy
+    emitting two same-task enqueues); unmatched leftovers still go
+    through the multiset compare below.
     """
     from .session import render_template
 
@@ -1286,37 +1448,38 @@ def compare_jobs(
             )
     dj_jobs = [j for j in dj_jobs if j["task"] not in known_absent]
     rs_jobs = [j for j in rs_jobs if j["task"] not in known_absent]
+    dj_pool = list(dj_jobs)
+    rs_pool = list(rs_jobs)
     for task, issue, dj_match, rs_match in known_shapes or []:
-        dj_have = [j for j in dj_jobs if j["task"] == task]
-        rs_have = [j for j in rs_jobs if j["task"] == task]
-        if not dj_have or not rs_have:
-            return (
-                f"known-shape pin {task} ({issue}) never engaged "
-                f"(django={len(dj_have)}, rust={len(rs_have)}) — the task "
-                "stopped being emitted on this request or the pin is "
-                "misplaced; remove or fix it"
-            )
         try:
             dj_want = render_template(dj_match, gap_ctx or {})
             rs_want = render_template(rs_match, gap_ctx or {})
         except KeyError as exc:
             return f"known-shape pin {task} ({issue}): unrenderable match: {exc}"
-        for job in dj_have:
-            if job != dj_want:
-                return (
-                    f"known-shape pin {task} ({issue}): Django bytes changed — "
-                    f"got {job!r:.400}"
-                )
-        for job in rs_have:
-            if job != rs_want:
-                return (
-                    f"known-shape pin {task} ({issue}): Rust bytes changed — "
-                    "fix landed or behavior changed; remove or update the pin. "
-                    f"got {job!r:.400}"
-                )
-    pinned_tasks = {task for task, _i, _d, _r in (known_shapes or [])}
-    dj_jobs = [j for j in dj_jobs if j["task"] not in pinned_tasks]
-    rs_jobs = [j for j in rs_jobs if j["task"] not in pinned_tasks]
+        dj_hit = next(
+            (j for j in dj_pool if j["task"] == task and j == dj_want), None
+        )
+        if dj_hit is None:
+            dj_have = [j for j in dj_pool if j["task"] == task]
+            return (
+                f"known-shape pin {task} ({issue}): Django bytes changed — "
+                f"no emitted job matches {dj_want!r:.400}; "
+                f"got {dj_have!r:.400}"
+            )
+        dj_pool.remove(dj_hit)
+        rs_hit = next(
+            (j for j in rs_pool if j["task"] == task and j == rs_want), None
+        )
+        if rs_hit is None:
+            rs_have = [j for j in rs_pool if j["task"] == task]
+            return (
+                f"known-shape pin {task} ({issue}): Rust bytes changed — "
+                "fix landed or behavior changed; remove or update the pin. "
+                f"no emitted job matches {rs_want!r:.400}; "
+                f"got {rs_have!r:.400}"
+            )
+        rs_pool.remove(rs_hit)
+    dj_jobs, rs_jobs = dj_pool, rs_pool
     remaining = list(rs_jobs)
     unmatched = []
     for job in dj_jobs:

@@ -375,6 +375,22 @@ class Runner:
                     row = cur.fetchone()
                     return dict(row) if row else None
 
+        def _db_value_exists(side: str, table: str, column: str, value) -> bool:
+            import re
+
+            if not re.fullmatch(r"[a-z_]+", table) or not re.fullmatch(r"[a-z_]+", column):
+                return False
+            db_url = config.django_db if side == "django" else config.rust_db
+            try:
+                with psycopg.connect(db_url, autocommit=True) as conn, conn.cursor() as cur:
+                    cur.execute(
+                        f'SELECT 1 FROM "{table}" WHERE "{column}" = %s',
+                        (str(value),),
+                    )
+                    return cur.fetchone() is not None
+            except Exception:
+                return False
+
         def _redis_for(side: str):
             import redis as redis_lib
 
@@ -394,6 +410,8 @@ class Runner:
             payload_time_paths=dict(sess.payload_time_paths),
             payload_row_refs=dict(sess.payload_row_refs),
             payload_value_diffs=dict(sess.payload_value_diffs),
+            payload_db_values=dict(sess.payload_db_values),
+            db_value_exists=_db_value_exists,
             db_cell_refs=list(sess.db_cell_refs),
             row_exists=_row_exists,
             payload_reset_tokens=dict(sess.payload_reset_tokens),
@@ -593,6 +611,7 @@ class Runner:
             req.body_regex_blanks,
             req.skip_body,
             req.body_contains,
+            req.known_body_aliases,
         )
         if error is not None:
             raise Divergence(f"{label}: {error}")

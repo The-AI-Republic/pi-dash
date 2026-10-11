@@ -185,6 +185,16 @@ def test_corpus_manifests_valid():
                         and re.fullmatch(r"PIDASHCONV-\d+", ref[1])
                         and ref[2] != ref[3]
                     ), f"{sess.name}: bad value diff {ref!r} for {task} ({owner})"
+        for task, refs in (sess.payload_db_values or {}).items():
+            assert isinstance(refs, (list, tuple)), f"{sess.name}: bad db values for {task}"
+            for ref in refs:
+                assert (
+                    isinstance(ref, (list, tuple))
+                    and len(ref) == 3
+                    and (ref[0].startswith("args/") or ref[0].startswith("kwargs/"))
+                    and re.fullmatch(r"[a-z_]+", ref[1])
+                    and re.fullmatch(r"[a-z_]+", ref[2])
+                ), f"{sess.name}: bad db value {ref!r} for {task}"
         for field_name in ("payload_reset_tokens", "payload_magic_codes"):
             for task, refs in (getattr(sess, field_name) or {}).items():
                 assert isinstance(refs, (list, tuple)), (
@@ -268,6 +278,17 @@ def test_corpus_manifests_valid():
                     and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
                     and entry[2] != entry[3]
                 ), f"{label}: bad known body diff {entry!r}"
+            for entry in req.known_body_aliases or []:
+                assert (
+                    isinstance(entry, (list, tuple))
+                    and len(entry) in (4, 5)
+                    and isinstance(entry[0], str)
+                    and re.fullmatch(r"[^/ ]+(/([^/ ]+))*", entry[0])
+                    and isinstance(entry[1], str)
+                    and re.fullmatch(r"[^/ ]+(/([^/ ]+))*", entry[1])
+                    and entry[0] != entry[1]
+                    and re.fullmatch(r"PIDASHCONV-\d+", entry[2])
+                ), f"{label}: bad known body alias {entry!r}"
             for entry in req.body_contains or []:
                 assert (
                     isinstance(entry, (list, tuple))
@@ -284,6 +305,7 @@ def test_corpus_manifests_valid():
             if req.skip_body:
                 assert not (
                     req.known_body_diffs or req.body_blank_paths or req.body_regex_blanks
+                    or req.known_body_aliases
                 ), f"{label}: skip_body with JSON-subtree pins is contradictory"
             bodies = sum(
                 [req.json is not None, req.raw_body is not None, bool(req.form),
@@ -502,6 +524,124 @@ def test_blank_value_diffs_exact_match_only():
     assert skipped == {"other": 1}
 
 
+def test_blank_db_values_only_blanks_stored():
+    """A queued secret blanks only when its side stored it."""
+    from . import compare
+    from . import effects
+
+    task = "pi_dash.bgtasks.workspace_invitation_task.workspace_invitation"
+    stored = {"django": {"tok-d"}, "rust": {"tok-r"}}
+    ctx = compare.CompareContext(
+        payload_db_values={task: [("args/2", "workspace_member_invites", "token")]},
+        db_value_exists=lambda side, table, column, value: value in stored[side],
+    )
+    args = ["n@example.com", "ws", "tok-d"]
+    blanked, _ = compare._blank_db_values(list(args), {}, task, "django", ctx)
+    assert blanked[2] == effects.VOLATILE_PLACEHOLDER
+    assert blanked[:2] == args[:2]
+    # A token the side never stored stays put (fails loudly).
+    kept, _ = compare._blank_db_values(
+        ["n@example.com", "ws", "tok-r"], {}, task, "django", ctx
+    )
+    assert kept[2] == "tok-r"
+    # Unresolved pointer skips.
+    skipped, _ = compare._blank_db_values(["n@example.com"], {}, task, "django", ctx)
+    assert skipped == ["n@example.com"]
+
+
+def test_known_body_alias_keys_removed_after_assert():
+    """A key-alias pin asserts exact bytes, then removes both keys."""
+    from types import SimpleNamespace
+
+    from . import compare
+
+    def resp(body: dict):
+        import json
+
+        raw = json.dumps(body).encode()
+        return SimpleNamespace(
+            status_code=404,
+            headers={},
+            content=raw,
+            text=raw.decode(),
+            json=lambda: json.loads(raw),
+        )
+
+    ctx = compare.CompareContext()
+    alias = [("detail", "Detail", "PIDASHCONV-901", "No X matches the given query.")]
+    assert (
+        compare.compare_response(
+            resp({"detail": "No X matches the given query."}),
+            resp({"Detail": "No X matches the given query."}),
+            ctx,
+            known_body_aliases=alias,
+        )
+        is None
+    )
+    # Either side changing value or key fails loudly.
+    assert (
+        compare.compare_response(
+            resp({"Detail": "something else"}),
+            resp({"detail": "No X matches the given query."}),
+            compare.CompareContext(),
+            known_body_aliases=alias,
+        )
+        is not None
+    )
+    assert (
+        compare.compare_response(
+            resp({"Detail": "No X matches the given query."}),
+            resp({"Detail": "No X matches the given query."}),
+            compare.CompareContext(),
+            known_body_aliases=alias,
+        )
+        is not None
+    )
+
+
+def test_known_body_alias_split_values():
+    """A 5-tuple alias pins different values under different keys."""
+    from types import SimpleNamespace
+
+    from . import compare
+
+    def resp(body: dict):
+        import json
+
+        raw = json.dumps(body).encode()
+        return SimpleNamespace(
+            status_code=404,
+            headers={},
+            content=raw,
+            text=raw.decode(),
+            json=lambda: json.loads(raw),
+        )
+
+    alias = [
+        ("detail", "Detail", "PIDASHCONV-907",
+         "No Sticky matches the given query.", "Not found."),
+    ]
+    assert (
+        compare.compare_response(
+            resp({"detail": "No Sticky matches the given query."}),
+            resp({"Detail": "Not found."}),
+            compare.CompareContext(),
+            known_body_aliases=alias,
+        )
+        is None
+    )
+    # Either side changing its pinned value fails loudly.
+    assert (
+        compare.compare_response(
+            resp({"detail": "No Sticky matches the given query."}),
+            resp({"Detail": "No Sticky matches the given query."}),
+            compare.CompareContext(),
+            known_body_aliases=alias,
+        )
+        is not None
+    )
+
+
 def test_blank_valid_magic_only_blanks_matching():
     """A queued magic code blanks only when it equals the stored token."""
     import json
@@ -630,6 +770,40 @@ def test_known_body_pin_passes_exact_and_fails_on_change():
     )
     error = compare.compare_response(other, rs, ctx, known_body=pin)
     assert error is not None and "Django body changed" in error
+
+
+def test_known_job_shapes_share_task_and_consume_one_each():
+    """Two same-task shape pins each excuse exactly one job per side."""
+    from . import compare
+
+    task = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
+
+    def job(model, pk, positional):
+        args = ["db", model, pk] + ([None] if positional else [])
+        return {
+            "task": task, "args": args,
+            "kwargs": {} if positional else {"using": None},
+            "eta": None, "retries": 0, "queue": "celery",
+        }
+
+    dj = [job("issue", "i1", False), job("intakeissue", "ii1", False)]
+    rs = [job("issue", "i1", True), job("intakeissue", "ii1", True)]
+    pins = [
+        (task, "PIDASHCONV-913", job("issue", "i1", False),
+         job("issue", "i1", True)),
+        (task, "PIDASHCONV-913", job("intakeissue", "ii1", False),
+         job("intakeissue", "ii1", True)),
+    ]
+    assert compare.compare_jobs(dj, rs, known_shapes=pins) is None
+    # Unpinned, the same pair fails.
+    assert compare.compare_jobs(dj, rs) is not None
+    # Fix landed on one enqueue (Rust sends the kwarg shape): loud.
+    fixed = [job("issue", "i1", False), job("intakeissue", "ii1", True)]
+    error = compare.compare_jobs(dj, fixed, known_shapes=pins)
+    assert error is not None and "PIDASHCONV-913" in error
+    # An extra unpinned job on one side still fails (leftovers compare).
+    extra = rs + [job("page", "p1", True)]
+    assert compare.compare_jobs(dj, extra, known_shapes=pins) is not None
 
 
 def test_known_cell_diff_blanks_exact_and_fails_on_change():

@@ -6,9 +6,12 @@
 
 from . import (
     app_cycles,
+    app_intake,
     app_issues,
     app_modules,
+    app_pages,
     app_project,
+    app_workspace,
     assistant,
     auth_device,
     auth_magic,
@@ -27,9 +30,12 @@ from . import (
 
 ALL_SESSIONS = [
     *app_cycles.SESSIONS,
+    *app_intake.SESSIONS,
     *app_issues.SESSIONS,
     *app_modules.SESSIONS,
+    *app_pages.SESSIONS,
     *app_project.SESSIONS,
+    *app_workspace.SESSIONS,
     *assistant.SESSIONS,
     *auth_device.SESSIONS,
     *auth_magic.SESSIONS,

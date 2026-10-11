@@ -99,6 +99,16 @@ class Request:
     # loudly (fix landed -> remove the pin; Django changed ->
     # investigate). Pinned subtrees blank out of the diff.
     known_body_diffs: list = field(default_factory=list)
+    # Known body KEY divergences on THIS request: [(dj_pointer,
+    # rs_pointer, fix_issue, value)] or [(dj_pointer, rs_pointer,
+    # fix_issue, dj_value, rs_value)]. Same value under a different
+    # key per side (a mistranscribed error envelope), or different
+    # values under different keys (the 5-tuple form); each side's
+    # pointer must resolve to exactly the pinned value (templates
+    # render over the gap ctx), then both blank out of the diff.
+    # The fix landing (keys align) breaks the pin loudly because
+    # one side's pointer stops resolving.
+    known_body_aliases: list = field(default_factory=list)
     # Known absent jobs for THIS request only: {task: fix_issue}. The
     # conditional counterpart to Session.known_absent_jobs (which
     # applies to every request and so only fits unconditional emits):
@@ -241,6 +251,15 @@ class Session:
     # multi-segment over dicts/lists and descend through nested JSON
     # strings (kwargs/current_instance/created_x/0/pk).
     payload_row_refs: dict = field(default_factory=dict)
+    # Job payload stored values: {task_name_or_"*": [(pointer, table,
+    # column)]}. Values at these pointers are backend-minted secrets
+    # a job echoes (an invite token the worker mails): each side's
+    # value must EXIST in that table column in its own database
+    # (checked live); existing values blank, anything else fails
+    # loudly. Pointers descend through nested JSON strings like
+    # payload_row_refs. Table/column are [a-z_]+ (manifest-checked)
+    # and quoted at query time.
+    payload_db_values: dict = field(default_factory=dict)
     # Job payload known-value divergences: {task_name_or_"*":
     # [(pointer, fix_issue, dj_value, rs_value)]}. Values at these
     # pointers are backend-local scalars a filed divergence explains
