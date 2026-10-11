@@ -5,8 +5,11 @@
 """Request corpus: realistic multi-step write sessions per domain."""
 
 from . import (
+    app_assets,
     app_cycles,
     app_intake,
+    app_integrations,
+    app_misc,
     app_issues,
     app_modules,
     app_notifications,
@@ -33,8 +36,11 @@ from . import (
 )
 
 ALL_SESSIONS = [
+    *app_assets.SESSIONS,
     *app_cycles.SESSIONS,
     *app_intake.SESSIONS,
+    *app_integrations.SESSIONS,
+    *app_misc.SESSIONS,
     *app_issues.SESSIONS,
     *app_modules.SESSIONS,
     *app_notifications.SESSIONS,

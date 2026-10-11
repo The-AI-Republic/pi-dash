@@ -101,6 +101,17 @@ jobs:
       REPLAY_RUST_WEBHOOK_BASE: http://127.0.0.1:18132
       REPLAY_DJANGO_SMTP_PORT: "11231"
       REPLAY_RUST_SMTP_PORT: "11232"
+      # GitHub App secrets for the replay servers (identity keys come
+      # from the corpus DB seed). The webhook secret MUST equal
+      # _WEBHOOK_SECRET in replay/corpus/app_integrations.py — the
+      # corpus HMAC-signs webhook deliveries with it.
+      GITHUB_APP_PRIVATE_KEY: replay-dummy-private-key
+      GITHUB_APP_CLIENT_SECRET: replay-dummy-client-secret
+      GITHUB_APP_WEBHOOK_SECRET: replay-webhook-secret-b6
+      # Same inert dummy as the contract suite: with the key set the
+      # AI-assistant task legs reach the provider-error envelope (500)
+      # instead of the missing-key 400.
+      LLM_API_KEY: dummy-contract-key
     steps:
       - uses: actions/checkout@v6
 

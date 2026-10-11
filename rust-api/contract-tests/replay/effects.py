@@ -111,6 +111,12 @@ TIMESTAMP_JSON_KEYS = frozenset(
         # requests 12+). The key exists only in the notification
         # model/serializer, so every compared value is server-minted.
         "read_at",
+        # Evidence: PAT disconnect stamps config.disconnected_at =
+        # now() per backend (integration/github.py:515); the replay
+        # sees two instants milliseconds apart inside the JSONB cell
+        # (app_integrations_lifecycle request 21). The key exists
+        # only there, so every compared value is server-minted.
+        "disconnected_at",
     }
 )
 
@@ -144,6 +150,15 @@ TIMESTAMP_COLUMNS = frozenset(
         # backend (notification/base.py:166, :285-287); the column
         # exists only on notifications (app_notifications_lifecycle).
         "read_at",
+        # Evidence: the App webhook stamps received_at (auto_now_add)
+        # and processed_at = now() per backend
+        # (db/models/integration/github.py:176-177); the replay sees
+        # two instants seconds apart (app_integrations_lifecycle
+        # request 63). Every writer is server-side (the view on
+        # receipt/process, the email-notifications worker on its own
+        # table), so every compared value is server-minted.
+        "received_at",
+        "processed_at",
     }
 )
 
