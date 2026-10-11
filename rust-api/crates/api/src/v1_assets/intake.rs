@@ -10886,12 +10886,29 @@ async fn intake_update(
         save_issue_patch(&ctx.pool, pre_save_issue, patch, &ctx.user_id).await?;
     }
 
+    // `views/intake.py:416` serializes `IntakeIssueSerializer(intake_issue)`
+    // AFTER `issue_serializer.save()` (`:412`), so the nested `.issue`
+    // relation resolves to the post-issue-save companion — UNLESS intake
+    // validation already cached it (`validate()` touches
+    // `intake_issue.issue` when `status == 1` validates;
+    // `serializers/intake.py:120-122`), in which case the cached PRE-save
+    // issue renders. The response `stale_cache` below models the same
+    // split; the job serializes before the transition, so it takes no
+    // `transitioned` leg.
+    let validate_cached_issue = intake_patch
+        .as_ref()
+        .is_some_and(|patch| patch.status == Some(1));
+    let job_issue = if issue_patch.is_some() && !validate_cached_issue {
+        fetch_companion_issue(&ctx.pool, &issue_id).await?
+    } else {
+        companion.clone()
+    };
     let pre_snapshot = render_intake_issue(
         &state,
         &ctx.pool,
         &slug,
         &intake_row,
-        &companion,
+        &job_issue,
         &ctx.timezone,
         None,
         None,
@@ -10899,7 +10916,7 @@ async fn intake_update(
     .await?;
     let pre_text = fix_nonfinite_sort(
         &serde_json::to_string(&pre_snapshot).expect("snapshot serializes"),
-        companion.sort_order,
+        job_issue.sort_order,
     );
     let mut saved_row = intake_row.clone();
     let mut transitioned = false;
