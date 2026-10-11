@@ -3187,7 +3187,9 @@ async fn join_post(
     .await;
     // The accept soft-delete (`.delete()` → `save()`): stamps
     // `updated_by` with the responder, nulling both audit columns when
-    // anonymous (`db/models/base.py:31-42`).
+    // anonymous (`db/models/base.py:31-42`), then the unconditional
+    // `soft_delete_related_objects.delay(...)` enqueue (`db/mixins.py:78`)
+    // — after the track enqueue, the same order as `invite.py`.
     let (accept_updated_by, accept_created_by) =
         audit_columns_on_update(responder_id, invite.created_by_id);
     if sqlx::query(
@@ -3204,6 +3206,13 @@ async fn join_post(
     {
         return Denial::ServerError.into_response();
     }
+    super::handlers_workspace::enqueue_soft_delete_related(
+        pool,
+        "db",
+        "workspacememberinvite",
+        &id,
+    )
+    .await;
     (
         StatusCode::OK,
         Json(message_envelope(JOIN_ACCEPTED_MESSAGE)),
