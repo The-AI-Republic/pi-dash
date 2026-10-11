@@ -938,7 +938,10 @@ fn snapshot_cycle_instance(before: &Map<String, Value>, timezone: &Tz) -> String
 /// `DateTimeField.to_representation` (djangorestframework 3.15.2
 /// `fields.py`), so the response-body [`shape_datetime`] applies; the
 /// Postgres `row_to_json` int rendering of `sort_order` goes through
-/// the float kernel.
+/// the float kernel. JSON props go through the domain
+/// `super::handlers_misc::python_dumps`: `json.dumps` separators apply
+/// at every nesting level, while the response-body [`raw_json`] is
+/// compact.
 fn snapshot_value(row: &Map<String, Value>, field: &str, timezone: &Tz) -> String {
     match field {
         "start_date" | "end_date" => shape_datetime(row.get(field), timezone),
@@ -949,7 +952,10 @@ fn snapshot_value(row: &Map<String, Value>, field: &str, timezone: &Tz) -> Strin
         "is_favorite" => raw_bool(row, field),
         "total_issues" | "cancelled_issues" | "completed_issues" | "started_issues"
         | "unstarted_issues" | "backlog_issues" => raw_int(row, field),
-        "view_props" | "progress_snapshot" | "logo_props" => raw_json(row, field),
+        "view_props" | "progress_snapshot" | "logo_props" => match row.get(field) {
+            Some(value) => super::handlers_misc::python_dumps(value),
+            None => "null".to_owned(),
+        },
         _ => raw_str(row, field),
     }
 }
@@ -2450,7 +2456,7 @@ mod tests {
     #[test]
     fn snapshot_matches_cycle_serializer_field_set() {
         // `base.py:345`: `json.dumps(CycleSerializer(cycle).data)` — the
-        // 24 declared fields minus the un-annotated trio DRF skips
+        // 22 declared fields minus the un-annotated trio DRF skips
         // (PIDASHCONV-871). No `archived_at`, `assignee_ids`,
         // `created_by` or `version`, even though the fetched map has them.
         let mut row = row_map();
@@ -2496,6 +2502,20 @@ mod tests {
         let snapshot = snapshot_cycle_instance(&row, &UTC);
         assert!(snapshot.contains("\"start_date\": null"), "{snapshot}");
         assert!(!snapshot.contains("external_id"), "{snapshot}");
+    }
+
+    #[test]
+    fn snapshot_renders_nested_json_with_cpython_separators() {
+        // `json.dumps` separators apply at every nesting level, not
+        // just the top object: `{"a": 1}`, never the compact
+        // response-body form.
+        let mut row = row_map();
+        row.insert("view_props".to_owned(), json!({"a": 1, "b": [true, null]}));
+        let snapshot = snapshot_cycle_instance(&row, &UTC);
+        assert!(
+            snapshot.contains(r#""view_props": {"a": 1, "b": [true, null]}"#),
+            "{snapshot}"
+        );
     }
 
     #[test]
