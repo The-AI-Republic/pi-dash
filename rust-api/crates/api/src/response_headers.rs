@@ -11,11 +11,12 @@
 //!
 //! The MIME path is `email.charset.SHORTEST` over utf-8 bytes: base64 wins
 //! iff strictly shorter than header-quoted-printable (ties go to Q), one
-//! encoded word, no folding (`maxlinelen` is `sys.maxsize`). `Header`
-//! would still fold on embedded `str.splitlines` characters, but those
-//! are unreachable here (Django's `URLValidator` rejects every one of
-//! them; hyper rejects raw controls in the request line and headers), so
-//! the port always emits a single word.
+//! encoded word, no length folding (`maxlinelen` is `sys.maxsize`).
+//! `Header.encode` still splits on embedded `str.splitlines` boundaries
+//! first: one line encodes to one word (a single trailing boundary is
+//! dropped by `splitlines`); a leading boundary plus one more line
+//! encodes to `' ' + word`; anything else folds with an embedded
+//! newline, which Django's WSGI layer rejects (500).
 
 use axum::http::HeaderValue;
 use base64::Engine as _;
@@ -23,9 +24,10 @@ use base64::Engine as _;
 /// Encode `value` the way Django stores a response header value.
 ///
 /// Returns `None` exactly when Django answers 500: a `\r`/`\n` in the
-/// value (`BadHeaderError`), or a latin-1 value with bytes no header can
-/// carry (controls, DEL — rejected at Django's WSGI layer). Callers map
-/// `None` to their module's own 500 response.
+/// value (`BadHeaderError`), a latin-1 value with bytes no header can
+/// carry (controls, DEL — rejected at Django's WSGI layer), or a MIME-path
+/// value whose `splitlines` fold differently (see [`mime_header_str`]).
+/// Callers map `None` to their module's own 500 response.
 pub fn header_value(value: &str) -> Option<HeaderValue> {
     if value.contains('\r') || value.contains('\n') {
         return None;
@@ -37,7 +39,51 @@ pub fn header_value(value: &str) -> Option<HeaderValue> {
         let bytes: Vec<u8> = value.chars().map(|c| c as u8).collect();
         return HeaderValue::from_bytes(&bytes).ok();
     }
-    HeaderValue::from_str(&mime_encode(value)).ok()
+    mime_header_str(value).and_then(|word| HeaderValue::from_str(&word).ok())
+}
+
+/// `str.splitlines` boundaries other than `\r`/`\n` (rejected before the
+/// MIME path): `Header.encode` splits on these even with a huge
+/// `maxlinelen`.
+fn is_split_boundary(c: char) -> bool {
+    matches!(
+        c,
+        '\x0B' | '\x0C' | '\x1C' | '\x1D' | '\x1E' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+/// The MIME-path header string for a value past latin-1.
+///
+/// Ports `Header(value, "utf-8", maxlinelen=sys.maxsize).encode()`
+/// including its `splitlines` pre-split (CPython `email/header.py`):
+/// one line encodes to one word; a leading boundary plus one more line
+/// encodes to `' ' + word(' ' + line.lstrip())`; anything else folds
+/// with an embedded newline, which Django's WSGI layer rejects with
+/// `ValueError` (500), so this returns `None` there.
+fn mime_header_str(value: &str) -> Option<String> {
+    if !value.contains(is_split_boundary) {
+        return Some(mime_encode(value));
+    }
+    // `splitlines` semantics over the boundary set: split everywhere,
+    // dropping one trailing empty when the value ends on a boundary.
+    let mut lines: Vec<&str> = value.split(is_split_boundary).collect();
+    if value.ends_with(is_split_boundary) {
+        lines.pop();
+    }
+    match lines.as_slice() {
+        [single] => Some(mime_encode(single)),
+        ["", second] => {
+            let mut cont = String::with_capacity(second.len() + 1);
+            cont.push(' ');
+            // Python `str.lstrip`: `char::is_whitespace` plus `\x1C`-`\x1F`
+            // (the only `str.isspace` chars outside Unicode White_Space).
+            cont.push_str(second.trim_start_matches(|c: char| {
+                c.is_whitespace() || matches!(c, '\u{1C}'..='\u{1F}')
+            }));
+            Some(format!(" {}", mime_encode(&cont)))
+        }
+        _ => None,
+    }
 }
 
 /// Port of `email.header.Header(value, "utf-8",
@@ -183,5 +229,43 @@ mod tests {
     fn empty_and_edge_values() {
         assert_eq!(mime_encode(""), "");
         assert!(header_value("").expect("empty").as_bytes().is_empty());
+    }
+
+    #[test]
+    fn split_boundaries_fold_to_500() {
+        // Interior `splitlines` boundaries fold the MIME output with an
+        // embedded newline, which Django's WSGI layer rejects (500).
+        // Expected shapes recorded from CPython's `email.header`.
+        assert!(header_value("a\x0b\u{1f600}").is_none());
+        assert!(header_value("a\u{2028}b\u{1f600}").is_none());
+        assert!(header_value("\u{2028}a\u{2028}\u{1f600}").is_none());
+        assert!(header_value("a\u{1f600}\u{2028}\u{2029}").is_none());
+    }
+
+    #[test]
+    fn trailing_boundary_is_dropped_like_splitlines() {
+        // One trailing boundary leaves a single line: the word covers
+        // the stripped value. Recorded from CPython's `email.header`.
+        let vt = header_value("a\u{1f600}\u{2028}").expect("single line");
+        assert_eq!(vt.to_str().expect("ascii"), "=?utf-8?b?YfCfmIA=?=");
+        let nel = header_value("a\u{1f600}\u{85}").expect("single line");
+        assert_eq!(nel.to_str().expect("ascii"), "=?utf-8?b?YfCfmIA=?=");
+        let lone = header_value("\u{2028}").expect("empty line");
+        assert!(lone.as_bytes().is_empty());
+    }
+
+    #[test]
+    fn leading_boundary_continuation_matches_django() {
+        // Leading boundary plus one more line: `' ' + word`, with the
+        // continuation lstripped (Python strips `\x1f` too, which Rust's
+        // `trim_start` would keep). Recorded from CPython's `email.header`.
+        let lead = header_value("\u{85}\u{1f600}").expect("continuation");
+        assert_eq!(lead.to_str().expect("ascii"), " =?utf-8?b?IPCfmIA=?=");
+        let two = header_value("\u{2028}\u{2029}").expect("continuation");
+        assert_eq!(two.to_str().expect("ascii"), " =?utf-8?q?_?=");
+        let ws = header_value("\u{2028} \t\u{1f600}").expect("continuation");
+        assert_eq!(ws.to_str().expect("ascii"), " =?utf-8?b?IPCfmIA=?=");
+        let us = header_value("\u{2028}\x1f\u{1f600}").expect("continuation");
+        assert_eq!(us.to_str().expect("ascii"), " =?utf-8?b?IPCfmIA=?=");
     }
 }
