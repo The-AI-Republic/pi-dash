@@ -1024,6 +1024,36 @@ async fn enqueue_invitation(pool: &PgPool, emit: &tasks::WorkspaceInvitationEmit
     enqueue_best_effort(pool, emit.task_name(), emit.args(), Map::new()).await;
 }
 
+/// `soft_delete_related_objects.delay("db", "workspacememberinvite", pk,
+/// using=None)` (`db/mixins.py:77-78`): three positional args, `using`
+/// stays a null kwarg — exactly as Python's `.delay(label, name, pk,
+/// using=using)` call sends it with `using=None`.
+fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
+        pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
+        vec![
+            Value::String("db".to_owned()),
+            Value::String("workspacememberinvite".to_owned()),
+            Value::String(pk.to_string()),
+        ],
+        kwargs,
+    )
+}
+
+/// Best-effort post-delete sweep: without it the response still stands.
+async fn enqueue_soft_delete(pool: &PgPool, pk: &uuid::Uuid) {
+    let message = soft_delete_message(pk);
+    enqueue_best_effort(
+        pool,
+        message.task.as_str(),
+        message.args.clone(),
+        message.kwargs.clone(),
+    )
+    .await;
+}
+
 // ---------------------------------------------------------------------------
 // Fetch + render (rows in, `ser_invite` views out)
 // ---------------------------------------------------------------------------
@@ -2929,11 +2959,12 @@ async fn invite_destroy(
         Ok(None) => return Denial::MissingObject.into_response(),
         Err(denial) => return denial.into_response(),
     }
-    // `SoftDeleteModel.delete(soft=True)` (`db/mixins.py:72-76`): stamps
+    // `SoftDeleteModel.delete(soft=True)` (`db/mixins.py:72-78`): stamps
     // `deleted_at` through a full `save()` (so `updated_at` and the
-    // crum `updated_by` too). The `soft_delete_related_objects` sweep
-    // it fires is owned by the jobs plane (no D-24 publisher; unpinned
-    // by F-W24-14).
+    // crum `updated_by` too), then unconditionally enqueues
+    // `soft_delete_related_objects.delay("db", "workspacememberinvite",
+    // pk, using=None)` — stamp first, enqueue after, same order as
+    // the mixin.
     let now = Utc::now();
     if let Err(error) = sqlx::query(
         "UPDATE workspace_member_invites SET deleted_at = $1, updated_at = $1, updated_by_id = $3 \
@@ -2950,6 +2981,7 @@ async fn invite_destroy(
         }
         return Denial::ServerError.into_response();
     }
+    enqueue_soft_delete(pool, &id).await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -4339,6 +4371,29 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soft_delete_message_shape() {
+        // `db/mixins.py:77-78`: `.delay(label, name, pk, using=using)`
+        // with `using=None` — three positional args, `using` stays a
+        // null kwarg (never a positional `"default"`).
+        let id = uuid::Uuid::nil();
+        let message = soft_delete_message(&id);
+        assert_eq!(
+            message.task,
+            pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("workspacememberinvite".to_owned()),
+                Value::String(id.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+        assert_eq!(message.kwargs.len(), 1);
+    }
 
     const FIXTURE_ROUTES: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
