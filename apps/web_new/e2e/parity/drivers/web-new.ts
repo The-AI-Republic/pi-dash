@@ -10360,4 +10360,8 @@ export class WebNewDriver implements ParityDriver {
   async estimatesActiveRow(): Promise<EstimatesActiveRow | null> {
     return todo("estimatesActiveRow");
   }
+
+  async estimatesEditDeleteFailEstimateDelete(): Promise<void> {
+    return todo("estimatesEditDeleteFailEstimateDelete");
+  }
 }

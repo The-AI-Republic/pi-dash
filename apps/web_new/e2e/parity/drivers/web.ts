@@ -33567,6 +33567,7 @@ export class WebDriver implements ParityDriver {
     return this.page.getByRole("main").last();
   }
 
+  /** Boxed list section under its settings heading. */
   private estimatesEditDeleteSection(title: "Estimates list" | "Archived estimates"): Locator {
     // The heading sits inside a heading block nested in the section
     // container, so climb from the heading to the container.
@@ -33576,6 +33577,7 @@ export class WebDriver implements ParityDriver {
       .locator("xpath=../../..");
   }
 
+  /** First boxed row of the active-system section. */
   private estimatesEditDeleteActiveBox(): Locator {
     return this.estimatesEditDeleteSection("Estimates list")
       .locator("div.rounded-lg h4")
@@ -36551,5 +36553,26 @@ export class WebDriver implements ParityDriver {
     await this.page.keyboard.press("Escape");
     await this.page.keyboard.press("Escape");
     await this.page.waitForTimeout(300);
+  }
+
+  // --- Failure-path spy for whole-system delete (NEWFRONT-324,
+  // --- EST-016). The navigation, dialog and row readers above are
+  // --- reused from the merged estimates siblings (NEWFRONT-321/326).
+
+  async estimatesEditDeleteFailEstimateDelete(): Promise<void> {
+    // Refuse whole-system deletes with a server error so the EST-016
+    // failure path shows; every other request passes through
+    // untouched. Context-scoped; the test's end drops it. The glob's
+    // `*` never crosses `/`, so only the bare estimate URL matches —
+    // nested point writes and the estimates list are unaffected. A 500
+    // keeps the round-trip answered, so the confirm settles on the
+    // response and the dialog's error notice follows (verified live).
+    await this.page.route("**/api/workspaces/*/projects/*/estimates/*/", async (route: Route) => {
+      if (route.request().method() === "DELETE") {
+        await route.fulfill({ status: 500, body: JSON.stringify({ error: "parity refuses this delete" }) });
+        return;
+      }
+      await route.continue();
+    });
   }
 }

@@ -15300,6 +15300,12 @@ export async function serverMovePageStatus(
 // --- (NEWFRONT-322, EST-004-007). Appended; existing helpers above are
 // --- untouched per the shared harness contract. The system list reader
 // --- is the shell child's serverEstimatesList (NEWFRONT-321, merged).
+// --- Estimates saved-system edit/delete, whole-system delete, server
+// --- rules (NEWFRONT-324, EST-014-016 + EST-025). serverEstimatesList
+// --- and serverEstimateRaw are reused from the merged shell/permissions
+// --- siblings (NEWFRONT-321/326); the helpers below are this child's
+// --- additive probes, kept whole at the rebase.
+
 /** The estimate system a project currently links (null when estimates are off). */
 export async function serverProjectEstimateId(
   workspaceSlug: string,
@@ -15351,6 +15357,53 @@ export async function serverCreateArchivedEstimate(
       if (typeof point["id"] !== "string" || typeof point["value"] !== "string")
         throw new Error("[parity] estimate point carried no string id/value.");
       return { id: point["id"], value: point["value"] };
+    }),
+  };
+}
+
+/** One estimate point with its position key (renumber assertions). */
+export interface ParityServerEstimatePointKeyed {
+  id: string;
+  key: number;
+  value: string;
+}
+
+/** One estimate system with positioned points, as the retrieve endpoint reports it. */
+export interface ParityServerEstimateDetail {
+  id: string;
+  name: string;
+  type: string;
+  lastUsed: boolean;
+  points: ParityServerEstimatePointKeyed[];
+}
+
+/** Single estimate system read (null when the id is gone). Distinct from the creation child's throwing serverEstimateDetail (NEWFRONT-323): delete-path assertions need the null, not an exception. */
+export async function serverEstimateDetailOrNull(
+  workspaceSlug: string,
+  projectId: string,
+  estimateId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerEstimateDetail | null> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/estimates/${estimateId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`[parity] estimate read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string" || typeof rec["name"] !== "string")
+    throw new Error("[parity] estimate detail carried no string id/name.");
+  const points = Array.isArray(rec["points"]) ? rec["points"] : [];
+  return {
+    id: rec["id"],
+    name: rec["name"],
+    type: typeof rec["type"] === "string" ? rec["type"] : "",
+    lastUsed: rec["last_used"] === true,
+    points: points.map((point) => {
+      const record = point as Record<string, unknown>;
+      if (typeof record["id"] !== "string" || typeof record["key"] !== "number" || typeof record["value"] !== "string")
+        throw new Error("[parity] estimate point carried no id/key/value.");
+      return { id: record["id"], key: record["key"], value: record["value"] };
     }),
   };
 }
@@ -15456,4 +15509,112 @@ export async function serverEstimateDetail(
   );
   if (!res.ok) throw new Error(`[parity] estimate detail failed with HTTP ${res.status}.`);
   return parseServerEstimateSystemKeyed((await res.json()) as Record<string, unknown>);
+}
+
+/** PATCH a saved system (name/type plus the full point set); status asserted by the caller. */
+export async function serverPatchEstimateSystem(
+  workspaceSlug: string,
+  projectId: string,
+  estimateId: string,
+  payload: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityEstimateRawProbe> {
+  return serverEstimateRaw(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/estimates/${estimateId}/`,
+    sessionCookie,
+    payload,
+    apiBase
+  );
+}
+
+/** DELETE a whole estimate system; status asserted by the caller. */
+export async function serverDeleteEstimateSystem(
+  workspaceSlug: string,
+  projectId: string,
+  estimateId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityEstimateRawProbe> {
+  return serverEstimateRaw(
+    "DELETE",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/estimates/${estimateId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+}
+
+/** DELETE a single point, optionally moving affected items to a replacement; status by caller. */
+export async function serverDeleteEstimatePoint(
+  workspaceSlug: string,
+  projectId: string,
+  estimateId: string,
+  pointId: string,
+  sessionCookie: string,
+  replacementId?: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityEstimateRawProbe> {
+  return serverEstimateRaw(
+    "DELETE",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/estimates/${estimateId}/estimate-points/${pointId}/`,
+    sessionCookie,
+    replacementId === undefined ? undefined : { new_estimate_id: replacementId },
+    apiBase
+  );
+}
+
+/** POST a single point; status asserted by the caller (EST-025 required-field matrix). */
+export async function serverCreateEstimatePoint(
+  workspaceSlug: string,
+  projectId: string,
+  estimateId: string,
+  payload: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityEstimateRawProbe> {
+  return serverEstimateRaw(
+    "POST",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/estimates/${estimateId}/estimate-points/`,
+    sessionCookie,
+    payload,
+    apiBase
+  );
+}
+
+/** PATCH a single point; status asserted by the caller (EST-025 length-cap path). */
+export async function serverPatchEstimatePoint(
+  workspaceSlug: string,
+  projectId: string,
+  estimateId: string,
+  pointId: string,
+  payload: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityEstimateRawProbe> {
+  return serverEstimateRaw(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/estimates/${estimateId}/estimate-points/${pointId}/`,
+    sessionCookie,
+    payload,
+    apiBase
+  );
+}
+
+/** Bulk-create a system with its points; status asserted by the caller (EST-025 matrix). */
+export async function serverCreateEstimateRaw(
+  workspaceSlug: string,
+  projectId: string,
+  payload: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityEstimateRawProbe> {
+  return serverEstimateRaw(
+    "POST",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/estimates/`,
+    sessionCookie,
+    payload,
+    apiBase
+  );
 }
