@@ -2372,7 +2372,8 @@ async fn inv_detail_patch_inner(
 }
 
 /// `DELETE invitations/<pk>/` (`invite.py:141-154`): accepted and
-/// responded guards, then the instance soft-delete (`deleted_at` only).
+/// responded guards, then the instance soft-delete (`deleted_at` +
+/// `updated_*`, plus the fan-out enqueue).
 async fn inv_detail_delete(
     State(state): State<AppState>,
     Path((slug, pk_raw)): Path<(String, String)>,
