@@ -2192,7 +2192,7 @@ async fn fetch_comment_by_id(
 /// `IssueCommentPublicViewSet.partial_update` (`views/issue.py:296-318`):
 /// actor-scoped get (a foreign comment is a 404, not a 403); the synced
 /// lock rejects changed locked fields; the activity carries the raw input
-/// dump plus the pre-save snapshot.
+/// dump plus the after image (`save()` mutates the serialized instance).
 async fn comment_partial_update(
     State(state): State<AppState>,
     Path((anchor, issue_id, pk)): Path<(String, String, String)>,
@@ -2311,15 +2311,14 @@ async fn comment_partial_update_inner(
     let rendered = render_comment(pool, &CommentRow::from_value(&row)?, &tz, false).await?;
     let value = serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?;
     // `requested_data` is the raw input dump; `current_instance` is the
-    // pre-save snapshot (the row was fetched at `:304`, before `:307`).
-    let old_view = render_comment(pool, &old, &tz, false).await?;
-    let old_value = serde_json::to_value(&old_view).map_err(|_| HandlerError::ServerError)?;
+    // after image: `save()` at `:307` mutates the in-memory instance, so
+    // Django serializes that SAME instance (already rendered as `value`).
     let publish = pidash_jobs::space::comment_updated(
         python_dumps(body),
         actor.id.to_string(),
         issue_id.to_owned(),
         board_project_str(&board),
-        python_dumps(&old_value),
+        python_dumps(&value),
         now.timestamp(),
     );
     enqueue_message(pool, publish.message()).await;
