@@ -1656,13 +1656,12 @@ pub async fn execute_mark_warm_dispatch_failed(
         return Ok(());
     };
     let session = session_from_pg(&row)?;
-    // `chat_warm_failed`, `{"message_id": None, "reason":
-    // "warm_dispatch_failed"}` (`chat.py:256-267`).
+    // `chat_warm_failed`, `{"code": "dispatch_failed"}`
+    // (`chat.py:256-267`).
     let inputs = chat_kernel::append_event_inputs(
         "chat_warm_failed",
         Some(&serde_json::json!({
-            "message_id": Value::Null,
-            "reason": "warm_dispatch_failed",
+            "code": "dispatch_failed",
         })),
         None,
         "",
