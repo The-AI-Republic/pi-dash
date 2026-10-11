@@ -14,7 +14,7 @@ on one host each take a namespace — see "Concurrent runs" below.
 | `mq`     | rabbitmq:3-management-alpine                                                       | none published | Broker for background tasks                                                                 |
 | `api`    | built from `apps/api` (`Dockerfile.dev`, lean migrate-plus-serve command)          | 18019          | Django + uvicorn, migrates on boot                                                          |
 | `worker` | same image as `api` (celery worker, default queue)                                 | none published | Consumes background tasks: mention links, notifications                                     |
-| `oracle` | built from the repo (`apps/web/Dockerfile.dev`)                                    | internal :3000 | Old app with same-origin API calls                                                          |
+| `oracle` | built from the repo root (`stack/Dockerfile.oracle`, old-app inputs only)          | internal :3000 | Old app with same-origin API calls                                                          |
 | `proxy`  | caddy:2-alpine (`stack/Caddyfile`)                                                 | 13000          | One origin: frontend plus `/auth`, `/api`, `/static` to Django, `/parity19-assets` to minio |
 | `minio`  | bitnamilegacy/minio, pinned tag+digest (bucket `parity19-assets`, created at boot) | 19019          | Object storage backing presigned asset uploads                                              |
 | `live`   | built from `apps/live` (opt-in profile `full`)                                     | 13001          | Realtime server for realtime rows                                                           |
@@ -43,19 +43,45 @@ apps/web_new/e2e/parity/stack/parity-up.sh
 ```
 
 This builds the scratch images, starts pg/redis/mq/api (plus worker,
-oracle and proxy), waits for the API, and seeds the deterministic parity
-workspace (one onboarded owner, one project, three named issues). Seed
-facts land in `apps/web_new/e2e/parity/.seed.json` under the default
-stack, or `.seed-<ns>.json` under a namespace (generated, never
-committed); scenarios read the file through `PARITY_SEED_FILE`, which
-`parity-up.sh` prints, along with the other suite exports, when it
-finishes. A preflight check refuses to start when another stack (or any
-foreign process) already holds one of this stack's ports — pick a free
-namespace instead of forcing it.
+oracle and proxy), waits for the API, seeds the deterministic parity
+workspace (one onboarded owner, one project, three named issues), and
+warms the oracle's entry routes. Seed facts land in
+`apps/web_new/e2e/parity/.seed.json` under the default stack, or
+`.seed-<ns>.json` under a namespace (generated, never committed);
+scenarios read the file through `PARITY_SEED_FILE`, which `parity-up.sh`
+prints, along with the other suite exports, when it finishes. A preflight
+check refuses to start when another stack (or any foreign process)
+already holds one of this stack's ports — pick a free namespace instead
+of forcing it.
 
 Never pipe bring-up (or reset) to `tail`: the pipe's exit status is
 `tail`'s, so a failed bring-up looks green. Run the script bare, or with
 `set -o pipefail`, or log to a file.
+
+Image builds reuse cached layers: a rerun rebuilds an image only when its
+Dockerfile or its copied inputs changed. The oracle Dockerfile copies just
+the old app's inputs (`apps/web`, the workspace packages it resolves, the
+root workspace files), so edits elsewhere — `apps/web_new`, the new
+packages, `apps/api`, e2e specs — never rebuild or recreate the oracle
+container. Edits to the old app itself, its packages, or the shared
+`pnpm-lock.yaml` still rebuild it, as they should; the install step is
+frozen, so even a cache miss recomputes the identical image instead of
+drifting with the registry (if it ever fails with an outdated-lockfile
+error, run `pnpm install` on the host first). For a clean no-cache
+rebuild of both images:
+
+```sh
+apps/web_new/e2e/parity/stack/parity-up.sh --rebuild
+```
+
+The warm-up step loads the entry route plus one seeded project route
+through the proxy and waits until both are served. The dev-server oracle
+pays its dependency-optimization spike on those first requests; warming
+here means the suite's first specs never meet a cold boot. If the oracle
+cannot serve within ten minutes the script fails with a pointer to its
+logs instead of letting the suite flake — on a loaded host that usually
+means the dev server was OOM-killed (see NEWFRONT-133). On the production
+oracle the step passes instantly.
 
 ## Reset
 
