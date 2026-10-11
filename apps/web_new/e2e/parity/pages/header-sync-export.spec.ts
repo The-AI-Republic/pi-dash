@@ -99,6 +99,61 @@ async function expectMenuItemOrReload(driver: ParityDriver, label: string): Prom
   await expect.poll(() => driver.pagesHeaderMenuItems(), { timeout: 30_000 }).toContain(label);
 }
 
+/** Quiesce until no toast shows for a sustained window: a single null
+ * sample can land in the gap between two stacked toasts and release the
+ * next mutation early, whose notice is then swallowed (observed live). */
+async function waitForToastQuiesce(driver: ParityDriver, timeoutMs = 30_000): Promise<void> {
+  let clearSince = 0;
+  await expect
+    .poll(
+      async () => {
+        const toast = await driver.rulesLastToast();
+        const now = Date.now();
+        if (toast !== null) {
+          clearSince = 0;
+          return false;
+        }
+        if (clearSince === 0) clearSince = now;
+        return now - clearSince >= 2000;
+      },
+      { timeout: timeoutMs }
+    )
+    .toBe(true);
+}
+
+/** Toggle the star, retrying once when nothing (notice, flip, or server
+ * write) shows within 15s: under load the click can miss its handler
+ * while the header re-renders (observed live). */
+async function toggleFavoriteRobust(
+  driver: ParityDriver,
+  seed: ParitySeedFacts,
+  projectId: string,
+  pageId: string,
+  session: string,
+  expectAdded: boolean
+): Promise<void> {
+  const notice = expectAdded ? "Page added to favorites." : "Page removed from favorites.";
+  const label = expectAdded ? "Remove favorite" : "Add to favorites";
+  await driver.pagesHeaderToggleFavorite();
+  try {
+    await expect
+      .poll(
+        async () => {
+          const toast = await driver.rulesLastToast();
+          if (toast !== null && `${toast.title} ${toast.message}`.includes(notice)) return "toast";
+          if ((await driver.pagesHeaderFavoriteLabel()) === label) return "flip";
+          if ((await pagesHeaderReadPage(seed.workspaceSlug, projectId, pageId, session)).is_favorite === expectAdded)
+            return "server";
+          return "";
+        },
+        { timeout: 15_000 }
+      )
+      .not.toBe("");
+  } catch {
+    await driver.pagesHeaderToggleFavorite();
+  }
+}
+
 /** Poll until a visible toast mentions `snippet` (toasts auto-dismiss; the box is loaded). */
 async function waitForToast(driver: ParityDriver, snippet: string, timeoutMs = 60_000): Promise<void> {
   await expect
@@ -165,11 +220,11 @@ test(
     // panel expansion still land). Observed live; see the row note.
     await driver.page.waitForTimeout(3_000);
 
-    await driver.pagesHeaderToggleFavorite();
+    await toggleFavoriteRobust(driver, seed, seed.projectId, pageId, session, true);
     await waitForToast(driver, "Page added to favorites.");
     // The header re-render lags the toast under load: poll the flip.
     await expect.poll(() => driver.pagesHeaderFavoriteLabel(), { timeout: 60_000 }).toBe("Remove favorite");
-    expect(await driver.pagesHeaderFavoriteFilled()).toBe(true);
+    await expect.poll(() => driver.pagesHeaderFavoriteFilled(), { timeout: 15_000 }).toBe(true);
     // First use prompts the favorites panel, and the page surfaces in it.
     await expect.poll(() => driver.pagesHeaderFavoritesExpanded(), { timeout: 15_000 }).toBe(true);
     await expect.poll(() => driver.pagesHeaderFavoritesNames(), { timeout: 15_000 }).toContain(title);
@@ -185,12 +240,12 @@ test(
     ).toContain(pageId);
     // Quiesce: on a fast box the added notice is still showing when the
     // removal lands, and the removal notice would be swallowed by it.
-    await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toBeNull();
+    await waitForToastQuiesce(driver);
 
-    await driver.pagesHeaderToggleFavorite();
+    await toggleFavoriteRobust(driver, seed, seed.projectId, pageId, session, false);
     await waitForToast(driver, "Page removed from favorites.");
     await expect.poll(() => driver.pagesHeaderFavoriteLabel(), { timeout: 60_000 }).toBe("Add to favorites");
-    expect(await driver.pagesHeaderFavoriteFilled()).toBe(false);
+    await expect.poll(() => driver.pagesHeaderFavoriteFilled(), { timeout: 15_000 }).toBe(false);
     await expect
       .poll(async () => (await pagesHeaderReadPage(seed.workspaceSlug, seed.projectId, pageId, session)).is_favorite, {
         timeout: 15_000,
@@ -233,18 +288,18 @@ test(
       await driver.pagesHeaderToggleFavorite();
       await waitForToast(driver, "Page could not be added to favorites.");
       await expect.poll(() => driver.pagesHeaderFavoriteLabel(), { timeout: 15_000 }).toBe("Add to favorites");
-      expect(await driver.pagesHeaderFavoriteFilled()).toBe(false);
+      await expect.poll(() => driver.pagesHeaderFavoriteFilled(), { timeout: 15_000 }).toBe(false);
       expect((await pagesHeaderReadPage(seed.workspaceSlug, seed.projectId, pageId, session)).is_favorite).toBe(false);
       // Let the error notice dismiss: a toast fired while another shows is
       // swallowed (observed), which would eat the recovery toast below.
-      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toBeNull();
+      await waitForToastQuiesce(driver);
     } finally {
       await driver.pagesHeaderUnfailFavoriteWrites();
     }
     // Writes flow again once the failure clears.
-    await driver.pagesHeaderToggleFavorite();
+    await toggleFavoriteRobust(driver, seed, seed.projectId, pageId, session, true);
     await waitForToast(driver, "Page added to favorites.");
-    expect(await driver.pagesHeaderFavoriteLabel()).toBe("Remove favorite");
+    await expect.poll(() => driver.pagesHeaderFavoriteLabel(), { timeout: 15_000 }).toBe("Remove favorite");
     await pagesHeaderSetFavorite(seed.workspaceSlug, seed.projectId, pageId, false, session);
 
     // Guests never reach the control: the detail refuses them outright.
@@ -284,7 +339,7 @@ test(
       .toBe(1);
     // Quiesce: a second notice fired while the first still shows is
     // swallowed, which would eat the make-public toast below.
-    await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toBeNull();
+    await waitForToastQuiesce(driver);
 
     await driver.pagesHeaderOpenOptions();
     await expectMenuItemOrReload(driver, "Make public");
@@ -386,7 +441,7 @@ test(
       await expect.poll(() => driver.pagesHeaderMenuItems(), { timeout: 15_000 }).toEqual([]);
       // Quiesce: on a fast box the lock notice is still showing when the
       // unlock lands, and the unlock notice would be swallowed by it.
-      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toBeNull();
+      await waitForToastQuiesce(driver);
 
       await driver.pagesHeaderToggleLock();
       // The store flips optimistically at click time, so the brief unlocked
@@ -433,7 +488,7 @@ test(
       await expect.poll(() => driver.pagesHeaderLockLabel(), { timeout: 15_000 }).toBe("Lock");
       expect((await pagesHeaderReadPage(seed.workspaceSlug, seed.projectId, pageId, session)).is_locked).toBe(false);
       // Let the error notice dismiss (a stacked toast would be swallowed).
-      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toBeNull();
+      await waitForToastQuiesce(driver);
     } finally {
       await driver.pagesHeaderUnfailLockWrites();
     }
@@ -481,7 +536,7 @@ test(
     await driver.page.keyboard.press("Escape");
     await expect.poll(() => driver.pagesHeaderMenuItems(), { timeout: 15_000 }).toEqual([]);
     // Let the archive notice dismiss so the restore notice is not swallowed.
-    await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toBeNull();
+    await waitForToastQuiesce(driver);
 
     await driver.pagesHeaderOpenOptions();
     await expectMenuItemOrReload(driver, "Restore");
@@ -603,7 +658,7 @@ test(
 
     await test.step("duplication mints a standalone copy", async () => {
       // Quiesce: the markdown notice above may still show on a fast box.
-      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toBeNull();
+      await waitForToastQuiesce(driver);
       const before = await pagesHeaderListPages(seed.workspaceSlug, seed.projectId, session);
       await driver.pagesHeaderOpenOptions();
       await driver.pagesHeaderChooseMenuItem("Make a copy");
@@ -845,8 +900,15 @@ test(
     expect(closes.find((entry) => entry.code === 4001)?.reason).toBe("document_too_large");
     // Now refuse reconnections: without the block the client would re-sync
     // the megabytes in a loop (and crash the renderer under load) instead
-    // of settling on the terminal badge.
+    // of settling on the terminal badge. The offline window is a
+    // circuit-breaker: installing the socket route while megabytes are in
+    // flight blows the string limit, so traffic stops first, the block
+    // lands on a quiet socket, and then the browser goes back online and
+    // the refused reconnects settle the terminal badge.
+    await driver.pagesLiveSetOffline(true);
+    await driver.page.waitForTimeout(1500);
     await driver.pagesLiveBlockCollaborationSocket();
+    await driver.pagesLiveSetOffline(false);
     // The force-closed client works through refused reconnect attempts before
     // settling on the terminal badge. The trail (last minute of samples)
     // rides into any timeout so a stuck transitional state reads

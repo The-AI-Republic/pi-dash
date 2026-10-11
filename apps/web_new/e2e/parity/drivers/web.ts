@@ -32800,6 +32800,7 @@ export class WebDriver implements ParityDriver {
       .waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS })
       .catch(() => undefined);
     await this.page.waitForTimeout(500);
+  }
 
   // -----------------------------------------------------------------------
   // Pages detail header actions + sync/save/export (NEWFRONT-318,
