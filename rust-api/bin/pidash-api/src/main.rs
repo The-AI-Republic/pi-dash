@@ -17,6 +17,7 @@
 //! [`build_app`] is the application seam: tests and later issues wrap it
 //! with extra routes or layers without touching `main`.
 
+mod execute_seams;
 mod inventory;
 mod ops;
 mod runner_seams;
@@ -354,6 +355,30 @@ async fn worker(concurrency: u32) -> MainResult {
         pools.primary().clone(),
         runner_seams.clone(),
         runner_seams,
+    );
+    // D-11 execution tasks (PIDASHCONV-832; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`). The
+    // scan/sweep/expire handlers execute here on bin-local live seams
+    // (`execute_seams::LiveExecuteSeams`); the run task's model
+    // runtime has no Rust counterpart, so its handler is overridden
+    // with an explicit forward and Python keeps executing runs
+    // (PIDASHCONV-866 tracks true run ownership). The register call
+    // also owns `managed_runner.expire_waiting_runs` (never published
+    // in OSS; the table follows the registry).
+    let execute_settings = pidash_db::config::Settings::from_env()?;
+    pidash_jobs::dispatch_execute::register_execute_tasks(
+        &mut registry,
+        pools.primary().clone(),
+        execute_settings.cloud_agent.clone(),
+        execute_settings.managed_runner.clone(),
+        std::sync::Arc::new(execute_seams::LiveExecuteSeams::new(
+            pools.primary().clone(),
+            execute_settings.cloud_agent.block_private_urls,
+        )),
+    );
+    registry.register(
+        pidash_jobs::dispatch::RUN_CLOUD_AGENT_TASK,
+        execute_seams::forward_to_python_handler(publisher.clone()),
     );
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,

@@ -21,7 +21,7 @@ Counts (2026-10-10, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 514 OWNED, 14 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 85 tasks — 47 OWNED, 32 proxied by design, 6 MISSING;
+- Jobs: 85 tasks — 51 OWNED, 31 proxied by design, 3 MISSING;
   beat 26/26 OWNED.
 
 ## Routes
@@ -165,14 +165,16 @@ there is nothing to wire; the `W-assistant` gap id stays reserved in
 ```expected-jobs
 ```
 
-### W-cloud-agent (3 rows)
+### W-cloud-agent (0 rows; wired)
 
-Fix: PIDASHCONV-832.
+Fix: PIDASHCONV-832 (wired `register_execute_tasks` in `worker()`:
+scan/sweep/expire execute in Rust on bin-local live seams. The run
+handler is overridden with an explicit forward — the model runtime
+(pydantic-ai) has no Rust counterpart, so Python keeps executing
+runs; PIDASHCONV-866 tracks true run ownership. The `W-cloud-agent`
+gap id stays reserved in `WIRE_GAPS`).
 
 ```expected-jobs
-W-cloud-agent :: cloud_agent.run_agent_run :: must-wire (lost without python worker)
-W-cloud-agent :: cloud_agent.scan_queued_runs :: must-wire (lost without python worker)
-W-cloud-agent :: cloud_agent.sweep_stale_runs :: must-wire (lost without python worker)
 ```
 
 ### W-mail (2 rows; notifications resolved by PIDASHCONV-834)
@@ -205,7 +207,7 @@ Fix: PIDASHCONV-836.
 W-activity :: pi_dash.bgtasks.issue_activities_task.issue_activity :: must-wire (lost without python worker)
 ```
 
-### Proxied by design (32 rows)
+### Proxied by design (31 rows)
 
 No fix issue: forwarding preserves Django's outcome on every row.
 
@@ -239,8 +241,6 @@ No fix issue: forwarding preserves Django's outcome on every row.
   switchover track (PIDASHCONV-857); revisit PIDASHCONV-863 by
   2027-04-10, or when Rust ships a live TurnSeam, whichever comes
   first.
-- `managed_runner.expire_waiting_runs`: cloud-only app; the OSS beat
-  entry fires into the void on both sides.
 - `project_invitation`: never invoked (`invite.py:105` calls `.delay`
   on a list; PDASHOSS01-292).
 - `recent_visited_task`: documented no-op (memory broker, no worker by
@@ -258,7 +258,6 @@ PROXIED :: celery.chunks :: celery-builtin; no canvas usage
 PROXIED :: celery.group :: celery-builtin; no canvas usage
 PROXIED :: celery.map :: celery-builtin; no canvas usage
 PROXIED :: celery.starmap :: celery-builtin; no canvas usage
-PROXIED :: managed_runner.expire_waiting_runs :: cloud-only app; oss beat fires into the void on both sides
 PROXIED :: pi_dash.bgtasks.analytic_plot_export.analytic_export_task :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.analytic_plot_export.export_analytics_to_csv_email :: dead (defined, never referenced)
 PROXIED :: pi_dash.bgtasks.event_tracking_task.track_event :: django-drops-too (PDASHOSS01-292); rust explicitly unregistered (early-return would swallow forward)
