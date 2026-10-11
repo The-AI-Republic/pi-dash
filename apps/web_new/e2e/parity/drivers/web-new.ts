@@ -101,7 +101,9 @@ import type {
   IntakeListOrderField,
   IntakeListOrderState,
   IntakeListTooltip,
+  EstimatesActiveRow,
   EstimatesFamilyOption,
+  EstimatesStarterCard,
   PagesGatingTab,
   PagesGatingListVariant,
   PagesGatingCreateState,
@@ -10281,5 +10283,81 @@ export class WebNewDriver implements ParityDriver {
 
   async modulesListCardClickControl(_name: string, _control: ModulesListCardControl): Promise<void> {
     return todo("modulesListCardClickControl");
+  }
+
+  // --- Estimates creation dialog (NEWFRONT-323, EST-008..013). Appended;
+  // --- sibling stubs above are untouched per the shared driver contract.
+  // --- The shell child's navigation (NEWFRONT-321, merged) and the dialog
+  // --- verbs shared with the permissions child (NEWFRONT-326, merged) are
+  // --- reused as-is; only the dialog-specific stubs below are new.
+
+  async estimatesDialogStep(): Promise<"1" | "2" | null> {
+    return todo("estimatesDialogStep");
+  }
+  async estimatesDialogBack(): Promise<void> {
+    return todo("estimatesDialogBack");
+  }
+  async estimatesBackVisible(): Promise<boolean> {
+    return todo("estimatesBackVisible");
+  }
+  async estimatesDialogCancel(): Promise<void> {
+    return todo("estimatesDialogCancel");
+  }
+  async estimatesStarterCards(): Promise<EstimatesStarterCard[]> {
+    return todo("estimatesStarterCards");
+  }
+  async estimatesStepTwoValues(): Promise<string[]> {
+    return todo("estimatesStepTwoValues");
+  }
+  async estimatesStepTwoFamily(): Promise<string> {
+    return todo("estimatesStepTwoFamily");
+  }
+  async estimatesDragValueBefore(_sourceIndex: number, _targetIndex: number): Promise<void> {
+    return todo("estimatesDragValueBefore");
+  }
+  async estimatesEditValueStart(_index: number, _via: "double-click" | "control"): Promise<void> {
+    return todo("estimatesEditValueStart");
+  }
+  async estimatesOpenFormValue(): Promise<string | null> {
+    return todo("estimatesOpenFormValue");
+  }
+  async estimatesOpenFormSave(_value: string): Promise<void> {
+    return todo("estimatesOpenFormSave");
+  }
+  async estimatesOpenFormFill(_value: string): Promise<void> {
+    return todo("estimatesOpenFormFill");
+  }
+  async estimatesOpenFormSubmit(): Promise<void> {
+    return todo("estimatesOpenFormSubmit");
+  }
+  async estimatesOpenFormCancel(): Promise<void> {
+    return todo("estimatesOpenFormCancel");
+  }
+  async estimatesOpenFormCount(): Promise<number> {
+    return todo("estimatesOpenFormCount");
+  }
+  async estimatesRemoveValue(_index: number): Promise<void> {
+    return todo("estimatesRemoveValue");
+  }
+  async estimatesRemoveVisible(_index: number): Promise<boolean> {
+    return todo("estimatesRemoveVisible");
+  }
+  async estimatesAddOpen(): Promise<void> {
+    return todo("estimatesAddOpen");
+  }
+  async estimatesAddVisible(): Promise<boolean> {
+    return todo("estimatesAddVisible");
+  }
+  async estimatesAddType(_value: string): Promise<void> {
+    return todo("estimatesAddType");
+  }
+  async estimatesValueErrors(): Promise<string[]> {
+    return todo("estimatesValueErrors");
+  }
+  async estimatesValueErrorCount(): Promise<number> {
+    return todo("estimatesValueErrorCount");
+  }
+  async estimatesActiveRow(): Promise<EstimatesActiveRow | null> {
+    return todo("estimatesActiveRow");
   }
 }

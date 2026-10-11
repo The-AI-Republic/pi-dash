@@ -15393,3 +15393,67 @@ export async function modulesListProgress(
   }
   throw new Error("[parity] module missing from its project list read.");
 }
+
+/** One estimate system with typed, position-keyed values as the server reports it (NEWFRONT-323). Distinct from the shell child's list shape (NEWFRONT-321, ParityServerEstimateSystem): the creation dialog's renumber assertions need the system type and point keys. */
+export interface ParityServerEstimateSystemKeyed {
+  id: string;
+  name: string;
+  type: string;
+  last_used: boolean;
+  points: { id: string; key: number; value: string }[];
+}
+
+/** Parse one estimate record; shared by the list and detail readers. */
+function parseServerEstimateSystemKeyed(rec: Record<string, unknown>): ParityServerEstimateSystemKeyed {
+  if (
+    typeof rec["id"] !== "string" ||
+    typeof rec["name"] !== "string" ||
+    typeof rec["type"] !== "string" ||
+    typeof rec["last_used"] !== "boolean"
+  )
+    throw new Error("[parity] estimate carried no id/name/type/last_used.");
+  const rows = Array.isArray(rec["points"]) ? rec["points"] : [];
+  return {
+    id: rec["id"],
+    name: rec["name"],
+    type: rec["type"],
+    last_used: rec["last_used"],
+    points: rows.map((row) => {
+      const point = row as Record<string, unknown>;
+      if (typeof point["id"] !== "string" || typeof point["key"] !== "number" || typeof point["value"] !== "string")
+        throw new Error("[parity] estimate point carried no string id/value or numeric key.");
+      return { id: point["id"], key: point["key"], value: point["value"] };
+    }),
+  };
+}
+
+/** List a project's estimate systems through the API (NEWFRONT-323). */
+export async function serverListEstimates(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerEstimateSystemKeyed[]> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/estimates/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] estimate list failed with HTTP ${res.status}.`);
+  const body = (await res.json()) as unknown[];
+  return body.map((row) => parseServerEstimateSystemKeyed(row as Record<string, unknown>));
+}
+
+/** Read one estimate system through the API (NEWFRONT-323). */
+export async function serverEstimateDetail(
+  workspaceSlug: string,
+  projectId: string,
+  estimateId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerEstimateSystemKeyed> {
+  const res = await fetchShared(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/estimates/${estimateId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] estimate detail failed with HTTP ${res.status}.`);
+  return parseServerEstimateSystemKeyed((await res.json()) as Record<string, unknown>);
+}

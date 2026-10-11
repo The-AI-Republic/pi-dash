@@ -6011,6 +6011,61 @@ export interface ParityDriver {
   /** Whether the active row exposes any edit control (cloud-only; false in OSS). */
   estimatesEditDeleteActiveRowEditControlVisible(): Promise<boolean>;
 
+  // -------------------------------------------------------------------------
+  // Estimates creation dialog (NEWFRONT-323, EST-008..013). Appended;
+  // existing methods above are untouched per the shared driver contract.
+  // The shell child's navigation (NEWFRONT-321, merged) and the dialog
+  // verbs shared with the permissions child (NEWFRONT-326, merged) are
+  // reused as-is; only the dialog-specific readers below are new.
+  // -------------------------------------------------------------------------
+
+  /** Current step counter ("1" or "2"), or null when the dialog is closed. */
+  estimatesDialogStep(): Promise<"1" | "2" | null>;
+  /** Click the dialog back control; resolves once step one shows. */
+  estimatesDialogBack(): Promise<void>;
+  /** Whether the dialog back control is offered. */
+  estimatesBackVisible(): Promise<boolean>;
+  /** Click Cancel; resolves once the dialog closes. */
+  estimatesDialogCancel(): Promise<void>;
+  /** Step-one starter cards (scratch plus templates) with their previews. */
+  estimatesStarterCards(): Promise<EstimatesStarterCard[]>;
+  /** Step-two value rows in display order. */
+  estimatesStepTwoValues(): Promise<string[]>;
+  /** Step-two family label as rendered (lowercase family key). */
+  estimatesStepTwoFamily(): Promise<string>;
+  /** Drag the value at sourceIndex above the value at targetIndex (real mouse drag). */
+  estimatesDragValueBefore(sourceIndex: number, targetIndex: number): Promise<void>;
+  /** Open the inline edit form for the value at index; resolves once its pre-populated value reads back. */
+  estimatesEditValueStart(index: number, via: "double-click" | "control"): Promise<void>;
+  /** Current value of the open value form, or null when no form is open. */
+  estimatesOpenFormValue(): Promise<string | null>;
+  /** Fill the open value form and submit it; resolves once the value lands in the rows with no form left open. */
+  estimatesOpenFormSave(value: string): Promise<void>;
+  /** Fill the open value form without submitting it. */
+  estimatesOpenFormFill(value: string): Promise<void>;
+  /** Submit the open value form; returns without waiting for it to close. */
+  estimatesOpenFormSubmit(): Promise<void>;
+  /** Close the open value form without saving. */
+  estimatesOpenFormCancel(): Promise<void>;
+  /** How many value forms are currently open. */
+  estimatesOpenFormCount(): Promise<number>;
+  /** Remove the value at index through its row control. */
+  estimatesRemoveValue(index: number): Promise<void>;
+  /** Whether the value at index offers a remove control. */
+  estimatesRemoveVisible(index: number): Promise<boolean>;
+  /** Open the add-value form. */
+  estimatesAddOpen(): Promise<void>;
+  /** Whether the add-value control is offered. */
+  estimatesAddVisible(): Promise<boolean>;
+  /** Type into the open add form one keystroke at a time (length-cap path). */
+  estimatesAddType(value: string): Promise<void>;
+  /** Validation messages currently flagged on value rows, in marker order. */
+  estimatesValueErrors(): Promise<string[]>;
+  /** How many value rows currently show a validation marker. */
+  estimatesValueErrorCount(): Promise<number>;
+  /** Active system row as the settings screen shows it, or null when absent. */
+  estimatesActiveRow(): Promise<EstimatesActiveRow | null>;
+
   // --- Intake-create dialog oracles (NEWFRONT-257, INT-013–017/033). ---
   // --- Appended; existing methods above are untouched per the shared
   // --- driver contract. Continues the merged intakeCreate family from
@@ -7641,7 +7696,7 @@ export interface CyclesHeroTrafficCounts {
   writes: number;
 }
 
-/** One measurement-family radio option (NEWFRONT-326, EST-029; duplicates NEWFRONT-323, unmerged). */
+/** One measurement-family radio option (NEWFRONT-323, EST-009; NEWFRONT-326, EST-029). */
 export interface EstimatesFamilyOption {
   /** Option value as submitted (points, categories, time on cloud). */
   value: string;
@@ -7802,3 +7857,19 @@ export interface ModulesListCardSegments {
 
 /** Clickable card controls that must not navigate (NEWFRONT-307, MOD-020). */
 export type ModulesListCardControl = "status" | "dates" | "favorite" | "menu";
+
+/** One step-one starter card (NEWFRONT-323, EST-010). */
+export interface EstimatesStarterCard {
+  /** Card title (scratch card or template name). */
+  title: string;
+  /** Preview line under the title (values the card loads). */
+  detail: string;
+}
+
+/** Active system row on the settings screen (NEWFRONT-323, EST-013). */
+export interface EstimatesActiveRow {
+  /** System name as rendered. */
+  name: string;
+  /** Joined value preview as rendered. */
+  values: string;
+}
