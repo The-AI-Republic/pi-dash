@@ -6392,3 +6392,4 @@ export interface ModulesRowFacts {
   nameHref: string | null;
   /** Whether the row offers the peek/info trigger. */
   hasPeek: boolean;
+}

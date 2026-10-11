@@ -8439,4 +8439,5 @@ export class WebNewDriver implements ParityDriver {
 
   async modulesRowFacts(_name: string): Promise<ModulesRowFacts> {
     return todo("modulesRowFacts");
+  }
 }

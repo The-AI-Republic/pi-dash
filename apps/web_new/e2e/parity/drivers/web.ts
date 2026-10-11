@@ -29945,4 +29945,5 @@ export class WebDriver implements ParityDriver {
     }, name);
     if (facts === null) throw new Error(`[parity] module row never rendered ${JSON.stringify(name)}.`);
     return { nameHref: facts.href, hasPeek: facts.hasPeek };
+  }
 }
