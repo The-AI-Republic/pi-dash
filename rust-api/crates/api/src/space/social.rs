@@ -2074,17 +2074,14 @@ async fn comment_create_inner(
         .await
         .map_err(|_| HandlerError::ServerError)?;
     // The description link is a second `save(update_fields=["description_id"])`
-    // (`IssueComment.save`, `:619-621`): with `adding=False` the base save
-    // stamps `updated_by`/`updated_at` again, so a created comment always
-    // carries its actor as `updated_by` (unlike reactions/votes, whose
-    // models never re-save).
-    let relinked_at = chrono::Utc::now();
+    // (`IssueComment.save`, `:620-627`): `update_fields` restricts the UPDATE
+    // to exactly that column, so `updated_by`/`updated_at` stay NULL and
+    // `created_at` in the row (same shape as
+    // `app_issues/handlers_engage.rs:5104-5116`).
     sqlx::query(
-        "UPDATE issue_comments SET description_id = $1, updated_by_id = $2, updated_at = $3 WHERE id = $4 AND deleted_at IS NULL",
+        "UPDATE issue_comments SET description_id = $1 WHERE id = $2 AND deleted_at IS NULL",
     )
     .bind(description_id)
-    .bind(actor.id)
-    .bind(relinked_at)
     .bind(comment_id)
     .execute(pool)
     .await
@@ -2092,8 +2089,14 @@ async fn comment_create_inner(
     let row = fetch_comment_by_id(pool, &comment_id)
         .await?
         .ok_or(HandlerError::ServerError)?;
+    // `BaseModel.save` still assigns `updated_by` on the in-memory instance
+    // before the `update_fields` save, and the view returns `serializer.data`
+    // from that instance — so the 201 carries the actor while the row keeps
+    // NULL (`handlers_engage.rs:5120-5124` renders the same split).
+    let mut created = CommentRow::from_value(&row)?;
+    created.updated_by = Some(actor.id.to_string());
     let tz = request_tz(Some(&actor));
-    let rendered = render_comment(pool, &CommentRow::from_value(&row)?, &tz, false).await?;
+    let rendered = render_comment(pool, &created, &tz, false).await?;
     let value = serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?;
     // Python order: delay first (`:274-282`), member tracking after
     // (`:283-291`).
