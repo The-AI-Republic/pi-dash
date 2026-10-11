@@ -2797,8 +2797,8 @@ pub async fn create_project_inner(
             .await?;
         }
     }
-    // The 8 `DEFAULT_STATES` (`views/project.py:240-254`, bypassing
-    // `save()` — slugs still slugified per row).
+    // The 8 `DEFAULT_STATES` (`views/project.py:240-254`): `bulk_create`
+    // calls no `save()`, so every row keeps `slug ""`.
     for (name, color, sequence, group, default) in
         pidash_db::v1_projects::models::state::DEFAULT_STATES.iter()
     {
@@ -3431,6 +3431,9 @@ pub async fn delete_project_inner(
 }
 
 /// One `DEFAULT_STATES` row (`views/project.py:240-254`).
+/// `bulk_create` calls no `save()`, so `slug` keeps the field default
+/// `""` (`db/models/state.py:97`) — the `save()` slugification (`:132`)
+/// never runs on this path (PIDASHCONV-893).
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_default_state(
     pool: &PgPool,
@@ -3444,7 +3447,6 @@ pub async fn insert_default_state(
     default: bool,
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Result<(), Denial> {
-    let slug = pidash_db::v1_projects::models::state::slugify_name(name);
     sqlx::query(
         r#"INSERT INTO "states" ("id", "created_at", "updated_at", "created_by_id",
             "project_id", "workspace_id", "name", "description", "color", "slug",
@@ -3459,7 +3461,8 @@ pub async fn insert_default_state(
     .bind(workspace_id)
     .bind(name)
     .bind(color)
-    .bind(&slug)
+    // `bulk_create` bypasses `save()`: `slug` keeps the `""` default.
+    .bind("")
     .bind(sequence)
     .bind(group)
     .bind(default)
