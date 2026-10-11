@@ -8103,7 +8103,7 @@ export async function serverUploadDraftAsset(
   // there — the signature covers the fields, not the host.
   const uploadUrl = (() => {
     try {
-      const proxy = new URL(process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000");
+      const proxy = new URL(parityOracleUrl(process.env));
       const target = new URL(signed.upload_data.url);
       target.protocol = proxy.protocol;
       target.host = proxy.host;
@@ -13313,7 +13313,7 @@ export async function cyclesUnfavoriteCycle(
 
 /** Oracle base URL (the slot proxy): live HTTP rides /live/* beside /api/*. */
 export function pagesLiveOracleBase(): string {
-  return (process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000").trim().replace(/\/+$/, "");
+  return parityOracleUrl(process.env).trim().replace(/\/+$/, "");
 }
 
 /** A project page record as the detail endpoint reports it. */
@@ -13851,7 +13851,7 @@ export async function serverIntakeXProjectFlags(
 
 /** Edge origin serving the oracle (browser-facing paths go through it). */
 function deskSigninOracleBase(): string {
-  const raw = (process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000").trim().replace(/\/+$/, "");
+  const raw = parityOracleUrl(process.env).trim().replace(/\/+$/, "");
   if (raw === "") throw new Error("[parity] PARITY_ORACLE_URL is empty.");
   return raw;
 }

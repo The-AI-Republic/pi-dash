@@ -4,7 +4,8 @@
 // Import-boundary check for the new trees (Architecture > Import rules).
 // Backstops the oxlint no-restricted-imports config with the rules oxlint
 // cannot express: layer direction, feature index.ts, network/TAuri touch
-// points, and the heavy-dependency import() rule.
+// points, the heavy-dependency import() rule, and the parity-env touch
+// point (suite URLs derive through helpers/parity-env.ts).
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, posix, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -162,6 +163,21 @@ function checkFile(full) {
     if (!inPlatform && (/__TAURI__/.test(text) || /@tauri-apps\//.test(text))) {
       failures.push(`${rel}: Tauri access is only allowed in core/platform`);
     }
+  }
+
+  // Parity suite URLs derive from PARITY_NS through helpers/parity-env.ts
+  // (NEWFRONT-132). A hardcoded localhost fallback anywhere else points at
+  // the wrong stack under a bare namespaced run, so it fails here instead
+  // of drifting back in through a concurrent oracle PR (NEWFRONT-353).
+  const parityTree = "apps/web_new/e2e/parity/";
+  if (
+    rel.startsWith(parityTree) &&
+    rel !== parityTree + "helpers/parity-env.ts" &&
+    /process\.env\[["']PARITY_(ORACLE|API)_URL["']\]\s*\?\?\s*["']http:\/\/localhost/.test(text)
+  ) {
+    failures.push(
+      `${rel}: hardcoded PARITY_ORACLE_URL/PARITY_API_URL localhost default; derive through parityOracleUrl/parityApiUrl from helpers/parity-env.ts`
+    );
   }
 }
 
