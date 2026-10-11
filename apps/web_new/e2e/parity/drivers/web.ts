@@ -93,6 +93,8 @@ import type {
   ServedShellMarkers,
   WorkspaceOnboardingView,
   PagesLiveSocketClose,
+  PagesKeysToolbarTooltip,
+  PagesPrefsLocalConfig,
   PagesPaneActor,
   PagesPaneAssetRow,
   PagesPaneOutlineHeading,
@@ -27803,6 +27805,506 @@ export class WebDriver implements ParityDriver {
     await expect(this.page.getByRole("textbox", { name: "Work item title" })).toHaveValue(name, {
       timeout: 30_000,
     });
+  }
+
+  // --- Pages prefs, key map, assistant, cloud stubs, desktop, negatives
+  // --- (NEWFRONT-320, PAGE-072-073, PAGE-075-078, PAGE-081-083).
+  // --- Selectors were read off the running-oracle DOM shapes the area
+  // --- research pinned: element ids first (#page-toolbar-container,
+  // --- #slash-command, #ai-handle), then accessible names, then scoped
+  // --- structural reads. Nothing here is shared with siblings.
+
+  /** Page-endpoint writes seen since pagesPrefsSpyPageWrites (per page). */
+  private pagesPrefsWriteCount = 0;
+
+  /** The live document editor body (title is a separate control). */
+  private pagesPrefsLiveEditor(): Locator {
+    return this.page.locator('.frame-renderer > .editor-container [contenteditable="true"]');
+  }
+
+  /** The live editor container (carries the font/display markers). */
+  private pagesPrefsLiveBody(): Locator {
+    return this.page.locator(".frame-renderer > .editor-container");
+  }
+
+  /** The detail title control. */
+  private pagesPrefsTitleBox(): Locator {
+    return this.page.getByPlaceholder("Untitled");
+  }
+
+  /** The detail header block (mark row plus title; carries the canvas width). */
+  private pagesPrefsHeaderBlock(): Locator {
+    return this.page.locator(".page-header-container");
+  }
+
+  /** The app-header action row (lock, copy-link, favorite, options). */
+  private pagesPrefsActionRow(): Locator {
+    return this.page
+      .locator("button[aria-label='Copy link'], button[aria-label='Copied link']")
+      .first()
+      .locator("xpath=..");
+  }
+
+  /** Menu items of the currently open headless menu. */
+  private pagesPrefsMenuItems(): Locator {
+    return this.page.getByRole("menuitem");
+  }
+
+  private async pagesPrefsWaitEditor(): Promise<void> {
+    await this.waitForContent("page live editor", () =>
+      this.pagesPrefsLiveEditor().first().waitFor({ timeout: 60_000 })
+    );
+  }
+
+  async pagesPrefsOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // The search box starts collapsed (its input reads hidden), so the
+    // settled-list signal is the tab strip or a row link instead.
+    await this.waitForContent("pages list", () =>
+      Promise.race([
+        this.page.locator("a[href*='pages?type=']").first().waitFor({ timeout: 60_000 }),
+        this.page.locator("a[href*='/pages/']").first().waitFor({ timeout: 60_000 }),
+      ])
+    );
+  }
+
+  async pagesPrefsOpenDetail(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.pagesPrefsWaitEditor();
+  }
+
+  async pagesPrefsReload(): Promise<void> {
+    await this.page.reload();
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.waitForContent("pages route after reload", () =>
+      Promise.race([
+        this.pagesPrefsLiveEditor().first().waitFor({ timeout: 60_000 }),
+        this.page.locator("a[href*='pages?type=']").first().waitFor({ timeout: 60_000 }),
+        this.page.locator("a[href*='/pages/']").first().waitFor({ timeout: 60_000 }),
+      ])
+    );
+  }
+
+  async pagesPrefsEditorHtml(): Promise<string> {
+    const editable = this.pagesPrefsLiveEditor().first();
+    return (await editable.innerHTML().catch(() => "")) ?? "";
+  }
+
+  async pagesPrefsEditorText(): Promise<string> {
+    const editable = this.pagesPrefsLiveEditor();
+    if ((await editable.count()) > 0) {
+      return (
+        (await editable
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+    }
+    const rendered = this.pagesPrefsLiveBody();
+    if ((await rendered.count()) === 0) return "";
+    return (
+      (await rendered
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async pagesPrefsEditorClickEnd(): Promise<void> {
+    const paras = this.pagesPrefsLiveEditor().locator("p");
+    if ((await paras.count()) > 0) {
+      await paras.last().click({ timeout: WebDriver.OPEN_MS, position: { x: 4, y: 4 } });
+      return;
+    }
+    await this.pagesPrefsLiveEditor().first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesPrefsEditorType(text: string): Promise<void> {
+    await this.page.keyboard.type(text);
+  }
+
+  async pagesPrefsEditorClear(): Promise<void> {
+    await this.pagesPrefsEditorClickEnd();
+    await this.page.keyboard.press("Control+a");
+    await this.page.keyboard.press("Backspace");
+  }
+
+  async pagesPrefsEditorSelectAll(): Promise<void> {
+    await this.pagesPrefsLiveEditor().first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press("Control+a");
+  }
+
+  async pagesPrefsTitleValue(): Promise<string> {
+    return this.pagesPrefsTitleBox().inputValue({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesPrefsTitleFill(text: string): Promise<void> {
+    await this.pagesPrefsTitleBox().fill(text, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesPrefsTitleFocus(): Promise<void> {
+    await this.pagesPrefsTitleBox().focus({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesPrefsTitlePressEnter(): Promise<void> {
+    await this.pagesPrefsTitleBox().press("Enter", { timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesPrefsTitleClass(): Promise<string> {
+    return (await this.pagesPrefsTitleBox().getAttribute("class")) ?? "";
+  }
+
+  async pagesPrefsFocusedRegion(): Promise<"title" | "body" | "other"> {
+    return this.page.evaluate(() => {
+      const active = document.activeElement;
+      if (active === null) return "other";
+      if (active.getAttribute("placeholder") === "Untitled") return "title";
+      if (active.closest(".frame-renderer > .editor-container") !== null) return "body";
+      if (active.getAttribute("contenteditable") === "true") return "body";
+      return "other";
+    });
+  }
+
+  async pagesPrefsOptionsOpen(): Promise<void> {
+    const trigger = this.pagesPrefsActionRow().locator("button:has(svg.lucide-ellipsis)");
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesPrefsMenuItems().first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async pagesPrefsOptionsItems(): Promise<string[]> {
+    const items = this.pagesPrefsMenuItems();
+    const count = await items.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const text = (
+        (await items
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text !== "") labels.push(text);
+    }
+    return labels;
+  }
+
+  async pagesPrefsOptionsToggle(label: string): Promise<void> {
+    await this.pagesPrefsMenuItems().filter({ hasText: label }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesPrefsMenuItems().first().waitFor({ state: "detached", timeout: WebDriver.WAIT_MS });
+  }
+
+  async pagesPrefsLocalConfig(): Promise<PagesPrefsLocalConfig | null> {
+    return this.page.evaluate(() => {
+      const raw = window.localStorage.getItem("pages_config");
+      if (raw === null) return null;
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      return {
+        fullWidth: parsed["full_width"] === true,
+        fontSize: typeof parsed["font_size"] === "string" ? parsed["font_size"] : "",
+        fontStyle: typeof parsed["font_style"] === "string" ? parsed["font_style"] : "",
+        stickyToolbar: parsed["sticky_toolbar"] === true,
+      };
+    });
+  }
+
+  async pagesPrefsSeedLocalConfig(config: PagesPrefsLocalConfig): Promise<void> {
+    await this.page.evaluate((seed) => {
+      window.localStorage.setItem(
+        "pages_config",
+        JSON.stringify({
+          full_width: seed.fullWidth,
+          font_size: seed.fontSize,
+          font_style: seed.fontStyle,
+          sticky_toolbar: seed.stickyToolbar,
+        })
+      );
+    }, config);
+  }
+
+  async pagesPrefsToolbarVisible(): Promise<boolean> {
+    const container = this.page.locator("#page-toolbar-container");
+    if ((await container.count()) === 0) return false;
+    const classes = (await container.getAttribute("class")) ?? "";
+    return !classes.includes("max-h-0");
+  }
+
+  async pagesPrefsToolbarWide(): Promise<boolean> {
+    const content = this.page.locator("#page-toolbar-container .page-toolbar-content");
+    if ((await content.count()) === 0) return false;
+    return ((await content.getAttribute("class")) ?? "").includes("wide-layout");
+  }
+
+  async pagesPrefsCanvasMaxWidth(): Promise<string> {
+    return this.pagesPrefsHeaderBlock()
+      .locator(":scope > div")
+      .first()
+      .evaluate((el) => getComputedStyle(el).maxWidth);
+  }
+
+  async pagesPrefsEditorClass(): Promise<string> {
+    return (await this.pagesPrefsLiveBody().first().getAttribute("class")) ?? "";
+  }
+
+  async pagesPrefsSpyPageWrites(): Promise<void> {
+    this.pagesPrefsWriteCount = 0;
+    await this.page.route("**/api/workspaces/**", async (route: Route) => {
+      const request = route.request();
+      const method = request.method();
+      if (
+        (method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE") &&
+        request.url().includes("/pages/")
+      ) {
+        this.pagesPrefsWriteCount += 1;
+      }
+      await route.continue();
+    });
+  }
+
+  async pagesPrefsPageWriteCount(): Promise<number> {
+    return this.pagesPrefsWriteCount;
+  }
+
+  async pagesKeysToolbarTooltips(): Promise<PagesKeysToolbarTooltip[]> {
+    const buttons = this.page.locator("#page-toolbar-container .page-toolbar-content button");
+    const count = await buttons.count();
+    const found: PagesKeysToolbarTooltip[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const button = buttons.nth(index);
+      await button.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+      await button.hover({ timeout: WebDriver.WAIT_MS });
+      const tip = this.page.getByRole("tooltip");
+      const label = await tip.waitFor({ state: "visible", timeout: 5_000 }).then(
+        () => true,
+        () => false
+      );
+      if (!label) {
+        const fallback = ((await button.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+        found.push({ label: fallback, keys: "" });
+        continue;
+      }
+      const text = (
+        (await tip
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line !== "");
+      found.push({ label: lines[0] ?? "", keys: lines.slice(1).join(" ") });
+      await this.page.mouse.move(2, 2);
+    }
+    return found;
+  }
+
+  async pagesKeysPress(chord: string): Promise<void> {
+    await this.page.keyboard.press(chord);
+  }
+
+  async pagesKeysSearchOpen(): Promise<void> {
+    const box = this.page.getByPlaceholder("Search pages");
+    if (await box.isVisible()) return;
+    const trigger = box.locator("xpath=ancestor::div[contains(@class, 'flex')][1]/button").first();
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
+    await box.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async pagesKeysSearchFill(text: string): Promise<void> {
+    await this.page.getByPlaceholder("Search pages").fill(text, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesKeysSearchValue(): Promise<string> {
+    return this.page.getByPlaceholder("Search pages").inputValue({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesKeysSearchPressEscape(): Promise<void> {
+    await this.page.getByPlaceholder("Search pages").press("Escape", { timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesKeysSearchExpanded(): Promise<boolean> {
+    return this.page.getByPlaceholder("Search pages").isVisible();
+  }
+
+  async pagesKeysListRowTitles(): Promise<string[]> {
+    const rows = this.page.locator("a[href*='/pages/']");
+    const count = await rows.count();
+    const titles: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const text = (
+        (await rows
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text !== "") titles.push(text);
+    }
+    return titles;
+  }
+
+  async pagesKeysShortcutReferenceVisible(): Promise<boolean> {
+    const phrase = this.page.getByText(/keyboard shortcuts?/i);
+    if ((await phrase.count()) > 0) return true;
+    const trigger = this.page.getByRole("button", { name: /shortcuts?/i });
+    return (await trigger.count()) > 0;
+  }
+
+  async pagesAssistAiHandleVisible(): Promise<boolean> {
+    const handle = this.page.locator("#ai-handle");
+    if ((await handle.count()) === 0) return false;
+    return handle.first().isVisible();
+  }
+
+  async pagesAssistAiMenuVisible(): Promise<boolean> {
+    if ((await this.page.getByText("Ask Pi", { exact: true }).count()) > 0) return true;
+    return (await this.page.locator("#editor-ai-response").count()) > 0;
+  }
+
+  async pagesCloudHeaderActionNames(): Promise<string[]> {
+    const buttons = this.pagesPrefsActionRow().locator("button");
+    const count = await buttons.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const button = buttons.nth(index);
+      const aria = await button.getAttribute("aria-label");
+      if (aria !== null && aria.trim() !== "") {
+        names.push(aria.trim());
+        continue;
+      }
+      const text = ((await button.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+      names.push(text === "" ? "(icon-only)" : text);
+    }
+    return names;
+  }
+
+  async pagesCloudToolbarEndNames(): Promise<string[]> {
+    const cluster = this.page.locator("#page-toolbar-container .page-toolbar-content div.flex.items-center.gap-2");
+    const buttons = cluster.locator(":scope button");
+    const count = await buttons.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const button = buttons.nth(index);
+      const aria = await button.getAttribute("aria-label");
+      if (aria !== null && aria.trim() !== "") {
+        names.push(aria.trim());
+        continue;
+      }
+      const icon = button.locator("svg");
+      const iconClass =
+        (await icon
+          .first()
+          .getAttribute("class")
+          .catch(() => null)) ?? "";
+      const match = /lucide-([a-z0-9-]+)/.exec(iconClass);
+      names.push(match ? `(icon:${match[1]})` : "(icon-only)");
+    }
+    return names;
+  }
+
+  async pagesCloudPaneOpen(): Promise<void> {
+    const labeled = this.page.getByRole("button", { name: "Open navigation pane" });
+    if ((await labeled.count()) > 0) {
+      await labeled.first().click({ timeout: WebDriver.OPEN_MS });
+    } else {
+      const toggle = this.page.locator("#page-toolbar-container button:has(svg.lucide-panel-right)");
+      await toggle.first().click({ timeout: WebDriver.OPEN_MS });
+    }
+    await this.page
+      .locator("aside", { has: this.page.getByRole("button", { name: "Close navigation pane" }) })
+      .getByRole("tab")
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async pagesCloudPaneTabNames(): Promise<string[]> {
+    const pane = this.page.locator("aside", {
+      has: this.page.getByRole("button", { name: "Close navigation pane" }),
+    });
+    if ((await pane.count()) === 0) return [];
+    const names = await pane.getByRole("tab").allInnerTexts();
+    return names.map((name) => name.trim()).filter((name) => name !== "");
+  }
+
+  async pagesCloudSlashEntries(): Promise<string[]> {
+    await this.pagesPrefsEditorClear();
+    await this.page.keyboard.type("/");
+    const menu = this.page.locator("#slash-command");
+    await menu.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const titles = await menu.locator("button p").allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    await menu.waitFor({ state: "detached", timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+    return titles.map((title) => title.trim()).filter((title) => title !== "");
+  }
+
+  async pagesDeskIsMobile(): Promise<boolean> {
+    return this.page.evaluate(() => /iPhone|iPad|iPod|Android/i.test(window.navigator.userAgent));
+  }
+
+  async pagesDeskPlatform(): Promise<string> {
+    return this.page.evaluate(() => {
+      const userAgent = window.navigator.userAgent;
+      if (/iPhone|iPad|iPod|Android/i.test(userAgent)) return "";
+      if (userAgent.indexOf("Win") !== -1) return "Windows";
+      if (userAgent.indexOf("Mac") !== -1) return "MacOS";
+      if (userAgent.indexOf("Linux") !== -1) return "Linux";
+      return "Unknown";
+    });
+  }
+
+  async pagesNegListTabNames(): Promise<string[]> {
+    const tabs = this.page.locator("a[href*='pages?type=']");
+    const names = await tabs.allInnerTexts();
+    return names.map((name) => name.trim()).filter((name) => name !== "");
+  }
+
+  async pagesNegRowMenuItems(title: string): Promise<string[]> {
+    const row = this.page.locator("a[href*='/pages/']", { hasText: title }).first();
+    await row.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await row.hover({ timeout: WebDriver.WAIT_MS });
+    const rowScope = this.page.locator("li", { hasText: title }).first();
+    const scope = (await rowScope.count()) > 0 ? rowScope : this.page.locator("div", { hasText: title }).first();
+    const trigger = scope.locator("button:has(svg.lucide-ellipsis)");
+    await trigger.first().click({ timeout: WebDriver.OPEN_MS });
+    const items = await this.pagesPrefsMenuItems().allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    return items.map((item) => item.trim().replace(/\s+/g, " ")).filter((item) => item !== "");
+  }
+
+  async pagesNegCoverPresent(): Promise<boolean> {
+    const main = this.page.locator("main");
+    const scope = (await main.count()) > 0 ? main : this.page.locator("body");
+    if ((await scope.getByText(/cover image|add cover|page cover|change cover/i).count()) > 0) return true;
+    if ((await scope.locator("input[type='file']").count()) > 0) return true;
+    return false;
+  }
+
+  async pagesNegConflictDialogVisible(): Promise<boolean> {
+    const dialogs = this.page.getByRole("dialog");
+    const count = await dialogs.count();
+    for (let index = 0; index < count; index += 1) {
+      const text = (
+        (await dialogs
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).toLowerCase();
+      if (text.includes("conflict")) return true;
+    }
+    const alerts = this.page.getByRole("alertdialog");
+    return (await alerts.count()) > 0;
+  }
+
+  async pagesNegMarkPresent(): Promise<boolean> {
+    // Fresh pages show the mark picker's trigger (smile-plus glyph); pages
+    // with a chosen mark render the mark itself (page-icon fallback).
+    const picker = this.pagesPrefsHeaderBlock().locator("button:has(svg.lucide-smile-plus)");
+    if ((await picker.count()) > 0) return true;
+    return (await this.pagesPrefsHeaderBlock().locator("button").count()) > 0;
   }
 
   // --- Intake cross-cutting (NEWFRONT-260, INT-018/030/031/032/034). Appended;
