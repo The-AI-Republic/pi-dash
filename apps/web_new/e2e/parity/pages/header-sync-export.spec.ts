@@ -525,7 +525,8 @@ test(
       })
       .not.toBeNull();
     // Shelved content stays readable but frozen; visibility switching hides.
-    expect(await driver.pagesHeaderEditorEditable()).toBe(false);
+    // The freeze lags the marker under load: poll it.
+    await expect.poll(() => driver.pagesHeaderEditorEditable(), { timeout: 15_000 }).toBe(false);
     await driver.pagesHeaderOpenOptions();
     await expectMenuItemOrReload(driver, "Restore");
     const items = await driver.pagesHeaderMenuItems();
@@ -548,7 +549,7 @@ test(
         timeout: 15_000,
       })
       .toBeNull();
-    expect(await driver.pagesHeaderEditorEditable()).toBe(true);
+    await expect.poll(() => driver.pagesHeaderEditorEditable(), { timeout: 15_000 }).toBe(true);
   }
 );
 
@@ -904,9 +905,12 @@ test(
     // circuit-breaker: installing the socket route while megabytes are in
     // flight blows the string limit, so traffic stops first, the block
     // lands on a quiet socket, and then the browser goes back online and
-    // the refused reconnects settle the terminal badge.
+    // the refused reconnects settle the terminal badge. The window is
+    // anchored on the Offline pill: going back online before the renderer
+    // has processed the offline state lets the events coalesce and leaves
+    // the client a connected-zombie with no badge (observed live).
     await driver.pagesLiveSetOffline(true);
-    await driver.page.waitForTimeout(1500);
+    await expect.poll(() => driver.pagesHeaderOfflinePill(), { timeout: 60_000 }).toBe("Offline");
     await driver.pagesLiveBlockCollaborationSocket();
     await driver.pagesLiveSetOffline(false);
     // The force-closed client works through refused reconnect attempts before
