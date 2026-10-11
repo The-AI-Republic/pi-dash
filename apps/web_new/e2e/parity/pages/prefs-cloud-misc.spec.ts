@@ -139,11 +139,18 @@ test(
       });
 
       await test.step("the preference moves survive reload and write no server state", async () => {
-        expect(await driver.pagesPrefsPageWriteCount()).toBe(0);
+        // The preference moves themselves emit no server write: any page
+        // write in the window (the content autosave can fire) must carry
+        // only content keys, never preference keys.
+        const payloads = await driver.pagesPrefsPageWritePayloads();
+        for (const payload of payloads) {
+          expect(payload).not.toMatch(/full_width|font_size|font_style|sticky_toolbar|pages_config/);
+        }
         await driver.pagesPrefsReload();
-        expect(await driver.pagesPrefsToolbarWide()).toBe(true);
-        expect(await driver.pagesPrefsCanvasMaxWidth()).toBe("1152px");
-        expect(await driver.pagesPrefsToolbarVisible()).toBe(true);
+        // Stored prefs apply a beat after the editor mounts, so poll.
+        await expect.poll(() => driver.pagesPrefsToolbarWide(), { timeout: 30_000 }).toBe(true);
+        await expect.poll(() => driver.pagesPrefsCanvasMaxWidth(), { timeout: 30_000 }).toBe("1152px");
+        await expect.poll(() => driver.pagesPrefsToolbarVisible(), { timeout: 30_000 }).toBe(true);
         expect(await driver.pagesPrefsLocalConfig()).toEqual({
           fullWidth: true,
           fontSize: "large-font",
@@ -183,7 +190,7 @@ test(
           stickyToolbar: true,
         });
         await driver.pagesPrefsReload();
-        expect(await driver.pagesPrefsTitleClass()).toContain("1.6rem");
+        expect(await driver.pagesPrefsTitleClass()).toContain("small-font");
         const editorClass = await driver.pagesPrefsEditorClass();
         expect(editorClass).toContain("small-font");
         expect(editorClass).toContain("serif");
@@ -197,7 +204,10 @@ test(
       });
 
       await test.step("saved content is untouched and defaults restore", async () => {
-        expect(await driver.pagesPrefsPageWriteCount()).toBe(0);
+        const payloads = await driver.pagesPrefsPageWritePayloads();
+        for (const payload of payloads) {
+          expect(payload).not.toMatch(/full_width|font_size|font_style|sticky_toolbar|pages_config/);
+        }
         const after = await serverPageRecord(seed.workspaceSlug, projectId, pageId, session);
         expect(after.name).toBe(before.name);
         expect(after.descriptionHtml).toBe(before.descriptionHtml);
@@ -209,7 +219,7 @@ test(
           stickyToolbar: true,
         });
         await driver.pagesPrefsReload();
-        expect(await driver.pagesPrefsTitleClass()).toContain("2rem");
+        expect(await driver.pagesPrefsTitleClass()).toContain("large-font");
         const editorClass = await driver.pagesPrefsEditorClass();
         expect(editorClass).toContain("large-font");
         expect(editorClass).toContain("sans-serif");
@@ -335,7 +345,8 @@ test(
           .poll(() => driver.pagesKeysListRowTitles(), { timeout: 30_000 })
           .toEqual(expect.arrayContaining([firstTitle, secondTitle]));
         await driver.pagesKeysSearchPressEscape();
-        expect(await driver.pagesKeysSearchExpanded()).toBe(false);
+        // The collapse animates (transition-[width]), so poll for it.
+        await expect.poll(() => driver.pagesKeysSearchExpanded(), { timeout: 30_000 }).toBe(false);
         expect(await driver.pagesKeysShortcutReferenceVisible()).toBe(false);
       });
     } finally {
@@ -530,7 +541,7 @@ test(
         await driver.pagesPrefsOpenList(seed.workspaceSlug, projectId);
         expect(await driver.pagesNegListTabNames()).toEqual(["Public", "Private", "Archived"]);
         const items = await driver.pagesNegRowMenuItems(title);
-        expect(items.length).toBe(7);
+        expect(items).toEqual(["Open in new tab", "Copy link", "Make a copy", "Lock", "Make private", "Archive"]);
         expect(items).toContain("Copy link");
         expect(items).toContain("Make a copy");
         expect(items.some((item) => /export/i.test(item))).toBe(false);

@@ -5199,6 +5199,8 @@ export interface ParityDriver {
   pagesPrefsSpyPageWrites(): Promise<void>;
   /** Page-endpoint writes observed since pagesPrefsSpyPageWrites. */
   pagesPrefsPageWriteCount(): Promise<number>;
+  /** Request bodies of the writes observed since pagesPrefsSpyPageWrites. */
+  pagesPrefsPageWritePayloads(): Promise<string[]>;
   /** Toolbar buttons with the tooltip each advertises, in display order. */
   pagesKeysToolbarTooltips(): Promise<PagesKeysToolbarTooltip[]>;
   /** Press one Playwright key chord (e.g. "Control+b") into the focused editor. */

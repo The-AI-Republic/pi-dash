@@ -27817,6 +27817,9 @@ export class WebDriver implements ParityDriver {
   /** Page-endpoint writes seen since pagesPrefsSpyPageWrites (per page). */
   private pagesPrefsWriteCount = 0;
 
+  /** Request bodies of the page-endpoint writes seen since the spy began. */
+  private pagesPrefsWriteBodies: string[] = [];
+
   /** The live document editor body (title is a separate control). */
   private pagesPrefsLiveEditor(): Locator {
     return this.page.locator('.frame-renderer > .editor-container [contenteditable="true"]');
@@ -27827,9 +27830,9 @@ export class WebDriver implements ParityDriver {
     return this.page.locator(".frame-renderer > .editor-container");
   }
 
-  /** The detail title control. */
+  /** The detail title control: a single-h1 TipTap editor, not a field. */
   private pagesPrefsTitleBox(): Locator {
-    return this.page.getByPlaceholder("Untitled");
+    return this.page.locator(".page-title-editor .ProseMirror");
   }
 
   /** The detail header block (mark row plus title; carries the canvas width). */
@@ -27863,7 +27866,7 @@ export class WebDriver implements ParityDriver {
     // settled-list signal is the tab strip or a row link instead.
     await this.waitForContent("pages list", () =>
       Promise.race([
-        this.page.locator("a[href*='pages?type=']").first().waitFor({ timeout: 60_000 }),
+        this.page.locator("a[href*='type=']").first().waitFor({ timeout: 60_000 }),
         this.page.locator("a[href*='/pages/']").first().waitFor({ timeout: 60_000 }),
       ])
     );
@@ -27881,7 +27884,7 @@ export class WebDriver implements ParityDriver {
     await this.waitForContent("pages route after reload", () =>
       Promise.race([
         this.pagesPrefsLiveEditor().first().waitFor({ timeout: 60_000 }),
-        this.page.locator("a[href*='pages?type=']").first().waitFor({ timeout: 60_000 }),
+        this.page.locator("a[href*='type=']").first().waitFor({ timeout: 60_000 }),
         this.page.locator("a[href*='/pages/']").first().waitFor({ timeout: 60_000 }),
       ])
     );
@@ -27937,32 +27940,37 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesPrefsTitleValue(): Promise<string> {
-    return this.pagesPrefsTitleBox().inputValue({ timeout: WebDriver.OPEN_MS });
+    const box = this.pagesPrefsTitleBox();
+    await box.waitFor({ timeout: WebDriver.WAIT_MS });
+    return ((await box.innerText()) ?? "").trim();
   }
 
   async pagesPrefsTitleFill(text: string): Promise<void> {
-    await this.pagesPrefsTitleBox().fill(text, { timeout: WebDriver.OPEN_MS });
+    const box = this.pagesPrefsTitleBox();
+    await box.click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press("Control+a");
+    await this.page.keyboard.type(text);
   }
 
   async pagesPrefsTitleFocus(): Promise<void> {
-    await this.pagesPrefsTitleBox().focus({ timeout: WebDriver.OPEN_MS });
+    await this.pagesPrefsTitleBox().click({ timeout: WebDriver.OPEN_MS });
   }
 
   async pagesPrefsTitlePressEnter(): Promise<void> {
-    await this.pagesPrefsTitleBox().press("Enter", { timeout: WebDriver.OPEN_MS });
+    await this.pagesPrefsTitleBox().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press("Enter");
   }
 
   async pagesPrefsTitleClass(): Promise<string> {
-    return (await this.pagesPrefsTitleBox().getAttribute("class")) ?? "";
+    return (await this.page.locator(".page-title-editor").first().getAttribute("class")) ?? "";
   }
 
   async pagesPrefsFocusedRegion(): Promise<"title" | "body" | "other"> {
     return this.page.evaluate(() => {
       const active = document.activeElement;
-      if (active === null) return "other";
-      if (active.getAttribute("placeholder") === "Untitled") return "title";
-      if (active.closest(".frame-renderer > .editor-container") !== null) return "body";
-      if (active.getAttribute("contenteditable") === "true") return "body";
+      if (active === null || active === document.body) return "other";
+      if (active.closest(".page-title-editor") !== null) return "title";
+      if (active.closest(".editor-container") !== null) return "body";
       return "other";
     });
   }
@@ -28038,10 +28046,17 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesPrefsCanvasMaxWidth(): Promise<string> {
-    return this.pagesPrefsHeaderBlock()
-      .locator(":scope > div")
-      .first()
-      .evaluate((el) => getComputedStyle(el).maxWidth);
+    // The canvas block animates width changes (transition-all), so poll
+    // until two consecutive reads agree instead of catching mid-flight.
+    const block = this.page.locator(".page-header-container > div").first();
+    let previous = await block.evaluate((el) => getComputedStyle(el).maxWidth);
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      await this.page.waitForTimeout(100);
+      const current = await block.evaluate((el) => getComputedStyle(el).maxWidth);
+      if (current === previous) return current;
+      previous = current;
+    }
+    return previous;
   }
 
   async pagesPrefsEditorClass(): Promise<string> {
@@ -28050,6 +28065,7 @@ export class WebDriver implements ParityDriver {
 
   async pagesPrefsSpyPageWrites(): Promise<void> {
     this.pagesPrefsWriteCount = 0;
+    this.pagesPrefsWriteBodies = [];
     await this.page.route("**/api/workspaces/**", async (route: Route) => {
       const request = route.request();
       const method = request.method();
@@ -28058,6 +28074,7 @@ export class WebDriver implements ParityDriver {
         request.url().includes("/pages/")
       ) {
         this.pagesPrefsWriteCount += 1;
+        this.pagesPrefsWriteBodies.push(request.postData() ?? "");
       }
       await route.continue();
     });
@@ -28067,36 +28084,47 @@ export class WebDriver implements ParityDriver {
     return this.pagesPrefsWriteCount;
   }
 
+  async pagesPrefsPageWritePayloads(): Promise<string[]> {
+    return [...this.pagesPrefsWriteBodies];
+  }
+
   async pagesKeysToolbarTooltips(): Promise<PagesKeysToolbarTooltip[]> {
+    // The tooltip popup carries no role and the trigger sets no
+    // labelledby link; the open trigger carries data-popup-open and the
+    // popup is a body-level div with data-base-ui-portal. Diff the
+    // portal layer per button to attribute each tooltip to its trigger.
     const buttons = this.page.locator("#page-toolbar-container .page-toolbar-content button");
+    const portals = this.page.locator("body > div[data-base-ui-portal]");
+    const baseline = new Set(await portals.allInnerTexts());
     const count = await buttons.count();
     const found: PagesKeysToolbarTooltip[] = [];
     for (let index = 0; index < count; index += 1) {
       const button = buttons.nth(index);
       await button.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
       await button.hover({ timeout: WebDriver.WAIT_MS });
-      const tip = this.page.getByRole("tooltip");
-      const label = await tip.waitFor({ state: "visible", timeout: 5_000 }).then(
-        () => true,
-        () => false
-      );
-      if (!label) {
+      let opened = false;
+      for (let attempt = 0; attempt < 20 && !opened; attempt += 1) {
+        opened = await button.evaluate((el) => el.hasAttribute("data-popup-open")).catch(() => false);
+        if (!opened) await this.page.waitForTimeout(100);
+      }
+      if (!opened) {
         const fallback = ((await button.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
         found.push({ label: fallback, keys: "" });
         continue;
       }
-      const text = (
-        (await tip
-          .first()
-          .innerText()
-          .catch(() => "")) ?? ""
-      ).trim();
-      const lines = text
+      const after = await portals.allInnerTexts();
+      const tip = after.find((text) => text.trim() !== "" && !baseline.has(text)) ?? "";
+      const lines = tip
         .split("\n")
         .map((line) => line.trim())
         .filter((line) => line !== "");
       found.push({ label: lines[0] ?? "", keys: lines.slice(1).join(" ") });
       await this.page.mouse.move(2, 2);
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const stillOpen = await button.evaluate((el) => el.hasAttribute("data-popup-open")).catch(() => false);
+        if (!stillOpen) break;
+        await this.page.waitForTimeout(100);
+      }
     }
     return found;
   }
@@ -28108,7 +28136,7 @@ export class WebDriver implements ParityDriver {
   async pagesKeysSearchOpen(): Promise<void> {
     const box = this.page.getByPlaceholder("Search pages");
     if (await box.isVisible()) return;
-    const trigger = box.locator("xpath=ancestor::div[contains(@class, 'flex')][1]/button").first();
+    const trigger = box.locator("xpath=../..").locator(":scope > button").first();
     await trigger.click({ timeout: WebDriver.OPEN_MS });
     await box.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
   }
@@ -28130,21 +28158,19 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesKeysListRowTitles(): Promise<string[]> {
-    const rows = this.page.locator("a[href*='/pages/']");
-    const count = await rows.count();
-    const titles: string[] = [];
-    for (let index = 0; index < count; index += 1) {
-      const text = (
-        (await rows
-          .nth(index)
-          .innerText()
-          .catch(() => "")) ?? ""
-      )
-        .trim()
-        .replace(/\s+/g, " ");
-      if (text !== "") titles.push(text);
-    }
-    return titles;
+    // Row links carry a page-id segment (/pages/<uuid>); the tab strip
+    // and sidebar "Pages" entries point at bare /pages routes instead.
+    return this.page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll("a[href*='/pages/']"));
+      const titles: string[] = [];
+      for (const link of links) {
+        const href = link.getAttribute("href") ?? "";
+        if (!/\/pages\/[0-9a-fA-F-]{8,}/.test(href)) continue;
+        const text = ((link as HTMLElement).innerText ?? "").trim().replace(/\s+/g, " ");
+        if (text !== "") titles.push(text);
+      }
+      return titles;
+    });
   }
 
   async pagesKeysShortcutReferenceVisible(): Promise<boolean> {
@@ -28257,19 +28283,25 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesNegListTabNames(): Promise<string[]> {
-    const tabs = this.page.locator("a[href*='pages?type=']");
+    // The strip mounts after the rows resolve, so wait for it: any link
+    // carrying a type= query belongs to the strip.
+    const tabs = this.page.locator("a[href*='type=']");
+    await tabs.first().waitFor({ timeout: WebDriver.WAIT_MS });
     const names = await tabs.allInnerTexts();
     return names.map((name) => name.trim()).filter((name) => name !== "");
   }
 
   async pagesNegRowMenuItems(title: string): Promise<string[]> {
+    // Row actions always render outside the link's own container, in
+    // DOM order right after it; no hover needed (a hover tooltip can
+    // cover the trigger).
     const row = this.page.locator("a[href*='/pages/']", { hasText: title }).first();
     await row.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
-    await row.hover({ timeout: WebDriver.WAIT_MS });
-    const rowScope = this.page.locator("li", { hasText: title }).first();
-    const scope = (await rowScope.count()) > 0 ? rowScope : this.page.locator("div", { hasText: title }).first();
-    const trigger = scope.locator("button:has(svg.lucide-ellipsis)");
-    await trigger.first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.mouse.move(2, 2);
+    const trigger = row.locator(
+      "xpath=following::button[.//*[local-name()='svg' and contains(@class, 'lucide-ellipsis')]][1]"
+    );
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
     const items = await this.pagesPrefsMenuItems().allInnerTexts();
     await this.page.keyboard.press("Escape");
     return items.map((item) => item.trim().replace(/\s+/g, " ")).filter((item) => item !== "");

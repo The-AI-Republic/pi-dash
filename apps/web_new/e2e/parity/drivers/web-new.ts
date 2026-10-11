@@ -7945,6 +7945,9 @@ export class WebNewDriver implements ParityDriver {
   async pagesPrefsPageWriteCount(): Promise<number> {
     return todo("pagesPrefsPageWriteCount");
   }
+  async pagesPrefsPageWritePayloads(): Promise<string[]> {
+    return todo("pagesPrefsPageWritePayloads");
+  }
   async pagesKeysToolbarTooltips(): Promise<PagesKeysToolbarTooltip[]> {
     return todo("pagesKeysToolbarTooltips");
   }
