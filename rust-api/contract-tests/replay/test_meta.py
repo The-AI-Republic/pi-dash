@@ -642,6 +642,49 @@ def test_known_body_alias_split_values():
     )
 
 
+def test_sink_base_blanks_per_side_but_path_still_compares():
+    """Each side's own webhook sink base blanks; the rest compares."""
+    from types import SimpleNamespace
+
+    from . import compare
+
+    def resp(body: dict):
+        import json
+
+        raw = json.dumps(body).encode()
+        return SimpleNamespace(
+            status_code=200,
+            headers={},
+            content=raw,
+            text=raw.decode(),
+            json=lambda: json.loads(raw),
+        )
+
+    def ctx():
+        return compare.CompareContext(
+            django_webhook_base="http://127.0.0.1:18131",
+            rust_webhook_base="http://127.0.0.1:18132",
+        )
+
+    assert (
+        compare.compare_response(
+            resp([{"url": "http://127.0.0.1:18131/hook/replay-ws"}]),
+            resp([{"url": "http://127.0.0.1:18132/hook/replay-ws"}]),
+            ctx(),
+        )
+        is None
+    )
+    # A different path after the base still fails loudly.
+    assert (
+        compare.compare_response(
+            resp([{"url": "http://127.0.0.1:18131/hook/replay-ws"}]),
+            resp([{"url": "http://127.0.0.1:18132/hook/other"}]),
+            ctx(),
+        )
+        is not None
+    )
+
+
 def test_blank_valid_magic_only_blanks_matching():
     """A queued magic code blanks only when it equals the stored token."""
     import json

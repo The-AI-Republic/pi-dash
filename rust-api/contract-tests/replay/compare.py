@@ -152,6 +152,26 @@ def _blank_webhook_base(value: str, base: str) -> str:
     return value
 
 
+def _sub_sink_base(node, base: str):
+    """Replace this side's webhook sink base with <replay-sink> (copy).
+
+    The world seed's webhook rows are rewritten per backend at restore
+    time (snapshot.rewrite_webhook_sinks), so any response rendering a
+    webhook URL legitimately carries this run's sink port
+    (app_webhooks_lifecycle request 0). Mirrors the DB path's
+    _blank_webhook_base; the path/query after the base still compares.
+    """
+    if not base:
+        return node
+    if isinstance(node, str):
+        return node.replace(base, "<replay-sink>") if base in node else node
+    if isinstance(node, list):
+        return [_sub_sink_base(item, base) for item in node]
+    if isinstance(node, dict):
+        return {key: _sub_sink_base(value, base) for key, value in node.items()}
+    return node
+
+
 def _blank_db_cell_ref(cell, pointer: str, ref_table: str, side: str, ctx: CompareContext):
     """Existence-checked blanking for one DB cell (scalar or JSONB path)."""
     import copy
@@ -684,6 +704,8 @@ def compare_response(
     rs_json = _sub_capture_values(rs_json, ctx.capture_pointers)
     dj_json = _blank_capture_pointers(dj_json, ctx.capture_pointers)
     rs_json = _blank_capture_pointers(rs_json, ctx.capture_pointers)
+    dj_json = _sub_sink_base(dj_json, ctx.django_webhook_base)
+    rs_json = _sub_sink_base(rs_json, ctx.rust_webhook_base)
     dj_norm = effects.normalise_json_body(
         dj_json, effects.bind_captures(ctx.captures, "django")
     )

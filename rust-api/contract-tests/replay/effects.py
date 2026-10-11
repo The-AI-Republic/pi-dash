@@ -105,6 +105,12 @@ TIMESTAMP_JSON_KEYS = frozenset(
         # sees two instants milliseconds apart (v1_work_items_followup
         # request 31). No corpus sends it.
         "yielded_at",
+        # Evidence: notification mark-read stamps read_at = now() per
+        # backend (notification/base.py:166, :285-287); the replay
+        # sees two instants seconds apart (app_notifications_lifecycle
+        # requests 12+). The key exists only in the notification
+        # model/serializer, so every compared value is server-minted.
+        "read_at",
     }
 )
 
@@ -134,6 +140,10 @@ TIMESTAMP_COLUMNS = frozenset(
         "last_login_time",
         "last_logout_time",
         "token_updated_at",
+        # Evidence: notification mark-read stamps read_at = now() per
+        # backend (notification/base.py:166, :285-287); the column
+        # exists only on notifications (app_notifications_lifecycle).
+        "read_at",
     }
 )
 

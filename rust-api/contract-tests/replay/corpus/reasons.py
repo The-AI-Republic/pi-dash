@@ -66,7 +66,6 @@ OWNED_UNCOVERED = {
     ('/api/users/me/email/generate-code/', 'POST'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.user.base.UserEndpoint
     ('/api/users/me/integrations/github/app/install/', 'POST'): "owned; no corpus session yet — batch 5 (app_integrations session)",  # app :: pi_dash.app.views.integration.github.view
     ('/api/users/me/integrations/github/app/refresh/', 'POST'): "owned; no corpus session yet — batch 5 (app_integrations session)",  # app :: pi_dash.app.views.integration.github.view
-    ('/api/users/me/notification-preferences/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_notifications session)",  # app :: pi_dash.app.views.notification.base.view
     ('/api/users/me/onboard/', 'PATCH'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.user.base.view
     ('/api/users/me/profile/', 'PATCH'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.user.base.view
     ('/api/users/me/tour-completed/', 'PATCH'): "owned; no corpus session yet — batch 5 (app misc session)",  # app :: pi_dash.app.views.user.base.view
@@ -90,31 +89,4 @@ OWNED_UNCOVERED = {
     ('/api/workspaces/{}/projects/{}/repository/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_integrations session)",  # app :: pi_dash.app.views.integration.git.view
     ('/api/workspaces/{}/projects/{}/repository/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_integrations session)",  # app :: pi_dash.app.views.integration.git.view
     ('/api/workspaces/{}/projects/{}/repository/bind/', 'POST'): "owned; no corpus session yet — batch 5 (app_integrations session)",  # app :: pi_dash.app.views.integration.git.view
-    ('/api/workspaces/{}/projects/{}/scheduler-bindings/', 'POST'): "owned; no corpus session yet — batch 5 (app_scheduler session)",  # app :: pi_dash.app.views.scheduler.views.view
-    ('/api/workspaces/{}/projects/{}/scheduler-bindings/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_scheduler session)",  # app :: pi_dash.app.views.scheduler.views.view
-    ('/api/workspaces/{}/projects/{}/scheduler-bindings/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_scheduler session)",  # app :: pi_dash.app.views.scheduler.views.view
-    ('/api/workspaces/{}/projects/{}/user-favorite-views/', 'POST'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.IssueViewFavoriteViewSet
-    ('/api/workspaces/{}/projects/{}/user-favorite-views/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.IssueViewFavoriteViewSet
-    ('/api/workspaces/{}/projects/{}/views/', 'POST'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.IssueViewViewSet
-    ('/api/workspaces/{}/projects/{}/views/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.IssueViewViewSet
-    ('/api/workspaces/{}/projects/{}/views/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.IssueViewViewSet
-    ('/api/workspaces/{}/projects/{}/views/{}/', 'PUT'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.IssueViewViewSet
-    ('/api/workspaces/{}/schedulers/', 'POST'): "owned; no corpus session yet — batch 5 (app_scheduler session)",  # app :: pi_dash.app.views.scheduler.views.view
-    ('/api/workspaces/{}/schedulers/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_scheduler session)",  # app :: pi_dash.app.views.scheduler.views.view
-    ('/api/workspaces/{}/schedulers/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_scheduler session)",  # app :: pi_dash.app.views.scheduler.views.view
-    ('/api/workspaces/{}/users/notifications/mark-all-read/', 'POST'): "owned; no corpus session yet — batch 5 (app_notifications session)",  # app :: pi_dash.app.views.notification.base.MarkAllReadNotificationViewSet
-    ('/api/workspaces/{}/users/notifications/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_notifications session)",  # app :: pi_dash.app.views.notification.base.NotificationViewSet
-    ('/api/workspaces/{}/users/notifications/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_notifications session)",  # app :: pi_dash.app.views.notification.base.NotificationViewSet
-    ('/api/workspaces/{}/users/notifications/{}/archive/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_notifications session)",  # app :: pi_dash.app.views.notification.base.NotificationViewSet
-    ('/api/workspaces/{}/users/notifications/{}/archive/', 'POST'): "owned; no corpus session yet — batch 5 (app_notifications session)",  # app :: pi_dash.app.views.notification.base.NotificationViewSet
-    ('/api/workspaces/{}/users/notifications/{}/read/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_notifications session)",  # app :: pi_dash.app.views.notification.base.NotificationViewSet
-    ('/api/workspaces/{}/users/notifications/{}/read/', 'POST'): "owned; no corpus session yet — batch 5 (app_notifications session)",  # app :: pi_dash.app.views.notification.base.NotificationViewSet
-    ('/api/workspaces/{}/views/', 'POST'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.WorkspaceViewViewSet
-    ('/api/workspaces/{}/views/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.WorkspaceViewViewSet
-    ('/api/workspaces/{}/views/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.WorkspaceViewViewSet
-    ('/api/workspaces/{}/views/{}/', 'PUT'): "owned; no corpus session yet — batch 5 (app_views_search session)",  # app :: pi_dash.app.views.view.base.WorkspaceViewViewSet
-    ('/api/workspaces/{}/webhooks/', 'POST'): "owned; no corpus session yet — batch 5 (app webhooks session)",  # app :: pi_dash.app.views.webhook.base.view
-    ('/api/workspaces/{}/webhooks/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app webhooks session)",  # app :: pi_dash.app.views.webhook.base.view
-    ('/api/workspaces/{}/webhooks/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app webhooks session)",  # app :: pi_dash.app.views.webhook.base.view
-    ('/api/workspaces/{}/webhooks/{}/regenerate/', 'POST'): "owned; no corpus session yet — batch 5 (app webhooks session)",  # app :: pi_dash.app.views.webhook.base.view
 }

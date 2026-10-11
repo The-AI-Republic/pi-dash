@@ -1,15 +1,15 @@
 # Replay corpus coverage (PIDASHCONV-823)
 
-Write ``(route, method)`` pairs: **595** total, **397** covered by the corpus.
+Write ``(route, method)`` pairs: **595** total, **425** covered by the corpus.
 
 | bucket | pairs |
 | --- | --- |
-| covered | 397 |
+| covered | 425 |
 | proxied by design | 92 |
 | debug toolbar (dev-only) | 28 |
 | missing with fix issue | 2 |
 | excluded with reason | 0 |
-| owned, no session yet | 76 |
+| owned, no session yet | 48 |
 
 ## Covered
 
@@ -85,6 +85,7 @@ Write ``(route, method)`` pairs: **595** total, **397** covered by the corpus.
 - `POST /api/users/me/ai-assistant/transcribe/` (assistant) — assistant_lifecycle, assistant_lifecycle, assistant_lifecycle (owned)
 - `PATCH /api/users/me/auto-pm/` (loop) — loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle (owned)
 - `PATCH /api/users/me/auto-pm/jobs/{}/` (loop) — loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle, loop_lifecycle (owned)
+- `PATCH /api/users/me/notification-preferences/` (app) — app_notifications_lifecycle, app_notifications_lifecycle (owned)
 - `POST /api/users/me/workspaces/invitations/` (app) — app_workspace_lifecycle (owned)
 - `POST /api/users/me/workspaces/join-requests/` (app) — app_workspace_lifecycle, app_workspace_lifecycle, app_workspace_lifecycle, app_workspace_lifecycle, app_workspace_lifecycle (owned)
 - `POST /api/users/me/workspaces/{}/projects/invitations/` (app) — app_project_lifecycle (owned)
@@ -359,6 +360,9 @@ Write ``(route, method)`` pairs: **595** total, **397** covered by the corpus.
 - `DELETE /api/workspaces/{}/projects/{}/project-deploy-boards/{}/` (app) — app_project_followup (owned)
 - `PATCH /api/workspaces/{}/projects/{}/project-deploy-boards/{}/` (app) — app_project_followup (owned)
 - `POST /api/workspaces/{}/projects/{}/project-views/` (app) — app_project_lifecycle (owned)
+- `POST /api/workspaces/{}/projects/{}/scheduler-bindings/` (app) — app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle (owned)
+- `DELETE /api/workspaces/{}/projects/{}/scheduler-bindings/{}/` (app) — app_scheduler_lifecycle (owned)
+- `PATCH /api/workspaces/{}/projects/{}/scheduler-bindings/{}/` (app) — app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle (owned)
 - `POST /api/workspaces/{}/projects/{}/states/` (app) — app_project_lifecycle, app_project_followup (owned)
 - `DELETE /api/workspaces/{}/projects/{}/states/{}/` (app) — app_project_followup, app_project_followup, app_project_followup (owned)
 - `PATCH /api/workspaces/{}/projects/{}/states/{}/` (app) — app_project_followup (owned)
@@ -367,7 +371,13 @@ Write ``(route, method)`` pairs: **595** total, **397** covered by the corpus.
 - `DELETE /api/workspaces/{}/projects/{}/user-favorite-cycles/{}/` (app) — app_cycles_lifecycle, app_cycles_lifecycle (owned)
 - `POST /api/workspaces/{}/projects/{}/user-favorite-modules/` (app) — app_modules_lifecycle, app_modules_lifecycle (owned)
 - `DELETE /api/workspaces/{}/projects/{}/user-favorite-modules/{}/` (app) — app_modules_lifecycle, app_modules_lifecycle (owned)
+- `POST /api/workspaces/{}/projects/{}/user-favorite-views/` (app) — app_views_lifecycle (owned)
+- `DELETE /api/workspaces/{}/projects/{}/user-favorite-views/{}/` (app) — app_views_lifecycle (owned)
 - `PATCH /api/workspaces/{}/projects/{}/user-properties/` (app) — app_issues_followup (owned)
+- `POST /api/workspaces/{}/projects/{}/views/` (app) — app_views_lifecycle (owned)
+- `DELETE /api/workspaces/{}/projects/{}/views/{}/` (app) — app_views_lifecycle, app_views_lifecycle, app_views_lifecycle (owned)
+- `PATCH /api/workspaces/{}/projects/{}/views/{}/` (app) — app_views_lifecycle, app_views_lifecycle (owned)
+- `PUT /api/workspaces/{}/projects/{}/views/{}/` (app) — app_views_lifecycle (owned)
 - `POST /api/workspaces/{}/projects/{}/work-items/{}/move/` (app) — app_issues_followup, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_followup (owned)
 - `DELETE /api/workspaces/{}/prompt-sections/{}` (prompting) — prompting_lifecycle, prompting_lifecycle, prompting_lifecycle (owned)
 - `PUT /api/workspaces/{}/prompt-sections/{}` (prompting) — prompting_lifecycle, prompting_lifecycle, prompting_lifecycle, prompting_lifecycle, prompting_lifecycle, prompting_lifecycle, prompting_lifecycle, prompting_lifecycle, prompting_lifecycle, prompting_lifecycle, prompting_lifecycle, prompting_lifecycle, prompting_lifecycle (owned)
@@ -375,6 +385,9 @@ Write ``(route, method)`` pairs: **595** total, **397** covered by the corpus.
 - `POST /api/workspaces/{}/quick-links/` (app) — app_workspace_extras, app_workspace_extras (owned)
 - `DELETE /api/workspaces/{}/quick-links/{}/` (app) — app_workspace_extras (owned)
 - `PATCH /api/workspaces/{}/quick-links/{}/` (app) — app_workspace_extras (owned)
+- `POST /api/workspaces/{}/schedulers/` (app) — app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle (owned)
+- `DELETE /api/workspaces/{}/schedulers/{}/` (app) — app_scheduler_lifecycle, app_scheduler_lifecycle (owned)
+- `PATCH /api/workspaces/{}/schedulers/{}/` (app) — app_scheduler_lifecycle, app_scheduler_lifecycle, app_scheduler_lifecycle (owned)
 - `PATCH /api/workspaces/{}/sidebar-preferences/` (app) — app_workspace_extras (owned)
 - `POST /api/workspaces/{}/stickies/` (app) — app_workspace_extras (owned)
 - `DELETE /api/workspaces/{}/stickies/{}/` (app) — app_workspace_extras (owned)
@@ -386,6 +399,21 @@ Write ``(route, method)`` pairs: **595** total, **397** covered by the corpus.
 - `DELETE /api/workspaces/{}/user-favorites/{}/` (app) — app_workspace_extras, app_workspace_extras (owned)
 - `PATCH /api/workspaces/{}/user-favorites/{}/` (app) — app_workspace_extras (owned)
 - `PATCH /api/workspaces/{}/user-properties/` (app) — app_workspace_extras (owned)
+- `POST /api/workspaces/{}/users/notifications/mark-all-read/` (app) — app_notifications_lifecycle (owned)
+- `DELETE /api/workspaces/{}/users/notifications/{}/` (app) — app_notifications_lifecycle, app_notifications_lifecycle (owned)
+- `PATCH /api/workspaces/{}/users/notifications/{}/` (app) — app_notifications_lifecycle, app_notifications_lifecycle, app_notifications_lifecycle (owned)
+- `DELETE /api/workspaces/{}/users/notifications/{}/archive/` (app) — app_notifications_lifecycle (owned)
+- `POST /api/workspaces/{}/users/notifications/{}/archive/` (app) — app_notifications_lifecycle, app_notifications_lifecycle (owned)
+- `DELETE /api/workspaces/{}/users/notifications/{}/read/` (app) — app_notifications_lifecycle, app_notifications_lifecycle (owned)
+- `POST /api/workspaces/{}/users/notifications/{}/read/` (app) — app_notifications_lifecycle, app_notifications_lifecycle (owned)
+- `POST /api/workspaces/{}/views/` (app) — app_views_lifecycle (owned)
+- `DELETE /api/workspaces/{}/views/{}/` (app) — app_views_lifecycle, app_views_lifecycle, app_views_lifecycle (owned)
+- `PATCH /api/workspaces/{}/views/{}/` (app) — app_views_lifecycle (owned)
+- `PUT /api/workspaces/{}/views/{}/` (app) — app_views_lifecycle (owned)
+- `POST /api/workspaces/{}/webhooks/` (app) — app_webhooks_lifecycle, app_webhooks_lifecycle, app_webhooks_lifecycle, app_webhooks_lifecycle, app_webhooks_lifecycle (owned)
+- `DELETE /api/workspaces/{}/webhooks/{}/` (app) — app_webhooks_lifecycle, app_webhooks_lifecycle, app_webhooks_lifecycle (owned)
+- `PATCH /api/workspaces/{}/webhooks/{}/` (app) — app_webhooks_lifecycle, app_webhooks_lifecycle (owned)
+- `POST /api/workspaces/{}/webhooks/{}/regenerate/` (app) — app_webhooks_lifecycle, app_webhooks_lifecycle (owned)
 - `POST /api/workspaces/{}/workspace-themes/` (app) — app_workspace_extras (owned)
 - `DELETE /api/workspaces/{}/workspace-themes/{}/` (app) — app_workspace_extras (owned)
 - `PATCH /api/workspaces/{}/workspace-themes/{}/` (app) — app_workspace_extras (owned)
@@ -573,7 +601,6 @@ Write ``(route, method)`` pairs: **595** total, **397** covered by the corpus.
 - `POST /api/users/me/email/generate-code/` (app) — owned; no corpus session yet — batch 5 (app misc session)
 - `POST /api/users/me/integrations/github/app/install/` (app) — owned; no corpus session yet — batch 5 (app_integrations session)
 - `POST /api/users/me/integrations/github/app/refresh/` (app) — owned; no corpus session yet — batch 5 (app_integrations session)
-- `PATCH /api/users/me/notification-preferences/` (app) — owned; no corpus session yet — batch 5 (app_notifications session)
 - `PATCH /api/users/me/onboard/` (app) — owned; no corpus session yet — batch 5 (app misc session)
 - `PATCH /api/users/me/profile/` (app) — owned; no corpus session yet — batch 5 (app misc session)
 - `PATCH /api/users/me/tour-completed/` (app) — owned; no corpus session yet — batch 5 (app misc session)
@@ -597,30 +624,3 @@ Write ``(route, method)`` pairs: **595** total, **397** covered by the corpus.
 - `DELETE /api/workspaces/{}/projects/{}/repository/` (app) — owned; no corpus session yet — batch 5 (app_integrations session)
 - `PATCH /api/workspaces/{}/projects/{}/repository/` (app) — owned; no corpus session yet — batch 5 (app_integrations session)
 - `POST /api/workspaces/{}/projects/{}/repository/bind/` (app) — owned; no corpus session yet — batch 5 (app_integrations session)
-- `POST /api/workspaces/{}/projects/{}/scheduler-bindings/` (app) — owned; no corpus session yet — batch 5 (app_scheduler session)
-- `DELETE /api/workspaces/{}/projects/{}/scheduler-bindings/{}/` (app) — owned; no corpus session yet — batch 5 (app_scheduler session)
-- `PATCH /api/workspaces/{}/projects/{}/scheduler-bindings/{}/` (app) — owned; no corpus session yet — batch 5 (app_scheduler session)
-- `POST /api/workspaces/{}/projects/{}/user-favorite-views/` (app) — owned; no corpus session yet — batch 5 (app_views_search session)
-- `DELETE /api/workspaces/{}/projects/{}/user-favorite-views/{}/` (app) — owned; no corpus session yet — batch 5 (app_views_search session)
-- `POST /api/workspaces/{}/projects/{}/views/` (app) — owned; no corpus session yet — batch 5 (app_views_search session)
-- `DELETE /api/workspaces/{}/projects/{}/views/{}/` (app) — owned; no corpus session yet — batch 5 (app_views_search session)
-- `PATCH /api/workspaces/{}/projects/{}/views/{}/` (app) — owned; no corpus session yet — batch 5 (app_views_search session)
-- `PUT /api/workspaces/{}/projects/{}/views/{}/` (app) — owned; no corpus session yet — batch 5 (app_views_search session)
-- `POST /api/workspaces/{}/schedulers/` (app) — owned; no corpus session yet — batch 5 (app_scheduler session)
-- `DELETE /api/workspaces/{}/schedulers/{}/` (app) — owned; no corpus session yet — batch 5 (app_scheduler session)
-- `PATCH /api/workspaces/{}/schedulers/{}/` (app) — owned; no corpus session yet — batch 5 (app_scheduler session)
-- `POST /api/workspaces/{}/users/notifications/mark-all-read/` (app) — owned; no corpus session yet — batch 5 (app_notifications session)
-- `DELETE /api/workspaces/{}/users/notifications/{}/` (app) — owned; no corpus session yet — batch 5 (app_notifications session)
-- `PATCH /api/workspaces/{}/users/notifications/{}/` (app) — owned; no corpus session yet — batch 5 (app_notifications session)
-- `DELETE /api/workspaces/{}/users/notifications/{}/archive/` (app) — owned; no corpus session yet — batch 5 (app_notifications session)
-- `POST /api/workspaces/{}/users/notifications/{}/archive/` (app) — owned; no corpus session yet — batch 5 (app_notifications session)
-- `DELETE /api/workspaces/{}/users/notifications/{}/read/` (app) — owned; no corpus session yet — batch 5 (app_notifications session)
-- `POST /api/workspaces/{}/users/notifications/{}/read/` (app) — owned; no corpus session yet — batch 5 (app_notifications session)
-- `POST /api/workspaces/{}/views/` (app) — owned; no corpus session yet — batch 5 (app_views_search session)
-- `DELETE /api/workspaces/{}/views/{}/` (app) — owned; no corpus session yet — batch 5 (app_views_search session)
-- `PATCH /api/workspaces/{}/views/{}/` (app) — owned; no corpus session yet — batch 5 (app_views_search session)
-- `PUT /api/workspaces/{}/views/{}/` (app) — owned; no corpus session yet — batch 5 (app_views_search session)
-- `POST /api/workspaces/{}/webhooks/` (app) — owned; no corpus session yet — batch 5 (app webhooks session)
-- `DELETE /api/workspaces/{}/webhooks/{}/` (app) — owned; no corpus session yet — batch 5 (app webhooks session)
-- `PATCH /api/workspaces/{}/webhooks/{}/` (app) — owned; no corpus session yet — batch 5 (app webhooks session)
-- `POST /api/workspaces/{}/webhooks/{}/regenerate/` (app) — owned; no corpus session yet — batch 5 (app webhooks session)
