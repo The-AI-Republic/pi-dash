@@ -1344,8 +1344,16 @@ test.describe("module detail on desktop", () => {
           await driver.modulesDetailLinkSubmit();
           expect(await toastText(driver)).toContain("Module link created successfully.");
           await toastDrained(driver);
+          // Both writes are toast-confirmed; settle the server first so a
+          // slow list refresh never reads a half-converged client copy.
           await expect
-            .poll(() => driver.modulesDetailLinksRows(), { timeout: 30_000 })
+            .poll(
+              async () => (await serverModulesDetailLinks(seed.workspaceSlug, projectId, moduleId, session)).length,
+              { timeout: 30_000 }
+            )
+            .toBe(2);
+          await expect
+            .poll(() => driver.modulesDetailLinksRows(), { timeout: 60_000 })
             .toEqual([
               { title: titledName, url: titledUrl, target: "_blank" },
               { title: "https://plain.example.com", url: "https://plain.example.com", target: "_blank" },
