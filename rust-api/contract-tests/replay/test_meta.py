@@ -239,6 +239,22 @@ def test_corpus_manifests_valid():
             assert req.method in HTTP_METHODS, f"{label}: bad method"
             assert req.path.startswith("/"), f"{label}: path must be absolute"
             assert req.route_template().startswith("/"), f"{label}: bad route"
+            # Coverage claims ride on route_template(): it must be the
+            # path's shape (same segments; route params where the path
+            # has values), else a typo claims a pair never hit.
+            route_segs = req.route_template().split("?", 1)[0].split("/")
+            path_segs = req.path.split("?", 1)[0].split("/")
+            assert len(route_segs) == len(path_segs), (
+                f"{label}: route {req.route_template()!r} is not "
+                f"the shape of path {req.path!r}"
+            )
+            for route_seg, path_seg in zip(route_segs, path_segs):
+                assert route_seg == path_seg or re.fullmatch(
+                    r"\{[^{}]*\}", route_seg
+                ), (
+                    f"{label}: route {req.route_template()!r} is not "
+                    f"the shape of path {req.path!r}"
+                )
             for placeholder in _placeholders(
                 [req.path, req.params, req.headers, req.json, req.form,
                  req.cookies, req.files]
