@@ -1,0 +1,20 @@
+[package]
+name = "pidash-ops"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pidash-db = { path = "../db" }
+pidash-services = { path = "../services" }
+pidash-jobs = { path = "../jobs" }
+# Pins copied from pidash-api-bin (PIDASHCONV-919: no lock churn — every
+# pin below was already in the lockfile via the bin or the sibling crates).
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
+# Only `tokio::time::timeout` is used (instance SMTP probe); the runtime
+# itself stays in the binaries, and the crate's tests are sync.
+tokio = { version = "1", features = ["time"] }
+uuid = { version = "1", features = ["serde", "v4", "v7"] }

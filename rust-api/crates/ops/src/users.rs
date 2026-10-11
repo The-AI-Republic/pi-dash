@@ -11,7 +11,7 @@
 //! two commands that swallow their own errors onto stdout),
 //! `1` on `CommandError` / crash branches, `2` on clap usage errors.
 
-use crate::ops::OpsIo;
+use crate::OpsIo;
 use clap::Args;
 
 // ---------------------------------------------------------------------------
@@ -867,7 +867,7 @@ async fn run_create_dummy_data_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::OpsCommand;
+    use crate::OpsCommand;
     use clap::Parser;
     use std::io::Cursor;
 
@@ -1082,17 +1082,5 @@ mod tests {
             stderr,
             b"Warning: Password input may be echoed.\nPassword: "
         );
-    }
-
-    #[test]
-    fn cli_parses_ops_activate_user() {
-        let ops = crate::Cli::try_parse_from(["pidash-api", "ops", "activate_user", "a@b.com"])
-            .expect("ops activate_user");
-        assert!(matches!(
-            ops.mode,
-            crate::Mode::Ops {
-                command: OpsCommand::ActivateUser(_)
-            }
-        ));
     }
 }

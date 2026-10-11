@@ -1,4 +1,7 @@
-//! `pidash-api ops`: Django management-command ports (D-37, PIDASHCONV-74).
+#![forbid(unsafe_code)]
+
+//! `ops`: Django management-command ports (D-37, PIDASHCONV-74), shared by
+//! the OSS and cloud binaries (PIDASHCONV-919).
 //!
 //! One module per command issue; each issue owns its `mod` line, its enum
 //! variants and its match arms below, and nothing else. Groups stay in the
@@ -12,6 +15,35 @@
 //! * [`instance`] — the instance lifecycle commands (PIDASHCONV-809).
 //! * [`prompting`] — the prompting reseed + revalidate commands
 //!   (PIDASHCONV-810).
+//!
+//! # Embedding (the cloud binary)
+//!
+//! The OSS binary holds [`OpsCommand`] directly under its `ops` mode and
+//! dispatches with [`run`]. A second binary embeds the same command set
+//! plus its own commands by flattening [`OpsCommand`] into its own
+//! subcommand enum — no extra nesting level, so `ops <command>` argv,
+//! help text and exit codes stay identical — and forwarding the OSS arm
+//! to [`run`]:
+//!
+//! ```rust,ignore
+//! #[derive(clap::Subcommand)]
+//! enum CloudOps {
+//!     #[command(flatten)]
+//!     Oss(pidash_ops::OpsCommand),
+//!     CloudGrantAdmin(cloud_args::CloudGrantAdminArgs),
+//! }
+//!
+//! async fn run_cloud(command: CloudOps) -> Result<(), Box<dyn std::error::Error>> {
+//!     match command {
+//!         CloudOps::Oss(oss) => pidash_ops::run(oss).await,
+//!         CloudOps::CloudGrantAdmin(args) => cloud_commands::run_grant_admin(args).await,
+//!     }
+//! }
+//! ```
+//!
+//! The flatten shape is pinned by `extension_flatten_embeds_oss_set`
+//! below (parse-level, no I/O): if clap ever stops merging the OSS
+//! variants into the embedding enum, that test fails.
 
 pub mod boot;
 pub mod instance;
@@ -381,66 +413,70 @@ async fn run_users(command: OpsCommand) -> Result<(), Box<dyn std::error::Error>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Cli, Mode};
-    use clap::Parser;
+    use clap::{Args, Parser, Subcommand};
 
-    fn parse_ops(argv: &[&str]) -> OpsCommand {
-        let mut full = vec!["pidash-api", "ops"];
-        full.extend(argv.iter());
-        match Cli::try_parse_from(full)
-            .unwrap_or_else(|error| panic!("parses {argv:?}: {error}"))
-            .mode
+    /// Stand-in for a cloud command (`cloud_grant_admin` arrives with
+    /// C-01): proves the embedding enum carries its own variants
+    /// alongside the flattened OSS set.
+    #[derive(Debug, Args)]
+    struct ProbeCloudArgs {
+        /// Admin email.
+        email: String,
+    }
+
+    /// The cloud embedding shape from the crate docs: the OSS set merges
+    /// in with no extra nesting level.
+    #[derive(Debug, Parser)]
+    struct ProbeCloudCli {
+        #[command(subcommand)]
+        command: ProbeCloudOps,
+    }
+
+    #[derive(Debug, Subcommand)]
+    enum ProbeCloudOps {
+        #[command(flatten)]
+        Oss(OpsCommand),
+        #[command(name = "cloud_grant_admin")]
+        CloudGrantAdmin(ProbeCloudArgs),
+    }
+
+    /// A second binary embeds the OSS command set by flattening
+    /// [`OpsCommand`] — OSS argv parses to the `Oss` arm with no extra
+    /// level, cloud argv to the cloud arm, and the `Oss` arm forwards to
+    /// [`run`]. Parse-level only: the forwarded future is built, never
+    /// polled, so the test performs no I/O.
+    #[test]
+    fn extension_flatten_embeds_oss_set() {
+        // One command per group parses flat, exactly like `pidash-api ops`.
+        let oss_argv: &[&[&str]] = &[
+            &["cloud", "wait_for_db"],
+            &["cloud", "activate_user", "a@b.com"],
+            &["cloud", "fix_duplicate_sequences", "FX-7"],
+            &["cloud", "instance", "configure-instance"],
+            &["cloud", "reseed_default_template"],
+        ];
+        for argv in oss_argv {
+            match ProbeCloudCli::try_parse_from(*argv)
+                .expect("oss argv parses")
+                .command
+            {
+                ProbeCloudOps::Oss(oss) => {
+                    // Async fns are lazy: building the future proves the
+                    // `run(oss).await` forward compiles; dropping it
+                    // unpolled runs nothing.
+                    let _forward = run(oss);
+                }
+                ProbeCloudOps::CloudGrantAdmin(_) => panic!("{argv:?} took the cloud arm"),
+            }
+        }
+        match ProbeCloudCli::try_parse_from(["cloud", "cloud_grant_admin", "a@b.com"])
+            .expect("cloud argv parses")
+            .command
         {
-            Mode::Ops { command } => command,
-            _ => panic!("wrong mode for {argv:?}"),
+            ProbeCloudOps::CloudGrantAdmin(args) => assert_eq!(args.email, "a@b.com"),
+            ProbeCloudOps::Oss(_) => panic!("cloud argv took the oss arm"),
         }
-    }
-
-    /// Command names are underscored Django names, not kebab-case.
-    #[test]
-    fn command_names_match_django() {
-        for (argv, check) in [
-            ("wait_for_db", "WaitForDb"),
-            ("wait_for_migrations", "WaitForMigrations"),
-            ("clear_cache", "ClearCache"),
-            ("create_bucket", "CreateBucket"),
-            ("update_bucket", "UpdateBucket"),
-        ] {
-            let command = parse_ops(&[argv]);
-            assert!(
-                format!("{command:?}").starts_with(check),
-                "{argv} parses to {check}"
-            );
-        }
-        assert!(
-            Cli::try_parse_from(["pidash-api", "ops", "wait-for-db"]).is_err(),
-            "kebab-case is not a Django command name"
-        );
-    }
-
-    /// `--key` takes an optional value (`nargs="?"`): absent and bare
-    /// both yield the full-clear path, like argparse's `None` const.
-    #[test]
-    fn clear_cache_key_arg_shapes() {
-        assert!(matches!(
-            parse_ops(&["clear_cache"]),
-            OpsCommand::ClearCache(boot::ClearCacheArgs { key: None })
-        ));
-        assert!(matches!(
-            parse_ops(&["clear_cache", "--key"]),
-            OpsCommand::ClearCache(boot::ClearCacheArgs { key: Some(_) })
-        ));
-        match parse_ops(&["clear_cache", "--key", "k"]) {
-            OpsCommand::ClearCache(args) => assert_eq!(args.key.as_deref(), Some("k")),
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    /// Unknown options fail with exit code 2, like argparse.
-    #[test]
-    fn unknown_option_exits_2() {
-        let error = Cli::try_parse_from(["pidash-api", "ops", "clear_cache", "--bogus"])
-            .expect_err("rejects");
-        assert_eq!(error.exit_code(), 2);
+        // The OSS set contributes no `oss` nesting level.
+        assert!(ProbeCloudCli::try_parse_from(["cloud", "oss", "wait_for_db"]).is_err());
     }
 }

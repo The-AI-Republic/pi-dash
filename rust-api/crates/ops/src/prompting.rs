@@ -133,37 +133,37 @@ mod tests {
         #[derive(Debug, Parser)]
         struct Cli {
             #[command(subcommand)]
-            command: crate::ops::OpsCommand,
+            command: crate::OpsCommand,
         }
         let cli =
             Cli::try_parse_from(["pidash-api", "reseed_default_template"]).expect("bare reseed");
         assert!(matches!(
             cli.command,
-            crate::ops::OpsCommand::ReseedDefaultTemplate(ReseedArgs { force: false })
+            crate::OpsCommand::ReseedDefaultTemplate(ReseedArgs { force: false })
         ));
         let cli = Cli::try_parse_from(["pidash-api", "reseed_review_template", "--force"])
             .expect("forced reseed");
         assert!(matches!(
             cli.command,
-            crate::ops::OpsCommand::ReseedReviewTemplate(ReseedArgs { force: true })
+            crate::OpsCommand::ReseedReviewTemplate(ReseedArgs { force: true })
         ));
         let cli = Cli::try_parse_from(["pidash-api", "reseed_test_template", "--force"])
             .expect("forced reseed");
         assert!(matches!(
             cli.command,
-            crate::ops::OpsCommand::ReseedTestTemplate(ReseedArgs { force: true })
+            crate::OpsCommand::ReseedTestTemplate(ReseedArgs { force: true })
         ));
         let cli = Cli::try_parse_from(["pidash-api", "revalidate_section_overrides"])
             .expect("bare revalidate");
         assert!(matches!(
             cli.command,
-            crate::ops::OpsCommand::RevalidateSectionOverrides(RevalidateArgs { clear: false })
+            crate::OpsCommand::RevalidateSectionOverrides(RevalidateArgs { clear: false })
         ));
         let cli = Cli::try_parse_from(["pidash-api", "revalidate_section_overrides", "--clear"])
             .expect("clear revalidate");
         assert!(matches!(
             cli.command,
-            crate::ops::OpsCommand::RevalidateSectionOverrides(RevalidateArgs { clear: true })
+            crate::OpsCommand::RevalidateSectionOverrides(RevalidateArgs { clear: true })
         ));
     }
 }
