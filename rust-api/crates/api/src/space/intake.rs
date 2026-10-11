@@ -1632,10 +1632,14 @@ async fn collection_create(
         Some(serde_json::Value::String(html)) => Some(html.clone()),
         Some(_) => return Denial::ServerError.into_response(),
     };
-    let description_stripped = description_html
-        .as_deref()
-        .map(super::sanitize::strip_tags)
-        .filter(|stripped| !stripped.is_empty());
+    // `Issue.save` (`db/models/issue.py:330-334`): `None` only when the
+    // *input* html is `""`/`None`, else `strip_tags(html)` verbatim — an
+    // empty strip (e.g. the `"<p></p>"` default) is stored as `""`, not
+    // collapsed to `None`.
+    let description_stripped: Option<String> = match description_html.as_deref() {
+        None | Some("") => None,
+        Some(html) => Some(super::sanitize::strip_tags(html)),
+    };
     // The advisory lock serializes sequence assignment
     // (`db/models/issue.py:336`); failure degrades to the plain path.
     let lock_key = advisory_key(&board.project_id);

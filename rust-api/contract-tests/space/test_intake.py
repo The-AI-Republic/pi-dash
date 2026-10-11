@@ -62,6 +62,21 @@ def test_create_shape(user_client, world):
     assert body["state_detail"] is not None
 
 
+def test_create_without_description_stores_empty_stripped(user_client, world, db):
+    # PIDASHCONV-882: a missing description_html defaults to "<p></p>"
+    # (views/intake.py:148) and Issue.save stores strip_tags verbatim —
+    # None only when the input html itself is ""/None
+    # (db/models/issue.py:330-334) — so the stored and returned
+    # description_stripped is "", not null.
+    response = user_client.post(_inbox_url(world), json={"issue": {"name": "nodesc idea"}})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["description_html"] == "<p></p>"
+    assert body["description_stripped"] == ""
+    row = db.fetchone("SELECT description_stripped FROM issues WHERE id=%s", (body["id"],))
+    assert row["description_stripped"] == ""
+
+
 def test_create_requires_name(user_client, world):
     response = user_client.post(_list_url(world), json={"issue": {"priority": "low"}})
     assert response.status_code == 400
