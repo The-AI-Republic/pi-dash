@@ -2089,6 +2089,16 @@ async fn create_workspace(
             return Denial::ServerError.into_response();
         }
     }
+    // `post_save` on `Workspace` (`scheduler/signals.py:28-39`) fires
+    // during the save above, before the member row below: seed the
+    // builtin schedulers. The receiver swallows every failure, so this
+    // never fails the request.
+    crate::app_workspace::handlers_workspace::seed_builtin_schedulers(
+        &pool,
+        workspace_id,
+        actor.id,
+    )
+    .await;
     // `WorkspaceMember.objects.create(workspace_id, member=user, role=20,
     // company_role=...)`: model `JSONField` defaults apply Python-side.
     let company_role = match company_role_value(map.get("company_role")) {

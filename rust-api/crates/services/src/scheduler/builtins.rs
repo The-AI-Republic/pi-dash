@@ -31,8 +31,9 @@
 //!   `update_fields=["name", "description", "prompt", "source",
 //!   "updated_at"]` — see [`builtin_repaint_sql`].
 //! * create: `workspace, slug, name, description, prompt,
-//!   source=builtin` (`is_enabled`/`color` fall to their model defaults)
-//!   wrapped in `transaction.atomic()` — see [`builtin_insert_sql`]. On
+//!   source=builtin` (`is_enabled`/`color` fall to their model defaults;
+//!   `created_by_id` is the request user via crum, `updated_by_id` stays
+//!   `NULL`) wrapped in `transaction.atomic()` — see [`builtin_insert_sql`]. On
 //!   `IntegrityError` (a racing caller won the insert under the
 //!   `(workspace, slug)` conditional unique constraint
 //!   `scheduler_unique_workspace_slug_when_active`) the loser re-fetches
@@ -230,14 +231,16 @@ pub fn ensure_select_sql() -> &'static str {
 
 /// Per-builtin insert (`builtins/__init__.py:171-177`): `workspace, slug,
 /// name, description, prompt, source=builtin`; `is_enabled`/`color` fall
-/// to their model defaults. Runs inside the caller's transaction (the
-/// `transaction.atomic()` savepoint).
+/// to their model defaults. `$7` is `created_by_id`: `BaseModel.save`
+/// stamps the crum request user on insert (`db/models/base.py:22-38`)
+/// while `updated_by` stays `NULL`. Runs inside the caller's transaction
+/// (the `transaction.atomic()` savepoint).
 pub fn builtin_insert_sql() -> &'static str {
     "INSERT INTO \"schedulers\" \
      (\"id\", \"workspace_id\", \"slug\", \"name\", \"description\", \"prompt\", \
      \"source\", \"is_enabled\", \"color\", \
      \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\") \
-     VALUES ($1, $2, $3, $4, $5, $6, 'builtin', TRUE, '#3b82f6', now(), now(), NULL, NULL, NULL)"
+     VALUES ($1, $2, $3, $4, $5, $6, 'builtin', TRUE, '#3b82f6', now(), now(), $7, NULL, NULL)"
 }
 
 /// Per-builtin repaint (`_apply_defaults`, `builtins/__init__.py:142-148`):
@@ -433,6 +436,12 @@ mod tests {
         let insert = builtin_insert_sql();
         assert!(insert.contains("'builtin'"));
         assert!(insert.contains("TRUE") && insert.contains("'#3b82f6'"));
+        // `created_by_id` binds the request user (`BaseModel.save` via
+        // crum); `updated_by_id`/`deleted_at` stay `NULL` on insert.
+        assert!(
+            insert.contains("$7, NULL, NULL)"),
+            "created_by binds, updated_by/deleted_at stay NULL"
+        );
         let repaint = builtin_repaint_sql();
         for col in [
             "\"name\" = $1",
