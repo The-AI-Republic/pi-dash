@@ -14171,6 +14171,86 @@ export async function serverEstimatesList(
   });
 }
 
+// --- Pages create, star, row actions, move (NEWFRONT-313, PAGE-007-017). ---
+// Appended; existing helpers above are untouched per the shared driver contract.
+// The favorite-pages pair below is the shared helper the header sibling
+// (PAGE-056) reuses. (NEWFRONT-317 owns serverPageRecord/serverPageLock;
+// this child reads the same endpoint through PagesRowPageFlags instead,
+// because fresh pages carry updated_by null, which that record requires.)
+
+/** Row-action page state the list behaviors hinge on (NEWFRONT-313). */
+export interface PagesRowPageFlags {
+  name: string;
+  access: number | null;
+  isFavorite: boolean;
+  isLocked: boolean;
+  archivedAt: string | null;
+  markInUse: string | null;
+}
+
+/** Read one page's row-action state; throws naming the failure. */
+export async function serverPagesRowFlags(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<PagesRowPageFlags> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] page flags read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const logo = rec["logo_props"] as Record<string, unknown> | null | undefined;
+  return {
+    name: typeof rec["name"] === "string" ? (rec["name"] as string) : "",
+    access: typeof rec["access"] === "number" ? rec["access"] : null,
+    isFavorite: rec["is_favorite"] === true,
+    isLocked: rec["is_locked"] === true,
+    archivedAt: typeof rec["archived_at"] === "string" ? rec["archived_at"] : null,
+    markInUse:
+      logo !== null && typeof logo === "object" && typeof logo["in_use"] === "string"
+        ? (logo["in_use"] as string)
+        : null,
+  };
+}
+
+/** One row of the project pages list (NEWFRONT-313). */
+export interface PagesRowListEntry {
+  id: string;
+  name: string;
+  access: number | null;
+  isFavorite: boolean;
+  isLocked: boolean;
+  archivedAt: string | null;
+}
+
+/** List a project's pages; throws naming the failure. */
+export async function serverPagesRowList(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<PagesRowListEntry[]> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] pages list failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : [];
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    return {
+      id: typeof rec["id"] === "string" ? (rec["id"] as string) : "",
+      name: typeof rec["name"] === "string" ? (rec["name"] as string) : "",
+      access: typeof rec["access"] === "number" ? rec["access"] : null,
+      isFavorite: rec["is_favorite"] === true,
+      isLocked: rec["is_locked"] === true,
+      archivedAt: typeof rec["archived_at"] === "string" ? rec["archived_at"] : null,
+    };
+  });
+}
+
 // Estimates consumers (NEWFRONT-325, EST-018). Appended; existing helpers
 // above are untouched per the shared parity contract.
 /**
@@ -15099,4 +15179,120 @@ export async function modulesFavoriteModule(
     { module: moduleId }
   );
   if (!res.ok) throw new Error(`[parity] module favorite failed with HTTP ${res.status}.`);
+}
+
+/** Switch one page's visibility; access 0 is open, 1 is restricted. */
+export async function serverPageAccess(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  access: number,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/access/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ access }),
+  });
+  if (!res.ok) throw new Error(`[parity] page access failed with HTTP ${res.status}.`);
+}
+
+/** Visibility-switch status without throwing (negative-path pin). */
+export async function serverPageAccessStatus(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  access: number,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/access/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ access }),
+  });
+  return res.status;
+}
+
+/** Shelve one page; resolves with the archived stamp. */
+export async function serverPageArchive(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/archive/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] page archive failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { archived_at?: unknown };
+  return typeof payload.archived_at === "string" ? payload.archived_at : "";
+}
+
+/** Restore one shelved page. */
+export async function serverPageRestore(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/archive/`, {
+    method: "DELETE",
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] page restore failed with HTTP ${res.status}.`);
+}
+
+/** Duplicate one page; resolves with the copy's id and name. */
+export async function serverDuplicatePage(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; name: string }> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/duplicate/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] page duplicate failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { id?: unknown; name?: unknown };
+  if (typeof payload.id !== "string") throw new Error("[parity] page duplicate returned no id.");
+  return { id: payload.id, name: typeof payload.name === "string" ? payload.name : "" };
+}
+
+/** Let guests view all project features (guest list would otherwise be empty). */
+export async function serverPagesRowEnableGuestViewAll(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    method: "PATCH",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ guest_view_all_features: true }),
+  });
+  if (!res.ok) throw new Error(`[parity] project guest-view patch failed with HTTP ${res.status}.`);
+}
+
+/** Move-attempt status without throwing (the community tree carries no move route). */
+export async function serverMovePageStatus(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  newProjectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/move/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ new_project_id: newProjectId }),
+  });
+  return res.status;
 }

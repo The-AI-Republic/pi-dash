@@ -123,6 +123,7 @@ import type {
   ModulesGateFacts,
   PagesListRowDetail,
   PagesListTab,
+  PagesRowTab,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -31754,6 +31755,500 @@ export class WebDriver implements ParityDriver {
     );
   }
 
+  // --- Pages create, star, row actions, move (NEWFRONT-313, PAGE-007-017). ---
+
+  private pagesRowTabQuery(tab: PagesRowTab): string {
+    return tab === "open" ? "public" : tab === "restricted" ? "private" : "archived";
+  }
+
+  private pagesRowTabLabel(tab: PagesRowTab): string {
+    return tab === "open" ? "Public" : tab === "restricted" ? "Private" : "Archived";
+  }
+
+  /** The main list's row root for `title` (sidebars mirror page links). */
+  private pagesRowContainer(title: string): Locator {
+    const link = this.page.getByRole("main").last().getByRole("link", { name: title }).first();
+    return link.locator('xpath=./ancestor::div[@class="relative"][1]');
+  }
+
+  private pagesRowStarButton(title: string): Locator {
+    return this.pagesRowContainer(title)
+      .locator("button")
+      .filter({ has: this.page.locator("svg.lucide-star") });
+  }
+
+  private pagesRowOverflowButton(title: string): Locator {
+    return this.pagesRowContainer(title)
+      .locator("button")
+      .filter({ has: this.page.locator("svg.lucide-ellipsis") });
+  }
+
+  private async pagesRowHover(title: string): Promise<void> {
+    const row = this.pagesRowContainer(title);
+    await row.scrollIntoViewIfNeeded({ timeout: WebDriver.OPEN_MS });
+    await row.hover({ timeout: WebDriver.OPEN_MS });
+  }
+
+  private pagesCreateDialog(): Locator {
+    return this.page.locator('[role="dialog"]', { has: this.page.getByPlaceholder("Title") });
+  }
+
+  private async pagesRowWaitToast(): Promise<void> {
+    await expect.poll(() => this.toastText(), { timeout: WebDriver.OPEN_MS }).not.toBeNull();
+  }
+
+  private pagesRowIdFromDetailUrl(url: string): string {
+    const parts = new URL(url).pathname.split("/").filter((part) => part.length > 0);
+    return parts[parts.length - 1] ?? "";
+  }
+
+  async pagesRowOpenList(workspaceSlug: string, projectId: string, tab?: PagesRowTab): Promise<void> {
+    const query = tab === undefined || tab === "open" ? "" : `?type=${this.pagesRowTabQuery(tab)}`;
+    // The empty state flashes before the list fetch lands, so mount
+    // alone cannot settle the rows: the pages response is the signal.
+    const fetched = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes(`/projects/${projectId}/pages/`) &&
+          response.request().method() === "GET",
+        { timeout: WebDriver.DETAIL_MS }
+      )
+      .catch(() => undefined);
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages${query}`, {
+      waitUntil: "domcontentloaded",
+    });
+    const main = this.page.getByRole("main").last();
+    await Promise.race([
+      main
+        .getByRole("link", { name: "Public" })
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined),
+      this.page
+        .getByRole("button", { name: "Add page" })
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined),
+      main
+        .getByText("Create page")
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined),
+    ]);
+    await fetched;
+    // The store renders a beat after the payload arrives.
+    await this.page.waitForTimeout(800);
+  }
+
+  async pagesRowOpenDetail(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    // Either the title editor or a bounce back to the list proves the
+    // detail settled (deleted records redirect to the list).
+    await expect
+      .poll(
+        async () => {
+          const editors = await this.page
+            .locator(`#editor-container-${pageId}-title .tiptap`)
+            .count();
+          if (editors > 0) return "ready";
+          if (!this.page.url().includes(pageId)) return "gone";
+          return "waiting";
+        },
+        { timeout: WebDriver.DETAIL_MS }
+      )
+      .not.toBe("waiting");
+  }
+
+  async pagesRowTitles(): Promise<string[]> {
+    const rows: Array<{ href: string; text: string }> = await this.page
+      .getByRole("main")
+      .last()
+      .locator('a[href*="/pages/"]')
+      .evaluateAll((links) =>
+        links.map((link) => ({
+          href: (link as HTMLAnchorElement).href,
+          text: ((link as HTMLElement).innerText ?? "").trim().replace(/\s+/g, " "),
+        }))
+      );
+    return rows
+      .filter((row) => /\/pages\/[0-9a-f-]{36}\/?$/.test(row.href))
+      .map((row) => row.text)
+      .filter((text) => text.length > 0);
+  }
+
+  async pagesRowActiveTab(): Promise<PagesRowTab | null> {
+    // The strip lives in the list header outside the tab content, so
+    // its links are matched page-wide by their exact labels.
+    const strip = this.page.getByRole("link", { name: "Public", exact: true });
+    if ((await strip.count()) === 0) return null;
+    const type = new URL(this.page.url()).searchParams.get("type");
+    if (type === "private") return "restricted";
+    if (type === "archived") return "shelved";
+    return "open";
+  }
+
+  async pagesRowSelectTab(tab: PagesRowTab): Promise<void> {
+    await this.page
+      .getByRole("link", { name: this.pagesRowTabLabel(tab), exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    // Clicking the active tab is a client-side no-op, so only the URL
+    // (already correct in that case) plus a settle proves the switch.
+    await expect
+      .poll(() => this.pagesRowActiveTab(), { timeout: WebDriver.OPEN_MS })
+      .toBe(tab);
+    await this.page.waitForTimeout(800);
+  }
+
+  async pagesCreateQuickVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Add page" }).first());
+  }
+
+  async pagesCreateQuick(): Promise<string> {
+    await this.page
+      .getByRole("button", { name: "Add page" })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    // Success navigates to the new id; a failed create stays put and
+    // reports through a notice instead — race the two so the failure
+    // path rejects fast instead of burning the whole detail budget.
+    try {
+      await expect
+        .poll(
+          async () => {
+            if (/^[0-9a-f-]{36}$/.test(this.pagesRowIdFromDetailUrl(this.page.url()))) return "created";
+            const toast = await this.toastText();
+            if (toast !== null && /could not be created|error/i.test(toast)) return "failed";
+            return "waiting";
+          },
+          { timeout: WebDriver.DETAIL_MS }
+        )
+        .not.toBe("waiting");
+    } catch {
+      throw new Error("[parity] quick-create neither navigated nor reported.");
+    }
+    const id = this.pagesRowIdFromDetailUrl(this.page.url());
+    if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error("[parity] quick-create failed as the app reports.");
+    return id;
+  }
+
+  async pagesCreateFailNextCreate(status?: number): Promise<void> {
+    await this.page.route(
+      "**/api/workspaces/*/projects/*/pages/",
+      (route) => route.fulfill({ status: status ?? 500, body: "{}" }),
+      { times: 1 }
+    );
+  }
+
+  async pagesCreateOpenDialog(): Promise<void> {
+    await this.pressPaletteOpenChord();
+    await expect.poll(() => this.isCommandPaletteOpen(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+    await this.typeInCommandPalette("New page");
+    await expect
+      .poll(() => this.paletteHasCommand("New page"), { timeout: WebDriver.OPEN_MS })
+      .toBe(true);
+    await this.activatePaletteCommand("New page");
+    await this.page.getByPlaceholder("Title").waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesCreateDialogVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByPlaceholder("Title").first());
+  }
+
+  async pagesCreateDialogSetTitle(text: string): Promise<void> {
+    // fill() is a silent no-op on this controlled input (pinned live);
+    // real keystrokes are the only path that reaches form state.
+    const field = this.page.getByPlaceholder("Title");
+    await field.click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press("ControlOrMeta+A");
+    await field.pressSequentially(text, { delay: 0, timeout: WebDriver.DETAIL_MS });
+    await expect.poll(() => field.inputValue(), { timeout: WebDriver.OPEN_MS }).toBe(text);
+  }
+
+  async pagesCreateDialogTitleValue(): Promise<string> {
+    return this.page.getByPlaceholder("Title").inputValue({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesCreateDialogOverLengthVisible(): Promise<boolean> {
+    const text = (await this.pagesCreateDialog().innerText({ timeout: WebDriver.OPEN_MS }).catch(() => "")) ?? "";
+    return text.includes("255");
+  }
+
+  async pagesCreateDialogSubmitEnabled(): Promise<boolean> {
+    return this.pagesCreateDialog()
+      .getByRole("button", { name: "Create Page" })
+      .isEnabled({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesCreateDialogAccess(): Promise<"open" | "restricted"> {
+    const label = (
+      (await this.pagesCreateDialog().locator("h6").first().innerText({ timeout: WebDriver.OPEN_MS })) ?? ""
+    ).trim();
+    return label === "Private" ? "restricted" : "open";
+  }
+
+  async pagesCreateDialogSetAccess(which: "open" | "restricted"): Promise<void> {
+    // The two icon buttons render in Public, Private order beside the label.
+    await this.pagesCreateDialog()
+      .getByRole("button")
+      .nth(which === "open" ? 1 : 2)
+      .click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.pagesCreateDialogAccess(), { timeout: WebDriver.OPEN_MS }).toBe(which);
+  }
+
+  async pagesCreateDialogPickIconMark(): Promise<void> {
+    // The icon tab is the picker's default and its entries render
+    // immediately; the emoji catalog loads async with empty labels.
+    await this.pagesCreateDialog().getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    const entries = this.page.locator("button.grid.h-9.w-9");
+    await entries.first().waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    await entries.first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.pagesCreateDialogHasMark(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  async pagesCreateDialogHasMark(): Promise<boolean> {
+    const mark = this.pagesCreateDialog().getByRole("button").first();
+    const icons = mark.locator("svg");
+    if ((await icons.count()) === 0) return true;
+    const cls = (await icons.first().getAttribute("class")) ?? "";
+    return cls !== "h-4 w-4 text-tertiary";
+  }
+
+  async pagesCreateDialogCancel(): Promise<void> {
+    await this.pagesCreateDialog()
+      .getByRole("button", { name: "Cancel" })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByPlaceholder("Title").waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesCreateDialogSubmit(): Promise<string> {
+    await this.pagesCreateDialog()
+      .getByRole("button", { name: "Create Page" })
+      .click({ timeout: WebDriver.OPEN_MS });
+    // A valid submit closes the dialog before navigating; validation
+    // failures keep it open, so a stuck dialog rejects fast here.
+    try {
+      await this.page.getByPlaceholder("Title").waitFor({ state: "hidden", timeout: 10_000 });
+    } catch {
+      throw new Error("[parity] dialog submit did not close the dialog.");
+    }
+    await expect
+      .poll(() => this.pagesRowIdFromDetailUrl(this.page.url()), { timeout: WebDriver.DETAIL_MS })
+      .toMatch(/^[0-9a-f-]{36}$/);
+    return this.pagesRowIdFromDetailUrl(this.page.url());
+  }
+
+  async pagesRowStarVisible(title: string): Promise<boolean> {
+    await this.pagesRowHover(title);
+    return (await this.pagesRowStarButton(title).count()) > 0;
+  }
+
+  async pagesRowStarSelected(title: string): Promise<boolean> {
+    const icon = this.pagesRowStarButton(title).locator("svg.lucide-star");
+    if ((await icon.count()) === 0) return false;
+    const cls = (await icon.first().getAttribute("class")) ?? "";
+    return cls.includes("fill-(--color-label-yellow-icon)");
+  }
+
+  async pagesRowToggleStar(title: string): Promise<void> {
+    await this.pagesRowHover(title);
+    const before = await this.pagesRowStarSelected(title);
+    await this.pagesRowStarButton(title).click({ timeout: WebDriver.OPEN_MS });
+    await expect
+      .poll(() => this.pagesRowStarSelected(title), { timeout: WebDriver.OPEN_MS })
+      .toBe(!before);
+    // The star flips optimistically while the notice trails the server
+    // roundtrip; settle on the notice so readers observe it.
+    await this.pagesRowWaitToast();
+  }
+
+  async pagesRowFilterFavoritesOnly(): Promise<void> {
+    await this.page
+      .getByRole("main")
+      .last()
+      .getByRole("button", { name: "Filters" })
+      .click({ timeout: WebDriver.OPEN_MS });
+    // The panel option sits beside the created-date/created-by options;
+    // sidebar buttons sharing its name do not.
+    const panel = this.page
+      .locator("div", { hasText: "Created date" })
+      .filter({ has: this.page.getByRole("button", { name: "Favorites" }) })
+      .last();
+    await panel
+      .getByRole("button", { name: "Favorites" })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press("Escape");
+    await expect
+      .poll(
+        async () => this.page.getByRole("button", { name: "Clear All" }).count(),
+        { timeout: WebDriver.OPEN_MS }
+      )
+      .toBeGreaterThan(0);
+  }
+
+  async pagesRowClearFilters(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: "Clear All" })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page
+      .getByRole("button", { name: "Clear All" })
+      .first()
+      .waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesRowFavoritesNavOpen(): Promise<boolean> {
+    const sidebar =
+      (await this.page.locator("aside, [role='complementary']").first().innerText({ timeout: WebDriver.OPEN_MS }).catch(() => "")) ?? "";
+    const section = sidebar.split("Favorites")[1]?.split("Projects")[0] ?? "";
+    return section.replace(/\s+/g, " ").trim().length > 0;
+  }
+
+  private async pagesRowCloseMenu(): Promise<void> {
+    // Re-clicking a trigger while its menu stands open shuts it, so
+    // every open starts from a known-closed state (Escape is harmless
+    // when nothing is open).
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("menuitem")
+      .first()
+      .waitFor({ state: "hidden", timeout: 5_000 })
+      .catch(() => undefined);
+  }
+
+  async pagesRowOpenMenu(title: string): Promise<void> {
+    await this.pagesRowCloseMenu();
+    await this.pagesRowHover(title);
+    await this.pagesRowOverflowButton(title).click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesRowOpenContextMenu(title: string): Promise<void> {
+    await this.pagesRowCloseMenu();
+    const row = this.pagesRowContainer(title);
+    await row.scrollIntoViewIfNeeded({ timeout: WebDriver.OPEN_MS });
+    await row.click({ button: "right", timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesRowMenuItems(): Promise<string[]> {
+    return this.page.getByRole("menuitem").allInnerTexts({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesRowMenuClick(item: string): Promise<void> {
+    await this.page
+      .getByRole("menuitem", { name: item, exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page
+      .getByRole("menuitem")
+      .first()
+      .waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS })
+      .catch(() => undefined);
+  }
+
+  async pagesRowOpenInNewTab(title: string): Promise<string> {
+    await this.pagesRowOpenMenu(title);
+    const popupPromise = this.page.waitForEvent("popup", { timeout: WebDriver.OPEN_MS });
+    await this.pagesRowMenuClick("Open in new tab");
+    const popup = await popupPromise;
+    await popup.waitForLoadState("domcontentloaded", { timeout: WebDriver.DETAIL_MS }).catch(() => undefined);
+    const url = popup.url();
+    await popup.close().catch(() => undefined);
+    return url;
+  }
+
+  async pagesRowCopyLink(title: string): Promise<void> {
+    // Headless Chromium denies clipboard writes unless permitted first.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.pagesRowOpenMenu(title);
+    await this.pagesRowMenuClick("Copy link");
+    await this.pagesRowWaitToast();
+  }
+
+  async pagesRowDuplicate(title: string): Promise<void> {
+    await this.pagesRowOpenMenu(title);
+    await this.pagesRowMenuClick("Make a copy");
+    await this.pagesRowWaitToast();
+  }
+
+  async pagesRowToggleAccess(title: string): Promise<void> {
+    await this.pagesRowOpenMenu(title);
+    const items = await this.pagesRowMenuItems();
+    const target = items.includes("Make private") ? "Make private" : "Make public";
+    await this.pagesRowMenuClick(target);
+    await this.pagesRowWaitToast();
+  }
+
+  async pagesRowToggleLock(title: string): Promise<void> {
+    await this.pagesRowOpenMenu(title);
+    const items = await this.pagesRowMenuItems();
+    const target = items.includes("Lock") ? "Lock" : "Unlock";
+    await this.pagesRowMenuClick(target);
+    await this.pagesRowWaitToast();
+  }
+
+  async pagesRowToggleArchive(title: string): Promise<void> {
+    await this.pagesRowOpenMenu(title);
+    const items = await this.pagesRowMenuItems();
+    const target = items.includes("Archive") ? "Archive" : "Restore";
+    await this.pagesRowMenuClick(target);
+    await this.pagesRowWaitToast();
+  }
+
+  private pagesRowDeleteDialog(): Locator {
+    return this.page.locator('[role="dialog"]', { hasText: "Delete page" });
+  }
+
+  async pagesRowDeleteModalVisible(): Promise<boolean> {
+    return this.isShown(this.pagesRowDeleteDialog().first());
+  }
+
+  async pagesRowDeleteModalText(): Promise<string> {
+    return ((await this.pagesRowDeleteDialog().first().innerText({ timeout: WebDriver.OPEN_MS })) ?? "").trim();
+  }
+
+  async pagesRowDeleteConfirmBusy(): Promise<boolean> {
+    const confirm = this.pagesRowDeleteDialog().getByRole("button", { name: "Delete" });
+    if ((await confirm.count()) === 0) return false;
+    return !(await confirm.first().isEnabled());
+  }
+
+  async pagesRowDeleteModalCancel(): Promise<void> {
+    await this.pagesRowDeleteDialog()
+      .getByRole("button", { name: "Cancel" })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesRowDeleteDialog()
+      .first()
+      .waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesRowDeleteModalConfirm(): Promise<void> {
+    await this.pagesRowDeleteDialog()
+      .getByRole("button", { name: "Delete" })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.pagesRowDeleteDialog()
+      .first()
+      .waitFor({ state: "hidden", timeout: WebDriver.DETAIL_MS });
+  }
+
+  async pagesRowSlowNextDelete(ms?: number): Promise<void> {
+    await this.page.route(
+      "**/api/workspaces/*/projects/*/pages/*/",
+      async (route) => {
+        if (route.request().method() !== "DELETE") {
+          await route.continue();
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, ms ?? 800));
+        await route.continue();
+      },
+      { times: 1 }
+    );
+  }
+
   private intakeListRequests: URL[] = [];
   private intakeListSpying = false;
 
@@ -34872,5 +35367,40 @@ export class WebDriver implements ParityDriver {
       labels.push(((await this.pagesListReadInnerText(() => buttons.nth(index))) ?? "").trim());
     }
     return labels;
+  }
+
+  async pagesRowDetailOpenOptions(): Promise<void> {
+    // The detail header cluster carries several unnamed icon buttons;
+    // the options trigger is the one whose menu holds the Export entry.
+    await this.pagesRowCloseMenu();
+    const triggers = this.page.getByRole("main").last().locator("button").filter({
+      has: this.page.locator("svg.lucide-ellipsis"),
+    });
+    const total = await triggers.count();
+    for (let index = 0; index < Math.min(total, 6); index += 1) {
+      await triggers.nth(index).click({ timeout: WebDriver.OPEN_MS });
+      const items = await this.page.getByRole("menuitem").allInnerTexts({ timeout: WebDriver.OPEN_MS }).catch(() => []);
+      if (items.includes("Export")) return;
+      await this.page.keyboard.press("Escape");
+      await this.page.waitForTimeout(400);
+    }
+    throw new Error("[parity] detail options menu never showed its Export entry.");
+  }
+
+  async pagesRowDetailReadOnly(): Promise<boolean> {
+    // The editors mount in both states; refusal surfaces as a
+    // non-editable canvas rather than absence.
+    const pageId = this.pagesRowIdFromDetailUrl(this.page.url());
+    const canvas = this.page.locator(`#editor-container-${pageId} .tiptap`).first();
+    await canvas.waitFor({ timeout: WebDriver.OPEN_MS });
+    return (await canvas.getAttribute("contenteditable")) === "false";
+  }
+
+  async pagesRowDetailMoveVisible(): Promise<boolean> {
+    // The community move control renders nothing; the licensed header
+    // would carry a move trigger beside the lock control.
+    if ((await this.page.locator("svg.lucide-file-output").count()) > 0) return true;
+    const header = this.page.getByRole("main").last().innerText({ timeout: WebDriver.OPEN_MS }).catch(() => "");
+    return ((await header) ?? "").includes("Move to");
   }
 }
