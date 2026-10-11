@@ -3496,7 +3496,14 @@ type SchedulerSeedRow = (
 /// every workspace creation. The receiver swallows every exception
 /// (`logger.exception`), so this edge returns `()` and every error arm
 /// below is a silent stop — seeding can never block workspace creation.
-async fn seed_builtin_schedulers(pool: &sqlx::PgPool, workspace_id: uuid::Uuid) {
+/// `created_by` is the requesting user (`BaseModel.save` stamps the crum
+/// user on the scheduler rows too). Shared by every workspace-create
+/// entry point (the Django signal fires regardless of entry point).
+pub(crate) async fn seed_builtin_schedulers(
+    pool: &sqlx::PgPool,
+    workspace_id: uuid::Uuid,
+    created_by: uuid::Uuid,
+) {
     use pidash_services::scheduler::builtins as seeder;
     use seeder::EnsureAction;
     if !seeder::should_seed_on_workspace_create(true) {
@@ -3541,6 +3548,7 @@ async fn seed_builtin_schedulers(pool: &sqlx::PgPool, workspace_id: uuid::Uuid) 
                     .bind(builtin.name)
                     .bind(builtin.description)
                     .bind(builtin.prompt)
+                    .bind(created_by)
                     .execute(pool)
                     .await
                 {
@@ -3704,7 +3712,7 @@ pub async fn create_workspace(
     // during the save above, before the member row below: seed the
     // builtin schedulers. The receiver swallows every failure, so this
     // never fails the request.
-    seed_builtin_schedulers(&pool, workspace_id).await;
+    seed_builtin_schedulers(&pool, workspace_id, user_id).await;
     // `WorkspaceMember.objects.create(...)` (`:126-132`): the `company_role`
     // echo (`:127`) renders through Python `str()` (null stays null).
     let company_role = match input.get("company_role") {
