@@ -25,7 +25,8 @@
 //!   too (Django builds the UPDATE from that list only — no `auto_now`
 //!   bump for the rest).
 //! * `save_project_cover` (`v2.py:631-634`) re-gets the project per row and
-//!   the LAST row wins.
+//!   the LAST row wins; the per-row write is a full `save()`, so it stamps
+//!   `updated_by`/`updated_at` too (unlike the `QuerySet.update` branches).
 //!
 //! # Ported bugs (translate, don't redesign)
 //!
@@ -290,11 +291,13 @@ pub fn bulk_swallows_integrity_error(branch: BulkBranch) -> bool {
 
 /// `save_project_cover` (`v2.py:631-634`): per row, re-get the project and
 /// stamp `cover_image_asset_id`; the LAST row wins. The re-get uses the
-/// default manager, so it carries `deleted_at IS NULL`.
+/// default manager, so it carries `deleted_at IS NULL`. The write is a
+/// FULL `project.save()` (`db/models/base.py:24-44`, `db/mixins.py:18-19`),
+/// so it also stamps `updated_by` (CRUM request user) and `updated_at`.
 pub const SAVE_PROJECT_COVER_GET_SQL: &str =
     "SELECT \"projects\".\"id\" FROM \"projects\" WHERE \"projects\".\"id\" = $1 AND \"projects\".\"deleted_at\" IS NULL";
 pub const SAVE_PROJECT_COVER_SQL: &str =
-    "UPDATE \"projects\" SET \"cover_image_asset_id\" = $2 WHERE \"projects\".\"id\" = $1";
+    "UPDATE \"projects\" SET \"cover_image_asset_id\" = $2, \"updated_at\" = $3, \"updated_by_id\" = $4 WHERE \"projects\".\"id\" = $1";
 
 // ---------------------------------------------------------------------------
 // Check endpoint (`v2.py:691-697`)
@@ -547,6 +550,9 @@ mod tests {
         assert!(!bulk_swallows_integrity_error(BulkBranch::ProjectCover));
         // Cover loop re-gets the project per row; last row wins (documented).
         assert!(SAVE_PROJECT_COVER_SQL.contains("\"cover_image_asset_id\" = $2"));
+        // Full save(): stamps updated_by (CRUM user) + updated_at (auto_now).
+        assert!(SAVE_PROJECT_COVER_SQL.contains("\"updated_at\" = $3"));
+        assert!(SAVE_PROJECT_COVER_SQL.contains("\"updated_by_id\" = $4"));
         // The per-row project re-get uses the default manager.
         assert!(SAVE_PROJECT_COVER_GET_SQL.contains("\"deleted_at\" IS NULL"));
         // Lookup scopes ids + slug + active rows.
