@@ -5,7 +5,8 @@
 //! PIDASHCONV-186). The walk orchestration (relation order, recursion,
 //! the ported bug BUG-DEL-2) lives in `pidash-services`; this module owns SQL
 //! shapes, the 18-table hard-delete order, the `(app_label, model_name)`
-//! entry map, and the Postgres-catalog discovery that stands in for
+//! entry map, the per-model Collector emulation behind `hard_delete`
+//! (PIDASHCONV-928), and the Postgres-catalog discovery that stands in for
 //! Django's `_meta` reverse-relation graph.
 //!
 //! Fixture pins: `rust-api/fixtures/tasks_cleanup/deletion.json`
@@ -19,7 +20,7 @@
 //! catalog-decoded `i64`) before use, and the cutoff is formatted by
 //! `chrono`. No caller input reaches SQL raw.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use sea_query::{Alias, Expr, Order, PostgresQueryBuilder, Query, SimpleExpr};
@@ -124,6 +125,140 @@ const ENTRY_TABLES: &[(&str, &str, &str)] = &[
     ("db", "workspace", "workspaces"),
     ("db", "workspacemember", "workspace_members"),
     ("db", "workspacememberinvite", "workspace_member_invites"),
+];
+
+/// The `apps.get_models()` sweep order (`deletion_task.py:183-188`):
+/// every model carrying `deleted_at`, frozen from `_meta`
+/// (PIDASHCONV-928). The Collector absorbs order on the success path, but
+/// the per-model failure points do not: a `PROTECT`/`DO_NOTHING` remnant
+/// aborts the task with earlier models committed (probed: a due issue with
+/// any `issue_activities` fails at `issues`, before `pages` ever runs), so
+/// the sweep must visit models in exactly this order. Physical table
+/// names; the 18 named tables re-appear here (the Python loop is
+/// re-inclusive). Same `_meta`-mirror maintenance class as
+/// [`ENTRY_TABLES`]: unknown catalog tables are appended alphabetically by
+/// [`sweep_tables_in_django_order`]. Regenerate from a Django shell with:
+///
+/// ```python
+/// from django.apps import apps
+/// for m in apps.get_models():
+///     if hasattr(m, "deleted_at"):
+///         print(m._meta.db_table)
+/// ```
+pub const HARD_DELETE_SWEEP_TABLES: [&str; 113] = [
+    "analytic_views",
+    "api_tokens",
+    "cli_device_codes",
+    "api_activity_logs",
+    "file_assets",
+    "projects",
+    "project_member_invites",
+    "project_members",
+    "project_identifiers",
+    "project_deploy_boards",
+    "project_public_members",
+    "workspaces",
+    "workspace_members",
+    "workspace_member_invites",
+    "workspace_join_requests",
+    "teams",
+    "workspace_themes",
+    "workspace_user_properties",
+    "workspace_user_links",
+    "workspace_home_preferences",
+    "workspace_user_preferences",
+    "descriptions",
+    "description_versions",
+    "states",
+    "issues",
+    "issue_blockers",
+    "issue_relations",
+    "issue_mentions",
+    "issue_assignees",
+    "issue_links",
+    "issue_attachments",
+    "issue_activities",
+    "issue_comments",
+    "issue_labels",
+    "issue_sequences",
+    "issue_subscribers",
+    "issue_reactions",
+    "comment_reactions",
+    "issue_votes",
+    "issue_versions",
+    "issue_description_versions",
+    "project_user_properties",
+    "cycles",
+    "cycle_issues",
+    "cycle_user_properties",
+    "deploy_boards",
+    "draft_issues",
+    "draft_issue_assignees",
+    "draft_issue_labels",
+    "draft_issue_modules",
+    "draft_issue_cycles",
+    "estimates",
+    "estimate_points",
+    "exporters",
+    "importers",
+    "intakes",
+    "intake_issues",
+    "integrations",
+    "workspace_integrations",
+    "github_repositories",
+    "github_repository_syncs",
+    "github_issue_syncs",
+    "github_comment_syncs",
+    "github_app_installations",
+    "github_webhook_deliveries",
+    "github_app_install_sessions",
+    "github_pull_request_links",
+    "git_provider_accounts",
+    "git_repositories",
+    "git_repository_bindings",
+    "git_issue_syncs",
+    "git_comment_syncs",
+    "git_code_review_links",
+    "git_webhook_deliveries",
+    "git_webhook_registrations",
+    "slack_project_syncs",
+    "modules",
+    "module_members",
+    "module_issues",
+    "module_links",
+    "module_user_properties",
+    "notifications",
+    "user_notification_preferences",
+    "email_notification_logs",
+    "pages",
+    "page_logs",
+    "page_labels",
+    "project_pages",
+    "page_versions",
+    "social_login_connections",
+    "issue_views",
+    "webhooks",
+    "webhook_logs",
+    "project_webhooks",
+    "user_favorites",
+    "issue_types",
+    "project_issue_types",
+    "user_recent_visits",
+    "labels",
+    "devices",
+    "device_sessions",
+    "stickies",
+    "issue_agent_ticker",
+    "schedulers",
+    "scheduler_bindings",
+    "loop_jobs",
+    "loop_targets",
+    "loop_user_preferences",
+    "instances",
+    "instance_admins",
+    "instance_configurations",
+    "changelogs",
+    "pod",
 ];
 
 /// Resolve the entry table for `(app_label, model_name)`, or `None` when
@@ -400,85 +535,37 @@ pub async fn load_schema_info(pool: &PgPool) -> Result<SchemaInfo, sqlx::Error> 
     Ok(info)
 }
 
-/// Every base table carrying the soft-delete marker, children before
-/// parents (topological order over `edges`, alphabetical tie-break).
+/// Every base table carrying the soft-delete marker, in Django's
+/// `apps.get_models()` order ([`HARD_DELETE_SWEEP_TABLES`]).
 ///
-/// Feeds the `apps.get_models()` sweep (`deletion_task.py:183-188`).
-/// Python iterates the app registry with the Collector absorbing the
-/// order (each per-model `.delete()` cascades inside one transaction);
-/// Rust issues one raw `DELETE` per table with the deferred FK check
-/// landing at each statement's own commit, so a tombstoned parent must
-/// sort after its children or the `DELETE` fails and aborts the whole
-/// task (PIDASHCONV-928: `loop_jobs` sorts before `loop_targets`
-/// alphabetically). Tables in FK cycles (e.g. `projects` ↔ `states`
-/// via `default_state_id`) have no valid order and are appended
-/// alphabetically; the joint retry in [`run_retry_hard_deletes`]
-/// deletes them together. Self-loops need no ordering: one statement
-/// removes the whole table's tombstones atomically. `edges` must hold
-/// distinct pairs ([`load_fk_edges`] deduplicates).
-pub fn sweep_tables(schema: &SchemaInfo, edges: &[(String, String)]) -> Vec<String> {
-    let mut tables: Vec<String> = schema
+/// Feeds the sweep at `deletion_task.py:183-188`. Each per-model
+/// `.delete()` runs the ORM Collector inside one transaction, so order
+/// only fixes the failure points (a `PROTECT`/`DO_NOTHING` remnant aborts
+/// the task with earlier models committed) — and those must match Django
+/// exactly, hence the frozen order rather than a topological sort: even
+/// the `loop_jobs` → `loop_targets` parent-first pair and the
+/// `projects` ↔ `states` cycle resolve inside the model's own pass
+/// (collection + nulling + one joint commit).
+///
+/// Catalog tables missing from the frozen list (a migration added a
+/// soft-delete model) are appended alphabetically: they are still swept,
+/// at an approximate position. Tables in the frozen list but absent from
+/// the catalog (a migration dropped a model) are skipped.
+pub fn sweep_tables_in_django_order(schema: &SchemaInfo) -> Vec<String> {
+    let mut ordered: Vec<String> = HARD_DELETE_SWEEP_TABLES
+        .iter()
+        .filter(|t| schema.has_deleted_at(t))
+        .map(ToString::to_string)
+        .collect();
+    let known: HashSet<&str> = HARD_DELETE_SWEEP_TABLES.iter().copied().collect();
+    let mut extra: Vec<String> = schema
         .columns
         .keys()
-        .filter(|t| schema.has_deleted_at(t))
+        .filter(|t| schema.has_deleted_at(t) && !known.contains(t.as_str()))
         .cloned()
         .collect();
-    tables.sort();
-    // Kahn's algorithm: a table is releasable once every sweep child
-    // (tables holding an FK into it) has been emitted, so children sort
-    // before parents. Edges outside the sweep set and self-loops are
-    // ignored: a parent that is never swept (or the table itself) cannot
-    // block a per-table `DELETE`.
-    let mut parents_of: HashMap<&str, Vec<&str>> = HashMap::new();
-    let mut child_count: HashMap<&str, usize> = HashMap::new();
-    for table in &tables {
-        child_count.insert(table.as_str(), 0);
-    }
-    for (child, parent) in edges {
-        if child == parent || !schema.has_deleted_at(child) || !schema.has_deleted_at(parent) {
-            continue;
-        }
-        parents_of
-            .entry(child.as_str())
-            .or_default()
-            .push(parent.as_str());
-        *child_count.entry(parent.as_str()).or_default() += 1;
-    }
-    let mut releasable: BTreeSet<&str> = tables
-        .iter()
-        .map(String::as_str)
-        .filter(|t| child_count[t] == 0)
-        .collect();
-    let mut ordered = Vec::with_capacity(tables.len());
-    let mut emitted: HashSet<&str> = HashSet::new();
-    while let Some(table) = releasable.pop_first() {
-        emitted.insert(table);
-        ordered.push(table.to_owned());
-        if let Some(parents) = parents_of.get(table) {
-            for parent in parents {
-                if emitted.contains(parent) {
-                    continue;
-                }
-                if let Some(count) = child_count.get_mut(parent) {
-                    *count = count.saturating_sub(1);
-                    if *count == 0 {
-                        releasable.insert(parent);
-                    }
-                }
-            }
-        }
-    }
-    if ordered.len() < tables.len() {
-        // Cycle remainder: no valid order exists; append alphabetically
-        // (the joint retry in `run_retry_hard_deletes` cracks these).
-        let mut rest: Vec<&str> = tables
-            .iter()
-            .map(String::as_str)
-            .filter(|t| !emitted.contains(t))
-            .collect();
-        rest.sort();
-        ordered.extend(rest.iter().map(ToString::to_string));
-    }
+    extra.sort();
+    ordered.extend(extra);
     ordered
 }
 
@@ -556,13 +643,35 @@ const DO_NOTHING_FKS: &[(&str, &str)] = &[
     ("issue_activities", "issue_id"),
 ];
 
-/// Audit FKs that break the audit-column rule: both are `PROTECT`, so the
-/// Python `else` stamps rather than nulling. Every other
-/// `created_by_id`/`updated_by_id` column (227 of 229) is `SET_NULL`
-/// (`db/mixins.py` `UserAuditModel`).
-const PROTECT_AUDIT_FKS: &[(&str, &str)] = &[
+/// `(child_table, fk_column)` pairs whose Django `on_delete` is
+/// `PROTECT`: all 7 in the schema, frozen from `_meta` (PIDASHCONV-928).
+/// The Collector raises `ProtectedError` when any row — live, tombstoned,
+/// even one collected for deletion itself — references a collected row
+/// through one of these, aborting the per-model delete. Includes the two
+/// audit FKs that break the audit-column rule below (every other
+/// `created_by_id`/`updated_by_id` column, 227 of 229, is `SET_NULL`).
+/// Same `_meta`-mirror maintenance class as [`SET_NULL_FKS`]: there is no
+/// `RESTRICT`, `SET_DEFAULT`, or `SET()` FK anywhere in the schema, so any
+/// future one needs both a mirror entry and an emulation branch in
+/// [`run_model_hard_delete`]. Regenerate from a Django shell with:
+///
+/// ```python
+/// from django.apps import apps
+/// from django.db import models
+/// for m in apps.get_models(include_auto_created=True):
+///     for f in m._meta.get_fields(include_hidden=True):
+///         if isinstance(f, (models.ForeignKey, models.OneToOneField)) and f.concrete \
+///                 and f.remote_field.on_delete.__name__ == "PROTECT":
+///             print((m._meta.db_table, f.column))
+/// ```
+const PROTECT_FKS: &[(&str, &str)] = &[
     ("agent_chat_session", "created_by_id"),
+    ("agent_chat_session", "pod_id"),
     ("agent_run", "created_by_id"),
+    ("agent_run", "pod_id"),
+    ("git_repository_bindings", "provider_account_id"),
+    ("issues", "assigned_pod_id"),
+    ("runner", "pod_id"),
 ];
 
 /// `(child_table, fk_column)` pairs whose reverse relation is hidden
@@ -622,12 +731,12 @@ impl ReverseRelation {
     /// `relation.on_delete.__name__` classifier, mirroring the Python
     /// branches at `deletion_task.py:44-64`: `DO_NOTHING` skips (exactly
     /// [`DO_NOTHING_FKS`]); `SET_NULL` nulls; everything else takes the
-    /// CASCADE branch — including `CASCADE`, `PROTECT`, `RESTRICT` and
-    /// `SET DEFAULT`, exactly like the Python `else` (ported as-is).
+    /// CASCADE branch — including `CASCADE`, `PROTECT` and `SET DEFAULT`,
+    /// exactly like the Python `else` (ported as-is).
     ///
     /// The DDL rule alone cannot decide: Django emits `NO ACTION` for
     /// `CASCADE`, `PROTECT`, `SET_NULL` and `DO_NOTHING` alike, so the
-    /// map below is the `_meta` ground truth.
+    /// maps below are the `_meta` ground truth.
     pub fn is_do_nothing(&self) -> bool {
         DO_NOTHING_FKS
             .iter()
@@ -640,9 +749,24 @@ impl ReverseRelation {
                 .iter()
                 .any(|(table, column)| *table == self.child_table && *column == self.fk_column)
             || ((self.fk_column == "created_by_id" || self.fk_column == "updated_by_id")
-                && !PROTECT_AUDIT_FKS
-                    .iter()
-                    .any(|(table, column)| *table == self.child_table && *column == self.fk_column))
+                && !self.is_protect())
+    }
+
+    /// True for the 7 [`PROTECT_FKS`] pairs. The soft-delete walk ignores
+    /// this (Python's `else` stamps through `PROTECT`); the hard-delete
+    /// Collector emulation fails the model pass on any referencing row.
+    pub fn is_protect(&self) -> bool {
+        PROTECT_FKS
+            .iter()
+            .any(|(table, column)| *table == self.child_table && *column == self.fk_column)
+    }
+
+    /// True for genuine `CASCADE` edges: anything the other three
+    /// classifiers reject (341 of 620 FKs). A migration adding a
+    /// non-`CASCADE` FK without extending the mirrors above silently lands
+    /// here — the same maintenance class as [`ENTRY_TABLES`].
+    pub fn is_cascade(&self) -> bool {
+        !self.is_do_nothing() && !self.is_set_null() && !self.is_protect()
     }
 
     /// True when Python never enumerates this relation at all
@@ -1020,23 +1144,44 @@ pub async fn null_bulk(
     execute(pool, &sql).await
 }
 
-/// Hard-delete tombstones from one table; returns affected rows.
-pub async fn hard_delete_table(
-    pool: &PgPool,
-    table: &str,
-    cutoff: &str,
-) -> Result<u64, sqlx::Error> {
-    execute(pool, &hard_delete_before_sql(table, cutoff)).await
+/// One catalog foreign key: the Collector emulation's graph edge.
+///
+/// Unlike [`ReverseRelation`] (one parent's reverse relations for the
+/// soft-delete walk), these load once per `hard_delete` run (all 620)
+/// and are bucketed by `on_delete` in [`classify_delete_edges`].
+/// Every constraint is single-column (verified against the catalog).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FkEdge {
+    /// Child table holding the FK.
+    pub child_table: String,
+    /// FK column on the child.
+    pub fk_column: String,
+    /// Referenced (parent) table.
+    pub parent_table: String,
+    /// Catalog `DELETE_RULE` (`NO ACTION` for all 620: Django emulates
+    /// every `on_delete` in the ORM, so this carries no dispatch signal
+    /// beyond an explicit `SET NULL` honored by [`ReverseRelation`]).
+    pub delete_rule: String,
 }
 
-/// Every `(child_table, parent_table)` FK edge in `public`, deduplicated.
-///
-/// Drives the sweep's topological order (children before parents).
-/// Django emits bare `NO ACTION` constraints for every `on_delete`, so
-/// the edge *rules* carry no signal — only the graph shape matters here.
-pub async fn load_fk_edges(pool: &PgPool) -> Result<Vec<(String, String)>, sqlx::Error> {
+impl FkEdge {
+    fn as_relation(&self, schema: &SchemaInfo) -> ReverseRelation {
+        ReverseRelation {
+            child_table: self.child_table.clone(),
+            fk_column: self.fk_column.clone(),
+            child_pk: schema.pk_column(&self.child_table).to_owned(),
+            delete_rule: self.delete_rule.clone(),
+            one_to_one: false,
+        }
+    }
+}
+
+/// Every FK edge in `public`, deduplicated, ordered by
+/// `(child_table, fk_column)` for determinism.
+pub async fn load_fk_details(pool: &PgPool) -> Result<Vec<FkEdge>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT DISTINCT kcu.table_name AS child_table, ccu.table_name AS parent_table \
+        "SELECT DISTINCT kcu.table_name AS child_table, kcu.column_name AS fk_column, \
+                ccu.table_name AS parent_table, rc.delete_rule AS delete_rule \
          FROM information_schema.referential_constraints rc \
          JOIN information_schema.key_column_usage kcu \
            ON kcu.constraint_name = rc.constraint_name \
@@ -1052,97 +1197,419 @@ pub async fn load_fk_edges(pool: &PgPool) -> Result<Vec<(String, String)>, sqlx:
     .await?;
     let mut edges = Vec::with_capacity(rows.len());
     for row in rows {
-        edges.push((row.try_get("child_table")?, row.try_get("parent_table")?));
+        edges.push(FkEdge {
+            child_table: row.try_get("child_table")?,
+            fk_column: row.try_get("fk_column")?,
+            parent_table: row.try_get("parent_table")?,
+            delete_rule: row.try_get("delete_rule")?,
+        });
     }
     Ok(edges)
 }
 
-/// `true` for a Postgres foreign-key violation (`23503`) — a tombstoned
-/// parent whose children are still present. Hard-delete passes record
-/// the table as blocked and continue; anything else aborts the task.
-pub fn is_fk_violation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().as_deref() == Some("23503"))
-}
-
-/// What one hard-delete pass did over its tables.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HardDeletePass {
-    /// Rows removed by the pass.
-    pub deleted: u64,
-    /// Tables whose `DELETE` hit an FK violation (SQLSTATE 23503): the
-    /// statement rolled back and the table is retried jointly in
-    /// [`run_retry_hard_deletes`]. Any other error aborts the pass.
-    pub blocked: Vec<String>,
-}
-
-/// The 18 named deletes, in fixture order. FK-blocked tables are
-/// recorded, not fatal: a named parent (e.g. `projects`) sorts before
-/// its sweep children (`project_members`), so the pass cannot be
-/// order-safe on its own — the joint retry finishes those tables.
-pub async fn run_named_hard_deletes(
-    pool: &PgPool,
-    cutoff: &str,
-) -> Result<HardDeletePass, sqlx::Error> {
-    let mut pass = HardDeletePass::default();
-    for table in HARD_DELETE_NAMED_TABLES {
-        match hard_delete_table(pool, table, cutoff).await {
-            Ok(affected) => pass.deleted += affected,
-            Err(error) if is_fk_violation(&error) => pass.blocked.push(table.to_owned()),
-            Err(error) => return Err(error),
+/// Bucket every edge by Django `on_delete` as `(cascade, set_null,
+/// protect)`, using the [`ReverseRelation`] classifiers (the `_meta`
+/// mirrors, not the bare `NO ACTION` DDL). `DO_NOTHING` edges are
+/// dropped: the Collector never collects through them and the deferred
+/// commit check enforces them for free.
+pub fn classify_delete_edges(
+    edges: &[FkEdge],
+    schema: &SchemaInfo,
+) -> (Vec<FkEdge>, Vec<FkEdge>, Vec<FkEdge>) {
+    let mut cascade = Vec::new();
+    let mut set_null = Vec::new();
+    let mut protect = Vec::new();
+    for edge in edges {
+        let relation = edge.as_relation(schema);
+        if relation.is_do_nothing() {
+            continue;
+        } else if relation.is_set_null() {
+            set_null.push(edge.clone());
+        } else if relation.is_protect() {
+            protect.push(edge.clone());
+        } else {
+            cascade.push(edge.clone());
         }
     }
-    Ok(pass)
+    (cascade, set_null, protect)
 }
 
-/// The `apps.get_models()` sweep: every `deleted_at` base table in
-/// topological order, re-inclusive of the 18 named ones, exactly like
-/// the Python loop at `:183-188` (the re-deletes match no rows unless
-/// the named pass left them blocked; kept for structural parity).
-pub async fn run_sweep_hard_deletes(
+/// `SELECT EXISTS(SELECT 1 FROM "<table>" WHERE "<table>"."deleted_at" <
+/// '<cutoff>')`: the empty-seed short-circuit. A Collector run over an
+/// empty queryset visits no relations and commits nothing, so a model
+/// with no due tombstones is a no-op without further queries.
+pub fn hard_delete_seed_exists_sql(table: &str, cutoff: &str) -> String {
+    format!(
+        "SELECT EXISTS(SELECT 1 FROM \"{table}\" WHERE \"{table}\".\"deleted_at\" < '{cutoff}')"
+    )
+}
+
+/// L1 CASCADE collection: `SELECT "<child_pk>" AS pk FROM "<child>"
+/// WHERE "<fk>" IN (SELECT "<parent_pk>" FROM "<parent>" WHERE
+/// "<parent>"."deleted_at" < '<cutoff>')`.
+///
+/// Direct children of a model's due seeds, UNSCOPED — live, tombstoned,
+/// triage, future-dated, all collected, exactly like the Collector's
+/// `_base_manager` lookup. The due set itself is never materialized:
+/// `hard_delete` runs daily, but a backlogged seed could still be large,
+/// while the collected fringe (rows outside the tombstone set) stays
+/// small. Child tables without `deleted_at` (M2M through tables) collect
+/// identically — there is no child-side predicate at all.
+pub fn cascade_seed_children_sql(
+    child_table: &str,
+    child_pk: &str,
+    fk_col: &str,
+    parent_table: &str,
+    parent_pk: &str,
+    cutoff: &str,
+) -> String {
+    format!(
+        "SELECT \"{child_pk}\" AS pk FROM \"{child_table}\" \
+         WHERE \"{fk_col}\" IN \
+         (SELECT \"{parent_pk}\" FROM \"{parent_table}\" \
+         WHERE \"{parent_table}\".\"deleted_at\" < '{cutoff}')"
+    )
+}
+
+/// Transitive CASCADE collection: `SELECT "<child_pk>" AS pk FROM
+/// "<child>" WHERE "<fk>" IN (<id literals>)`. `ids` is one chunk of an
+/// already-collected parent id set; callers never pass an empty slice
+/// (`IN ()` is invalid SQL).
+pub fn cascade_collected_children_sql(
+    child_table: &str,
+    child_pk: &str,
+    fk_col: &str,
+    ids: &[RowPk],
+) -> String {
+    let mut stmt = Query::select();
+    stmt.expr_as(
+        Expr::col(Alias::new(child_pk.to_owned())),
+        Alias::new("pk".to_owned()),
+    )
+    .from(Alias::new(child_table.to_owned()))
+    .and_where(
+        Expr::col(Alias::new(fk_col.to_owned())).is_in(ids.iter().map(RowPk::as_query_value)),
+    );
+    stmt.to_string(PostgresQueryBuilder)
+}
+
+/// `PROTECT` pre-check over the due seeds: `SELECT EXISTS(SELECT 1 FROM
+/// "<child>" WHERE "<fk>" IN (SELECT ... due seeds ...))`. Any hit aborts
+/// the model pass before its transaction opens, like the Collector
+/// raising during collection.
+pub fn protect_seed_check_sql(
+    child_table: &str,
+    fk_col: &str,
+    parent_table: &str,
+    parent_pk: &str,
+    cutoff: &str,
+) -> String {
+    format!(
+        "SELECT EXISTS(SELECT 1 FROM \"{child_table}\" WHERE \"{fk_col}\" IN \
+         (SELECT \"{parent_pk}\" FROM \"{parent_table}\" \
+         WHERE \"{parent_table}\".\"deleted_at\" < '{cutoff}'))"
+    )
+}
+
+/// `PROTECT` pre-check over collected ids: `SELECT EXISTS(SELECT 1 FROM
+/// "<child>" WHERE "<fk>" IN (<id literals>))`. No exclusion of rows
+/// collected for deletion: `PROTECT` fires on those too (the Collector
+/// checks the unscoped related set, not the delete set).
+pub fn protect_collected_check_sql(child_table: &str, fk_col: &str, ids: &[RowPk]) -> String {
+    let mut stmt = Query::select();
+    let mut inner = Query::select();
+    inner
+        .expr(Expr::val(1))
+        .from(Alias::new(child_table.to_owned()))
+        .and_where(
+            Expr::col(Alias::new(fk_col.to_owned())).is_in(ids.iter().map(RowPk::as_query_value)),
+        );
+    stmt.expr(Expr::exists(inner));
+    stmt.to_string(PostgresQueryBuilder)
+}
+
+/// Collector `SET_NULL` over the due seeds: `UPDATE "<child>" SET
+/// "<fk>" = NULL WHERE "<fk>" IN (SELECT ... due seeds ...)`, UNSCOPED.
+///
+/// Deliberately unlike [`null_fk_bulk_sql`]: the soft-delete walk nulls
+/// through scoped related managers (`deleted_at IS NULL`,
+/// `IssueManager`/`StateManager` guards), but the Collector nulls through
+/// `_base_manager` — tombstoned, triage, archived, and draft rows are
+/// nulled exactly like live ones, and `updated_at` is untouched (a bulk
+/// `QuerySet.update`, never a save).
+pub fn null_fk_emulation_seed_sql(
+    child_table: &str,
+    fk_col: &str,
+    parent_table: &str,
+    parent_pk: &str,
+    cutoff: &str,
+) -> String {
+    format!(
+        "UPDATE \"{child_table}\" SET \"{fk_col}\" = NULL WHERE \"{fk_col}\" IN \
+         (SELECT \"{parent_pk}\" FROM \"{parent_table}\" \
+         WHERE \"{parent_table}\".\"deleted_at\" < '{cutoff}')"
+    )
+}
+
+/// Collector `SET_NULL` over collected ids: `UPDATE "<child>" SET
+/// "<fk>" = NULL WHERE "<fk>" IN (<id literals>)`, unscoped as above.
+pub fn null_fk_emulation_ids_sql(child_table: &str, fk_col: &str, ids: &[RowPk]) -> String {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new(child_table.to_owned()))
+        .value(Alias::new(fk_col.to_owned()), None::<&str>)
+        .and_where(
+            Expr::col(Alias::new(fk_col.to_owned())).is_in(ids.iter().map(RowPk::as_query_value)),
+        );
+    stmt.to_string(PostgresQueryBuilder)
+}
+
+/// `DELETE FROM "<table>" WHERE "<pk>" IN (<id literals>)`: removes one
+/// chunk of CASCADE-collected rows (which may be live, so the
+/// `deleted_at` predicate cannot select them).
+pub fn delete_ids_sql(table: &str, pk_col: &str, ids: &[RowPk]) -> String {
+    let mut stmt = Query::delete();
+    stmt.from_table(Alias::new(table.to_owned())).and_where(
+        Expr::col(Alias::new(pk_col.to_owned())).is_in(ids.iter().map(RowPk::as_query_value)),
+    );
+    stmt.to_string(PostgresQueryBuilder)
+}
+
+/// Id-list chunk size for collected-id statements: 1000 UUIDs render
+/// ~40KB of SQL, far under any statement limit, while the per-run
+/// collected fringe is usually a single chunk.
+const ID_CHUNK: usize = 1000;
+
+/// What one model's Collector pass did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelDeleteOutcome {
+    /// Rows removed per table (the model's own seeds plus
+    /// CASCADE-collected rows in any table).
+    pub deleted: Vec<(String, u64)>,
+    /// Rows touched by `SET_NULL` nulling.
+    pub nulled: u64,
+}
+
+/// What one model's Collector pass may fail with, beyond the database.
+#[derive(Debug, thiserror::Error)]
+pub enum ModelDeleteError {
+    /// The `ProtectedError` equivalent: a row still references a
+    /// collected row through a `PROTECT` FK. Rendered table-flavored
+    /// (model names are `_meta`-only).
+    #[error(
+        "cannot delete some instances of table \"{parent_table}\" \
+         because they are referenced through protected foreign keys: \
+         \"{child_table}\".\"{fk_column}\""
+    )]
+    Protected {
+        parent_table: String,
+        child_table: String,
+        fk_column: String,
+    },
+    /// Any database failure — including the deferred `DO_NOTHING`
+    /// violation (SQLSTATE 23503) surfacing at the pass commit, which
+    /// rolls this model's writes back exactly like the Collector's
+    /// per-model transaction.
+    #[error("database error: {0}")]
+    Db(#[from] sqlx::Error),
+}
+
+/// One model's Collector pass: `Model.all_objects.filter(deleted_at__lt=
+/// cutoff).delete()` (`deletion_task.py:138-191`, PIDASHCONV-928).
+///
+/// The pass mirrors `Collector.collect` + `Collector.delete`
+/// (`django/db/models/deletion.py`): the due seeds are collected with
+/// their `CASCADE` closure (unscoped — live, tombstoned, triage, and
+/// future-dated rows alike), `SET_NULL` targets are nulled unscoped, a
+/// remaining `PROTECT` reference aborts before any write, and the writes
+/// land in ONE transaction whose deferred FK checks enforce `DO_NOTHING`
+/// at commit. Earlier models' commits are untouched by an abort, exactly
+/// like the sequential Python `.delete()` calls.
+///
+/// Collection never materializes the due set itself (L1 selects seed
+/// through a subquery); only the collected fringe (rows outside the
+/// tombstone set: live/future children and their transitives) accumulates
+/// as id sets, in visited-set fixpoint form so `CASCADE` cycles
+/// terminate. `DO_NOTHING` edges need no branch: they are never
+/// collected, and the commit check fails the pass when remnants exist.
+pub async fn run_model_hard_delete(
     pool: &PgPool,
     schema: &SchemaInfo,
-    edges: &[(String, String)],
+    cascade: &[FkEdge],
+    set_null: &[FkEdge],
+    protect: &[FkEdge],
+    table: &str,
     cutoff: &str,
-) -> Result<HardDeletePass, sqlx::Error> {
-    let mut pass = HardDeletePass::default();
-    for table in sweep_tables(schema, edges) {
-        match hard_delete_table(pool, &table, cutoff).await {
-            Ok(affected) => pass.deleted += affected,
-            Err(error) if is_fk_violation(&error) => pass.blocked.push(table),
-            Err(error) => return Err(error),
+) -> Result<ModelDeleteOutcome, ModelDeleteError> {
+    let seed_exists: bool = sqlx::query_scalar(&hard_delete_seed_exists_sql(table, cutoff))
+        .fetch_one(pool)
+        .await?;
+    if !seed_exists {
+        return Ok(ModelDeleteOutcome::default());
+    }
+    let parent_pk = schema.pk_column(table);
+
+    // L1: direct CASCADE children of the due seeds (subquery-seeded).
+    let mut collected: HashMap<String, HashSet<RowPk>> = HashMap::new();
+    for edge in cascade.iter().filter(|e| e.parent_table == table) {
+        let sql = cascade_seed_children_sql(
+            &edge.child_table,
+            schema.pk_column(&edge.child_table),
+            &edge.fk_column,
+            table,
+            parent_pk,
+            cutoff,
+        );
+        for row in sqlx::query(&sql).fetch_all(pool).await? {
+            collected
+                .entry(edge.child_table.clone())
+                .or_default()
+                .insert(decode_child_pk(&row)?);
         }
     }
-    Ok(pass)
-}
 
-/// Joint retry for blocked tables: one transaction, deferred FK checks.
-///
-/// Cracks FK cycles (no table order deletes `projects` + `states`
-/// tombstones with separate per-table `DELETE`s) and cross-phase
-/// stragglers (a named parent whose sweep children deleted late in the
-/// pass). Every constraint is `DEFERRABLE INITIALLY DEFERRED`, so a
-/// consistent tombstoned set commits cleanly whatever the statement
-/// order; a tombstoned parent with *live* children still fails loudly
-/// with the FK violation (the pinned PIDASHCONV-928 divergence from the
-/// Collector, which would delete the live children). Returns per-table
-/// row counts for phase attribution; any error rolls the whole retry
-/// back and propagates.
-pub async fn run_retry_hard_deletes(
-    pool: &PgPool,
-    tables: &[String],
-    cutoff: &str,
-) -> Result<Vec<(String, u64)>, sqlx::Error> {
+    // L2+: transitive closure over collected ids (visited-set fixpoint;
+    // each round must add a row to continue, so cycles terminate).
+    loop {
+        let frontier: Vec<(String, Vec<RowPk>)> = collected
+            .iter()
+            .map(|(t, ids)| (t.clone(), ids.iter().copied().collect()))
+            .collect();
+        let mut grew = false;
+        for edge in cascade.iter() {
+            let Some(parent_ids) = frontier
+                .iter()
+                .find(|(t, _)| t == &edge.parent_table)
+                .map(|(_, ids)| ids)
+            else {
+                continue;
+            };
+            if parent_ids.is_empty() {
+                continue;
+            }
+            let child_pk_col = schema.pk_column(&edge.child_table);
+            for chunk in parent_ids.chunks(ID_CHUNK) {
+                let sql = cascade_collected_children_sql(
+                    &edge.child_table,
+                    child_pk_col,
+                    &edge.fk_column,
+                    chunk,
+                );
+                for row in sqlx::query(&sql).fetch_all(pool).await? {
+                    if collected
+                        .entry(edge.child_table.clone())
+                        .or_default()
+                        .insert(decode_child_pk(&row)?)
+                    {
+                        grew = true;
+                    }
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    // PROTECT pre-check, before the transaction opens: seed-subquery form
+    // for this model's own seeds, id-list form for collected parents.
+    for edge in protect.iter() {
+        if edge.parent_table == table {
+            let hit: bool = sqlx::query_scalar(&protect_seed_check_sql(
+                &edge.child_table,
+                &edge.fk_column,
+                table,
+                parent_pk,
+                cutoff,
+            ))
+            .fetch_one(pool)
+            .await?;
+            if hit {
+                return Err(ModelDeleteError::Protected {
+                    parent_table: table.to_owned(),
+                    child_table: edge.child_table.clone(),
+                    fk_column: edge.fk_column.clone(),
+                });
+            }
+        }
+        if let Some(ids) = collected.get(&edge.parent_table) {
+            let ids: Vec<RowPk> = ids.iter().copied().collect();
+            for chunk in ids.chunks(ID_CHUNK) {
+                if chunk.is_empty() {
+                    continue;
+                }
+                let hit: bool = sqlx::query_scalar(&protect_collected_check_sql(
+                    &edge.child_table,
+                    &edge.fk_column,
+                    chunk,
+                ))
+                .fetch_one(pool)
+                .await?;
+                if hit {
+                    return Err(ModelDeleteError::Protected {
+                        parent_table: edge.parent_table.clone(),
+                        child_table: edge.child_table.clone(),
+                        fk_column: edge.fk_column.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    // The Collector's per-model transaction: SET_NULL updates first (as
+    // `Collector.delete` orders field updates before deletes), then the
+    // seed predicate DELETE (fixture shape) plus id-list DELETEs for
+    // collected rows (which may be live). Statement order inside is
+    // irrelevant — every constraint is deferred to the commit.
     let mut tx = pool.begin().await?;
-    let mut per_table = Vec::with_capacity(tables.len());
-    for table in tables {
-        let affected = sqlx::query(&hard_delete_before_sql(table, cutoff))
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-        per_table.push((table.clone(), affected));
+    let mut outcome = ModelDeleteOutcome::default();
+    for edge in set_null.iter() {
+        if edge.parent_table == table {
+            let sql = null_fk_emulation_seed_sql(
+                &edge.child_table,
+                &edge.fk_column,
+                table,
+                parent_pk,
+                cutoff,
+            );
+            outcome.nulled += sqlx::query(&sql).execute(&mut *tx).await?.rows_affected();
+        }
+        if let Some(ids) = collected.get(&edge.parent_table) {
+            let ids: Vec<RowPk> = ids.iter().copied().collect();
+            for chunk in ids.chunks(ID_CHUNK) {
+                if chunk.is_empty() {
+                    continue;
+                }
+                let sql = null_fk_emulation_ids_sql(&edge.child_table, &edge.fk_column, chunk);
+                outcome.nulled += sqlx::query(&sql).execute(&mut *tx).await?.rows_affected();
+            }
+        }
+    }
+    let seeds_removed = sqlx::query(&hard_delete_before_sql(table, cutoff))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if seeds_removed > 0 {
+        outcome.deleted.push((table.to_owned(), seeds_removed));
+    }
+    for (collected_table, ids) in &collected {
+        let ids: Vec<RowPk> = ids.iter().copied().collect();
+        let pk_col = schema.pk_column(collected_table);
+        let mut removed = 0;
+        for chunk in ids.chunks(ID_CHUNK) {
+            if chunk.is_empty() {
+                continue;
+            }
+            removed += sqlx::query(&delete_ids_sql(collected_table, pk_col, chunk))
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        }
+        if removed > 0 {
+            outcome.deleted.push((collected_table.clone(), removed));
+        }
     }
     tx.commit().await?;
-    Ok(per_table)
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -1361,6 +1828,17 @@ mod tests {
             ..cascade.clone()
         };
         assert!(!protect_audit.is_set_null() && !protect_audit.is_do_nothing());
+        assert!(protect_audit.is_protect() && !protect_audit.is_cascade());
+        // Genuine CASCADE edges (the default bucket): the loop pair and an
+        // unlisted pair with any non-SET-NULL DDL rule.
+        assert!(cascade.is_cascade() && !cascade.is_protect());
+        let listed_protect = ReverseRelation {
+            child_table: "issues".to_owned(),
+            fk_column: "assigned_pod_id".to_owned(),
+            ..cascade.clone()
+        };
+        assert!(listed_protect.is_protect() && !listed_protect.is_cascade());
+        assert!(!listed_protect.is_set_null() && !listed_protect.is_do_nothing());
         // A listed SET_NULL pair nulls despite NO ACTION DDL.
         let listed_null = ReverseRelation {
             child_table: "loop_targets".to_owned(),
@@ -1438,11 +1916,13 @@ mod tests {
         schema
     }
 
-    fn edges(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs
-            .iter()
-            .map(|(child, parent)| ((*child).to_owned(), (*parent).to_owned()))
-            .collect()
+    fn fk_edge(child: &str, column: &str, parent: &str) -> FkEdge {
+        FkEdge {
+            child_table: child.to_owned(),
+            fk_column: column.to_owned(),
+            parent_table: parent.to_owned(),
+            delete_rule: "NO ACTION".to_owned(),
+        }
     }
 
     #[test]
@@ -1484,135 +1964,173 @@ mod tests {
     }
 
     #[test]
-    fn sweep_lists_deleted_tables_sorted() {
-        let mut schema = sweep_schema(&["b_table", "a_table"]);
-        schema
-            .columns
-            .insert("users".to_owned(), HashSet::from(["id".to_owned()]));
-        assert_eq!(
-            sweep_tables(&schema, &[]),
-            vec!["a_table".to_owned(), "b_table".to_owned()]
-        );
+    fn sweep_lists_known_tables_in_django_order() {
+        // PIDASHCONV-928: the sweep follows apps.get_models() order, not
+        // topology — the per-model pass absorbs the order (collection +
+        // nulling + one joint commit), and the order fixes the failure
+        // points. `issues` precedes `issue_activities` (a due issue with
+        // activities fails the task: BUG-DEL-3); `pod` sorts last.
+        let schema = sweep_schema(&[
+            "pod",
+            "issues",
+            "issue_activities",
+            "issue_comments",
+            "projects",
+        ]);
+        let ordered = sweep_tables_in_django_order(&schema);
+        let position = |table: &str| ordered.iter().position(|t| t == table).unwrap();
+        assert!(position("projects") < position("issues"));
+        assert!(position("issues") < position("issue_activities"));
+        assert!(position("issue_activities") < position("issue_comments"));
+        assert_eq!(ordered.last().map(String::as_str), Some("pod"));
         assert_eq!(schema.pk_column("whatever"), "id");
     }
 
     #[test]
-    fn sweep_orders_children_before_parents() {
-        // PIDASHCONV-928: the loop pair sorts parent-first
-        // alphabetically; the sweep must still delete the children first.
-        let schema = sweep_schema(&[
-            "loop_jobs",
-            "loop_targets",
-            "loop_user_preferences",
-            "unrelated",
-        ]);
-        let fk = edges(&[
-            ("loop_targets", "loop_jobs"),
-            ("loop_user_preferences", "loop_jobs"),
-        ]);
-        let ordered = sweep_tables(&schema, &fk);
-        let position = |table: &str| ordered.iter().position(|t| t == table).unwrap();
-        assert!(position("loop_targets") < position("loop_jobs"));
-        assert!(position("loop_user_preferences") < position("loop_jobs"));
-        // Alphabetical tie-break among the releasable tables.
-        assert_eq!(ordered[0], "loop_targets");
-        assert_eq!(ordered[1], "loop_user_preferences");
-        // A chain emits leaf-first.
-        let chain = sweep_schema(&["grandparent", "parent", "child"]);
-        let chain_fk = edges(&[("child", "parent"), ("parent", "grandparent")]);
-        assert_eq!(
-            sweep_tables(&chain, &chain_fk),
-            vec![
-                "child".to_owned(),
-                "parent".to_owned(),
-                "grandparent".to_owned()
-            ]
-        );
-    }
-
-    #[test]
-    fn sweep_appends_cycles_and_ignores_foreign_edges() {
-        let mut schema = sweep_schema(&["projects", "states", "issues"]);
+    fn sweep_skips_tables_without_the_marker() {
+        let mut schema = sweep_schema(&["projects"]);
         schema
             .columns
             .insert("users".to_owned(), HashSet::from(["id".to_owned()]));
-        let fk = edges(&[
-            ("projects", "states"),
-            ("states", "projects"),
-            ("issues", "projects"),
-            ("issues", "users"),
-            ("issues", "issues"),
-        ]);
-        // `issues` has no sweep children, so it sorts first; the
-        // `projects` ↔ `states` cycle has no valid order and is appended
-        // alphabetically for the joint retry to crack.
         assert_eq!(
-            sweep_tables(&schema, &fk),
+            sweep_tables_in_django_order(&schema),
+            vec!["projects".to_owned()]
+        );
+    }
+
+    #[test]
+    fn sweep_appends_unknown_tables_alphabetically() {
+        // A migration adding a soft-delete model is still swept, at an
+        // approximate (appended) position.
+        let schema = sweep_schema(&["zzz_new_model", "projects", "aaa_new_model"]);
+        assert_eq!(
+            sweep_tables_in_django_order(&schema),
             vec![
-                "issues".to_owned(),
                 "projects".to_owned(),
-                "states".to_owned()
+                "aaa_new_model".to_owned(),
+                "zzz_new_model".to_owned()
             ]
         );
     }
 
-    #[derive(Debug)]
-    struct CodedDbError {
-        message: String,
-        code: Option<String>,
-    }
-
-    impl std::fmt::Display for CodedDbError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.message)
+    #[test]
+    fn sweep_order_freeze_covers_the_named_tables() {
+        assert_eq!(HARD_DELETE_SWEEP_TABLES.len(), 113);
+        for table in HARD_DELETE_NAMED_TABLES {
+            assert!(
+                HARD_DELETE_SWEEP_TABLES.contains(&table),
+                "named table {table} missing from the sweep freeze"
+            );
         }
-    }
-
-    impl std::error::Error for CodedDbError {}
-
-    impl sqlx::error::DatabaseError for CodedDbError {
-        fn message(&self) -> &str {
-            &self.message
-        }
-
-        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
-            self.code.as_deref().map(std::borrow::Cow::Borrowed)
-        }
-
-        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
-            self
-        }
-
-        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
-            self
-        }
-
-        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
-            self
-        }
-
-        fn kind(&self) -> sqlx::error::ErrorKind {
-            sqlx::error::ErrorKind::ForeignKeyViolation
-        }
+        // Failure-point pins (see the probe matrix in the services docs):
+        // `issues` before `issue_activities`, provider account before its
+        // binding, `pod` last.
+        let position = |table: &str| {
+            HARD_DELETE_SWEEP_TABLES
+                .iter()
+                .position(|t| *t == table)
+                .unwrap()
+        };
+        assert!(position("issues") < position("issue_activities"));
+        assert!(position("git_provider_accounts") < position("git_repository_bindings"));
+        assert_eq!(HARD_DELETE_SWEEP_TABLES[112], "pod");
     }
 
     #[test]
-    fn fk_violation_matches_only_23503() {
-        let fk = sqlx::Error::Database(Box::new(CodedDbError {
-            message: "violates foreign key constraint".to_owned(),
-            code: Some("23503".to_owned()),
-        }));
-        assert!(is_fk_violation(&fk));
-        let unique = sqlx::Error::Database(Box::new(CodedDbError {
-            message: "duplicate key".to_owned(),
-            code: Some("23505".to_owned()),
-        }));
-        assert!(!is_fk_violation(&unique));
-        let codeless = sqlx::Error::Database(Box::new(CodedDbError {
-            message: "boom".to_owned(),
-            code: None,
-        }));
-        assert!(!is_fk_violation(&codeless));
-        assert!(!is_fk_violation(&sqlx::Error::RowNotFound));
+    fn emulation_builders_match_collector_shapes() {
+        // L1 collection: subquery-seeded, no child-side scope — not even
+        // `deleted_at IS NULL`.
+        assert_eq!(
+            cascade_seed_children_sql("loop_targets", "id", "job_id", "loop_jobs", "id", CUTOFF),
+            "SELECT \"id\" AS pk FROM \"loop_targets\" WHERE \"job_id\" IN \
+             (SELECT \"id\" FROM \"loop_jobs\" WHERE \"loop_jobs\".\"deleted_at\" < \
+             '2026-08-29 06:00:00+00:00')"
+        );
+        // Transitive collection over one chunk of parent ids.
+        let one = RowPk::Uuid(uuid("12345678-1234-1234-1234-1234567890ab"));
+        let two = RowPk::Int(7);
+        assert_eq!(
+            cascade_collected_children_sql("loop_targets", "id", "job_id", &[one, two]),
+            "SELECT \"id\" AS \"pk\" FROM \"loop_targets\" WHERE \"job_id\" IN \
+             ('12345678-1234-1234-1234-1234567890ab', 7)"
+        );
+        // Empty-seed short-circuit.
+        assert_eq!(
+            hard_delete_seed_exists_sql("issues", CUTOFF),
+            "SELECT EXISTS(SELECT 1 FROM \"issues\" WHERE \"issues\".\"deleted_at\" < \
+             '2026-08-29 06:00:00+00:00')"
+        );
+        // PROTECT pre-checks: seed-subquery + id-list forms.
+        assert_eq!(
+            protect_seed_check_sql("issues", "assigned_pod_id", "pod", "id", CUTOFF),
+            "SELECT EXISTS(SELECT 1 FROM \"issues\" WHERE \"assigned_pod_id\" IN \
+             (SELECT \"id\" FROM \"pod\" WHERE \"pod\".\"deleted_at\" < \
+             '2026-08-29 06:00:00+00:00'))"
+        );
+        let probe = protect_collected_check_sql("issues", "assigned_pod_id", &[one]);
+        assert!(probe.starts_with("SELECT EXISTS("), "{probe}");
+        assert!(
+            probe.contains("\"assigned_pod_id\" IN ('12345678-1234-1234-1234-1234567890ab')"),
+            "{probe}"
+        );
+        // Collector SET_NULL: unscoped (no deleted_at / manager guards)
+        // and no updated_at touch — unlike null_fk_bulk_sql.
+        assert_eq!(
+            null_fk_emulation_seed_sql(
+                "issues",
+                "estimate_point_id",
+                "estimate_points",
+                "id",
+                CUTOFF
+            ),
+            "UPDATE \"issues\" SET \"estimate_point_id\" = NULL WHERE \"estimate_point_id\" IN \
+             (SELECT \"id\" FROM \"estimate_points\" WHERE \"estimate_points\".\"deleted_at\" < \
+             '2026-08-29 06:00:00+00:00')"
+        );
+        assert_eq!(
+            null_fk_emulation_ids_sql("issues", "estimate_point_id", &[one]),
+            "UPDATE \"issues\" SET \"estimate_point_id\" = NULL WHERE \"estimate_point_id\" IN \
+             ('12345678-1234-1234-1234-1234567890ab')"
+        );
+        // Id-list delete (live collected rows need no deleted_at predicate).
+        assert_eq!(
+            delete_ids_sql("states", "id", &[one, two]),
+            "DELETE FROM \"states\" WHERE \"id\" IN \
+             ('12345678-1234-1234-1234-1234567890ab', 7)"
+        );
+    }
+
+    #[test]
+    fn classify_delete_edges_buckets_by_on_delete() {
+        let schema = SchemaInfo::default();
+        let edges = vec![
+            fk_edge("loop_targets", "job_id", "loop_jobs"),
+            fk_edge("projects", "default_state_id", "states"),
+            fk_edge("issues", "assigned_pod_id", "pod"),
+            fk_edge("issue_activities", "issue_id", "issues"),
+            fk_edge("webhook_logs", "created_by_id", "users"),
+        ];
+        let (cascade, set_null, protect) = classify_delete_edges(&edges, &schema);
+        assert_eq!(cascade.len(), 1);
+        assert_eq!(cascade[0].child_table, "loop_targets");
+        assert_eq!(set_null.len(), 2);
+        assert_eq!(protect.len(), 1);
+        assert_eq!(protect[0].child_table, "issues");
+        // DO_NOTHING edges are dropped (never collected, commit-enforced).
+        assert_eq!(cascade.len() + set_null.len() + protect.len(), 4);
+    }
+
+    #[test]
+    fn protected_error_names_table_and_key() {
+        let error = ModelDeleteError::Protected {
+            parent_table: "pod".to_owned(),
+            child_table: "issues".to_owned(),
+            fk_column: "assigned_pod_id".to_owned(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "cannot delete some instances of table \"pod\" because they are referenced \
+             through protected foreign keys: \"issues\".\"assigned_pod_id\""
+        );
     }
 }
