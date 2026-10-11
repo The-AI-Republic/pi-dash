@@ -6187,6 +6187,88 @@ export interface ParityDriver {
   pagesGatingOpenRow(title: string): Promise<void>;
   /** Go back to the list (client-side when the row opened it that way); settles the list. */
   pagesGatingGoBack(): Promise<void>;
+
+  // --- Pages list discovery (NEWFRONT-312, PAGE-001-006).
+  /** Open the project pages list; resolves once list, gate, or empty state settles. */
+  pagesListOpenProjectPages(workspaceSlug: string, projectId: string, query?: string): Promise<void>;
+  /** Whether the feature-off guidance shows instead of the list. */
+  pagesListGateVisible(): Promise<boolean>;
+  /** Whether the gate's management shortcut is enabled (project admins). */
+  pagesListGateManageEnabled(): Promise<boolean>;
+  /** Follow the gate's management shortcut; resolves once project features show. */
+  pagesListGateOpenManage(): Promise<void>;
+  /** Whether the visibility tab strip renders. */
+  pagesListTabsVisible(): Promise<boolean>;
+  /** Visible tab labels in order, or [] when the strip is absent. */
+  pagesListTabs(): Promise<string[]>;
+  /** Active tab key from the URL (`public` when the value is missing or unknown). */
+  pagesListActiveTab(): Promise<PagesListTab>;
+  /** Tab whose link styling differs from its siblings, or null when none does. */
+  pagesListMarkedTab(): Promise<PagesListTab | null>;
+  /** Href of one tab link, or null when the strip is absent. */
+  pagesListTabHref(tab: PagesListTab): Promise<string | null>;
+  /** Click one tab; resolves once its rows settle. */
+  pagesListClickTab(tab: PagesListTab): Promise<void>;
+  /** Row titles in display order. */
+  pagesListRowTitles(): Promise<string[]>;
+  /** Open the collapsed search control; resolves once the input shows. */
+  pagesListSearchOpen(): Promise<void>;
+  /** Whether the search input is currently expanded. */
+  pagesListSearchExpanded(): Promise<boolean>;
+  /** Type into the expanded search input (replaces content). */
+  pagesListSearchType(text: string): Promise<void>;
+  /** Current search input value, or null when collapsed. */
+  pagesListSearchValue(): Promise<string | null>;
+  /** Press Escape in the search input. */
+  pagesListSearchEscape(): Promise<void>;
+  /** Click the expanded search's clear control. */
+  pagesListSearchClear(): Promise<void>;
+  /** Click the active tab (outside the search input) without navigating. */
+  pagesListClickAway(): Promise<void>;
+  /** Whether the no-results state shows. */
+  pagesListNoResultsVisible(): Promise<boolean>;
+  /** Current sort control state (key label plus direction). */
+  pagesListSortState(): Promise<{ label: string; descending: boolean }>;
+  /** Open the sort menu; resolves once its options render. */
+  pagesListSortOpen(): Promise<void>;
+  /** Visible sort menu option labels, in order. */
+  pagesListSortOptions(): Promise<string[]>;
+  /** Choose one sort key; resolves once rows re-settle. */
+  pagesListSortChooseKey(label: string): Promise<void>;
+  /** Choose one sort direction; resolves once rows re-settle (no-op when current). */
+  pagesListSortChooseDirection(label: string): Promise<void>;
+  /** Open the filters panel; resolves once its sections render. */
+  pagesListFiltersOpen(): Promise<void>;
+  /** Close the filters panel. */
+  pagesListFiltersClose(): Promise<void>;
+  /** Toggle the favorites-only option. */
+  pagesListFilterToggleFavorites(): Promise<void>;
+  /** Toggle one created-date option by label. */
+  pagesListFilterChooseDate(label: string): Promise<void>;
+  /** Search the filters panel (narrows creator options). */
+  pagesListFilterSearch(text: string): Promise<void>;
+  /** Creator option labels currently offered, in order. */
+  pagesListFilterCreatorOptions(): Promise<string[]>;
+  /** Pick one creator option by label. */
+  pagesListFilterPickCreator(label: string): Promise<void>;
+  /** Applied-filter chip texts in order, or [] when none render. */
+  pagesListChips(): Promise<string[]>;
+  /** Remove one applied chip by its key label; resolves once rows re-settle. */
+  pagesListChipRemove(keyLabel: string): Promise<void>;
+  /** Clear all applied filters; resolves once rows re-settle. */
+  pagesListClearAll(): Promise<void>;
+  /** Row anatomy snapshot for one title (owner, visibility, date, star, menu). */
+  pagesListRowDetail(title: string): Promise<PagesListRowDetail>;
+  /** Click one row; resolves once its detail shows. */
+  pagesListClickRow(title: string): Promise<void>;
+  /** Dismiss any open menu. */
+  pagesListDismissMenus(): Promise<void>;
+  /** Overflow menu item labels for one row, in order. */
+  pagesListRowMenuItems(title: string): Promise<string[]>;
+  /** Right-click one row; resolves once the context menu shows. */
+  pagesListRowRightClick(title: string): Promise<void>;
+  /** Visible context-menu item labels, in order. */
+  pagesListContextMenuItems(): Promise<string[]>;
 }
 
 /** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */
@@ -7412,4 +7494,27 @@ export interface ModulesGateFacts {
   buttonDisabled: boolean;
   /** Whether themed art renders. */
   hasArt: boolean;
+}
+
+/** Pages list tab keys (NEWFRONT-312, PAGE-002). */
+export type PagesListTab = "public" | "private" | "archived";
+
+/** One list row's anatomy snapshot (NEWFRONT-312, PAGE-006). */
+export interface PagesListRowDetail {
+  /** Displayed title (untitled fallback already applied). */
+  title: string;
+  /** Whether the leading mark renders. */
+  markOffered: boolean;
+  /** Owner tooltip content after hovering the avatar, or null when absent. */
+  owner: string | null;
+  /** Visibility tooltip content after hovering the glyph, or null when absent. */
+  visibility: string | null;
+  /** Date tooltip content after hovering the info mark, or null when absent. */
+  createdOn: string | null;
+  /** Whether the favorite star renders. */
+  starOffered: boolean;
+  /** Whether the star shows selected. */
+  starred: boolean;
+  /** Whether the overflow menu trigger renders. */
+  menuOffered: boolean;
 }

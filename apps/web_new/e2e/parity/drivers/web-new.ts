@@ -112,6 +112,8 @@ import type {
   ModulesBreadcrumb,
   ModulesChip,
   ModulesGateFacts,
+  PagesListRowDetail,
+  PagesListTab,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -9680,5 +9682,167 @@ export class WebNewDriver implements ParityDriver {
 
   async modulesManualSortWarningVisible(): Promise<boolean> {
     return todo("modulesManualSortWarningVisible");
+  }
+
+  // --- Pages list discovery (NEWFRONT-312, PAGE-001-006).
+
+  async pagesListOpenProjectPages(_workspaceSlug: string, _projectId: string, _query?: string): Promise<void> {
+    return todo("pagesListOpenProjectPages");
+  }
+
+  async pagesListGateVisible(): Promise<boolean> {
+    return todo("pagesListGateVisible");
+  }
+
+  async pagesListGateManageEnabled(): Promise<boolean> {
+    return todo("pagesListGateManageEnabled");
+  }
+
+  async pagesListGateOpenManage(): Promise<void> {
+    return todo("pagesListGateOpenManage");
+  }
+
+  async pagesListTabsVisible(): Promise<boolean> {
+    return todo("pagesListTabsVisible");
+  }
+
+  async pagesListTabs(): Promise<string[]> {
+    return todo("pagesListTabs");
+  }
+
+  async pagesListActiveTab(): Promise<PagesListTab> {
+    return todo("pagesListActiveTab");
+  }
+
+  async pagesListMarkedTab(): Promise<PagesListTab | null> {
+    return todo("pagesListMarkedTab");
+  }
+
+  async pagesListTabHref(_tab: PagesListTab): Promise<string | null> {
+    return todo("pagesListTabHref");
+  }
+
+  async pagesListClickTab(_tab: PagesListTab): Promise<void> {
+    return todo("pagesListClickTab");
+  }
+
+  async pagesListRowTitles(): Promise<string[]> {
+    return todo("pagesListRowTitles");
+  }
+
+  async pagesListSearchOpen(): Promise<void> {
+    return todo("pagesListSearchOpen");
+  }
+
+  async pagesListSearchExpanded(): Promise<boolean> {
+    return todo("pagesListSearchExpanded");
+  }
+
+  async pagesListSearchType(_text: string): Promise<void> {
+    return todo("pagesListSearchType");
+  }
+
+  async pagesListSearchValue(): Promise<string | null> {
+    return todo("pagesListSearchValue");
+  }
+
+  async pagesListSearchEscape(): Promise<void> {
+    return todo("pagesListSearchEscape");
+  }
+
+  async pagesListSearchClear(): Promise<void> {
+    return todo("pagesListSearchClear");
+  }
+
+  async pagesListClickAway(): Promise<void> {
+    return todo("pagesListClickAway");
+  }
+
+  async pagesListNoResultsVisible(): Promise<boolean> {
+    return todo("pagesListNoResultsVisible");
+  }
+
+  async pagesListSortState(): Promise<{ label: string; descending: boolean }> {
+    return todo("pagesListSortState");
+  }
+
+  async pagesListSortOpen(): Promise<void> {
+    return todo("pagesListSortOpen");
+  }
+
+  async pagesListSortOptions(): Promise<string[]> {
+    return todo("pagesListSortOptions");
+  }
+
+  async pagesListSortChooseKey(_label: string): Promise<void> {
+    return todo("pagesListSortChooseKey");
+  }
+
+  async pagesListSortChooseDirection(_label: string): Promise<void> {
+    return todo("pagesListSortChooseDirection");
+  }
+
+  async pagesListFiltersOpen(): Promise<void> {
+    return todo("pagesListFiltersOpen");
+  }
+
+  async pagesListFiltersClose(): Promise<void> {
+    return todo("pagesListFiltersClose");
+  }
+
+  async pagesListFilterToggleFavorites(): Promise<void> {
+    return todo("pagesListFilterToggleFavorites");
+  }
+
+  async pagesListFilterChooseDate(_label: string): Promise<void> {
+    return todo("pagesListFilterChooseDate");
+  }
+
+  async pagesListFilterSearch(_text: string): Promise<void> {
+    return todo("pagesListFilterSearch");
+  }
+
+  async pagesListFilterCreatorOptions(): Promise<string[]> {
+    return todo("pagesListFilterCreatorOptions");
+  }
+
+  async pagesListFilterPickCreator(_label: string): Promise<void> {
+    return todo("pagesListFilterPickCreator");
+  }
+
+  async pagesListChips(): Promise<string[]> {
+    return todo("pagesListChips");
+  }
+
+  async pagesListChipRemove(_keyLabel: string): Promise<void> {
+    return todo("pagesListChipRemove");
+  }
+
+  async pagesListClearAll(): Promise<void> {
+    return todo("pagesListClearAll");
+  }
+
+  async pagesListRowDetail(_title: string): Promise<PagesListRowDetail> {
+    return todo("pagesListRowDetail");
+  }
+
+  async pagesListClickRow(_title: string): Promise<void> {
+    return todo("pagesListClickRow");
+  }
+
+  async pagesListDismissMenus(): Promise<void> {
+    return todo("pagesListDismissMenus");
+  }
+
+  async pagesListRowMenuItems(_title: string): Promise<string[]> {
+    return todo("pagesListRowMenuItems");
+  }
+
+  async pagesListRowRightClick(_title: string): Promise<void> {
+    return todo("pagesListRowRightClick");
+  }
+
+  async pagesListContextMenuItems(): Promise<string[]> {
+    return todo("pagesListContextMenuItems");
   }
 }
