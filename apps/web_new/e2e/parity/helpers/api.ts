@@ -13415,3 +13415,78 @@ export async function serverProjectEstimate(
   if (typeof record.estimate !== "string") throw new Error("[parity] project estimate carried no string id.");
   return record.estimate;
 }
+
+
+// Modules cross-cutting parity helpers (NEWFRONT-311, rows MOD-036..043).
+//
+// Added additively to the harness (never altering the helpers above). The
+// cross-cutting scenarios flip the project's modules feature flag through
+// the settings UI and read the flag back here, resolve single modules for
+// deep-link and no-live-update assertions, and read a work item's module
+// membership for palette-picker preselection agreement. Fixture creation
+// reuses the merged helpers (serverCreateModule, archivesPatchModule,
+// serverProjectModules, serverCreateIssue, serverAddIssuesToModule).
+// ---------------------------------------------------------------------------
+
+/** One module's identity facts the cross-cutting scenarios assert on. */
+export interface ModulesXModuleFacts {
+  id: string;
+  name: string;
+  status: string;
+}
+
+/** Flip the project's modules feature flag (the settings toggle's PATCH). */
+export async function modulesXSetModuleView(
+  workspaceSlug: string,
+  projectId: string,
+  enabled: boolean,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    { module_view: enabled }
+  );
+  if (!res.ok) throw new Error(`[parity] module_view patch failed with HTTP ${res.status}.`);
+}
+
+/** One module's live facts (name + lifecycle status) by id. */
+export async function modulesXModuleDetail(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ModulesXModuleFacts> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] module read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string" || typeof rec["name"] !== "string" || typeof rec["status"] !== "string")
+    throw new Error("[parity] module row carried no string id/name/status.");
+  return { id: rec["id"] as string, name: rec["name"] as string, status: rec["status"] as string };
+}
+
+/** Module ids a work item currently belongs to (palette-picker agreement). */
+export async function modulesXIssueModuleIds(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string[]> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] issue read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const ids = rec["module_ids"];
+  if (!Array.isArray(ids) || !ids.every((id) => typeof id === "string"))
+    throw new Error("[parity] issue row carried no string-array module_ids.");
+  return ids as string[];
+}

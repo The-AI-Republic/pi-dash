@@ -5249,6 +5249,111 @@ export interface ParityDriver {
   estimatesAnalyticsPickXAxis(label: string): Promise<void>;
   /** Cell texts of the Customized Insights data table, row by row (header first). */
   estimatesAnalyticsTableRows(): Promise<string[][]>;
+
+  // -------------------------------------------------------------------------
+  // Modules cross-cutting (NEWFRONT-311, rows MOD-036..043).
+  // Settings toggle + flag gate, palette creation and module menus, deep
+  // links, and the no-live-update / keyboard / no-drag-export /
+  // desktop / edition negatives. Appended additively; sibling modules*
+  // methods are untouched. The `modulesX` prefix marks the cross-cutting
+  // child's additions so parallel children never collide on a name.
+  // -------------------------------------------------------------------------
+
+  // --- settings toggle + flag gate (MOD-036) ---
+  /** Open the project features settings page for modules; resolves once settled. */
+  modulesXOpenSettingsModules(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Whether the settings page shows the not-authorized notice instead of the toggle. */
+  modulesXSettingsShowsNotAuthorized(): Promise<boolean>;
+  /** The modules toggle state, or null when no toggle renders. */
+  modulesXModulesToggleState(): Promise<boolean | null>;
+  /** Flip the modules toggle; resolves once the flag PATCH answers. */
+  modulesXFlipModulesToggle(): Promise<void>;
+  /** Open the project's modules list; resolves once rows/empty/gate settle. */
+  modulesXOpenModulesList(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Whether the list shows the flag-off gate instead of rows. */
+  modulesXListGateVisible(): Promise<boolean>;
+  /** The gate's Manage-features button visibility + disabled state. */
+  modulesXGateManageFeaturesState(): Promise<{ visible: boolean; disabled: boolean }>;
+  /** Module row names in display order on the list layout. */
+  modulesXListNames(): Promise<string[]>;
+
+  // --- create/edit dialog (MOD-037/039/040) ---
+  /** Whether the module create/edit dialog is open. */
+  modulesXModuleDialogOpen(): Promise<boolean>;
+  /** Fill the open create dialog's name field. */
+  modulesXFillCreateName(name: string): Promise<void>;
+  /** Submit the open create dialog; resolves once the create answers. */
+  modulesXSubmitCreate(): Promise<void>;
+  /** Focus descriptors walking Tab from the dialog's initial focus. */
+  modulesXDialogTabSequence(): Promise<string[]>;
+  /** Descriptor of the currently focused element (dialog focus settle). */
+  modulesXDialogFocused(): Promise<string>;
+  /** Open the row menu for `name` and pick Edit; resolves once the dialog opens. */
+  modulesXOpenEditDialogFromRow(name: string): Promise<void>;
+
+  // --- palette module menus (MOD-037) ---
+  /** Module entries in the open palette module menu, with icon + check marks. */
+  modulesXPaletteModuleMenuItems(): Promise<ModulesXPaletteMenuItem[]>;
+  /** Activate the palette module-menu entry `name` (jump navigation). */
+  modulesXActivatePaletteModuleMenuItem(name: string): Promise<void>;
+
+  // --- deep links (MOD-038) ---
+  /** Open a module's detail page directly; resolves once content/empty settle. */
+  modulesXOpenModuleDetail(workspaceSlug: string, projectId: string, moduleId: string): Promise<void>;
+  /** The module name the detail page shows, or null when it shows none. */
+  modulesXDetailName(): Promise<string | null>;
+  /** Whether detail shows the missing-module empty state. */
+  modulesXDetailMissingVisible(): Promise<boolean>;
+  /** Click the missing-module empty state's back button; resolves once the list loads. */
+  modulesXMissingModuleBackToList(): Promise<void>;
+  /** Whether the project access wall shows instead of the module content. */
+  modulesXProjectAccessWallVisible(): Promise<boolean>;
+  /** Open the modules list carrying the peek parameter for `moduleId`. */
+  modulesXOpenModulesListWithPeek(workspaceSlug: string, projectId: string, moduleId: string): Promise<void>;
+  /** The module name the peek panel shows, or null when no panel shows. */
+  modulesXPeekName(): Promise<string | null>;
+
+  // --- keyboard + list search (MOD-040) ---
+  /** Press a key with neutral page focus (Escape/Tab/single letters). */
+  modulesXPressKey(key: string): Promise<void>;
+  /** Press a two-key palette sequence back-to-back (e.g. "nm" for creation). */
+  modulesXPressKeySequence(sequence: string): Promise<void>;
+  /** Expand the list search field via its icon. */
+  modulesXOpenListSearch(): Promise<void>;
+  /** Fill the expanded list search field. */
+  modulesXFillListSearch(text: string): Promise<void>;
+  /** Whether the search field is expanded, plus its current query. */
+  modulesXListSearchState(): Promise<{ expanded: boolean; query: string }>;
+
+  // --- drag + layout + export absence (MOD-041) ---
+  /** Drag the list row `sourceName` onto the row `targetName`. */
+  modulesXAttemptRowDrag(sourceName: string, targetName: string): Promise<void>;
+  /** Switch the modules layout; resolves once the new layout settles. */
+  modulesXSwitchModulesLayout(layout: "list" | "board" | "timeline"): Promise<void>;
+  /** Module card names in display order on the board layout. */
+  modulesXBoardNames(): Promise<string[]>;
+  /** Drag the board card `sourceName` onto the card `targetName`. */
+  modulesXAttemptCardDrag(sourceName: string, targetName: string): Promise<void>;
+  /** Whether any export/import/print action shows on the named surface. */
+  modulesXExportActionsPresent(scope: "list" | "detail" | "dialog"): Promise<boolean>;
+  /** Entry labels of the opened row menu for `name` (menu closes after). */
+  modulesXRowMenuEntries(name: string): Promise<string[]>;
+
+  // --- desktop + edition negatives (MOD-042/043) ---
+  /** API paths the modules list entry fetches (traffic-allowlist spy). */
+  modulesXEntryRequestPaths(workspaceSlug: string, projectId: string): Promise<string[]>;
+  /** Whether the first list row shows a favorite toggle. */
+  modulesXRowFavoriteToggleVisible(): Promise<boolean>;
+  /** Open the list filters menu; resolves true when its panel shows. */
+  modulesXFiltersMenuOpens(): Promise<boolean>;
+  /** Whether the timeline layout renders module bars. */
+  modulesXTimelineBarsPresent(): Promise<boolean>;
+  /** Whether the detail page shows the analytics sidebar. */
+  modulesXAnalyticsSidebarVisible(): Promise<boolean>;
+  /** Whether the detail sidebar shows the links section. */
+  modulesXLinksSectionVisible(): Promise<boolean>;
+  /** Whether edition/desktop gate markers show on the named surface. */
+  modulesXEditionGateMarkersPresent(scope: "list" | "detail"): Promise<boolean>;
 }
 
 /** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */
@@ -6176,4 +6281,14 @@ export interface IntakeXApiRequest {
   method: string;
   /** Full request URL. */
   url: string;
+}
+
+/** One module entry in an open palette module menu (NEWFRONT-311, MOD-037). */
+export interface ModulesXPaletteMenuItem {
+  /** Module display name. */
+  name: string;
+  /** Whether the entry shows its status icon. */
+  hasIcon: boolean;
+  /** Whether the entry shows the selected check mark. */
+  hasCheck: boolean;
 }
