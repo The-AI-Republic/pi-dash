@@ -13,6 +13,7 @@ import {
   browserSessionCookies,
   createProjectViaApi,
   createWorkspaceForProjects,
+  drainWorkspaceSeed,
   markOnboardedForProjects,
   projectMemberRole,
   seatFreshMember,
@@ -31,7 +32,9 @@ test(
   async ({ driver }) => {
     const owner = await signUpAuthedSession("parity-join");
     const suffix = uniqueSuffixForProjects();
-    const ws = await createWorkspaceForProjects(owner, { name: `Join WS ${suffix}`, slug: `join-${suffix}` });
+    const wsName = `Join WS ${suffix}`;
+    const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `join-${suffix}` });
+    await drainWorkspaceSeed(owner, ws.slug, wsName);
     await markOnboardedForProjects(owner);
     const projId = await createProjectViaApi(owner, ws.slug, {
       name: "Joinable Project",
@@ -65,7 +68,9 @@ test(
   async ({ driver }) => {
     const owner = await signUpAuthedSession("parity-leave");
     const suffix = uniqueSuffixForProjects();
-    const ws = await createWorkspaceForProjects(owner, { name: `Leave WS ${suffix}`, slug: `leave-${suffix}` });
+    const wsName = `Leave WS ${suffix}`;
+    const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `leave-${suffix}` });
+    await drainWorkspaceSeed(owner, ws.slug, wsName);
     await markOnboardedForProjects(owner);
     const projId = await createProjectViaApi(owner, ws.slug, {
       name: "Leavable Project",

@@ -12,6 +12,7 @@ import {
   browserSessionCookies,
   createProjectViaApi,
   createWorkspaceForProjects,
+  drainWorkspaceSeed,
   markOnboardedForProjects,
   projectByName,
   projectFeatureFlags,
@@ -29,7 +30,9 @@ const COVER = ["SHELL-042"];
 async function freshOwnerWorkspace(prefix: string) {
   const owner = await signUpAuthedSession(prefix);
   const suffix = uniqueSuffixForProjects();
-  const ws = await createWorkspaceForProjects(owner, { name: `${prefix} WS ${suffix}`, slug: `${prefix}-${suffix}` });
+  const wsName = `${prefix} WS ${suffix}`;
+  const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `${prefix}-${suffix}` });
+  await drainWorkspaceSeed(owner, ws.slug, wsName);
   await markOnboardedForProjects(owner);
   await setLastWorkspaceForProjects(owner, ws.id);
   return { owner, ws };

@@ -15,6 +15,7 @@ import {
   browserSessionCookies,
   createProjectViaApi,
   createWorkspaceForProjects,
+  drainWorkspaceSeed,
   markOnboardedForProjects,
   projectByName,
   seatFreshMember,
@@ -34,7 +35,9 @@ test(
   async ({ driver }) => {
     const owner = await signUpAuthedSession("parity-arch");
     const suffix = uniqueSuffixForProjects();
-    const ws = await createWorkspaceForProjects(owner, { name: `Arch WS ${suffix}`, slug: `arch-${suffix}` });
+    const wsName = `Arch WS ${suffix}`;
+    const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `arch-${suffix}` });
+    await drainWorkspaceSeed(owner, ws.slug, wsName);
     await markOnboardedForProjects(owner);
     await setLastWorkspaceForProjects(owner, ws.id);
     const projId = await createProjectViaApi(owner, ws.slug, { name: "Archivable Project", identifier: "ARCH" });
@@ -80,7 +83,9 @@ test(
   async ({ driver }) => {
     const owner = await signUpAuthedSession("parity-acard");
     const suffix = uniqueSuffixForProjects();
-    const ws = await createWorkspaceForProjects(owner, { name: `ACard WS ${suffix}`, slug: `acard-${suffix}` });
+    const wsName = `ACard WS ${suffix}`;
+    const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `acard-${suffix}` });
+    await drainWorkspaceSeed(owner, ws.slug, wsName);
     await markOnboardedForProjects(owner);
     await setLastWorkspaceForProjects(owner, ws.id);
     const projId = await createProjectViaApi(owner, ws.slug, { name: "Muted Project", identifier: "MUTD" });
@@ -113,7 +118,9 @@ test(
   async ({ driver }) => {
     const owner = await signUpAuthedSession("parity-del");
     const suffix = uniqueSuffixForProjects();
-    const ws = await createWorkspaceForProjects(owner, { name: `Del WS ${suffix}`, slug: `del-${suffix}` });
+    const wsName = `Del WS ${suffix}`;
+    const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `del-${suffix}` });
+    await drainWorkspaceSeed(owner, ws.slug, wsName);
     await markOnboardedForProjects(owner);
     await setLastWorkspaceForProjects(owner, ws.id);
     // The workspace's default (first) project is delete-protected by the

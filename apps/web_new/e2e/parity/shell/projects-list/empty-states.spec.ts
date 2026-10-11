@@ -10,6 +10,7 @@ import {
   browserSessionCookies,
   createProjectViaApi,
   createWorkspaceForProjects,
+  drainWorkspaceSeed,
   markOnboardedForProjects,
   seatFreshMember,
   setLastWorkspaceForProjects,
@@ -27,7 +28,9 @@ test(
   async ({ driver }) => {
     const owner = await signUpAuthedSession("parity-empty");
     const suffix = uniqueSuffixForProjects();
-    const ws = await createWorkspaceForProjects(owner, { name: `Empty WS ${suffix}`, slug: `empty-${suffix}` });
+    const wsName = `Empty WS ${suffix}`;
+    const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `empty-${suffix}` });
+    await drainWorkspaceSeed(owner, ws.slug, wsName);
     await markOnboardedForProjects(owner);
     await setLastWorkspaceForProjects(owner, ws.id);
 
@@ -61,7 +64,9 @@ test(
   async ({ driver }) => {
     const owner = await signUpAuthedSession("parity-distinct");
     const suffix = uniqueSuffixForProjects();
-    const ws = await createWorkspaceForProjects(owner, { name: `Distinct WS ${suffix}`, slug: `distinct-${suffix}` });
+    const wsName = `Distinct WS ${suffix}`;
+    const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `distinct-${suffix}` });
+    await drainWorkspaceSeed(owner, ws.slug, wsName);
     await markOnboardedForProjects(owner);
     await setLastWorkspaceForProjects(owner, ws.id);
     await createProjectViaApi(owner, ws.slug, { name: "Real Project", identifier: "REAL" });

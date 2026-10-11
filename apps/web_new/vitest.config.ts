@@ -24,9 +24,9 @@ export default defineConfig({
     setupFiles: ["./src/test-setup.ts"],
     // Feature tests live under src. Named checks/ files only: other checks
     // carry node:test self-tests (e.g. coexistence-routes, run via
-    // test:coexistence) that vitest must not sweep up. The parity-env
-    // resolver and parity-guard tests are named likewise: Playwright
-    // specs (*.spec.ts) must never be swept up here.
+    // test:coexistence) that vitest must not sweep up. The parity helper
+    // tests are named likewise: Playwright specs (*.spec.ts) must never be
+    // swept up here.
     include: [
       "src/**/*.test.ts",
       "src/**/*.test.tsx",
@@ -35,6 +35,7 @@ export default defineConfig({
       "e2e/parity/helpers/parity-env.test.ts",
       "e2e/parity/helpers/parity-guard.test.ts",
       "e2e/parity/helpers/api.test.ts",
+      "e2e/parity/helpers/seed-settle.test.ts",
     ],
   },
 });

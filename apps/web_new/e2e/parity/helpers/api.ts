@@ -14692,3 +14692,213 @@ export async function serverPageRequestStatus(
   const res = await apiJson(method, path, sessionCookie, body, apiBase);
   return res.status;
 }
+
+// --- Fresh-workspace seed settling (NEWFRONT-265). ---
+// Appended; existing helpers above are untouched per the shared harness
+// contract. POST /api/workspaces/ unconditionally queues the workspace_seed
+// celery task, which creates exactly one project NAMED AFTER THE WORKSPACE
+// seconds to minutes later (the seed file's "Pi Dash Demo Project" title is
+// discarded; only its description and demo content survive). Specs that
+// provision a fresh workspace and then assert emptiness or exact counts race
+// that task: on a fast worker the seed lands before the assertion and fails
+// it, on a slow worker the same spec passes by luck. These helpers make
+// setup deterministic in both directions: wait for the seed where the
+// scenario needs it (the home dashboard renders its body only once seeded),
+// and drain it where the scenario asserts emptiness or exact counts. The
+// drain deletes through the Django shell because the API refuses to delete
+// the workspace's default project, and the seed project is the default
+// whenever it lands first.
+
+/** Polling budget for seed waits. */
+export interface SeedSettleOptions {
+  /** Total time to wait for the seed project to appear. Defaults to 300_000. */
+  timeoutMs?: number;
+  /** Delay between project-list polls. Defaults to 2000. */
+  pollMs?: number;
+  /** Extra cleanup passes after the first delete. Defaults to 4. */
+  settleRounds?: number;
+  /** Delay between cleanup passes. Defaults to 5000. */
+  settleMs?: number;
+}
+
+/**
+ * Whether a project row is the backend's seed for a workspace. The match is
+ * exact-name equality: scenario projects must never reuse the workspace
+ * name, or the drain cannot tell them apart.
+ */
+export function isWorkspaceSeedProject(projectName: string, workspaceName: string): boolean {
+  return projectName === workspaceName;
+}
+
+/**
+ * Django snippet removing one workspace's seed rows, mirroring the app's own
+ * project delete: the seed project by id is soft-deleted (list endpoints
+ * exclude soft-deleted rows, and the delete queues the related-objects
+ * cascade), and so are the bot's workspace-level pages and membership,
+ * while the bot user — which has no soft-delete — is hard-deleted (its
+ * membership cascades with it). Soft (not hard) deleting the project keeps
+ * a mid-flight seed task harmless: its remaining writes still succeed
+ * against the hidden row instead of failing. Idempotent: a second run
+ * deletes nothing and prints zeros. Built by a function so the unit test
+ * can pin the escaping and the printed marker without a stack.
+ */
+export function workspaceSeedCleanupPython(slug: string, projectId: string): string {
+  return (
+    `from django.db.models import Q\n` +
+    `from pi_dash.db.models import Page, Project, User, Workspace, WorkspaceMember\n` +
+    `ws = Workspace.objects.get(slug=${JSON.stringify(slug)})\n` +
+    `proj = Project.objects.filter(id=${JSON.stringify(projectId)}, workspace=ws).first()\n` +
+    `projects = 0\n` +
+    `if proj is not None:\n` +
+    `    proj.delete()\n` +
+    `    projects = 1\n` +
+    `bot = User.objects.filter(username="bot_user_" + str(ws.id)).first()\n` +
+    `pages, members, users = 0, 0, 0\n` +
+    `if bot is not None:\n` +
+    `    pages = Page.objects.filter(workspace=ws).filter(Q(created_by=bot) | Q(owned_by=bot)).delete()\n` +
+    `    members = WorkspaceMember.objects.filter(workspace=ws, member=bot).delete()\n` +
+    `    users, _ = User.objects.filter(id=bot.id).delete()\n` +
+    `import json as parity_json\n` +
+    `print("PARITY_SEED_DRAIN:" + parity_json.dumps({"projects": projects, "pages": pages, "members": members, "users": users}))\n`
+  );
+}
+
+function seedDrainOf(out: string): { projects: number; pages: number; members: number; users: number } {
+  const line = /^PARITY_SEED_DRAIN:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (line === "") throw new Error("[parity] seed drain produced no marker row.");
+  const row = JSON.parse(line) as Record<string, unknown>;
+  for (const key of ["projects", "pages", "members", "users"]) {
+    if (typeof row[key] !== "number") throw new Error("[parity] seed drain marker carried no numeric counts.");
+  }
+  return row as { projects: number; pages: number; members: number; users: number };
+}
+
+/** Lists a workspace's projects as id/name pairs for the seed wait. */
+type SeedProjectLister = () => Promise<Array<{ id: string; name: string }>>;
+
+/** Project id/name pairs through a raw session cookie (no AuthedSession). */
+async function cookieProjectList(
+  sessionCookie: string,
+  apiBase: string,
+  slug: string
+): Promise<Array<{ id: string; name: string }>> {
+  const res = await fetch(`${apiBase}/api/workspaces/${slug}/projects/details/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] projects/details read failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Array<Record<string, unknown>>;
+  return rows.map((r) => {
+    if (typeof r["id"] !== "string" || typeof r["name"] !== "string") {
+      throw new Error("[parity] project row carried no string id and name.");
+    }
+    return { id: r["id"], name: r["name"] };
+  });
+}
+
+async function awaitSeededProjectId(
+  list: SeedProjectLister,
+  slug: string,
+  workspaceName: string,
+  opts: SeedSettleOptions
+): Promise<string> {
+  const timeoutMs = opts.timeoutMs ?? 300_000;
+  const pollMs = opts.pollMs ?? 2000;
+  const started = Date.now();
+  for (;;) {
+    const found = (await list()).find((p) => isWorkspaceSeedProject(p.name, workspaceName));
+    if (found !== undefined) return found.id;
+    if (Date.now() - started >= timeoutMs) {
+      throw new Error(
+        `[parity] seed project for workspace ${slug} never appeared within ${timeoutMs}ms; ` +
+          `is the stack worker running?`
+      );
+    }
+    await sleep(pollMs);
+  }
+}
+
+async function drainSeededProject(
+  list: SeedProjectLister,
+  slug: string,
+  workspaceName: string,
+  opts: SeedSettleOptions
+): Promise<void> {
+  const settleRounds = opts.settleRounds ?? 4;
+  const settleMs = opts.settleMs ?? 5000;
+  const projectId = await awaitSeededProjectId(list, slug, workspaceName, opts);
+  for (let round = 0; round <= settleRounds; round += 1) {
+    if (round > 0) await sleep(settleMs);
+    const counts = seedDrainOf(await apiShell(workspaceSeedCleanupPython(slug, projectId)));
+    if (counts.projects + counts.pages + counts.members + counts.users === 0) break;
+    if (round === settleRounds) {
+      throw new Error(`[parity] seed drain for workspace ${slug} kept deleting rows after ${settleRounds + 1} passes.`);
+    }
+  }
+  const leftover = (await list()).find((p) => isWorkspaceSeedProject(p.name, workspaceName));
+  if (leftover !== undefined) {
+    throw new Error(`[parity] seed project for workspace ${slug} is still listed after the drain.`);
+  }
+}
+
+/**
+ * Wait until the backend's seed project appears in a fresh workspace and
+ * return its id. For scenarios that need the seed to render (home
+ * dashboard). Throws on timeout: with no seed the workspace never reaches
+ * the state the scenario asserts, so a loud failure beats a flaky pass —
+ * check the stack worker first.
+ */
+export async function awaitWorkspaceSeededProject(
+  session: AuthedSession,
+  slug: string,
+  workspaceName: string,
+  opts: SeedSettleOptions = {}
+): Promise<string> {
+  return awaitSeededProjectId(() => projectsDetails(session, slug), slug, workspaceName, opts);
+}
+
+/**
+ * Cookie-session variant of awaitWorkspaceSeededProject, for callers that
+ * authenticate with a raw session cookie instead of an AuthedSession.
+ */
+export async function awaitWorkspaceSeededProjectWithSession(
+  sessionCookie: string,
+  slug: string,
+  workspaceName: string,
+  apiBase: string = apiBaseFromEnv(),
+  opts: SeedSettleOptions = {}
+): Promise<string> {
+  return awaitSeededProjectId(() => cookieProjectList(sessionCookie, apiBase, slug), slug, workspaceName, opts);
+}
+
+/**
+ * Remove a fresh workspace's backend seed so emptiness and exact-count
+ * assertions hold regardless of worker speed. Waits for the seed project to
+ * appear, soft-deletes it plus the bot rows through the Django shell (the
+ * API refuses to delete the default project at all), then re-runs the
+ * cleanup while anything is still being deleted: the seed task may be
+ * mid-flight, and its workspace-level page writes can still land one pass
+ * later. Finishes by proving over the API that no seed-named project
+ * remains listed.
+ */
+export async function drainWorkspaceSeed(
+  session: AuthedSession,
+  slug: string,
+  workspaceName: string,
+  opts: SeedSettleOptions = {}
+): Promise<void> {
+  return drainSeededProject(() => projectsDetails(session, slug), slug, workspaceName, opts);
+}
+
+/**
+ * Cookie-session variant of drainWorkspaceSeed, for callers that
+ * authenticate with a raw session cookie instead of an AuthedSession.
+ */
+export async function drainWorkspaceSeedWithSession(
+  sessionCookie: string,
+  slug: string,
+  workspaceName: string,
+  apiBase: string = apiBaseFromEnv(),
+  opts: SeedSettleOptions = {}
+): Promise<void> {
+  return drainSeededProject(() => cookieProjectList(sessionCookie, apiBase, slug), slug, workspaceName, opts);
+}

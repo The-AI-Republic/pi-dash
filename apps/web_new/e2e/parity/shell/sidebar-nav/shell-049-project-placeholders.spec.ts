@@ -10,7 +10,7 @@
 // workspace with no projects offers a direct creation action instead of
 // an empty list. Row: SHELL-049.
 import { test, expect } from "../../fixtures";
-import { deleteWorkspace, ensureWorkspace, ownerSession } from "../../helpers/api";
+import { deleteWorkspace, drainWorkspaceSeedWithSession, ensureWorkspace, ownerSession } from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
 
 const ROWS = ["SHELL-049"];
@@ -59,7 +59,12 @@ test(
     });
 
     await test.step("an empty workspace offers creation instead of a list", async () => {
+      // Start from a guaranteed-fresh workspace (a residue from a dead run
+      // would skip the seed and hang the drain), then drain the seed so
+      // the sidebar deterministically shows the empty-workspace action.
+      await deleteWorkspace(session, EMPTY_SLUG).catch(() => undefined);
       await ensureWorkspace(session, "Parity Empty", EMPTY_SLUG);
+      await drainWorkspaceSeedWithSession(session, EMPTY_SLUG, "Parity Empty");
       await driver.openWorkspacePath(`/${EMPTY_SLUG}/`);
       await expect.poll(() => driver.isSidebarOnScreen(), { timeout: 60_000 }).toBe(true);
       await expect.poll(() => driver.sidebarLinkTexts(), { timeout: 60_000 }).toContain("Home");

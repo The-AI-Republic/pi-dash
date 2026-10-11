@@ -15,6 +15,7 @@ import {
   browserSessionCookies,
   createProjectViaApi,
   createWorkspaceForProjects,
+  drainWorkspaceSeed,
   markOnboardedForProjects,
   projectByName,
   seatFreshMember,
@@ -36,7 +37,9 @@ async function ownerWithProjects(
 ) {
   const owner = await signUpAuthedSession(prefix);
   const suffix = uniqueSuffixForProjects();
-  const ws = await createWorkspaceForProjects(owner, { name: `${prefix} WS ${suffix}`, slug: `${prefix}-${suffix}` });
+  const wsName = `${prefix} WS ${suffix}`;
+  const ws = await createWorkspaceForProjects(owner, { name: wsName, slug: `${prefix}-${suffix}` });
+  await drainWorkspaceSeed(owner, ws.slug, wsName);
   await markOnboardedForProjects(owner);
   await setLastWorkspaceForProjects(owner, ws.id);
   for (const p of projects) await createProjectViaApi(owner, ws.slug, p);
