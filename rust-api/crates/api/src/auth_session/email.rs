@@ -758,7 +758,9 @@ async fn stamp_last_login(
 
 /// `Profile.objects.get_or_create(user=user)` for
 /// `get_redirection_path` (`redirection_path.py:11`): the insert
-/// carries every model default.
+/// carries every model default. Also serves the adapter
+/// `Profile.objects.create(user=user)` (`base.py:342`) at signup,
+/// where the SELECT always misses on the fresh user id.
 async fn get_or_create_profile(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
@@ -1639,6 +1641,15 @@ async fn serve_email_form(state: &AppState, req: &EmailRequest, current_site: &s
                 .await
                 .is_err()
             {
+                return server_error();
+            }
+            // `Profile.objects.create(user=user)` (`adapter/base.py:342`):
+            // the adapter creates the profile for every new user on both
+            // surfaces. The app branch used to get it only incidentally via
+            // `redirection_path`'s get-or-create, and the space branch never
+            // did (PIDASHCONV-879). `user_id` is fresh, so the SELECT inside
+            // always misses and this is exactly Django's create.
+            if get_or_create_profile(pool, user_id, now).await.is_err() {
                 return server_error();
             }
             run_authenticated(
