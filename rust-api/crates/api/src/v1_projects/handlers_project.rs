@@ -2570,7 +2570,7 @@ pub fn user_property_defaults() -> (Value, Value, Value) {
             "assignee": true, "attachment_count": true, "created_on": true,
             "due_date": true, "estimate": true, "key": true, "labels": true,
             "link": true, "priority": true, "start_date": true, "state": true,
-            "sub_issue": true, "updated_on": true
+            "sub_issue_count": true, "updated_on": true
         }),
     )
 }
@@ -3494,6 +3494,39 @@ mod tests {
         );
         assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
         assert_eq!(message.kwargs.len(), 1);
+    }
+
+    #[test]
+    fn user_property_defaults_match_python() {
+        // Exact dicts from issue.py:50-91. The display_properties dict
+        // carries sub_issue_count (not the display_filters key sub_issue;
+        // PIDASHCONV-892).
+        let (filters, display_filters, display_properties) = user_property_defaults();
+        assert_eq!(
+            filters,
+            serde_json::json!({
+                "priority": null, "state": null, "state_group": null,
+                "assignees": null, "created_by": null, "labels": null,
+                "start_date": null, "target_date": null, "subscriber": null
+            })
+        );
+        assert_eq!(
+            display_filters,
+            serde_json::json!({
+                "group_by": null, "order_by": "-created_at", "type": null,
+                "sub_issue": true, "show_empty_groups": true,
+                "layout": "list", "calendar_date_range": ""
+            })
+        );
+        assert_eq!(
+            display_properties,
+            serde_json::json!({
+                "assignee": true, "attachment_count": true, "created_on": true,
+                "due_date": true, "estimate": true, "key": true, "labels": true,
+                "link": true, "priority": true, "start_date": true, "state": true,
+                "sub_issue_count": true, "updated_on": true
+            })
+        );
     }
 
     #[test]
