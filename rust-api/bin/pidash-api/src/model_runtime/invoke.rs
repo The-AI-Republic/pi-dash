@@ -98,16 +98,7 @@ pub async fn invoke(
                 message: error.to_string(),
             })
         })?;
-    let Some(row) = row else {
-        // The config vanished between the drive's resolve and the
-        // decrypt (`tasks.py:186-189` analog): report it as
-        // unconfigured, code passthrough.
-        return Err(InvokeError::Failed(ModelFailure {
-            code: Some(CODE_LLM_CONFIG_MISSING.to_owned()),
-            message: MSG_NO_PROVIDER.to_owned(),
-        }));
-    };
-    let ciphertext = row.api_key_encrypted.as_deref().unwrap_or(&[]);
+    let ciphertext = gate_row(row.as_ref()).map_err(InvokeError::Failed)?;
     let api_key = ctx.keys.decrypted_key(ciphertext).map_err(|failure| {
         InvokeError::Failed(ModelFailure {
             code: failure.code,
@@ -151,7 +142,7 @@ pub async fn invoke(
         mcp_names: &mcp_names,
         max_tool_retries: u64::from(invocation.retries),
         max_output_retries: u64::from(invocation.retries),
-        mcp_max_retries: 1,
+        mcp_max_retries: u64::from(invocation.retries),
         limits: &invocation.usage_limits,
         max_tokens: invocation.model_settings.max_tokens,
         timeout_secs: invocation.model_settings.timeout_secs.max(0) as u64,
@@ -171,6 +162,25 @@ pub async fn invoke(
             message,
         })),
     }
+}
+
+/// The re-read gate (`resolve_byok_model`, `llm.py:69-76`): the
+/// drive's resolve already ran, but the row is re-read for the
+/// decrypt — a vanished row, or a key emptied between the two reads,
+/// reports unconfigured (the `tasks.py:186-189` analog), with the
+/// code the drive passes through to the failed row.
+fn gate_row(row: Option<&crate::execute_seams::LlmRow>) -> Result<&[u8], ModelFailure> {
+    let missing = || ModelFailure {
+        code: Some(CODE_LLM_CONFIG_MISSING.to_owned()),
+        message: MSG_NO_PROVIDER.to_owned(),
+    };
+    let Some(row) = row else {
+        return Err(missing());
+    };
+    if !row.has_api_key() {
+        return Err(missing());
+    }
+    Ok(row.api_key_encrypted.as_deref().unwrap_or(&[]))
 }
 
 /// One wire tool in registration order: the golden description plus
@@ -250,6 +260,33 @@ mod tests {
     use super::super::usage::RunUsage;
     use super::*;
     use serde_json::Value;
+
+    fn llm_row_with(key: Option<Vec<u8>>) -> crate::execute_seams::LlmRow {
+        crate::execute_seams::LlmRow {
+            provider_kind: "openai".to_owned(),
+            base_url: "https://t/v1".to_owned(),
+            model_name: "m".to_owned(),
+            api_key_encrypted: key,
+        }
+    }
+
+    /// The re-read gate (`llm.py:69-76`): a missing row, a missing
+    /// key, or an emptied key all report `llm_config_missing` — only
+    /// a set non-empty key decrypts.
+    #[test]
+    fn gate_row_reports_unconfigured_without_key() {
+        for row in [
+            None,
+            Some(llm_row_with(None)),
+            Some(llm_row_with(Some(Vec::new()))),
+        ] {
+            let failure = gate_row(row.as_ref()).expect_err("missing");
+            assert_eq!(failure.code.as_deref(), Some(CODE_LLM_CONFIG_MISSING));
+            assert_eq!(failure.message, MSG_NO_PROVIDER);
+        }
+        let row = llm_row_with(Some(vec![7, 7]));
+        assert_eq!(gate_row(Some(&row)).expect("key"), [7u8, 7].as_slice());
+    }
 
     fn zero_usage() -> RunUsage {
         RunUsage {

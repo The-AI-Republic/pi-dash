@@ -159,8 +159,10 @@ impl ToolExecError {
             ToolExecError::Missing { model } => {
                 format!("{model} matching query does not exist.")
             }
+            // `str(ValidationError)` is `repr(list(self))`: ASCII
+            // single quotes around the curly-quoted message.
             ToolExecError::InvalidUuid { value } => {
-                format!("[“{value}” is not a valid UUID.]")
+                format!("['“{value}” is not a valid UUID.']")
             }
             ToolExecError::AttributeError { attribute } => {
                 format!("'NoneType' object has no attribute '{attribute}'.")
@@ -424,7 +426,7 @@ pub async fn write_begin<'a>(
         plan::ReplayDecision::Proceed => {}
     }
     let mut tx = Transaction::begin(&ctx.pool).await?;
-    let scope = match load_scope(&mut **tx.inner(), run_id, true).await {
+    let scope = match load_scope(tx.inner(), run_id, true).await {
         Ok(scope) => scope,
         Err(error) => {
             let _ = tx.rollback().await;
@@ -546,7 +548,7 @@ pub async fn read_begin(
         plan::ReplayDecision::Proceed => {}
     }
     let mut conn = ctx.pool.acquire().await?;
-    let scope = load_scope(&mut *conn, run_id, false).await?;
+    let scope = load_scope(&mut conn, run_id, false).await?;
     let ledger_id = Uuid::new_v4();
     let now = Utc::now();
     sqlx::query(plan::LEDGER_INSERT_READ_SQL)
@@ -2736,12 +2738,10 @@ async fn dispatch_fn(
                 }
             }
         }
-        // GitHub twins grant as MCP tools only (`partition_tools`
-        // excludes them from the internal build); the loop never routes
-        // them here.
-        TOOL_GITHUB_GET_FILE | TOOL_GITHUB_GET_LINKED_PULL_REQUEST | _ => {
-            Err(plan::ToolCallFailure::Failed(format!("unexpected tool {name}")).into())
-        }
+        // GitHub twins (`TOOL_GITHUB_*`) grant as MCP tools only
+        // (`partition_tools` excludes them from the internal build);
+        // the loop never routes them — or anything else unknown — here.
+        _ => Err(plan::ToolCallFailure::Failed(format!("unexpected tool {name}")).into()),
     }
 }
 
@@ -2860,7 +2860,7 @@ mod tests {
             value: "nope".to_owned(),
         };
         assert_eq!(invalid.python_type(), "ValidationError");
-        assert_eq!(invalid.message(), "[“nope” is not a valid UUID.]");
+        assert_eq!(invalid.message(), "['“nope” is not a valid UUID.']");
         let attribute = ToolExecError::AttributeError {
             attribute: "project",
         };
@@ -2963,8 +2963,10 @@ mod tests {
             // Pool spent: park.
             let mut ticker = agent_ticker();
             ticker.used = 5;
-            let mut policy = ProjectClockPolicy::default();
-            policy.agent_default_max_ticks = Some(5);
+            let policy = ProjectClockPolicy {
+                agent_default_max_ticks: Some(5),
+                ..ProjectClockPolicy::default()
+            };
             let outcome = on_enter_or_move(
                 &mut ticker,
                 &stateless_issue(policy),

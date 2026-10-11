@@ -129,35 +129,31 @@ impl RunUsage {
             .cache_audio_read_tokens
             .add(response.cache_audio_read_tokens);
         for (key, value) in &response.details {
-            match (self.details.remove(key), value) {
-                (Some(Value::Number(have)), Value::Number(want)) => {
-                    self.details.insert(
-                        key.clone(),
-                        add_json_numbers(&have, want).unwrap_or(Value::Null),
-                    );
+            // `if isinstance(value, (int, float))` (`usage.py`,
+            // `_incr_usage_tokens`): anything else leaves the key
+            // untouched. (Bools are ints: `get(key, 0) + True == 1`.)
+            let incoming = match value {
+                Value::Number(number) => number.clone(),
+                Value::Bool(flag) => i64::from(*flag).into(),
+                _ => continue,
+            };
+            let have = match self.details.remove(key) {
+                // A non-numeric incumbent plus numeric incoming raises
+                // `TypeError` in Python; unreachable from conforming
+                // providers (only numerics ever merge in), so the key
+                // keeps its value.
+                Some(Value::Number(have)) => have,
+                Some(Value::Bool(have)) => i64::from(have).into(),
+                Some(kept) => {
+                    self.details.insert(key.clone(), kept);
+                    continue;
                 }
-                (Some(Value::Bool(have)), Value::Bool(want)) => {
-                    self.details.insert(
-                        key.clone(),
-                        Value::Number((i64::from(have) + i64::from(*want)).into()),
-                    );
-                }
-                (Some(Value::Bool(have)), Value::Number(want)) => {
-                    self.details.insert(
-                        key.clone(),
-                        add_json_numbers(&i64::from(have).into(), want).unwrap_or(Value::Null),
-                    );
-                }
-                (Some(Value::Number(have)), Value::Bool(want)) => {
-                    self.details.insert(
-                        key.clone(),
-                        add_json_numbers(&have, &i64::from(*want).into()).unwrap_or(Value::Null),
-                    );
-                }
-                (Some(_), _) | (None, _) => {
-                    self.details.insert(key.clone(), value.clone());
-                }
-            }
+                None => 0.into(),
+            };
+            self.details.insert(
+                key.clone(),
+                add_json_numbers(&have, &incoming).unwrap_or(Value::Null),
+            );
         }
     }
 
@@ -834,6 +830,36 @@ mod tests {
     }
 
     #[test]
+    fn details_merge_skips_non_numeric() {
+        // `if isinstance(value, (int, float))` (`_incr_usage_tokens`):
+        // a string-valued detail never lands (first-seen) nor
+        // clobbers (later-seen); a first-seen bool coerces to int.
+        let mut run = RunUsage::default();
+        run.incr(&RequestUsage {
+            details: Map::from_iter([
+                ("note".to_string(), Value::String("x".to_owned())),
+                ("flag".to_string(), Value::Bool(true)),
+                ("count".to_string(), Value::from(2)),
+            ]),
+            ..RequestUsage::zeros()
+        });
+        assert!(!run.details.contains_key("note"));
+        assert_eq!(run.details.get("flag"), Some(&Value::Number(1.into())));
+        assert_eq!(run.details.get("count"), Some(&Value::Number(2.into())));
+        run.incr(&RequestUsage {
+            details: Map::from_iter([
+                ("note".to_string(), Value::String("y".to_owned())),
+                ("flag".to_string(), Value::from(4)),
+                ("count".to_string(), Value::Null),
+            ]),
+            ..RequestUsage::zeros()
+        });
+        assert!(!run.details.contains_key("note"));
+        assert_eq!(run.details.get("flag"), Some(&Value::Number(5.into())));
+        assert_eq!(run.details.get("count"), Some(&Value::Number(2.into())));
+    }
+
+    #[test]
     fn limit_messages_match_python() {
         let limits = UsageLimits {
             request_limit: Some(1),
@@ -842,14 +868,18 @@ mod tests {
             output_tokens_limit: Some(50),
             total_tokens_limit: Some(120),
         };
-        let mut usage = RunUsage::default();
-        usage.requests = 1;
+        let usage = RunUsage {
+            requests: 1,
+            ..RunUsage::default()
+        };
         assert_eq!(
             check_before_request(&limits, &usage).unwrap_err(),
             LimitBreach("The next request would exceed the request_limit of 1".to_string())
         );
-        usage.requests = 0;
-        usage.input_tokens = UsageNumber::Int(101);
+        let usage = RunUsage {
+            input_tokens: UsageNumber::Int(101),
+            ..RunUsage::default()
+        };
         assert_eq!(
             check_before_request(&limits, &usage).unwrap_err(),
             LimitBreach(
@@ -857,8 +887,11 @@ mod tests {
                     .to_string()
             )
         );
-        usage.input_tokens = UsageNumber::Int(100);
-        usage.output_tokens = UsageNumber::Int(50);
+        let usage = RunUsage {
+            input_tokens: UsageNumber::Int(100),
+            output_tokens: UsageNumber::Int(50),
+            ..RunUsage::default()
+        };
         assert_eq!(
             check_tokens(&limits, &usage),
             Err(LimitBreach(

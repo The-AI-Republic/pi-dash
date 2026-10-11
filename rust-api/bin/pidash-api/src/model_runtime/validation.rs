@@ -49,59 +49,6 @@ impl ValidationDetail {
             input,
         }
     }
-
-    /// Render as a `{"type","loc","msg","input"}` object (that key order).
-    fn to_json(&self) -> Value {
-        let mut map = Map::with_capacity(4);
-        map.insert(
-            "type".to_string(),
-            Value::String(self.error_type.to_string()),
-        );
-        map.insert(
-            "loc".to_string(),
-            Value::Array(
-                self.loc
-                    .iter()
-                    .map(|seg| match seg {
-                        LocSeg::Field(name) => Value::String(name.clone()),
-                        LocSeg::Index(index) => {
-                            Value::Number(serde_json::Number::from(*index as u64))
-                        }
-                    })
-                    .collect(),
-            ),
-        );
-        map.insert("msg".to_string(), Value::String(self.msg.clone()));
-        map.insert("input".to_string(), self.input.clone());
-        Value::Object(map)
-    }
-}
-
-/// Render the model-facing retry prompt for one or more details:
-///
-/// `{n} validation error(s):\n```json\n{details}\n```\n\nFix the errors
-/// and try again.`
-///
-/// (`RetryPromptPart.model_response`, `messages.py:1445-1467`.) The JSON
-/// block matches `json.dumps(errors, indent=2)` byte-for-byte, including
-/// `ensure_ascii` escaping of non-ASCII text. Known micro-divergence:
-/// extreme-float exponents inside echoed inputs render in serde/ryu style
-/// rather than CPython `repr` style (`1e30` vs `1e+30`); the values are
-/// identical once parsed.
-pub fn render_retry_message(details: &[ValidationDetail]) -> String {
-    let noun = if details.len() == 1 {
-        "error"
-    } else {
-        "errors"
-    };
-    let values: Vec<Value> = details.iter().map(ValidationDetail::to_json).collect();
-    let array = Value::Array(values);
-    let pretty = serde_json::to_string_pretty(&array).unwrap_or_else(|_| "[]".to_string());
-    format!(
-        "{} validation {noun}:\n```json\n{}\n```\n\nFix the errors and try again.",
-        details.len(),
-        ensure_ascii(&pretty),
-    )
 }
 
 /// Re-escape non-ASCII text in an already-serialized JSON document the way
@@ -165,14 +112,6 @@ pub fn unknown_tool_content(name: &str, available_sorted: &[&str]) -> String {
     format!(
         "Unknown tool name: '{name}'. Available tools: {}",
         quoted.join(", ")
-    )
-}
-
-/// Unknown-tool retry text: the content rendered for the model.
-pub fn unknown_tool_message(name: &str, available_sorted: &[&str]) -> String {
-    format!(
-        "{}\n\nFix the errors and try again.",
-        unknown_tool_content(name, available_sorted)
     )
 }
 
@@ -407,7 +346,7 @@ fn validate_args(
                 Ok(valid) => {
                     values.insert(spec.name.clone(), valid);
                 }
-                Err(detail) => details.push(detail),
+                Err(detail) => details.push(*detail),
             },
         }
     }
@@ -428,31 +367,37 @@ fn validate_args(
     }
 }
 
-fn validate_param(spec: &ParamSpec, value: &Value) -> Result<ValidatedValue, ValidationDetail> {
+fn validate_param(
+    spec: &ParamSpec,
+    value: &Value,
+) -> Result<ValidatedValue, Box<ValidationDetail>> {
     let loc = vec![LocSeg::Field(spec.name.clone())];
     match spec.kind {
         ParamKind::Str => match value.as_str() {
             Some(text) => Ok(ValidatedValue::Str(text.to_string())),
-            None => Err(ValidationDetail::new(
+            None => Err(Box::new(ValidationDetail::new(
                 "string_type",
                 loc,
                 "Input should be a valid string".to_string(),
                 value.clone(),
-            )),
+            ))),
         },
         ParamKind::Int => match lax_int(value) {
             Ok(number) => Ok(ValidatedValue::Int(number)),
-            Err((error_type, msg)) => {
-                Err(ValidationDetail::new(error_type, loc, msg, value.clone()))
-            }
+            Err((error_type, msg)) => Err(Box::new(ValidationDetail::new(
+                error_type,
+                loc,
+                msg,
+                value.clone(),
+            ))),
         },
         ParamKind::StrList => match value.as_array() {
-            None => Err(ValidationDetail::new(
+            None => Err(Box::new(ValidationDetail::new(
                 "list_type",
                 loc,
                 "Input should be a valid array".to_string(),
                 value.clone(),
-            )),
+            ))),
             Some(items) => {
                 // Relate lists carry no length cap; every item must be a string.
                 let mut validated = Vec::with_capacity(items.len());
@@ -460,7 +405,7 @@ fn validate_param(spec: &ParamSpec, value: &Value) -> Result<ValidatedValue, Val
                     match item.as_str() {
                         Some(text) => validated.push(text.to_string()),
                         None => {
-                            return Err(ValidationDetail::new(
+                            return Err(Box::new(ValidationDetail::new(
                                 "string_type",
                                 vec![
                                     LocSeg::Field(spec.name.clone()),
@@ -468,7 +413,7 @@ fn validate_param(spec: &ParamSpec, value: &Value) -> Result<ValidatedValue, Val
                                 ],
                                 "Input should be a valid string".to_string(),
                                 item.clone(),
-                            ));
+                            )));
                         }
                     }
                 }
@@ -523,8 +468,17 @@ fn lax_int(value: &Value) -> Result<i64, (&'static str, String)> {
     }
 }
 
+/// pydantic-core's string padding strip, probed exhaustively (BMP
+/// minus surrogates): exactly CPython's `str.strip` set minus
+/// U+001C..=U+001F — i.e. exactly Rust `trim()`, NEL included. (The
+/// foundation `py_stripped` helper is wrong here: it strips the
+/// 1C..=1F group that pydantic-core keeps.)
+fn pydantic_trim(text: &str) -> &str {
+    text.trim()
+}
+
 fn lax_int_from_str(text: &str) -> Option<i64> {
-    let trimmed = text.trim();
+    let trimmed = pydantic_trim(text);
     let (negative, rest) = match trimmed.strip_prefix(['+', '-']) {
         Some(rest) => (trimmed.starts_with('-'), rest),
         None => (false, trimmed),
@@ -712,7 +666,7 @@ fn validate_output_items(
                 // Strip-then-length, storing the stripped value (the
                 // ported constructor agrees); the error reports the
                 // original item (probed).
-                let stripped = text.trim();
+                let stripped = pydantic_trim(text);
                 if stripped.chars().count() > max_chars {
                     details.push(ValidationDetail::new(
                         "string_too_long",
@@ -732,7 +686,19 @@ fn validate_output_items(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_runtime::provider::{retry_message, RetryContent};
     use crate::model_runtime::schemas::Golden;
+
+    /// Render through the production retry path
+    /// (`provider::retry_message`), the way the loop renders tool and
+    /// output retries.
+    fn provider_retry(details: &[ValidationDetail], tool: Option<&str>) -> String {
+        retry_message(&RetryContent::Errors(details.to_vec()), tool)
+    }
+
+    fn provider_text_retry(text: &str, tool: Option<&str>) -> String {
+        retry_message(&RetryContent::Text(text.to_owned()), tool)
+    }
 
     /// Replay every golden battery case: invalid inputs must reproduce the
     /// recorded retry message byte-for-byte; valid inputs must validate.
@@ -766,7 +732,7 @@ mod tests {
                             .as_str()
                             .expect("retry content");
                         assert_eq!(
-                            render_retry_message(&details),
+                            provider_retry(&details, Some(tool)),
                             expected,
                             "{label}: retry message drift"
                         );
@@ -782,7 +748,13 @@ mod tests {
                     .as_str()
                     .expect("retry content");
                 assert_eq!(
-                    unknown_tool_message(tool, &["final_result", "pidash_search_project_issues"]),
+                    provider_text_retry(
+                        &unknown_tool_content(
+                            tool,
+                            &["final_result", "pidash_search_project_issues"]
+                        ),
+                        Some(tool)
+                    ),
                     expected,
                     "{label}: unknown-tool message drift"
                 );
@@ -822,7 +794,7 @@ mod tests {
                         .as_str()
                         .expect("retry content");
                     assert_eq!(
-                        render_retry_message(&details),
+                        provider_retry(&details, Some(tool)),
                         expected,
                         "{label}: retry message drift"
                     );
@@ -860,6 +832,10 @@ mod tests {
             ("inf", Err("int_parsing")),
             ("nan", Err("int_parsing")),
             ("５", Err("int_parsing")),
+            // pydantic-core strips NEL but keeps 1C..=1F.
+            ("\u{85}5\u{85}", Ok(5)),
+            ("\u{1c}5", Err("int_parsing")),
+            ("5\u{1f}", Err("int_parsing")),
         ];
         for (text, expected) in cases {
             let got = lax_int(&Value::String(text.to_string()));
@@ -900,9 +876,22 @@ mod tests {
     }
 
     #[test]
+    fn pydantic_trim_set_matches_pydantic_core() {
+        // Exhaustive BMP probe: pydantic-core strips NEL (unlike the
+        // review's first reading of Rust `trim`) and keeps
+        // U+001C..=U+001F (unlike `str.strip` / `py_stripped`).
+        assert_eq!(pydantic_trim("\u{85}5\u{85}"), "5");
+        assert_eq!(pydantic_trim("\u{1c}5\u{1f}"), "\u{1c}5\u{1f}");
+        assert_eq!(pydantic_trim("  x  "), "x");
+    }
+
+    #[test]
     fn unknown_tool_message_matches_probe() {
         assert_eq!(
-            unknown_tool_message("nope_tool", &["final_result", "probe_tool"]),
+            provider_text_retry(
+                &unknown_tool_content("nope_tool", &["final_result", "probe_tool"]),
+                Some("nope_tool")
+            ),
             "Unknown tool name: 'nope_tool'. Available tools: 'final_result', 'probe_tool'\n\nFix the errors and try again."
         );
     }

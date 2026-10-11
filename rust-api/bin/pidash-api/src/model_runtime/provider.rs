@@ -488,12 +488,13 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
-    /// `args_as_dict()` (`messages.py:1840-1847`): dicts as-is;
-    /// strings parsed, falling back to the `INVALID_JSON` wrap when
-    /// the payload is not a JSON object.
+    /// `args_as_dict()` (`messages.py:1838-1847`): falsy args read
+    /// `{}`, dicts as-is; strings parsed, falling back to the
+    /// `INVALID_JSON` wrap when the payload is not a JSON object.
     pub fn args_as_dict(&self) -> Map<String, Value> {
         match &self.args {
             ToolArgs::Dict(map) => map.clone(),
+            ToolArgs::Raw(raw) if raw.is_empty() => Map::new(),
             ToolArgs::Raw(raw) => match serde_json::from_str::<Value>(raw) {
                 Ok(Value::Object(map)) => map,
                 _ => Map::from_iter([(INVALID_JSON_KEY.to_owned(), Value::String(raw.clone()))]),
@@ -524,6 +525,9 @@ pub enum RequestPart {
     UserPrompt(String),
     /// `ToolReturnPart`: a tool result.
     ToolReturn {
+        // Kept for `ModelResponse` parity: neither wire format echoes
+        // the tool name on results.
+        #[allow(dead_code)]
         name: String,
         content: Value,
         call_id: String,
@@ -565,6 +569,9 @@ pub enum HistoryMessage {
     Request {
         parts: Vec<RequestPart>,
     },
+    // The metadata rides along for `ModelResponse` parity; only
+    // `parts`/`finish` are re-read (history replay, stub detection).
+    #[allow(dead_code)]
     Response {
         parts: Vec<ResponsePart>,
         usage: crate::model_runtime::usage::RequestUsage,
@@ -723,10 +730,22 @@ pub fn openai_request_body(
         }
     }
     if !instructions.is_empty() {
-        // No `SystemPromptPart`s ever occur here, so the
-        // instructions land at index 0 (`_map_messages` insertion
-        // with `system_prompt_count == 0`).
-        messages.insert(0, openai_system_message(instructions));
+        // `openai_system_prompt_role` (`profiles/openai.py:218`,
+        // `models/openai.py:1464`): o1-mini rejects the `system`
+        // role, so its instructions travel as `user`. Either way
+        // they insert after the leading same-role messages
+        // (`system_prompt_count`; always 0 for `system` here since
+        // no `SystemPromptPart`s ever occur).
+        let role = if model.starts_with("o1-mini") {
+            "user"
+        } else {
+            "system"
+        };
+        let at = messages
+            .iter()
+            .take_while(|message| message.get("role").and_then(Value::as_str) == Some(role))
+            .count();
+        messages.insert(at, openai_role_message(role, instructions));
     }
     let wire_tools: Vec<Value> = tools.iter().map(openai_wire_tool).collect();
     Value::Object(Map::from_iter([
@@ -752,9 +771,9 @@ fn openai_user_message(content: &str) -> Value {
     ]))
 }
 
-fn openai_system_message(content: &str) -> Value {
+fn openai_role_message(role: &str, content: &str) -> Value {
     Value::Object(Map::from_iter([
-        ("role".to_owned(), Value::String("system".to_owned())),
+        ("role".to_owned(), Value::String(role.to_owned())),
         ("content".to_owned(), Value::String(content.to_owned())),
     ]))
 }
@@ -908,6 +927,12 @@ pub fn anthropic_request_body(
         }
     }
     let wire_tools: Vec<Value> = tools.iter().map(anthropic_wire_tool).collect();
+    // `supports_forced_tool_choice` (`profiles/anthropic.py:214-216`,
+    // `models/anthropic.py:1146-1152`): these models reject `any`
+    // outright, so forcing degrades to `auto`.
+    let forced = !["claude-fable-5", "claude-mythos-5", "claude-mythos-preview"]
+        .iter()
+        .any(|prefix| model.starts_with(prefix));
     let mut body = Map::from_iter([
         ("max_tokens".to_owned(), Value::Number(max_tokens.into())),
         ("model".to_owned(), Value::String(model.to_owned())),
@@ -918,7 +943,7 @@ pub fn anthropic_request_body(
             "tool_choice".to_owned(),
             Value::Object(Map::from_iter([(
                 "type".to_owned(),
-                Value::String("any".to_owned()),
+                Value::String(if forced { "any" } else { "auto" }.to_owned()),
             )])),
         ),
     ]);
@@ -1072,7 +1097,8 @@ pub fn py_repr(value: &Value) -> String {
 
 /// Python single-quoted `repr` for one string: single quotes unless
 /// the text contains one (but no double quote), with `\\`, `\n`,
-/// `\r`, `\t` escaped and other controls `\x..`-escaped.
+/// `\r`, `\t` escaped and every other non-printable char
+/// `\x..`-/`\u..`-escaped by width.
 fn py_repr_str(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     let quote = if text.contains('\'') && !text.contains('"') {
@@ -1091,14 +1117,37 @@ fn py_repr_str(text: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
-            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32));
+            c if !py_printable(c) => {
+                let code = c as u32;
+                if code < 0x100 {
+                    out.push_str(&format!("\\x{code:02x}"));
+                } else if code < 0x1_0000 {
+                    out.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{code:08x}"));
+                }
             }
             c => out.push(c),
         }
     }
     out.push(quote);
     out
+}
+
+/// `Py_UNICODE_ISPRINTABLE` (`str.isprintable`, probed across the BMP
+/// against CPython 3.12): general categories Other/Separator except
+/// SPACE. Unicode tables come from the locked `regex`, whose version
+/// may be newer than 3.12's 15.0 — only chars assigned since (exotic
+/// scripts in error bodies) can differ.
+fn py_printable(candidate: char) -> bool {
+    if candidate == ' ' {
+        return true;
+    }
+    static NONPRINTABLE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern =
+        NONPRINTABLE.get_or_init(|| regex::Regex::new(r"[\p{C}\p{Z}]").expect("class regex"));
+    let mut encoded = [0u8; 4];
+    !pattern.is_match(candidate.encode_utf8(&mut encoded))
 }
 
 /// Parse one response into history parts (`_process_response`,
@@ -1156,12 +1205,10 @@ pub fn parse_openai_response(
     if let Some(refusal) = message.get("refusal").and_then(Value::as_str) {
         let mut details = Map::new();
         details.insert("refusal".to_owned(), Value::String(refusal.to_owned()));
-        if let Some(created) = body.get("created").and_then(Value::as_i64) {
-            details.insert(
-                "timestamp".to_owned(),
-                Value::String(number_to_datetime(created)),
-            );
-        }
+        details.insert(
+            "timestamp".to_owned(),
+            Value::String(number_to_datetime(response_created(body))),
+        );
         return Ok(ParsedResponse {
             parts: Vec::new(),
             usage,
@@ -1206,9 +1253,12 @@ pub fn parse_openai_response(
             parts.push(ResponsePart::ToolCall(ToolCall {
                 name: name.to_owned(),
                 args: ToolArgs::Raw(arguments.to_owned()),
+                // `t.tool_call_id or generate_tool_call_id()`
+                // (`_utils.py:419`): missing AND empty ids regenerate.
                 call_id: call
                     .get("id")
                     .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
                     .map(str::to_owned)
                     .unwrap_or_else(generate_tool_call_id),
             }));
@@ -1221,12 +1271,10 @@ pub fn parse_openai_response(
             Value::String(raw_finish.to_owned()),
         );
     }
-    if let Some(created) = body.get("created").and_then(Value::as_i64) {
-        details.get_or_insert_with(Map::new).insert(
-            "timestamp".to_owned(),
-            Value::String(number_to_datetime(created)),
-        );
-    }
+    details.get_or_insert_with(Map::new).insert(
+        "timestamp".to_owned(),
+        Value::String(number_to_datetime(response_created(body))),
+    );
     // Unknown reasons map to `None` (the `.get` miss); the parsed
     // parts still stand.
     let finish = match raw_finish {
@@ -1249,6 +1297,16 @@ pub fn parse_openai_response(
 /// `pyd_ai_{uuid4hex}` (`generate_tool_call_id`, `_utils.py:431-436`).
 pub fn generate_tool_call_id() -> String {
     format!("pyd_ai_{}", uuid::Uuid::new_v4().simple())
+}
+
+/// The response `created` stamp (`openai.py:1068-1069`): falsy
+/// values backfill with now, so the `timestamp` detail is always
+/// present.
+fn response_created(body: &Map<String, Value>) -> i64 {
+    body.get("created")
+        .and_then(Value::as_i64)
+        .filter(|created| *created != 0)
+        .unwrap_or_else(|| chrono::Utc::now().timestamp())
 }
 
 /// `number_to_datetime`: epoch seconds rendered UTC ISO-8601.
@@ -1315,9 +1373,13 @@ pub fn parse_anthropic_response(
                         .unwrap_or_default()
                         .to_owned(),
                     args: ToolArgs::Dict(input.clone()),
+                    // `t.tool_call_id or generate_tool_call_id()`
+                    // (`_utils.py:419`): missing AND empty ids
+                    // regenerate.
                     call_id: block
                         .get("id")
                         .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
                         .map(str::to_owned)
                         .unwrap_or_else(generate_tool_call_id),
                 }));
@@ -1681,6 +1743,32 @@ mod tests {
     }
 
     #[test]
+    fn o1_mini_instructions_use_user_role() {
+        // `openai_system_prompt_role` (`profiles/openai.py:218`):
+        // o1-mini instructions travel as `user`, after the leading
+        // user messages; anything else stays `system` at index 0.
+        let history = vec![HistoryMessage::Request {
+            parts: vec![RequestPart::UserPrompt("go".to_owned())],
+        }];
+        let body = openai_request_body("o1-mini-2024-09-12", "Behave.", &history, &[], 0);
+        assert_eq!(
+            body["messages"],
+            serde_json::json!([
+                {"role": "user", "content": "go"},
+                {"role": "user", "content": "Behave."},
+            ])
+        );
+        let body = openai_request_body("gpt-4o-mini", "Behave.", &history, &[], 0);
+        assert_eq!(
+            body["messages"],
+            serde_json::json!([
+                {"role": "system", "content": "Behave."},
+                {"role": "user", "content": "go"},
+            ])
+        );
+    }
+
+    #[test]
     fn openai_strict_inference_matches_catalog_capture() {
         // `wiretools.json`: strict holds exactly for the six
         // default-free, fully-required tools (plus the synthetic
@@ -1777,6 +1865,30 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_forced_choice_rejectors_send_auto() {
+        // `supports_forced_tool_choice`
+        // (`profiles/anthropic.py:214-216`): the fable/mythos models
+        // reject `any`, so forcing degrades to `auto`.
+        let history = vec![HistoryMessage::Request {
+            parts: vec![RequestPart::UserPrompt("hi".to_owned())],
+        }];
+        for model in [
+            "claude-fable-5-20260101",
+            "claude-mythos-5-20260101",
+            "claude-mythos-preview-20260101",
+        ] {
+            let body = anthropic_request_body(model, "", &history, &[], 4096);
+            assert_eq!(
+                body["tool_choice"]["type"],
+                Value::String("auto".to_owned()),
+                "{model}"
+            );
+        }
+        let body = anthropic_request_body("claude-opus-4-6", "", &history, &[], 4096);
+        assert_eq!(body["tool_choice"]["type"], Value::String("any".to_owned()));
+    }
+
+    #[test]
     fn retry_renderings_match_captures() {
         // Unknown-tool retry (`loopprobe.json`): the tool message
         // content is the message plus the fix suffix.
@@ -1840,6 +1952,110 @@ mod tests {
         );
         assert_eq!(parsed.model_name, "gpt-4o-mini");
         assert_eq!(parsed.response_id.as_deref(), Some("chatcmpl-x1"));
+    }
+
+    #[test]
+    fn empty_raw_args_read_empty_object() {
+        // `if not self.args: return {}` (`messages.py:1838-1839`).
+        let call = ToolCall {
+            name: "add".to_owned(),
+            args: ToolArgs::Raw(String::new()),
+            call_id: "c1".to_owned(),
+        };
+        assert!(call.args_as_dict().is_empty());
+    }
+
+    #[test]
+    fn empty_tool_ids_regenerate() {
+        // `t.tool_call_id or generate_tool_call_id()`
+        // (`_utils.py:419`): empty ids regenerate like missing ones.
+        let golden = Golden::load().expect("golden parses");
+        let table = ProviderTable::load(&golden).expect("table compiles");
+        let openai = Lane::OpenAICompatible {
+            model: "m".to_owned(),
+            base_url: "https://t/v1".to_owned(),
+            api_key: "k".to_owned(),
+        };
+        let payload: Value = serde_json::from_str(
+            r#"{"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"","type":"function","function":{"name":"add","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+        )
+        .unwrap();
+        let parsed = parse_openai_response(&openai, &payload, &table).expect("parses");
+        let ResponsePart::ToolCall(call) = &parsed.parts[0] else {
+            panic!("expected a tool call");
+        };
+        assert!(call.call_id.starts_with("pyd_ai_"), "got: {}", call.call_id);
+        let anthropic = Lane::Anthropic {
+            model: "c".to_owned(),
+            api_key: "k".to_owned(),
+        };
+        let payload: Value = serde_json::from_str(
+            r#"{"id":"m","model":"c","stop_reason":"tool_use","content":[{"type":"tool_use","id":"","name":"add","input":{}}],"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )
+        .unwrap();
+        let parsed = parse_anthropic_response(&anthropic, &payload, &table).expect("parses");
+        let ResponsePart::ToolCall(call) = &parsed.parts[0] else {
+            panic!("expected a tool call");
+        };
+        assert!(call.call_id.starts_with("pyd_ai_"), "got: {}", call.call_id);
+    }
+
+    #[test]
+    fn missing_created_backfills_timestamp() {
+        // `if not response.created: ... = int(now)`
+        // (`openai.py:1068-1069`): the `timestamp` detail is always
+        // present, on both the refusal and the normal arms.
+        let golden = Golden::load().expect("golden parses");
+        let table = ProviderTable::load(&golden).expect("table compiles");
+        let lane = Lane::OpenAICompatible {
+            model: "m".to_owned(),
+            base_url: "https://t/v1".to_owned(),
+            api_key: "k".to_owned(),
+        };
+        for payload in [
+            r#"{"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"nope"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+            r#"{"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"x"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+        ] {
+            let payload: Value = serde_json::from_str(payload).unwrap();
+            let parsed = parse_openai_response(&lane, &payload, &table).expect("parses");
+            let details = parsed.provider_details.expect("details");
+            let timestamp = details
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .expect("timestamp");
+            assert!(timestamp.ends_with('Z'), "got: {timestamp}");
+            assert!(timestamp > "2026-01-01T00:00:00Z");
+        }
+    }
+
+    #[test]
+    fn py_repr_escapes_nonprintables() {
+        // `Py_UNICODE_ISPRINTABLE` (probed against CPython 3.12):
+        // C1 controls `\x..`-escape, astral private-use
+        // `\U..`-escapes, separators escape — printable text stays
+        // raw, including astral emoji.
+        for (text, expected) in [
+            ("a\x7fb", "'a\\x7fb'"),
+            ("a\u{2028}b", "'a\\u2028b'"),
+            ("a\u{ad}b", "'a\\xadb'"),
+            ("a\u{a0}b", "'a\\xa0b'"),
+            ("a😀b", "'a😀b'"),
+            ("a\u{e0001}b", "'a\\U000e0001b'"),
+            ("aÿb", "'aÿb'"),
+            ("café 中文", "'café 中文'"),
+            ("a'b\"c", "'a\\'b\"c'"),
+            ("don't", "\"don't\""),
+            // C1 controls, written as escapes (invisible in source).
+            ("a\u{80}b", "'a\\x80b'"),
+            ("a\u{85}b", "'a\\x85b'"),
+            ("a\u{9f}b", "'a\\x9fb'"),
+        ] {
+            assert_eq!(
+                py_repr(&Value::String(text.to_owned())),
+                expected,
+                "{text:?}"
+            );
+        }
     }
 
     #[test]

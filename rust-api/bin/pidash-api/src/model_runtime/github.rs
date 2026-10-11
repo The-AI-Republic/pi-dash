@@ -13,7 +13,7 @@
 //! CPython (`GithubAuthError`, `KeyError`, `ValueError`, ...).
 //!
 //! Two deliberate approximations, both unreachable against real GitHub:
-//! non-string `token` / `expires_at` / `sha` payload fields (Python would
+//! non-string `token` / `expires_at` payload fields (Python would
 //! `f-string`-format or `AttributeError` them) and non-array paginated
 //! bodies (Python would iterate or `TypeError` them).
 
@@ -82,12 +82,18 @@ impl GithubFailure {
         Self::new("GithubNotFoundError", message)
     }
 
-    /// `requests.HTTPError`: `raise_for_status` on any other non-2xx.
-    pub fn http_error(status: reqwest::StatusCode, body: &str, url: &str) -> Self {
+    /// `requests.HTTPError` (`models.py:1017-1025`):
+    /// `raise_for_status` on any other non-2xx — no body.
+    pub fn http_error(status: reqwest::StatusCode, _body: &str, url: &str) -> Self {
         let reason = status.canonical_reason().unwrap_or("Error");
+        let kind = if status.is_server_error() {
+            "Server Error"
+        } else {
+            "Client Error"
+        };
         Self::new(
             "HTTPError",
-            format!("{} {reason}: {body} for url: {url}", status.as_u16()),
+            format!("{} {kind}: {reason} for url: {url}", status.as_u16()),
         )
     }
 
@@ -113,7 +119,7 @@ impl GithubFailure {
         Self::new("KeyError", format!("'{key}'"))
     }
 
-    /// `TypeError`: non-iterable paginated bodies, non-string shas.
+    /// `TypeError`: non-iterable paginated bodies, non-object heads.
     pub fn type_error(message: impl Into<String>) -> Self {
         Self::new("TypeError", message)
     }
@@ -372,6 +378,44 @@ pub struct GithubRestClient {
     api_base: String,
 }
 
+/// `raw = response.text.encode()[:65536]`
+/// (`github_client.py:197-198`): decode (utf-8, `replace`),
+/// re-encode, cut at 64 KiB, decode again — then
+/// `{"diff", "truncated": len(content) > len(raw)}`. The cut lands
+/// on re-encoded bytes, so replacement expansion shifts it for
+/// non-UTF8 bodies.
+fn truncate_diff(content: &[u8]) -> Value {
+    let text = String::from_utf8_lossy(content);
+    let encoded = text.as_bytes();
+    let take = encoded.len().min(DIFF_RESULT_LIMIT_BYTES);
+    let raw = &encoded[..take];
+    let mut out = serde_json::Map::with_capacity(2);
+    out.insert(
+        "diff".to_owned(),
+        Value::String(String::from_utf8_lossy(raw).into_owned()),
+    );
+    out.insert(
+        "truncated".to_owned(),
+        Value::Bool(content.len() > raw.len()),
+    );
+    Value::Object(out)
+}
+
+/// What `head["sha"]` raises when `head` is present but not an
+/// object (CPython subscript errors).
+fn subscript_error(head: &Value) -> String {
+    match head {
+        Value::String(_) => "string indices must be integers".to_owned(),
+        Value::Array(_) => "list indices must be integers or slices, not str".to_owned(),
+        Value::Number(number) if number.is_f64() => {
+            "'float' object is not subscriptable".to_owned()
+        }
+        Value::Number(_) => "'int' object is not subscriptable".to_owned(),
+        Value::Bool(_) => "'bool' object is not subscriptable".to_owned(),
+        Value::Null | Value::Object(_) => unreachable!("handled by the caller"),
+    }
+}
+
 impl GithubRestClient {
     /// `GithubClient(token, timeout, api_base)` (`:39-44`): empty
     /// tokens raise before anything else; the base loses its trailing
@@ -596,8 +640,9 @@ impl GithubRestClient {
         Ok(Value::Object(out))
     }
 
-    /// `get_pull_request_diff` (`:191-198`): the diff media type, first
-    /// 64 KiB lossy-decoded, `truncated` when the body ran longer.
+    /// `get_pull_request_diff` (`:191-198`): the diff media type,
+    /// truncated to the first 64 KiB through the
+    /// `response.text.encode()[:65536]` round-trip.
     pub async fn get_pull_request_diff(
         &self,
         owner: &str,
@@ -616,14 +661,7 @@ impl GithubRestClient {
             .bytes()
             .await
             .map_err(|error| GithubFailure::transport(&error))?;
-        let take = bytes.len().min(DIFF_RESULT_LIMIT_BYTES);
-        let mut out = serde_json::Map::with_capacity(2);
-        out.insert(
-            "diff".to_owned(),
-            Value::String(String::from_utf8_lossy(&bytes[..take]).into_owned()),
-        );
-        out.insert("truncated".to_owned(), Value::Bool(bytes.len() > take));
-        Ok(Value::Object(out))
+        Ok(truncate_diff(&bytes))
     }
 
     /// `list_pull_request_files` (`:200-202`): all pages, first 300.
@@ -644,8 +682,9 @@ impl GithubRestClient {
     }
 
     /// `list_pull_request_checks` (`:203-206`): the PR's head sha,
-    /// then its check-runs. A missing `head` / `sha` is the `KeyError`
-    /// Python's subscript raises.
+    /// then its check-runs. `pull["head"]["sha"]` subscripts, so a
+    /// missing key is `KeyError`, a non-object `head` is `TypeError`,
+    /// and a non-string `sha` formats into the URL.
     pub async fn list_pull_request_checks(
         &self,
         owner: &str,
@@ -656,10 +695,23 @@ impl GithubRestClient {
         let head = pull
             .get("head")
             .ok_or_else(|| GithubFailure::key_error("head"))?;
-        let sha = head
-            .get("sha")
-            .and_then(Value::as_str)
-            .ok_or_else(|| GithubFailure::key_error("sha"))?;
+        let sha_value = match head {
+            Value::Object(map) => map
+                .get("sha")
+                .ok_or_else(|| GithubFailure::key_error("sha"))?,
+            Value::Null => {
+                return Err(GithubFailure::type_error(
+                    "'NoneType' object is not subscriptable",
+                ));
+            }
+            other => return Err(GithubFailure::type_error(subscript_error(other))),
+        };
+        // An f-string formats anything (`str`, i.e. `repr` except for
+        // strings themselves).
+        let sha = match sha_value {
+            Value::String(sha) => sha.clone(),
+            other => super::provider::py_repr(other),
+        };
         let url = format!(
             "{}/repos/{owner}/{name}/commits/{sha}/check-runs",
             self.api_base
@@ -951,7 +1003,50 @@ mod tests {
         );
         let error = client.get_pull_request("o", "r", 1).await.expect_err("500");
         assert_eq!(error.python_type, "HTTPError");
-        assert!(error.message.contains("500"), "{}", error.message);
+        // `requests.HTTPError` (`models.py:1017-1025`): no body.
+        assert_eq!(
+            error.message,
+            format!("500 Server Error: Internal Server Error for url: {base}/repos/o/r/pulls/1")
+        );
+    }
+
+    #[test]
+    fn diff_truncation_mirrors_encode_round_trip() {
+        // `raw = response.text.encode()[:65536]`
+        // (`github_client.py:197-198`): the cut lands on re-encoded
+        // bytes, and `truncated` compares against the raw cut — so a
+        // 64 KiB body with invalid bytes loses a char yet reports
+        // `truncated: false`.
+        let out = truncate_diff(b"abc");
+        assert_eq!(out["diff"], Value::String("abc".to_owned()));
+        assert_eq!(out["truncated"], Value::Bool(false));
+        let out = truncate_diff(&vec![b'a'; 70_000]);
+        assert_eq!(out["diff"].as_str().unwrap().len(), 65_536);
+        assert_eq!(out["truncated"], Value::Bool(true));
+        let mut content = vec![b'a'; 65_534];
+        content.extend_from_slice(&[0xff, 0xff]);
+        let out = truncate_diff(&content);
+        assert_eq!(
+            out["diff"],
+            Value::String(format!("{}\u{fffd}", "a".repeat(65_534)))
+        );
+        assert_eq!(out["truncated"], Value::Bool(false));
+        let out = truncate_diff(&vec![0xff; 70_000]);
+        assert_eq!(out["diff"], Value::String("\u{fffd}".repeat(21_846)));
+        assert_eq!(out["truncated"], Value::Bool(true));
+    }
+
+    #[test]
+    fn http_error_names_client_and_server() {
+        assert_eq!(
+            GithubFailure::http_error(
+                reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+                "ignored body",
+                "https://x/y"
+            )
+            .message,
+            "422 Client Error: Unprocessable Entity for url: https://x/y"
+        );
     }
 
     #[tokio::test]
@@ -1061,6 +1156,39 @@ mod tests {
             .expect_err("sha");
         assert_eq!(error.python_type, "KeyError");
         assert_eq!(error.message, "'sha'");
+    }
+
+    #[tokio::test]
+    async fn checks_null_head_is_type_error() {
+        // `None["sha"]`: `TypeError`, not `KeyError('sha')`.
+        let (base, _) = mock_server(vec![json_reply(r#"{"head": null}"#)]).await;
+        let client = client_for(&base);
+        let error = client
+            .list_pull_request_checks("o", "r", 3)
+            .await
+            .expect_err("null head");
+        assert_eq!(error.python_type, "TypeError");
+        assert_eq!(error.message, "'NoneType' object is not subscriptable");
+    }
+
+    #[tokio::test]
+    async fn checks_non_string_sha_formats_into_url() {
+        // An f-string formats anything: no raise.
+        let (base, state) = mock_server(vec![
+            json_reply(r#"{"head": {"sha": 123}}"#),
+            json_reply(r#"{"total_count": 0}"#),
+        ])
+        .await;
+        let client = client_for(&base);
+        client
+            .list_pull_request_checks("o", "r", 3)
+            .await
+            .expect("checks");
+        let urls = state.urls.lock().unwrap();
+        assert!(
+            urls[1].ends_with("/repos/o/r/commits/123/check-runs"),
+            "{urls:?}"
+        );
     }
 
     #[test]

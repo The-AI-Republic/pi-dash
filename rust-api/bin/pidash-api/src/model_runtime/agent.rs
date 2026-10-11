@@ -24,11 +24,14 @@
 //!   valid calls execute concurrently with results appended in call
 //!   order (`_call_tools`, first-completed error wins, siblings
 //!   dropped).
-//! * Tool retries (`tool_manager.py:177-196,407-414`): per-name
-//!   failure counts bump each step; at the max the turn raises
-//!   `Tool 'name' exceeded max retries count of N`. Function tools
-//!   get 2, MCP tools 1 (`mcp.py:814`), unknown tools 1
-//!   (`default_max_retries`).
+//! * Tool retries (`tool_manager.py:122-140,177-181,407-414`):
+//!   per-name failure counts are consecutive — each step rebuilds
+//!   the map from the previous step's failed set only, so a success
+//!   (or a step without that tool failing) resets the count; at the
+//!   max the turn raises `Tool 'name' exceeded max retries count of
+//!   N`. Function, MCP, and unknown tools all get 2: MCP resolves
+//!   `max_retries=None` from `ctx.max_retries` (`mcp.py:2450`, the
+//!   run-step default), and unknown names use `default_max_retries`.
 //! * Tool errors: `ModelRetry` retries with its message; anything
 //!   else propagates raw (`loopprobe.json` `tool_exc`).
 //! * Sync function tools have no effective timeout: the toolset's
@@ -65,6 +68,11 @@ use super::validation::{ValidatedArgs, ValidationDetail};
 /// `final_result`: the output tool name (`_output.py`).
 pub const OUTPUT_TOOL_NAME: &str = "final_result";
 
+/// The textless no-recovery retry content: `Please {" or
+/// ".join(alternatives)}.` for this configuration (output toolset +
+/// `return text`).
+const TEXTLESS_RETRY_TEXT: &str = "Please return text or include your response in a tool call.";
+
 /// How one tool call resolves (`get_tool_def` /
 /// `_classify_tool_calls`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +95,9 @@ pub enum ToolKind {
 /// leg adds masked `Fatal` text and `Timeout`.
 pub enum ToolOutcome {
     Ok(Value),
+    // Only test fakes return this — production twins mask it to
+    // `Fatal` first — but the executor contract keeps the variant.
+    #[allow(dead_code)]
     ModelRetry(String),
     Fatal(String),
     Timeout,
@@ -137,7 +148,10 @@ pub struct LoopConfig<'a> {
     pub mcp_names: &'a HashSet<String>,
     pub max_tool_retries: u64,
     pub max_output_retries: u64,
-    /// MCP tools retry once (`MCPToolset(max_retries=1)`).
+    /// MCP tools retry like function tools: our `MCPToolset` passes
+    /// `max_retries=None`, which resolves per-tool from
+    /// `ctx.max_retries` (`mcp.py:2450`), i.e. the run-step default
+    /// — not the standalone-construction default of 1 (`mcp.py:814`).
     pub mcp_max_retries: u64,
     pub limits: &'a pidash_jobs::dispatch_execute::UsageLimits,
     pub max_tokens: i64,
@@ -214,9 +228,14 @@ pub async fn run_loop<E: ToolExecutor>(
                 return Err(LoopError::failed(length_message(state.last_max_tokens)));
             }
             if response.finish == Some(Finish::ContentFilter) {
-                return Err(LoopError::failed(content_filter_message(&state, &response)));
+                return Err(LoopError::failed(content_filter_message(
+                    config.lane,
+                    &state,
+                    &response,
+                )));
             }
             state.consume_output_retry(config.max_output_retries)?;
+            state.reset_tool_retries();
             state.history.push(response_message(&response));
             state
                 .history
@@ -233,12 +252,8 @@ pub async fn run_loop<E: ToolExecutor>(
             }
         }
         if !calls.is_empty() {
-            // Text alongside tool calls is discarded (but kept for
-            // history recovery).
-            let text = texts.concat();
-            if !text.is_empty() {
-                state.discarded_text = Some(text);
-            }
+            // Text alongside tool calls is discarded (kept in
+            // history for `_recover_text_from_message_history`).
             state.history.push(response_message(&response));
             let outcome = process_tool_calls(config, executor, &mut state, &calls).await?;
             state.history.push(HistoryMessage::Request {
@@ -255,25 +270,26 @@ pub async fn run_loop<E: ToolExecutor>(
 
         // No tool calls: the concatenated text, recovered from
         // history when the turn itself is textless
-        // (`_agent_graph.py:1192-1258`).
+        // (`_agent_graph.py:1192-1258`). The response lands in
+        // history before handling (`_append_response`), so the
+        // recovery scan sees it — textless, hence skipped.
         let text = texts.concat();
+        state.history.push(response_message(&response));
         let recovered = if text.is_empty() {
-            recover_text(&state.history, state.discarded_text.as_deref())
+            recover_text(&state.history)
         } else {
             Some(text)
         };
-        state.history.push(response_message(&response));
         let Some(text) = recovered else {
             // Files-only responses cannot occur here (no file
             // parts exist); the alternatives arm still reads
             // faithfully.
             state.consume_output_retry(config.max_output_retries)?;
+            state.reset_tool_retries();
             state.history.push(HistoryMessage::Request {
                 parts: vec![RequestPart::Retry {
                     tool_name: None,
-                    content: RetryContent::Text(
-                        "Please include your response in a tool call.".to_owned(),
-                    ),
+                    content: RetryContent::Text(TEXTLESS_RETRY_TEXT.to_owned()),
                     call_id: generate_tool_call_id(),
                 }],
             });
@@ -293,6 +309,7 @@ pub async fn run_loop<E: ToolExecutor>(
                     call_id: generate_tool_call_id(),
                 };
                 state.consume_output_retry(config.max_output_retries)?;
+                state.reset_tool_retries();
                 state
                     .history
                     .push(HistoryMessage::Request { parts: vec![retry] });
@@ -309,9 +326,6 @@ struct LoopState {
     retries: HashMap<String, u64>,
     output_retries_used: u64,
     last_max_tokens: Option<i64>,
-    /// Text discarded from the latest tool-call turn, for
-    /// `_recover_text_from_message_history`.
-    discarded_text: Option<String>,
     run_id: String,
     conversation_id: String,
 }
@@ -324,7 +338,6 @@ impl LoopState {
             retries: HashMap::new(),
             output_retries_used: 0,
             last_max_tokens: None,
-            discarded_text: None,
             // `uuid7()` (`_agent_graph.py` run/conversation ids).
             run_id: uuid::Uuid::now_v7().to_string(),
             conversation_id: uuid::Uuid::now_v7().to_string(),
@@ -371,6 +384,13 @@ impl LoopState {
         ))
     }
 
+    /// A step with no tool failures still rebuilds the retry map
+    /// (`for_run_step` with an empty failed set): every count
+    /// resets.
+    fn reset_tool_retries(&mut self) {
+        self.retries.clear();
+    }
+
     /// `_check_max_retries`: raise the per-tool exhaustion error at
     /// the max.
     fn check_max_retries(&self, name: &str, max_retries: u64) -> Result<(), LoopError> {
@@ -407,36 +427,56 @@ fn length_message(last_max_tokens: Option<i64>) -> String {
     )
 }
 
-/// The content-filter message (`_agent_graph.py:1117-1123` +
-/// `UnexpectedModelBehavior.__str__`): the refusal or raw finish
-/// reason plus the pretty-printed response body.
-fn content_filter_message(state: &LoopState, response: &ParsedResponse) -> String {
+/// The content-filter message (`_agent_graph.py:1117-1129` +
+/// `UnexpectedModelBehavior.__str__`): the finish reason, block
+/// reason, or `repr`'d refusal plus the pretty-printed response
+/// body (`json.dumps(..., indent=2)`, ASCII-escaped).
+fn content_filter_message(lane: &Lane, state: &LoopState, response: &ParsedResponse) -> String {
     let details_empty = Map::new();
     let details = response.provider_details.as_ref().unwrap_or(&details_empty);
-    let message = if let Some(reason) = details.get("finish_reason").and_then(Value::as_str) {
+    // Each arm reads a truthy value (`:=` in Python): empty strings
+    // fall through.
+    let present = |key: &str| {
+        details
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let message = if let Some(reason) = present("finish_reason") {
         format!("Content filter triggered. Finish reason: '{reason}'")
-    } else if let Some(refusal) = details.get("refusal").and_then(Value::as_str) {
-        format!("Content filter triggered. Refusal: '{refusal}'")
+    } else if let Some(blocked) = present("block_reason") {
+        format!("Content filter triggered. Block reason: '{blocked}'")
+    } else if let Some(refusal) = present("refusal") {
+        format!(
+            "Content filter triggered. Refusal: {}",
+            super::provider::py_repr(&Value::String(refusal.to_owned()))
+        )
     } else {
         "Content filter triggered.".to_owned()
     };
-    let body = Value::Array(vec![response_json(state, response)]);
+    let body = Value::Array(vec![response_json(lane, state, response)]);
     let pretty = serde_json::to_string_pretty(&body).unwrap_or_default();
+    let pretty = super::validation::ensure_ascii(&pretty);
     format!("{message}, body:\n{pretty}")
 }
 
 /// The `ModelResponse` JSON inside the filter body
-/// (`ModelMessagesTypeAdapter.dump_json`, warnings dropped).
-fn response_json(state: &LoopState, response: &ParsedResponse) -> Value {
+/// (`ModelMessagesTypeAdapter.dump_json`): dataclass key order, the
+/// actual response usage, nulls included.
+fn response_json(lane: &Lane, state: &LoopState, response: &ParsedResponse) -> Value {
     let parts: Vec<Value> = response
         .parts
         .iter()
         .map(|part| match part {
             ResponsePart::Text(text) => Value::Object(Map::from_iter([
                 ("content".to_owned(), Value::String(text.clone())),
+                ("id".to_owned(), Value::Null),
+                ("provider_name".to_owned(), Value::Null),
+                ("provider_details".to_owned(), Value::Null),
                 ("part_kind".to_owned(), Value::String("text".to_owned())),
             ])),
             ResponsePart::ToolCall(call) => Value::Object(Map::from_iter([
+                ("tool_name".to_owned(), Value::String(call.name.clone())),
                 (
                     "args".to_owned(),
                     match &call.args {
@@ -445,20 +485,23 @@ fn response_json(state: &LoopState, response: &ParsedResponse) -> Value {
                     },
                 ),
                 (
-                    "part_kind".to_owned(),
-                    Value::String("tool-call".to_owned()),
-                ),
-                (
                     "tool_call_id".to_owned(),
                     Value::String(call.call_id.clone()),
                 ),
-                ("tool_name".to_owned(), Value::String(call.name.clone())),
+                ("tool_kind".to_owned(), Value::Null),
+                ("id".to_owned(), Value::Null),
+                ("provider_name".to_owned(), Value::Null),
+                ("provider_details".to_owned(), Value::Null),
+                (
+                    "part_kind".to_owned(),
+                    Value::String("tool-call".to_owned()),
+                ),
             ])),
         })
         .collect();
-    let mut message = Map::from_iter([
+    Value::Object(Map::from_iter([
         ("parts".to_owned(), Value::Array(parts)),
-        ("usage".to_owned(), usage_json(&RequestUsage::zeros())),
+        ("usage".to_owned(), usage_json(&response.usage)),
         (
             "model_name".to_owned(),
             Value::String(response.model_name.clone()),
@@ -468,39 +511,59 @@ fn response_json(state: &LoopState, response: &ParsedResponse) -> Value {
             Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)),
         ),
         ("kind".to_owned(), Value::String("response".to_owned())),
-    ]);
-    if let Some(id) = &response.response_id {
-        message.insert("provider_response_id".to_owned(), Value::String(id.clone()));
-    }
-    if let Some(details) = &response.provider_details {
-        message.insert(
+        (
+            "provider_name".to_owned(),
+            Value::String(lane.provider_name().to_owned()),
+        ),
+        (
+            "provider_url".to_owned(),
+            Value::String(lane.provider_url()),
+        ),
+        (
             "provider_details".to_owned(),
-            Value::Object(details.clone()),
-        );
-    }
-    if let Some(finish) = response.finish {
-        message.insert(
+            response
+                .provider_details
+                .clone()
+                .map(Value::Object)
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "provider_response_id".to_owned(),
+            response
+                .response_id
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        ),
+        (
             "finish_reason".to_owned(),
-            Value::String(
-                match finish {
-                    Finish::Stop => "stop",
-                    Finish::Length => "length",
-                    Finish::ToolCall => "tool_call",
-                    Finish::ContentFilter => "content_filter",
-                }
-                .to_owned(),
-            ),
-        );
-    }
-    message.insert("run_id".to_owned(), Value::String(state.run_id.clone()));
-    message.insert(
-        "conversation_id".to_owned(),
-        Value::String(state.conversation_id.clone()),
-    );
-    Value::Object(message)
+            response
+                .finish
+                .map(|finish| {
+                    Value::String(
+                        match finish {
+                            Finish::Stop => "stop",
+                            Finish::Length => "length",
+                            Finish::ToolCall => "tool_call",
+                            Finish::ContentFilter => "content_filter",
+                        }
+                        .to_owned(),
+                    )
+                })
+                .unwrap_or(Value::Null),
+        ),
+        ("run_id".to_owned(), Value::String(state.run_id.clone())),
+        (
+            "conversation_id".to_owned(),
+            Value::String(state.conversation_id.clone()),
+        ),
+        ("metadata".to_owned(), Value::Null),
+        ("state".to_owned(), Value::String("complete".to_owned())),
+    ]))
 }
 
-/// The `RequestUsage` JSON shape (`model_dump`).
+/// The `RequestUsage` JSON shape in dataclass field order
+/// (`model_dump`).
 fn usage_json(usage: &RequestUsage) -> Value {
     Value::Object(Map::from_iter([
         ("input_tokens".to_owned(), usage.input_tokens.to_json()),
@@ -512,6 +575,7 @@ fn usage_json(usage: &RequestUsage) -> Value {
             "cache_read_tokens".to_owned(),
             usage.cache_read_tokens.to_json(),
         ),
+        ("output_tokens".to_owned(), usage.output_tokens.to_json()),
         (
             "input_audio_tokens".to_owned(),
             usage.input_audio_tokens.to_json(),
@@ -520,7 +584,6 @@ fn usage_json(usage: &RequestUsage) -> Value {
             "cache_audio_read_tokens".to_owned(),
             usage.cache_audio_read_tokens.to_json(),
         ),
-        ("output_tokens".to_owned(), usage.output_tokens.to_json()),
         (
             "output_audio_tokens".to_owned(),
             usage.output_audio_tokens.to_json(),
@@ -530,31 +593,26 @@ fn usage_json(usage: &RequestUsage) -> Value {
 }
 
 /// Recover discarded text from history
-/// (`_recover_text_from_message_history`): the latest turn's kept
-/// text, else the latest tool-call turn's discarded text.
-fn recover_text(history: &[HistoryMessage], discarded: Option<&str>) -> Option<String> {
+/// (`_recover_text_from_message_history`): scan every response
+/// newest-first; the first response whose concatenated text is
+/// non-empty wins. (No `NativeToolCallPart` reset: native tools never
+/// occur in this configuration.)
+fn recover_text(history: &[HistoryMessage]) -> Option<String> {
     for message in history.iter().rev() {
         if let HistoryMessage::Response { parts, .. } = message {
-            let texts: Vec<&str> = parts
+            let text: String = parts
                 .iter()
                 .filter_map(|part| match part {
                     ResponsePart::Text(text) => Some(text.as_str()),
                     ResponsePart::ToolCall(_) => None,
                 })
                 .collect();
-            if texts.iter().any(|text| !text.is_empty()) {
-                return Some(texts.concat());
+            if !text.is_empty() {
+                return Some(text);
             }
-            let has_calls = parts
-                .iter()
-                .any(|part| matches!(part, ResponsePart::ToolCall(_)));
-            if has_calls {
-                return discarded.map(str::to_owned);
-            }
-            return None;
         }
     }
-    discarded.map(str::to_owned)
+    None
 }
 
 /// Wrap a parsed response as a history message.
@@ -595,8 +653,9 @@ fn strip_markdown_fences(text: &str) -> &str {
     }
     static FENCES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let pattern = FENCES.get_or_init(|| {
-        // `\Z` (absolute end) reads `\z` in Rust syntax.
-        regex::Regex::new(r"```(?:\w+)?\n(\{.*?\})\s*(?:\n?```|\z)").unwrap()
+        // `(?s)`: `re.DOTALL` — `{...}` spans newlines. `\Z`
+        // (absolute end) reads `\z` in Rust syntax.
+        regex::Regex::new(r"(?s)```(?:\w+)?\n(\{.*?\})\s*(?:\n?```|\z)").unwrap()
     });
     pattern
         .captures(text)
@@ -689,6 +748,9 @@ async fn process_tool_calls<E: ToolExecutor>(
     }
     calls_to_run.extend(unknown_calls);
 
+    // The retry map rebuilds every step, even with nothing to run
+    // (an output-only turn resets every count).
+    let mut failed: HashSet<String> = HashSet::new();
     if !calls_to_run.is_empty() {
         // The usage gate runs over the projected count (current +
         // pending, unknowns included).
@@ -697,7 +759,6 @@ async fn process_tool_calls<E: ToolExecutor>(
         // Validation runs sequentially in call order; the first
         // exhaustion raises before anything executes.
         let mut validated: Vec<ValidatedCall> = Vec::with_capacity(calls_to_run.len());
-        let mut failed: HashSet<String> = HashSet::new();
         for call in &calls_to_run {
             match validate_function_call(config, state, call) {
                 ValidationResult::Valid(valid) => validated.push(valid),
@@ -728,8 +789,8 @@ async fn process_tool_calls<E: ToolExecutor>(
             output_parts.push(part);
         }
         state.usage.tool_calls += successes;
-        state.retries = for_run_step(&state.retries, &failed);
     }
+    state.retries = for_run_step(&state.retries, &failed);
     Ok(TurnOutcome {
         parts: output_parts,
         final_result,
@@ -832,7 +893,9 @@ fn validate_function_call(
             fail(
                 state,
                 &call.name,
-                1,
+                // Unknown names budget against `default_max_retries`
+                // (`tool_manager.py:407`), like function tools.
+                config.max_tool_retries,
                 RetryContent::Text(message),
                 &call.call_id,
             )
@@ -1040,14 +1103,15 @@ async fn execute_mcp<E: ToolExecutor>(
     }
 }
 
-/// `for_run_step`: bump the failure count of every tool that failed
-/// this step (`tool_manager.py:78-100`).
+/// `for_run_step`: rebuild the failure counts for the next step
+/// (`tool_manager.py:122-140`): only tools that failed this step
+/// carry over, bumped by one — everything else resets. Runs every
+/// step, including steps with no tool failures.
 fn for_run_step(retries: &HashMap<String, u64>, failed: &HashSet<String>) -> HashMap<String, u64> {
-    let mut next = retries.clone();
-    for name in failed {
-        *next.entry(name.clone()).or_insert(0) += 1;
-    }
-    next
+    failed
+        .iter()
+        .map(|name| (name.clone(), retries.get(name).copied().unwrap_or(0) + 1))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,9 +1121,11 @@ fn for_run_step(retries: &HashMap<String, u64>, failed: &HashSet<String>) -> Has
 /// Validate MCP arguments against the tool's input schema
 /// (`jsonschema.validate`, `mcp/server/lowlevel/server.py:530-538`)
 /// for the shapes these schemas use (`type`, `required`,
-/// `properties`, `default`-less): the first failure message, in
-/// `jsonschema` wording (`'xx' is not of type 'integer'`, `'path'
-/// is a required property`).
+/// `properties`, `additionalProperties: false`, `default`-less):
+/// the first failure message, in `jsonschema` wording (`'xx' is not
+/// of type 'integer'`, `'path' is a required property`,
+/// `Additional properties are not allowed (...)`). Keyword order is
+/// `required` > `additionalProperties` > `type`.
 fn jsonschema_validate(schema: &Value, args: &Map<String, Value>) -> Result<(), String> {
     let Value::Object(schema) = schema else {
         return Ok(());
@@ -1069,6 +1135,33 @@ fn jsonschema_validate(schema: &Value, args: &Map<String, Value>) -> Result<(), 
             if !args.contains_key(name) {
                 return Err(format!("'{name}' is a required property"));
             }
+        }
+    }
+    if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+        let known = schema.get("properties").and_then(Value::as_object);
+        // `extras_msg(sorted(extras))`: one quoted name + `was`,
+        // several sorted + `were` (`_utils.py:87-92`).
+        let mut extras: Vec<&str> = args
+            .keys()
+            .filter(|name| !known.is_some_and(|known| known.contains_key(*name)))
+            .map(String::as_str)
+            .collect();
+        extras.sort_unstable();
+        if extras.len() == 1 {
+            return Err(format!(
+                "Additional properties are not allowed ('{}' was unexpected)",
+                extras[0]
+            ));
+        }
+        if extras.len() > 1 {
+            let joined = extras
+                .iter()
+                .map(|name| format!("'{name}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "Additional properties are not allowed ({joined} were unexpected)"
+            ));
         }
     }
     if let Value::Object(properties) = schema.get("properties").unwrap_or(&Value::Null) {
@@ -1130,7 +1223,6 @@ mod tests {
     enum MockReply {
         Json(Value),
         Status(u16, Vec<u8>),
-        Sleep(u64, Value),
     }
 
     #[derive(Clone)]
@@ -1160,10 +1252,6 @@ mod tests {
                 String::from_utf8_lossy(&bytes).into_owned(),
             )
                 .into_response(),
-            MockReply::Sleep(secs, value) => {
-                tokio::time::sleep(Duration::from_secs(secs)).await;
-                (StatusCode::OK, value.to_string()).into_response()
-            }
         }
     }
 
@@ -1365,7 +1453,7 @@ mod tests {
                 mcp_names: &self.mcp_names,
                 max_tool_retries: 2,
                 max_output_retries: 2,
-                mcp_max_retries: 1,
+                mcp_max_retries: 2,
                 limits: &self.limits,
                 max_tokens: 4096,
                 timeout_secs: 60,
@@ -1539,8 +1627,8 @@ mod tests {
         .await;
         let executor = FakeExecutor::named(vec![]);
         let error = failed_message(run_loop(&board.config(), &executor).await.unwrap_err());
-        assert_eq!(error, "Tool 'nope' exceeded max retries count of 1");
-        assert_eq!(board.state.requests.lock().unwrap().len(), 2);
+        assert_eq!(error, "Tool 'nope' exceeded max retries count of 2");
+        assert_eq!(board.state.requests.lock().unwrap().len(), 3);
     }
 
     #[tokio::test]
@@ -1702,9 +1790,120 @@ mod tests {
         let error = failed_message(run_loop(&board.config(), &executor).await.unwrap_err());
         let (head, body) = error.split_once(", body:\n").expect("filter body");
         assert_eq!(head, "Content filter triggered. Refusal: 'nope'");
+        // The body mirrors `ModelMessagesTypeAdapter.dump_json`
+        // exactly: dataclass key order, the actual response usage,
+        // nulls included.
         let parsed: Value = serde_json::from_str(body).expect("body is JSON");
-        assert_eq!(parsed[0]["kind"], Value::String("response".to_owned()));
-        assert!(parsed[0].get("run_id").is_some());
+        let message = parsed[0].as_object().expect("message object");
+        assert_eq!(
+            message.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "parts",
+                "usage",
+                "model_name",
+                "timestamp",
+                "kind",
+                "provider_name",
+                "provider_url",
+                "provider_details",
+                "provider_response_id",
+                "finish_reason",
+                "run_id",
+                "conversation_id",
+                "metadata",
+                "state",
+            ]
+            .as_slice()
+        );
+        assert_eq!(message["kind"], Value::String("response".to_owned()));
+        assert_eq!(
+            message["usage"],
+            serde_json::json!({
+                "input_tokens": 5,
+                "cache_write_tokens": 0,
+                "cache_read_tokens": 0,
+                "output_tokens": 3,
+                "input_audio_tokens": 0,
+                "cache_audio_read_tokens": 0,
+                "output_audio_tokens": 0,
+                "details": {},
+            })
+        );
+        assert_eq!(
+            message["usage"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "input_tokens",
+                "cache_write_tokens",
+                "cache_read_tokens",
+                "output_tokens",
+                "input_audio_tokens",
+                "cache_audio_read_tokens",
+                "output_audio_tokens",
+                "details",
+            ]
+            .as_slice()
+        );
+        assert_eq!(message["model_name"], Value::String("m".to_owned()));
+        assert!(message["timestamp"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(message["provider_name"], Value::String("openai".to_owned()));
+        assert!(message["provider_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://127.0.0.1:"));
+        assert_eq!(
+            message["provider_details"],
+            serde_json::json!({"refusal": "nope", "timestamp": "1970-01-01T00:00:01Z"})
+        );
+        assert_eq!(
+            message["provider_response_id"],
+            Value::String("c1".to_owned())
+        );
+        assert_eq!(
+            message["finish_reason"],
+            Value::String("content_filter".to_owned())
+        );
+        assert!(uuid::Uuid::parse_str(message["run_id"].as_str().unwrap()).is_ok());
+        assert!(uuid::Uuid::parse_str(message["conversation_id"].as_str().unwrap()).is_ok());
+        assert_eq!(message["metadata"], Value::Null);
+        assert_eq!(message["state"], Value::String("complete".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn refusal_head_uses_py_repr() {
+        // `Refusal: {refusal!r}` (`_agent_graph.py:1128`): a refusal
+        // holding a single quote renders double-quoted.
+        let board = harness(
+            vec![chat_reply(
+                serde_json::json!({"role": "assistant", "content": null, "refusal": "o'clock"}),
+                "stop",
+            )],
+            vec![output_wire_tool()],
+            vec![],
+            vec![],
+        )
+        .await;
+        let executor = FakeExecutor::named(vec![]);
+        let error = failed_message(run_loop(&board.config(), &executor).await.unwrap_err());
+        let (head, _) = error.split_once(", body:\n").expect("filter body");
+        assert_eq!(head, "Content filter triggered. Refusal: \"o'clock\"");
+    }
+
+    #[test]
+    fn textless_retry_text_names_both_alternatives() {
+        // `Please {" or ".join(alternatives)}.` with the
+        // output-toolset alternative plus `return text`, since the
+        // (present) text processor got no text
+        // (`_agent_graph.py:1216-1246`).
+        let content = RetryContent::Text(TEXTLESS_RETRY_TEXT.to_owned());
+        assert_eq!(
+            crate::model_runtime::provider::retry_message(&content, None),
+            "Validation feedback:\nPlease return text or include your response in a tool call.\n\nFix the errors and try again."
+        );
     }
 
     #[tokio::test]
@@ -1785,6 +1984,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multiline_fenced_output_parses_first_try() {
+        // `re.DOTALL` (`_utils.py:1091`): the `{...}` group spans
+        // newlines, so pretty-printed fenced JSON validates without
+        // a retry.
+        let board = harness(
+            vec![text_reply(
+                "Here you go:\n```json\n{\n\"outcome\": \"completed\",\n\"summary\": \"pretty\"\n}\n```",
+            )],
+            vec![output_wire_tool()],
+            vec![],
+            vec![],
+        )
+        .await;
+        let executor = FakeExecutor::named(vec![]);
+        let output = run_loop(&board.config(), &executor).await.expect("runs");
+        assert_eq!(output.output.summary(), "pretty");
+        assert_eq!(board.state.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn recover_text_skips_empty_responses() {
+        // `_recover_text_from_message_history`: the scan never stops
+        // early — an empty response between the text turn and the
+        // recovery turn does not hide the older text.
+        fn response(parts: Vec<ResponsePart>) -> HistoryMessage {
+            HistoryMessage::Response {
+                parts,
+                usage: RequestUsage::zeros(),
+                model_name: "m".to_owned(),
+                finish: None,
+                provider_details: None,
+                response_id: None,
+            }
+        }
+        let history = vec![
+            HistoryMessage::Request {
+                parts: vec![RequestPart::UserPrompt("go".to_owned())],
+            },
+            response(vec![ResponsePart::Text("stale but failed".to_owned())]),
+            HistoryMessage::Request {
+                parts: vec![RequestPart::Retry {
+                    tool_name: None,
+                    content: RetryContent::Text("retry".to_owned()),
+                    call_id: "c0".to_owned(),
+                }],
+            },
+            // The empty arm's push plus its resubmit.
+            response(Vec::new()),
+            HistoryMessage::Request { parts: Vec::new() },
+            // The current textless turn (already in history).
+            response(vec![ResponsePart::Text(String::new())]),
+        ];
+        assert_eq!(recover_text(&history).as_deref(), Some("stale but failed"));
+        assert_eq!(recover_text(&history[..1]), None);
+    }
+
+    #[tokio::test]
     async fn tool_arg_exhaustion() {
         let board = harness(
             vec![tool_reply(vec![("c1", "add", r#"{"a": "xx"}"#)])],
@@ -1798,6 +2054,31 @@ mod tests {
         assert_eq!(error, "Tool 'add' exceeded max retries count of 2");
         assert_eq!(board.state.requests.lock().unwrap().len(), 3);
         assert!(executor.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_retry_counts_reset_on_success() {
+        // Consecutive budgets (`tool_manager.py:122-140`): fail,
+        // succeed, fail, fail never exhausts — the success resets
+        // the count. (Cumulative counts would exhaust on turn 4.)
+        let board = harness(
+            vec![
+                tool_reply(vec![("c1", "add", r#"{"a": "xx"}"#)]),
+                tool_reply(vec![("c2", "add", r#"{"a": 1, "b": 2}"#)]),
+                tool_reply(vec![("c3", "add", r#"{"a": "xx"}"#)]),
+                tool_reply(vec![("c4", "add", r#"{"a": "xx"}"#)]),
+                text_reply(&done_text("completed", "survived")),
+            ],
+            vec![add_wire_tool(), output_wire_tool()],
+            vec![add_schema()],
+            vec![],
+        )
+        .await;
+        let executor = FakeExecutor::named(vec![("add", Behavior::Add)]);
+        let output = run_loop(&board.config(), &executor).await.expect("runs");
+        assert_eq!(output.output.summary(), "survived");
+        assert_eq!(output.usage.tool_calls, 1);
+        assert_eq!(board.state.requests.lock().unwrap().len(), 5);
     }
 
     #[tokio::test]
@@ -1843,7 +2124,7 @@ mod tests {
             name: "mcp_add".to_owned(),
             description: "Add via MCP.".to_owned(),
             parameters: serde_json::from_str(
-                r#"{"properties":{"a":{"type":"integer"}},"required":["a"],"type":"object"}"#,
+                r#"{"additionalProperties":false,"properties":{"a":{"type":"integer"}},"required":["a"],"type":"object"}"#,
             )
             .unwrap(),
         }
@@ -1914,6 +2195,94 @@ mod tests {
         let executor = FakeExecutor::named(vec![]);
         let error = failed_message(run_loop(&board.config(), &executor).await.unwrap_err());
         assert_eq!(error, "Input validation error: 'a' is a required property");
+    }
+
+    #[tokio::test]
+    async fn mcp_extra_arg_is_fatal() {
+        // `additionalProperties: false` (`_keywords.py:44-56`): one
+        // extra, singular message.
+        let board = harness(
+            vec![tool_reply(vec![("c1", "mcp_add", r#"{"a": 1, "zzz": 2}"#)])],
+            vec![mcp_add_wire_tool(), output_wire_tool()],
+            vec![],
+            vec![mcp_add_schema()],
+        )
+        .await;
+        let executor = FakeExecutor::named(vec![]);
+        let error = failed_message(run_loop(&board.config(), &executor).await.unwrap_err());
+        assert_eq!(
+            error,
+            "Input validation error: Additional properties are not allowed ('zzz' was unexpected)"
+        );
+        assert!(executor.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn mcp_extra_args_sort_with_plural() {
+        // Several extras: one error, sorted names, `were`.
+        let board = harness(
+            vec![tool_reply(vec![(
+                "c1",
+                "mcp_add",
+                r#"{"a": 1, "zzz": 2, "aaa": 3}"#,
+            )])],
+            vec![mcp_add_wire_tool(), output_wire_tool()],
+            vec![],
+            vec![mcp_add_schema()],
+        )
+        .await;
+        let executor = FakeExecutor::named(vec![]);
+        let error = failed_message(run_loop(&board.config(), &executor).await.unwrap_err());
+        assert_eq!(
+            error,
+            "Input validation error: Additional properties are not allowed ('aaa', 'zzz' were unexpected)"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_keyword_precedence() {
+        // `required` beats `additionalProperties` beats `type`.
+        for (args, expected) in [
+            (
+                r#"{"zzz": 1}"#,
+                "Input validation error: 'a' is a required property",
+            ),
+            (
+                r#"{"a": "x", "zzz": 1}"#,
+                "Input validation error: Additional properties are not allowed ('zzz' was unexpected)",
+            ),
+        ] {
+            let board = harness(
+                vec![tool_reply(vec![("c1", "mcp_add", args)])],
+                vec![mcp_add_wire_tool(), output_wire_tool()],
+                vec![],
+                vec![mcp_add_schema()],
+            )
+            .await;
+            let executor = FakeExecutor::named(vec![]);
+            let error =
+                failed_message(run_loop(&board.config(), &executor).await.unwrap_err());
+            assert_eq!(error, expected, "args: {args}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_dict_violation_exhausts_on_third() {
+        // Non-dict MCP arguments retry against the run-step budget
+        // (`mcp.py:2450`): three consecutive failures exhaust with a
+        // count of 2.
+        let board = harness(
+            vec![tool_reply(vec![("c1", "mcp_add", "5")])],
+            vec![mcp_add_wire_tool(), output_wire_tool()],
+            vec![],
+            vec![mcp_add_schema()],
+        )
+        .await;
+        let executor = FakeExecutor::named(vec![]);
+        let error = failed_message(run_loop(&board.config(), &executor).await.unwrap_err());
+        assert_eq!(error, "Tool 'mcp_add' exceeded max retries count of 2");
+        assert_eq!(board.state.requests.lock().unwrap().len(), 3);
+        assert!(executor.seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
