@@ -25,5 +25,6 @@ pub mod github;
 pub mod keys;
 pub mod provider;
 pub mod schemas;
+pub mod tools_exec;
 pub mod usage;
 pub mod validation;

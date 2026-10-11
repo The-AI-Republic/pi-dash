@@ -69,7 +69,12 @@ impl LiveExecuteSeams {
 
     /// Mirror of `get_config` (`llm.py:67-68`): the creator's BYOK row,
     /// if any. `user_id` is one-to-one, so at most one row exists.
-    async fn llm_row(pool: &PgPool, creator_id: Uuid) -> Result<Option<LlmRow>, sqlx::Error> {
+    /// `pub(crate)` for the model runtime (key resolve + transition
+    /// presence prefetch), which reuses this read without forking it.
+    pub(crate) async fn llm_row(
+        pool: &PgPool,
+        creator_id: Uuid,
+    ) -> Result<Option<LlmRow>, sqlx::Error> {
         sqlx::query_as::<_, LlmRow>(
             "SELECT provider_kind, base_url, model_name, api_key_encrypted \
              FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1",
@@ -83,17 +88,17 @@ impl LiveExecuteSeams {
 /// One `assistant_user_llm_config` row: the `UserLLMConfig` columns
 /// the model resolve consumes (`models.py:238-263`).
 #[derive(Debug, Clone, sqlx::FromRow)]
-struct LlmRow {
-    provider_kind: String,
-    base_url: String,
-    model_name: String,
-    api_key_encrypted: Option<Vec<u8>>,
+pub(crate) struct LlmRow {
+    pub(crate) provider_kind: String,
+    pub(crate) base_url: String,
+    pub(crate) model_name: String,
+    pub(crate) api_key_encrypted: Option<Vec<u8>>,
 }
 
 impl LlmRow {
     /// `has_api_key` (`models.py:261-262`): the key column is set and
     /// non-empty.
-    fn has_api_key(&self) -> bool {
+    pub(crate) fn has_api_key(&self) -> bool {
         self.api_key_encrypted
             .as_ref()
             .is_some_and(|key| !key.is_empty())
