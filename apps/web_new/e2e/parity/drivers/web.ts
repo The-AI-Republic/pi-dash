@@ -31051,21 +31051,23 @@ export class WebDriver implements ParityDriver {
     return this.modulesListEmptyRoot().locator("h3").first();
   }
 
-  /** Header search area, scoped off the always-mounted search box. */
+  /** Header search box: the innermost flex row holding the search input. */
   private modulesListSearchArea(): Locator {
     // The sidebar project search shares the placeholder, so scope to the
     // list main; the filters popover carries a second box only while open,
-    // and these scenarios never open it.
-    return this.modulesListMain().locator('div.flex.items-center:has(input[placeholder="Search"])').first();
+    // and these scenarios never open it. The :has() also matches every
+    // ancestor row (five nested in the live DOM), so take the innermost —
+    // the expanding box itself — never the page header bar.
+    return this.modulesListMain().locator('div.flex.items-center:has(input[placeholder="Search"])').last();
   }
 
   private modulesListSearchInput(): Locator {
     return this.modulesListSearchArea().locator('input[placeholder="Search"]');
   }
 
-  /** Collapsed search toggle: the area's direct button (the box holds its own close). */
+  /** Collapsed search toggle: the magnifier button just ahead of the expanding box. */
   private modulesListSearchToggle(): Locator {
-    return this.modulesListSearchArea().locator(":scope > button");
+    return this.modulesListSearchArea().locator("xpath=preceding-sibling::button[1]");
   }
 
   /** Desktop layout switcher (icon buttons; hidden on small screens). */
@@ -33703,6 +33705,10 @@ export class WebDriver implements ParityDriver {
   }
 
   async modulesListSkeletonVisible(): Promise<boolean> {
+    // The skeleton body only: every layout holds a div.h-full.animate-pulse
+    // for the whole fetch. The route-level brand flash before it is over in
+    // half a second and must never resolve the slow-fetch poll. Nothing
+    // pulses once the list settles, in any layout.
     return this.isShown(this.modulesListSkeletonRoot());
   }
 
@@ -33714,6 +33720,8 @@ export class WebDriver implements ParityDriver {
       const root = main?.querySelector("div.h-full.animate-pulse") ?? null;
       if (!root) return null;
       if (root.querySelector('[class*="25.5rem"]')) return "timeline";
+      // Board before list: the board cards carry rounded-full avatar dots
+      // too, so the list probe alone would claim the board skeleton.
       if (root.querySelector("div.h-44")) return "board";
       if (root.querySelector("span.rounded-full")) return "list";
       return null;
@@ -33736,56 +33744,56 @@ export class WebDriver implements ParityDriver {
     projectId: string,
     layout: ModulesListLayout
   ): Promise<ModulesListSkeletonResult> {
-    // Two rounds: the dev oracle stalls whole renders (or fails a chunk
-    // import) under shared-box load, and a stalled first pass must not
-    // fail the transition assertion.
-    for (let round = 1; round <= 2; round++) {
-      await this.modulesListOpenList(workspaceSlug, projectId);
-      if ((await this.modulesListActiveLayout()) !== layout) {
-        await this.modulesListSwitchLayout(layout);
-      }
-      // Hold the entry fetches (StrictMode fires two), then let every
-      // later request through: unrouting mid-hold makes the sleeping
-      // handler's continue() throw "already handled", so the route stays
-      // armed until the list settles instead.
-      let holdsLeft = 2;
-      await this.page.route(
-        (url) => url.pathname.endsWith(`/projects/${projectId}/modules/`),
-        async (route) => {
-          if (holdsLeft > 0) {
-            holdsLeft -= 1;
-            await new Promise((resolve) => setTimeout(resolve, 5000));
-          }
-          // Swallow "already handled": the catch-path unroute may land
-          // mid-hold, and the request is then already released.
-          await route.continue().catch(() => null);
-        }
-      );
-      try {
-        await this.page.reload({ waitUntil: "domcontentloaded" });
-        // 60s: a cold route compiles for 10s+ before the fetch starts.
-        const seen = await expect
-          .poll(() => this.modulesListSkeletonVisible(), { timeout: 60_000 })
-          .toBe(true)
-          .then(
-            () => true,
-            () => false
-          );
-        let layoutMatched = false;
-        let exclusive = false;
-        if (seen) {
-          layoutMatched = (await this.modulesListSkeletonLayout()) === layout;
-          exclusive = await this.modulesListSkeletonExclusive();
-        }
-        await this.modulesListWaitSettled();
-        await this.page.unrouteAll({ behavior: "wait" }).catch(() => null);
-        return { shown: seen, layoutMatched, exclusive };
-      } catch (error) {
-        await this.page.unrouteAll({ behavior: "wait" }).catch(() => null);
-        if (round === 2) throw error;
-      }
+    await this.modulesListOpenList(workspaceSlug, projectId);
+    if ((await this.modulesListActiveLayout()) !== layout) {
+      await this.modulesListSwitchLayout(layout);
     }
-    throw new Error("[parity] skeleton slow-fetch never settled.");
+    // Hold BOTH list fetches: the rows render from whichever answers, so
+    // holding only the project fetch lets the workspace fetch settle the
+    // list and the skeleton flashes past unseen. Four holds cover the
+    // StrictMode double-fire per URL on the dev oracle; later requests
+    // pass through. The route stays armed until the list settles: unrouting
+    // mid-hold makes the sleeping handler's continue() throw "already
+    // handled".
+    const workspacePath = `/api/workspaces/${workspaceSlug}/modules/`;
+    const projectPath = `/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/`;
+    let holdsLeft = 4;
+    await this.page.route(
+      (url) => url.pathname === workspacePath || url.pathname === projectPath,
+      async (route) => {
+        if (holdsLeft > 0) {
+          holdsLeft -= 1;
+          await new Promise((resolve) => setTimeout(resolve, 8000));
+        }
+        // Swallow "already handled": the catch-path unroute may land
+        // mid-hold, and the request is then already released.
+        await route.continue().catch(() => null);
+      }
+    );
+    try {
+      await this.page.reload({ waitUntil: "domcontentloaded" });
+      // 45s: a cold route boots for 10s+ before the fetch starts, and the
+      // hold sustains the skeleton for 8s once mounted.
+      const seen = await expect
+        .poll(() => this.modulesListSkeletonVisible(), { timeout: 45_000 })
+        .toBe(true)
+        .then(
+          () => true,
+          () => false
+        );
+      let layoutMatched = false;
+      let exclusive = false;
+      if (seen) {
+        layoutMatched = (await this.modulesListSkeletonLayout()) === layout;
+        exclusive = await this.modulesListSkeletonExclusive();
+      }
+      await this.modulesListWaitSettled();
+      await this.page.unrouteAll({ behavior: "wait" }).catch(() => null);
+      return { shown: seen, layoutMatched, exclusive };
+    } catch (error) {
+      await this.page.unrouteAll({ behavior: "wait" }).catch(() => null);
+      throw error;
+    }
   }
 
   async modulesListZeroStateVisible(): Promise<boolean> {
@@ -33821,11 +33829,14 @@ export class WebDriver implements ParityDriver {
   }
 
   async modulesListNoMatchShowViaSearch(text: string): Promise<void> {
-    // Collapsed, the toggle is the search area's direct button; opening
-    // swaps it for the expanding box. The toggle's own focus call is a
-    // no-op (the input mounts only after the state flip), so focus
-    // explicitly with a click.
-    if ((await this.modulesListSearchToggle().count()) > 0) {
+    // The box mounts collapsed (zero width, transparent): expand it through
+    // the magnifier only while the input is still hidden. Clicking the
+    // toggle while already open would collapse it again.
+    if (
+      !(await this.modulesListSearchInput()
+        .isVisible()
+        .catch(() => false))
+    ) {
       await this.modulesListSearchToggle().first().click({ timeout: WebDriver.OPEN_MS });
     }
     await this.modulesListSearchInput().waitFor({ timeout: WebDriver.OPEN_MS });

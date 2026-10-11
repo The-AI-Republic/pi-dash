@@ -455,7 +455,9 @@ test(
       await driver.modulesListCardOpenPeek("Card Route");
       const path = await driver.currentPath();
       expect(path).toContain("peekModule=");
-      expect(path.split("?")[0]).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/modules`);
+      // The app addresses the list with a trailing slash; only the route
+      // below the query string matters here.
+      expect(path.split("?")[0].replace(/\/$/, "")).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/modules`);
     });
   }
 );
