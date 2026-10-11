@@ -58,6 +58,15 @@ def test_create_roundtrip(seed, conn):
     assert body["identifier"] == ident
     saved = db.fetch_one(conn, "SELECT name, identifier FROM projects WHERE id = %s", (body["id"],))
     assert saved == {"name": name, "identifier": ident}
+    # Default pod (runner post_save signal): one active row, named
+    # {identifier}_pod_1, carrying the signal's description verbatim.
+    pod = db.fetch_one(
+        conn,
+        "SELECT name, description, is_default, created_by_id FROM pod"
+        " WHERE project_id = %s AND deleted_at IS NULL", (body["id"],))
+    assert pod == {"name": "%s_pod_1" % ident,
+                   "description": "Auto-created default pod. Add tier pods anytime.",
+                   "is_default": True, "created_by_id": None}
     # Creating default states is part of create: the project must be usable.
     states = http.get(seed["keys"]["states"],
                       f"{base(seed)}/{body['id']}/states/").json()

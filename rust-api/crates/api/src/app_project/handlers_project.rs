@@ -5404,6 +5404,21 @@ async fn project_create(
     let identifier = pidash_db::app_project::models::project::normalize_identifier(
         validated.identifier.as_deref().expect("required on create"),
     );
+    // `create_default_pod_for_new_project` (`runner/signals.py:31-66`): the
+    // `post_save` handler fires during `serializer.save()`, before the
+    // members/states below. Best-effort + idempotent — never fails creation.
+    crate::runner_runs::signals::create_default_pod_for_new_project(
+        &pool,
+        &crate::runner_runs::signals::NewProject {
+            id: project_id,
+            workspace_id,
+            identifier: identifier.clone(),
+            created: true,
+            project_lead: validated.project_lead.unwrap_or(None),
+            default_assignee: validated.default_assignee.unwrap_or(None),
+        },
+    )
+    .await;
     insert_project_identifier(&pool, &project_id, &workspace_id, &identifier, now).await?;
     insert_member(&pool, &project_id, &workspace_id, &actor.id, &actor.id, now).await?;
     if let Some(Some(lead)) = validated.project_lead {

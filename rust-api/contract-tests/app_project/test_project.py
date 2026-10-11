@@ -95,14 +95,30 @@ def test_create_project_shape_and_side_effects(world, db):
     world.ws_member(ws, user, 20)
     client = world.client(user)
     tag = uuid.uuid4().hex[:8].upper()
+    ident = "S%s" % tag[:9]
     resp = client.post(f"/api/workspaces/{ws['slug']}/projects/",
-                       json={"name": "Shaped %s" % tag, "identifier": "S%s" % tag[:9]})
+                       json={"name": "Shaped %s" % tag, "identifier": ident})
     assert resp.status_code == 201
     assert_keys(resp.json(), DETAIL_KEYS, "create")
     pid = resp.json()["id"]
     with db.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT COUNT(*) AS n FROM states WHERE project_id=%s", (pid,))
         assert cur.fetchone()["n"] == 8
+        # Default pod (runner post_save signal): one active row, named
+        # {identifier}_pod_1, carrying the signal's description verbatim.
+        cur.execute(
+            "SELECT name, description, is_default, created_by_id, workspace_id,"
+            " deleted_at FROM pod WHERE project_id=%s AND deleted_at IS NULL",
+            (pid,))
+        pods = cur.fetchall()
+        assert len(pods) == 1
+        assert pods[0]["name"] == "%s_pod_1" % ident
+        assert pods[0]["description"] == \
+            "Auto-created default pod. Add tier pods anytime."
+        assert pods[0]["is_default"] is True
+        assert pods[0]["created_by_id"] is None
+        assert str(pods[0]["workspace_id"]) == str(ws["id"])
+        assert pods[0]["deleted_at"] is None
         # The triage row carries group='triage' (is_triage stays False;
         # TriageStateManager filters on group).
         cur.execute(
