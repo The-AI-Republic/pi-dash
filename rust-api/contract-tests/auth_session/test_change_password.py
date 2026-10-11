@@ -107,3 +107,26 @@ def test_unauthenticated_is_denied_and_creates_no_session(browser):
     assert not [
         c for c in res.headers.get_list("set-cookie") if c.startswith(SESSION_COOKIE_NAME + "=")
     ], res.headers.get_list("set-cookie")
+
+
+def test_success_cycles_session_key_and_deletes_old_row(browser, db, user):
+    cookies = login_cookies(user)
+    old_key = cookies[SESSION_COOKIE_NAME]
+    res = browser(cookies).post(
+        "/auth/change-password/",
+        json={"old_password": PASSWORD, "new_password": NEW_PASSWORD},
+    )
+    assert res.status_code == 200, res.text[:200]
+    rotated = [
+        c for c in res.headers.get_list("set-cookie") if c.startswith(SESSION_COOKIE_NAME + "=")
+    ]
+    assert len(rotated) == 1, res.headers.get_list("set-cookie")
+    new_key = rotated[0].split("=", 1)[1].split(";", 1)[0]
+    assert new_key and new_key != old_key
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM sessions WHERE session_key = %s", (old_key,))
+            assert cur.fetchone()[0] == 0, "re-login must delete the old row like cycle_key()"
+            cur.execute("SELECT session_key FROM sessions WHERE user_id = %s", (user["id"],))
+            keys = [row[0] for row in cur.fetchall()]
+    assert keys == [new_key]

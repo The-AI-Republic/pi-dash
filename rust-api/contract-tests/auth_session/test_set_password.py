@@ -10,6 +10,7 @@ Only users with ``is_password_autoset`` may set a password; success is
 """
 
 from _harness.checks import forbid_keys, require_keys
+from _harness.sessions import SESSION_COOKIE_NAME
 
 from .conftest import NEW_PASSWORD, WEAK_PASSWORD, login_cookies
 
@@ -64,3 +65,23 @@ def test_weak_password_is_invalid_password(browser, autoset_user):
 def test_unauthenticated_is_denied(browser):
     res = browser().post("/auth/set-password/", json={"password": NEW_PASSWORD})
     assert res.status_code in (401, 403), res.text[:200]
+
+
+def test_success_cycles_session_key_and_deletes_old_row(browser, db, autoset_user):
+    cookies = login_cookies(autoset_user)
+    old_key = cookies[SESSION_COOKIE_NAME]
+    res = browser(cookies).post("/auth/set-password/", json={"password": NEW_PASSWORD})
+    assert res.status_code == 200, res.text[:200]
+    rotated = [
+        c for c in res.headers.get_list("set-cookie") if c.startswith(SESSION_COOKIE_NAME + "=")
+    ]
+    assert len(rotated) == 1, res.headers.get_list("set-cookie")
+    new_key = rotated[0].split("=", 1)[1].split(";", 1)[0]
+    assert new_key and new_key != old_key
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM sessions WHERE session_key = %s", (old_key,))
+            assert cur.fetchone()[0] == 0, "re-login must delete the old row like cycle_key()"
+            cur.execute("SELECT session_key FROM sessions WHERE user_id = %s", (autoset_user["id"],))
+            keys = [row[0] for row in cur.fetchall()]
+    assert keys == [new_key]

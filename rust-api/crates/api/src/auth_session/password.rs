@@ -917,13 +917,16 @@ fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
 }
 
 /// `user_login(user, request, is_app=True)` (`utils/login.py:14-28`) over
-/// the request session: Django `login()` cycles the session key, writes
+/// the request session: Django `login()` re-keys the session, writes
 /// `_auth_user_id`/`_auth_user_backend`/`_auth_user_hash` plus the
 /// `device_info` dict, and rotates the CSRF secret. The middleware
 /// persists the mutated session and re-sets the session cookie; the
 /// fresh `csrftoken` cookie is appended here. Returns the new CSRF
-/// secret for the `Set-Cookie` value.
-fn relogin(
+/// secret for the `Set-Cookie` value, or `None` when the old-row delete
+/// fails (the caller answers 500).
+#[allow(clippy::too_many_arguments)]
+async fn relogin(
+    pool: &sqlx::PgPool,
     handle: &crate::middleware::SessionHandle,
     user_id: &str,
     password_field: &str,
@@ -931,9 +934,15 @@ fn relogin(
     user_agent: &str,
     ip: Option<&str>,
     domain: &str,
-) -> String {
+) -> Option<String> {
     let hash = session_auth_hash(password_field, secret_key);
-    {
+    // `login()` re-keys: drop the key so the save issues a fresh one,
+    // and delete the abandoned row. After a password change the stored
+    // hash always mismatches, so Django takes the `flush()` path — clear,
+    // delete the row, save fresh. A missing key means no row exists, so
+    // there is nothing to delete. The lock is statement-scoped — it never
+    // crosses the `.await` below, per the session layer's contract.
+    let old: Option<String> = {
         let mut session = handle.lock();
         session.set(
             "_auth_user_id".to_owned(),
@@ -948,12 +957,19 @@ fn relogin(
             "device_info".to_owned(),
             crate::license::handlers_auth_forms::device_info(user_agent, ip, domain),
         );
-        // `login()` cycles the key: drop it so the save issues a fresh
-        // 128-char one (the stale row keeps its old hash and reads as
-        // anonymous, like Django's deleted row).
-        session.key = None;
+        session.key.take()
+    };
+    if let Some(old) = old {
+        if sqlx::query("DELETE FROM sessions WHERE session_key = $1")
+            .bind(&old)
+            .execute(pool)
+            .await
+            .is_err()
+        {
+            return None;
+        }
     }
-    pidash_auth::csrf::new_secret()
+    Some(pidash_auth::csrf::new_secret())
 }
 
 /// Append the rotated `csrftoken` cookie (`login()` calls
@@ -1119,7 +1135,8 @@ async fn change_password(
     if let Some(axum::Extension(handle)) = extension {
         let domain = base_host_for(&state, true, false);
         let ip = client_ip(&headers, peer_addr);
-        let csrf_secret = relogin(
+        let Some(csrf_secret) = relogin(
+            &pool,
             &handle,
             &actor.id.to_string(),
             &encoded,
@@ -1127,7 +1144,11 @@ async fn change_password(
             &user_agent_of(&headers),
             ip.as_deref(),
             &domain,
-        );
+        )
+        .await
+        else {
+            return server_error();
+        };
         push_csrf_cookie(&mut response, &csrf_secret, secure, now);
     }
     response
@@ -1240,7 +1261,8 @@ async fn set_password(
     if let Some(axum::Extension(handle)) = extension {
         let domain = base_host_for(&state, true, false);
         let ip = client_ip(&headers, peer_addr);
-        let csrf_secret = relogin(
+        let Some(csrf_secret) = relogin(
+            &pool,
             &handle,
             &actor.id.to_string(),
             &encoded,
@@ -1248,7 +1270,11 @@ async fn set_password(
             &user_agent_of(&headers),
             ip.as_deref(),
             &domain,
-        );
+        )
+        .await
+        else {
+            return server_error();
+        };
         push_csrf_cookie(&mut response, &csrf_secret, secure, now);
     }
     response
