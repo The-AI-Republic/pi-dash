@@ -336,6 +336,42 @@ pub(crate) async fn enqueue_task(pool: &sqlx::PgPool, task: &str, kwargs: Map<St
     }
 }
 
+/// `soft_delete_related_objects.delay("db", <model>, pk, using=None)`
+/// (`db/mixins.py:77-78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it with `using=None`. Fires on every instance `.delete()`
+/// in these views.
+pub(crate) fn soft_delete_message(
+    model: &str,
+    pk: &uuid::Uuid,
+) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
+        pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
+        vec![
+            Value::String("db".to_owned()),
+            Value::String(model.to_owned()),
+            Value::String(pk.to_string()),
+        ],
+        kwargs,
+    )
+}
+
+/// Best-effort publish of [`soft_delete_message`]: without the queue
+/// the response still stands.
+pub(crate) async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &uuid::Uuid) {
+    let message = soft_delete_message(model, pk);
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        Value::Array(message.args.clone()),
+        Value::Object(message.kwargs.clone()),
+    );
+    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
+        tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
+    }
+}
+
 /// `request.user.user_timezone` (`TimezoneMixin`): unknown zones 500
 /// through the same branch Django's `zoneinfo` activation raises into.
 /// Shared with sibling handler issue 407 (same render path).
@@ -2504,8 +2540,10 @@ async fn module_partial_update(
 // ---------------------------------------------------------------------------
 
 /// `ModuleViewSet.destroy`: ADMIN + creator fast-path gate, per-issue
-/// `issue_activity.deleted` publishes, soft-delete module + bridges,
-/// soft-delete requester favorites + hard-delete all recent visits, 204 empty.
+/// `issue_activity.deleted` publishes, soft-delete module (instance
+/// `delete()`, so the `soft_delete_related_objects` mixin job fires) +
+/// bridges, soft-delete requester favorites + hard-delete all recent
+/// visits, 204 empty.
 async fn module_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
@@ -2595,6 +2633,11 @@ async fn module_destroy(
         .execute(&pool)
         .await
         .map_err(|_| Denial::ServerError)?;
+    // `module.delete()` is the instance call, so the mixin fires
+    // `soft_delete_related_objects("db", "module", pk, using=None)`
+    // (`db/mixins.py:77-78`) — before the queryset deletes below, which
+    // are bulk updates with no job.
+    enqueue_soft_delete(&pool, "module", &module_id).await;
     sqlx::query(
         r#"UPDATE module_issues SET deleted_at = now() WHERE module_id = $1 AND project_id = $2"#,
     )
@@ -2635,6 +2678,31 @@ async fn module_destroy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soft_delete_message_matches_the_mixin_call() {
+        // `db/mixins.py:77-78`: `.delay(label, name, pk, using=using)`
+        // with `using=None` — three positional args, `using` stays a
+        // null kwarg (never a positional `"default"`).
+        let pk = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
+        for model in ["module", "modulelink"] {
+            let message = soft_delete_message(model, &pk);
+            assert_eq!(
+                message.task,
+                "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
+            );
+            assert_eq!(
+                message.args,
+                vec![
+                    Value::String("db".to_owned()),
+                    Value::String(model.to_owned()),
+                    Value::String(pk.to_string()),
+                ]
+            );
+            assert_eq!(message.kwargs.len(), 1);
+            assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+        }
+    }
 
     #[test]
     fn gates_cover_all_six_owned_actions() {
