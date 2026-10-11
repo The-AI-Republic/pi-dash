@@ -4,13 +4,29 @@
 
 """Request corpus: realistic multi-step write sessions per domain."""
 
-from . import app_cycles, app_issues, app_modules, app_project, v1_work_items
+from . import (
+    app_cycles,
+    app_issues,
+    app_modules,
+    app_project,
+    auth_device,
+    auth_magic,
+    auth_session,
+    license,
+    space,
+    v1_work_items,
+)
 
 ALL_SESSIONS = [
     *app_cycles.SESSIONS,
     *app_issues.SESSIONS,
     *app_modules.SESSIONS,
     *app_project.SESSIONS,
+    *auth_device.SESSIONS,
+    *auth_magic.SESSIONS,
+    *auth_session.SESSIONS,
+    *license.SESSIONS,
+    *space.SESSIONS,
     *v1_work_items.SESSIONS,
 ]
 

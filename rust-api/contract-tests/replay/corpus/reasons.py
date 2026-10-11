@@ -37,11 +37,6 @@ EXCLUDED = {}
 
 MISSING_FIX = {
     ('/api/instances/admins/', 'DELETE'): "MISSING parity gap G2 (no Rust route); fix PIDASHCONV-827 (Rust license fix: instance-admin session/auth endpoints)",
-    ('/api/instances/admins/', 'POST'): "MISSING parity gap G2 (no Rust route); fix PIDASHCONV-827 (Rust license fix: instance-admin session/auth endpoints)",
-    ('/api/instances/admins/sign-in/', 'POST'): "MISSING parity gap G2 (no Rust route); fix PIDASHCONV-827 (Rust license fix: instance-admin session/auth endpoints)",
-    ('/api/instances/admins/sign-out/', 'POST'): "MISSING parity gap G2 (no Rust route); fix PIDASHCONV-827 (Rust license fix: instance-admin session/auth endpoints)",
-    ('/api/instances/admins/sign-up/', 'POST'): "MISSING parity gap G2 (no Rust route); fix PIDASHCONV-827 (Rust license fix: instance-admin session/auth endpoints)",
-    ('/api/instances/admins/{}/', 'DELETE'): "MISSING parity gap G2 (no Rust route); fix PIDASHCONV-827 (Rust license fix: instance-admin session/auth endpoints)",
     ('/api/instances/admins/{}/', 'POST'): "MISSING parity gap G2 (no Rust route); fix PIDASHCONV-827 (Rust license fix: instance-admin session/auth endpoints)",
 }
 
@@ -61,34 +56,10 @@ OWNED_UNCOVERED = {
     ('/api/assets/v2/workspaces/{}/restore/{}/', 'POST'): "owned; no corpus session yet — batch 5 (app_assets session)",  # app :: pi_dash.app.views.asset.v2.view
     ('/api/assets/v2/workspaces/{}/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_assets session)",  # app :: pi_dash.app.views.asset.v2.view
     ('/api/assets/v2/workspaces/{}/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_assets session)",  # app :: pi_dash.app.views.asset.v2.view
-    ('/api/instances/', 'PATCH'): "owned; no corpus session yet — batch 3 (license session)",  # license :: pi_dash.license.api.views.instance.view
-    ('/api/instances/admins/sign-up-screen-visited/', 'POST'): "owned; no corpus session yet — batch 3 (license session)",  # license :: pi_dash.license.api.views.instance.view
-    ('/api/instances/configurations/', 'PATCH'): "owned; no corpus session yet — batch 3 (license session)",  # license :: pi_dash.license.api.views.configuration.view
-    ('/api/instances/configurations/disable-email-feature/', 'DELETE'): "owned; no corpus session yet — batch 3 (license session)",  # license :: pi_dash.license.api.views.configuration.view
-    ('/api/instances/email-credentials-check/', 'POST'): "owned; no corpus session yet — batch 3 (license session)",  # license :: pi_dash.license.api.views.configuration.view
     ('/api/instances/loop/jobs/', 'POST'): "owned; no corpus session yet — batch 3 (license session)",  # license :: pi_dash.loop.admin_views.view
     ('/api/instances/loop/jobs/{}/', 'DELETE'): "owned; no corpus session yet — batch 3 (license session)",  # license :: pi_dash.loop.admin_views.view
     ('/api/instances/loop/jobs/{}/', 'PATCH'): "owned; no corpus session yet — batch 3 (license session)",  # license :: pi_dash.loop.admin_views.view
-    ('/api/instances/workspaces/', 'POST'): "owned; no corpus session yet — batch 3 (license session)",  # license :: pi_dash.license.api.views.workspace.view
     ('/api/integrations/github/app/webhook/', 'POST'): "owned; no corpus session yet — batch 5 (app_integrations session)",  # app :: pi_dash.app.views.integration.github.view
-    ('/api/public/anchor/{}/comments/{}/reactions/', 'POST'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.issue.CommentReactionPublicViewSet
-    ('/api/public/anchor/{}/comments/{}/reactions/{}/', 'DELETE'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.issue.CommentReactionPublicViewSet
-    ('/api/public/anchor/{}/intakes/{}/inbox-issues/', 'POST'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.intake.IntakeIssuePublicViewSet
-    ('/api/public/anchor/{}/intakes/{}/intake-issues/', 'POST'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.intake.IntakeIssuePublicViewSet
-    ('/api/public/anchor/{}/intakes/{}/intake-issues/{}/', 'DELETE'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.intake.IntakeIssuePublicViewSet
-    ('/api/public/anchor/{}/intakes/{}/intake-issues/{}/', 'PATCH'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.intake.IntakeIssuePublicViewSet
-    ('/api/public/anchor/{}/issues/{}/comments/', 'POST'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.issue.IssueCommentPublicViewSet
-    ('/api/public/anchor/{}/issues/{}/comments/{}/', 'DELETE'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.issue.IssueCommentPublicViewSet
-    ('/api/public/anchor/{}/issues/{}/comments/{}/', 'PATCH'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.issue.IssueCommentPublicViewSet
-    ('/api/public/anchor/{}/issues/{}/reactions/', 'POST'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.issue.IssueReactionPublicViewSet
-    ('/api/public/anchor/{}/issues/{}/reactions/{}/', 'DELETE'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.issue.IssueReactionPublicViewSet
-    ('/api/public/anchor/{}/issues/{}/votes/', 'DELETE'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.issue.IssueVotePublicViewSet
-    ('/api/public/anchor/{}/issues/{}/votes/', 'POST'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.issue.IssueVotePublicViewSet
-    ('/api/public/assets/v2/anchor/{}/', 'POST'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.asset.view
-    ('/api/public/assets/v2/anchor/{}/restore/{}/', 'POST'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.asset.view
-    ('/api/public/assets/v2/anchor/{}/{}/', 'DELETE'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.asset.view
-    ('/api/public/assets/v2/anchor/{}/{}/', 'PATCH'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.asset.view
-    ('/api/public/assets/v2/anchor/{}/{}/bulk/', 'POST'): "owned; no corpus session yet — batch 3 (space session)",  # space :: pi_dash.space.views.asset.view
     ('/api/runners/approvals/{}/decide/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.approvals.view
     ('/api/runners/chat/approvals/{}/decide/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.chat.view
     ('/api/runners/chat/sessions/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner_web :: pi_dash.runner.views.chat.view
@@ -150,11 +121,6 @@ OWNED_UNCOVERED = {
     ('/api/v1/assets/user-assets/{}/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.asset.view
     ('/api/v1/assets/user-assets/{}/server/', 'DELETE'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.asset.view
     ('/api/v1/assets/user-assets/{}/server/', 'PATCH'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.api.views.asset.view
-    ('/api/v1/auth/device/approve/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.authentication.views.cli.device.view
-    ('/api/v1/auth/device/start/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.authentication.views.cli.device.view
-    ('/api/v1/auth/device/token/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.authentication.views.cli.device.view
-    ('/api/v1/auth/machine-token/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.authentication.views.cli.device.view
-    ('/api/v1/auth/revoke/', 'POST'): "owned; no corpus session yet — batch 2 (v1_work_items/v1_projects/v1_cycles_modules/v1_cli_auth sessions)",  # api_v1 :: pi_dash.authentication.views.cli.device.view
     ('/api/v1/runner/chat/sessions/{}/approvals/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.chat.view
     ('/api/v1/runner/chat/sessions/{}/closed/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.chat.view
     ('/api/v1/runner/chat/sessions/{}/events/', 'POST'): "owned; no corpus session yet — batch 4 (runner/runner_web sessions)",  # runner :: pi_dash.runner.views.chat.view
@@ -406,24 +372,4 @@ OWNED_UNCOVERED = {
     ('/api/workspaces/{}/workspace-themes/{}/', 'DELETE'): "owned; no corpus session yet — batch 5 (app_workspace session)",  # app :: pi_dash.app.views.workspace.base.WorkspaceThemeViewSet
     ('/api/workspaces/{}/workspace-themes/{}/', 'PATCH'): "owned; no corpus session yet — batch 5 (app_workspace session)",  # app :: pi_dash.app.views.workspace.base.WorkspaceThemeViewSet
     ('/api/workspaces/{}/workspace-views/', 'POST'): "owned; no corpus session yet — batch 5 (app_workspace session)",  # app :: pi_dash.app.views.workspace.member.view
-    ('/auth/change-password/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.common.view
-    ('/auth/email-check/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.app.check.view
-    ('/auth/forgot-password/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.app.password_management.view
-    ('/auth/magic-generate/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.app.magic.view
-    ('/auth/magic-sign-in/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.app.magic.view
-    ('/auth/magic-sign-up/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.app.magic.view
-    ('/auth/reset-password/{}/{}/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.app.password_management.view
-    ('/auth/set-password/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.common.view
-    ('/auth/sign-in/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.app.email.view
-    ('/auth/sign-out/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.app.signout.view
-    ('/auth/sign-up/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.app.email.view
-    ('/auth/spaces/email-check/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.space.check.view
-    ('/auth/spaces/forgot-password/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.space.password_management.view
-    ('/auth/spaces/magic-generate/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.space.magic.view
-    ('/auth/spaces/magic-sign-in/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.space.magic.view
-    ('/auth/spaces/magic-sign-up/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.space.magic.view
-    ('/auth/spaces/reset-password/{}/{}/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.space.password_management.view
-    ('/auth/spaces/sign-in/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.space.email.view
-    ('/auth/spaces/sign-out/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.space.signout.view
-    ('/auth/spaces/sign-up/', 'POST'): "owned; no corpus session yet — batch 3 (auth_session/auth_device/auth_magic sessions)",  # auth :: pi_dash.authentication.views.space.email.view
 }

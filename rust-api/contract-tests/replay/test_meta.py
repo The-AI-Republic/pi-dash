@@ -110,11 +110,17 @@ def test_corpus_manifests_valid():
         assert sess.source, f"{sess.name}: no source provenance"
         assert sess.requests, f"{sess.name}: no requests"
         for user in sess.auth_users:
-            assert user in (*world_seed.USER_KEYS, "api_key"), (
+            base = user.split(":", 1)[1] if user.startswith("admin:") else user
+            assert base in (*world_seed.USER_KEYS, "api_key"), (
                 f"{sess.name}: unknown auth user {user!r}"
             )
         if sess.seed is not None:
             assert callable(sess.seed), f"{sess.name}: seed is not callable"
+        if sess.setup is not None:
+            assert callable(sess.setup), f"{sess.name}: setup is not callable"
+            assert sess.setup_keys, (
+                f"{sess.name}: setup without setup_keys declares nothing"
+            )
         for task, issue in (sess.known_absent_jobs or {}).items():
             assert "." in task, f"{sess.name}: bad pinned task {task!r}"
             assert re.fullmatch(r"PIDASHCONV-\d+", issue), (
@@ -129,15 +135,28 @@ def test_corpus_manifests_valid():
                 and re.fullmatch(r"[a-z_]+", entry[2])
                 and isinstance(entry[3], str)
             ), f"{sess.name}: bad db cell ref {entry!r}"
-        for entry in sess.known_extra_rows or []:
+        for field_name in ("known_extra_rows", "known_rust_extra_rows"):
+            for entry in getattr(sess, field_name) or []:
+                assert (
+                    isinstance(entry, (list, tuple))
+                    and len(entry) == 3
+                    and re.fullmatch(r"[a-z_]+", entry[0])
+                    and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                    and isinstance(entry[2], dict)
+                    and entry[2]
+                ), f"{sess.name}: bad {field_name} {entry!r}"
+        for entry in sess.known_cell_diffs or []:
             assert (
                 isinstance(entry, (list, tuple))
-                and len(entry) == 3
+                and len(entry) == 6
                 and re.fullmatch(r"[a-z_]+", entry[0])
                 and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
                 and isinstance(entry[2], dict)
                 and entry[2]
-            ), f"{sess.name}: bad known extra row {entry!r}"
+                and re.fullmatch(r"[a-z_]+", entry[3])
+                and entry[3] not in entry[2]
+                and entry[4] != entry[5]
+            ), f"{sess.name}: bad known cell diff {entry!r}"
         for task, refs in (sess.payload_row_refs or {}).items():
             assert isinstance(refs, (list, tuple)), f"{sess.name}: bad row refs for {task}"
             for ref in refs:
@@ -147,14 +166,28 @@ def test_corpus_manifests_valid():
                     and (ref[0].startswith("args/") or ref[0].startswith("kwargs/"))
                     and re.fullmatch(r"[a-z_]+", ref[1])
                 ), f"{sess.name}: bad row ref {ref!r} for {task}"
-        available = set(WORLD_KEYS) | set(sess.static_context or {})
+        for field_name in ("payload_reset_tokens", "payload_magic_codes"):
+            for task, refs in (getattr(sess, field_name) or {}).items():
+                assert isinstance(refs, (list, tuple)), (
+                    f"{sess.name}: bad {field_name} for {task}"
+                )
+                for ref in refs:
+                    assert (
+                        isinstance(ref, (list, tuple))
+                        and len(ref) == 2
+                        and (ref[0].startswith("args/") or ref[0].startswith("kwargs/"))
+                        and (ref[1].startswith("args/") or ref[1].startswith("kwargs/"))
+                    ), f"{sess.name}: bad {field_name} {ref!r} for {task}"
+        available = (
+            set(WORLD_KEYS) | set(sess.static_context or {}) | set(sess.setup_keys or ())
+        )
         for index, req in enumerate(sess.requests):
             label = f"{sess.name} request {index} {req.method} {req.path}"
             assert req.method in HTTP_METHODS, f"{label}: bad method"
             assert req.path.startswith("/"), f"{label}: path must be absolute"
             assert req.route_template().startswith("/"), f"{label}: bad route"
             for placeholder in _placeholders(
-                [req.path, req.params, req.headers, req.json]
+                [req.path, req.params, req.headers, req.json, req.form, req.cookies]
             ):
                 assert placeholder in available, (
                     f"{label}: {{{placeholder}}} is neither a world key "
@@ -206,9 +239,448 @@ def test_corpus_manifests_valid():
                     and (entry[3] is None or isinstance(entry[3], str))
                     and entry[2] != entry[3]
                 ), f"{label}: bad known header {entry!r}"
-            assert not (req.json is not None and req.raw_body is not None), (
-                f"{label}: json and raw_body are exclusive"
+            for entry in req.known_body_diffs or []:
+                assert (
+                    isinstance(entry, (list, tuple))
+                    and len(entry) == 4
+                    and isinstance(entry[0], str)
+                    and re.fullmatch(r"[^/ ]+(/([^/ ]+))*", entry[0])
+                    and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                    and entry[2] != entry[3]
+                ), f"{label}: bad known body diff {entry!r}"
+            bodies = sum(
+                [req.json is not None, req.raw_body is not None, bool(req.form)]
             )
+            assert bodies <= 1, f"{label}: json, raw_body and form are exclusive"
+            if req.auth.startswith("admin:"):
+                assert req.auth in sess.auth_users, (
+                    f"{label}: {req.auth!r} needs an auth_users entry"
+                )
+
+
+def _sessions_ctx(django_users: set, rust_users: set, captures=None):
+    from . import compare
+
+    present = {"django": set(django_users), "rust": set(rust_users)}
+    return compare.CompareContext(
+        captures=dict(captures or {}),
+        row_exists=lambda side, table, value: (
+            table == "users" and str(value) in present[side]
+        ),
+    )
+
+
+def _sessions_snap(*user_ids):
+    return {
+        "sessions": [
+            {"session_key": f"key-{u}", "user_id": u, "session_data": "x"}
+            for u in user_ids
+        ]
+    }
+
+
+def test_sessions_created_user_ids_match_by_count():
+    """View-created users (sign-up) mint different uuids per backend.
+
+    Unknown ids that exist as users rows on their own side compare by
+    count; anything else (bogus ids, one-side-only sign-ins) still fails.
+    """
+    from . import compare
+
+    captures = {"member": ("u-member", "u-member")}
+    dj = compare.normalise_snapshot(
+        _sessions_snap("u-member", "u-dj-new"),
+        "django",
+        _sessions_ctx({"u-member", "u-dj-new"}, {"u-member", "u-rs-new"}, captures),
+    )
+    rs = compare.normalise_snapshot(
+        _sessions_snap("u-member", "u-rs-new"),
+        "rust",
+        _sessions_ctx({"u-member", "u-dj-new"}, {"u-member", "u-rs-new"}, captures),
+    )
+    assert dj["sessions"] == [{"user_id": "{member}"}, {"user_id": "{created_user}"}]
+    assert compare.compare_db(dj, rs) == []
+
+
+def test_sessions_bogus_and_lopsided_ids_still_fail():
+    from . import compare
+
+    ctx = _sessions_ctx({"u-member"}, {"u-member"})
+    dj = compare.normalise_snapshot(_sessions_snap("u-member", "u-bogus"), "django", ctx)
+    rs = compare.normalise_snapshot(_sessions_snap("u-member"), "rust", ctx)
+    assert compare.compare_db(dj, rs) != []
+    same = compare.normalise_snapshot(_sessions_snap("u-member"), "django", ctx)
+    assert compare.compare_db(same, rs) == []
+
+
+def _mint_token_inline(user_id, password_field, last_login, email, secret, ts):
+    """Independent Django-4.2 reset-token recipe (test oracle for effects)."""
+    import base64
+    import hashlib
+    import hmac
+
+    alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+    b36 = ""
+    number = ts
+    while number:
+        number, remainder = divmod(number, 36)
+        b36 = alphabet[remainder] + b36
+    login_ts = "" if last_login is None else str(last_login)
+    value = f"{user_id}{password_field}{login_ts}{ts}{email}"
+    key = hashlib.sha256(
+        ("django.contrib.auth.tokens.PasswordResetTokenGenerator" + secret).encode()
+    ).digest()
+    digest = hmac.new(key, msg=value.encode(), digestmod=hashlib.sha256).hexdigest()[::2]
+    uidb64 = base64.urlsafe_b64encode(str(user_id).encode()).rstrip(b"=").decode()
+    return uidb64, f"{b36}-{digest}"
+
+
+def test_reset_token_validator_accepts_fresh_rejects_rest():
+    import calendar
+    import time
+    from datetime import datetime
+
+    from . import effects
+
+    epoch2001 = calendar.timegm(datetime(2001, 1, 1).utctimetuple())
+    now_ts = int(time.time()) - epoch2001
+    uid, token = _mint_token_inline(
+        "u-1", "pbkdf2$hash", None, "u@example.com", "s3cret", now_ts
+    )
+    assert effects.decode_reset_uid(uid) == "u-1"
+    assert effects.validate_reset_token(
+        token, "u-1", "pbkdf2$hash", None, "u@example.com", "s3cret"
+    )
+    # Tampered HMAC, wrong user row, expired stamp, garbage: all invalid.
+    assert not effects.validate_reset_token(
+        token[:-1] + ("0" if token[-1] != "0" else "1"),
+        "u-1",
+        "pbkdf2$hash",
+        None,
+        "u@example.com",
+        "s3cret",
+    )
+    assert not effects.validate_reset_token(
+        token, "u-2", "pbkdf2$hash", None, "u@example.com", "s3cret"
+    )
+    old_uid, old_token = _mint_token_inline(
+        "u-1",
+        "pbkdf2$hash",
+        None,
+        "u@example.com",
+        "s3cret",
+        now_ts - effects.RESET_TOKEN_TIMEOUT_SECONDS - 1,
+    )
+    assert effects.decode_reset_uid(old_uid) == "u-1"
+    assert not effects.validate_reset_token(
+        old_token, "u-1", "pbkdf2$hash", None, "u@example.com", "s3cret"
+    )
+    assert not effects.validate_reset_token(
+        "bogus-token", "u-1", "pbkdf2$hash", None, "u@example.com", "s3cret"
+    )
+    assert effects.decode_reset_uid("!!!") is None
+
+
+def test_blank_valid_tokens_only_blanks_valid():
+    import calendar
+    import time
+    from datetime import datetime
+
+    from . import compare
+    from . import effects
+
+    epoch2001 = calendar.timegm(datetime(2001, 1, 1).utctimetuple())
+    now_ts = int(time.time()) - epoch2001
+    row = {
+        "id": "u-1",
+        "password": "pbkdf2$hash",
+        "last_login": None,
+        "email": "u@example.com",
+    }
+    uid, token = _mint_token_inline(
+        "u-1", "pbkdf2$hash", None, "u@example.com", "s3cret", now_ts
+    )
+    task = "pi_dash.bgtasks.forgot_password_task.forgot_password"
+    ctx = compare.CompareContext(
+        payload_reset_tokens={task: [("args/2", "args/3")]},
+        db_row=lambda side, table, value: dict(row) if value == "u-1" else None,
+        secret_key="s3cret",
+    )
+    args = ["N", "u@example.com", uid, token, "http://localhost"]
+    blanked, _ = compare._blank_valid_tokens(list(args), {}, task, "django", ctx)
+    assert blanked[3] == effects.VOLATILE_PLACEHOLDER
+    assert blanked[:3] == args[:3]
+    # A token minted for another user stays put (fails the compare loudly).
+    _, other = _mint_token_inline(
+        "u-2", "pbkdf2$hash", None, "u@example.com", "s3cret", now_ts
+    )
+    kept, _ = compare._blank_valid_tokens(
+        ["N", "u@example.com", uid, other, "http://localhost"], {}, task, "django", ctx
+    )
+    assert kept[3] == other
+
+
+def test_blank_valid_magic_only_blanks_matching():
+    """A queued magic code blanks only when it equals the stored token."""
+    import json
+
+    from . import compare
+    from . import effects
+
+    class _FakeRedis:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def get(self, key):
+            value = self.rows.get(key)
+            return json.dumps(value) if value is not None else None
+
+        def close(self):
+            pass
+
+    task = "pi_dash.bgtasks.magic_link_code_task.magic_link"
+    rows = {"magic_u@example.com": {"current_attempt": 0, "email": "u", "token": "492151"}}
+    ctx = compare.CompareContext(
+        payload_magic_codes={task: [("args/0", "args/2")]},
+        redis_for=lambda side: _FakeRedis(rows),
+    )
+    args = ["u@example.com", "magic_u@example.com", "492151"]
+    blanked, _ = compare._blank_valid_magic(list(args), {}, task, "django", ctx)
+    assert blanked[2] == effects.VOLATILE_PLACEHOLDER
+    assert blanked[:2] == args[:2]
+    # Stored/queued split stays put (fails the compare loudly).
+    split, _ = compare._blank_valid_magic(
+        ["u@example.com", "magic_u@example.com", "000000"], {}, task, "django", ctx
+    )
+    assert split[2] == "000000"
+    # Missing row stays put too.
+    missing, _ = compare._blank_valid_magic(
+        ["nobody@example.com", "magic_nobody@example.com", "492151"],
+        {},
+        task,
+        "django",
+        ctx,
+    )
+    assert missing[2] == "492151"
+
+
+def test_set_cookie_parses_each_line_and_blanks_expires():
+    """Two Set-Cookie lines stay separate; expires values blank.
+
+    httpx folds repeated headers into one comma-joined string; parsing
+    that as one cookie glues attributes across cookies. Expires is
+    now()+max-age per backend (seconds apart), while Max-Age is the
+    configured duration and still compares exactly.
+    """
+    import httpx
+
+    from .compare import _parse_set_cookie
+
+    headers = httpx.Headers(
+        [
+            (
+                b"set-cookie",
+                b"csrftoken=C1; expires=Sun, 10 Oct 2027 00:50:26 GMT; "
+                b"Max-Age=31449600; Path=/; SameSite=Lax; HttpOnly",
+            ),
+            (
+                b"set-cookie",
+                b"session-id=S1; expires=Sun, 18 Oct 2026 00:50:26 GMT; "
+                b"Max-Age=604800; Path=/; SameSite=Lax; HttpOnly",
+            ),
+        ]
+    )
+    assert _parse_set_cookie(headers) == [
+        (
+            "csrftoken",
+            "HttpOnly; Max-Age=31449600; Path=/; SameSite=Lax; "
+            "expires=<replay-volatile>",
+        ),
+        (
+            "session-id",
+            "HttpOnly; Max-Age=604800; Path=/; SameSite=Lax; "
+            "expires=<replay-volatile>",
+        ),
+    ]
+    assert _parse_set_cookie(httpx.Headers([])) == []
+
+
+def _fake_response(status: int, body: bytes, headers=None):
+    import httpx
+
+    return httpx.Response(status, content=body, headers=list((headers or {}).items()))
+
+
+def test_known_body_pin_passes_exact_and_fails_on_change():
+    """Exact per-side body pins excuse the divergence but stay loud."""
+    import json
+
+    from . import compare
+
+    ctx = compare.CompareContext()
+    dj = _fake_response(
+        400,
+        json.dumps({"error_code": 5102, "email": "a@x.com"}).encode(),
+        {"content-type": "application/json"},
+    )
+    rs = _fake_response(
+        400,
+        json.dumps({"error_code": 5102, "email": "magic_a@x.com"}).encode(),
+        {"content-type": "application/json"},
+    )
+    pin = [("email", "PIDASHCONV-881", "a@x.com", "magic_a@x.com")]
+    assert compare.compare_response(dj, rs, ctx, known_body=pin) is None
+    # Unpinned, the same pair fails.
+    assert compare.compare_response(dj, rs, ctx) is not None
+    # Fix landed (Rust returns the bare address): the pin fails loudly.
+    fixed = _fake_response(
+        400,
+        json.dumps({"error_code": 5102, "email": "a@x.com"}).encode(),
+        {"content-type": "application/json"},
+    )
+    error = compare.compare_response(dj, fixed, ctx, known_body=pin)
+    assert error is not None and "PIDASHCONV-881" in error
+    # Django changed: loud too.
+    other = _fake_response(
+        400,
+        json.dumps({"error_code": 5102, "email": "b@x.com"}).encode(),
+        {"content-type": "application/json"},
+    )
+    error = compare.compare_response(other, rs, ctx, known_body=pin)
+    assert error is not None and "Django body changed" in error
+
+
+def test_known_cell_diff_blanks_exact_and_fails_on_change():
+    """Cell pins excuse one cell of matched rows, nothing else."""
+    from . import compare
+    from . import effects
+
+    pin = [("issues", "PIDASHCONV-882", {"name": "Inbox idea"}, "description_stripped", "", None)]
+    dj = {"issues": [{"id": "1", "name": "Inbox idea", "description_stripped": ""}]}
+    rs = {"issues": [{"id": "1", "name": "Inbox idea", "description_stripped": None}]}
+    dj_norm = compare.normalise_snapshot(
+        dj, "django", compare.CompareContext(cell_diffs=pin)
+    )
+    rs_norm = compare.normalise_snapshot(rs, "rust", compare.CompareContext(cell_diffs=pin))
+    assert compare.compare_db(dj_norm, rs_norm) == []
+    # Unpinned, the same pair fails.
+    assert (
+        compare.compare_db(
+            compare.normalise_snapshot(dj, "django", compare.CompareContext()),
+            compare.normalise_snapshot(rs, "rust", compare.CompareContext()),
+        )
+        != []
+    )
+    # Fix landed (Rust stores ''): the pin no longer matches → loud.
+    fixed = {"issues": [{"id": "1", "name": "Inbox idea", "description_stripped": ""}]}
+    assert (
+        compare.compare_db(
+            dj_norm,
+            compare.normalise_snapshot(fixed, "rust", compare.CompareContext(cell_diffs=pin)),
+        )
+        != []
+    )
+    # Other rows are untouched by the pin.
+    other = {"issues": [{"id": "2", "name": "Other", "description_stripped": None}]}
+    other_norm = compare.normalise_snapshot(
+        other, "rust", compare.CompareContext(cell_diffs=pin)
+    )
+    assert other_norm["issues"][0]["description_stripped"] is None
+    assert effects.VOLATILE_PLACEHOLDER in dj_norm["issues"][0].values()
+
+
+def test_body_blank_paths_blank_presence_and_fail_on_missing():
+    """Blank paths excuse volatile subtrees but never dropped fields."""
+    import json
+
+    from . import compare
+
+    ctx = compare.CompareContext()
+    dj = _fake_response(
+        200,
+        json.dumps({"asset_id": "a", "key": "ws/111-shot.png"}).encode(),
+        {"content-type": "application/json"},
+    )
+    rs = _fake_response(
+        200,
+        json.dumps({"asset_id": "b", "key": "ws/222-shot.png"}).encode(),
+        {"content-type": "application/json"},
+    )
+    # Unblanked, the ids and keys fail.
+    assert compare.compare_response(dj, rs, ctx) is not None
+    # Blanked, only the stable leaf compares.
+    assert compare.compare_response(dj, rs, ctx, blank_paths=["asset_id", "key"]) is None
+    # A path missing on one side fails loudly (never a silent excuse).
+    dropped = _fake_response(
+        200,
+        json.dumps({"asset_id": "b"}).encode(),
+        {"content-type": "application/json"},
+    )
+    error = compare.compare_response(dj, dropped, ctx, blank_paths=["key"])
+    assert error is not None and "key" in error and "rust" in error
+
+
+def test_fernet_decrypt_round_trip_and_rejects_garbage():
+    """License ciphertext decrypts under Django's key schedule only."""
+    import base64
+    import hashlib
+
+    from cryptography.fernet import Fernet
+
+    from . import effects
+
+    secret = "test-secret-key"
+    dk = hashlib.pbkdf2_hmac("sha256", secret.encode(), b"salt", 100000)
+    token = Fernet(base64.urlsafe_b64encode(dk)).encrypt(b"fresh").decode()
+    assert effects.fernet_decrypt(token, secret) == "fresh"
+    # Same plaintext encrypts differently every time (random IV).
+    other = Fernet(base64.urlsafe_b64encode(dk)).encrypt(b"fresh").decode()
+    assert other != token
+    assert effects.fernet_decrypt(other, secret) == "fresh"
+    # Garbage, empty, and wrong-key cells stay raw (compare loudly).
+    assert effects.fernet_decrypt("old", secret) is None
+    assert effects.fernet_decrypt("", secret) is None
+    assert effects.fernet_decrypt(token, "wrong-secret") is None
+    assert effects.fernet_decrypt(token, "") is None
+
+
+def test_encrypted_columns_decrypt_flagged_rows_only():
+    """Encrypted columns compare decrypted plaintext, nothing else."""
+    import base64
+    import hashlib
+
+    from cryptography.fernet import Fernet
+
+    from . import compare
+
+    secret = "test-secret-key"
+    dk = hashlib.pbkdf2_hmac("sha256", secret.encode(), b"salt", 100000)
+    cipher = Fernet(base64.urlsafe_b64encode(dk))
+    dj_ct = cipher.encrypt(b"fresh").decode()
+    rs_ct = cipher.encrypt(b"fresh").decode()
+    assert dj_ct != rs_ct
+    table = "instance_configurations"
+    tuned = compare.CompareContext(
+        encrypted_columns={table: ["value"]}, secret_key=secret
+    )
+    dj = {table: [{"id": "1", "key": "S", "value": dj_ct, "is_encrypted": True}]}
+    rs = {table: [{"id": "1", "key": "S", "value": rs_ct, "is_encrypted": True}]}
+    dj_norm = compare.normalise_snapshot(dj, "django", tuned)
+    rs_norm = compare.normalise_snapshot(rs, "rust", tuned)
+    assert compare.compare_db(dj_norm, rs_norm) == []
+    assert dj_norm[table][0]["value"] == "fresh"
+    # Unflagged rows still compare raw.
+    plain = {table: [{"id": "2", "key": "P", "value": "new", "is_encrypted": False}]}
+    assert (
+        compare.normalise_snapshot(plain, "django", tuned)[table][0]["value"]
+        == "new"
+    )
+    # A plaintext seed under a true flag stays raw on both sides.
+    seed = {table: [{"id": "3", "key": "S", "value": "old", "is_encrypted": True}]}
+    assert (
+        compare.normalise_snapshot(seed, "django", tuned)[table][0]["value"]
+        == "old"
+    )
 
 
 def test_reasons_shape():

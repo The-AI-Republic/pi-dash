@@ -52,6 +52,9 @@ export REPLAY_RUST_URL=http://127.0.0.1:18225
 export REPLAY_RUST_DB="postgresql://.../replay_rust"
 export REPLAY_UPSTREAM_BROKER_URL=redis://127.0.0.1:6379/17
 export CELERY_BROKER_URL=redis://127.0.0.1:6379/16
+export REPLAY_DJANGO_REDIS_URL=redis://127.0.0.1:6379/13
+export REPLAY_RUST_REDIS_URL=redis://127.0.0.1:6379/15
+export REPLAY_RUST_AMQP_URL=amqp://pi_dash:pi_dash@127.0.0.1:5672/replay
 export SECRET_KEY=replay-secret
 export REPLAY_SNAPSHOT=/tmp/replay-snapshot.sql
 export REPLAY_DJANGO_WEBHOOK_BASE=http://127.0.0.1:18131
@@ -67,6 +70,20 @@ pytest replay/test_replay.py replay/test_meta.py -v
 Databases `replay_django` / `replay_rust` must exist and be migrated
 (the runner only truncates + loads data, never DDL — except the Rust
 queue tables, which it ensures in the Rust copy).
+
+`REPLAY_DJANGO_REDIS_URL` / `REPLAY_RUST_REDIS_URL` are the two servers'
+cache-Redis URLs (their `REDIS_URL`, not the brokers). The runner clears
+DRF throttle counters and `magic_*` rows on both before every session,
+so per-IP rate limits and code attempt counters never leak between
+sessions; a corpus session's `setup` hook runs after the flush and may
+prime same-value Redis state (magic-link codes) on both.
+
+`REPLAY_RUST_AMQP_URL` is the Rust server's AMQP broker (its `AMQP_URL`,
+a RabbitMQ the topology provides). Most Rust handlers enqueue into
+`rust_job_queue`, but a few publish direct to AMQP
+(`auth_session/password.rs` forgot-password, `space/assets.rs`, ...);
+without this broker those handlers 500, and the runner drains it per
+request as Rust-side jobs.
 
 ## Coverage
 

@@ -22,8 +22,10 @@ drives HTTP + SQL + broker drains against live infrastructure):
   ``REPLAY_RUST_SMTP_PORT``.
 - Rust: ``REPLAY_RUST_URL`` serving ``REPLAY_RUST_DB`` with every
   ``PIDASH_RUST_*`` flag on and ``PIDASH_DJANGO_UPSTREAM`` pointing at
-  Django-upstream. No workers and no beat anywhere: enqueued jobs
-  accumulate observably instead of executing.
+  Django-upstream. Most handlers enqueue into ``rust_job_queue``; a few
+  (forgot-password, space assets, ...) publish direct to the AMQP broker
+  at ``REPLAY_RUST_AMQP_URL``. No workers and no beat anywhere:
+  enqueued jobs accumulate observably instead of executing.
 
 Sinks (``_harness.sinks.Worker*Sink``) run in the pytest process on the
 fixed ports the servers were booted against.
@@ -41,6 +43,7 @@ import psycopg
 
 from _harness import auth as auth_harness
 from _harness import broker_probe
+from _harness.sessions import ADMIN_SESSION_COOKIE_NAME
 
 from . import compare, effects, session as session_model, snapshot
 
@@ -62,6 +65,18 @@ class ReplayConfig:
     rust_webhook_base: str
     session_cookie_name: str = "session-id"
     work_dir: str = ""
+    # Cache-Redis URLs of the Django-direct and Rust servers (their
+    # REDIS_URL). The runner clears DRF throttle counters on both before
+    # every session, so per-IP rate limits never leak between sessions.
+    # Empty when the topology has no separate caches to reset.
+    django_redis_url: str = ""
+    rust_redis_url: str = ""
+    # The Rust server's AMQP broker URL (its AMQP_URL). A few Rust
+    # handlers publish direct to AMQP instead of rust_job_queue; the
+    # runner drains this broker per request as Rust-side jobs. Empty
+    # when the topology has no AMQP broker (those handlers 500 — see
+    # README, this must be set).
+    rust_amqp_url: str = ""
 
     @classmethod
     def from_env(cls, env=None) -> "ReplayConfig":
@@ -89,6 +104,9 @@ class ReplayConfig:
             rust_webhook_base=need("REPLAY_RUST_WEBHOOK_BASE").rstrip("/"),
             session_cookie_name=env.get("SESSION_COOKIE_NAME", "session-id"),
             work_dir=work,
+            django_redis_url=env.get("REPLAY_DJANGO_REDIS_URL", ""),
+            rust_redis_url=env.get("REPLAY_RUST_REDIS_URL", ""),
+            rust_amqp_url=env.get("REPLAY_RUST_AMQP_URL", ""),
         )
 
 
@@ -119,6 +137,29 @@ class SessionReport:
     requests: list = field(default_factory=list)
 
 
+def _clear_ephemeral_redis(redis_url: str) -> None:
+    """Delete per-session-ephemeral keys on one cache Redis.
+
+    DRF throttle counters (reused helper) and magic-link rows
+    (``magic_*``, 10-minute TTL but sessions re-run faster than that):
+    sessions restore their databases but never their Redis, so without
+    this a re-run would observe the previous run's rate limits and
+    attempt counters. Runs before the session's ``setup`` hook, which
+    re-primes whatever the session needs.
+    """
+    import redis as redis_lib
+
+    from _harness import redis as redis_helper
+
+    client = redis_lib.Redis.from_url(redis_url, decode_responses=True)
+    try:
+        redis_helper.clear_throttle_counters(client)
+        for key in client.scan_iter("magic_*"):
+            client.delete(key)
+    finally:
+        client.close()
+
+
 def _queue_max_id(database_url: str) -> int:
     with psycopg.connect(database_url, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT COALESCE(MAX(id), 0) FROM rust_job_queue")
@@ -144,6 +185,8 @@ class Runner:
         self.config = config
         self.sinks = sinks
         self.world: dict | None = None
+        self.extra_context: dict = {}
+        self._cookie_names: dict[str, str] = {}
 
     # -- session setup ---------------------------------------------------
 
@@ -161,13 +204,19 @@ class Runner:
         snapshot.rewrite_webhook_sinks(cfg.rust_db, cfg.rust_webhook_base)
 
     def forge_credentials(self, sess: session_model.Session) -> dict:
-        """Forge session cookies in both DBs; return {(side, user): key}."""
+        """Forge session cookies in both DBs; return {(side, user): key}.
+
+        ``admin:<user>`` entries forge the same sessions row but the
+        client presents it as the admin-session-id cookie (the
+        /api/instances/* console reads that name instead).
+        """
         creds = {}
         users = self.world.get("users", {})
         for user_key in sess.auth_users:
             if user_key == "api_key":
                 continue
-            user = users[user_key]
+            base_key = user_key.split(":", 1)[1] if user_key.startswith("admin:") else user_key
+            user = users[base_key]
             for side, db_url in (("django", self.config.django_db), ("rust", self.config.rust_db)):
                 with psycopg.connect(db_url, autocommit=True) as conn:
                     key = auth_harness.forge_session_key(
@@ -179,9 +228,17 @@ class Runner:
                 creds[(side, user_key)] = key
         return creds
 
-    def _client_for(self, side: str, auth: str, creds: dict, captures: dict) -> httpx.Client:
+    def _client_for(
+        self,
+        side: str,
+        auth: str,
+        creds: dict,
+        captures: dict,
+        extra_cookies: dict | None = None,
+    ) -> httpx.Client:
         base = self.config.django_url if side == "django" else self.config.rust_url
         headers: dict[str, str] = {}
+        cookie_parts: list[str] = []
         if auth == "anonymous":
             pass
         elif auth == "api_key":
@@ -192,12 +249,21 @@ class Runner:
                 raise Divergence(f"auth {auth!r}: nothing captured as {cap!r} yet")
             value = captures[cap][0 if side == "django" else 1]
             cookie_name = self._cookie_names.get(cap, self.config.session_cookie_name)
-            headers["Cookie"] = f"{cookie_name}={value}"
+            cookie_parts.append(f"{cookie_name}={value}")
+        elif auth.startswith("admin:"):
+            key = (side, auth)
+            if key not in creds:
+                raise Divergence(f"unknown auth {auth!r} (session users: {sorted({k[1] for k in creds})})")
+            cookie_parts.append(f"{ADMIN_SESSION_COOKIE_NAME}={creds[key]}")
         else:
             key = (side, auth)
             if key not in creds:
                 raise Divergence(f"unknown auth {auth!r} (session users: {sorted({k[1] for k in creds})})")
-            headers["Cookie"] = f"{self.config.session_cookie_name}={creds[key]}"
+            cookie_parts.append(f"{self.config.session_cookie_name}={creds[key]}")
+        for name, value in (extra_cookies or {}).items():
+            cookie_parts.append(f"{name}={value}")
+        if cookie_parts:
+            headers["Cookie"] = "; ".join(cookie_parts)
         return httpx.Client(base_url=base, timeout=30.0, follow_redirects=False, headers=headers)
 
     # -- capture ----------------------------------------------------------
@@ -251,6 +317,23 @@ class Runner:
         # Drain broker leftovers so per-request attribution starts clean.
         broker_probe.drain_queue("celery", limit=10000)
         broker_probe.drain_queue("celery", limit=10000, broker_url=self.config.upstream_broker_url)
+        if self.config.rust_amqp_url:
+            broker_probe.drain_queue(
+                "celery", limit=10000, broker_url=self.config.rust_amqp_url
+            )
+        # Throttle counters and magic rows live in the cache Redises
+        # (never restored), so rate limits and attempt counters would
+        # otherwise leak between sessions.
+        for redis_url in (self.config.django_redis_url, self.config.rust_redis_url):
+            if redis_url:
+                _clear_ephemeral_redis(redis_url)
+        # Per-run context (read back seeded ids, mint tokens, prime Redis).
+        self.extra_context = dict(sess.setup(self.world, self.config)) if sess.setup else {}
+        missing = [k for k in (sess.setup_keys or ()) if k not in self.extra_context]
+        if missing:
+            raise Divergence(
+                f"session {sess.name}: setup() omitted declared keys {missing}"
+            )
         for sink in (
             self.sinks.django_smtp,
             self.sinks.rust_smtp,
@@ -272,16 +355,41 @@ class Runner:
             except Exception:
                 return False
 
+        def _db_row(side: str, table: str, value):
+            from psycopg.rows import dict_row
+
+            db_url = config.django_db if side == "django" else config.rust_db
+            with psycopg.connect(db_url, autocommit=True) as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(f'SELECT * FROM "{table}" WHERE id = %s', (str(value),))
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+
+        def _redis_for(side: str):
+            import redis as redis_lib
+
+            url = config.django_redis_url if side == "django" else config.rust_redis_url
+            if not url:
+                return None
+            return redis_lib.Redis.from_url(url, decode_responses=True)
+
         ctx = compare.CompareContext(
             timestamp_columns=dict(sess.timestamp_columns),
             generated_columns=dict(sess.generated_columns),
             skip_tables=dict(sess.skip_tables),
             django_webhook_base=self.config.django_webhook_base,
             rust_webhook_base=self.config.rust_webhook_base,
+            encrypted_columns=dict(sess.encrypted_columns),
             payload_time_paths=dict(sess.payload_time_paths),
             payload_row_refs=dict(sess.payload_row_refs),
             db_cell_refs=list(sess.db_cell_refs),
             row_exists=_row_exists,
+            payload_reset_tokens=dict(sess.payload_reset_tokens),
+            db_row=_db_row,
+            secret_key=self.config.secret_key,
+            payload_magic_codes=dict(sess.payload_magic_codes),
+            redis_for=_redis_for,
+            cell_diffs=list(sess.known_cell_diffs),
         )
         # Restore sanity: both copies compare equal before request 1, or
         # the restore/clone itself is broken (never a product divergence).
@@ -295,17 +403,21 @@ class Runner:
                 f"not a product divergence). Tables: {tables}"
             )
 
-        gap_tracker: dict[int, int] = {}
+        gap_tracker: dict[tuple, int] = {}
         for index, req in enumerate(sess.requests):
             result = self._run_request(sess, req, index, captures, creds, ctx, gap_tracker)
             report.requests.append(result)
-        for decl_index, (table, issue, _match) in enumerate(sess.known_extra_rows or []):
-            if not gap_tracker.get(decl_index):
-                raise Divergence(
-                    f"session {sess.name}: known-divergence pin for {table} "
-                    f"({issue}) never matched — the fix landed or the shape "
-                    "changed; remove or update the pin"
-                )
+        for side, declarations in (
+            ("dj", sess.known_extra_rows or []),
+            ("rs", sess.known_rust_extra_rows or []),
+        ):
+            for decl_index, (table, issue, _match) in enumerate(declarations):
+                if not gap_tracker.get((side, decl_index)):
+                    raise Divergence(
+                        f"session {sess.name}: known-divergence pin for {table} "
+                        f"({issue}) never matched — the fix landed or the shape "
+                        "changed; remove or update the pin"
+                    )
         return report
 
     def _gap_ctx(self, sess, captures) -> dict:
@@ -314,32 +426,44 @@ class Runner:
 
         gap_ctx = world_seed.template_context(self.world)
         gap_ctx.update(sess.static_context or {})
+        gap_ctx.update(self.extra_context or {})
         for name in captures:
             gap_ctx[name] = "{%s}" % name
         return gap_ctx
 
     def _apply_db_gap_pins(self, db_diffs, sess, captures, gap_tracker):
-        """Excuse declared django-only rows; return the remaining diffs."""
-        if not sess.known_extra_rows:
+        """Excuse declared one-sided rows; return the remaining diffs."""
+        if not sess.known_extra_rows and not sess.known_rust_extra_rows:
             return db_diffs
         # Gap match dicts are written against NORMALISED rows: captures
         # already substituted ({name}), world/static values raw.
         gap_ctx = self._gap_ctx(sess, captures)
         remaining = []
         for table, only_dj, only_rs in db_diffs:
-            decls = [
-                (i, match)
-                for i, (t, _issue, match) in enumerate(sess.known_extra_rows)
-                if t == table
-            ]
+            if only_dj and not only_rs:
+                decls = [
+                    (("dj", i), match)
+                    for i, (t, _issue, match) in enumerate(sess.known_extra_rows or [])
+                    if t == table
+                ]
+                one_sided = only_dj
+            elif only_rs and not only_dj:
+                decls = [
+                    (("rs", i), match)
+                    for i, (t, _issue, match) in enumerate(sess.known_rust_extra_rows or [])
+                    if t == table
+                ]
+                one_sided = only_rs
+            else:
+                # Both sides differ: pins excuse pure one-sided gaps
+                # only, never a table both backends changed differently.
+                remaining.append((table, only_dj, only_rs))
+                continue
             if not decls:
                 remaining.append((table, only_dj, only_rs))
                 continue
-            if only_rs:
-                remaining.append((table, only_dj, only_rs))
-                continue
             unmatched = []
-            for row in only_dj:
+            for row in one_sided:
                 hit = None
                 for decl_index, match in decls:
                     try:
@@ -354,7 +478,10 @@ class Runner:
                 else:
                     gap_tracker[hit] = gap_tracker.get(hit, 0) + 1
             if unmatched:
-                remaining.append((table, unmatched, []))
+                if one_sided is only_dj:
+                    remaining.append((table, unmatched, []))
+                else:
+                    remaining.append((table, [], unmatched))
         return remaining
 
     def _run_request(self, sess, req, index, captures, creds, ctx, gap_tracker) -> RequestResult:
@@ -363,22 +490,33 @@ class Runner:
 
         base_ctx = world_seed.template_context(self.world)
         base_ctx.update(sess.static_context or {})
+        base_ctx.update(self.extra_context or {})
 
         def _side_ctx(index: int) -> dict:
             side_ctx = dict(base_ctx)
             side_ctx.update({name: pair[index] for name, pair in captures.items()})
             return side_ctx
 
+        bodies = sum([req.json is not None, req.raw_body is not None, bool(req.form)])
+        if bodies > 1:
+            raise Divergence(
+                f"session {sess.name} request {index} {req.method} {req.path}: "
+                "corpus bug — set only one of json / raw_body / form"
+            )
         dj_ctx = _side_ctx(0)
         rs_ctx = _side_ctx(1)
         dj_path = session_model.render_template(req.path, dj_ctx)
         rs_path = session_model.render_template(req.path, rs_ctx)
         dj_json = session_model.render_template(req.json, dj_ctx)
         rs_json = session_model.render_template(req.json, rs_ctx)
+        dj_form = session_model.render_template(dict(req.form or {}), dj_ctx) or None
+        rs_form = session_model.render_template(dict(req.form or {}), rs_ctx) or None
         dj_params = session_model.render_template(dict(req.params or {}), dj_ctx)
         rs_params = session_model.render_template(dict(req.params or {}), rs_ctx)
         dj_headers = session_model.render_template(dict(req.headers or {}), dj_ctx)
         rs_headers = session_model.render_template(dict(req.headers or {}), rs_ctx)
+        dj_cookies = session_model.render_template(dict(req.cookies or {}), dj_ctx)
+        rs_cookies = session_model.render_template(dict(req.cookies or {}), rs_ctx)
 
         dj_before = compare.snapshot_full(self.config.django_db)
         rs_before = compare.snapshot_full(self.config.rust_db)
@@ -386,22 +524,30 @@ class Runner:
         mail_before = (len(self.sinks.django_smtp.snapshot()), len(self.sinks.rust_smtp.snapshot()))
         hooks_before = (len(self.sinks.django_webhook.snapshot()), len(self.sinks.rust_webhook.snapshot()))
 
+        if req.delay_before:
+            import time as _time
+
+            _time.sleep(req.delay_before)
         started = datetime.now(timezone.utc)
-        with self._client_for("django", req.auth, creds, captures) as client:
+        with self._client_for("django", req.auth, creds, captures, dj_cookies) as client:
             dj_resp = client.request(
                 req.method, dj_path, json=dj_json, content=req.raw_body,
-                params=dj_params, headers=dj_headers,
+                data=dj_form, params=dj_params, headers=dj_headers,
             )
         dj_msgs = broker_probe.drain_queue("celery", limit=10000)
-        with self._client_for("rust", req.auth, creds, captures) as client:
+        with self._client_for("rust", req.auth, creds, captures, rs_cookies) as client:
             rs_resp = client.request(
                 req.method, rs_path, json=rs_json, content=req.raw_body,
-                params=rs_params, headers=rs_headers,
+                data=rs_form, params=rs_params, headers=rs_headers,
             )
         rs_queue_rows = _queue_rows_since(self.config.rust_db, queue_before)
         rs_msgs = broker_probe.drain_queue(
             "celery", limit=10000, broker_url=self.config.upstream_broker_url
         )
+        if self.config.rust_amqp_url:
+            rs_msgs = rs_msgs + broker_probe.drain_queue(
+                "celery", limit=10000, broker_url=self.config.rust_amqp_url
+            )
         ctx.request_start = started
 
         if req.expect_status is not None and dj_resp.status_code != req.expect_status:
@@ -415,7 +561,13 @@ class Runner:
         label = f"session {sess.name} request {index} {req.method} {req.route_template()}"
         ctx.capture_pointers = dict(req.capture or {})
         error = compare.compare_response(
-            dj_resp, rs_resp, ctx, req.known_headers, self._gap_ctx(sess, captures)
+            dj_resp,
+            rs_resp,
+            ctx,
+            req.known_headers,
+            self._gap_ctx(sess, captures),
+            req.known_body_diffs,
+            req.body_blank_paths,
         )
         if error is not None:
             raise Divergence(f"{label}: {error}")
@@ -432,6 +584,26 @@ class Runner:
             captures[name] = (dj_cap[name], rs_cap[name])
         ctx.captures = dict(captures)
         ctx.capture_pointers = {}
+        if sess.known_cell_diffs:
+            # Cell pins are templates over the gap ctx: world/static
+            # values render raw (seed-random ids compare literally),
+            # captures render as {name} (their normalised form). A pin
+            # naming a capture not seen yet cannot match this request.
+            gap_ctx = self._gap_ctx(sess, captures)
+            rendered_pins = []
+            for pin in sess.known_cell_diffs:
+                table, issue, match, column, dj_value, rs_value = pin
+                try:
+                    rendered_pins.append((
+                        table, issue,
+                        session_model.render_template(dict(match), gap_ctx),
+                        column,
+                        session_model.render_template(dj_value, gap_ctx),
+                        session_model.render_template(rs_value, gap_ctx),
+                    ))
+                except KeyError:
+                    continue
+            ctx.cell_diffs = rendered_pins
         dj_ctx = _side_ctx(0)
 
         dj_after = compare.snapshot_full(self.config.django_db)

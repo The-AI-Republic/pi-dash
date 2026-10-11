@@ -36,6 +36,7 @@ class CompareContext:
     # Session tuning (table -> [column]).
     timestamp_columns: dict = field(default_factory=dict)
     generated_columns: dict = field(default_factory=dict)
+    encrypted_columns: dict = field(default_factory=dict)
     # Extra skipped tables: {table: reason}.
     skip_tables: dict = field(default_factory=dict)
     # This backend run's webhook sink bases, for URL blanking.
@@ -52,6 +53,27 @@ class CompareContext:
     # Existence check for row refs: fn(side, table, value) -> bool.
     # None leaves ref values untouched (they fail loudly in comparison).
     row_exists: object = None
+    # Validated reset tokens: {task_name_or_"*": [(uid_pointer,
+    # token_pointer)]}. Pointers are args/... or kwargs/... roots over
+    # the payload. Each side's token is validated against its own user
+    # row (decoded from the uid pointer) and blanked only when valid.
+    payload_reset_tokens: dict = field(default_factory=dict)
+    # Validated magic codes: {task_name_or_"*": [(email_pointer,
+    # code_pointer)]}. Each side's queued code must equal the token its
+    # own backend stored in its cache Redis (magic_<email> row); a code
+    # that matches is blanked, anything else fails loudly.
+    payload_magic_codes: dict = field(default_factory=dict)
+    # Cache-Redis access for magic validation: fn(side) -> client or
+    # None. None leaves codes untouched (they fail loudly).
+    redis_for: object = None
+    # Row fetch for token validation: fn(side, table, id) -> dict|None.
+    # None leaves tokens untouched (they fail loudly in comparison).
+    db_row: object = None
+    # Cell pins: [(table, fix_issue, match_dict, column, dj_value,
+    # rs_value)] (mirrors Session.known_cell_diffs).
+    cell_diffs: list = field(default_factory=list)
+    # Server SECRET_KEY (validates token HMACs); None skips validation.
+    secret_key: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -162,17 +184,50 @@ def normalise_snapshot(snap: dict, side: str, ctx: CompareContext) -> dict:
             continue
         if table == effects.SESSIONS_TABLE:
             # Multiset of user_ids (capture-substituted), nothing else.
-            users = sorted(
-                flat.get(str(r.get("user_id")), str(r.get("user_id"))) for r in rows
-            )
+            # Ids no capture names (view-created users, e.g. sign-up
+            # mints a fresh uuid per backend) must EXIST as users rows
+            # on their own side, then compare by count: a sign-in on one
+            # side only still fails (0 vs 1), and a session for a bogus
+            # user still fails (kept raw). Mirrors payload_row_refs.
+            users = []
+            unknown = 0
+            for r in rows:
+                raw = str(r.get("user_id"))
+                if raw in flat:
+                    users.append(flat[raw])
+                    continue
+                exists = False
+                if ctx.row_exists is not None:
+                    try:
+                        exists = bool(ctx.row_exists(side, "users", raw))
+                    except Exception:
+                        exists = False
+                if exists:
+                    unknown += 1
+                else:
+                    users.append(raw)
+            users = sorted(users)
+            users.extend(["{created_user}"] * unknown)
             out[table] = [{"user_id": u} for u in users]
             continue
         ts_extra = frozenset(ctx.timestamp_columns.get(table, ()))
         gen_extra = frozenset(ctx.generated_columns.get(table, ()))
+        enc_extra = frozenset(ctx.encrypted_columns.get(table, ()))
+        pins = [entry for entry in ctx.cell_diffs if entry[0] == table]
         normed = []
         for row in rows:
             new = {}
             for col, val in row.items():
+                if (
+                    col in enc_extra
+                    and row.get("is_encrypted") is True
+                    and isinstance(val, str)
+                    and val
+                    and ctx.secret_key
+                ):
+                    plain = effects.fernet_decrypt(val, ctx.secret_key)
+                    if plain is not None:
+                        val = plain
                 cell = effects.normalise_db_value(table, col, val, ts_extra, gen_extra)
                 if isinstance(cell, str):
                     if (table, col) in effects.WEBHOOK_URL_COLUMNS:
@@ -182,6 +237,11 @@ def normalise_snapshot(snap: dict, side: str, ctx: CompareContext) -> dict:
                 for ref_table, pointer in cell_refs.get((table, col), ()):
                     cell = _blank_db_cell_ref(cell, pointer, ref_table, side, ctx)
                 new[col] = cell
+            for _pin_table, _issue, match, column, dj_value, rs_value in pins:
+                want = dj_value if side == "django" else rs_value
+                if column in new and all(new.get(k) == v for k, v in match.items()):
+                    if new[column] == want:
+                        new[column] = effects.VOLATILE_PLACEHOLDER
             normed.append(new)
         normed.sort(key=lambda r: json.dumps(r, sort_keys=True, default=str))
         out[table] = normed
@@ -238,20 +298,33 @@ def _parse_set_cookie(headers) -> list[tuple[str, str]]:
     never match byte for byte; the names plus attributes (Path, HttpOnly,
     SameSite, ...) still compare. A wrong-user session still fails via
     the sessions-table user_id multiset.
+
+    Every Set-Cookie line parses separately (httpx folds repeated headers
+    into one comma-joined string, which would glue two cookies' attributes
+    together), and ``expires`` values blank: both backends compute them as
+    now()+max-age, so they legitimately differ by the seconds between the
+    two requests (Max-Age, the configured duration, still compares).
     """
     out = []
-    raw = headers.get("set-cookie")
-    if raw is None:
-        multi = getattr(headers, "get_list", None)
-        values = multi("set-cookie") if multi else []
+    multi = getattr(headers, "get_list", None)
+    if multi is not None:
+        values = multi("set-cookie", split_commas=False)
     else:
-        values = [raw]
+        raw = headers.get("set-cookie")
+        values = [raw] if raw is not None else []
     for value in values:
         parts = [p.strip() for p in value.split(";")]
         if not parts or "=" not in parts[0]:
             continue
         name = parts[0].split("=", 1)[0]
-        out.append((name, "; ".join(sorted(parts[1:]))))
+        attrs = []
+        for attr in parts[1:]:
+            key, sep, _val = attr.partition("=")
+            if sep and key.strip().lower() == "expires":
+                attrs.append("expires=%s" % effects.VOLATILE_PLACEHOLDER)
+            else:
+                attrs.append(attr)
+        out.append((name, "; ".join(sorted(attrs))))
     return sorted(out)
 
 
@@ -350,18 +423,48 @@ def first_diffs(left, right, limit: int = 12, path: str = "$") -> list[str]:
     return out
 
 
+def _json_pointer_get(body, pointer: str):
+    """Value at a ``/``-separated JSON pointer; (False, None) when missing."""
+    node = body
+    for part in pointer.split("/"):
+        if isinstance(node, list):
+            try:
+                node = node[int(part)]
+            except (ValueError, IndexError):
+                return False, None
+        elif isinstance(node, dict):
+            if part not in node:
+                return False, None
+            node = node[part]
+        else:
+            return False, None
+    return True, node
+
+
+def _json_pointer_set(body, pointer: str, value) -> bool:
+    """Set the value at a pointer; False when it does not resolve."""
+    return _pointer_set(body, pointer, value)
+
+
 def compare_response(
     dj_resp,
     rs_resp,
     ctx: CompareContext,
     known_headers: list | None = None,
     gap_ctx: dict | None = None,
+    known_body: list | None = None,
+    blank_paths: list | None = None,
 ) -> str | None:
     """Compare status, content-type, location/cookies, and body.
 
     ``known_headers`` ([(header, fix_issue, dj_value, rs_value)]) pins
     exact per-side header values (None = must be absent); pinned
-    headers skip the standard checks below.
+    headers skip the standard checks below. ``known_body``
+    ([(json_pointer, fix_issue, dj_value, rs_value)]) pins exact
+    per-side JSON subtree values the same way; pinned subtrees must
+    match on their side and then blank out of the diff.
+    ``blank_paths`` ([json_pointer, ...]) blanks volatile subtrees
+    after asserting they resolve on both sides.
     """
     from .session import render_template
 
@@ -423,7 +526,7 @@ def compare_response(
         rs_cookies = _parse_set_cookie(rs_resp.headers)
         if dj_cookies != rs_cookies:
             return f"set-cookie differs: django={dj_cookies!r} rust={rs_cookies!r}"
-    if dj_resp.content == rs_resp.content:
+    if dj_resp.content == rs_resp.content and not known_body and not blank_paths:
         return None
     try:
         dj_json = dj_resp.json()
@@ -434,6 +537,13 @@ def compare_response(
     except ValueError:
         rs_json = None
     if dj_json is None or rs_json is None:
+        if known_body or blank_paths:
+            return (
+                "known-body pin / blank path declared but a side has no "
+                "JSON body (pins apply to normalised JSON subtrees)"
+            )
+        if dj_resp.content == rs_resp.content:
+            return None
         return (
             "non-JSON body bytes differ:\n"
             f"django: {dj_resp.content[:2000]!r}\n"
@@ -449,6 +559,40 @@ def compare_response(
     rs_norm = effects.normalise_json_body(
         rs_json, effects.bind_captures(ctx.captures, "rust")
     )
+    for pointer, issue, dj_want, rs_want in known_body or []:
+        try:
+            dj_want = render_template(dj_want, gap_ctx or {})
+            rs_want = render_template(rs_want, gap_ctx or {})
+        except KeyError as exc:
+            return f"known-body pin {pointer} ({issue}): unrenderable match: {exc}"
+        dj_found, dj_have = _json_pointer_get(dj_norm, pointer)
+        rs_found, rs_have = _json_pointer_get(rs_norm, pointer)
+        if not dj_found or dj_have != dj_want:
+            return (
+                f"known-body pin {pointer} ({issue}): Django body changed — "
+                f"got {dj_have!r}, want {dj_want!r}"
+            )
+        if not rs_found or rs_have != rs_want:
+            return (
+                f"known-body pin {pointer} ({issue}): Rust body changed — "
+                "fix landed or behavior changed; remove or update the pin. "
+                f"got {rs_have!r}, want {rs_want!r}"
+            )
+        _json_pointer_set(dj_norm, pointer, effects.VOLATILE_PLACEHOLDER)
+        _json_pointer_set(rs_norm, pointer, effects.VOLATILE_PLACEHOLDER)
+    for pointer in blank_paths or []:
+        dj_found, _ = _json_pointer_get(dj_norm, pointer)
+        rs_found, _ = _json_pointer_get(rs_norm, pointer)
+        if not dj_found or not rs_found:
+            missing = ",".join(
+                [s for s, found in (("django", dj_found), ("rust", rs_found)) if not found]
+            )
+            return (
+                f"body blank path {pointer}: missing on {missing} "
+                "(the path must resolve on both sides)"
+            )
+        _json_pointer_set(dj_norm, pointer, effects.VOLATILE_PLACEHOLDER)
+        _json_pointer_set(rs_norm, pointer, effects.VOLATILE_PLACEHOLDER)
     if dj_norm != rs_norm:
         lines = first_diffs(dj_norm, rs_norm)
         dj_text = json.dumps(dj_norm, sort_keys=True, indent=1, default=str)
@@ -702,6 +846,142 @@ def _blank_row_refs(args, kwargs, task: str, side: str, ctx: CompareContext):
     return args, kwargs
 
 
+def _pointer_get(root, pointer: str):
+    """Value at an args/... or kwargs/...-rooted pointer, else None."""
+    node = root
+    for part in pointer.split("/"):
+        if isinstance(node, list):
+            try:
+                node = node[int(part)]
+            except (ValueError, IndexError):
+                return None
+        elif isinstance(node, dict):
+            if part not in node:
+                return None
+            node = node[part]
+        else:
+            return None
+    return node
+
+
+def _pointer_set(root, pointer: str, value) -> bool:
+    """Set the value at a pointer; False when it does not resolve."""
+    node = root
+    parts = pointer.split("/")
+    try:
+        for part in parts[:-1]:
+            node = node[int(part)] if isinstance(node, list) else node[part]
+        last = parts[-1]
+        if isinstance(node, list):
+            node[int(last)] = value
+        elif isinstance(node, dict) and last in node:
+            node[last] = value
+        else:
+            return False
+    except (KeyError, IndexError, ValueError, TypeError):
+        return False
+    return True
+
+
+def _blank_valid_tokens(args, kwargs, task: str, side: str, ctx: CompareContext):
+    """Blank per-side-minted reset tokens that validate, nothing else.
+
+    The uid pointer names the user the token was minted for; the token
+    validates against that user's live row on its own side. A token that
+    fails (wrong HMAC, expired, malformed uid, missing row) stays in
+    place and fails the job compare loudly.
+    """
+    refs = list(ctx.payload_reset_tokens.get("*", ())) + list(
+        ctx.payload_reset_tokens.get(task or "", ())
+    )
+    if not refs or ctx.db_row is None or not ctx.secret_key:
+        return args, kwargs
+    import copy
+
+    args, kwargs = copy.deepcopy(args), copy.deepcopy(kwargs)
+    for uid_pointer, token_pointer in refs:
+        _, uid = _resolve_root_pointer(args, kwargs, uid_pointer)
+        token_root, token = _resolve_root_pointer(args, kwargs, token_pointer)
+        if not isinstance(uid, str) or not isinstance(token, str):
+            continue
+        if token_root not in ("args", "kwargs"):
+            continue
+        user_id = effects.decode_reset_uid(uid)
+        if user_id is None:
+            continue
+        try:
+            row = ctx.db_row(side, "users", user_id)
+        except Exception:
+            continue
+        if not row:
+            continue
+        valid = effects.validate_reset_token(
+            token,
+            str(row.get("id", user_id)),
+            row.get("password", ""),
+            row.get("last_login"),
+            row.get("email", ""),
+            ctx.secret_key,
+        )
+        if not valid:
+            continue
+        target = args if token_root == "args" else kwargs
+        _pointer_set(target, token_pointer.split("/", 1)[1], effects.VOLATILE_PLACEHOLDER)
+    return args, kwargs
+
+
+def _resolve_root_pointer(args, kwargs, pointer: str):
+    """(root_name, value) for an args/... or kwargs/... pointer."""
+    for root, name in ((args, "args"), (kwargs, "kwargs")):
+        if pointer.startswith(name + "/"):
+            return name, _pointer_get(root, pointer[len(name) + 1:])
+    return None, None
+
+
+def _blank_valid_magic(args, kwargs, task: str, side: str, ctx: CompareContext):
+    """Blank queued magic codes that match the side's own Redis row.
+
+    The generate view stores the code in its cache Redis
+    (``magic_<email>``) and queues the same code; the comparer re-reads
+    the row (reused ``_harness.redis.read_magic``) and blanks the
+    payload code only when they agree. A stored/queued split, a missing
+    row, or an unreachable Redis leaves the code in place and fails the
+    job compare loudly.
+    """
+    refs = list(ctx.payload_magic_codes.get("*", ())) + list(
+        ctx.payload_magic_codes.get(task or "", ())
+    )
+    if not refs or ctx.redis_for is None:
+        return args, kwargs
+    from _harness import redis as redis_helper
+
+    import copy
+
+    args, kwargs = copy.deepcopy(args), copy.deepcopy(kwargs)
+    for email_pointer, code_pointer in refs:
+        _email_root, email = _resolve_root_pointer(args, kwargs, email_pointer)
+        code_root, code = _resolve_root_pointer(args, kwargs, code_pointer)
+        if not isinstance(email, str) or code_root not in ("args", "kwargs"):
+            continue
+        client = None
+        try:
+            client = ctx.redis_for(side)
+            stored = redis_helper.read_magic(client, email) if client is not None else None
+        except Exception:
+            continue
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        if not stored or str(stored.get("token")) != str(code):
+            continue
+        target = args if code_root == "args" else kwargs
+        _pointer_set(target, code_pointer.split("/", 1)[1], effects.VOLATILE_PLACEHOLDER)
+    return args, kwargs
+
+
 def normalise_celery_message(
     headers: dict, payload, side: str, ctx: CompareContext, queue: str = "celery"
 ) -> dict:
@@ -723,6 +1003,8 @@ def normalise_celery_message(
     if task == effects.PROCESS_LOGS_TASK:
         args, kwargs = _blank_topology_hosts(args), _blank_topology_hosts(kwargs)
     args, kwargs = _blank_row_refs(args, kwargs, task, side, ctx)
+    args, kwargs = _blank_valid_tokens(args, kwargs, task, side, ctx)
+    args, kwargs = _blank_valid_magic(args, kwargs, task, side, ctx)
     return {
         "task": task,
         "args": args,
@@ -752,6 +1034,8 @@ def normalise_queue_row(row: dict, ctx: CompareContext) -> dict:
     if task == effects.PROCESS_LOGS_TASK:
         args, kwargs = _blank_topology_hosts(args), _blank_topology_hosts(kwargs)
     args, kwargs = _blank_row_refs(args, kwargs, task, "rust", ctx)
+    args, kwargs = _blank_valid_tokens(args, kwargs, task, "rust", ctx)
+    args, kwargs = _blank_valid_magic(args, kwargs, task, "rust", ctx)
     return {
         "task": task,
         "args": args,

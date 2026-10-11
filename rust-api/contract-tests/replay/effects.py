@@ -5,13 +5,13 @@
 """Explicit ignore maps for write-replay comparison (PIDASHCONV-823).
 
 Every value the comparer blanks is named here (or in a session's own
-``timestamp_columns`` / ``generated_columns`` additions, which name the
-table and column). Nothing is auto-detected: a column whose values
-legitimately differ between backends but is not listed here fails the
-replay loudly, and the fix is a precise map entry with cited evidence —
-never a looser rule. This mirrors the shadow-read volatile allowlist
-policy (``crates/api/src/edge_shadow.rs``: "extend only with cited
-evidence, never speculatively").
+``timestamp_columns`` / ``generated_columns`` / ``encrypted_columns``
+additions, which name the table and column). Nothing is auto-detected:
+a column whose values legitimately differ between backends but is not
+listed here fails the replay loudly, and the fix is a precise map entry
+with cited evidence — never a looser rule. This mirrors the shadow-read
+volatile allowlist policy (``crates/api/src/edge_shadow.rs``: "extend
+only with cited evidence, never speculatively").
 
 Normalisation is type-preserving: ``None`` stays ``None`` and booleans
 stay booleans, so "field went null on one side" still fails. Only
@@ -68,6 +68,13 @@ TIMESTAMP_JSON_KEYS = frozenset(
         # Evidence: comment PATCH stamps edited_at=now() on both backends
         # (replay app_issues_lifecycle request 4).
         "edited_at",
+        # Evidence: set-password serializes the user with stamped
+        # last_active/last_login_time/token_updated_at, seconds apart
+        # (replay auth_session_lifecycle request 24); mirrors the DB map.
+        "last_active",
+        "last_login_time",
+        "last_logout_time",
+        "token_updated_at",
         "createdAt",
         "updatedAt",
         "dateJoined",
@@ -93,6 +100,14 @@ TIMESTAMP_COLUMNS = frozenset(
         # Evidence: comments.edited_at is stamped now() by comment PATCH
         # on both backends (replay app_issues_lifecycle request 4).
         "edited_at",
+        # Evidence: sign-up stamps last_active/last_login_time/
+        # token_updated_at with now() on both backends, seconds apart
+        # (replay auth_session_lifecycle request 3); sign-out stamps
+        # last_logout_time the same way (request 44).
+        "last_active",
+        "last_login_time",
+        "last_logout_time",
+        "token_updated_at",
     }
 )
 
@@ -127,7 +142,9 @@ SKIP_TABLES = frozenset(
 # field for field. What the replay pins instead: the multiset of
 # user_ids (seeded users are deterministic, so a sign-in on one side
 # only — or for the wrong user — still fails) plus the row count, which
-# the multiset length carries.
+# the multiset length carries. Ids no capture names (view-created users:
+# sign-up mints a fresh uuid per backend) must exist as users rows on
+# their own side and then compare by count (see compare.py).
 SESSIONS_TABLE = "sessions"
 SESSIONS_COMPARE_KEYS = ("user_id",)
 
@@ -151,6 +168,18 @@ JOB_ETA_TOLERANCE_SECONDS = 120.0
 # Placeholder host seeded into webhook rows; rewritten per backend.
 WEBHOOK_PLACEHOLDER_HOST = "replay-webhook-sink.invalid"
 
+# --- Password-reset tokens in job payloads ---
+# ``forgot_password.delay`` carries a freshly minted reset token
+# (``PasswordResetTokenGenerator``: base36 seconds + HMAC). The two
+# backends mint seconds apart, so the bytes can never match — but a
+# blind blank would also hide a broken HMAC. The comparer instead
+# VALIDATES each side's token against its own user row (same recipe as
+# ``auth_session/tokens.py`` minting plus Django's ``check_token`` age
+# gate) and blanks it only when valid; anything else fails loudly.
+# Timeout mirrors ``settings/common.py`` (3600, not Django's default).
+RESET_TOKEN_TIMEOUT_SECONDS = 3600
+RESET_TOKEN_KEY_SALT = "django.contrib.auth.tokens.PasswordResetTokenGenerator"
+
 # --- process_logs payload topology ---
 # The API-token audit payload embeds the request's Host header, which
 # legitimately differs per backend by port in the replay topology
@@ -165,6 +194,111 @@ def placeholder_for(value):
     if value is None or isinstance(value, bool):
         return value
     return VOLATILE_PLACEHOLDER
+
+
+def _b36_to_int(value: str) -> int:
+    return int(value, 36)
+
+
+def validate_reset_token(
+    token: str,
+    user_id: str,
+    password_field: str,
+    last_login,
+    email: str,
+    secret: str,
+    now=None,
+) -> bool:
+    """Whether ``token`` is a valid reset token for this user row.
+
+    Mirrors Django 4.2 ``PasswordResetTokenGenerator.check_token`` with
+    the ``auth_session/tokens.py`` value recipe: base36 timestamp within
+    :data:`RESET_TOKEN_TIMEOUT_SECONDS` of now, and the HMAC half
+    recomputed from ``(user_id, password_field, last_login, ts, email)``
+    matching. ``last_login`` is the raw DB value (None or datetime).
+    """
+    import hashlib
+    import hmac
+    from datetime import datetime, timezone
+
+    if not isinstance(token, str) or "-" not in token:
+        return False
+    ts_b36, _, _hash = token.partition("-")
+    try:
+        ts = _b36_to_int(ts_b36)
+    except ValueError:
+        return False
+    if now is None:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+    epoch = datetime(2001, 1, 1)
+    age = int((now - epoch).total_seconds()) - ts
+    if age < 0 or age > RESET_TOKEN_TIMEOUT_SECONDS:
+        return False
+    if last_login is None:
+        login_ts = ""
+    else:
+        moment = last_login
+        if getattr(moment, "tzinfo", None) is not None:
+            moment = moment.replace(tzinfo=None)
+        login_ts = str(moment.replace(microsecond=0))
+    value = f"{user_id}{password_field}{login_ts}{ts}{email}"
+    key = hashlib.sha256((RESET_TOKEN_KEY_SALT + secret).encode()).digest()
+    expect = hmac.new(key, msg=value.encode(), digestmod=hashlib.sha256).hexdigest()[::2]
+    return hmac.compare_digest(expect, token.partition("-")[2])
+
+
+_FERNET_CACHE: dict = {}
+
+
+def fernet_decrypt(value: str, secret_key: str) -> str | None:
+    """Decrypt one Fernet cell under Django's license key schedule.
+
+    Mirrors ``pi_dash/license/utils/encryption.py`` (``derive_key`` +
+    ``decrypt_data``): PBKDF2-HMAC-SHA256 over the server SECRET_KEY
+    (100 000 rounds, salt ``b"salt"``), URL-safe base64, standard
+    Fernet. The Rust port uses the same schedule
+    (``crates/db/src/config/encryption.rs``), so either backend's
+    ciphertext must decrypt here: Fernet randomises the IV, so two
+    encryptions of the same plaintext never match byte for byte —
+    comparing the decrypted plaintext is the only strict check.
+
+    Returns None when ``value`` is not valid ciphertext under the key
+    (a plaintext seed in an ``is_encrypted`` row, or a backend that
+    stored garbage): callers leave such cells raw so they compare —
+    and fail — exactly like any other cell.
+    """
+    if not value or not secret_key:
+        return None
+    try:
+        import base64
+        import hashlib
+
+        from cryptography.fernet import Fernet
+
+        # The key schedule is 100k PBKDF2 rounds; the secret is fixed
+        # per replay run, so derive once and reuse across snapshots.
+        cached = _FERNET_CACHE.get(secret_key)
+        if cached is None:
+            dk = hashlib.pbkdf2_hmac("sha256", secret_key.encode(), b"salt", 100000)
+            cached = Fernet(base64.urlsafe_b64encode(dk))
+            _FERNET_CACHE[secret_key] = cached
+        return cached.decrypt(value.encode()).decode()
+    except Exception:
+        return None
+
+
+def decode_reset_uid(uidb64: str):
+    """Decode a reset uidb64 to the user id string, or None when malformed."""
+    import base64
+
+    if not isinstance(uidb64, str) or not uidb64:
+        return None
+    try:
+        padded = uidb64 + "=" * (-len(uidb64) % 4)
+        decoded = base64.urlsafe_b64decode(padded.encode()).decode()
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return decoded or None
 
 
 def _redact_url_params(url: str) -> str:
