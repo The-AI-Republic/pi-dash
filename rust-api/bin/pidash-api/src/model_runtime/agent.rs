@@ -699,6 +699,21 @@ async fn process_tool_calls<E: ToolExecutor>(
     for call in calls {
         match resolve_tool(config, &call.name) {
             ToolKind::Output => {
+                // `early` + a final result: later output calls stub
+                // out before validation (`_agent_graph.py`
+                // output-loop elif) — no failed-mark, no increment,
+                // no raise.
+                if final_result.is_some() {
+                    output_parts.push(RequestPart::ToolReturn {
+                        name: call.name.clone(),
+                        content: Value::String(
+                            "Output tool not used - a final result was already processed."
+                                .to_owned(),
+                        ),
+                        call_id: call.call_id.clone(),
+                    });
+                    continue;
+                }
                 // Output calls validate in order; the first success
                 // ends the turn. Failures check the consecutive
                 // per-name count first (`tool_manager.py:403-408`):
@@ -729,23 +744,12 @@ async fn process_tool_calls<E: ToolExecutor>(
                         state.output_retries_used += 1;
                     }
                     Ok(output) => {
-                        if final_result.is_some() {
-                            output_parts.push(RequestPart::ToolReturn {
-                                name: call.name.clone(),
-                                content: Value::String(
-                                    "Output tool not used - a final result was already processed."
-                                        .to_owned(),
-                                ),
-                                call_id: call.call_id.clone(),
-                            });
-                        } else {
-                            output_parts.push(RequestPart::ToolReturn {
-                                name: call.name.clone(),
-                                content: Value::String("Final result processed.".to_owned()),
-                                call_id: call.call_id.clone(),
-                            });
-                            final_result = Some(output);
-                        }
+                        output_parts.push(RequestPart::ToolReturn {
+                            name: call.name.clone(),
+                            content: Value::String("Final result processed.".to_owned()),
+                            call_id: call.call_id.clone(),
+                        });
+                        final_result = Some(output);
                     }
                 }
             }
@@ -1614,6 +1618,34 @@ mod tests {
         let output = run_loop(&board.config(), &executor).await.expect("runs");
         assert_eq!(output.output.summary(), "mixed");
         assert_eq!(board.state.requests.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn output_call_after_final_result_stubs_unvalidated() {
+        // `[F(out), F(out), (valid, invalid)]` succeeds: under
+        // `early` the output node stubs every output call once a
+        // final result exists — before validation, so the per-name
+        // count (at max here) never trips
+        // (`_agent_graph.py` output-loop elif).
+        let valid = done_text("completed", "dup");
+        let board = harness(
+            vec![
+                tool_reply(vec![("c1", OUTPUT_TOOL_NAME, r#"{"nope": 1}"#)]),
+                tool_reply(vec![("c2", OUTPUT_TOOL_NAME, r#"{"nope": 1}"#)]),
+                tool_reply(vec![
+                    ("c3a", OUTPUT_TOOL_NAME, &valid),
+                    ("c3b", OUTPUT_TOOL_NAME, r#"{"nope": 1}"#),
+                ]),
+            ],
+            vec![output_wire_tool()],
+            vec![],
+            vec![],
+        )
+        .await;
+        let executor = FakeExecutor::named(vec![]);
+        let output = run_loop(&board.config(), &executor).await.expect("runs");
+        assert_eq!(output.output.summary(), "dup");
+        assert_eq!(board.state.requests.lock().unwrap().len(), 3);
     }
 
     #[tokio::test]
