@@ -8266,4 +8266,29 @@ export class WebNewDriver implements ParityDriver {
   async estimatesNotFoundVisible(): Promise<boolean> {
     return todo("estimatesNotFoundVisible");
   }
+
+  async estimatesOpenAnalytics(): Promise<void> {
+    return todo("estimatesOpenAnalytics");
+  }
+  async estimatesAnalyticsYAxisValue(): Promise<string> {
+    return todo("estimatesAnalyticsYAxisValue");
+  }
+  async estimatesAnalyticsYAxisOptions(): Promise<string[]> {
+    return todo("estimatesAnalyticsYAxisOptions");
+  }
+  async estimatesAnalyticsPickYAxis(_label: string): Promise<void> {
+    return todo("estimatesAnalyticsPickYAxis");
+  }
+  async estimatesAnalyticsXAxisValue(): Promise<string> {
+    return todo("estimatesAnalyticsXAxisValue");
+  }
+  async estimatesAnalyticsXAxisOptions(): Promise<string[]> {
+    return todo("estimatesAnalyticsXAxisOptions");
+  }
+  async estimatesAnalyticsPickXAxis(_label: string): Promise<void> {
+    return todo("estimatesAnalyticsPickXAxis");
+  }
+  async estimatesAnalyticsTableRows(): Promise<string[][]> {
+    return todo("estimatesAnalyticsTableRows");
+  }
 }

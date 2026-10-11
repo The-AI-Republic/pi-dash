@@ -5038,15 +5038,16 @@ export async function serverCreateEstimate(
   name: string,
   points: string[],
   sessionCookie: string,
-  system: "points" | "time" = "points",
-  apiBase: string = apiBaseFromEnv()
+  system: "points" | "time" | "categories" = "points",
+  apiBase: string = apiBaseFromEnv(),
+  lastUsed: boolean = true
 ): Promise<{ id: string; points: ParityServerEstimatePoint[] }> {
   const res = await mutateJSON(
     "POST",
     `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/estimates/`,
     sessionCookie,
     {
-      estimate: { name, type: system, last_used: true },
+      estimate: { name, type: system, last_used: lastUsed },
       estimate_points: points.map((value) => ({ value })),
     }
   );
@@ -13374,4 +13375,43 @@ export async function serverEstimatesList(
       }),
     };
   });
+}
+
+// Estimates consumers (NEWFRONT-325, EST-018). Appended; existing helpers
+// above are untouched per the shared parity contract.
+/**
+ * Clear a project's estimate link through the API (estimates off). This is
+ * the same project-flag write the settings enable switch performs when it
+ * is flipped off (pinned by EST-004); EST-018 asserts the gating outcome.
+ */
+export async function serverClearProjectEstimate(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    { estimate: null }
+  );
+  if (!res.ok) throw new Error(`[parity] project estimate clear failed with HTTP ${res.status}.`);
+}
+
+/** The estimate system id a project currently points at, or null when estimates are off. */
+export async function serverProjectEstimate(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string | null> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as { estimate?: unknown };
+  if (record.estimate === null || record.estimate === undefined) return null;
+  if (typeof record.estimate !== "string") throw new Error("[parity] project estimate carried no string id.");
+  return record.estimate;
 }
