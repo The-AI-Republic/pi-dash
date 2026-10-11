@@ -21,7 +21,7 @@ Counts (2026-10-10, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 514 OWNED, 14 MISSING (all listed below),
   5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 85 tasks — 36 OWNED, 36 proxied by design, 13 MISSING;
+- Jobs: 85 tasks — 47 OWNED, 32 proxied by design, 6 MISSING;
   beat 26/26 OWNED.
 
 ## Routes
@@ -205,21 +205,7 @@ Fix: PIDASHCONV-836.
 W-activity :: pi_dash.bgtasks.issue_activities_task.issue_activity :: must-wire (lost without python worker)
 ```
 
-### W-runner (7 rows)
-
-Fix: PIDASHCONV-840.
-
-```expected-jobs
-W-runner :: runner.apply_agent_run_terminal_effects :: must-wire (lost without python worker)
-W-runner :: runner.expire_stale_approvals :: must-wire (lost without python worker)
-W-runner :: runner.mark_offline_runners :: must-wire (lost without python worker)
-W-runner :: runner.reconcile_agent_run_terminal_effects :: must-wire (lost without python worker)
-W-runner :: runner.reconcile_stalled_runs :: must-wire (lost without python worker)
-W-runner :: runner.sweep_agent_chat_state :: must-wire (lost without python worker)
-W-runner :: runner.sweep_chat_message_dedupe :: must-wire (lost without python worker)
-```
-
-### Proxied by design (36 rows)
+### Proxied by design (32 rows)
 
 No fix issue: forwarding preserves Django's outcome on every row.
 
@@ -228,8 +214,6 @@ No fix issue: forwarding preserves Django's outcome on every row.
   (PDASHOSS01-292) — the Python worker drops them; forwarding drops
   them identically. `track_event` is explicitly unregistered in Rust
   because an early-return handler would swallow the forward.
-- `dormant` (4): registered but never published; forward preserves
-  non-execution.
 - `delete_old_s3_link`: hybrid worker (PIDASHCONV-835). Registered
   and beat-scheduled (twice daily), but the body deletes objects from
   a live S3 bucket and Rust has no live S3 delete path (`ObjectStore`
@@ -296,10 +280,6 @@ PROXIED :: pi_dash.bgtasks.webhook_task.webhook_activity :: django-drops-too (PD
 PROXIED :: pi_dash.bgtasks.webhook_task.webhook_send_task :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.work_item_link_task.crawl_work_item_link_title :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.workspace_invitation_task.workspace_invitation :: django-drops-too (PDASHOSS01-292)
-PROXIED :: runner.sweep_idle_sessions :: dormant (never published; forward preserves non-execution)
-PROXIED :: runner.sweep_old_streams :: dormant (never published; forward preserves non-execution)
-PROXIED :: runner.sweep_run_message_dedupe :: dormant (never published; forward preserves non-execution)
-PROXIED :: runner.sweep_stale_runners :: dormant (never published; forward preserves non-execution)
 ```
 
 ## Beat

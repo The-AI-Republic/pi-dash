@@ -1441,47 +1441,47 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "runner.apply_agent_run_terminal_effects",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.expire_stale_approvals",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.mark_offline_runners",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.reconcile_agent_run_terminal_effects",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.reconcile_stalled_runs",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.sweep_agent_chat_state",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.sweep_chat_message_dedupe",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.sweep_idle_sessions",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.sweep_old_streams",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.sweep_run_message_dedupe",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.sweep_stale_runners",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
 ];
 
@@ -1857,6 +1857,26 @@ mod tests {
             ),
         );
         pidash_jobs::tasks_mail::register_notifications_task(&mut registry, pool.clone());
+        // Runner tasks (PIDASHCONV-859): the real `worker()` calls —
+        // the providers construct with no I/O (lazy pool, no Redis
+        // client, test-default settings).
+        let runner_settings = pidash_db::config::Settings::test_defaults();
+        let runner_seams = std::sync::Arc::new(crate::runner_seams::RunnerSeams::new(
+            pool.clone(),
+            None,
+            &runner_settings,
+        ));
+        pidash_jobs::runner_runs::register_runner_runs_tasks(
+            &mut registry,
+            pool.clone(),
+            runner_seams.clone(),
+        );
+        pidash_jobs::runner_runs::register_sweeps_runs_tasks(
+            &mut registry,
+            pool.clone(),
+            runner_seams.clone(),
+            runner_seams,
+        );
 
         // The const union, independent of the table.
         let mut expected_rust = std::collections::BTreeSet::new();
@@ -1885,6 +1905,7 @@ mod tests {
             pidash_jobs::tasks_ticker::scan::FIRE_SCHEDULER_BINDING_TASK,
         ]);
         expected_rust.insert(pidash_jobs::tasks_mail::NOTIFICATIONS_TASK);
+        expected_rust.extend(pidash_jobs::runner_runs::TASK_NAMES);
         // Count pins: a const that grows must update the table too.
         assert_eq!(
             tasks_cleanup::cleanup::TASKS.len(),
@@ -1911,7 +1932,12 @@ mod tests {
             2,
             "loop_scan group drifted"
         );
-        assert_eq!(expected_rust.len(), 36, "worker-owned count drifted");
+        assert_eq!(
+            pidash_jobs::runner_runs::TASK_NAMES.len(),
+            11,
+            "runner_runs group drifted"
+        );
+        assert_eq!(expected_rust.len(), 47, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()

@@ -19,6 +19,7 @@
 
 mod inventory;
 mod ops;
+mod runner_seams;
 
 use clap::{Parser, Subcommand};
 use pidash_api::{with_routes, AppState, EdgeHandle};
@@ -315,6 +316,45 @@ async fn worker(concurrency: u32) -> MainResult {
     // Rust-queue `StackOutbox` seam exists (only test fakes) — never
     // register them here until the seams land (PIDASHCONV-865).
     pidash_jobs::tasks_mail::register_notifications_task(&mut registry, pools.primary().clone());
+    // Runner tasks (PIDASHCONV-859; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`). The
+    // beat entries fire the sweeps and the L6 handlers exist with
+    // live bin-local seam providers (`runner_seams::RunnerSeams`
+    // over the PIDASHCONV-862 executors), so the Rust worker owns
+    // all eleven — otherwise the runs are lost at switchover
+    // (parity gap W-runner, plus the four dormant names the
+    // registers also own).
+    let settings = Settings::from_env()?;
+    let redis = match settings
+        .redis
+        .url
+        .as_deref()
+        .filter(|url| !url.is_empty())
+        .map(redis::Client::open)
+    {
+        None => None,
+        Some(Ok(client)) => Some(client),
+        Some(Err(error)) => {
+            tracing::warn!(%error, "redis: REDIS_URL unparsable; continuing without cache");
+            None
+        }
+    };
+    let runner_seams = std::sync::Arc::new(runner_seams::RunnerSeams::new(
+        pools.primary().clone(),
+        redis,
+        &settings,
+    ));
+    pidash_jobs::runner_runs::register_runner_runs_tasks(
+        &mut registry,
+        pools.primary().clone(),
+        runner_seams.clone(),
+    );
+    pidash_jobs::runner_runs::register_sweeps_runs_tasks(
+        &mut registry,
+        pools.primary().clone(),
+        runner_seams.clone(),
+        runner_seams,
+    );
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()
