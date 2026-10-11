@@ -383,7 +383,9 @@ pub struct GithubRestClient {
 /// re-encode, cut at 64 KiB, decode again — then
 /// `{"diff", "truncated": len(content) > len(raw)}`. The cut lands
 /// on re-encoded bytes, so replacement expansion shifts it for
-/// non-UTF8 bodies.
+/// non-UTF8 bodies. PY decodes via requests `apparent_encoding`,
+/// probed byte-equal to utf-8/`replace` for every valid-UTF8 body —
+/// only non-UTF8 bytes (pathological for diffs) can differ.
 fn truncate_diff(content: &[u8]) -> Value {
     let text = String::from_utf8_lossy(content);
     let encoded = text.as_bytes();

@@ -602,7 +602,9 @@ pub fn tool_result_text(content: &Value) -> String {
 /// name, `Validation feedback:\n`-prefixed without one; error lists
 /// render as `{n} validation error(s):\n```json\n{errors}\n``` ` with
 /// the `input`/`ctx` exclusions, always suffixed with
-/// `\n\nFix the errors and try again.`
+/// `\n\nFix the errors and try again.` Floats render via serde/ryu,
+/// which diverges from CPython for large exponents (`1e30` vs
+/// `1e+30`).
 pub fn retry_message(content: &RetryContent, tool_name: Option<&str>) -> String {
     let description = match content {
         RetryContent::Text(text) => {

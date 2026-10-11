@@ -48,7 +48,10 @@
 //!   (`strip_markdown_fences`, `_utils.py:1091-1100`).
 //! * Output retries share one counter (`output_retries_used`, 3
 //!   attempts at `retries=2`), spent by text failures, output-tool
-//!   failures, and empty resubmits alike.
+//!   failures, and empty resubmits alike — but only the text/empty
+//!   paths enforce the max; the output-tool path only increments
+//!   (`_agent_graph.py:1624`) and exhausts via its consecutive
+//!   per-name count, relabeled to the global message.
 //! * Either exhaustion path first checks for a length-truncated
 //!   tool call and raises `IncompleteToolCall` instead
 //!   (`check_incomplete_tool_call`).
@@ -688,21 +691,42 @@ async fn process_tool_calls<E: ToolExecutor>(
     let mut final_result: Option<pidash_types::dispatch::CloudAgentOutput> = None;
     let mut function_calls: Vec<&ToolCall> = Vec::new();
     let mut unknown_calls: Vec<&ToolCall> = Vec::new();
+    // Failed names rebuild every step (`for_run_step` below), even
+    // with nothing to run — so the set lives above the output loop:
+    // output failures mark it too.
+    let mut failed: HashSet<String> = HashSet::new();
 
     for call in calls {
         match resolve_tool(config, &call.name) {
             ToolKind::Output => {
-                // Output calls validate in order; failures append a
-                // retry and consume output budget, the first success
-                // ends the turn.
+                // Output calls validate in order; the first success
+                // ends the turn. Failures check the consecutive
+                // per-name count first (`tool_manager.py:403-408`):
+                // at the max the output node relabels the exhaustion
+                // to the global message (`_agent_graph.py:1598-1603`)
+                // instead of the per-tool text. Otherwise the retry
+                // stands and the budget only increments, unchecked
+                // (`:1624`) — `consume_output_retry` never runs here.
                 match validate_output_call(&call.args) {
                     Err(details) => {
+                        if state.retries.get(OUTPUT_TOOL_NAME).copied().unwrap_or(0)
+                            == config.max_output_retries
+                        {
+                            if let Some(message) = state.check_incomplete_tool_call() {
+                                return Err(LoopError::failed(message));
+                            }
+                            return Err(LoopError::failed(format!(
+                                "Exceeded maximum output retries ({})",
+                                config.max_output_retries
+                            )));
+                        }
+                        failed.insert(OUTPUT_TOOL_NAME.to_owned());
                         output_parts.push(RequestPart::Retry {
                             tool_name: Some(call.name.clone()),
                             content: RetryContent::Errors(details),
                             call_id: call.call_id.clone(),
                         });
-                        state.consume_output_retry(config.max_output_retries)?;
+                        state.output_retries_used += 1;
                     }
                     Ok(output) => {
                         if final_result.is_some() {
@@ -749,8 +773,7 @@ async fn process_tool_calls<E: ToolExecutor>(
     calls_to_run.extend(unknown_calls);
 
     // The retry map rebuilds every step, even with nothing to run
-    // (an output-only turn resets every count).
-    let mut failed: HashSet<String> = HashSet::new();
+    // (an output-only turn resets every count but the marked one).
     if !calls_to_run.is_empty() {
         // The usage gate runs over the projected count (current +
         // pending, unknowns included).
@@ -1557,6 +1580,49 @@ mod tests {
     async fn output_exhaustion() {
         let board = harness(
             vec![text_reply(r#"{"nope": 1}"#)],
+            vec![output_wire_tool()],
+            vec![],
+            vec![],
+        )
+        .await;
+        let executor = FakeExecutor::named(vec![]);
+        let error = failed_message(run_loop(&board.config(), &executor).await.unwrap_err());
+        assert_eq!(error, "Exceeded maximum output retries (2)");
+        assert_eq!(board.state.requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn output_tool_failures_do_not_spend_checked_budget() {
+        // `[text-fail, F(out), F(out), valid]` succeeds in 4 turns:
+        // the output-tool path increments `output_retries_used`
+        // without enforcing it (`_agent_graph.py:1624`); only the
+        // consecutive per-name count can end the run there.
+        let valid = done_text("completed", "mixed");
+        let board = harness(
+            vec![
+                text_reply(r#"{"nope": 1}"#),
+                tool_reply(vec![("c2", OUTPUT_TOOL_NAME, r#"{"nope": 1}"#)]),
+                tool_reply(vec![("c3", OUTPUT_TOOL_NAME, r#"{"nope": 1}"#)]),
+                text_reply(&valid),
+            ],
+            vec![output_wire_tool()],
+            vec![],
+            vec![],
+        )
+        .await;
+        let executor = FakeExecutor::named(vec![]);
+        let output = run_loop(&board.config(), &executor).await.expect("runs");
+        assert_eq!(output.output.summary(), "mixed");
+        assert_eq!(board.state.requests.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn consecutive_output_tool_failures_raise_global() {
+        // `[F(out) x 3]` raises the relabeled global message: the
+        // consecutive per-name check trips and the output node
+        // relabels it (`_agent_graph.py:1586-1603`).
+        let board = harness(
+            vec![tool_reply(vec![("c1", OUTPUT_TOOL_NAME, r#"{"nope": 1}"#)])],
             vec![output_wire_tool()],
             vec![],
             vec![],
