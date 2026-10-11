@@ -8145,26 +8145,6 @@ export async function serverUploadDraftAsset(
   return serverFileAsset(workspaceId, assetKey, sessionCookie, apiBase);
 }
 
-/**
- * The estimate system a project points at (NEWFRONT-32, DRAFT-017). The
- * project LIST payload never carries this field; only the single-project
- * detail does — which is exactly why the drafts screen cannot offer the
- * estimate picker.
- */
-export async function serverProjectEstimate(
-  workspaceSlug: string,
-  projectId: string,
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<string | null> {
-  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
-    headers: { cookie: sessionCookie },
-  });
-  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
-  const row = (await res.json()) as Record<string, unknown>;
-  return typeof row["estimate"] === "string" ? row["estimate"] : null;
-}
-
 /** Read a file asset back by its storage key. */
 export async function serverFileAsset(
   workspaceId: string,
@@ -13841,7 +13821,6 @@ export async function serverProjectEstimate(
   if (typeof record.estimate !== "string") throw new Error("[parity] project estimate carried no string id.");
   return record.estimate;
 }
-
 
 // Modules cross-cutting parity helpers (NEWFRONT-311, rows MOD-036..043).
 //
