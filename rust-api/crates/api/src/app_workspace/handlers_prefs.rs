@@ -2405,8 +2405,11 @@ async fn quick_link_list(
 // Stickies (sticky.py:16-60)
 // ---------------------------------------------------------------------------
 
-/// Stock `get_object()` miss (`ModelViewSet`, DRF `NotFound`).
-pub const STICKY_NOT_FOUND_BODY: &str = r#"{"Detail":"Not found."}"#;
+/// DRF `get_object()` miss on the sticky detail routes (unknown pk,
+/// another owner's row, or the detail-after-delete probe): Django's
+/// `get_object_or_404` (`shortcuts.py`) raises `Http404` carrying the
+/// model's message, rendered by DRF under `detail` (PIDASHCONV-907).
+pub const STICKY_NOT_FOUND_BODY: &str = r#"{"detail":"No Sticky matches the given query."}"#;
 /// Django model name for the delete fan-out (`db/mixins.py:78`).
 const STICKY_MODEL: &str = "sticky";
 
@@ -5159,6 +5162,18 @@ mod tests {
             parse_uuid_or_invalid("xyz"),
             Err(Denial::BadError(_))
         ));
+    }
+
+    #[test]
+    fn sticky_lookup_miss_renders_the_model_message() {
+        // Unknown pk, another owner's row, or the detail-after-delete
+        // probe: Django's `get_object_or_404` raises `Http404` carrying
+        // the model's message, rendered under lowercase `detail`
+        // (PIDASHCONV-907).
+        assert_eq!(
+            STICKY_NOT_FOUND_BODY,
+            r#"{"detail":"No Sticky matches the given query."}"#
+        );
     }
 
     /// Non-dict write bodies on the override-less serializers (sticky,

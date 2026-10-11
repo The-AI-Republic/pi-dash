@@ -780,11 +780,23 @@ def test_sticky_crud(user_api, space, world):
     assert res.status_code == 200
     assert res.json()["name"] == "S2"
     assert user_api.delete(f"/api/workspaces/{space['slug']}/stickies/{sid}/").status_code == 204
+    res = user_api.get(f"/api/workspaces/{space['slug']}/stickies/{sid}/")
+    assert res.status_code == 404
+    assert res.json() == {"detail": "No Sticky matches the given query."}
 
 
 def test_stickies_owner_scoped(user_api, member_api, space):
     member_api.post(f"/api/workspaces/{space['slug']}/stickies/", json={"name": "Other"})
     assert user_api.get(f"/api/workspaces/{space['slug']}/stickies/").json()["results"] == []
+
+
+def test_sticky_retrieve_other_owner_404(user_api, member_api, space):
+    res = member_api.post(f"/api/workspaces/{space['slug']}/stickies/", json={"name": "Other"})
+    assert res.status_code == 201
+    sid = res.json()["id"]
+    res = user_api.get(f"/api/workspaces/{space['slug']}/stickies/{sid}/")
+    assert res.status_code == 404
+    assert res.json() == {"detail": "No Sticky matches the given query."}
 
 
 def test_stickies_non_member_denied(other_api, space):
