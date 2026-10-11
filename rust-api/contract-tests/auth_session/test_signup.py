@@ -64,6 +64,17 @@ def test_space_success_redirects_to_space_base(browser, space_base, db):
         c.startswith(SESSION_COOKIE_NAME + "=") for c in res.headers.get_list("set-cookie")
     )
     _assert_prefs_row(email)
+    # The credential adapter creates the profile for every new user
+    # (`adapter/base.py:342`); the space branch has no redirection
+    # fallback, so assert the row here (PIDASHCONV-879).
+    with psycopg.connect(database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT p.id FROM profiles p JOIN users u ON u.id = p.user_id"
+                " WHERE u.email = %s",
+                (email,),
+            )
+            assert cur.fetchone() is not None
 
 
 def test_space_existing_user_redirects_with_error_code(browser, space_base, user):
