@@ -14469,3 +14469,226 @@ export async function serverEstimateRaw(
   const json: unknown = await res.json().catch(() => null);
   return { status: res.status, json };
 }
+
+
+// --- Pages list discovery (NEWFRONT-312, PAGE-001-006).
+
+/** One project page as the list endpoint reports it. */
+export interface PagesListServerRow {
+  id: string;
+  name: string;
+  /** 0 public, 1 private. */
+  access: number;
+  ownedBy: string;
+  isFavorite: boolean;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** List a project's pages (live rows; archived excluded unless requested). */
+export async function serverListPages(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  includeArchived = false,
+  apiBase: string = apiBaseFromEnv()
+): Promise<PagesListServerRow[]> {
+  const params = includeArchived ? "?include_archived=true" : "";
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${params}`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) throw new Error(`[parity] page list failed with HTTP ${res.status}.`);
+  const rows: unknown[] = Array.isArray(res.payload)
+    ? res.payload
+    : ((res.payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    if (typeof rec["id"] !== "string") throw new Error("[parity] page list carried a row without a string id.");
+    return {
+      id: rec["id"] as string,
+      name: typeof rec["name"] === "string" ? (rec["name"] as string) : "",
+      access: typeof rec["access"] === "number" ? (rec["access"] as number) : 0,
+      ownedBy: typeof rec["owned_by"] === "string" ? (rec["owned_by"] as string) : "",
+      isFavorite: rec["is_favorite"] === true,
+      archivedAt: typeof rec["archived_at"] === "string" ? (rec["archived_at"] as string) : null,
+      createdAt: typeof rec["created_at"] === "string" ? (rec["created_at"] as string) : "",
+      updatedAt: typeof rec["updated_at"] === "string" ? (rec["updated_at"] as string) : "",
+    };
+  });
+}
+
+/** Set a page's access level (0 public, 1 private); owner-only on the server. */
+export async function serverSetPageAccess(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  access: number,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await apiJson(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/`,
+    sessionCookie,
+    { access },
+    apiBase
+  );
+  if (res.status !== 200) throw new Error(`[parity] page access patch failed with HTTP ${res.status}.`);
+}
+
+/** Rename one page (also bumps its modification date for sort fixtures). */
+export async function serverRenamePage(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  name: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await apiJson(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/`,
+    sessionCookie,
+    { name },
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(
+      `[parity] page rename failed with HTTP ${res.status}: ${JSON.stringify(res.payload).slice(0, 300)}.`
+    );
+  }
+}
+
+/** Read a project's pages feature switch (the PAGE-001 gate flag). */
+export async function serverProjectPageView(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  return (res.payload as { page_view?: unknown }).page_view === true;
+}
+
+/** Archive one page without deleting it (the shelved-tab fixture step). */
+export async function serverArchivePage(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await apiJson(
+    "POST",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/archive/`,
+    sessionCookie,
+    {},
+    apiBase
+  );
+  if (res.status !== 200 && res.status !== 201 && res.status !== 204) {
+    throw new Error(`[parity] page archive failed with HTTP ${res.status}.`);
+  }
+}
+
+/** Favorite one page (shared user-favorites surface; PAGE-009/PAGE-056 reuse it). */
+export async function serverFavoritePage(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  name: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await createFavorite(
+    workspaceSlug,
+    sessionCookie,
+    { entity_type: "page", entity_identifier: pageId, project_id: projectId, entity_data: { name } },
+    apiBase
+  );
+}
+
+/** Remove one page's favorite mark (no-op when it carries none). */
+export async function serverUnfavoritePage(
+  workspaceSlug: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const rows = await listFavorites(workspaceSlug, sessionCookie, apiBase);
+  const match = rows.find((row) => row.entity_type === "page" && row.entity_identifier === pageId);
+  if (match !== undefined) await deleteFavorite(workspaceSlug, sessionCookie, match.id, apiBase);
+}
+
+// --- Pages gating, list states, URLs, detail shell (NEWFRONT-314,
+// --- PAGE-018-025,079-080). Appended; existing helpers above are untouched
+// --- per the shared parity contract. Restore, unlock, and delete round out
+// --- the gating fixtures; the status probe pins server-vs-client divergence
+// --- for the PAGE-018 permission matrix without throwing on refusal.
+
+/** Restore one shelved page (DELETE on the archive endpoint). */
+export async function serverUnarchivePage(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await apiJson(
+    "DELETE",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/archive/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200 && res.status !== 204) {
+    throw new Error(`[parity] page unarchive failed with HTTP ${res.status}.`);
+  }
+}
+
+/** Unlock one page (DELETE on the lock endpoint). */
+export async function serverPageUnlock(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await apiJson(
+    "DELETE",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/lock/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200 && res.status !== 204) {
+    throw new Error(`[parity] page unlock failed with HTTP ${res.status}.`);
+  }
+}
+
+/**
+ * Non-throwing page-request probe for the permission matrix: answers the
+ * HTTP status so scenarios can pin where the server refuses what the UI
+ * hides (open confirmation #6). `body` stays undefined for bodyless verbs.
+ */
+export async function serverPageRequestStatus(
+  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
+  path: string,
+  sessionCookie: string,
+  body?: unknown,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await apiJson(method, path, sessionCookie, body, apiBase);
+  return res.status;
+}
