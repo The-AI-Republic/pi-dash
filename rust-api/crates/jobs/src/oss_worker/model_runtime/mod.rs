@@ -1,11 +1,12 @@
-//! Bin-local live model runtime for the cloud-agent execute plane
-//! (PIDASHCONV-866).
+//! Live model runtime for the cloud-agent execute plane
+//! (PIDASHCONV-866; moved from the binary to this library module in
+//! PIDASHCONV-918 so both binaries compose the same runtime).
 //!
 //! Ports pydantic-ai 1.107.0 `Agent.run` as constructed by
 //! `cloud_agent/runtime.py:18-76` (`execute`): the Anthropic +
 //! OpenAI-compatible provider lanes, the agent loop (retries, usage
 //! limits, output validation), and the 15 tool executors with the
-//! in-process GitHub leg. [`crate::execute_seams::LiveExecuteSeams`]
+//! in-process GitHub leg. [`crate::oss_worker::execute_seams::LiveExecuteSeams`]
 //! implements `ExecuteSeams::invoke_model` on top of this module.
 //!
 //! The behavioral contract is the `fx-disp-08-model-runtime` golden

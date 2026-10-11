@@ -17,11 +17,16 @@
 //! [`build_app`] is the application seam: tests and later issues wrap it
 //! with extra routes or layers without touching `main`.
 
+/// Re-export shims for the inventory mirror test (PIDASHCONV-918):
+/// the providers moved to `pidash_jobs::oss_worker`, and only the
+/// `#[cfg(test)]` mirror still addresses them through the binary.
+#[cfg(test)]
 mod execute_seams;
 mod inventory;
+#[cfg(test)]
 mod model_runtime;
 mod ops;
-mod redis_origin;
+#[cfg(test)]
 mod runner_seams;
 
 use clap::{Parser, Subcommand};
@@ -181,7 +186,6 @@ fn seed_data_dir() -> std::path::PathBuf {
 
 async fn worker(concurrency: u32) -> MainResult {
     let db = pidash_db::DbConfig::from_env()?;
-    let settings = Settings::from_env()?;
     let pools = pidash_db::Pools::connect(&db, None).await?;
     tracing::info!(target = %db.redacted_url(), "connected postgres");
     pidash_jobs::queue::ensure_schema(pools.primary()).await?;
@@ -201,247 +205,30 @@ async fn worker(concurrency: u32) -> MainResult {
             None
         }
     };
-    // Task handlers register here (the D-07…D-10 ports register theirs);
-    // any still-unregistered name forwards to Python.
+    // Task handlers register through the shared OSS composition
+    // (`pidash_jobs::register_oss_handlers`, PIDASHCONV-918); any
+    // still-unregistered name forwards to Python. The async inputs —
+    // the Mongo sink and the boot-loaded fire-tick states — load here,
+    // exactly as before; registration itself is a pure function of
+    // the context.
     let mut registry = pidash_jobs::Registry::new();
+    let settings = Settings::from_env()?;
     let mongo = pidash_db::tasks_cleanup::cleanup_queries::MongoSink::from_env().await;
     if mongo.is_none() {
         tracing::info!("MongoDB not configured; cleanup tasks will delete from Postgres only");
     }
-    pidash_jobs::tasks_cleanup::register_cleanup_handlers(
-        &mut registry,
-        pools.clone(),
-        mongo.clone(),
-    );
-    pidash_jobs::tasks_cleanup::register_versions(&mut registry, pools.primary().clone());
-    // D-09 remaining groups (PIDASHCONV-224; kept in sync with
-    // `tests::worker_registry_owns_all_d09_local_tasks`). The four export
-    // tasks stay Python-owned: never register them here.
-    pidash_jobs::tasks_cleanup::register_deletion_tasks(&mut registry, pools.clone());
-    // `register_assets` installs sweep + metadata + copy (assets.rs:692).
-    pidash_jobs::tasks_cleanup::assets::register_assets(
-        &mut registry,
-        pools.primary().clone(),
-        std::sync::Arc::new(pidash_jobs::tasks_cleanup::assets::UnavailableObjectStore),
-        std::sync::Arc::new(pidash_jobs::tasks_cleanup::assets::NoopLiveConvert),
-    );
-    pidash_jobs::tasks_cleanup::register_workspace_seed(
-        &mut registry,
-        pools.primary().clone(),
-        seed_data_dir(),
-    );
-    pidash_jobs::tasks_cleanup::dummy_data::register(&mut registry, pools.primary().clone());
-    // D-05 integrations groups (PIDASHCONV-238; kept in sync with
-    // `tests::worker_registry_owns_all_d05_local_tasks`). All six task
-    // names are worker-owned with live providers.
-    pidash_jobs::integrations::git_sync::register_git_sync_tasks(
-        &mut registry,
-        pools.primary().clone(),
-        pidash_jobs::integrations::git_sync::LiveProviders::from_env(),
-    );
-    pidash_jobs::integrations::github_sync::register_github_sync_tasks(
-        &mut registry,
-        pools.primary().clone(),
-        pidash_jobs::integrations::github_sync::LiveTransports::from_env(),
-    );
-    // D-08 process_logs (PIDASHCONV-260, FX-LOG-01; kept in sync with
-    // `tests::worker_registry_owns_process_logs_task`). EXECUTE parity
-    // per PIDASHCONV-242: canonical Django (settings.local, the CI
-    // worker-plane env) executes `process_logs` at worker boot, so the
-    // Rust worker owns it too — the existing `process_logs_handler`
-    // (mongo-configured → mongo sink, else the Postgres fallback row;
-    // `logger_task.py:97-100`). `track_event` stays Python-owned: with no
-    // PostHog configured it early-returns, so local registration would
-    // only swallow the forward — never register it here.
-    registry.register(
-        pidash_jobs::tasks_webhooks::PROCESS_LOGS_TASK,
-        pidash_jobs::tasks_webhooks::process_logs_handler(pools.clone(), mongo),
-    );
-    // License instance_traces (PIDASHCONV-839; kept in sync with
-    // `mirror_registry_matches_tasks_table` in inventory.rs). The
-    // beat entry fires it every 6 hours and the D-01 handler exists, so
-    // the Rust worker owns it — otherwise the task is lost at
-    // switchover (parity gap W-license).
-    pidash_jobs::license::tasks::register(&mut registry, pools.primary().clone());
-    // D-06 stale-turn sweep (PIDASHCONV-831; kept in sync with
-    // `inventory::tests::mirror_registry_matches_tasks_table`). The live
-    // store fails RUNNING turns older than 390s, like the beat in Django.
-    // `assistant.run_turn` stays Python-owned: `register_turn_handler`
-    // needs a live `TurnSeam` and none exists (only test fakes) — never
-    // register it here until the seam lands.
-    pidash_jobs::assistant::register_sweep_handler(&mut registry, pools.primary().clone());
-    // Loop scan + fire (PIDASHCONV-838; kept in sync with
-    // `inventory::tests::mirror_registry_matches_tasks_table`). The
-    // beat entry fires the scanner every minute and the scanner fans
-    // out one fire job per eligible due target, so the Rust worker
-    // owns both — otherwise the loop is lost at switchover (parity
-    // gap W-loop).
-    pidash_jobs::loop_scan::register_scanner(&mut registry, pools.primary().clone());
-    pidash_jobs::loop_fire::register_fire(&mut registry, pools.primary().clone());
-    // D-08 archive-and-close (PIDASHCONV-837; kept in sync with
-    // `mirror_registry_matches_tasks_table` in inventory.rs). The
-    // daily beat entry fires it and the D-08 handler exists, so the
-    // Rust worker owns it — otherwise the task is lost at switchover
-    // (parity gap W-automation).
-    pidash_jobs::tasks_webhooks::register_automation_handlers(&mut registry, pools.clone());
-    // D-10 ticker + scheduler scans (PIDASHCONV-833; kept in sync with
-    // `inventory::tests::mirror_registry_matches_tasks_table`). One
-    // shared call wires both beat scans; each fan-out enqueues into
-    // the Rust queue.
-    pidash_jobs::tasks_ticker::scan::register_scanners(&mut registry, pools.primary().clone());
-    // D-10 ticker + scheduler fires (PIDASHCONV-861; kept in sync with
-    // `inventory::tests::mirror_registry_matches_tasks_table`). Live
-    // seams: the tick seam prefetches creator presence per fire and
-    // runs the jobs continuation driver; the scheduler dispatch runs
-    // the jobs scheduler driver over a live EntriesSeam. Both need
-    // dispatch settings + the boot-loaded state map.
-    let dispatch_settings = Settings::from_env()?;
     let fire_tick_states =
         pidash_jobs::orchestration::LiveFireTickSeam::load_states(pools.primary()).await?;
-    pidash_jobs::tasks_ticker::fire_tick::register_fire_tick(
+    pidash_jobs::register_oss_handlers(
         &mut registry,
-        pools.primary().clone(),
-        std::sync::Arc::new(pidash_jobs::orchestration::LiveFireTickSeam::new(
-            pools.primary().clone(),
-            dispatch_settings.cloud_agent.clone(),
-            dispatch_settings.managed_runner.clone(),
+        &pidash_jobs::OssWorkerCtx {
+            pools: pools.clone(),
+            settings,
+            mongo,
             fire_tick_states,
-        )),
-    );
-    pidash_jobs::tasks_ticker::fire_binding::register_fire_binding(
-        &mut registry,
-        pools.primary().clone(),
-        pidash_jobs::orchestration::live_scheduler_dispatch(
-            pools.primary().clone(),
-            dispatch_settings.cloud_agent,
-            dispatch_settings.managed_runner,
-        ),
-    );
-    // D-07 send/stack (PIDASHCONV-865; kept in sync with
-    // `inventory::tests::mirror_registry_matches_tasks_table`). The live
-    // mail seams exist (`tasks_mail::live`), so the Rust worker owns both
-    // names — otherwise the tasks are lost at switchover (parity gap
-    // W-mail). A missing/unparsable `REDIS_URL` or a drifted template
-    // fails boot (fail-fast, like the missing database above):
-    // registering without the seams would ACK-and-drop mail.
-    let mail_redis = pidash_jobs::tasks_mail::live::LiveRedisMail::from_settings(&settings)
-        .map_err(|detail| format!("worker mail redis unavailable: {detail}"))?;
-    let mail_renderer = pidash_jobs::tasks_mail::live::IssueUpdatesRenderer::new()
-        .map_err(|error| format!("worker mail renderer unavailable: {error}"))?;
-    pidash_jobs::tasks_mail::register_email_notification_tasks(
-        &mut registry,
-        pidash_jobs::tasks_mail::email_notification::stack_handler(
-            std::sync::Arc::new(
-                pidash_jobs::tasks_mail::email_notification::SqlStackStore::new(
-                    pools.primary().clone(),
-                ),
-            ),
-            std::sync::Arc::new(pidash_jobs::tasks_mail::live::QueueStackOutbox::new(
-                pools.primary().clone(),
-            )),
-        ),
-        pidash_jobs::tasks_mail::email_notification::send_handler(
-            std::sync::Arc::new(mail_redis),
-            std::sync::Arc::new(pidash_jobs::tasks_mail::live::SqlMailDb::new(
-                pools.primary().clone(),
-            )),
-            std::sync::Arc::new(mail_renderer),
-            std::sync::Arc::new(pidash_jobs::tasks_mail::live::SmtpMailer::new()),
-        ),
-    );
-    // D-07 notifications (PIDASHCONV-834; kept in sync with
-    // `inventory::tests::mirror_registry_matches_tasks_table`). The
-    // pool-only handler exists, so the Rust worker owns it —
-    // otherwise the task is lost at switchover (parity gap W-mail).
-    pidash_jobs::tasks_mail::register_notifications_task(&mut registry, pools.primary().clone());
-    // Runner tasks (PIDASHCONV-859; kept in sync with
-    // `inventory::tests::mirror_registry_matches_tasks_table`). The
-    // beat entries fire the sweeps and the L6 handlers exist with
-    // live bin-local seam providers (`runner_seams::RunnerSeams`
-    // over the PIDASHCONV-862 executors), so the Rust worker owns
-    // all eleven — otherwise the runs are lost at switchover
-    // (parity gap W-runner, plus the four dormant names the
-    // registers also own).
-    let settings = Settings::from_env()?;
-    let redis = match settings
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .map(redis::Client::open)
-    {
-        None => None,
-        Some(Ok(client)) => Some(client),
-        Some(Err(error)) => {
-            tracing::warn!(%error, "redis: REDIS_URL unparsable; continuing without cache");
-            None
-        }
-    };
-    let runner_seams = std::sync::Arc::new(runner_seams::RunnerSeams::new(
-        pools.primary().clone(),
-        redis,
-        &settings,
-    ));
-    pidash_jobs::runner_runs::register_runner_runs_tasks(
-        &mut registry,
-        pools.primary().clone(),
-        runner_seams.clone(),
-    );
-    pidash_jobs::runner_runs::register_sweeps_runs_tasks(
-        &mut registry,
-        pools.primary().clone(),
-        runner_seams.clone(),
-        runner_seams,
-    );
-    // D-11 execution tasks (PIDASHCONV-832; kept in sync with
-    // `inventory::tests::mirror_registry_matches_tasks_table`). All
-    // four handlers execute here on bin-local live seams
-    // (`execute_seams::LiveExecuteSeams`), including the run task's
-    // model runtime (PIDASHCONV-866 — no forward override). The
-    // register call also owns `managed_runner.expire_waiting_runs`
-    // (never published in OSS; the table follows the registry).
-    let execute_settings = pidash_db::config::Settings::from_env()?;
-    let invoke = model_runtime::invoke::InvokeCtx {
-        tools: model_runtime::tools_exec::ToolCtx {
-            pool: pools.primary().clone(),
-            cloud: execute_settings.cloud_agent.clone(),
-            managed: execute_settings.managed_runner.clone(),
-            http: reqwest::Client::new(),
-            github: model_runtime::github::GithubAppContext::new(
-                pools.primary().clone(),
-                pidash_db::redis::RedisHandle::from_settings(&execute_settings),
-                execute_settings.secret_key.clone(),
-            ),
+            seed_dir: seed_data_dir(),
         },
-        keys: model_runtime::keys::KeyResolver::from_env(
-            execute_settings.assistant.key_cache_ttl_secs,
-            execute_settings.assistant.key_cache_maxsize,
-        ),
-    };
-    pidash_jobs::dispatch_execute::register_execute_tasks(
-        &mut registry,
-        pools.primary().clone(),
-        execute_settings.cloud_agent.clone(),
-        execute_settings.managed_runner.clone(),
-        std::sync::Arc::new(execute_seams::LiveExecuteSeams::new(
-            pools.primary().clone(),
-            execute_settings.cloud_agent.block_private_urls,
-            invoke,
-        )),
-    );
-    // D-08 issue_activity (PIDASHCONV-836; kept in sync with
-    // `inventory::tests::mirror_registry_matches_tasks_table`, where the
-    // `Pools`-taking register is a stub over the same name const).
-    // Ownership flips to Rust the moment this registers; the live
-    // `OriginRedis` (REDIS_URL, sync SETEX) preserves the still-Python
-    // mail task's `ri.get(issue_id)` read. Without a REDIS_URL the
-    // origin write errors per call and the task aborts, exactly like
-    // Django's `redis_instance()` RuntimeError under the broad-except.
-    pidash_jobs::tasks_webhooks::register_activity_task(
-        &mut registry,
-        pools.clone(),
-        redis_origin::OriginRedis::from_env(),
-    );
+    )?;
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()

@@ -10,7 +10,7 @@ pidash-db = { path = "../db" }
 pidash-services = { path = "../services" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 rrule = { version = "0.14", features = ["exrule", "by-easter"] }
 thiserror = "2"
@@ -58,6 +58,17 @@ sha2 = "0.10"
 # (PIDASHCONV-191) needs rand 0.9 APIs (`random_range`, `from_os_rng`):
 # keep both via an alias rather than dropping either side.
 rand08 = { package = "rand", version = "0.8" }
+# OSS worker composition (PIDASHCONV-918, moved from pidash-api-bin):
+# the agent loop's concurrent tool-call polling (`FuturesUnordered`).
+# The moved runner seams and `OriginRedis` share the `redis` pin above
+# (PIDASHCONV-865: same version + TLS features, no second entry).
+# Same locked futures-util 0.3.x the binary builds on (no new
+# downloads). uuid gains v7 above for the agent loop's `uuid7()`
+# run/conversation ids.
+futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 sqlparser = "0.63.0"
+# The moved model-runtime tests assert HTTP types via axum's re-export
+# (same locked axum 0.8.x as the workspace, no new downloads).
+axum = "0.8"

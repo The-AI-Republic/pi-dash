@@ -686,8 +686,8 @@ fn validate_output_items(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_runtime::provider::{retry_message, RetryContent};
-    use crate::model_runtime::schemas::Golden;
+    use crate::oss_worker::model_runtime::provider::{retry_message, RetryContent};
+    use crate::oss_worker::model_runtime::schemas::Golden;
 
     /// Render through the production retry path
     /// (`provider::retry_message`), the way the loop renders tool and

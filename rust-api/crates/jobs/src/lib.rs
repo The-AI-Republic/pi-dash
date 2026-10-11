@@ -62,6 +62,10 @@ pub mod loop_fire;
 #[path = "loop/scan.rs"]
 pub mod loop_scan;
 pub mod orchestration;
+/// OSS worker composition entry points (PIDASHCONV-918): the
+/// [`register_oss_handlers`][oss_worker::register_oss_handlers] helper
+/// plus the live seam providers both binaries share.
+pub mod oss_worker;
 pub mod queue;
 /// Runner task executors (D-15 L6, PIDASHCONV-539/540): the executing
 /// half of `runner/tasks.py` over the L4/L5 planners — approval expiry
@@ -88,6 +92,7 @@ pub mod worker;
 
 pub use amqp::{AmqpConfig, AmqpError, Publisher, CELERY_EXCHANGE, CELERY_ROUTING_KEY};
 pub use celery::{format_eta, py_repr, AmqpProperties, CeleryTaskMessage};
+pub use oss_worker::{register_oss_handlers, OssWorkerCtx};
 pub use queue::{
     JobRow, JobStatus, NewJob, DEFAULT_MAX_RETRIES, DEFAULT_QUEUE, DEFAULT_RETRY_DELAY_SECS,
     QUEUE_TABLE,

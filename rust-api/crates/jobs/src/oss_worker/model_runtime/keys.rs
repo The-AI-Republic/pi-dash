@@ -167,11 +167,11 @@ pub struct KeyResolver {
 
 impl KeyResolver {
     /// Build from the environment: [`CryptoConfig::from_env`], the
-    /// production [`HttpKmsTransport`][pidash_api::assistant::kms::HttpKmsTransport],
+    /// production [`HttpKmsTransport`][crate::oss_worker::kms_transport::HttpKmsTransport],
     /// and the registry TTL/maxsize.
     pub fn from_env(ttl_secs: i64, maxsize: i64) -> Self {
         let config = CryptoConfig::from_env();
-        let kms = pidash_api::assistant::kms::HttpKmsTransport::from_env(&config);
+        let kms = crate::oss_worker::kms_transport::HttpKmsTransport::from_env(&config);
         Self::with_transport(config, Arc::new(kms), ttl_secs, maxsize)
     }
 

@@ -54,14 +54,14 @@ use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::dispatch::{append_event, dispatch_agent_run};
+use crate::orchestration::{LiveCreationStore, RunnerSeamCache, StoreDeps};
+use crate::queue::{enqueue_in, NewJob};
+use crate::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
 use pidash_db::orchestration::querysets::MEMBER_PROJECT_ISSUES_SQL;
 use pidash_db::tx::Transaction;
-use pidash_jobs::dispatch::{append_event, dispatch_agent_run};
-use pidash_jobs::orchestration::{LiveCreationStore, RunnerSeamCache, StoreDeps};
-use pidash_jobs::queue::{enqueue_in, NewJob};
-use pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_services::assistant::markdown::to_safe_html;
 use pidash_services::assistant::seams::agent_model_profile_for_user;
 use pidash_services::assistant::tools_issues::{escape_icontains, PROJECT_WRITE_GATE_SQL};
@@ -1440,10 +1440,12 @@ async fn drive_transition<'a>(
     now: DateTime<Utc>,
 ) -> (Transaction<'a>, Result<(), ToolExecError>) {
     let creator = scope.creator_id;
-    let has_key = match crate::execute_seams::LiveExecuteSeams::llm_row(&ctx.pool, creator).await {
-        Ok(row) => row.as_ref().is_some_and(|row| row.has_api_key()),
-        Err(error) => return (tx, Err(ToolExecError::Db(error))),
-    };
+    let has_key =
+        match crate::oss_worker::execute_seams::LiveExecuteSeams::llm_row(&ctx.pool, creator).await
+        {
+            Ok(row) => row.as_ref().is_some_and(|row| row.has_api_key()),
+            Err(error) => return (tx, Err(ToolExecError::Db(error))),
+        };
     let deps = StoreDeps {
         cloud: ctx.cloud.clone(),
         managed: ctx.managed.clone(),

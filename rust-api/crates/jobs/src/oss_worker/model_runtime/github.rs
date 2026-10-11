@@ -1,5 +1,5 @@
 //! The GitHub leg of the cloud-agent tools (`utils/github_client.py:38-220`
-//! + `utils/github_app_auth.py:63-193`), bin-local.
+//! + `utils/github_app_auth.py:63-193`), shared by both binaries.
 //!
 //! The ported [`GithubClient`][pidash_services::integrations::adapters_github::GithubClient]
 //! trait covers only the endpoints the sync adapter touches; the twin tools

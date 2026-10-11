@@ -1407,27 +1407,14 @@ async fn xadd_offline(
 
 // ---------------------------------------------------------------------------
 // Chat event publish (`services/chat.py:140-147`)
+//
+// Re-export: the body moved to `pidash_jobs::oss_worker::runner_seams`
+// in PIDASHCONV-918 (the worker seam is its second caller, and
+// `pidash-jobs` cannot depend on `pidash-api`). This path stays so the
+// chat handler is untouched.
 // ---------------------------------------------------------------------------
 
-/// `publish_event`: PUBLISH the serialized event on the session channel.
-/// A missing client is a no-op (`redis_instance()` returning `None`).
-/// The caller swallows every publish failure with a log line — the
-/// source's `except Exception: logger.exception(...)`
-/// (`services/chat.py:140-147`) never 500s. The caller passes
-/// [`RunnerPorts::redis_client`].
-pub async fn publish_chat_event(
-    client: Option<&redis::Client>,
-    channel: &str,
-    payload: &str,
-) -> Result<(), redis::RedisError> {
-    let Some(client) = client else {
-        return Ok(());
-    };
-    use redis::AsyncCommands;
-    let mut connection = client.get_multiplexed_async_connection().await?;
-    let _: () = connection.publish(channel, payload).await?;
-    Ok(())
-}
+pub use pidash_jobs::oss_worker::runner_seams::publish_chat_event;
 
 #[cfg(test)]
 mod ports_tests {

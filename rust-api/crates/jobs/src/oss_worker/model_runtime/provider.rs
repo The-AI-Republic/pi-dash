@@ -35,7 +35,7 @@
 //!   `min(0.5 * 2^n, 8) * (1 - 0.25 * rand)`; `retry-after-ms` or
 //!   `retry-after` (seconds, float, or HTTP-date) honoured when within
 //!   `(0, 60]`.
-//! * Usage extraction delegates to [`crate::model_runtime::usage`]; the
+//! * Usage extraction delegates to [`crate::oss_worker::model_runtime::usage`]; the
 //!   per-lane `details` shapes are read from each model's `_map_usage`.
 
 use serde_json::{Map, Value};
@@ -549,7 +549,7 @@ pub enum RetryContent {
     /// request).
     Text(String),
     /// Pydantic error details (tool-arg or output validation).
-    Errors(Vec<crate::model_runtime::validation::ValidationDetail>),
+    Errors(Vec<crate::oss_worker::model_runtime::validation::ValidationDetail>),
 }
 
 /// A response-side part (`ModelResponsePart` subset: no thinking,
@@ -574,7 +574,7 @@ pub enum HistoryMessage {
     #[allow(dead_code)]
     Response {
         parts: Vec<ResponsePart>,
-        usage: crate::model_runtime::usage::RequestUsage,
+        usage: crate::oss_worker::model_runtime::usage::RequestUsage,
         model_name: String,
         finish: Option<Finish>,
         provider_details: Option<Map<String, Value>>,
@@ -622,7 +622,7 @@ pub fn retry_message(content: &RetryContent, tool_name: Option<&str>) -> String 
             let pretty =
                 serde_json::to_string_pretty(&Value::Array(errors)).unwrap_or("[]".to_owned());
             // `json.dumps(..., ensure_ascii=True)`.
-            let body = crate::model_runtime::validation::ensure_ascii(&pretty);
+            let body = crate::oss_worker::model_runtime::validation::ensure_ascii(&pretty);
             let plural = details.len() != 1;
             format!(
                 "{} validation error{}:\n```json\n{body}\n```",
@@ -640,10 +640,10 @@ pub fn retry_message(content: &RetryContent, tool_name: Option<&str>) -> String 
 /// drops `ctx` only. `url` is already excluded at collection
 /// (`error.errors(include_url=False, include_context=False)`).
 fn render_retry_error(
-    detail: &crate::model_runtime::validation::ValidationDetail,
+    detail: &crate::oss_worker::model_runtime::validation::ValidationDetail,
     no_tool: bool,
 ) -> Value {
-    use crate::model_runtime::validation::LocSeg;
+    use crate::oss_worker::model_runtime::validation::LocSeg;
     let mut error = Map::new();
     error.insert(
         "type".to_owned(),
@@ -1157,7 +1157,7 @@ fn py_printable(candidate: char) -> bool {
 #[derive(Debug)]
 pub struct ParsedResponse {
     pub parts: Vec<ResponsePart>,
-    pub usage: crate::model_runtime::usage::RequestUsage,
+    pub usage: crate::oss_worker::model_runtime::usage::RequestUsage,
     pub model_name: String,
     pub finish: Option<Finish>,
     pub provider_details: Option<Map<String, Value>>,
@@ -1169,7 +1169,7 @@ pub struct ParsedResponse {
 pub fn parse_openai_response(
     lane: &Lane,
     payload: &Value,
-    extract: &crate::model_runtime::usage::ProviderTable,
+    extract: &crate::oss_worker::model_runtime::usage::ProviderTable,
 ) -> Result<ParsedResponse, ProviderError> {
     let invalid = |detail: &str| {
         ProviderError::InvalidResponse(format!(
@@ -1324,8 +1324,8 @@ fn number_to_datetime(epoch: i64) -> String {
 fn openai_request_usage(
     lane: &Lane,
     body: &Map<String, Value>,
-    extract: &crate::model_runtime::usage::ProviderTable,
-) -> crate::model_runtime::usage::RequestUsage {
+    extract: &crate::oss_worker::model_runtime::usage::ProviderTable,
+) -> crate::oss_worker::model_runtime::usage::RequestUsage {
     let usage = body.get("usage").and_then(Value::as_object);
     extract.extract_openai(&lane.provider_url(), lane.model_name(), usage)
 }
@@ -1335,7 +1335,7 @@ fn openai_request_usage(
 pub fn parse_anthropic_response(
     lane: &Lane,
     payload: &Value,
-    extract: &crate::model_runtime::usage::ProviderTable,
+    extract: &crate::oss_worker::model_runtime::usage::ProviderTable,
 ) -> Result<ParsedResponse, ProviderError> {
     let invalid = || {
         ProviderError::InvalidResponse(format!(
@@ -1444,10 +1444,10 @@ pub fn parse_anthropic_response(
 fn anthropic_request_usage(
     lane: &Lane,
     body: &Map<String, Value>,
-    extract: &crate::model_runtime::usage::ProviderTable,
-) -> crate::model_runtime::usage::RequestUsage {
+    extract: &crate::oss_worker::model_runtime::usage::ProviderTable,
+) -> crate::oss_worker::model_runtime::usage::RequestUsage {
     let Value::Object(usage) = body.get("usage").unwrap_or(&Value::Null) else {
-        return crate::model_runtime::usage::RequestUsage::zeros();
+        return crate::oss_worker::model_runtime::usage::RequestUsage::zeros();
     };
     extract.extract_anthropic(&lane.provider_url(), usage)
 }
@@ -1465,7 +1465,7 @@ pub struct Turn<'a> {
     pub max_tokens: i64,
     /// Per-request timeout, seconds (`model_settings["timeout"]`).
     pub timeout_secs: u64,
-    pub extract: &'a crate::model_runtime::usage::ProviderTable,
+    pub extract: &'a crate::oss_worker::model_runtime::usage::ProviderTable,
 }
 
 /// POST one turn and parse the response (`request`,
@@ -1652,8 +1652,8 @@ fn unit_random() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_runtime::schemas::Golden;
-    use crate::model_runtime::usage::ProviderTable;
+    use crate::oss_worker::model_runtime::schemas::Golden;
+    use crate::oss_worker::model_runtime::usage::ProviderTable;
 
     /// The captured turn-1 OpenAI request (`wirecap.json`,
     /// `Agent(OpenAIModel, output_type=Sum)` + `add` tool, no
@@ -1722,7 +1722,7 @@ mod tests {
                     args: ToolArgs::Raw("{\"a\": 2, \"b\": \"3\"}".to_owned()),
                     call_id: "call_1".to_owned(),
                 })],
-                usage: crate::model_runtime::usage::RequestUsage::zeros(),
+                usage: crate::oss_worker::model_runtime::usage::RequestUsage::zeros(),
                 model_name: String::new(),
                 finish: Some(Finish::ToolCall),
                 provider_details: None,
@@ -1844,7 +1844,7 @@ mod tests {
                         call_id: "toolu_1".to_owned(),
                     }),
                 ],
-                usage: crate::model_runtime::usage::RequestUsage::zeros(),
+                usage: crate::oss_worker::model_runtime::usage::RequestUsage::zeros(),
                 model_name: String::new(),
                 finish: Some(Finish::ToolCall),
                 provider_details: None,
@@ -1907,14 +1907,16 @@ mod tests {
         // Output-validation retry drops top-level `input`
         // (`loopprobe.json` `output_retry_then_ok`).
         let text = retry_message(
-            &RetryContent::Errors(vec![crate::model_runtime::validation::ValidationDetail {
-                error_type: "missing",
-                loc: vec![crate::model_runtime::validation::LocSeg::Field(
-                    "sum".to_owned(),
-                )],
-                msg: "Field required".to_owned(),
-                input: serde_json::from_str::<Value>(r#"{"nope":1}"#).unwrap(),
-            }]),
+            &RetryContent::Errors(vec![
+                crate::oss_worker::model_runtime::validation::ValidationDetail {
+                    error_type: "missing",
+                    loc: vec![crate::oss_worker::model_runtime::validation::LocSeg::Field(
+                        "sum".to_owned(),
+                    )],
+                    msg: "Field required".to_owned(),
+                    input: serde_json::from_str::<Value>(r#"{"nope":1}"#).unwrap(),
+                },
+            ]),
             None,
         );
         assert_eq!(
