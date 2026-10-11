@@ -6850,10 +6850,150 @@ export interface ParityDriver {
   pagesHeaderExportConfirm(): Promise<PagesHeaderDownload>;
   /** Cancel the export dialog. */
   pagesHeaderExportCancel(): Promise<void>;
+
+  // -------------------------------------------------------------------------
+  // Pages title, mark + formatting toolbar (NEWFRONT-315, PAGE-026-036).
+  // Icon buttons are positional (0-13: four text marks, three alignments,
+  // three list kinds, quote, code, table, image); tooltips name each action.
+  // Title/mark reads go through the detail header; body reads through the
+  // live editor. Scenarios reuse the 319 open/sync/title/body basics.
+  // -------------------------------------------------------------------------
+
+  /** Focus the title editor and press Enter. */
+  pagesTitlePressEnter(): Promise<void>;
+  /** Whether keyboard focus currently sits inside the body editor. */
+  pagesTitleFocusInBody(): Promise<boolean>;
+  /** Whether the body caret sits at the very top (start of the first block). */
+  pagesTitleBodyCaretAtTop(): Promise<boolean>;
+  /** Whether the title editor is editable (contenteditable true). */
+  pagesTitleEditable(): Promise<boolean>;
+  /** Placeholder text the empty title shows, or null when it shows none. */
+  pagesTitleEmptyFallback(): Promise<string | null>;
+  /** "N/255"-style count badge near the title, or null when absent. */
+  pagesTitleCountBadge(): Promise<string | null>;
+  /** Click into the title editor (focus without changing text). */
+  pagesTitleFocus(): Promise<void>;
+  /**
+   * Replace the title editor contents, typing one char per `delayMs`.
+   * Slow typing keeps per-keystroke title PATCHes from racing (see
+   * NEWFRONT-358): the delay should exceed a PATCH round-trip.
+   */
+  pagesTitleSetTitle(text: string, delayMs: number): Promise<void>;
+  /** Whether the title editor currently holds keyboard focus. */
+  pagesTitleIsFocused(): Promise<boolean>;
+  /** Open the mark picker (hover-revealed affordance or current mark). */
+  pagesMarkOpenPicker(): Promise<void>;
+  /** Picker tab labels in order. */
+  pagesMarkTabs(): Promise<string[]>;
+  /** Select a picker tab by label. */
+  pagesMarkSelectTab(name: string): Promise<void>;
+  /** Search the emoji tab for `query` and pick the `emoji` result. */
+  pagesMarkSearchPick(emoji: string, query: string): Promise<void>;
+  /** Pick the `index`-th vector icon on the icon tab. */
+  pagesMarkPickIcon(index: number): Promise<void>;
+  /** Currently selected mark as the header renders it, or null when markless. */
+  pagesMarkCurrent(): Promise<PagesMarkCurrent | null>;
+  /** Whether the picker trigger is disabled (read-only). */
+  pagesMarkPickerDisabled(): Promise<boolean>;
+  /** Computed opacity of the unhovered mark affordance ("0", "1", "selected"). */
+  pagesMarkAffordanceOpacity(): Promise<string>;
+  /** Whether the open picker offers any remove/clear control. */
+  pagesMarkClearControl(): Promise<boolean>;
+  /** Hover the detail header (reveals the mark affordance without opening it). */
+  pagesMarkHoverHeader(): Promise<void>;
+  /** Mark glyph the list row for `pageName` shows (emoji text or null). */
+  pagesMarkListGlyph(workspaceSlug: string, projectId: string, pageName: string): Promise<string | null>;
+  /** Breadcrumb page-switcher trigger text (mark glyph plus page name). */
+  pagesMarkBreadcrumbGlyph(pageName: string): Promise<string | null>;
+  /** Switcher dropdown entry text for `pageName` (mark glyph plus name). */
+  pagesMarkSwitcherGlyph(pageName: string): Promise<string | null>;
+  /**
+   * Settle the detail view for toolbar driving: wait for socket steady
+   * state, then verify a command round-trips (bold on/off), reloading up
+   * to three times when the load bound the toolbar to a dead editor.
+   */
+  pagesToolbarSettle(workspaceSlug: string, projectId: string, pageId: string): Promise<void>;
+  /** Count of icon buttons on the formatting bar (typography/color excluded). */
+  pagesToolbarIconCount(): Promise<number>;
+  /** Click the `index`-th formatting icon button. */
+  pagesToolbarClick(index: number): Promise<void>;
+  /** Whether the `index`-th icon button shows its active highlight. */
+  pagesToolbarActive(index: number): Promise<boolean>;
+  /** Tooltip (action name plus key hint) of the `index`-th icon button. */
+  pagesToolbarTooltip(index: number): Promise<PagesToolbarTooltip>;
+  /** Current typography selector label. */
+  pagesToolbarTypography(): Promise<string>;
+  /** Typography menu entries in order. */
+  pagesToolbarTypographyItems(): Promise<string[]>;
+  /** Apply the typography style named `name`. */
+  pagesToolbarTypographyPick(name: string): Promise<void>;
+  /** Open the color popover. */
+  pagesToolbarColorOpen(): Promise<void>;
+  /** Swatch counts per color row plus clear-control presence. */
+  pagesToolbarColorCounts(): Promise<PagesToolbarColorCounts>;
+  /** Pick the `index`-th swatch of the `kind` color row. */
+  pagesToolbarColorPick(kind: "text" | "background", index: number): Promise<void>;
+  /** Click the clear control of the `kind` color row. */
+  pagesToolbarColorClear(kind: "text" | "background"): Promise<void>;
+  /** Color preview state on the toolbar button (style strings or null). */
+  pagesToolbarColorPreview(): Promise<PagesToolbarColorPreview>;
+  /** Body editor inner HTML. */
+  pagesToolbarBodyHtml(): Promise<string>;
+  /** Focus the body editor and select all its content. */
+  pagesToolbarSelectAll(): Promise<void>;
+  /** Type `text` at the current body caret (no click first). */
+  pagesToolbarTypeText(text: string): Promise<void>;
+  /** Fire the manual save gesture (Control/Command+S). */
+  pagesToolbarSave(): Promise<void>;
+  /** Press one key into the focused editor (Tab, arrows, Enter). */
+  pagesToolbarPressKey(key: string): Promise<void>;
+  /** First table dimensions as "RxC", or null when the body has no table. */
+  pagesToolbarTableDims(): Promise<string | null>;
+  /** Caret cell as "rXcY", or "outside" when the caret is not in a table. */
+  pagesToolbarCaretCell(): Promise<string>;
+  /** Insert an image through the toolbar entry and upload `filePath`. */
+  pagesToolbarImageUpload(filePath: string): Promise<void>;
+  /** Whether the body holds an uploaded (asset-URL) image. */
+  pagesToolbarEditorHasImage(): Promise<boolean>;
+  /** Src of the first uploaded body image, or null when there is none. */
+  pagesToolbarImageSrc(): Promise<string | null>;
+  /** Whether the formatting bar renders with a non-zero height. */
+  pagesToolbarVisible(): Promise<boolean>;
+  /** Whether the floating pane toggle shows (bar-hidden state). */
+  pagesToolbarFloatingToggle(): Promise<boolean>;
+  /** Seed the sticky-toolbar preference before the next navigation. */
+  pagesToolbarSeedStickyPref(value: boolean): Promise<void>;
 }
 
 /** Pages list tabs as the row-actions scenarios address them (NEWFRONT-313). */
 export type PagesRowTab = "open" | "restricted" | "shelved";
+
+/** Current page mark as the detail header renders it (NEWFRONT-315, PAGE-027). */
+export interface PagesMarkCurrent {
+  kind: "emoji" | "icon";
+  /** Emoji glyph, or the vector-icon name. */
+  label: string;
+}
+
+/** One toolbar tooltip: action name plus optional key hint (NEWFRONT-315, PAGE-029-031). */
+export interface PagesToolbarTooltip {
+  name: string;
+  hint: string | null;
+}
+
+/** Color popover swatch counts per row (NEWFRONT-315, PAGE-036). */
+export interface PagesToolbarColorCounts {
+  text: number;
+  textClear: boolean;
+  background: number;
+  backgroundClear: boolean;
+}
+
+/** Color preview state on the toolbar button (NEWFRONT-315, PAGE-036). */
+export interface PagesToolbarColorPreview {
+  text: string | null;
+  background: string | null;
+}
 
 /** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */
 export interface ModulesToast {
