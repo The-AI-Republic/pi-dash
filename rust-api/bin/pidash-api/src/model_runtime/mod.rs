@@ -22,6 +22,7 @@
 
 pub mod agent;
 pub mod github;
+pub mod invoke;
 pub mod keys;
 pub mod provider;
 pub mod schemas;

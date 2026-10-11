@@ -44,7 +44,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 # Model runtime (PIDASHCONV-866): JWT claims struct.
 # Same locked serde 1.x as the workspace (no lock churn).
 serde = "1"
->>>>>>> e055ba0d (PIDASHCONV-866: github leg + key resolver with mock-server tests)
 serde_json = { version = "1", features = ["preserve_order"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
 tokio = { version = "1", features = ["full"] }

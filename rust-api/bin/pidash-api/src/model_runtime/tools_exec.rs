@@ -664,9 +664,10 @@ async fn emit_completed(
 /// manager's filter, so a soft-deleted bound issue still reads (unlike
 /// [`plan::GET_PROJECT_ISSUE_SQL`], which serves the by-id tool's
 /// manager-filtered `.get()`). `$1` is the bound issue id.
-pub const BOUND_ISSUE_SQL: &str = "SELECT issues.id, issues.project_id, issues.state_id, \
-     issues.sequence_id, issues.name, issues.priority, issues.description_stripped, \
-     issues.workpad, states.name, states.group, projects.identifier FROM issues \
+pub const BOUND_ISSUE_SQL: &str = "SELECT issues.id, issues.workspace_id, issues.project_id, \
+     issues.state_id, issues.sequence_id, issues.name, issues.priority, \
+     issues.description_stripped, issues.workpad, states.name, states.group, \
+     projects.identifier FROM issues \
      INNER JOIN projects ON projects.id = issues.project_id \
      LEFT OUTER JOIN states ON states.id = issues.state_id \
      WHERE issues.id = $1 LIMIT 1";
@@ -675,6 +676,9 @@ pub const BOUND_ISSUE_SQL: &str = "SELECT issues.id, issues.project_id, issues.s
 pub struct BoundIssue {
     /// `str(issue.id)`.
     pub id: Uuid,
+    /// `issue.workspace_id` (the relations default source reads it
+    /// off the issue, not the run).
+    pub workspace_id: Uuid,
     /// `issue.project_id`.
     pub project_id: Uuid,
     /// `issue.sequence_id`.
@@ -731,18 +735,19 @@ async fn bound_issue(
         .fetch_optional(pool)
         .await?;
     row.map(|row| {
-        // `name` collides (issue 4, state 8): the state pair reads
+        // `name` collides (issue 5, state 9): the state pair reads
         // positionally, the rest by (unique) name.
         Ok(BoundIssue {
             id: row.try_get("id")?,
+            workspace_id: row.try_get("workspace_id")?,
             project_id: row.try_get("project_id")?,
             sequence_id: row.try_get("sequence_id")?,
             name: row.try_get("name")?,
             priority: row.try_get("priority")?,
             description_stripped: row.try_get("description_stripped")?,
             workpad: row.try_get("workpad")?,
-            state_name: row.try_get(8)?,
-            state_group: row.try_get(9)?,
+            state_name: row.try_get(9)?,
+            state_group: row.try_get(10)?,
             project_identifier: row.try_get("identifier")?,
         })
     })
@@ -1022,14 +1027,15 @@ async fn bound_issue_tx(
     row.map(|row| {
         Ok(BoundIssue {
             id: row.try_get("id")?,
+            workspace_id: row.try_get("workspace_id")?,
             project_id: row.try_get("project_id")?,
             sequence_id: row.try_get("sequence_id")?,
             name: row.try_get("name")?,
             priority: row.try_get("priority")?,
             description_stripped: row.try_get("description_stripped")?,
             workpad: row.try_get("workpad")?,
-            state_name: row.try_get(8)?,
-            state_group: row.try_get(9)?,
+            state_name: row.try_get(9)?,
+            state_group: row.try_get(10)?,
             project_identifier: row.try_get("identifier")?,
         })
     })
@@ -2043,7 +2049,7 @@ async fn op_list_issue_relations(
             };
             rel::ResolvedIssue {
                 id: issue.id,
-                workspace_id: scope.workspace_id,
+                workspace_id: issue.workspace_id,
                 project_id: issue.project_id,
                 project_identifier: issue.project_identifier,
                 sequence_id: issue.sequence_id,

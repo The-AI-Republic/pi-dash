@@ -1894,11 +1894,28 @@ mod tests {
             runner_seams.clone(),
             runner_seams,
         );
-        // D-11 execution tasks (PIDASHCONV-832): the same calls
-        // `worker()` makes — real register over the lazy pool, then
-        // the run forward override (handlers never run here).
+        // D-11 execution tasks (PIDASHCONV-832 + PIDASHCONV-866):
+        // the same calls `worker()` makes — real register over the
+        // lazy pool, no forward override (handlers never run here).
         let execute_settings =
             pidash_db::config::Settings::from_env().expect("settings parse in test env");
+        let invoke = crate::model_runtime::invoke::InvokeCtx {
+            tools: crate::model_runtime::tools_exec::ToolCtx {
+                pool: pool.clone(),
+                cloud: execute_settings.cloud_agent.clone(),
+                managed: execute_settings.managed_runner.clone(),
+                http: reqwest::Client::new(),
+                github: crate::model_runtime::github::GithubAppContext::new(
+                    pool.clone(),
+                    pidash_db::redis::RedisHandle::from_settings(&execute_settings),
+                    execute_settings.secret_key.clone(),
+                ),
+            },
+            keys: crate::model_runtime::keys::KeyResolver::from_env(
+                execute_settings.assistant.key_cache_ttl_secs,
+                execute_settings.assistant.key_cache_maxsize,
+            ),
+        };
         pidash_jobs::dispatch_execute::register_execute_tasks(
             &mut registry,
             pool.clone(),
@@ -1907,11 +1924,8 @@ mod tests {
             std::sync::Arc::new(crate::execute_seams::LiveExecuteSeams::new(
                 pool.clone(),
                 execute_settings.cloud_agent.block_private_urls,
+                invoke,
             )),
-        );
-        registry.register(
-            pidash_jobs::dispatch::RUN_CLOUD_AGENT_TASK,
-            crate::execute_seams::forward_to_python_handler(None),
         );
 
         // The const union, independent of the table.

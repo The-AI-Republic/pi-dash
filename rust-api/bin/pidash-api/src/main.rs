@@ -366,15 +366,30 @@ async fn worker(concurrency: u32) -> MainResult {
         runner_seams,
     );
     // D-11 execution tasks (PIDASHCONV-832; kept in sync with
-    // `inventory::tests::mirror_registry_matches_tasks_table`). The
-    // scan/sweep/expire handlers execute here on bin-local live seams
-    // (`execute_seams::LiveExecuteSeams`); the run task's model
-    // runtime has no Rust counterpart, so its handler is overridden
-    // with an explicit forward and Python keeps executing runs
-    // (PIDASHCONV-866 tracks true run ownership). The register call
-    // also owns `managed_runner.expire_waiting_runs` (never published
-    // in OSS; the table follows the registry).
+    // `inventory::tests::mirror_registry_matches_tasks_table`). All
+    // four handlers execute here on bin-local live seams
+    // (`execute_seams::LiveExecuteSeams`), including the run task's
+    // model runtime (PIDASHCONV-866 — no forward override). The
+    // register call also owns `managed_runner.expire_waiting_runs`
+    // (never published in OSS; the table follows the registry).
     let execute_settings = pidash_db::config::Settings::from_env()?;
+    let invoke = model_runtime::invoke::InvokeCtx {
+        tools: model_runtime::tools_exec::ToolCtx {
+            pool: pools.primary().clone(),
+            cloud: execute_settings.cloud_agent.clone(),
+            managed: execute_settings.managed_runner.clone(),
+            http: reqwest::Client::new(),
+            github: model_runtime::github::GithubAppContext::new(
+                pools.primary().clone(),
+                pidash_db::redis::RedisHandle::from_settings(&execute_settings),
+                execute_settings.secret_key.clone(),
+            ),
+        },
+        keys: model_runtime::keys::KeyResolver::from_env(
+            execute_settings.assistant.key_cache_ttl_secs,
+            execute_settings.assistant.key_cache_maxsize,
+        ),
+    };
     pidash_jobs::dispatch_execute::register_execute_tasks(
         &mut registry,
         pools.primary().clone(),
@@ -383,11 +398,8 @@ async fn worker(concurrency: u32) -> MainResult {
         std::sync::Arc::new(execute_seams::LiveExecuteSeams::new(
             pools.primary().clone(),
             execute_settings.cloud_agent.block_private_urls,
+            invoke,
         )),
-    );
-    registry.register(
-        pidash_jobs::dispatch::RUN_CLOUD_AGENT_TASK,
-        execute_seams::forward_to_python_handler(publisher.clone()),
     );
     // D-08 issue_activity (PIDASHCONV-836; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`, where the
