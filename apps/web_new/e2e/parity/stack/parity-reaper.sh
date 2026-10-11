@@ -54,13 +54,32 @@ case "${1:-}" in
       exit 0
     fi
     # Own session and cwd /, so the watcher outlives the agent's process group
-    # and never looks like work in progress inside the checkout.
-    (cd / && setsid nohup "$STACK_DIR/parity-reaper.sh" watch "$AGENT" > /dev/null 2>&1 &
-      echo $! > "$MARK")
+    # and never looks like work in progress inside the checkout. setsid --fork
+    # makes the spawned parent exit at once: without it setsid execs the
+    # watcher in place (no fork when it is not a process-group leader), the
+    # background job blocks in waitpid until the run ends, and its inherited
+    # stdout keeps any `parity-up.sh ... | tail` bring-up from ever seeing EOF
+    # (NEWFRONT-350). No `&` job is left behind at all.
+    if (cd / && setsid --fork nohup "$STACK_DIR/parity-reaper.sh" watch "$AGENT" \
+        </dev/null >/dev/null 2>&1); then
+      # The watcher announces its own pid in MARK on startup ($! would only be
+      # the short-lived fork parent). Wait briefly so a back-to-back arm sees
+      # the live watcher, but exit promptly either way.
+      for _ in $(seq 1 50); do
+        WATCHER="$(cat "$MARK" 2>/dev/null || true)"
+        if [ -n "$WATCHER" ] && kill -0 "$WATCHER" 2>/dev/null; then
+          break
+        fi
+        sleep 0.1
+      done
+    fi
     echo "[parity] stack $PARITY_PROJECT will be torn down when this run (pid $AGENT) ends"
     ;;
   watch)
     AGENT="${2:?usage: parity-reaper.sh watch <pid>}"
+    # Announce this watcher's pid so `arm` (which waits on MARK) and later
+    # arms track the watcher itself rather than a spawn intermediate.
+    echo "$$" > "${TMPDIR:-/tmp}/parity-reaper.$PARITY_PROJECT.$AGENT.pid"
     while kill -0 "$AGENT" 2>/dev/null; do
       sleep 15
     done
