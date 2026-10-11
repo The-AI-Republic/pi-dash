@@ -139,6 +139,9 @@ def test_link_crud_roundtrip(clients, seed):
         json={"title": "docs", "url": "https://example.com/docs"},
     )
     assert resp.status_code == 201
+    # Sibling audit (PIDASHCONV-873): IssueLinkViewSet.create is custom and
+    # returns a bare 201 — no DRF Location header, unlike module links.
+    assert "location" not in resp.headers
     body = resp.json()
     assert set(body) == LINK_KEYS
     assert body["title"] == "docs"

@@ -40,6 +40,19 @@ def test_create_shape(api, tenant_a, project_a, auth_a, module_a):
     assert body["metadata"] == {}
 
 
+def test_create_sets_location_to_link_url(api, tenant_a, project_a, auth_a, module_a):
+    # DRF quirk (PIDASHCONV-873): ModuleLinkViewSet has no custom create,
+    # so CreateModelMixin answers 201 with Location: <data['url']> — the
+    # created link's target URL, not a resource URL.
+    r = api.post(
+        _links_url(tenant_a, project_a, module_a), headers=auth_a,
+        json={"title": "Specs", "url": "https://example.com/specs"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.headers["location"] == "https://example.com/specs"
+    assert r.headers["location"] == r.json()["url"]
+
+
 def test_create_bare_domain_gets_http_prefix(api, tenant_a, project_a, auth_a, module_a):
     r = api.post(
         _links_url(tenant_a, project_a, module_a), headers=auth_a,
