@@ -29,6 +29,9 @@ import type {
   ArchivesPeekReadOnly,
   ArchivesTab,
   ArchivesTrafficCounts,
+  ModulesDetailGroupedOption,
+  ModulesDetailLinkRow,
+  ModulesDetailStatRow,
   ModulesMenuEntry,
   ModulesTimelineRow,
   ModulesToast,
@@ -35660,6 +35663,213 @@ export class WebDriver implements ParityDriver {
     return false;
   }
 
+  // --- Module detail/analytics/links (NEWFRONT-310, MOD-029-035).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. Anchors mirror the cycles-detail ones: the app
+  // --- header bar, the floating analytics sidebar (detail page and peek
+  // --- render the same sidebar), and the shared issues-layout host.
+
+  /** App header bar of the module detail page. */
+  private modulesDetailHeader(): Locator {
+    return this.page.locator("main").locator("div[class*='z-[18]']").first();
+  }
+
+  /**
+   * Floating analytics sidebar panel (absent while collapsed). The peek
+   * mount renders the same sidebar outside main in a max-w-[24rem]
+   * container, so the anchor covers both mounts; only one mounts per
+   * page, and portals sort after the sidebar in document order.
+   */
+  private modulesDetailPanel(): Locator {
+    return this.page.locator("main div[class*='w-[24rem]'], div[class*='max-w-[24rem]']").first();
+  }
+
+  private async modulesDetailPanelSettled(): Promise<void> {
+    await this.modulesDetailPanel().locator("h4").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  /** Sidebar date control (nested buttons share the range text). */
+  private modulesDetailDateButtons(): Locator {
+    return this.modulesDetailPanel().getByRole("button", { name: /\w{3} \d{1,2}|Start date/ });
+  }
+
+  /** Sidebar plot-measure dropdown trigger (reads the current measure). */
+  private modulesDetailMeasureButton(): Locator {
+    return this.modulesDetailPanel().getByRole("button", { name: /^(Work items|Points)$/ });
+  }
+
+  /** One labeled sidebar facts row (Date range, Lead, Members, ...). */
+  private modulesDetailFactsRow(label: string): Locator {
+    // The label is a span in the row's label cell: span -> cell -> row.
+    return this.modulesDetailPanel().getByText(label, { exact: true }).first().locator("xpath=ancestor::div[2]");
+  }
+
+  /**
+   * Breadcrumb trail: the Modules link sits in a per-crumb wrapper (div 1)
+   * inside the trail root (div 2), which holds project, link, switcher.
+   */
+  private modulesDetailTrail(): Locator {
+    return this.modulesDetailHeader().getByRole("link", { name: "Modules" }).first().locator("xpath=ancestor::div[2]");
+  }
+
+  /** Closed status set the sidebar pill renders (MODULE_STATUS labels). */
+  private static readonly MODULES_DETAIL_STATUSES = [
+    "Backlog",
+    "Planned",
+    "In Progress",
+    "Paused",
+    "Completed",
+    "Cancelled",
+  ];
+
+  async modulesDetailSidebarName(): Promise<string | null> {
+    const heading = this.modulesDetailPanel().locator("h4").first();
+    if ((await heading.count()) === 0) return null;
+    if (!(await heading.isVisible().catch(() => false))) return null;
+    return ((await heading.innerText()) ?? "").trim();
+  }
+
+  async modulesDetailBadgeText(): Promise<string | null> {
+    const badge = this.modulesDetailHeader().locator("span.rounded-xl").first();
+    if ((await badge.count()) === 0) return null;
+    if (!(await badge.isVisible().catch(() => false))) return null;
+    return ((await badge.innerText()) ?? "").trim();
+  }
+
+  async modulesDetailBadgeTooltip(): Promise<string | null> {
+    const badge = this.modulesDetailHeader().locator("span.rounded-xl").first();
+    if ((await badge.count()) === 0) return null;
+    await badge.hover({ timeout: WebDriver.OPEN_MS });
+    // The propel tooltip renders as plain text (no tooltip role); the
+    // archives badge reads its tooltip the same way.
+    const tip = this.page.getByText(/There are \d+ work items? in this module/).first();
+    try {
+      await tip.waitFor({ state: "visible", timeout: 10_000 });
+    } catch {
+      return null;
+    }
+    return ((await tip.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim() || null;
+  }
+
+  async modulesDetailPageTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async modulesDetailCrumbs(): Promise<string[]> {
+    const trail = this.modulesDetailTrail();
+    await trail.waitFor({ timeout: WebDriver.OPEN_MS });
+    const text = ((await trail.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    // "project Modules module": the middle crumb is fixed, so it splits
+    // the trail into its three labels.
+    const middle = " Modules ";
+    const at = text.indexOf(middle);
+    if (at < 0) return text === "" ? [] : [text];
+    return [text.slice(0, at).trim(), "Modules", text.slice(at + middle.length).trim()].filter((part) => part !== "");
+  }
+
+  async modulesDetailClickModulesCrumb(): Promise<void> {
+    await this.modulesDetailHeader()
+      .getByRole("link", { name: "Modules" })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailClickProjectCrumb(projectName: string): Promise<void> {
+    // Nested pair: the outer trigger opens the project menu, the inner
+    // label navigates to the project. Click the innermost match.
+    const matches = this.modulesDetailHeader().getByRole("button", { name: projectName, exact: true });
+    const total = await matches.count();
+    if (total === 0) throw new Error("[parity] project crumb never rendered.");
+    await matches.nth(total - 1).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailSwitcherOpen(): Promise<void> {
+    // The switcher trigger is the trail's last control: a nested button
+    // carrying the current module name after the Modules link.
+    const triggers = this.modulesDetailTrail().getByRole("button");
+    const total = await triggers.count();
+    if (total === 0) throw new Error("[parity] module switcher trigger never rendered.");
+    await triggers.nth(total - 1).click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailSwitcherOptions(): Promise<string[]> {
+    const options = this.page.getByRole("option");
+    const total = await options.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await options
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
+  async modulesDetailSwitcherSearch(text: string): Promise<void> {
+    const box = this.page.getByRole("combobox").first();
+    await box.fill(text, { timeout: WebDriver.OPEN_MS });
+    await this.page.waitForTimeout(750);
+  }
+
+  async modulesDetailSwitcherPick(name: string): Promise<void> {
+    await this.page.getByRole("option", { name }).first().click({ timeout: WebDriver.OPEN_MS });
+    await expect
+      .poll(() => this.modulesDetailHeader().getByRole("button", { name }).count(), {
+        timeout: WebDriver.OPEN_MS,
+      })
+      .toBeGreaterThan(0);
+  }
+
+  async modulesDetailUnknownTitle(): Promise<string | null> {
+    const title = this.page.getByText("Module does not exist", { exact: true });
+    if ((await title.count()) === 0) return null;
+    if (
+      !(await title
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return null;
+    return "Module does not exist";
+  }
+
+  async modulesDetailUnknownBack(): Promise<void> {
+    await this.page.getByRole("button", { name: "View other modules" }).first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailSwitchLayout(layout: LayoutsLayoutKey): Promise<void> {
+    const order: LayoutsLayoutKey[] = ["list", "kanban", "calendar", "spreadsheet", "gantt_chart"];
+    const index = order.indexOf(layout);
+    const buttons = this.page.locator("div.flex.items-center.gap-1.rounded-md.bg-layer-3.p-1 > button");
+    await buttons.nth(index).click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.layoutsActiveLayout(), { timeout: WebDriver.OPEN_MS }).toBe(layout);
+  }
+
+  async modulesDetailFilterToggleVisible(): Promise<boolean> {
+    // Icon-only square button between the layout switcher and Display;
+    // its propel icon carries no lucide class (unlike the sidebar-toggle
+    // and quick-actions squares around it). Absent on small screens.
+    const squares = this.modulesDetailHeader().locator("button.aspect-square");
+    const total = await squares.count();
+    for (let i = 0; i < total; i++) {
+      const icon = squares.nth(i).locator("svg").first();
+      const classes = (await icon.getAttribute("class").catch(() => "")) ?? "";
+      if (classes !== "" && !classes.includes("lucide")) {
+        return squares
+          .nth(i)
+          .isVisible()
+          .catch(() => false);
+      }
+    }
+    return false;
+  }
+
   async pagesListSearchType(text: string): Promise<void> {
     await this.pagesListSearchOpen();
     await this.pagesListSearchInput().first().fill(text, { timeout: WebDriver.OPEN_MS });
@@ -36573,6 +36783,773 @@ export class WebDriver implements ParityDriver {
         return;
       }
       await route.continue();
+    });
+  }
+
+  async modulesDetailDisplayGroupedOptions(): Promise<ModulesDetailGroupedOption[]> {
+    const section = this.displaySection("Group by");
+    await section.waitFor({ timeout: WebDriver.OPEN_MS });
+    let buttons = section.getByRole("button");
+    if ((await buttons.count()) === 0) {
+      // Collapsed preview: the section header toggles it open.
+      await section.getByText("Group by", { exact: true }).click({ timeout: WebDriver.OPEN_MS });
+      buttons = section.getByRole("button");
+    }
+    const total = await buttons.count();
+    const out: ModulesDetailGroupedOption[] = [];
+    for (let i = 0; i < total; i++) {
+      const button = buttons.nth(i);
+      const label = ((await button.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+      if (label === "") continue;
+      out.push({ label, disabled: await button.isDisabled().catch(() => false) });
+    }
+    return out;
+  }
+
+  async modulesDetailMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
+    const bar = this.page.locator("div.md\\:hidden").first();
+    await bar.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebDriver.OPEN_MS });
+    const items = this.page.getByRole("menuitem");
+    const total = await items.count();
+    const labels: string[] = [];
+    for (let i = 0; i < total; i++) {
+      labels.push(
+        (
+          (await items
+            .nth(i)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim()
+      );
+    }
+    await this.page.keyboard.press("Escape");
+    const known: Array<[LayoutsLayoutKey, string]> = [
+      ["list", "List"],
+      ["kanban", "Board"],
+      ["calendar", "Calendar"],
+    ];
+    return labels.map((label) => {
+      const found = known.find(([, text]) => text === label);
+      if (!found) throw new Error(`[parity] unknown module mobile layout label "${label}".`);
+      return found[0];
+    });
+  }
+
+  async modulesDetailMobileSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
+    const labels: Partial<Record<LayoutsLayoutKey, string>> = { list: "List", kanban: "Board", calendar: "Calendar" };
+    const label = labels[layout];
+    if (label === undefined) throw new Error(`[parity] the module mobile menu offers no "${layout}" layout.`);
+    const bar = this.page.locator("div.md\\:hidden").first();
+    await bar.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem", { name: label }).first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.layoutsActiveLayout(), { timeout: WebDriver.OPEN_MS }).toBe(layout);
+  }
+
+  async modulesDetailMobileDisplayVisible(): Promise<boolean> {
+    const bar = this.page.locator("div.md\\:hidden").first();
+    if ((await bar.count()) === 0) return false;
+    const display = bar.getByText("Display", { exact: true });
+    return (await display.count()) > 0 && (await display.isVisible().catch(() => false));
+  }
+
+  async modulesDetailMobileFilterToggleVisible(): Promise<boolean> {
+    const bar = this.page.locator("div.md\\:hidden").first();
+    if ((await bar.count()) === 0) return false;
+    const squares = bar.locator("button.aspect-square");
+    const total = await squares.count();
+    for (let i = 0; i < total; i++) {
+      const icon = squares.nth(i).locator("svg").first();
+      const classes = (await icon.getAttribute("class").catch(() => "")) ?? "";
+      if (classes !== "" && !classes.includes("lucide")) {
+        return squares
+          .nth(i)
+          .isVisible()
+          .catch(() => false);
+      }
+    }
+    return false;
+  }
+
+  async modulesDetailHeaderAddVisible(): Promise<boolean> {
+    const button = this.modulesDetailHeader().getByRole("button", { name: "Add work item" });
+    return (
+      (await button.count()) > 0 &&
+      (await button
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
+  }
+
+  async modulesDetailHeaderAddClick(): Promise<void> {
+    await this.modulesDetailHeader()
+      .getByRole("button", { name: "Add work item" })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailFailNextIssuesAdd(): Promise<void> {
+    // Page-scoped (the fixture page dies with the scenario): fail the
+    // module-issues add write, passing list reads through untouched.
+    await this.page.route("**/modules/*/issues/", async (route) => {
+      if (route.request().method() === "POST") {
+        await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+      } else {
+        await route.continue();
+      }
+    });
+  }
+
+  async modulesDetailPickerSearch(text: string): Promise<void> {
+    await this.page.getByPlaceholder("Type to search").fill(text, { timeout: WebDriver.OPEN_MS });
+    // The picker debounces 500ms before searching.
+    await this.page.waitForTimeout(1_500);
+  }
+
+  async modulesDetailAnalyticsVisible(): Promise<boolean> {
+    const button = this.modulesDetailHeader().getByRole("button", { name: "Analytics", exact: true });
+    return (
+      (await button.count()) > 0 &&
+      (await button
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
+  }
+
+  async modulesDetailOpenAnalytics(): Promise<void> {
+    await this.modulesDetailHeader()
+      .getByRole("button", { name: "Analytics", exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("dialog").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailAnalyticsDialogVisible(): Promise<boolean> {
+    const dialog = this.page.getByRole("dialog").first();
+    return (await dialog.count()) > 0 && (await dialog.isVisible().catch(() => false));
+  }
+
+  async modulesDetailDismissAnalytics(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("dialog")
+      .first()
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS })
+      .catch(() => undefined);
+  }
+
+  async modulesDetailToggleSidebar(): Promise<void> {
+    await this.modulesDetailHeader()
+      .locator("button:has(svg.lucide-panel-right)")
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailSidebarVisible(): Promise<boolean> {
+    const panel = this.modulesDetailPanel();
+    return (await panel.count()) > 0 && (await panel.isVisible().catch(() => false));
+  }
+
+  async modulesDetailSidebarCollapsedStored(): Promise<boolean> {
+    // The hook JSON-encodes values and this page stores the string
+    // "true" (unlike cycles, which stores the boolean true), so the raw
+    // item carries quotes: parse before comparing.
+    return this.page.evaluate(() => {
+      try {
+        const raw = window.localStorage.getItem("module_sidebar_collapsed");
+        if (raw === null) return false;
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          return parsed === "true" || parsed === true;
+        } catch {
+          return raw === "true";
+        }
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  async modulesDetailCloseSidebarViaPanel(): Promise<void> {
+    await this.modulesDetailPanelSettled();
+    await this.modulesDetailPanel().locator("div.sticky").first().getByRole("button").first().click({
+      timeout: WebDriver.OPEN_MS,
+    });
+  }
+
+  async modulesDetailMobileOpenAnalytics(): Promise<void> {
+    await this.page
+      .locator("div.md\\:hidden")
+      .first()
+      .getByText("Analytics", { exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("dialog").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailSidebarStatus(): Promise<string | null> {
+    await this.modulesDetailPanelSettled();
+    for (const status of WebDriver.MODULES_DETAIL_STATUSES) {
+      const pill = this.modulesDetailPanel().getByRole("button", { name: status, exact: true });
+      if (
+        (await pill.count()) > 0 &&
+        (await pill
+          .first()
+          .isVisible()
+          .catch(() => false))
+      )
+        return status;
+    }
+    return null;
+  }
+
+  async modulesDetailSidebarSetStatus(status: string): Promise<void> {
+    const current = await this.modulesDetailSidebarStatus();
+    if (current === null) throw new Error("[parity] module status pill never rendered.");
+    await this.modulesDetailPanel()
+      .getByRole("button", { name: current, exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    const option = this.page.getByRole("option", { name: status }).first();
+    await option.click({ timeout: WebDriver.OPEN_MS });
+    // A landed selection closes the menu: if the options are still
+    // attached the click missed, so click once more before polling.
+    const detached = await this.page
+      .getByRole("option")
+      .first()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!detached) await option.click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.modulesDetailSidebarStatus(), { timeout: WebDriver.OPEN_MS }).toBe(status);
+  }
+
+  async modulesDetailSidebarDescription(): Promise<string | null> {
+    await this.modulesDetailPanelSettled();
+    const area = this.modulesDetailPanel().locator("textarea").first();
+    if ((await area.count()) === 0) return null;
+    return area.inputValue({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailSidebarDateText(): Promise<string> {
+    await this.modulesDetailPanelSettled();
+    return ((await this.modulesDetailDateButtons().first().innerText({ timeout: WebDriver.OPEN_MS })) ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async modulesDetailSidebarDateDisabled(): Promise<boolean> {
+    await this.modulesDetailPanelSettled();
+    return this.modulesDetailDateButtons()
+      .first()
+      .isDisabled({ timeout: WebDriver.OPEN_MS })
+      .catch(() => true);
+  }
+
+  async modulesDetailSidebarOpenDatePicker(): Promise<void> {
+    await this.modulesDetailPanelSettled();
+    await this.modulesDetailDateButtons().first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.locator("button.rdp-day_button").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailPickDateDay(label: string): Promise<void> {
+    await this.page.getByRole("button", { name: label }).first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailDismissDatePicker(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .locator("button.rdp-day_button")
+      .first()
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS })
+      .catch(() => undefined);
+  }
+
+  async modulesDetailSidebarLead(): Promise<string | null> {
+    await this.modulesDetailPanelSettled();
+    const row = this.modulesDetailFactsRow("Lead");
+    const text = ((await row.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    if (text === "" || text === "Lead") return null;
+    return text.replace(/^Lead\s*/, "").trim() || null;
+  }
+
+  async modulesDetailSidebarSetLead(name: string): Promise<void> {
+    // The row shows the lead's avatar initial plus the unresolved-name
+    // placeholder (live the display name never resolves there), so the
+    // UI proof is the row changing; the spec proves identity by server.
+    const before = await this.modulesDetailSidebarLead();
+    const row = this.modulesDetailFactsRow("Lead");
+    await row.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option", { name }).first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.modulesDetailSidebarLead(), { timeout: WebDriver.OPEN_MS }).not.toEqual(before);
+  }
+
+  async modulesDetailSidebarMembers(): Promise<string[]> {
+    await this.modulesDetailPanelSettled();
+    const row = this.modulesDetailFactsRow("Members");
+    // Populated rows render an avatar stack (names ride on image alts);
+    // empty rows render the Members placeholder text.
+    const images = row.locator("img");
+    const total = await images.count();
+    if (total > 0) {
+      const names: string[] = [];
+      for (let i = 0; i < total; i++) {
+        const alt = ((await images.nth(i).getAttribute("alt")) ?? "").trim();
+        if (alt !== "") names.push(alt);
+      }
+      if (names.length > 0) return names;
+      return [`${total} avatar${total === 1 ? "" : "s"}`];
+    }
+    const text = ((await row.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    const rest = text.replace(/^Members\s*/, "").trim();
+    if (rest === "" || rest === "Members") return [];
+    return [rest];
+  }
+
+  async modulesDetailSidebarAddMember(name: string): Promise<void> {
+    await this.modulesDetailPanelSettled();
+    const before = await this.modulesDetailSidebarMembers();
+    const row = this.modulesDetailFactsRow("Members");
+    await row.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option", { name }).first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press("Escape");
+    await expect.poll(() => this.modulesDetailSidebarMembers(), { timeout: WebDriver.OPEN_MS }).not.toEqual(before);
+  }
+
+  async modulesDetailSidebarStatusDisabled(): Promise<boolean> {
+    // Side-effect free on purpose: probing the pill with a click would
+    // toggle the status menu and desync the very next edit. The trigger
+    // button and its pill span both carry cursor-not-allowed when edits
+    // are refused (guests, archived modules).
+    const current = await this.modulesDetailSidebarStatus();
+    if (current === null) return true;
+    const pill = this.modulesDetailPanel().getByRole("button", { name: current, exact: true }).first();
+    if (await pill.isDisabled().catch(() => false)) return true;
+    const buttonClasses = (await pill.getAttribute("class").catch(() => "")) ?? "";
+    if (buttonClasses.includes("cursor-not-allowed")) return true;
+    const inner = pill.locator("span.w-20").first();
+    return ((await inner.getAttribute("class").catch(() => "")) ?? "").includes("cursor-not-allowed");
+  }
+
+  async modulesDetailSidebarLeadDisabled(): Promise<boolean> {
+    await this.modulesDetailPanelSettled();
+    const row = this.modulesDetailFactsRow("Lead");
+    return row
+      .getByRole("button")
+      .first()
+      .isDisabled({ timeout: WebDriver.OPEN_MS })
+      .catch(() => true);
+  }
+
+  async modulesDetailSidebarMembersDisabled(): Promise<boolean> {
+    await this.modulesDetailPanelSettled();
+    const row = this.modulesDetailFactsRow("Members");
+    return row
+      .getByRole("button")
+      .first()
+      .isDisabled({ timeout: WebDriver.OPEN_MS })
+      .catch(() => true);
+  }
+
+  async modulesDetailSidebarWorkItemsText(): Promise<string> {
+    await this.modulesDetailPanelSettled();
+    const row = this.modulesDetailFactsRow("Work items");
+    return ((await row.locator("span[class*='text-tertiary']").first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async modulesDetailSidebarPointsText(): Promise<string | null> {
+    const label = this.modulesDetailPanel().getByText("Points", { exact: true });
+    if ((await label.count()) === 0) return null;
+    const row = label.first().locator("xpath=ancestor::div[2]");
+    return ((await row.locator("span[class*='text-tertiary']").first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async modulesDetailSlowFetchShowsLoader(): Promise<boolean> {
+    const pattern = "**/api/workspaces/*/projects/*/modules/*/";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() === "GET") {
+        await new Promise((resolve) => setTimeout(resolve, 4000));
+      }
+      await route.continue();
+    });
+    try {
+      // Watch before reloading: domcontentloaded can resolve after the
+      // delayed fetch already settled, missing the loader window.
+      const seenPromise = this.modulesDetailPanel()
+        .locator(".animate-pulse")
+        .first()
+        .waitFor({ timeout: 20_000 })
+        .then(
+          () => true,
+          () => false
+        );
+      await this.page.reload({ waitUntil: "domcontentloaded" });
+      const seen = await seenPromise;
+      await this.modulesDetailPanelSettled();
+      return seen;
+    } finally {
+      await this.page.unroute(pattern);
+    }
+  }
+
+  async modulesDetailProgressOpen(): Promise<boolean> {
+    // The breakdown tabs mount only while the disclosure expands; the
+    // inactive/invalid branch never renders them.
+    const tabs = this.modulesDetailPanel().getByRole("tab");
+    return (
+      (await tabs.count()) > 0 &&
+      (await tabs
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
+  }
+
+  async modulesDetailProgressHeaderPercent(): Promise<number | null> {
+    const badge = this.modulesDetailPanel().getByText(/^\d+%$/, { exact: true });
+    if ((await badge.count()) === 0) return null;
+    if (
+      !(await badge
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return null;
+    return Number(((await badge.first().innerText()) ?? "").replace(/\D/g, "") || "0");
+  }
+
+  async modulesDetailProgressNotice(): Promise<string | null> {
+    for (const text of ["This module isn't active yet.", "Invalid date. Please enter valid date."]) {
+      const notice = this.modulesDetailPanel().getByText(text, { exact: true });
+      if (
+        (await notice.count()) > 0 &&
+        (await notice
+          .first()
+          .isVisible()
+          .catch(() => false))
+      )
+        return text;
+    }
+    return null;
+  }
+
+  async modulesDetailProgressChartVisible(): Promise<boolean> {
+    const chart = this.modulesDetailPanel().locator("div.recharts-wrapper").first();
+    return (await chart.count()) > 0 && (await chart.isVisible().catch(() => false));
+  }
+
+  async modulesDetailProgressMeasureValue(): Promise<string | null> {
+    const button = this.modulesDetailMeasureButton();
+    if ((await button.count()) === 0) return null;
+    if (
+      !(await button
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return null;
+    return ((await button.first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async modulesDetailProgressMeasureOptions(): Promise<string[]> {
+    const button = this.modulesDetailMeasureButton();
+    if ((await button.count()) === 0) return [];
+    await button.first().scrollIntoViewIfNeeded({ timeout: WebDriver.OPEN_MS });
+    await button.first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebDriver.OPEN_MS });
+    const options = this.page.getByRole("option");
+    const total = await options.count();
+    const labels: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await options
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") labels.push(text);
+    }
+    // Close by toggling the button (Escape leaves the headlessui open
+    // state desynced, so the next click re-closes instead of opening).
+    await button.first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page
+      .getByRole("option")
+      .first()
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS })
+      .catch(() => undefined);
+    return labels;
+  }
+
+  async modulesDetailMeasureSwitchGetCount(label: string): Promise<number> {
+    let gets = 0;
+    const onResponse = (response: { request: () => { method: () => string }; url: () => string }): void => {
+      try {
+        if (response.request().method() !== "GET") return;
+        if (/\/modules\/[0-9a-fA-F-]{36}\/$/.test(new URL(response.url()).pathname)) gets += 1;
+      } catch {
+        // Ignore malformed URLs; the waiter below is the real gate.
+      }
+    };
+    this.page.on("response", onResponse);
+    try {
+      await this.modulesDetailMeasureButton().first().scrollIntoViewIfNeeded({ timeout: WebDriver.OPEN_MS });
+      await this.modulesDetailMeasureButton().first().click({ timeout: WebDriver.OPEN_MS });
+      // If a stale toggle state swallowed the open, the option never
+      // appears: one recovery click re-opens before giving up.
+      const option = this.page.getByRole("option", { name: label }).first();
+      try {
+        await option.waitFor({ state: "visible", timeout: 5_000 });
+      } catch {
+        await this.modulesDetailMeasureButton().first().click({ timeout: WebDriver.OPEN_MS });
+      }
+      await option.click({ timeout: WebDriver.OPEN_MS });
+      await expect.poll(() => this.modulesDetailProgressMeasureValue(), { timeout: WebDriver.OPEN_MS }).toBe(label);
+      // Let the refetch the switch fires land before counting.
+      await this.page.waitForTimeout(3_000);
+      return gets;
+    } finally {
+      this.page.off("response", onResponse);
+    }
+  }
+
+  async modulesDetailProgressStatsTab(tab: "States" | "Assignees" | "Labels"): Promise<void> {
+    const trigger = this.modulesDetailPanel().getByRole("tab", { name: tab });
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebDriver.OPEN_MS });
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => trigger.getAttribute("aria-selected"), { timeout: WebDriver.OPEN_MS }).toBe("true");
+  }
+
+  async modulesDetailActiveStatsTab(): Promise<string> {
+    const selected = this.modulesDetailPanel().locator("[role='tab'][aria-selected='true']").first();
+    await selected.waitFor({ timeout: WebDriver.OPEN_MS });
+    return ((await selected.innerText()) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async modulesDetailProgressStatsRows(): Promise<ModulesDetailStatRow[]> {
+    const panel = this.modulesDetailPanel().locator("[role='tabpanel'][data-headlessui-state='selected']");
+    const rows = panel.locator("div.flex.w-full.items-center.justify-between");
+    const total = await rows.count();
+    const out: ModulesDetailStatRow[] = [];
+    for (let i = 0; i < total; i++) {
+      const row = rows.nth(i);
+      const title = (
+        (await row
+          .locator("div")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      const percentText = (
+        (await row
+          .getByText(/%/)
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).replace(/\D/g, "");
+      const totalText = (
+        (await row
+          .getByText(/of \d+/)
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).replace(/\D/g, "");
+      if (title === "") continue;
+      out.push({ title, percent: Number(percentText || "0"), total: Number(totalText || "0") });
+    }
+    return out;
+  }
+
+  async modulesDetailProgressEntryClick(title: string): Promise<void> {
+    const panel = this.modulesDetailPanel().locator("[role='tabpanel'][data-headlessui-state='selected']");
+    const entry = panel.locator("div.flex.w-full.items-center.justify-between", { hasText: title }).first();
+    await entry.scrollIntoViewIfNeeded({ timeout: WebDriver.OPEN_MS });
+    await entry.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailLinksOpen(): Promise<boolean> {
+    // The disclosure body mounts only while expanded: rows, the add
+    // action, or the no-links notice. All three hide when collapsed.
+    const body = this.modulesDetailPanel().locator("div.min-h-72").first();
+    return (await body.count()) > 0 && (await body.isVisible().catch(() => false));
+  }
+
+  async modulesDetailLinksToggle(): Promise<void> {
+    await this.modulesDetailPanelSettled();
+    await this.modulesDetailPanel()
+      .getByRole("button", { name: "Links", exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailLinksEmptyNotice(): Promise<string | null> {
+    const notice = this.modulesDetailPanel().getByText("No links added yet", { exact: true });
+    if ((await notice.count()) === 0) return null;
+    if (
+      !(await notice
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return null;
+    return "No links added yet";
+  }
+
+  async modulesDetailLinksAddVisible(): Promise<boolean> {
+    const button = this.modulesDetailPanel().getByRole("button", { name: "Add link", exact: true });
+    return (
+      (await button.count()) > 0 &&
+      (await button
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
+  }
+
+  async modulesDetailLinksAddClick(): Promise<void> {
+    await this.modulesDetailPanel()
+      .getByRole("button", { name: "Add link", exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.modulesDetailLinkDialogOpen(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  async modulesDetailLinksRows(): Promise<ModulesDetailLinkRow[]> {
+    const anchors = this.modulesDetailPanel().locator("a[target]");
+    const total = await anchors.count();
+    const out: ModulesDetailLinkRow[] = [];
+    for (let i = 0; i < total; i++) {
+      const anchor = anchors.nth(i);
+      const title = ((await anchor.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+      if (title === "") continue;
+      out.push({
+        title,
+        url: (await anchor.getAttribute("href")) ?? "",
+        target: (await anchor.getAttribute("target")) ?? "",
+      });
+    }
+    return out;
+  }
+
+  /** The add/update link dialog (scoped so its buttons never hit the section). */
+  private modulesDetailLinkDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ hasText: /Add link|Update link/ })
+      .first();
+  }
+
+  async modulesDetailLinkDialogOpen(): Promise<boolean> {
+    // Attachment, not visibility: closed dialogs unmount, while an open
+    // dialog keeps a zero-size box under load, so isVisible lies (the
+    // cycles create dialog reads attachment for the same reason).
+    return (await this.modulesDetailLinkDialog().count()) > 0;
+  }
+
+  async modulesDetailLinkDialogTitle(): Promise<string | null> {
+    const dialog = this.modulesDetailLinkDialog();
+    if ((await dialog.count()) === 0) return null;
+    const heading = dialog.locator("h3").first();
+    if ((await heading.count()) === 0) return null;
+    return ((await heading.innerText()) ?? "").replace(/\s+/g, " ").trim() || null;
+  }
+
+  async modulesDetailLinkFillUrl(url: string): Promise<void> {
+    await this.modulesDetailLinkDialog().getByLabel("URL", { exact: true }).fill(url, {
+      timeout: WebDriver.OPEN_MS,
+    });
+  }
+
+  async modulesDetailLinkFillTitle(title: string): Promise<void> {
+    await this.modulesDetailLinkDialog()
+      .getByLabel(/Display title/)
+      .fill(title, {
+        timeout: WebDriver.OPEN_MS,
+      });
+  }
+
+  async modulesDetailLinkSubmit(): Promise<void> {
+    const dialog = this.modulesDetailLinkDialog();
+    const submit = dialog.getByRole("button", { name: /Add link|Update link|Add|Update/ }).last();
+    await submit.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailLinkUrlInvalid(): Promise<boolean> {
+    // The dialog renders no error text for a missing URL (only the red
+    // border), so invalidity is the field's error class, read after a
+    // short wait for validation to land.
+    const field = this.modulesDetailLinkDialog().getByLabel("URL", { exact: true });
+    try {
+      await expect
+        .poll(async () => (await field.getAttribute("class").catch(() => "")) ?? "", { timeout: 5_000 })
+        .toContain("border-danger-strong");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async modulesDetailLinkCancel(): Promise<void> {
+    await this.modulesDetailLinkDialog()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.modulesDetailLinkDialog()
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS })
+      .catch(() => undefined);
+  }
+
+  /** One link row card, scoped by its rendered title-or-URL. */
+  private modulesDetailLinkRow(title: string): Locator {
+    return this.modulesDetailPanel().locator("div.rounded-md", { hasText: title }).first();
+  }
+
+  async modulesDetailLinkCopy(title: string): Promise<void> {
+    // Headless browsing denies clipboard writes, and the copy handler
+    // toasts only on success (no catch), so the proof needs the grant;
+    // the fixture context dies with the scenario, nothing leaks.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const row = this.modulesDetailLinkRow(title);
+    const buttons = row.getByRole("button");
+    const total = await buttons.count();
+    // Editors see edit/copy/delete; guests see copy alone.
+    await buttons.nth(total === 1 ? 0 : 1).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailLinkEdit(title: string): Promise<void> {
+    const row = this.modulesDetailLinkRow(title);
+    await row.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.modulesDetailLinkDialogOpen(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  async modulesDetailLinkDelete(title: string): Promise<void> {
+    const row = this.modulesDetailLinkRow(title);
+    const buttons = row.getByRole("button");
+    await buttons.nth((await buttons.count()) - 1).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async modulesDetailLinkMeta(title: string): Promise<string | null> {
+    const row = this.modulesDetailLinkRow(title);
+    const meta = row.getByText(/Added /).first();
+    if ((await meta.count()) === 0) return null;
+    return ((await meta.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim() || null;
+  }
+
+  async modulesDetailFailNextLinkWrite(): Promise<void> {
+    // Page-scoped (the fixture page dies with the scenario): fail link
+    // writes, passing reads through untouched.
+    await this.page.route("**/module-links/**", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.continue();
+      } else {
+        await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+      }
     });
   }
 }

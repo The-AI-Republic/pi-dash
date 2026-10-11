@@ -15618,3 +15618,142 @@ export async function serverCreateEstimateRaw(
     apiBase
   );
 }
+
+// --- Module detail server reads (NEWFRONT-310, MOD-029-035). Appended;
+// --- existing helpers above are untouched per the shared harness
+// --- contract. The detail page, its analytics sidebar, progress
+// --- breakdowns, and links assert against these: the full module record,
+// --- a PATCH for fixtures and inline-edit proofs, the caller's
+// --- per-module preferences, and the record's embedded links (the API
+// --- serves no standalone links list; the client reads link_module).
+
+/** One module's detail record as the server reports it (shape-tolerant). */
+export interface ServerModulesDetailRecord {
+  id: string;
+  name: string;
+  description: string;
+  status: string;
+  startDate: string | null;
+  targetDate: string | null;
+  leadId: string | null;
+  memberIds: string[];
+  totalIssues: number;
+  completedIssues: number;
+  totalPoints: number;
+  completedPoints: number;
+  archivedAt: string | null;
+  linkModule: Array<Record<string, unknown>>;
+}
+
+/** Read one module's full detail record. */
+export async function serverModulesDetailGet(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerModulesDetailRecord> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] module detail read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string" || typeof rec["name"] !== "string")
+    throw new Error("[parity] module record carried no string id/name.");
+  const num = (value: unknown): number => (typeof value === "number" ? value : 0);
+  const date = (value: unknown): string | null => (typeof value === "string" ? value : null);
+  const members = Array.isArray(rec["member_ids"])
+    ? (rec["member_ids"] as unknown[]).filter((id): id is string => typeof id === "string")
+    : [];
+  return {
+    id: rec["id"],
+    name: rec["name"],
+    description: typeof rec["description"] === "string" ? rec["description"] : "",
+    status: typeof rec["status"] === "string" ? rec["status"] : "",
+    startDate: date(rec["start_date"]),
+    targetDate: date(rec["target_date"]),
+    leadId: typeof rec["lead_id"] === "string" ? rec["lead_id"] : null,
+    memberIds: members,
+    totalIssues: num(rec["total_issues"]),
+    completedIssues: num(rec["completed_issues"]),
+    totalPoints: num(rec["total_estimate_points"]),
+    completedPoints: num(rec["completed_estimate_points"]),
+    archivedAt: date(rec["archived_at"]),
+    linkModule: Array.isArray(rec["link_module"]) ? (rec["link_module"] as Array<Record<string, unknown>>) : [],
+  };
+}
+
+/** PATCH one module's definition (dates, status, lead, members for fixtures). */
+export async function serverModulesDetailPatch(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  patch: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/`,
+    sessionCookie,
+    patch
+  );
+  if (!res.ok) throw new Error(`[parity] module detail patch failed with HTTP ${res.status}.`);
+}
+
+/** The caller's per-module preferences (stored layout plus filter state). */
+export interface ServerModulesDetailUserProperties {
+  layout: string | null;
+  richFilters: unknown;
+  filters: Record<string, unknown>;
+}
+
+/** Read the caller's per-module preferences. */
+export async function serverModulesDetailUserProperties(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerModulesDetailUserProperties> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/user-properties/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] module user-properties read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const display = rec["display_filters"] as Record<string, unknown> | undefined;
+  return {
+    layout: typeof display?.["layout"] === "string" ? (display["layout"] as string) : null,
+    richFilters: rec["rich_filters"] ?? null,
+    filters: (rec["filters"] as Record<string, unknown> | undefined) ?? {},
+  };
+}
+
+/** One module link as the detail record embeds it. */
+export interface ServerModulesDetailLink {
+  id: string;
+  title: string;
+  url: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+/** Links currently attached to a module (from its detail record). */
+export async function serverModulesDetailLinks(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerModulesDetailLink[]> {
+  const detail = await serverModulesDetailGet(workspaceSlug, projectId, moduleId, sessionCookie, apiBase);
+  return detail.linkModule.map((row) => ({
+    id: typeof row["id"] === "string" ? row["id"] : "",
+    title: typeof row["title"] === "string" ? row["title"] : "",
+    url: typeof row["url"] === "string" ? row["url"] : "",
+    createdBy: typeof row["created_by"] === "string" ? row["created_by"] : "",
+    createdAt: typeof row["created_at"] === "string" ? row["created_at"] : "",
+  }));
+}
