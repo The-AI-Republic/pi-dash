@@ -457,7 +457,9 @@ test(
       expect(path).toContain("peekModule=");
       // The app addresses the list with a trailing slash; only the route
       // below the query string matters here.
-      expect(path.split("?")[0].replace(/\/$/, "")).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/modules`);
+      expect((path.split("?")[0] ?? "").replace(/\/$/, "")).toBe(
+        `/${world.workspaceSlug}/projects/${world.projectId}/modules`
+      );
     });
   }
 );
