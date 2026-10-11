@@ -182,8 +182,14 @@ pub const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"
 /// `BaseViewSet.handle_exception`'s `ObjectDoesNotExist` branch
 /// (`views/base.py`): the workspace-miss body.
 pub const WORKSPACE_MISSING_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// DRF's default `Http404` body: the `get_object` miss body (scoped pk miss
-/// — unknown pk or another owner's row — and the detail-after-delete probe).
+/// DRF `get_object()` miss on the detail routes (unknown pk or another
+/// owner's row, including the detail-after-delete probe): Django's
+/// `get_object_or_404` (`shortcuts.py`) raises `Http404` carrying the
+/// model's message, rendered by DRF under `detail`.
+pub const STICKY_NOT_FOUND_BODY: &str = r#"{"detail":"No Sticky matches the given query."}"#;
+/// Malformed pk: DRF's `get_object_or_404` (`generics.py`) converts the
+/// UUID `ValidationError` to a bare `Http404`, so DRF renders its
+/// default `NotFound` detail.
 pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
 /// `handle_exception`'s generic 500 branch.
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
@@ -199,8 +205,11 @@ pub enum Denial {
     Forbidden,
     /// 404, workspace lookup miss (`ObjectDoesNotExist` branch).
     WorkspaceMissing,
-    /// 404, `get_object` miss (DRF `Http404` body).
+    /// 404, `get_object` lookup miss (unknown pk or another owner's row:
+    /// the model's `Http404` message).
     NotFoundDetail,
+    /// 404, malformed pk (bare `Http404` default body).
+    InvalidPk,
     /// 400, `{"detail": ...}` (`ParseError`: per_page / cursor).
     BadDetail(String),
     /// 400, `{"error": ...}` (`handle_exception` `KeyError` branch:
@@ -221,7 +230,8 @@ impl Denial {
             Denial::InvalidToken => (StatusCode::FORBIDDEN, INVALID_TOKEN_BODY.to_owned()),
             Denial::Forbidden => (StatusCode::FORBIDDEN, v1_perm::CLASS_DENIAL_BODY.to_owned()),
             Denial::WorkspaceMissing => (StatusCode::NOT_FOUND, WORKSPACE_MISSING_BODY.to_owned()),
-            Denial::NotFoundDetail => (StatusCode::NOT_FOUND, NOT_FOUND_DETAIL_BODY.to_owned()),
+            Denial::NotFoundDetail => (StatusCode::NOT_FOUND, STICKY_NOT_FOUND_BODY.to_owned()),
+            Denial::InvalidPk => (StatusCode::NOT_FOUND, NOT_FOUND_DETAIL_BODY.to_owned()),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
@@ -1436,19 +1446,21 @@ fn query_last(params: &HashMap<String, String>, key: &str) -> Option<String> {
     params.get(key).cloned()
 }
 
-/// Badly-formed UUIDs in detail paths are `get_object` misses: DRF's
-/// `get_object_or_404` (`generics.py:14-21`) catches the Django
-/// `ValidationError` the UUID lookup raises and re-raises `Http404`, so a
-/// bad pk is the 404 `{"detail": "Not found."}` — never the
-/// `handle_exception` `ValidationError` branch (that branch only sees
-/// `ValidationError`s raised outside `get_object`, which this view has
-/// none of).
+/// Badly-formed UUIDs in detail paths (the router's pk segment is
+/// `[^/.]+`, so they reach the view): DRF's `get_object_or_404`
+/// (`generics.py:14-21`) catches the Django `ValidationError` the UUID
+/// lookup raises and re-raises a bare `Http404`, so a bad pk is the 404
+/// `{"detail": "Not found."}` — the default detail, not the model's
+/// lookup-miss message, and never the `handle_exception`
+/// `ValidationError` branch (that branch only sees `ValidationError`s
+/// raised outside `get_object`, which this view has none of).
 fn parse_uuid_or_invalid(raw: &str) -> Result<Uuid, Denial> {
-    raw.parse::<Uuid>().map_err(|_| Denial::NotFoundDetail)
+    raw.parse::<Uuid>().map_err(|_| Denial::InvalidPk)
 }
 
 /// `get_object` for one `(slug, owner, pk)`: the scoped lookup above; any
-/// miss is the DRF `Http404` 404.
+/// miss (unknown pk or another owner's row) is the model's `Http404`
+/// message.
 async fn get_sticky(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -2056,6 +2068,10 @@ mod tests {
             WORKSPACE_MISSING_BODY,
             r#"{"error":"The required object does not exist."}"#
         );
+        assert_eq!(
+            STICKY_NOT_FOUND_BODY,
+            r#"{"detail":"No Sticky matches the given query."}"#
+        );
         assert_eq!(NOT_FOUND_DETAIL_BODY, r#"{"detail":"Not found."}"#);
         assert_eq!(
             SERVER_ERROR_BODY,
@@ -2069,16 +2085,27 @@ mod tests {
     }
 
     #[test]
-    fn invalid_uuid_pk_is_a_get_object_404() {
+    fn invalid_uuid_pk_is_a_bare_http404() {
         // DRF's `get_object_or_404` converts the UUID `ValidationError`
-        // to `Http404` — never the `handle_exception` branch.
-        let Err(Denial::NotFoundDetail) = parse_uuid_or_invalid("zzz") else {
-            panic!("expected NotFoundDetail");
+        // to a bare `Http404` (the default detail, not the model's
+        // lookup-miss message) — never the `handle_exception` branch.
+        let Err(Denial::InvalidPk) = parse_uuid_or_invalid("zzz") else {
+            panic!("expected InvalidPk");
         };
-        let (status, body) = Denial::NotFoundDetail.status_and_body();
+        let (status, body) = Denial::InvalidPk.status_and_body();
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body, NOT_FOUND_DETAIL_BODY);
         assert!(parse_uuid_or_invalid("11111111-1111-1111-1111-111111111111").is_ok());
+    }
+
+    #[test]
+    fn lookup_miss_renders_the_model_message() {
+        // Unknown pk or another owner's row: Django's
+        // `get_object_or_404` raises `Http404` carrying the model's
+        // message (PIDASHCONV-899).
+        let (status, body) = Denial::NotFoundDetail.status_and_body();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, STICKY_NOT_FOUND_BODY);
     }
 
     #[test]

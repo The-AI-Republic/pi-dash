@@ -94,6 +94,7 @@ def test_sticky_delete(org):
     assert r.text == ""
     r = org.request("GET", f"{_base(org)}{created['id']}/", "admin")
     assert r.status_code == 404
+    assert r.json() == {"detail": "No Sticky matches the given query."}
 
 
 def test_sticky_list_owner_scoped(org):
@@ -110,6 +111,7 @@ def test_sticky_retrieve_other_owners_404(org):
     created = _create(org, role="admin")
     r = org.request("GET", f"{_base(org)}{created['id']}/", "member")
     assert r.status_code == 404
+    assert r.json() == {"detail": "No Sticky matches the given query."}
 
 
 def test_sticky_guest_may_create(org):
