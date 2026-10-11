@@ -6564,6 +6564,9 @@ export interface ParityDriver {
    * opened popover dismissed.
    */
   modulesListCardClickControl(name: string, control: ModulesListCardControl): Promise<void>;
+
+  /** Refuse whole-system deletes behind the dialog's back (failure-path spy). */
+  estimatesEditDeleteFailEstimateDelete(): Promise<void>;
 }
 
 /** Pages list tabs as the row-actions scenarios address them (NEWFRONT-313). */
