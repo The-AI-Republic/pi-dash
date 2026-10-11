@@ -266,12 +266,14 @@ test(
 
     await driver.pagesRowToggleStar(name);
     expect(await driver.pagesRowStarSelected(name)).toBe(true);
-    expect((await driver.toastText()) ?? "").toMatch(/added to favorites/i);
+    await expect.poll(() => driver.toastText(), { timeout: 30_000 }).toMatch(/added to favorites/i);
     expect((await serverPagesRowFlags(seed.workspaceSlug, projectId, pageId, session)).isFavorite).toBe(true);
 
     await driver.pagesRowToggleStar(name);
     expect(await driver.pagesRowStarSelected(name)).toBe(false);
-    expect((await driver.toastText()) ?? "").toMatch(/removed from favorites/i);
+    // The notice arrives a beat after the optimistic star flips, and the
+    // previous notice is still showing until it does.
+    await expect.poll(() => driver.toastText(), { timeout: 30_000 }).toMatch(/removed from favorites/i);
     expect((await serverPagesRowFlags(seed.workspaceSlug, projectId, pageId, session)).isFavorite).toBe(false);
   }
 );
@@ -550,7 +552,7 @@ test(
     await driver.pagesRowOpenMenu(name);
     expect(await driver.pagesRowMenuItems()).toContain("Delete");
     await driver.pagesRowMenuClick("Delete");
-    expect(await driver.pagesRowDeleteModalVisible()).toBe(true);
+    await expect.poll(() => driver.pagesRowDeleteModalVisible(), { timeout: 15_000 }).toBe(true);
     const modalText = await driver.pagesRowDeleteModalText();
     expect(modalText).toContain(name);
     expect(modalText).toMatch(/permanently|cannot be undone/i);
@@ -575,7 +577,7 @@ test(
     await driver.pagesRowOpenList(seed.workspaceSlug, projectId, "shelved");
     await driver.pagesRowOpenMenu(name);
     await driver.pagesRowMenuClick("Delete");
-    expect(await driver.pagesRowDeleteModalVisible()).toBe(true);
+    await expect.poll(() => driver.pagesRowDeleteModalVisible(), { timeout: 15_000 }).toBe(true);
 
     await driver.pagesRowSlowNextDelete(2000);
     const confirmed = driver.pagesRowDeleteModalConfirm();
@@ -598,16 +600,16 @@ test(
     const name = `Delete Detail ${stamp()}`;
     const pageId = await serverCreatePage(seed.workspaceSlug, projectId, session, name);
     await serverPageArchive(seed.workspaceSlug, projectId, pageId, session);
-    await driver.openAuthenticated(
-      detailUrl(seed, projectId, pageId),
-      sessionBrowserCookies(session)
-    );
+    // The list lands in history first: after the delete the detail goes
+    // back to wherever the viewer came from.
+    await driver.openAuthenticated(listUrl(seed, projectId), sessionBrowserCookies(session));
+    await driver.pagesRowOpenList(seed.workspaceSlug, projectId, "shelved");
     await driver.pagesRowOpenDetail(seed.workspaceSlug, projectId, pageId);
 
     await driver.pagesRowDetailOpenOptions();
     expect(await driver.pagesRowMenuItems()).toContain("Delete");
     await driver.pagesRowMenuClick("Delete");
-    expect(await driver.pagesRowDeleteModalVisible()).toBe(true);
+    await expect.poll(() => driver.pagesRowDeleteModalVisible(), { timeout: 15_000 }).toBe(true);
     await driver.pagesRowDeleteModalConfirm();
     await expect.poll(() => driver.currentUrlPath(), { timeout: 30_000 }).toBe(
       listUrl(seed, projectId)
@@ -617,7 +619,7 @@ test(
 );
 
 test(
-  specTitle(["PAGE-016"], "viewers of a deleted page land back on the list"),
+  specTitle(["PAGE-016"], "viewers of a deleted page meet the not-found view"),
   { tag: specTags(["PAGE-016"]) },
   async ({ driver, seed, browser }) => {
     const session = await ownerSession(seed);
@@ -641,9 +643,19 @@ test(
       await driver.pagesRowMenuClick("Delete");
       await driver.pagesRowDeleteModalConfirm();
 
-      // Revisiting the deleted record bounces back to the list.
+      // Revisiting the deleted record keeps its address and renders the
+      // not-found view (no automatic redirect); its recovery link
+      // returns the viewer to the list, where the row is gone.
       await peer.driver.pagesRowOpenDetail(seed.workspaceSlug, projectId, pageId);
-      expect(await peer.driver.currentUrlPath()).toBe(listUrl(seed, projectId));
+      expect(bare(await peer.driver.currentUrlPath())).toBe(bare(detailUrl(seed, projectId, pageId)));
+      expect(await peer.driver.pagesRowDetailNotFoundVisible()).toBe(true);
+      await peer.driver.pagesRowDetailNotFoundBackToList();
+      // The recovery link lands on the list with a trailing slash.
+      await expect.poll(() => peer.driver.currentUrlPath(), { timeout: 30_000 }).toBe(
+        `${listUrl(seed, projectId)}/`
+      );
+      await peer.driver.pagesRowOpenList(seed.workspaceSlug, projectId, "shelved");
+      expect(await peer.driver.pagesRowTitles()).toEqual([]);
     } finally {
       await peer.close();
     }

@@ -10032,4 +10032,12 @@ export class WebNewDriver implements ParityDriver {
   async pagesRowDetailMoveVisible(): Promise<boolean> {
     return todo("pagesRowDetailMoveVisible");
   }
+
+  async pagesRowDetailNotFoundVisible(): Promise<boolean> {
+    return todo("pagesRowDetailNotFoundVisible");
+  }
+
+  async pagesRowDetailNotFoundBackToList(): Promise<void> {
+    return todo("pagesRowDetailNotFoundBackToList");
+  }
 }

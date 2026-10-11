@@ -6366,6 +6366,10 @@ export interface ParityDriver {
   pagesRowDetailReadOnly(): Promise<boolean>;
   /** Whether a move affordance renders in the detail header for this page. */
   pagesRowDetailMoveVisible(): Promise<boolean>;
+  /** Whether the detail view shows its not-found state for a missing page. */
+  pagesRowDetailNotFoundVisible(): Promise<boolean>;
+  /** Follow the not-found view's recovery link back to the pages list. */
+  pagesRowDetailNotFoundBackToList(): Promise<void>;
 }
 
 /** Pages list tabs as the row-actions scenarios address them (NEWFRONT-313). */

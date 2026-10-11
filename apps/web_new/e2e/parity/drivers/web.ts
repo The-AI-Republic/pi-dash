@@ -31844,8 +31844,9 @@ export class WebDriver implements ParityDriver {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`, {
       waitUntil: "domcontentloaded",
     });
-    // Either the title editor or a bounce back to the list proves the
-    // detail settled (deleted records redirect to the list).
+    // Either the title editor, a bounce back to the list, or the
+    // not-found view proves the detail settled (deleted records keep
+    // their address and render the not-found view instead of redirecting).
     await expect
       .poll(
         async () => {
@@ -31854,6 +31855,7 @@ export class WebDriver implements ParityDriver {
             .count();
           if (editors > 0) return "ready";
           if (!this.page.url().includes(pageId)) return "gone";
+          if ((await this.pagesRowDetailNotFoundHeading().count()) > 0) return "gone";
           return "waiting";
         },
         { timeout: WebDriver.DETAIL_MS }
@@ -32202,8 +32204,15 @@ export class WebDriver implements ParityDriver {
     return this.page.locator('[role="dialog"]', { hasText: "Delete page" });
   }
 
+  private pagesRowDeletePanel(): Locator {
+    // The dialog root holds only fixed-position children, so its own box
+    // is empty and never counts as visible; the heading inside the panel
+    // is the shown/hidden signal.
+    return this.pagesRowDeleteDialog().getByRole("heading", { name: "Delete page" });
+  }
+
   async pagesRowDeleteModalVisible(): Promise<boolean> {
-    return this.isShown(this.pagesRowDeleteDialog().first());
+    return this.isShown(this.pagesRowDeletePanel().first());
   }
 
   async pagesRowDeleteModalText(): Promise<string> {
@@ -32211,16 +32220,22 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesRowDeleteConfirmBusy(): Promise<boolean> {
-    const confirm = this.pagesRowDeleteDialog().getByRole("button", { name: "Delete" });
-    if ((await confirm.count()) === 0) return false;
-    return !(await confirm.first().isEnabled());
+    // The confirm control relabels while submitting ("Delete" becomes
+    // its progress label), so match by state, not by name: Cancel stays
+    // enabled throughout, only the submitting confirm disables.
+    const buttons = this.pagesRowDeleteDialog().getByRole("button");
+    const total = await buttons.count();
+    for (let index = 0; index < total; index += 1) {
+      if (await buttons.nth(index).isDisabled().catch(() => false)) return true;
+    }
+    return false;
   }
 
   async pagesRowDeleteModalCancel(): Promise<void> {
     await this.pagesRowDeleteDialog()
       .getByRole("button", { name: "Cancel" })
       .click({ timeout: WebDriver.OPEN_MS });
-    await this.pagesRowDeleteDialog()
+    await this.pagesRowDeletePanel()
       .first()
       .waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
   }
@@ -32229,7 +32244,7 @@ export class WebDriver implements ParityDriver {
     await this.pagesRowDeleteDialog()
       .getByRole("button", { name: "Delete" })
       .click({ timeout: WebDriver.OPEN_MS });
-    await this.pagesRowDeleteDialog()
+    await this.pagesRowDeletePanel()
       .first()
       .waitFor({ state: "hidden", timeout: WebDriver.DETAIL_MS });
   }
@@ -35402,5 +35417,21 @@ export class WebDriver implements ParityDriver {
     if ((await this.page.locator("svg.lucide-file-output").count()) > 0) return true;
     const header = this.page.getByRole("main").last().innerText({ timeout: WebDriver.OPEN_MS }).catch(() => "");
     return ((await header) ?? "").includes("Move to");
+  }
+
+  private pagesRowDetailNotFoundHeading(): Locator {
+    return this.page.getByRole("main").last().getByRole("heading", { name: "Page not found" });
+  }
+
+  async pagesRowDetailNotFoundVisible(): Promise<boolean> {
+    return this.isShown(this.pagesRowDetailNotFoundHeading().first());
+  }
+
+  async pagesRowDetailNotFoundBackToList(): Promise<void> {
+    await this.page
+      .getByRole("main")
+      .last()
+      .getByRole("link", { name: "View other Pages" })
+      .click({ timeout: WebDriver.OPEN_MS });
   }
 }
