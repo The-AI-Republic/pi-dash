@@ -112,7 +112,7 @@ async function deleteStrayTempStates(
 }
 
 async function openSheet(
-  driver: Pick<ParityDriver, "openAuthenticated">,
+  driver: Pick<ParityDriver, "openAuthenticated" | "layoutsSpreadsheetVisible">,
   seed: Pick<ParitySeedFacts, "workspaceSlug" | "projectId">,
   session: string,
   keepStateId = ""
@@ -125,6 +125,10 @@ async function openSheet(
     `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
     sessionBrowserCookies(session)
   );
+  // Settle before interacting: the sheet's controls render before their
+  // handlers attach, and a click into that window is silently swallowed
+  // on fast builds (the quick-add trigger is the observed victim).
+  await expect.poll(async () => driver.layoutsSpreadsheetVisible(), { timeout: 120_000 }).toEqual(true);
 }
 
 test(

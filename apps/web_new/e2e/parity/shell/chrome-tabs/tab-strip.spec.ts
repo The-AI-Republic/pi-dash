@@ -208,10 +208,8 @@ test(
   }
 );
 
-const BUG_078 = "NEWFRONT-142";
-
 test(
-  specTitle(ROWS_078, `bug: narrow widths clip tabs without pooling them (${BUG_078})`),
+  specTitle(ROWS_078, "narrow widths pool trailing tabs into the overflow menu"),
   { tag: specTags(ROWS_078) },
   async ({ driver, seed }) => {
     await test.step("sign in through the UI", async () => {
@@ -242,17 +240,25 @@ test(
       await expect.poll(() => driver.projectTabs(), { timeout: 60_000 }).not.toEqual([]);
     });
 
-    await test.step("narrow widths clip trailing tabs without pooling them", async () => {
-      // The responsive measurement never recomputes its visible count, so
-      // narrowing the strip clips trailing tabs instead of pooling them
-      // and no overflow trigger ever renders for width pressure.
+    await test.step("narrow widths pool trailing tabs into the overflow menu", async () => {
+      // Production truth (NEWFRONT-246): narrowing the strip pools trailing
+      // tabs behind the overflow trigger. The old bug: scenario asserted the
+      // dev oracle, where the resize measurement never recomputes (StrictMode
+      // double-mount disconnects the tab strip's ResizeObserver), so widths
+      // clipped without pooling there — recorded as dev-only on
+      // NEWFRONT-142. The row and scenario follow production, which is what
+      // users run.
       await driver.openProjectTab(seed.workspaceSlug, seed.projectId, "issues");
       const wide = await driver.projectTabs();
       expect(wide.length).toBeGreaterThan(0);
+      expect(await driver.overflowTriggerPresent()).toBe(false);
       await driver.setViewportSize(500, 800);
       await driver.page.waitForTimeout(2_000);
-      expect(await driver.projectTabs()).toEqual(wide);
-      expect(await driver.overflowTriggerPresent()).toBe(false);
+      await expect.poll(() => driver.overflowTriggerPresent(), { timeout: 30_000 }).toBe(true);
+      await driver.openOverflowMenu();
+      const pooled = await driver.overflowRowNames();
+      expect(pooled.length).toBeGreaterThan(0);
+      expect(pooled).toContain("Schedulers");
       await driver.setViewportSize(1280, 720);
     });
 

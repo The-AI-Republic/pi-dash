@@ -58,7 +58,7 @@ test(
 );
 
 test(
-  specTitle(["ISS-165"], "bug: NEWFRONT-139 nested sub-issue peek needs widget rows"),
+  specTitle(["ISS-165"], "nested sub-issue peek from a widget row"),
   { tag: specTags(["ISS-165"]) },
   async ({ driver, seed }) => {
     await signIn(driver, seed);
@@ -74,10 +74,14 @@ test(
       await test.step("the peek widget counts the child", async () => {
         await expect.poll(() => driver.widgetProgress("Sub-work items"), { timeout: 30_000 }).toBe("0/1 Done");
       });
-      await test.step("bug: no child row renders to nest the peek from", async () => {
-        // Intended: clicking the child row nests the peek (peekNestingLevel
-        // in the URL, child title on top). Unreachable while rows don't render.
-        expect(await driver.widgetRowNames("Sub-work items")).toEqual([]);
+      await test.step("the child row renders to nest the peek from", async () => {
+        // Covered: the row renders with identifier and name (dev-only bug
+        // NEWFRONT-139 leaves the panel empty on the dev oracle). Still
+        // open: clicking the row nesting the peek (peekNestingLevel in the
+        // URL, child title on top).
+        await expect
+          .poll(async () => (await driver.widgetRowNames("Sub-work items")).join("\n"), { timeout: 30_000 })
+          .toContain(child.name);
         expect((await fetchIssue(seed.workspaceSlug, seed.projectId, child.id, session))["parent_id"]).toBe(parent.id);
       });
     } finally {
