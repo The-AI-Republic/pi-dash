@@ -376,6 +376,143 @@ def test_hard_delete_removes_tombstoned_rows(db_conn, broker_url):
     )
 
 
+def _tombstone(conn, table: str, pk) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            f'UPDATE "{table}" SET deleted_at = %s WHERE id = %s::uuid',
+            (_old(), str(pk)),
+        )
+
+
+def _seed_loop_tree(db_conn, tag: str):
+    """Loop job + target + preference (all live); caller tombstones."""
+    owner = seed_helpers.user(db_conn, f"contract-looptomb-owner-{tag}")
+    workspace = seed_helpers.workspace(db_conn, f"contractlooptomb{tag}", owner["id"])
+    member = seed_helpers.user(db_conn, f"contract-looptomb-member-{tag}")
+    job = insert_row(
+        db_conn,
+        "loop_jobs",
+        {
+            "slug": f"contract-looptomb-{tag}",
+            "name": "oracle job",
+            "public_name": "Oracle Job",
+            "public_description": "seeded",
+            "prompt": "Do the thing.",
+            "min_role": 15,
+            "enabled": True,
+            "is_builtin": False,
+            "dtstart": _old(days=1),
+            "rrule": "FREQ=DAILY;BYHOUR=3;BYMINUTE=0",
+            "tzid": "UTC",
+        },
+    )
+    target = insert_row(
+        db_conn,
+        "loop_targets",
+        {
+            "job_id": str(job["id"]),
+            "workspace_id": str(workspace["id"]),
+            "user_id": str(member["id"]),
+            "last_skip_reason": "",
+        },
+    )
+    pref = insert_row(
+        db_conn,
+        "loop_user_preferences",
+        {
+            "user_id": str(member["id"]),
+            "job_id": str(job["id"]),
+            "enabled": False,
+        },
+    )
+    return job, target, pref
+
+
+def test_hard_delete_removes_tombstoned_subtree(db_conn, broker_url):
+    """PIDASHCONV-928 oracle: the Collector removes a tombstoned subtree.
+
+    ``loop_jobs`` sorts before ``loop_targets`` alphabetically, so this is
+    the parent-first pair the Rust sweep used to fail on (FK violation).
+    Django's per-model ``.delete()`` runs the ORM Collector, which deletes
+    CASCADE children along with the parent inside one transaction.
+    """
+    tag = uuid.uuid4().hex[:8]
+    job, target, pref = _seed_loop_tree(db_conn, tag)
+    for table, row in (
+        ("loop_jobs", job),
+        ("loop_targets", target),
+        ("loop_user_preferences", pref),
+    ):
+        _tombstone(db_conn, table, row["id"])
+    celery_wire.publish(f"{M}.deletion_task.hard_delete")
+    for table, row in (
+        ("loop_jobs", job),
+        ("loop_targets", target),
+        ("loop_user_preferences", pref),
+    ):
+        wait_for(
+            lambda t=table, r=row: _missing(db_conn, t, r["id"]),
+            what=f"tombstoned {table} row hard-deleted",
+        )
+
+
+def test_hard_delete_cascade_deletes_live_child(db_conn, broker_url):
+    """PIDASHCONV-928 oracle: Collector deletes LIVE CASCADE children.
+
+    A tombstoned parent with a live CASCADE child is inconsistent input
+    (reachable only by direct SQL now that the soft-delete walk cascades),
+    and Django resolves it by hard-deleting the live child too. This pins
+    the baseline the Rust port deliberately diverges from: Rust fails the
+    task loudly instead (see the replay pin), because hard-deleting live
+    rows outside the tombstone set is destructive emulation.
+    """
+    tag = uuid.uuid4().hex[:8]
+    job, target, _pref = _seed_loop_tree(db_conn, tag)
+    _tombstone(db_conn, "loop_jobs", job["id"])
+    celery_wire.publish(f"{M}.deletion_task.hard_delete")
+    wait_for(
+        lambda: _missing(db_conn, "loop_jobs", job["id"]),
+        what="tombstoned loop_jobs row hard-deleted",
+    )
+    wait_for(
+        lambda: _missing(db_conn, "loop_targets", target["id"]),
+        what="live loop_targets child cascade-deleted by Collector",
+    )
+
+
+def test_hard_delete_mutual_project_state(db_conn, broker_url):
+    """PIDASHCONV-928 oracle: Collector cracks the project/state FK cycle.
+
+    ``projects.default_state_id`` and ``states.project_id`` reference each
+    other, so no table order can delete tombstoned project+state rows with
+    plain per-table DELETEs. Django's single-transaction Collector checks
+    the deferred FKs once at commit and removes both.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"928cyc{tag}")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET default_state_id = %s::uuid WHERE id = %s::uuid",
+            (str(chain["state"]["id"]), str(chain["project"]["id"])),
+        )
+    for table, key in (
+        ("projects", "project"),
+        ("states", "state"),
+        ("issues", "issue"),
+    ):
+        _tombstone(db_conn, table, chain[key]["id"])
+    celery_wire.publish(f"{M}.deletion_task.hard_delete")
+    for table, key in (
+        ("projects", "project"),
+        ("states", "state"),
+        ("issues", "issue"),
+    ):
+        wait_for(
+            lambda t=table, k=key: _missing(db_conn, t, chain[k]["id"]),
+            what=f"tombstoned {table} row hard-deleted",
+        )
+
+
 def test_eta_delayed_execution(db_conn, broker_url):
     """ETA parity through the real worker: countdown delays the delete."""
     row = insert_row(

@@ -691,6 +691,185 @@ def test_rust_soft_delete_project_skips_soft_deleted_identifier(db_conn, broker_
     assert str(after["project_id"]) == str(project["id"]), (
         "CASCADE O2O parity broken: soft-deleted child FK nulled"
     )
+def _tombstone(conn, table: str, pk) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            f'UPDATE "{table}" SET deleted_at = %s WHERE id = %s::uuid',
+            (_old(), str(pk)),
+        )
+
+
+def _seed_loop_tree(db_conn, tag: str):
+    """Loop job + target + preference (all live); caller tombstones."""
+    owner = seed_helpers.user(db_conn, f"rust-replay-looptomb-owner-{tag}")
+    workspace = seed_helpers.workspace(
+        db_conn, f"rustreplaylooptomb{tag}", owner["id"]
+    )
+    member = seed_helpers.user(db_conn, f"rust-replay-looptomb-member-{tag}")
+    job = insert_row(
+        db_conn,
+        "loop_jobs",
+        {
+            "slug": f"rust-replay-looptomb-{tag}",
+            "name": "replay job",
+            "public_name": "Replay Job",
+            "public_description": "seeded",
+            "prompt": "Do the thing.",
+            "min_role": 15,
+            "enabled": True,
+            "is_builtin": False,
+            "dtstart": _old(days=1),
+            "rrule": "FREQ=DAILY;BYHOUR=3;BYMINUTE=0",
+            "tzid": "UTC",
+        },
+    )
+    target = insert_row(
+        db_conn,
+        "loop_targets",
+        {
+            "job_id": str(job["id"]),
+            "workspace_id": str(workspace["id"]),
+            "user_id": str(member["id"]),
+            "last_skip_reason": "",
+        },
+    )
+    pref = insert_row(
+        db_conn,
+        "loop_user_preferences",
+        {
+            "user_id": str(member["id"]),
+            "job_id": str(job["id"]),
+            "enabled": False,
+        },
+    )
+    return job, target, pref
+
+
+def test_rust_hard_delete_removes_tombstoned_subtree(db_conn, broker_url):
+    """PIDASHCONV-928: the Rust sweep deletes children before parents.
+
+    ``loop_jobs`` sorts before ``loop_targets`` alphabetically, and the
+    pre-fix sweep deleted table by table in that order — so a tombstoned
+    parent always failed its deferred FK check at the statement commit,
+    aborting the whole task. The fix orders the sweep topologically over
+    the catalog FK graph; the whole tombstoned subtree goes in one run.
+    """
+    tag = uuid.uuid4().hex[:8]
+    job, target, pref = _seed_loop_tree(db_conn, tag)
+    for table, row in (
+        ("loop_jobs", job),
+        ("loop_targets", target),
+        ("loop_user_preferences", pref),
+    ):
+        _tombstone(db_conn, table, row["id"])
+    rust_queue.publish(f"{M}.deletion_task.hard_delete")
+    for table, row in (
+        ("loop_jobs", job),
+        ("loop_targets", target),
+        ("loop_user_preferences", pref),
+    ):
+        wait_for(
+            lambda t=table, r=row: _missing(db_conn, t, r["id"]),
+            what=f"tombstoned {table} row hard-deleted by rust worker",
+        )
+
+
+def _queue_failure(conn, celery_id):
+    """Parked-failure text, or None while the job has not failed.
+
+    A ``Verdict::Fail`` parks immediately (``status = 'failed'`` with the
+    error text; only ``Verdict::Retry`` requeues), so the parked row —
+    not the attempts counter — is the failure signal.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT status, last_error FROM rust_job_queue WHERE celery_id = %s",
+            (celery_id,),
+        )
+        row = cur.fetchone()
+        if row is None or row["status"] != "failed":
+            return None
+        return row["last_error"]
+
+
+def test_rust_hard_delete_live_child_fails_loud(db_conn, broker_url):
+    """PIDASHCONV-928: tombstoned parent + LIVE child fails, rows remain.
+
+    Deliberate divergence from the Django Collector (see the
+    ``test_hard_delete_cascade_deletes_live_child`` oracle, which deletes
+    the live child): the Rust task reports the FK violation and leaves
+    every row alone instead of hard-deleting live rows outside the
+    tombstone set. The parked queue row and the seeds are removed at the
+    end: a leftover tombstoned parent would fail every later hard_delete
+    run in this suite.
+    """
+    tag = uuid.uuid4().hex[:8]
+    job, target, pref = _seed_loop_tree(db_conn, tag)
+    _tombstone(db_conn, "loop_jobs", job["id"])
+    celery_id = rust_queue.publish(f"{M}.deletion_task.hard_delete")
+    try:
+        failure = wait_for(
+            lambda: _queue_failure(db_conn, celery_id),
+            what="rust hard_delete failed loudly on live child",
+        )
+        assert "foreign key" in (failure or ""), (
+            f"expected an FK violation in last_error, got: {failure!r}"
+        )
+        assert not _missing(db_conn, "loop_jobs", job["id"]), (
+            "loud-failure parity broken: blocked parent was deleted"
+        )
+        assert not _missing(db_conn, "loop_targets", target["id"]), (
+            "loud-failure parity broken: live child was deleted"
+        )
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM rust_job_queue WHERE celery_id = %s", (celery_id,)
+            )
+            for table, row in (
+                ("loop_targets", target),
+                ("loop_user_preferences", pref),
+                ("loop_jobs", job),
+            ):
+                cur.execute(
+                    f'DELETE FROM "{table}" WHERE id = %s::uuid', (str(row["id"]),)
+                )
+
+
+def test_rust_hard_delete_mutual_project_state(db_conn, broker_url):
+    """PIDASHCONV-928: the retry transaction cracks the project/state cycle.
+
+    ``projects.default_state_id`` and ``states.project_id`` reference each
+    other, so no table order deletes tombstoned project+state rows with
+    plain per-table DELETEs. Tables that hit an FK violation in the pass
+    are retried jointly in one transaction, whose deferred FK check at
+    commit sees the whole consistent set gone at once.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"928rcyc{tag}")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET default_state_id = %s::uuid WHERE id = %s::uuid",
+            (str(chain["state"]["id"]), str(chain["project"]["id"])),
+        )
+    for table, key in (
+        ("projects", "project"),
+        ("states", "state"),
+        ("issues", "issue"),
+    ):
+        _tombstone(db_conn, table, chain[key]["id"])
+    rust_queue.publish(f"{M}.deletion_task.hard_delete")
+    for table, key in (
+        ("projects", "project"),
+        ("states", "state"),
+        ("issues", "issue"),
+    ):
+        wait_for(
+            lambda t=table, k=key: _missing(db_conn, t, chain[k]["id"]),
+            what=f"tombstoned {table} row hard-deleted by rust worker",
+        )
+
+
 
 
 def test_rust_eta_delayed_execution(db_conn, broker_url):

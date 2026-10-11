@@ -47,9 +47,10 @@
 use std::collections::HashSet;
 
 use pidash_db::tasks_cleanup::{
-    entry_table_for, fetch_live_to_many, fetch_one_to_one, fetch_row, load_schema_info, now_stamp,
-    null_bulk, null_one_to_one, parse_pk, reverse_relations, run_named_hard_deletes,
-    run_sweep_hard_deletes, stamp_row, sweep_tables, LookupError, RowState,
+    entry_table_for, fetch_live_to_many, fetch_one_to_one, fetch_row, load_fk_edges,
+    load_schema_info, now_stamp, null_bulk, null_one_to_one, parse_pk, reverse_relations,
+    run_named_hard_deletes, run_retry_hard_deletes, run_sweep_hard_deletes, stamp_row,
+    sweep_tables, LookupError, RowState, HARD_DELETE_NAMED_TABLES,
 };
 use pidash_db::{Pools, RequestContext};
 use serde_json::Value;
@@ -352,23 +353,61 @@ pub struct HardDeleteOutcome {
 /// `hard_delete()` (`deletion_task.py:114-193`): the 18 named models in
 /// source order, then every `deleted_at` base table. `cutoff` is the
 /// preformatted `now - HARD_DELETE_AFTER_DAYS` literal.
+///
+/// FK-safe execution (PIDASHCONV-928): Django's per-model `.delete()`
+/// runs the ORM Collector (CASCADE children deleted, `SET_NULL` nulled,
+/// one transaction), while Rust issues one raw `DELETE` per table with
+/// the deferred FK check landing at each statement's own commit. The
+/// named pass keeps source order and the sweep sorts children before
+/// parents (topological over the catalog FK graph); a `DELETE` that hits
+/// an FK violation records its table as blocked instead of aborting,
+/// and the blocked tables retry jointly in one transaction — whose
+/// deferred checks crack FK cycles (`projects` ↔ `states`) and
+/// cross-phase stragglers (named parents sort before sweep children).
+/// A tombstoned parent with *live* children still fails the task loudly
+/// with the FK violation: deliberate divergence from the Collector,
+/// which would hard-delete the live children (pinned by
+/// `test_rust_hard_delete_live_child_fails_loud`; Django baseline in
+/// `test_hard_delete_cascade_deletes_live_child`).
 pub async fn hard_delete(
     pools: &Pools,
     ctx: &RequestContext,
     cutoff: &str,
 ) -> Result<HardDeleteOutcome, DeletionError> {
     let writes = pools.primary();
-    let named_deleted = run_named_hard_deletes(writes, cutoff)
+    let named = run_named_hard_deletes(writes, cutoff)
         .await
         .map_err(db_error)?;
-    let schema = load_schema_info(read_pool!(pools, ctx))
-        .await
-        .map_err(db_error)?;
-    let tables = sweep_tables(&schema);
+    let reads = read_pool!(pools, ctx);
+    let schema = load_schema_info(reads).await.map_err(db_error)?;
+    let edges = load_fk_edges(reads).await.map_err(db_error)?;
+    let tables = sweep_tables(&schema, &edges);
     let sweep_tables_count = tables.len();
-    let sweep_deleted = run_sweep_hard_deletes(writes, &schema, cutoff)
+    let sweep = run_sweep_hard_deletes(writes, &schema, &edges, cutoff)
         .await
         .map_err(db_error)?;
+    let mut retry_tables: Vec<String> = named
+        .blocked
+        .iter()
+        .chain(&sweep.blocked)
+        .cloned()
+        .collect();
+    retry_tables.sort();
+    retry_tables.dedup();
+    let mut named_deleted = named.deleted;
+    let mut sweep_deleted = sweep.deleted;
+    if !retry_tables.is_empty() {
+        let retried = run_retry_hard_deletes(writes, &retry_tables, cutoff)
+            .await
+            .map_err(db_error)?;
+        for (table, affected) in retried {
+            if HARD_DELETE_NAMED_TABLES.contains(&table.as_str()) {
+                named_deleted += affected;
+            } else {
+                sweep_deleted += affected;
+            }
+        }
+    }
     Ok(HardDeleteOutcome {
         named_deleted,
         sweep_deleted,

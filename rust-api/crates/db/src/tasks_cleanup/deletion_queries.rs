@@ -19,7 +19,7 @@
 //! catalog-decoded `i64`) before use, and the cutoff is formatted by
 //! `chrono`. No caller input reaches SQL raw.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use sea_query::{Alias, Expr, Order, PostgresQueryBuilder, Query, SimpleExpr};
@@ -400,12 +400,23 @@ pub async fn load_schema_info(pool: &PgPool) -> Result<SchemaInfo, sqlx::Error> 
     Ok(info)
 }
 
-/// Every base table carrying the soft-delete marker, alphabetically.
-/// Feeds the `apps.get_models()` sweep (`deletion_task.py:183-188`):
-/// Python iterates the app registry, Rust iterates the catalog — the
-/// statement order differs, but each `DELETE` is independent so the
-/// before/after DB state is identical.
-pub fn sweep_tables(schema: &SchemaInfo) -> Vec<String> {
+/// Every base table carrying the soft-delete marker, children before
+/// parents (topological order over `edges`, alphabetical tie-break).
+///
+/// Feeds the `apps.get_models()` sweep (`deletion_task.py:183-188`).
+/// Python iterates the app registry with the Collector absorbing the
+/// order (each per-model `.delete()` cascades inside one transaction);
+/// Rust issues one raw `DELETE` per table with the deferred FK check
+/// landing at each statement's own commit, so a tombstoned parent must
+/// sort after its children or the `DELETE` fails and aborts the whole
+/// task (PIDASHCONV-928: `loop_jobs` sorts before `loop_targets`
+/// alphabetically). Tables in FK cycles (e.g. `projects` ↔ `states`
+/// via `default_state_id`) have no valid order and are appended
+/// alphabetically; the joint retry in [`run_retry_hard_deletes`]
+/// deletes them together. Self-loops need no ordering: one statement
+/// removes the whole table's tombstones atomically. `edges` must hold
+/// distinct pairs ([`load_fk_edges`] deduplicates).
+pub fn sweep_tables(schema: &SchemaInfo, edges: &[(String, String)]) -> Vec<String> {
     let mut tables: Vec<String> = schema
         .columns
         .keys()
@@ -413,7 +424,62 @@ pub fn sweep_tables(schema: &SchemaInfo) -> Vec<String> {
         .cloned()
         .collect();
     tables.sort();
-    tables
+    // Kahn's algorithm: a table is releasable once every sweep child
+    // (tables holding an FK into it) has been emitted, so children sort
+    // before parents. Edges outside the sweep set and self-loops are
+    // ignored: a parent that is never swept (or the table itself) cannot
+    // block a per-table `DELETE`.
+    let mut parents_of: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut child_count: HashMap<&str, usize> = HashMap::new();
+    for table in &tables {
+        child_count.insert(table.as_str(), 0);
+    }
+    for (child, parent) in edges {
+        if child == parent || !schema.has_deleted_at(child) || !schema.has_deleted_at(parent) {
+            continue;
+        }
+        parents_of
+            .entry(child.as_str())
+            .or_default()
+            .push(parent.as_str());
+        *child_count.entry(parent.as_str()).or_default() += 1;
+    }
+    let mut releasable: BTreeSet<&str> = tables
+        .iter()
+        .map(String::as_str)
+        .filter(|t| child_count[t] == 0)
+        .collect();
+    let mut ordered = Vec::with_capacity(tables.len());
+    let mut emitted: HashSet<&str> = HashSet::new();
+    while let Some(table) = releasable.pop_first() {
+        emitted.insert(table);
+        ordered.push(table.to_owned());
+        if let Some(parents) = parents_of.get(table) {
+            for parent in parents {
+                if emitted.contains(parent) {
+                    continue;
+                }
+                if let Some(count) = child_count.get_mut(parent) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        releasable.insert(parent);
+                    }
+                }
+            }
+        }
+    }
+    if ordered.len() < tables.len() {
+        // Cycle remainder: no valid order exists; append alphabetically
+        // (the joint retry in `run_retry_hard_deletes` cracks these).
+        let mut rest: Vec<&str> = tables
+            .iter()
+            .map(String::as_str)
+            .filter(|t| !emitted.contains(t))
+            .collect();
+        rest.sort();
+        ordered.extend(rest.iter().map(ToString::to_string));
+    }
+    ordered
 }
 
 /// `(child_table, fk_column)` pairs whose Django `on_delete` is
@@ -963,28 +1029,120 @@ pub async fn hard_delete_table(
     execute(pool, &hard_delete_before_sql(table, cutoff)).await
 }
 
-/// The 18 named deletes, in fixture order.
-pub async fn run_named_hard_deletes(pool: &PgPool, cutoff: &str) -> Result<u64, sqlx::Error> {
-    let mut affected = 0;
-    for table in HARD_DELETE_NAMED_TABLES {
-        affected += hard_delete_table(pool, table, cutoff).await?;
+/// Every `(child_table, parent_table)` FK edge in `public`, deduplicated.
+///
+/// Drives the sweep's topological order (children before parents).
+/// Django emits bare `NO ACTION` constraints for every `on_delete`, so
+/// the edge *rules* carry no signal — only the graph shape matters here.
+pub async fn load_fk_edges(pool: &PgPool) -> Result<Vec<(String, String)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT kcu.table_name AS child_table, ccu.table_name AS parent_table \
+         FROM information_schema.referential_constraints rc \
+         JOIN information_schema.key_column_usage kcu \
+           ON kcu.constraint_name = rc.constraint_name \
+          AND kcu.constraint_schema = rc.constraint_schema \
+         JOIN information_schema.constraint_column_usage ccu \
+           ON ccu.constraint_name = rc.unique_constraint_name \
+          AND ccu.constraint_schema = rc.unique_constraint_schema \
+         WHERE rc.constraint_schema = 'public' \
+           AND ccu.table_schema = 'public' \
+         ORDER BY 1, 2",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut edges = Vec::with_capacity(rows.len());
+    for row in rows {
+        edges.push((row.try_get("child_table")?, row.try_get("parent_table")?));
     }
-    Ok(affected)
+    Ok(edges)
 }
 
-/// The `apps.get_models()` sweep: every `deleted_at` base table,
-/// re-inclusive of the 18 named ones, exactly like the Python loop at
-/// `:183-188` (the re-deletes match no rows; kept for structural parity).
+/// `true` for a Postgres foreign-key violation (`23503`) — a tombstoned
+/// parent whose children are still present. Hard-delete passes record
+/// the table as blocked and continue; anything else aborts the task.
+pub fn is_fk_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db) if db.code().as_deref() == Some("23503"))
+}
+
+/// What one hard-delete pass did over its tables.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HardDeletePass {
+    /// Rows removed by the pass.
+    pub deleted: u64,
+    /// Tables whose `DELETE` hit an FK violation (SQLSTATE 23503): the
+    /// statement rolled back and the table is retried jointly in
+    /// [`run_retry_hard_deletes`]. Any other error aborts the pass.
+    pub blocked: Vec<String>,
+}
+
+/// The 18 named deletes, in fixture order. FK-blocked tables are
+/// recorded, not fatal: a named parent (e.g. `projects`) sorts before
+/// its sweep children (`project_members`), so the pass cannot be
+/// order-safe on its own — the joint retry finishes those tables.
+pub async fn run_named_hard_deletes(
+    pool: &PgPool,
+    cutoff: &str,
+) -> Result<HardDeletePass, sqlx::Error> {
+    let mut pass = HardDeletePass::default();
+    for table in HARD_DELETE_NAMED_TABLES {
+        match hard_delete_table(pool, table, cutoff).await {
+            Ok(affected) => pass.deleted += affected,
+            Err(error) if is_fk_violation(&error) => pass.blocked.push(table.to_owned()),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(pass)
+}
+
+/// The `apps.get_models()` sweep: every `deleted_at` base table in
+/// topological order, re-inclusive of the 18 named ones, exactly like
+/// the Python loop at `:183-188` (the re-deletes match no rows unless
+/// the named pass left them blocked; kept for structural parity).
 pub async fn run_sweep_hard_deletes(
     pool: &PgPool,
     schema: &SchemaInfo,
+    edges: &[(String, String)],
     cutoff: &str,
-) -> Result<u64, sqlx::Error> {
-    let mut affected = 0;
-    for table in sweep_tables(schema) {
-        affected += hard_delete_table(pool, &table, cutoff).await?;
+) -> Result<HardDeletePass, sqlx::Error> {
+    let mut pass = HardDeletePass::default();
+    for table in sweep_tables(schema, edges) {
+        match hard_delete_table(pool, &table, cutoff).await {
+            Ok(affected) => pass.deleted += affected,
+            Err(error) if is_fk_violation(&error) => pass.blocked.push(table),
+            Err(error) => return Err(error),
+        }
     }
-    Ok(affected)
+    Ok(pass)
+}
+
+/// Joint retry for blocked tables: one transaction, deferred FK checks.
+///
+/// Cracks FK cycles (no table order deletes `projects` + `states`
+/// tombstones with separate per-table `DELETE`s) and cross-phase
+/// stragglers (a named parent whose sweep children deleted late in the
+/// pass). Every constraint is `DEFERRABLE INITIALLY DEFERRED`, so a
+/// consistent tombstoned set commits cleanly whatever the statement
+/// order; a tombstoned parent with *live* children still fails loudly
+/// with the FK violation (the pinned PIDASHCONV-928 divergence from the
+/// Collector, which would delete the live children). Returns per-table
+/// row counts for phase attribution; any error rolls the whole retry
+/// back and propagates.
+pub async fn run_retry_hard_deletes(
+    pool: &PgPool,
+    tables: &[String],
+    cutoff: &str,
+) -> Result<Vec<(String, u64)>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let mut per_table = Vec::with_capacity(tables.len());
+    for table in tables {
+        let affected = sqlx::query(&hard_delete_before_sql(table, cutoff))
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        per_table.push((table.clone(), affected));
+    }
+    tx.commit().await?;
+    Ok(per_table)
 }
 
 #[cfg(test)]
@@ -1269,6 +1427,24 @@ mod tests {
         );
     }
 
+    fn sweep_schema(tables: &[&str]) -> SchemaInfo {
+        let mut schema = SchemaInfo::default();
+        for table in tables {
+            schema.columns.insert(
+                (*table).to_owned(),
+                HashSet::from(["deleted_at".to_owned()]),
+            );
+        }
+        schema
+    }
+
+    fn edges(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(child, parent)| ((*child).to_owned(), (*parent).to_owned()))
+            .collect()
+    }
+
     #[test]
     fn one_to_one_select_is_unscoped_base_manager_read() {
         // PIDASHCONV-936: the reverse-O2O `getattr`
@@ -1309,22 +1485,134 @@ mod tests {
 
     #[test]
     fn sweep_lists_deleted_tables_sorted() {
-        let mut schema = SchemaInfo::default();
-        schema.columns.insert(
-            "b_table".to_owned(),
-            HashSet::from(["deleted_at".to_owned()]),
-        );
-        schema.columns.insert(
-            "a_table".to_owned(),
-            HashSet::from(["deleted_at".to_owned()]),
-        );
+        let mut schema = sweep_schema(&["b_table", "a_table"]);
         schema
             .columns
             .insert("users".to_owned(), HashSet::from(["id".to_owned()]));
         assert_eq!(
-            sweep_tables(&schema),
+            sweep_tables(&schema, &[]),
             vec!["a_table".to_owned(), "b_table".to_owned()]
         );
         assert_eq!(schema.pk_column("whatever"), "id");
+    }
+
+    #[test]
+    fn sweep_orders_children_before_parents() {
+        // PIDASHCONV-928: the loop pair sorts parent-first
+        // alphabetically; the sweep must still delete the children first.
+        let schema = sweep_schema(&[
+            "loop_jobs",
+            "loop_targets",
+            "loop_user_preferences",
+            "unrelated",
+        ]);
+        let fk = edges(&[
+            ("loop_targets", "loop_jobs"),
+            ("loop_user_preferences", "loop_jobs"),
+        ]);
+        let ordered = sweep_tables(&schema, &fk);
+        let position = |table: &str| ordered.iter().position(|t| t == table).unwrap();
+        assert!(position("loop_targets") < position("loop_jobs"));
+        assert!(position("loop_user_preferences") < position("loop_jobs"));
+        // Alphabetical tie-break among the releasable tables.
+        assert_eq!(ordered[0], "loop_targets");
+        assert_eq!(ordered[1], "loop_user_preferences");
+        // A chain emits leaf-first.
+        let chain = sweep_schema(&["grandparent", "parent", "child"]);
+        let chain_fk = edges(&[("child", "parent"), ("parent", "grandparent")]);
+        assert_eq!(
+            sweep_tables(&chain, &chain_fk),
+            vec![
+                "child".to_owned(),
+                "parent".to_owned(),
+                "grandparent".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn sweep_appends_cycles_and_ignores_foreign_edges() {
+        let mut schema = sweep_schema(&["projects", "states", "issues"]);
+        schema
+            .columns
+            .insert("users".to_owned(), HashSet::from(["id".to_owned()]));
+        let fk = edges(&[
+            ("projects", "states"),
+            ("states", "projects"),
+            ("issues", "projects"),
+            ("issues", "users"),
+            ("issues", "issues"),
+        ]);
+        // `issues` has no sweep children, so it sorts first; the
+        // `projects` ↔ `states` cycle has no valid order and is appended
+        // alphabetically for the joint retry to crack.
+        assert_eq!(
+            sweep_tables(&schema, &fk),
+            vec![
+                "issues".to_owned(),
+                "projects".to_owned(),
+                "states".to_owned()
+            ]
+        );
+    }
+
+    #[derive(Debug)]
+    struct CodedDbError {
+        message: String,
+        code: Option<String>,
+    }
+
+    impl std::fmt::Display for CodedDbError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.message)
+        }
+    }
+
+    impl std::error::Error for CodedDbError {}
+
+    impl sqlx::error::DatabaseError for CodedDbError {
+        fn message(&self) -> &str {
+            &self.message
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            self.code.as_deref().map(std::borrow::Cow::Borrowed)
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::ForeignKeyViolation
+        }
+    }
+
+    #[test]
+    fn fk_violation_matches_only_23503() {
+        let fk = sqlx::Error::Database(Box::new(CodedDbError {
+            message: "violates foreign key constraint".to_owned(),
+            code: Some("23503".to_owned()),
+        }));
+        assert!(is_fk_violation(&fk));
+        let unique = sqlx::Error::Database(Box::new(CodedDbError {
+            message: "duplicate key".to_owned(),
+            code: Some("23505".to_owned()),
+        }));
+        assert!(!is_fk_violation(&unique));
+        let codeless = sqlx::Error::Database(Box::new(CodedDbError {
+            message: "boom".to_owned(),
+            code: None,
+        }));
+        assert!(!is_fk_violation(&codeless));
+        assert!(!is_fk_violation(&sqlx::Error::RowNotFound));
     }
 }

@@ -69,6 +69,7 @@
     ],
     "statement_count_observed": 131,
     "sweep": "After the 18: for model in apps.get_models(): if hasattr(model, 'deleted_at'): same filter+delete. Observed 131 total statements (18 named + 113 sweep incl. re-deletes of the named tables). Returns None.",
+    "rust_execution_928": "Rust keeps the 18 named DELETEs in source order and the re-inclusive sweep, but executes FK-safely (PIDASHCONV-928): the sweep sorts children-before-parents (topological over the catalog FK graph, FK rules carry no signal since Django emits bare NO ACTION); each DELETE runs in its own transaction and an FK violation (23503) records the table as blocked instead of aborting; blocked tables retry jointly in one transaction whose deferred FK checks crack cycles (projects<->states) and cross-phase stragglers. A tombstoned parent with LIVE children still fails loudly: deliberate divergence from the Collector (which would delete the live children), pinned by contract-tests/tasks_cleanup/test_rust_replay.py::test_rust_hard_delete_live_child_fails_loud against the Django baseline test_cleanup_tasks.py::test_hard_delete_cascade_deletes_live_child.",
     "all_statements": [
       "DELETE FROM \"workspaces\" WHERE \"workspaces\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
       "DELETE FROM \"projects\" WHERE \"projects\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
