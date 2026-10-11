@@ -1,13 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Oracle scenarios: attachments widget (NEWFRONT-121, Part C).
-// bug: NEWFRONT-143 — the parity stack configures no S3 bucket, so the
-// metadata POST 500s and no upload can succeed; success/open/delete paths
-// assert the observed failure behavior. Client-side rejections
-// (multi-file, oversize) and the server 400 for non-whitelisted types
-// behave normally and are green. Against scenario-owned issues, green on
-// apps/web first.
+// Oracle scenarios: attachments widget (NEWFRONT-121, Part C; success paths
+// restored by NEWFRONT-143 once the parity stack shipped MinIO storage).
+// Uploads complete end to end: metadata POST, presigned bytes POST through
+// the proxy origin, status PATCH. Client-side rejections (multi-file,
+// oversize) and the server 400 for non-whitelisted types behave normally.
+// Against scenario-owned issues, green on apps/web first.
 // Rows: ISS-187, ISS-188, ISS-189, ISS-190, ISS-191.
 import { test, expect } from "../fixtures";
 import { instanceConfig, issueAttachments, signInSession } from "../helpers/api";
@@ -23,7 +22,7 @@ const PIXEL_PNG = Buffer.from(
 );
 
 test(
-  specTitle(["ISS-188", "ISS-187"], "bug: NEWFRONT-143 uploads fail without stack storage; rejections work"),
+  specTitle(["ISS-188", "ISS-187"], "allowed uploads succeed and render rows; rejections work"),
   { tag: specTags(["ISS-188", "ISS-187"]) },
   async ({ driver, seed }) => {
     await signIn(driver, seed);
@@ -56,15 +55,22 @@ test(
         const assets = await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session);
         expect(assets.map((row) => String(row["name"] ?? ""))).not.toContain(`oracle-a-${ts}.png`);
       });
-      await test.step("bug: an allowed upload fails and renders no row", async () => {
-        // Intended: the row renders with icon, filename, size, and uploader
-        // avatar, plus a success toast and a server-side asset.
-        // Observed: the dropzone raises its own failure toast over the
-        // shared operation's promise toast, so this text wins.
+      await test.step("an allowed upload succeeds and renders its row", async () => {
         await driver.uploadAttachment({ name: fileName, mime: "image/png", bytes: PIXEL_PNG });
-        await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toMatch(/file could not be attached/i);
-        expect(await driver.widgetTitles()).not.toContain("Attachments");
-        expect(await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session)).toHaveLength(0);
+        await expect.poll(() => driver.lastToast(), { timeout: 60_000 }).toContain("Attachment uploaded");
+        // The in-flight row shows the bare name; the settled row carries the
+        // human size, so waiting for both pins the completed render.
+        await expect
+          .poll(async () => (await driver.widgetRowNames("Attachments")).find((row) => row.includes(fileName)) ?? "", {
+            timeout: 60_000,
+          })
+          .toContain("0 KB");
+        const rows = await driver.widgetRowNames("Attachments");
+        expect(rows.find((row) => row.includes(fileName)) ?? "").toContain("0 KB");
+        const assets = await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session);
+        expect(assets).toHaveLength(1);
+        const attributes = assets[0]["attributes"] as Record<string, unknown>;
+        expect(String(attributes["name"] ?? "")).toBe(fileName);
       });
       await test.step("a server-rejected type surfaces an error", async () => {
         await driver.uploadAttachment({
@@ -83,20 +89,31 @@ test(
 );
 
 test(
-  specTitle(["ISS-189"], "bug: NEWFRONT-143 no attachment to open without storage"),
+  specTitle(["ISS-189"], "opening an attachment downloads its bytes in a new tab"),
   { tag: specTags(["ISS-189"]) },
   async ({ driver, seed }) => {
     await signIn(driver, seed);
     const session = await signInSession(seed.email, seed.password);
-    const issue = await ownIssue(seed, session, `Oracle attach open ${Date.now()}`);
+    const ts = Date.now();
+    const fileName = `oracle-open-${ts}.png`;
+    const issue = await ownIssue(seed, session, `Oracle attach open ${ts}`);
     try {
       await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
       await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(issue.name);
       await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
-      // Intended: clicking an attachment row opens its asset_url in a new
-      // browser tab. Unreachable while uploads fail.
-      expect(await driver.widgetTitles()).not.toContain("Attachments");
-      expect(await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session)).toHaveLength(0);
+      await driver.uploadAttachment({ name: fileName, mime: "image/png", bytes: PIXEL_PNG });
+      await expect
+        .poll(async () => (await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session)).length, {
+          timeout: 60_000,
+        })
+        .toBe(1);
+      // The row opens the file in a new browser tab, which serves the bytes
+      // as a download under the original filename.
+      const opened = await driver.downloadWidgetRowFile("Attachments", fileName);
+      expect(opened.fileName).toBe(fileName);
+      expect(opened.bytes.equals(PIXEL_PNG)).toBe(true);
+      const rowsAfter = await driver.widgetRowNames("Attachments");
+      expect(rowsAfter.some((row) => row.includes(fileName))).toBe(true);
     } finally {
       await dropIssue(seed, session, issue.id);
     }
@@ -104,21 +121,46 @@ test(
 );
 
 test(
-  specTitle(["ISS-190"], "bug: NEWFRONT-143 no attachment to delete without storage"),
+  specTitle(["ISS-190"], "deleting an attachment confirms and removes it"),
   { tag: specTags(["ISS-190"]) },
   async ({ driver, seed }) => {
     await signIn(driver, seed);
     const session = await signInSession(seed.email, seed.password);
-    const issue = await ownIssue(seed, session, `Oracle attach del ${Date.now()}`);
+    const ts = Date.now();
+    const fileName = `oracle-del-${ts}.png`;
+    const issue = await ownIssue(seed, session, `Oracle attach del ${ts}`);
     try {
       await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
       await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(issue.name);
       await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
-      // Intended: Delete asks for confirmation naming the file ("Delete
-      // attachment ... permanently removed"), then removes the row and the
-      // asset with an "Attachment removed" toast. Unreachable while uploads fail.
-      expect(await driver.widgetTitles()).not.toContain("Attachments");
-      expect(await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session)).toHaveLength(0);
+      await driver.uploadAttachment({ name: fileName, mime: "image/png", bytes: PIXEL_PNG });
+      await expect
+        .poll(async () => (await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session)).length, {
+          timeout: 60_000,
+        })
+        .toBe(1);
+      // Gate on the settled row (name plus human size): the row menu mounts
+      // with it, so the delete click below never catches the row mid-mount.
+      // (Reading the menu first would toggle it closed on the next click.)
+      await expect
+        .poll(async () => (await driver.widgetRowNames("Attachments")).find((row) => row.includes(fileName)) ?? "", {
+          timeout: 60_000,
+        })
+        .toContain("0 KB");
+      await driver.clickWidgetRowAction("Attachments", fileName, "Delete");
+      expect(await driver.confirmModalTitle()).toBe("Delete attachment");
+      const modalText = await driver.confirmModalText();
+      // The confirmation names the file without its extension.
+      expect(modalText).toContain(`oracle-del-${ts}`);
+      expect(modalText).toContain("permanently removed");
+      await driver.confirmModal("Delete");
+      await expect
+        .poll(async () => (await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session)).length, {
+          timeout: 60_000,
+        })
+        .toBe(0);
+      expect(await driver.widgetRowNames("Attachments")).toHaveLength(0);
+      await expect.poll(() => driver.lastToast(), { timeout: 60_000 }).toContain("Attachment removed");
     } finally {
       await dropIssue(seed, session, issue.id);
     }

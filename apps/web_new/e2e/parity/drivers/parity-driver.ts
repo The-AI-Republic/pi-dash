@@ -877,6 +877,8 @@ export interface ParityDriver {
   widgetRowActionNames(widget: string, rowName: string): Promise<string[]>;
   /** Click the named ellipsis-menu action for the named row in the named widget. */
   clickWidgetRowAction(widget: string, rowName: string, action: string): Promise<void>;
+  /** Click the named row and capture the file it opens as a download; requires the new tab. */
+  downloadWidgetRowFile(widget: string, rowName: string): Promise<{ fileName: string; bytes: Buffer }>;
   /** Title of the open confirm modal, or null when no dialog shows. */
   confirmModalTitle(): Promise<string | null>;
   /** Full text of the open confirm modal, or null when no dialog shows. */
