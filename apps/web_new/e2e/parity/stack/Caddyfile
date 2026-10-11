@@ -38,6 +38,16 @@
 	handle /parity19-assets/* {
 		reverse_proxy minio:9000
 	}
+	# Live collaboration server (NEWFRONT-319): the oracle builds with an
+	# empty live base URL, so the editor falls back to this same origin at
+	# /live/*; route it to the slot's live server. Unset means the compose
+	# `live` service, so slots without live are unchanged; point
+	# LIVE_UPSTREAM at `host.docker.internal:<port>` for a natively run
+	# live server, like ORACLE_UPSTREAM below. Must precede the frontend
+	# catch-all.
+	handle /live/* {
+		reverse_proxy {$LIVE_UPSTREAM:live:3001}
+	}
 	# The oracle normally runs in Docker as `oracle:3000`. Point
 	# ORACLE_UPSTREAM at `host.docker.internal:<port>` to serve a natively
 	# run frontend through the same one-origin proxy instead; unset means

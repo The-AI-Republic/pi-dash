@@ -14,7 +14,7 @@
 // back to structural reads (icon glyph, header position) proven
 // element-identical on the oracle. Tab reads scope to the nested
 // workspace main so sidebar rows and issue rows never leak in.
-import { expect, type ElementHandle, type Locator, type Page, type Route } from "@playwright/test";
+import { expect, type CDPSession, type ElementHandle, type Locator, type Page, type Route } from "@playwright/test";
 import type {
   ArchivesFilterExpression,
   ArchivesListQuery,
@@ -88,6 +88,7 @@ import type {
   RunnersTableRow,
   ServedShellMarkers,
   WorkspaceOnboardingView,
+  PagesLiveSocketClose,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -159,6 +160,21 @@ export class WebDriver implements ParityDriver {
   private assistantGptFailure: { status: number; body: Record<string, string> } | null = null;
   private assistantGptSeen: { prompt: string; task: string }[] = [];
   private pageEditorRephraseSeen: string[] = [];
+
+  // --- Pages realtime collaboration socket captures (NEWFRONT-319).
+  private pagesLiveSocketWatchInstalled = false;
+  private pagesLiveSocketUrlsSeen: string[] = [];
+  private pagesLiveCdp: CDPSession | null = null;
+  private pagesLiveCdpReady: Promise<void> | null = null;
+  private pagesLiveCollabRequestIds = new Map<string, string>();
+  private pagesLiveAuthTokensSeen: string[] = [];
+  private pagesLiveAuthCapturedIds = new Set<string>();
+  private pagesLiveReceivedFramesSeen: string[] = [];
+  private pagesLiveClosePatchInstalled = false;
+  private pagesLiveDescriptionWatchInstalled = false;
+  private pagesLiveDescriptionFetchCountSeen = 0;
+  private pagesLiveCollabRouteInstalled = false;
+  private pagesLiveCollabRouteBlocked = false;
 
   /** Every wait below is explicitly bounded: the suite config leaves action and navigation timeouts at Playwright's unbounded defaults, so a bare waitFor would hang to the test timeout instead of failing honestly. */
   private static readonly WAIT_MS = 30_000;
@@ -26712,5 +26728,260 @@ export class WebDriver implements ParityDriver {
     await this.page.mouse.move(onto.x, onto.y, { steps: 6 });
     await this.page.mouse.up();
     await this.page.waitForTimeout(3_000);
+  }
+
+  // -------------------------------------------------------------------------
+  // Pages realtime collaboration + live server (NEWFRONT-319, PAGE-065-071).
+  // The old app mounts one title and one body editor per page detail inside
+  // containers keyed by page id; the sync badge carries user-visible labels
+  // for its transitional and fault states and hides once synced. Socket
+  // captures ride the browser's own events (page websocket events plus one
+  // lazy CDP Network session for handshake bytes and close frames), so the
+  // first reader call installs the listener and the later call asserts.
+  // -------------------------------------------------------------------------
+
+  private pagesLivePageIdFromUrl(): string {
+    const parts = new URL(this.page.url()).pathname.split("/").filter((part) => part.length > 0);
+    return parts[parts.length - 1] ?? "";
+  }
+
+  private pagesLiveTitleEditor(): Locator {
+    return this.page.locator(`#editor-container-${this.pagesLivePageIdFromUrl()}-title .tiptap`);
+  }
+
+  private pagesLiveBodyEditor(): Locator {
+    return this.page.locator(`#editor-container-${this.pagesLivePageIdFromUrl()} .tiptap`);
+  }
+
+  async pagesLiveOpenPageDetail(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    // Either the editors or the sync loader prove the detail mounted; the
+    // loader is the terminal state when the socket can never connect.
+    await Promise.race([
+      this.page
+        .locator(`#editor-container-${pageId} .tiptap`)
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined),
+      this.page
+        .locator(".document-editor-loader")
+        .first()
+        .waitFor({ timeout: WebDriver.OPEN_MS })
+        .catch(() => undefined),
+    ]);
+  }
+
+  async pagesLiveSyncBadge(): Promise<string | null> {
+    if (await this.isShown(this.page.getByText("Syncing...", { exact: true }))) return "Syncing...";
+    if (await this.isShown(this.page.getByText("Connection lost", { exact: true }))) return "Connection lost";
+    return null;
+  }
+
+  async pagesLiveWaitSynced(): Promise<void> {
+    await expect.poll(async () => this.pagesLiveSyncBadge(), { timeout: 60_000 }).toBeNull();
+    await this.pagesLiveBodyEditor().first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesLiveBodyText(): Promise<string> {
+    return ((await this.pagesLiveBodyEditor().first().innerText({ timeout: WebDriver.OPEN_MS })) ?? "").trim();
+  }
+
+  async pagesLiveTitleText(): Promise<string> {
+    return ((await this.pagesLiveTitleEditor().first().innerText({ timeout: WebDriver.OPEN_MS })) ?? "").trim();
+  }
+
+  async pagesLiveTypeInBody(text: string): Promise<void> {
+    await this.pagesLiveBodyEditor().first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.type(text);
+  }
+
+  async pagesLiveSetTitle(text: string): Promise<void> {
+    await this.pagesLiveTitleEditor().first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press("ControlOrMeta+A");
+    await this.page.keyboard.type(text);
+  }
+
+  private pagesLiveEnsureSocketWatch(): void {
+    if (this.pagesLiveSocketWatchInstalled) return;
+    this.pagesLiveSocketWatchInstalled = true;
+    this.page.on("websocket", (ws) => {
+      if (ws.url().includes("/live/collaboration")) this.pagesLiveSocketUrlsSeen.push(ws.url());
+    });
+  }
+
+  /** Balanced-JSON slice starting at `start` (the handshake token inside binary frame bytes). */
+  private pagesLiveSliceTokenJson(bytes: string, start: number): string | null {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < bytes.length; i++) {
+      const char = bytes[i] ?? "";
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') inString = true;
+      else if (char === "{") depth += 1;
+      else if (char === "}") {
+        depth -= 1;
+        if (depth === 0) return bytes.slice(start, i + 1);
+      }
+    }
+    return null;
+  }
+
+  private pagesLiveEnsureCdp(): Promise<void> {
+    if (this.pagesLiveCdpReady) return this.pagesLiveCdpReady;
+    this.pagesLiveCdpReady = (async () => {
+      const session = await this.page.context().newCDPSession(this.page);
+      this.pagesLiveCdp = session;
+      session.on("Network.webSocketCreated", (payload) => {
+        const { requestId, url } = payload as { requestId: string; url: string };
+        if (url.includes("/live/collaboration")) this.pagesLiveCollabRequestIds.set(requestId, url);
+      });
+      session.on("Network.webSocketFrameSent", (payload) => {
+        const { requestId, response } = payload as {
+          requestId: string;
+          response: { opcode: number; payloadData: string };
+        };
+        if (!this.pagesLiveCollabRequestIds.has(requestId)) return;
+        if (response.opcode !== 2 || this.pagesLiveAuthCapturedIds.has(requestId)) return;
+        this.pagesLiveAuthCapturedIds.add(requestId);
+        // The first binary frame carries the length-prefixed handshake
+        // identity JSON after a short binary header.
+        const bytes = Buffer.from(response.payloadData, "base64").toString("latin1");
+        const start = bytes.indexOf('{"id"');
+        if (start < 0) return;
+        const token = this.pagesLiveSliceTokenJson(bytes, start);
+        if (token !== null && token.includes('"color"')) this.pagesLiveAuthTokensSeen.push(token);
+      });
+      session.on("Network.webSocketFrameReceived", (payload) => {
+        const { requestId, response } = payload as {
+          requestId: string;
+          response: { opcode: number; payloadData: string };
+        };
+        if (!this.pagesLiveCollabRequestIds.has(requestId)) return;
+        // Binary document frames are dropped; only realtime event payloads
+        // (error/force-close notices) are kept, capped for memory. Close
+        // frames never surface here (Chromium does not report them), so close
+        // codes are captured by the init-script socket patch instead.
+        if (response.opcode !== 2 || this.pagesLiveReceivedFramesSeen.length >= 50) return;
+        const text = Buffer.from(response.payloadData, "base64").toString("latin1");
+        if (
+          text.includes("force_close") ||
+          text.includes("error_message") ||
+          text.includes('"action":"error"') ||
+          text.includes('"action": "error"')
+        ) {
+          this.pagesLiveReceivedFramesSeen.push(text);
+        }
+      });
+      session.on("Network.webSocketClosed", (payload) => {
+        const { requestId } = payload as { requestId: string };
+        this.pagesLiveCollabRequestIds.delete(requestId);
+      });
+      await session.send("Network.enable");
+    })();
+    return this.pagesLiveCdpReady;
+  }
+
+  async pagesLiveSocketUrls(): Promise<string[]> {
+    this.pagesLiveEnsureSocketWatch();
+    return [...this.pagesLiveSocketUrlsSeen];
+  }
+
+  async pagesLiveSocketAuthTokens(): Promise<string[]> {
+    this.pagesLiveEnsureSocketWatch();
+    await this.pagesLiveEnsureCdp();
+    return [...this.pagesLiveAuthTokensSeen];
+  }
+
+  /**
+   * Wrap the page's WebSocket constructor (before first navigation) so every
+   * collaboration socket records its close code. Chromium never reports close
+   * frames over CDP, so the browser's own close events are the only faithful
+   * source; the wrapper preserves statics, prototype, and instanceof.
+   */
+  private async pagesLiveEnsureClosePatch(): Promise<void> {
+    if (this.pagesLiveClosePatchInstalled) return;
+    this.pagesLiveClosePatchInstalled = true;
+    await this.page.addInitScript(() => {
+      const store = ((window as unknown as Record<string, unknown>)["__pagesLiveCloses"] ??= []) as Array<{
+        code: number;
+        reason: string;
+      }>;
+      const OriginalWebSocket = window.WebSocket;
+      function PatchedWebSocket(this: unknown, url: string | URL, protocols?: string | string[]): WebSocket {
+        const socket = protocols === undefined ? new OriginalWebSocket(url) : new OriginalWebSocket(url, protocols);
+        if (String(url).includes("/live/collaboration")) {
+          socket.addEventListener("close", (event: CloseEvent) => {
+            store.push({ code: event.code, reason: event.reason });
+          });
+        }
+        return socket;
+      }
+      PatchedWebSocket.prototype = OriginalWebSocket.prototype;
+      Object.setPrototypeOf(PatchedWebSocket, OriginalWebSocket);
+      window.WebSocket = PatchedWebSocket as unknown as typeof WebSocket;
+    });
+  }
+
+  async pagesLiveSocketCloseEvents(): Promise<PagesLiveSocketClose[]> {
+    this.pagesLiveEnsureSocketWatch();
+    await this.pagesLiveEnsureClosePatch();
+    const closes = await this.page.evaluate(
+      () => (window as unknown as Record<string, unknown>)["__pagesLiveCloses"] as PagesLiveSocketClose[] | undefined
+    );
+    return closes ?? [];
+  }
+
+  async pagesLiveSocketReceivedFrames(): Promise<string[]> {
+    this.pagesLiveEnsureSocketWatch();
+    await this.pagesLiveEnsureCdp();
+    return [...this.pagesLiveReceivedFramesSeen];
+  }
+
+  async pagesLiveSetOffline(offline: boolean): Promise<void> {
+    await this.page.context().setOffline(offline);
+  }
+
+  async pagesLiveBlockCollaborationSocket(): Promise<void> {
+    // Plain page.route cannot intercept upgrade requests, so the socket route
+    // closes immediately while blocked: the client observes an unreachable
+    // server and runs its reconnect cycle while REST stays up. The handler
+    // stays installed (page.unroute does not cover socket routes) and the
+    // flag flips it between close and transparent forward.
+    if (!this.pagesLiveCollabRouteInstalled) {
+      this.pagesLiveCollabRouteInstalled = true;
+      await this.page.routeWebSocket("**/live/collaboration**", (ws) => {
+        if (this.pagesLiveCollabRouteBlocked) void ws.close();
+        else ws.connectToServer();
+      });
+    }
+    this.pagesLiveCollabRouteBlocked = true;
+  }
+
+  async pagesLiveUnblockCollaborationSocket(): Promise<void> {
+    this.pagesLiveCollabRouteBlocked = false;
+  }
+
+  async pagesLiveDescriptionFetchCount(): Promise<number> {
+    if (!this.pagesLiveDescriptionWatchInstalled) {
+      this.pagesLiveDescriptionWatchInstalled = true;
+      this.page.on("request", (request) => {
+        if (request.method() === "GET" && request.url().includes("/description/")) {
+          this.pagesLiveDescriptionFetchCountSeen += 1;
+        }
+      });
+    }
+    return this.pagesLiveDescriptionFetchCountSeen;
+  }
+
+  async pagesLiveSyncLoaderVisible(): Promise<boolean> {
+    return this.isShown(this.page.locator(".document-editor-loader"));
   }
 }

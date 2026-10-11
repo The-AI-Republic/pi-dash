@@ -12548,3 +12548,173 @@ export async function cyclesUnfavoriteCycle(
   );
   if (!res.ok && res.status !== 404) throw new Error(`[parity] cycle unfavorite failed with HTTP ${res.status}.`);
 }
+
+// --- Pages realtime collaboration + live server (NEWFRONT-319, PAGE-065-071).
+// --- Appended; existing helpers above are untouched per the shared driver contract.
+// --- Live HTTP goes through the slot proxy origin (/live/*), the same origin
+// --- the editor's same-origin fallback dials, so no new env var is needed.
+
+/** Oracle base URL (the slot proxy): live HTTP rides /live/* beside /api/*. */
+export function pagesLiveOracleBase(): string {
+  return (process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000").trim().replace(/\/+$/, "");
+}
+
+/** A project page record as the detail endpoint reports it. */
+export interface PagesLivePageRecord {
+  id: string;
+  name: string;
+  description_html: string | null;
+  is_locked: boolean;
+  archived_at: string | null;
+}
+
+/** Read one project page; throws naming the failure. */
+export async function pagesLiveReadPage(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<PagesLivePageRecord> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] page read failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as {
+    id?: unknown;
+    name?: unknown;
+    description_html?: unknown;
+    is_locked?: unknown;
+    archived_at?: unknown;
+  };
+  if (typeof row.id !== "string" || typeof row.name !== "string") {
+    throw new Error("[parity] page read carried no string id/name.");
+  }
+  return {
+    id: row.id,
+    name: row.name,
+    description_html: typeof row.description_html === "string" ? row.description_html : null,
+    is_locked: row.is_locked === true,
+    archived_at: typeof row.archived_at === "string" ? row.archived_at : null,
+  };
+}
+
+/** Lock or unlock a page through the dedicated endpoint; throws naming the failure. */
+export async function pagesLiveSetPageLock(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  locked: boolean,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    locked ? "POST" : "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/lock/`,
+    sessionCookie
+  );
+  if (!res.ok) throw new Error(`[parity] page lock patch failed with HTTP ${res.status}.`);
+}
+
+/**
+ * PATCH a page description without throwing, for oversized/locked refusal
+ * assertions (the status IS the expectation). Resolves with status + body.
+ */
+export async function pagesLivePatchDescriptionLenient(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  body: { description_binary?: string; description_html?: string; description_json?: unknown },
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; bodyText: string }> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/description/`,
+    sessionCookie,
+    body
+  );
+  return { status: res.status, bodyText: (await res.text()).slice(0, 500) };
+}
+
+/** Live liveness probe answer. */
+export interface PagesLiveHealth {
+  status: string;
+  timestamp: string;
+  version: string;
+}
+
+/** GET the live liveness probe through the proxy; throws naming the failure. */
+export async function pagesLiveHealth(oracleBase: string = pagesLiveOracleBase()): Promise<PagesLiveHealth> {
+  const res = await fetch(`${oracleBase}/live/health/`);
+  if (!res.ok) throw new Error(`[parity] live health probe failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { status?: unknown; timestamp?: unknown; version?: unknown };
+  if (
+    typeof payload.status !== "string" ||
+    typeof payload.timestamp !== "string" ||
+    typeof payload.version !== "string"
+  ) {
+    throw new Error("[parity] live health probe carried no status/timestamp/version strings.");
+  }
+  return { status: payload.status, timestamp: payload.timestamp, version: payload.version };
+}
+
+/**
+ * POST the live document-conversion endpoint without throwing (validation
+ * failures are expectations). Resolves with status + parsed-or-raw body.
+ */
+export async function pagesLiveConvertDocumentLenient(
+  body: unknown,
+  oracleBase: string = pagesLiveOracleBase()
+): Promise<{ status: number; payload: unknown }> {
+  const res = await fetch(`${oracleBase}/live/convert-document/`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let payload: unknown = text;
+  try {
+    payload = JSON.parse(text) as unknown;
+  } catch {
+    // Non-JSON error bodies stay raw; the status carries the assertion.
+  }
+  return { status: res.status, payload };
+}
+
+/**
+ * POST the live printable-export endpoint without throwing (each failure
+ * class maps to a status). Resolves with status, content type, and either
+ * the JSON error body or the leading bytes of the file.
+ */
+export async function pagesLivePdfExportLenient(
+  body: unknown,
+  sessionCookie: string,
+  oracleBase: string = pagesLiveOracleBase()
+): Promise<{ status: number; contentType: string; head: string; byteLength: number }> {
+  const res = await fetch(`${oracleBase}/live/pdf-export/`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: sessionCookie },
+    body: JSON.stringify(body),
+  });
+  const buffer = Buffer.from(await res.arrayBuffer());
+  return {
+    status: res.status,
+    contentType: res.headers.get("content-type") ?? "",
+    head: buffer.subarray(0, 200).toString("latin1"),
+    byteLength: buffer.length,
+  };
+}
+
+/**
+ * GET a live path without throwing, for admin-surface absence assertions.
+ * Extra headers ride along (e.g. the shared secret header).
+ */
+export async function pagesLiveGetLenient(
+  path: string,
+  headers: Record<string, string> = {},
+  oracleBase: string = pagesLiveOracleBase()
+): Promise<{ status: number; bodyText: string }> {
+  const res = await fetch(`${oracleBase}${path}`, { headers });
+  return { status: res.status, bodyText: (await res.text()).slice(0, 500) };
+}

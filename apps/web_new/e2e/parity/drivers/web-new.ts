@@ -78,6 +78,7 @@ import type {
   RunnersTableRow,
   ServedShellMarkers,
   WorkspaceOnboardingView,
+  PagesLiveSocketClose,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -7625,5 +7626,57 @@ export class WebNewDriver implements ParityDriver {
   }
   async modulesTimelineAttemptBarMove(_name: string, _dayDelta: number): Promise<void> {
     return todo("modulesTimelineAttemptBarMove");
+  }
+
+  // --- Pages realtime collaboration + live server (NEWFRONT-319,
+  // --- PAGE-065-071). Stage 0 oracle stubs; the pages build slice lands them.
+
+  async pagesLiveOpenPageDetail(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
+    return todo("pagesLiveOpenPageDetail");
+  }
+  async pagesLiveSyncBadge(): Promise<string | null> {
+    return todo("pagesLiveSyncBadge");
+  }
+  async pagesLiveWaitSynced(): Promise<void> {
+    return todo("pagesLiveWaitSynced");
+  }
+  async pagesLiveBodyText(): Promise<string> {
+    return todo("pagesLiveBodyText");
+  }
+  async pagesLiveTitleText(): Promise<string> {
+    return todo("pagesLiveTitleText");
+  }
+  async pagesLiveTypeInBody(_text: string): Promise<void> {
+    return todo("pagesLiveTypeInBody");
+  }
+  async pagesLiveSetTitle(_text: string): Promise<void> {
+    return todo("pagesLiveSetTitle");
+  }
+  async pagesLiveSocketUrls(): Promise<string[]> {
+    return todo("pagesLiveSocketUrls");
+  }
+  async pagesLiveSocketAuthTokens(): Promise<string[]> {
+    return todo("pagesLiveSocketAuthTokens");
+  }
+  async pagesLiveSocketCloseEvents(): Promise<PagesLiveSocketClose[]> {
+    return todo("pagesLiveSocketCloseEvents");
+  }
+  async pagesLiveSocketReceivedFrames(): Promise<string[]> {
+    return todo("pagesLiveSocketReceivedFrames");
+  }
+  async pagesLiveSetOffline(_offline: boolean): Promise<void> {
+    return todo("pagesLiveSetOffline");
+  }
+  async pagesLiveBlockCollaborationSocket(): Promise<void> {
+    return todo("pagesLiveBlockCollaborationSocket");
+  }
+  async pagesLiveUnblockCollaborationSocket(): Promise<void> {
+    return todo("pagesLiveUnblockCollaborationSocket");
+  }
+  async pagesLiveDescriptionFetchCount(): Promise<number> {
+    return todo("pagesLiveDescriptionFetchCount");
+  }
+  async pagesLiveSyncLoaderVisible(): Promise<boolean> {
+    return todo("pagesLiveSyncLoaderVisible");
   }
 }
