@@ -262,8 +262,15 @@ services:
       - minio
     # Forwarded so the Caddyfile's {$ORACLE_UPSTREAM} override (native
     # frontend, or oracle-prod) reaches the server; unset keeps oracle:3000.
+    # LIVE_UPSTREAM likewise for the Caddyfile's /live/* route (NEWFRONT-319):
+    # unset keeps the compose `live` service; a natively run live server
+    # overrides with host.docker.internal:<port> (extra_hosts below resolves
+    # it on Linux).
     environment:
       ORACLE_UPSTREAM: ${ORACLE_UPSTREAM:-oracle:3000}
+      LIVE_UPSTREAM: ${LIVE_UPSTREAM:-live:3001}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
     ports:
@@ -279,9 +286,16 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    # Full required env (NEWFRONT-319): the server refuses to boot without
+    # API_BASE_URL and LIVE_SERVER_SECRET_KEY, and browsers reach it through
+    # the slot proxy, so CORS names the slot's oracle origin. The secret is
+    # scratch-only, like the minio one above.
     environment:
       PORT: "3001"
       REDIS_URL: redis://redis:6379/0
+      API_BASE_URL: http://api:8000
+      LIVE_SERVER_SECRET_KEY: parity19-scratch-live-secret
+      CORS_ALLOWED_ORIGINS: "http://localhost:${PARITY_ORACLE_PORT:-13000}"
     ports:
       - "${PARITY_LIVE_PORT:-13001}:3001"
     profiles: ["full"]

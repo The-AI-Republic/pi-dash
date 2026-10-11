@@ -4992,7 +4992,49 @@ export interface ParityDriver {
   modulesTimelineAttemptRowBefore(sourceName: string, targetName: string): Promise<void>;
   /** Attempt a bar move the timeline may refuse; fixed wait, no settle. */
   modulesTimelineAttemptBarMove(name: string, dayDelta: number): Promise<void>;
+
+  // -------------------------------------------------------------------------
+  // Pages realtime collaboration + live server (NEWFRONT-319, PAGE-065-071).
+  // Socket captures are two-phase: the first call installs the listener, the
+  // later call reads what arrived — so scenarios call the reader once before
+  // the triggering step and again to assert. Close codes come from the
+  // browser's own socket-close frames (1006 when the drop carried no frame).
+  // -------------------------------------------------------------------------
+
+  /** Open a project page detail; resolves once the body editor mounts. */
+  pagesLiveOpenPageDetail(workspaceSlug: string, projectId: string, pageId: string): Promise<void>;
+  /** Visible sync badge label, or null when the badge is hidden (synced). */
+  pagesLiveSyncBadge(): Promise<string | null>;
+  /** Wait until the sync badge hides (the server confirmed synced). */
+  pagesLiveWaitSynced(): Promise<void>;
+  /** Body editor plain text. */
+  pagesLiveBodyText(): Promise<string>;
+  /** Title editor plain text. */
+  pagesLiveTitleText(): Promise<string>;
+  /** Click the body editor and type `text`. */
+  pagesLiveTypeInBody(text: string): Promise<void>;
+  /** Replace the title editor contents with `text`. */
+  pagesLiveSetTitle(text: string): Promise<void>;
+  /** Collaboration socket URLs this page opened (query carries doc context). */
+  pagesLiveSocketUrls(): Promise<string[]>;
+  /** Handshake identity payloads (user id, name, cursor color) the page sent. */
+  pagesLiveSocketAuthTokens(): Promise<string[]>;
+  /** Close codes observed on collaboration sockets, oldest first. */
+  pagesLiveSocketCloseEvents(): Promise<PagesLiveSocketClose[]>;
+  /** Received socket frames carrying realtime event payloads (error/force-close), oldest first. */
+  pagesLiveSocketReceivedFrames(): Promise<string[]>;
+  /** Toggle browser offline emulation for this page's context. */
+  pagesLiveSetOffline(offline: boolean): Promise<void>;
+  /** Abort the collaboration socket upgrade (socket down, REST up). */
+  pagesLiveBlockCollaborationSocket(): Promise<void>;
+  /** Undo pagesLiveBlockCollaborationSocket. */
+  pagesLiveUnblockCollaborationSocket(): Promise<void>;
+  /** Binary description fetches this page issued (fallback proof). */
+  pagesLiveDescriptionFetchCount(): Promise<number>;
+  /** Whether the sync loader skeleton is currently showing. */
+  pagesLiveSyncLoaderVisible(): Promise<boolean>;
 }
+
 
 /** Most recent toast: title plus message (NEWFRONT-308, MOD-013/014/016). */
 export interface ModulesToast {
@@ -5020,6 +5062,15 @@ export interface ModulesTimelineRow {
   href: string | null;
   /** Whether a status glyph renders beside the name. */
   statusGlyph: boolean;
+}
+
+
+/** One collaboration socket close as the browser observed it. */
+export interface PagesLiveSocketClose {
+  /** WebSocket close code (1006 when the drop carried no close frame). */
+  code: number;
+  /** Close reason (empty when the drop carried no close frame). */
+  reason: string;
 }
 
 /** One catalog table row: the user-visible definition facts. */
