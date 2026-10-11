@@ -13155,6 +13155,7 @@ export interface ParityPageRecord {
   createdAt: string;
   updatedAt: string;
   descriptionHtml: string;
+  isLocked: boolean;
 }
 
 /** Read a page's live description binary (Yjs state stream). */
@@ -13285,7 +13286,24 @@ export async function serverPageRecord(
     createdAt: rec["created_at"] as string,
     updatedAt: rec["updated_at"] as string,
     descriptionHtml: typeof rec["description_html"] === "string" ? rec["description_html"] : "",
+    isLocked: rec["is_locked"] === true,
   };
+}
+
+/** Lock a page (NEWFRONT-317 read-only fixtures stage the lock before opening). */
+export async function serverPageLock(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/lock/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: "{}",
+  });
+  if (!res.ok) throw new Error(`[parity] page lock failed with HTTP ${res.status}.`);
 }
 
 /**

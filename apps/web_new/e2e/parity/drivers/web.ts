@@ -27868,6 +27868,16 @@ export class WebDriver implements ParityDriver {
     await this.pagesPaneWaitLiveEditor();
   }
 
+  async pagesPaneOpenDetailReadOnly(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    // Locked pages render no editable region, so this waits for the body
+    // alone instead of the live editor.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await expect
+      .poll(async () => (await this.pagesPaneLiveBody().count()) > 0, { timeout: WebDriver.WAIT_MS })
+      .toBe(true);
+  }
+
   async pagesPaneEditorText(): Promise<string> {
     const editable = this.pagesPaneLiveEditor();
     if ((await editable.count()) > 0) {
@@ -28023,8 +28033,15 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesPanePreviewCardVisible(): Promise<boolean> {
+    // The card hides with opacity (a sized box), so Playwright visibility
+    // lies; the computed opacity is the state signal.
     const card = await this.pagesPanePreviewCard();
-    return (await card.count()) > 0 && (await card.first().isVisible());
+    if ((await card.count()) === 0) return false;
+    const opacity = await card
+      .first()
+      .evaluate((el) => getComputedStyle(el).opacity)
+      .catch(() => "0");
+    return Number.parseFloat(opacity) > 0;
   }
 
   async pagesPanePreviewCardHeadings(): Promise<string[]> {
@@ -28260,16 +28277,35 @@ export class WebDriver implements ParityDriver {
 
   async pagesPaneSelectCurrentVersion(): Promise<void> {
     await this.pagesPaneRoot().getByRole("link", { name: "Current version" }).click({ timeout: WebDriver.OPEN_MS });
-    await expect.poll(() => this.pagesPaneOverlayOpen(), { timeout: WebDriver.WAIT_MS }).toBe(false);
+    try {
+      await expect.poll(() => this.pagesPaneOverlayOpen(), { timeout: 10_000 }).toBe(false);
+    } catch {
+      // Some viewers render the current row with its key intact, so the
+      // click reselects instead of closing; history back leaves the keyed
+      // entry behind instead.
+      await this.page.goBack();
+      await expect.poll(() => this.pagesPaneOverlayOpen(), { timeout: WebDriver.WAIT_MS }).toBe(false);
+    }
+  }
+
+  /**
+   * The closed shell keeps its content mounted but fully transparent, and
+   * Playwright visibility ignores opacity, so the inherited hit-testing
+   * (toggled with the transparency) is the shown signal for anything the
+   * shell wraps.
+   */
+  private async pagesPaneOverlayShown(target: Locator): Promise<boolean> {
+    if ((await target.count()) === 0) return false;
+    const hit = await target
+      .first()
+      .evaluate((el) => getComputedStyle(el).pointerEvents)
+      .catch(() => "none");
+    return hit !== "none";
   }
 
   async pagesPaneOverlayOpen(): Promise<boolean> {
-    // The closed shell keeps its content mounted but fully transparent,
-    // so visibility (not attachment) is the open signal either way.
-    const marker = this.pagesPaneViewOnly();
-    if ((await marker.count()) > 0 && (await marker.first().isVisible())) return true;
-    const error = this.pagesPaneOverlayErrorHeading();
-    return (await error.count()) > 0 && (await error.first().isVisible());
+    if (await this.pagesPaneOverlayShown(this.pagesPaneViewOnly())) return true;
+    return this.pagesPaneOverlayShown(this.pagesPaneOverlayErrorHeading());
   }
 
   async pagesPaneOverlayHeader(): Promise<PagesPaneOverlayHeader> {
@@ -28301,8 +28337,7 @@ export class WebDriver implements ParityDriver {
   async pagesPaneOverlaySkeletonVisible(): Promise<boolean> {
     if (await this.pagesPaneOverlayErrorVisible()) return false;
     const main = this.pagesPaneOverlayHeaderRow().locator("xpath=..");
-    const skeleton = main.locator('[role="status"]');
-    return (await skeleton.count()) > 0 && (await skeleton.first().isVisible());
+    return this.pagesPaneOverlayShown(main.locator('[role="status"]'));
   }
 
   /** Install the version-detail spy once; the mode flag steers each answer. */
@@ -28367,8 +28402,7 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesPaneOverlayErrorVisible(): Promise<boolean> {
-    const error = this.pagesPaneOverlayErrorHeading();
-    return (await error.count()) > 0 && (await error.first().isVisible());
+    return this.pagesPaneOverlayShown(this.pagesPaneOverlayErrorHeading());
   }
 
   async pagesPaneOverlayErrorTexts(): Promise<{ heading: string | null; body: string | null; retry: string | null }> {
@@ -28413,6 +28447,17 @@ export class WebDriver implements ParityDriver {
     await this.page.keyboard.press("Backspace");
   }
 
+  async pagesPaneEditorDeleteImage(): Promise<void> {
+    // Select-all spares image blocks, so the removal clicks the block's
+    // error placeholder (the fixture image 404s by design) to select it
+    // before pressing Backspace, as a user deleting an image would.
+    await this.pagesPaneLiveBody()
+      .getByText("Error loading image", { exact: true })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press("Backspace");
+  }
+
   async pagesPaneOmitWorkspaceMember(userId: string): Promise<void> {
     // Stage the client-side condition a deactivated account produces (the
     // member lookup misses) without mutating shared seed membership: the
@@ -28423,5 +28468,24 @@ export class WebDriver implements ParityDriver {
 
   async pagesPaneRestoreWorkspaceMembers(): Promise<void> {
     this.pagesPaneOmittedMember = null;
+  }
+
+  async pagesPaneProfileRoundtrip(): Promise<void> {
+    const labelEl = this.pagesPaneRoot().getByText("Created by", { exact: true }).first();
+    const row = labelEl.locator("xpath=following-sibling::div[1]");
+    const link = row.getByRole("link").first();
+    await this.page.evaluate(() => {
+      (window as unknown as Record<string, string>).__parityWarmMount = "alive";
+    });
+    await link.click({ timeout: WebDriver.OPEN_MS });
+    await this.page.waitForURL((url) => url.pathname.includes("/profile/"), { timeout: WebDriver.WAIT_MS });
+    await this.page.goBack();
+    await this.pagesPaneWaitLiveEditor();
+    const warm = await this.page
+      .evaluate(() => (window as unknown as Record<string, string>).__parityWarmMount)
+      .catch(() => undefined);
+    if (warm !== "alive") {
+      throw new Error("[parity] the profile roundtrip reloaded the page; the detail view remounted cold.");
+    }
   }
 }

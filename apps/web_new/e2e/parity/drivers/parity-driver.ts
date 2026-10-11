@@ -5226,6 +5226,8 @@ export interface ModulesTimelineRow {
   pagesPaneOpenDetail(workspaceSlug: string, projectId: string, pageId: string): Promise<void>;
   /** Open a page detail with a raw query string (shareable pane/version links). */
   pagesPaneOpenDetailQuery(workspaceSlug: string, projectId: string, pageId: string, query: string): Promise<void>;
+  /** Open a page detail that renders no editable region (locked pages). */
+  pagesPaneOpenDetailReadOnly(workspaceSlug: string, projectId: string, pageId: string): Promise<void>;
   /** Visible text of the live editor. */
   pagesPaneEditorText(): Promise<string>;
   /** Focus the live editor at its end, ready for typing. */
@@ -5324,10 +5326,17 @@ export interface ModulesTimelineRow {
   pagesPaneEditorClickText(text: string): Promise<void>;
   /** Select all live-editor content and delete it. */
   pagesPaneEditorClear(): Promise<void>;
+  /** Click the live-editor image block, then delete it. */
+  pagesPaneEditorDeleteImage(): Promise<void>;
   /** Omit a workspace member from member-list answers (deactivated lookalike). */
   pagesPaneOmitWorkspaceMember(userId: string): Promise<void>;
   /** Stop omitting workspace members from member-list answers. */
   pagesPaneRestoreWorkspaceMembers(): Promise<void>;
+  /**
+   * Leave the detail view through the creator profile link and come back,
+   * so the pane's shared editor handle remounts on warm client state.
+   */
+  pagesPaneProfileRoundtrip(): Promise<void>;
 }
 
 /** One outline heading as the pane lists it (NEWFRONT-317, PAGE-047). */

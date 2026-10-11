@@ -7974,6 +7974,10 @@ export class WebNewDriver implements ParityDriver {
     return todo("pagesPaneOpenDetailQuery");
   }
 
+  async pagesPaneOpenDetailReadOnly(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
+    return todo("pagesPaneOpenDetailReadOnly");
+  }
+
   async pagesPaneEditorText(): Promise<string> {
     return todo("pagesPaneEditorText");
   }
@@ -8174,11 +8178,19 @@ export class WebNewDriver implements ParityDriver {
     return todo("pagesPaneEditorClear");
   }
 
+  async pagesPaneEditorDeleteImage(): Promise<void> {
+    return todo("pagesPaneEditorDeleteImage");
+  }
+
   async pagesPaneOmitWorkspaceMember(_userId: string): Promise<void> {
     return todo("pagesPaneOmitWorkspaceMember");
   }
 
   async pagesPaneRestoreWorkspaceMembers(): Promise<void> {
     return todo("pagesPaneRestoreWorkspaceMembers");
+  }
+
+  async pagesPaneProfileRoundtrip(): Promise<void> {
+    return todo("pagesPaneProfileRoundtrip");
   }
 }
