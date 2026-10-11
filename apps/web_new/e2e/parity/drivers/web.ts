@@ -39460,6 +39460,19 @@ export class WebDriver implements ParityDriver {
   }
 
   async analyticsEmptyFacts(): Promise<AnalyticsEmptyFacts | null> {
+    const hasHeading = await this.page.evaluate(() => {
+      const main = document.querySelector("main") ?? document.body;
+      return [...main.querySelectorAll("h3")].some((h) => ((h.textContent ?? "") as string).includes("No project"));
+    });
+    if (!hasHeading) return null;
+    // The creation action mounts a beat after the heading; waiting keeps
+    // the read from racing it (the null-action path below is preserved for
+    // empty views that genuinely render no action).
+    await this.page
+      .getByRole("button", { name: /create a project/i })
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
     return this.page.evaluate(() => {
       const main = document.querySelector("main") ?? document.body;
       const heading = [...main.querySelectorAll("h3")].find((h) =>
