@@ -101,6 +101,17 @@ impl Pools {
         })
     }
 
+    /// Wrap one pool with no read replica (PIDASHCONV-918): the OSS
+    /// worker-registration helper test builds its context over a lazy
+    /// pool this way, since registration constructs handlers without
+    /// I/O and `connect` needs a live database.
+    pub fn primary_only(primary: PgPool) -> Self {
+        Self {
+            primary,
+            replica: None,
+        }
+    }
+
     pub fn primary(&self) -> &PgPool {
         &self.primary
     }

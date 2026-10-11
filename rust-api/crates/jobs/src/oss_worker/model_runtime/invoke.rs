@@ -1,7 +1,7 @@
 //! `Agent.run` for the execute plane (PIDASHCONV-866).
 //!
 //! Ports the invocation half of `cloud_agent/runtime.py:18-76`
-//! (`execute`): the drive ([`drive_execute`][pidash_jobs::dispatch_execute])
+//! (`execute`): the drive ([`drive_execute`][crate::dispatch_execute])
 //! already resolved the model, appended `model_started`, resolved the
 //! limits, and wraps this call in the execution timeout — [`invoke`]
 //! runs the agent loop itself and returns the structured output plus
@@ -34,7 +34,7 @@ use std::sync::OnceLock;
 use sqlx::Row;
 use uuid::Uuid;
 
-use pidash_jobs::dispatch_execute::{
+use crate::dispatch_execute::{
     InvokeError, ModelFailure, ModelInvocation, RawUsage, CODE_LLM_CONFIG_MISSING,
 };
 use pidash_services::assistant::llm::MSG_NO_PROVIDER;
@@ -90,7 +90,7 @@ pub async fn invoke(
         "CE resolves no extra toolsets"
     );
     let creator = creator_of(&ctx.tools.pool, invocation.run_id).await?;
-    let row = crate::execute_seams::LiveExecuteSeams::llm_row(&ctx.tools.pool, creator)
+    let row = crate::oss_worker::execute_seams::LiveExecuteSeams::llm_row(&ctx.tools.pool, creator)
         .await
         .map_err(|error| {
             InvokeError::Failed(ModelFailure {
@@ -169,7 +169,7 @@ pub async fn invoke(
 /// decrypt — a vanished row, or a key emptied between the two reads,
 /// reports unconfigured (the `tasks.py:186-189` analog), with the
 /// code the drive passes through to the failed row.
-fn gate_row(row: Option<&crate::execute_seams::LlmRow>) -> Result<&[u8], ModelFailure> {
+fn gate_row(row: Option<&crate::oss_worker::execute_seams::LlmRow>) -> Result<&[u8], ModelFailure> {
     let missing = || ModelFailure {
         code: Some(CODE_LLM_CONFIG_MISSING.to_owned()),
         message: MSG_NO_PROVIDER.to_owned(),
@@ -261,8 +261,8 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
-    fn llm_row_with(key: Option<Vec<u8>>) -> crate::execute_seams::LlmRow {
-        crate::execute_seams::LlmRow {
+    fn llm_row_with(key: Option<Vec<u8>>) -> crate::oss_worker::execute_seams::LlmRow {
+        crate::oss_worker::execute_seams::LlmRow {
             provider_kind: "openai".to_owned(),
             base_url: "https://t/v1".to_owned(),
             model_name: "m".to_owned(),
@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(raw.total_tokens, Some(46));
         assert_eq!(raw.fields.get("requests"), Some(&Value::Number(2.into())));
         // The drive's overlay reproduces `_usage_report` exactly.
-        let report = pidash_jobs::dispatch_execute::usage_report(&raw);
+        let report = crate::dispatch_execute::usage_report(&raw);
         assert_eq!(report.get("input_tokens"), Some(&Value::Number(12.into())));
         assert_eq!(report.get("total_tokens"), Some(&Value::Number(46.into())));
     }
@@ -332,7 +332,7 @@ mod tests {
         usage.input_tokens = UsageNumber::Float(12.5);
         let raw = raw_usage(&usage);
         assert_eq!(raw.input_tokens, None);
-        let report = pidash_jobs::dispatch_execute::usage_report(&raw);
+        let report = crate::dispatch_execute::usage_report(&raw);
         assert_eq!(
             report.get("input_tokens"),
             Some(

@@ -156,7 +156,7 @@ pub struct LoopConfig<'a> {
     /// `ctx.max_retries` (`mcp.py:2450`), i.e. the run-step default
     /// — not the standalone-construction default of 1 (`mcp.py:814`).
     pub mcp_max_retries: u64,
-    pub limits: &'a pidash_jobs::dispatch_execute::UsageLimits,
+    pub limits: &'a crate::dispatch_execute::UsageLimits,
     pub max_tokens: i64,
     pub timeout_secs: u64,
     /// MCP call timeout, seconds (`read_timeout` /
@@ -1237,7 +1237,7 @@ fn jsonschema_check_type(subschema: &Value, value: &Value) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_runtime::schemas::Golden;
+    use crate::oss_worker::model_runtime::schemas::Golden;
     use axum::extract::State;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -1423,7 +1423,8 @@ mod tests {
             r#"{"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}"#,
         )
         .unwrap();
-        let (parameters, strict) = crate::model_runtime::provider::transform_openai_schema(&raw);
+        let (parameters, strict) =
+            crate::oss_worker::model_runtime::provider::transform_openai_schema(&raw);
         WireTool {
             name: OUTPUT_TOOL_NAME.to_owned(),
             description: "The final response which ends this conversation".to_owned(),
@@ -1434,7 +1435,9 @@ mod tests {
 
     fn add_wire_tool() -> WireTool {
         let (parameters, strict) =
-            crate::model_runtime::provider::transform_openai_schema(&add_schema().parameters);
+            crate::oss_worker::model_runtime::provider::transform_openai_schema(
+                &add_schema().parameters,
+            );
         WireTool {
             name: "add".to_owned(),
             description: "Add.".to_owned(),
@@ -1443,8 +1446,8 @@ mod tests {
         }
     }
 
-    fn no_limits() -> pidash_jobs::dispatch_execute::UsageLimits {
-        pidash_jobs::dispatch_execute::UsageLimits {
+    fn no_limits() -> crate::dispatch_execute::UsageLimits {
+        crate::dispatch_execute::UsageLimits {
             request_limit: None,
             tool_calls_limit: None,
             input_tokens_limit: None,
@@ -1461,7 +1464,7 @@ mod tests {
         function_schemas: HashMap<String, ToolSchema>,
         mcp_schemas: HashMap<String, ToolSchema>,
         mcp_names: HashSet<String>,
-        limits: pidash_jobs::dispatch_execute::UsageLimits,
+        limits: crate::dispatch_execute::UsageLimits,
         mcp_timeout_secs: u64,
         state: MockState,
     }
@@ -1999,7 +2002,7 @@ mod tests {
         // (`_agent_graph.py:1216-1246`).
         let content = RetryContent::Text(TEXTLESS_RETRY_TEXT.to_owned());
         assert_eq!(
-            crate::model_runtime::provider::retry_message(&content, None),
+            crate::oss_worker::model_runtime::provider::retry_message(&content, None),
             "Validation feedback:\nPlease return text or include your response in a tool call.\n\nFix the errors and try again."
         );
     }
@@ -2229,8 +2232,9 @@ mod tests {
     }
 
     fn mcp_add_wire_tool() -> WireTool {
-        let (parameters, _) =
-            crate::model_runtime::provider::transform_openai_schema(&mcp_add_schema().parameters);
+        let (parameters, _) = crate::oss_worker::model_runtime::provider::transform_openai_schema(
+            &mcp_add_schema().parameters,
+        );
         WireTool {
             name: "mcp_add".to_owned(),
             description: "Add via MCP.".to_owned(),

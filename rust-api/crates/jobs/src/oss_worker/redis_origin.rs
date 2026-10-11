@@ -2,9 +2,9 @@
 //!
 //! `register_activity_task` takes a synchronous [`RedisOrigin`] (`set_ex`
 //! returns a `Result`, it does not await), while the foundation handle
-//! (`pidash_db::redis::RedisHandle`) is async-only — so the worker binary
-//! owns this thin sync adapter over the same locked `redis` crate. The
-//! foundation crates stay untouched.
+//! (`pidash_db::redis::RedisHandle`) is async-only — so this module owns
+//! the thin sync adapter over the same locked `redis` crate (moved from
+//! the binary in PIDASHCONV-918 so both binaries share it).
 //!
 //! Semantics mirror `redis_instance()`
 //! (`apps/api/pi_dash/settings/redis.py`): Django raises at call time when
@@ -19,9 +19,9 @@
 //! behavior matches redis-py's pooled client; throughput is a
 //! worker-sizing note, not a behavior difference.
 //!
-//! [`RedisOrigin`]: pidash_jobs::tasks_webhooks::RedisOrigin
+//! [`RedisOrigin`]: crate::tasks_webhooks::RedisOrigin
 
-use pidash_jobs::tasks_webhooks::RedisOrigin;
+use crate::tasks_webhooks::RedisOrigin;
 use redis::Commands;
 
 /// `socket_connect_timeout` (`settings/redis.py` default 2.0s).

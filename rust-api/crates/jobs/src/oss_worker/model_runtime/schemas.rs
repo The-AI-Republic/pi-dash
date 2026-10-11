@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 /// The embedded golden document (D-11 fixture, PIDASHCONV-866).
 const GOLDEN: &str =
-    include_str!("../../../../fixtures/dispatch/fx-disp-08-model-runtime.golden.json");
+    include_str!("../../../../../fixtures/dispatch/fx-disp-08-model-runtime.golden.json");
 
 /// Golden load failure: the embedded fixture is corrupt or has drifted
 /// from the shape the runtime expects. Fail-closed at worker boot.

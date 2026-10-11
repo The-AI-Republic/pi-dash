@@ -2807,10 +2807,12 @@ version = "0.1.0"
 dependencies = [
  "ammonia",
  "amqprs",
+ "axum",
  "base64 0.22.1",
  "bson",
  "chrono",
  "crc32fast",
+ "futures-util",
  "hmac 0.12.1",
  "jsonwebtoken",
  "md-5 0.10.6",

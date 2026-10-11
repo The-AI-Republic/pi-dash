@@ -18,7 +18,7 @@
 //!   `anthropic`); every step's failure falls through to zeros+details.
 
 use super::schemas::Golden;
-use pidash_jobs::dispatch_execute::UsageLimits;
+use crate::dispatch_execute::UsageLimits;
 use serde_json::{Map, Value};
 
 /// A usage counter value: integers stay integers, floats stay floats
@@ -41,6 +41,9 @@ impl UsageNumber {
     /// cannot reach `i64::MAX` in practice); any float operand yields a
     /// float (`add_usage_values` with JSON inputs, which are never
     /// `Decimal`).
+    // The `add` name transcribes the ported helper (PIDASHCONV-866), not
+    // `std::ops::Add`: the operator spelling would obscure the call shape.
+    #[allow(clippy::should_implement_trait)]
     pub fn add(self, other: UsageNumber) -> UsageNumber {
         match (self, other) {
             (UsageNumber::Int(left), UsageNumber::Int(right)) => {
@@ -163,7 +166,7 @@ impl RunUsage {
     }
 
     /// The `dataclasses.asdict` shape in field order, for
-    /// [`pidash_jobs::dispatch_execute::RawUsage`] `fields`.
+    /// [`crate::dispatch_execute::RawUsage`] `fields`.
     pub fn as_report(&self) -> Map<String, Value> {
         let mut report = Map::with_capacity(10);
         report.insert("input_tokens".to_string(), self.input_tokens.to_json());
