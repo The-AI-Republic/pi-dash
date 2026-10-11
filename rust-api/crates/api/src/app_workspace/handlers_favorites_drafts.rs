@@ -7525,6 +7525,7 @@ async fn draft_to_issue(
     .bind(utc_now_micros())
     .bind(Some(user_id))
     .bind(None::<Uuid>)
+    .bind(None::<DateTime<Utc>>)
     .bind(draft_project)
     .bind(project.workspace_id)
     .bind(row.id)

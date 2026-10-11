@@ -140,6 +140,50 @@ QUICKLINK_KEYS = {
     "workspace",
 }
 
+ISSUE_CREATE_KEYS = {
+    "agent_executor",
+    "archived_at",
+    "assignee_ids",
+    "assignees",
+    "assigned_pod_id",
+    "completed_at",
+    "complexity_score",
+    "created_at",
+    "created_by",
+    "created_via",
+    "deleted_at",
+    "description_binary",
+    "description_html",
+    "description_json",
+    "description_stripped",
+    "estimate_point",
+    "external_id",
+    "external_source",
+    "git_work_branch",
+    "id",
+    "is_draft",
+    "label_ids",
+    "labels",
+    "name",
+    "parent",
+    "parent_id",
+    "point",
+    "priority",
+    "project",
+    "project_id",
+    "sequence_id",
+    "sort_order",
+    "start_date",
+    "state",
+    "state_id",
+    "target_date",
+    "type",
+    "updated_at",
+    "updated_by",
+    "workspace",
+    "workspace_id",
+}
+
 STICKY_KEYS = {
     "background_color",
     "color",
@@ -629,6 +673,35 @@ def test_draft_to_issue_requires_project(user_api, space):
     )
     assert res.status_code == 400
     assert res.json() == {"error": "Project is required to create an issue."}
+
+
+def test_draft_to_issue_converts_with_project(user_api, space, world):
+    # PIDASHCONV-904: converting a project-bearing draft 500'd on Rust
+    # (the issue_sequences INSERT missed its deleted_at bind) while
+    # Django 201s, deletes the draft and enqueues issue_activity.
+    proj = world["db"].make_project(space["id"], "RPJ")
+    did = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-issues/",
+        json={"name": "D2", "project_id": proj["id"]},
+    ).json()["id"]
+    res = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-to-issue/{did}/", json={"name": "DI1"}
+    )
+    assert res.status_code == 201
+    body = res.json()
+    assert set(body.keys()) == ISSUE_CREATE_KEYS
+    assert body["name"] == "DI1"
+    assert body["project"] == proj["id"]
+    assert body["project_id"] == proj["id"]
+    assert body["workspace"] == space["id"]
+    assert body["sequence_id"] == 1
+    assert body["sort_order"] == 65535.0
+    assert body["assignee_ids"] == []
+    assert body["label_ids"] == []
+    # The convert deletes the draft row.
+    res = user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/{did}/")
+    assert res.status_code == 404
+    assert res.json() == {"error": "The required object does not exist."}
 
 
 def test_drafts_only_own_visible(user_api, member_api, space):
