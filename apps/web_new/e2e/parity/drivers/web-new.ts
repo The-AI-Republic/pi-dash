@@ -16,6 +16,9 @@ import type {
   ArchivesPeekReadOnly,
   ArchivesTab,
   ArchivesTrafficCounts,
+  ModulesMenuEntry,
+  ModulesTimelineRow,
+  ModulesToast,
   AddRunnerFormState,
   CyclesProgressStatRow,
   AddRunnerRemotePhase,
@@ -7451,5 +7454,176 @@ export class WebNewDriver implements ParityDriver {
   }
   async cyclesGrantClipboardAccess(): Promise<void> {
     return todo("cyclesGrantClipboardAccess");
+  }
+
+  async modulesOpenList(_workspaceSlug: string, _projectId: string, _cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("modulesOpenList");
+  }
+  async modulesAwaitRow(_name: string): Promise<void> {
+    return todo("modulesAwaitRow");
+  }
+  async modulesCurrentUrl(): Promise<string> {
+    return todo("modulesCurrentUrl");
+  }
+  async modulesSetLayout(_layout: "list" | "board" | "timeline"): Promise<void> {
+    return todo("modulesSetLayout");
+  }
+  async modulesSetSort(_label: string): Promise<void> {
+    return todo("modulesSetSort");
+  }
+  async modulesSortLabel(): Promise<string> {
+    return todo("modulesSortLabel");
+  }
+  async modulesRowDateText(_name: string): Promise<string> {
+    return todo("modulesRowDateText");
+  }
+  async modulesRowDateDisabled(_name: string): Promise<boolean> {
+    return todo("modulesRowDateDisabled");
+  }
+  async modulesRowOpenDates(_name: string): Promise<void> {
+    return todo("modulesRowOpenDates");
+  }
+  async modulesCalendarVisible(): Promise<boolean> {
+    return todo("modulesCalendarVisible");
+  }
+  async modulesCalendarPickDay(_day: number): Promise<void> {
+    return todo("modulesCalendarPickDay");
+  }
+  async modulesCalendarGotoMonth(_monthLabel: string, _yearLabel: string): Promise<void> {
+    return todo("modulesCalendarGotoMonth");
+  }
+  async modulesCardDateText(_name: string): Promise<string> {
+    return todo("modulesCardDateText");
+  }
+  async modulesCardDateDisabled(_name: string): Promise<boolean> {
+    return todo("modulesCardDateDisabled");
+  }
+  async modulesCardOpenDates(_name: string): Promise<void> {
+    return todo("modulesCardOpenDates");
+  }
+  async modulesLastToast(): Promise<ModulesToast | null> {
+    return todo("modulesLastToast");
+  }
+  async modulesAwaitToast(_text: string): Promise<void> {
+    return todo("modulesAwaitToast");
+  }
+  async modulesPillText(_name: string): Promise<string> {
+    return todo("modulesPillText");
+  }
+  async modulesPillColor(_name: string): Promise<string> {
+    return todo("modulesPillColor");
+  }
+  async modulesStatusDisabled(_name: string): Promise<boolean> {
+    return todo("modulesStatusDisabled");
+  }
+  async modulesOpenStatus(_name: string): Promise<void> {
+    return todo("modulesOpenStatus");
+  }
+  async modulesStatusOptions(): Promise<string[]> {
+    return todo("modulesStatusOptions");
+  }
+  async modulesPickStatus(_label: string): Promise<void> {
+    return todo("modulesPickStatus");
+  }
+  async modulesLeadState(_name: string): Promise<"avatar" | "none"> {
+    return todo("modulesLeadState");
+  }
+  async modulesLeadTooltip(_name: string): Promise<string | null> {
+    return todo("modulesLeadTooltip");
+  }
+  async modulesStarVisible(_name: string): Promise<boolean> {
+    return todo("modulesStarVisible");
+  }
+  async modulesStarSelected(_name: string): Promise<boolean> {
+    return todo("modulesStarSelected");
+  }
+  async modulesToggleStar(_name: string): Promise<void> {
+    return todo("modulesToggleStar");
+  }
+  async modulesFavoritesExpanded(): Promise<boolean> {
+    return todo("modulesFavoritesExpanded");
+  }
+  async modulesOpenRowMenu(_name: string): Promise<void> {
+    return todo("modulesOpenRowMenu");
+  }
+  async modulesMenuItems(): Promise<ModulesMenuEntry[]> {
+    return todo("modulesMenuItems");
+  }
+  async modulesMenuChoose(_title: string): Promise<void> {
+    return todo("modulesMenuChoose");
+  }
+  async modulesMenuChooseOpenTab(_titlePart: string): Promise<{ url: string; title: string }> {
+    return todo("modulesMenuChooseOpenTab");
+  }
+  async modulesDialogVisible(_kind: "edit" | "archive" | "delete"): Promise<boolean> {
+    return todo("modulesDialogVisible");
+  }
+  async modulesDialogHeading(): Promise<string | null> {
+    return todo("modulesDialogHeading");
+  }
+  async modulesReadClipboard(): Promise<string> {
+    return todo("modulesReadClipboard");
+  }
+  async modulesOpenDetail(
+    _workspaceSlug: string,
+    _projectId: string,
+    _moduleId: string,
+    _cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    return todo("modulesOpenDetail");
+  }
+  async modulesDetailOpenMenu(): Promise<void> {
+    return todo("modulesDetailOpenMenu");
+  }
+  async modulesTogglePeek(_name: string): Promise<void> {
+    return todo("modulesTogglePeek");
+  }
+  async modulesPeekVisible(): Promise<boolean> {
+    return todo("modulesPeekVisible");
+  }
+  async modulesPeekName(): Promise<string | null> {
+    return todo("modulesPeekName");
+  }
+  async modulesClosePeek(): Promise<void> {
+    return todo("modulesClosePeek");
+  }
+  async modulesBoardColumnCount(): Promise<number> {
+    return todo("modulesBoardColumnCount");
+  }
+  async modulesClickRow(_name: string): Promise<void> {
+    return todo("modulesClickRow");
+  }
+  async modulesTimelineRows(): Promise<ModulesTimelineRow[]> {
+    return todo("modulesTimelineRows");
+  }
+  async modulesTimelineBarColor(_name: string): Promise<string> {
+    return todo("modulesTimelineBarColor");
+  }
+  async modulesTimelineHoverBar(_name: string): Promise<void> {
+    return todo("modulesTimelineHoverBar");
+  }
+  async modulesTimelineTooltip(): Promise<string | null> {
+    return todo("modulesTimelineTooltip");
+  }
+  async modulesTimelineBarExists(_name: string): Promise<boolean> {
+    return todo("modulesTimelineBarExists");
+  }
+  async modulesTimelineDragBar(_name: string, _dayDelta: number): Promise<void> {
+    return todo("modulesTimelineDragBar");
+  }
+  async modulesTimelineResizeBar(_name: string, _side: "left" | "right", _dayDelta: number): Promise<void> {
+    return todo("modulesTimelineResizeBar");
+  }
+  async modulesTimelineOrder(): Promise<string[]> {
+    return todo("modulesTimelineOrder");
+  }
+  async modulesTimelineDragRowBefore(_sourceName: string, _targetName: string): Promise<void> {
+    return todo("modulesTimelineDragRowBefore");
+  }
+  async modulesTimelineAttemptRowBefore(_sourceName: string, _targetName: string): Promise<void> {
+    return todo("modulesTimelineAttemptRowBefore");
+  }
+  async modulesTimelineAttemptBarMove(_name: string, _dayDelta: number): Promise<void> {
+    return todo("modulesTimelineAttemptBarMove");
   }
 }
