@@ -2531,12 +2531,18 @@ async fn comment_destroy_inner(
         now.timestamp(),
     );
     enqueue_message(pool, publish.message()).await;
-    sqlx::query("UPDATE issue_comments SET deleted_at = $1 WHERE id = $2 AND deleted_at IS NULL")
-        .bind(now)
-        .bind(comment_id)
-        .execute(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    // `comment.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a full
+    // `save()` (`updated_at`, CRUM `updated_by`).
+    sqlx::query(
+        "UPDATE issue_comments SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(actor.id)
+    .bind(comment_id)
+    .execute(pool)
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
     enqueue_soft_delete(pool, "issuecomment", &comment_id).await;
     Ok(())
 }
@@ -2806,9 +2812,15 @@ async fn issue_reaction_destroy_inner(
     );
     enqueue_message(pool, publish.message()).await;
     let id = uuid::Uuid::parse_str(&reaction_id).map_err(|_| HandlerError::ServerError)?;
-    sqlx::query("UPDATE issue_reactions SET deleted_at = $1 WHERE id = $2 AND deleted_at IS NULL")
-        .bind(now)
-        .bind(id)
+    // `issue_reaction.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a
+    // full `save()` (`updated_at`, CRUM `updated_by`).
+    sqlx::query(
+        "UPDATE issue_reactions SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(actor.id)
+    .bind(id)
         .execute(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
@@ -3061,10 +3073,14 @@ async fn comment_reaction_destroy_inner(
     );
     enqueue_message(pool, publish.message()).await;
     let id = uuid::Uuid::parse_str(&reaction_id).map_err(|_| HandlerError::ServerError)?;
+    // `comment_reaction.delete()` (`db/mixins.py:72-77`): `deleted_at` plus
+    // a full `save()` (`updated_at`, CRUM `updated_by`).
     sqlx::query(
-        "UPDATE comment_reactions SET deleted_at = $1 WHERE id = $2 AND deleted_at IS NULL",
+        "UPDATE comment_reactions SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL",
     )
     .bind(now)
+    .bind(now)
+    .bind(actor.id)
     .bind(id)
     .execute(pool)
     .await
@@ -3404,9 +3420,15 @@ async fn vote_destroy_inner(
     );
     enqueue_message(pool, publish.message()).await;
     let id = uuid::Uuid::parse_str(&vote_id).map_err(|_| HandlerError::ServerError)?;
-    sqlx::query("UPDATE issue_votes SET deleted_at = $1 WHERE id = $2 AND deleted_at IS NULL")
-        .bind(now)
-        .bind(id)
+    // `issue_vote.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a full
+    // `save()` (`updated_at`, CRUM `updated_by`).
+    sqlx::query(
+        "UPDATE issue_votes SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(actor.id)
+    .bind(id)
         .execute(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
