@@ -1,0 +1,423 @@
+# Contract suites against the Rust server, all routing flags on (PIDASHCONV-821).
+#
+# Every HTTP contract suite under rust-api/contract-tests/ (see HTTP_SUITES.txt)
+# runs twice per matrix entry: first against live Django (oracle validity),
+# then against pidash-api serve with PIDASH_DJANGO_UPSTREAM pointing at that
+# same Django and EVERY PIDASH_RUST_* flag set to 1. One matrix job per suite
+# keeps failures attributable and each job under 30 minutes.
+#
+# The database and Redis are reset between the two runs (drop + recreate +
+# migrate, FLUSHDB): suites must see a pristine backend on both sides, and
+# throttle counters must not leak from the Django run into the Rust run.
+# No Celery worker runs by default — same as the existing Django HTTP
+# workflows, a worker would consume .delay() side effects the HTTP suites do
+# not expect. The suites in WORKER_SUITES.txt are the exception: they assert
+# on rows Django creates only inside a task, so they get a solo worker for
+# the Django run (stopped at the reset; the Rust run stays workerless). The
+# task-oracle files inside mixed suites (TASK_ORACLE_IGNORES.txt) are excluded
+# from both runs with the same --ignore selection. Django is served with
+# runserver except for the suites in ASGI_SUITES.txt, whose SSE/event
+# streams are async iterators runserver can never flush (uvicorn instead).
+name: rust-api contract tests — Rust matrix
+
+on:
+  pull_request:
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-contract-rust.yml"
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-contract-rust.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.suites.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate matrix inputs
+        run: python3 rust-api/contract-tests/_harness/rust_matrix.py check
+
+      - id: suites
+        run: echo "matrix=$(python3 rust-api/contract-tests/_harness/rust_matrix.py matrix)" >> "$GITHUB_OUTPUT"
+
+  contract-rust:
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pidash_contract
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      rabbitmq:
+        image: rabbitmq:3.13.6-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: pi_dash
+          RABBITMQ_DEFAULT_PASS: pi_dash
+          RABBITMQ_DEFAULT_VHOST: pi_dash
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pidash_contract
+      REDIS_URL: redis://localhost:6379/0
+      # Django publishes .delay() side effects here with no consumer (same as
+      # the existing HTTP workflows). The Rust step below overrides AMQP_URL
+      # with the AMQP broker: pidash-jobs' Publisher is AMQP-only, so any
+      # Rust handler that publishes .delay() (e.g. forgot-password mail)
+      # 500s without a reachable broker.
+      AMQP_URL: redis://localhost:6379/1
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: pi_dash
+      RABBITMQ_PASSWORD: pi_dash
+      RABBITMQ_VHOST: pi_dash
+      CONTRACT_REDIS_URL: redis://localhost:6379/0
+      # Django's own base URLs (the Rust step overrides these with :8080 so
+      # each backend's redirects match the BASE_URL it is tested under).
+      # SPACE_BASE_URL must be configured: the auth_magic oracle documents
+      # that sign-in/up redirects 500 without it.
+      WEB_URL: http://127.0.0.1:8000
+      APP_BASE_URL: http://127.0.0.1:8000
+      SPACE_BASE_URL: http://127.0.0.1:8000
+      DJANGO_BASE_URL: http://127.0.0.1:8000
+      RUST_BASE_URL: http://127.0.0.1:8080
+      EMAIL_HOST: localhost
+      API_KEY_RATE_LIMIT: 100000/minute
+      # Fixed key so HTTP suites can forge session rows (see
+      # rust-api/contract-tests/_harness/http.py); Rust serve gets the same
+      # SECRET_KEY so forged sessions validate on both backends.
+      SECRET_KEY: "contract-tests-fixed-secret"
+      CONTRACT_SECRET_KEY: "contract-tests-fixed-secret"
+      # _harness/client.py session forging reads this name (assistant suite).
+      CONTRACT_DJANGO_SECRET_KEY: "contract-tests-fixed-secret"
+      # Inert dummies (same as the app-integrations workflow): with them set
+      # the suite exercises the configured paths instead of the fallbacks.
+      # No test calls a real provider.
+      LLM_API_KEY: dummy-contract-key
+      GITHUB_APP_PRIVATE_KEY: dummy-private-key
+      GITHUB_APP_WEBHOOK_SECRET: contract91-webhook-secret
+      GITHUB_APP_CLIENT_SECRET: dummy-client-secret
+      # Assistant BYOK encryption backend. Fernet with a committed test-only
+      # key (ephemeral CI database; never a real secret) — same as the
+      # worker-plane oracle job.
+      ASSISTANT_CRYPTO_BACKEND: fernet
+      ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # SSRF guard for BYOK base_url (cloud parity): the assistant suite
+      # pins blocked-URL rejections at save, and both backends implement
+      # the same gate off this variable (Django ssrf.py, Rust
+      # assistant/common.rs). Off in OSS by default; the suite needs it on.
+      ASSISTANT_BLOCK_PRIVATE_URLS: "True"
+      # Object-store credentials for offline SigV4 presigning. Both bucket
+      # names are set: Django's S3Storage reads AWS_S3_BUCKET_NAME
+      # (presigned POSTs 500 without it), while minio-style clients use
+      # AWS_STORAGE_BUCKET_NAME. Deliberately NO endpoint URL and no
+      # LocalStack: no HTTP suite does live S3 I/O, and pointing Django at
+      # LocalStack breaks suites pinning https-shaped presigned URLs
+      # (api_assets_stickies_intake). Both backends presign offline from
+      # these same values, so policies stay byte-identical.
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_S3_BUCKET_NAME: pi-dash-contract
+      AWS_STORAGE_BUCKET_NAME: pi-dash-contract
+      AWS_REGION: us-east-1
+      # OpenAPI schema routes only exist behind this flag (both backends).
+      ENABLE_DRF_SPECTACULAR: "1"
+      # Cutover edge: Django upstream + EVERY routing flag on (see
+      # rust-api/crates/api/src/edge.rs Prefix::ALL). Django and pytest
+      # ignore these; pidash-api serve reads them.
+      PIDASH_DJANGO_UPSTREAM: http://127.0.0.1:8000
+      PIDASH_RUST_WEB: "1"
+      PIDASH_RUST_APP: "1"
+      PIDASH_RUST_ASSISTANT: "1"
+      PIDASH_RUST_LOOP: "1"
+      PIDASH_RUST_PROMPTING: "1"
+      PIDASH_RUST_SPACE: "1"
+      PIDASH_RUST_LICENSE: "1"
+      PIDASH_RUST_RUNNER_WEB: "1"
+      PIDASH_RUST_API_V1: "1"
+      PIDASH_RUST_RUNNER: "1"
+      PIDASH_RUST_AUTH: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements/base.txt
+            rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install system deps for psycopg-c
+        run: sudo apt-get update -y && sudo apt-get install -y libpq-dev
+
+      - name: Install Django server and contract-test deps
+        run: >-
+          python -m pip install
+          -r apps/api/requirements/base.txt
+          -r rust-api/contract-tests/requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --noinput
+
+      # runserver cannot serve async-iterator SSE/event streams (the
+      # client hangs waiting for headers), so ASGI_SUITES.txt suites get
+      # uvicorn for both Django starts. Same app, same responses; only the
+      # server flavor differs.
+      - name: Select Django server flavor
+        run: |
+          if grep -qx "${{ matrix.suite }}" rust-api/contract-tests/ASGI_SUITES.txt; then
+            echo "DJANGO_SERVER=uvicorn" >> "$GITHUB_ENV"
+          else
+            echo "DJANGO_SERVER=runserver" >> "$GITHUB_ENV"
+          fi
+
+      - name: Start live Django server
+        working-directory: apps/api
+        run: |
+          if [ "$DJANGO_SERVER" = "uvicorn" ]; then
+            nohup python -m uvicorn pi_dash.asgi:application \
+              --host 127.0.0.1 --port 8000 > /tmp/django-contract.log 2>&1 &
+          else
+            nohup python manage.py runserver 127.0.0.1:8000 --noreload \
+              > /tmp/django-contract.log 2>&1 &
+          fi
+          echo $! > /tmp/django-contract.pid
+          # TCP probe: Django returns 404 on / with DEBUG on, so don't use -f.
+          for i in $(seq 1 60); do
+            (echo > /dev/tcp/127.0.0.1/8000) >/dev/null 2>&1 && break
+            sleep 2
+          done
+
+      # Suites in WORKER_SUITES.txt assert on rows Django creates only
+      # inside a task: they get a solo worker on the redis broker for the
+      # Django run. Every other suite runs workerless (consumed .delay()
+      # side effects break suites that do not expect them). The worker is
+      # stopped at the reset; the Rust run stays workerless.
+      - name: Start Django worker for worker suites
+        working-directory: apps/api
+        run: |
+          if grep -qx "${{ matrix.suite }}" ../../rust-api/contract-tests/WORKER_SUITES.txt; then
+            nohup python -m celery -A pi_dash worker --pool=solo --concurrency=1 \
+              --loglevel=info > /tmp/django-worker.log 2>&1 &
+            echo $! > /tmp/django-worker.pid
+            echo "WORKER_STARTED=1" >> "$GITHUB_ENV"
+            for i in $(seq 1 60); do
+              grep -q "ready\." /tmp/django-worker.log 2>/dev/null && break
+              sleep 2
+            done
+            grep -q "ready\." /tmp/django-worker.log
+          else
+            echo "WORKER_STARTED=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run ${{ matrix.suite }} vs Django (oracle validity)
+        working-directory: rust-api/contract-tests
+        run: |
+          set +e
+          IGNORES=$(grep "^${{ matrix.suite }}/" TASK_ORACLE_IGNORES.txt | sed 's/^/--ignore=/' | tr '\n' ' ')
+          LOG="/tmp/pytest-django-${{ matrix.suite }}.log"
+          BASE_URL="$DJANGO_BASE_URL" CONTRACT_WEB_URL="$DJANGO_BASE_URL" \
+            python -m pytest "${{ matrix.suite }}" $IGNORES -q --tb=short 2>&1 | tee "$LOG"
+          echo "DJANGO_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+          echo "DJANGO_SUMMARY=$(tail -n 1 "$LOG")" >> "$GITHUB_ENV"
+
+      - name: Build pidash-api
+        if: env.DJANGO_EXIT == '0'
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      # runserver holds one idle connection for its whole life (despite
+      # CONN_MAX_AGE=0), which blocks DROP DATABASE — stop it for the reset
+      # and start it again afterwards as the Rust upstream.
+      - name: Stop Django and worker for reset
+        if: env.DJANGO_EXIT == '0'
+        run: |
+          stop_pid() {
+            # $1 = pid file, $2 = label. SIGTERM + grace, then SIGKILL.
+            # uvicorn can hang in "Waiting for background tasks" after
+            # SIGTERM (lingering SSE/WebSocket tasks from streaming
+            # suites): without the KILL fallback the survivor keeps its
+            # port and its DB backends, and the reset DROP fails with
+            # ObjectInUse (runner, CI run 38066491265).
+            [ -f "$1" ] || return 0
+            pid="$(cat "$1")"
+            kill "$pid" 2>/dev/null || return 0
+            for i in $(seq 1 30); do
+              kill -0 "$pid" 2>/dev/null || return 0
+              sleep 1
+            done
+            kill -9 "$pid" 2>/dev/null || return 0
+            for i in $(seq 1 10); do
+              kill -0 "$pid" 2>/dev/null || return 0
+              sleep 1
+            done
+            echo "$2 pid $pid survived SIGKILL"
+            return 1
+          }
+          stop_pid /tmp/django-contract.pid "Django server"
+          if [ "${WORKER_STARTED:-0}" = "1" ]; then
+            stop_pid /tmp/django-worker.pid "Django worker"
+          fi
+
+      - name: Reset database and Redis between backends
+        if: env.DJANGO_EXIT == '0'
+        run: |
+          python - <<'EOF'
+          import psycopg
+          with psycopg.connect("postgresql://postgres:postgres@localhost:5432/postgres",
+                                autocommit=True) as conn:
+              # A backend can briefly outlive its client (SIGTERM races):
+              # evict every pidash_contract backend first so the DROP
+              # cannot fail with ObjectInUse.
+              conn.execute(
+                  "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                  "WHERE datname = 'pidash_contract' AND pid <> pg_backend_pid()"
+              )
+              conn.execute("DROP DATABASE pidash_contract")
+              conn.execute("CREATE DATABASE pidash_contract")
+          EOF
+          python - <<'EOF'
+          import os
+          import redis
+          redis.Redis.from_url(os.environ["REDIS_URL"]).flushdb()
+          EOF
+
+      - name: Migrate contract database (Rust run)
+        if: env.DJANGO_EXIT == '0'
+        working-directory: apps/api
+        run: python manage.py migrate --noinput
+
+      - name: Restart Django server (Rust upstream)
+        if: env.DJANGO_EXIT == '0'
+        working-directory: apps/api
+        run: |
+          if [ "$DJANGO_SERVER" = "uvicorn" ]; then
+            nohup python -m uvicorn pi_dash.asgi:application \
+              --host 127.0.0.1 --port 8000 >> /tmp/django-contract.log 2>&1 &
+          else
+            nohup python manage.py runserver 127.0.0.1:8000 --noreload \
+              >> /tmp/django-contract.log 2>&1 &
+          fi
+          for i in $(seq 1 60); do
+            (echo > /dev/tcp/127.0.0.1/8000) >/dev/null 2>&1 && break
+            sleep 2
+          done
+
+      - name: Start Rust server (all flags on)
+        if: env.DJANGO_EXIT == '0'
+        working-directory: rust-api
+        env:
+          WEB_URL: http://127.0.0.1:8080
+          APP_BASE_URL: http://127.0.0.1:8080
+          SPACE_BASE_URL: http://127.0.0.1:8080
+          AMQP_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+        run: |
+          ./target/debug/pidash-api serve --bind 127.0.0.1:8080 > /tmp/rust-serve.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+              echo "Rust is up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Rust did not start:"; tail -n 50 /tmp/rust-serve.log; exit 1
+
+      - name: Run ${{ matrix.suite }} vs Rust (all flags on)
+        if: env.DJANGO_EXIT == '0'
+        working-directory: rust-api/contract-tests
+        run: |
+          set +e
+          IGNORES=$(grep "^${{ matrix.suite }}/" TASK_ORACLE_IGNORES.txt | sed 's/^/--ignore=/' | tr '\n' ' ')
+          LOG="/tmp/pytest-rust-${{ matrix.suite }}.log"
+          BASE_URL="$RUST_BASE_URL" CONTRACT_WEB_URL="$RUST_BASE_URL" \
+            python -m pytest "${{ matrix.suite }}" $IGNORES -q --tb=short 2>&1 | tee "$LOG"
+          echo "RUST_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+          echo "RUST_SUMMARY=$(tail -n 1 "$LOG")" >> "$GITHUB_ENV"
+
+      - name: Known-failures gate
+        if: always()
+        working-directory: rust-api/contract-tests
+        run: |
+          if [ -z "${DJANGO_EXIT+x}" ]; then
+            echo "gate FAILED: an earlier step failed before the Django run recorded an exit"
+            exit 1
+          fi
+          python3 _harness/rust_matrix.py gate --suite "${{ matrix.suite }}" \
+            --django-exit "$DJANGO_EXIT" --rust-exit "${RUST_EXIT:--1}"
+
+      - name: Report counts
+        if: always()
+        run: |
+          {
+            echo "## ${{ matrix.suite }}"
+            echo ""
+            echo "| backend | exit | summary |"
+            echo "|---|---|---|"
+            echo "| Django (:8000) | ${DJANGO_EXIT:-n/a} | ${DJANGO_SUMMARY:-n/a} |"
+            echo "| Rust (:8080, all flags) | ${RUST_EXIT:-n/a} | ${RUST_SUMMARY:-n/a} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload service logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-rust-${{ matrix.suite }}-logs
+          path: |
+            /tmp/django-contract.log
+            /tmp/django-worker.log
+            /tmp/rust-serve.log
+            /tmp/pytest-django-${{ matrix.suite }}.log
+            /tmp/pytest-rust-${{ matrix.suite }}.log
