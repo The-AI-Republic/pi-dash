@@ -50,6 +50,7 @@ import type {
   KanbanCard,
   KanbanColumn,
   LayoutsLayoutKey,
+  ModulesXPaletteMenuItem,
   DocumentShellFacts,
   NotFoundFacts,
   NotificationsAppliedChip,
@@ -28844,5 +28845,622 @@ export class WebDriver implements ParityDriver {
       out.push(texts);
     }
     return out;
+  }
+
+  // -------------------------------------------------------------------------
+  // Modules cross-cutting (NEWFRONT-311, rows MOD-036..043).
+  // -------------------------------------------------------------------------
+
+  private async modulesXRowNames(): Promise<string[]> {
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main");
+      const anchors = [...(main?.querySelectorAll('a[href*="/modules/"]') ?? [])];
+      const names: string[] = [];
+      for (const anchor of anchors) {
+        if (!/\/modules\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(anchor.getAttribute("href") ?? "")) continue;
+        const label = anchor.querySelector("span.truncate")?.textContent?.trim() ?? "";
+        if (label !== "") names.push(label);
+      }
+      return names;
+    });
+  }
+
+  private async modulesXAwaitListSettled(): Promise<void> {
+    await this.page.waitForFunction(
+      () => {
+        const main = document.querySelector("main");
+        if (!main) return false;
+        const anchors = [...main.querySelectorAll('a[href*="/modules/"]')];
+        if (
+          anchors.some((anchor) => /\/modules\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(anchor.getAttribute("href") ?? ""))
+        )
+          return true;
+        const text = main.innerText ?? "";
+        return (
+          text.includes("Modules are not enabled for the project.") ||
+          text.includes("Map your project goals to Modules") ||
+          text.includes("No matching results.")
+        );
+      },
+      null,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  /** The module create/update dialog, scoped by its submit button. */
+  private modulesXDialogScope(): Locator {
+    // NOTE: the role=dialog wrapper itself reports invisible (boxless
+    // container); the submit button is the visible open marker, and the
+    // scope only anchors sub-queries, never visibility.
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("button", { name: /^(Create|Update) Module$/ }) })
+      .first();
+  }
+
+  /** The dialog's submit button: the visible open marker. */
+  private modulesXDialogSubmit(): Locator {
+    return this.page.getByRole("button", { name: /^(Create|Update) Module$/ }).first();
+  }
+
+  async modulesXOpenSettingsModules(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/features/modules`, {
+      waitUntil: "domcontentloaded",
+      timeout: 120_000,
+    });
+    await this.page.waitForFunction(
+      () => {
+        // Content markers only: the bare word "Modules" also matches the
+        // settings sidebar, which renders before the content does.
+        const text = document.querySelector("main")?.innerText ?? "";
+        return text.includes("Oops! You are not authorized to view this page") || text.includes("Enable modules");
+      },
+      null,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async modulesXSettingsShowsNotAuthorized(): Promise<boolean> {
+    return this.isShown(this.page.getByText("Oops! You are not authorized to view this page").first());
+  }
+
+  async modulesXModulesToggleState(): Promise<boolean | null> {
+    const toggle = this.page.getByRole("switch").first();
+    await toggle.waitFor({ timeout: 10_000 }).catch(() => null);
+    if ((await toggle.count()) === 0) return null;
+    const checked = await toggle.getAttribute("aria-checked").catch(() => null);
+    if (checked !== null) return checked === "true";
+    return (await toggle.getAttribute("aria-pressed").catch(() => null)) === "true";
+  }
+
+  async modulesXFlipModulesToggle(): Promise<void> {
+    const toggle = this.page.getByRole("switch").first();
+    await toggle.waitFor({ timeout: WebDriver.WAIT_MS });
+    const answered = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "PATCH" &&
+          /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/?$/.test(new URL(response.url()).pathname),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => null);
+    await toggle.click({ timeout: WebDriver.WAIT_MS });
+    await answered;
+  }
+
+  async modulesXOpenModulesList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules`, {
+      waitUntil: "domcontentloaded",
+      timeout: 120_000,
+    });
+    await this.modulesXAwaitListSettled();
+  }
+
+  async modulesXListGateVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByText("Modules are not enabled for the project.").first());
+  }
+
+  async modulesXGateManageFeaturesState(): Promise<{ visible: boolean; disabled: boolean }> {
+    const button = this.page.getByRole("button", { name: "Manage features" }).first();
+    if ((await button.count()) === 0 || !(await this.isShown(button))) return { visible: false, disabled: false };
+    return { visible: true, disabled: await button.isDisabled().catch(() => false) };
+  }
+
+  async modulesXListNames(): Promise<string[]> {
+    return this.modulesXRowNames();
+  }
+
+  async modulesXModuleDialogOpen(): Promise<boolean> {
+    return this.isShown(this.modulesXDialogSubmit());
+  }
+
+  async modulesXFillCreateName(name: string): Promise<void> {
+    const field = this.modulesXDialogScope().getByPlaceholder("Title").first();
+    await field.waitFor({ timeout: WebDriver.WAIT_MS });
+    // The create form re-initializes after its async options (lead/members)
+    // land, and under load that reset can wipe an early fill (submit then
+    // fails with "Title is required"). Fill until the value sticks across a
+    // gap, so a late reset cannot slip between fill and submit.
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await field.fill(name);
+      const stuck = await this.page
+        .waitForFunction(
+          (want) => {
+            const el = document.querySelector('input[placeholder="Title"]') as HTMLInputElement | null;
+            return el !== null && el.value === want;
+          },
+          name,
+          { timeout: 5_000 }
+        )
+        .then(() => true)
+        .catch(() => false);
+      if (!stuck) continue;
+      await this.page.waitForTimeout(750);
+      if ((await field.inputValue().catch(() => "")) === name) return;
+    }
+    await field.fill(name);
+    await expect(field).toHaveValue(name, { timeout: 5_000 });
+  }
+
+  async modulesXSubmitCreate(): Promise<void> {
+    const scope = this.modulesXDialogScope();
+    const submit = scope.getByRole("button", { name: /^Create Module$/ }).first();
+    await submit.waitFor({ timeout: WebDriver.WAIT_MS });
+    const answered = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/modules\/?$/.test(new URL(response.url()).pathname),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => null);
+    await submit.click({ timeout: WebDriver.WAIT_MS });
+    await answered;
+  }
+
+  private async modulesXFocusDescriptor(): Promise<string> {
+    return this.page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el) return "none";
+      const tag = el.tagName.toLowerCase();
+      if (tag === "body") return "body";
+      const placeholder = el.getAttribute("placeholder");
+      if (placeholder) return `${tag}:${placeholder}`;
+      const label = el.getAttribute("aria-label");
+      if (label) return `${tag}:${label}`;
+      const text = (el.innerText ?? "").trim().replace(/\s+/g, " ").slice(0, 40);
+      if (text !== "") return `${tag}:${text}`;
+      const role = el.getAttribute("role");
+      if (role) return `${tag}[${role}]`;
+      return tag;
+    });
+  }
+
+  async modulesXDialogFocused(): Promise<string> {
+    return this.modulesXFocusDescriptor();
+  }
+
+  async modulesXDialogTabSequence(): Promise<string[]> {
+    // Walk Tab from the dialog's autofocused field, describing each stop.
+    // Descriptors name the user-visible control (placeholder, label, or
+    // button text) so the scenario asserts a concrete focus order.
+    const seen: string[] = [];
+    for (let step = 0; step < 12; step++) {
+      seen.push(await this.modulesXFocusDescriptor());
+      await this.page.keyboard.press("Tab");
+      await this.page.waitForTimeout(120);
+    }
+    return seen;
+  }
+
+  async modulesXOpenEditDialogFromRow(name: string): Promise<void> {
+    // Right-click opens the same row menu as the hover ellipsis trigger.
+    const row = this.page.getByText(name, { exact: true }).first();
+    await row.waitFor({ timeout: WebDriver.WAIT_MS });
+    await row.click({ button: "right", timeout: WebDriver.WAIT_MS });
+    const entry = this.page.getByRole("button", { name: "Edit", exact: true }).first();
+    await entry.waitFor({ timeout: WebDriver.WAIT_MS });
+    await entry.dispatchEvent("click");
+    await this.modulesXDialogSubmit().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesXPaletteModuleMenuItems(): Promise<ModulesXPaletteMenuItem[]> {
+    // cmdk module-menu entries: the status glyph sits left of the label and
+    // the selected check (when membership pre-selects the row) sits right.
+    return this.paletteItems().evaluateAll((items) =>
+      items.map((item) => {
+        const name = (item.textContent ?? "").trim().replace(/\s+/g, " ");
+        const svgs = item.querySelectorAll("svg");
+        const trailing = item.querySelector("div.flex.shrink-0");
+        return { name, hasIcon: svgs.length > 0, hasCheck: (trailing?.querySelectorAll("svg") ?? []).length > 0 };
+      })
+    );
+  }
+
+  async modulesXActivatePaletteModuleMenuItem(name: string): Promise<void> {
+    const item = this.paletteModal().locator("[cmdk-item]", { hasText: name }).first();
+    await item.waitFor({ timeout: WebDriver.WAIT_MS });
+    await item.click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesXOpenModuleDetail(workspaceSlug: string, projectId: string, moduleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules/${moduleId}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 120_000,
+    });
+    await this.page.waitForFunction(
+      () => {
+        const main = document.querySelector("main");
+        if (!main) return false;
+        if (main.querySelector("h4.text-18")) return true;
+        const text = main.innerText ?? "";
+        return text.includes("Module does not exist");
+      },
+      null,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async modulesXDetailName(): Promise<string | null> {
+    // The detail sidebar heads the module with its name; the size class
+    // tells it apart from smaller headings sharing the page.
+    const heading = this.page.locator("main h4.text-18").first();
+    if ((await heading.count()) === 0 || !(await this.isShown(heading))) return null;
+    const text = ((await heading.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  async modulesXDetailMissingVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByText("Module does not exist").first());
+  }
+
+  async modulesXMissingModuleBackToList(): Promise<void> {
+    const back = this.page.getByRole("button", { name: "View other modules" }).first();
+    await back.waitFor({ timeout: WebDriver.WAIT_MS });
+    await back.click({ timeout: WebDriver.WAIT_MS });
+    await this.modulesXAwaitListSettled();
+  }
+
+  async modulesXProjectAccessWallVisible(): Promise<boolean> {
+    // Regex: the heading carries a curly apostrophe.
+    return this.isShown(this.page.getByText(/have access to this Project/).first());
+  }
+
+  async modulesXOpenModulesListWithPeek(workspaceSlug: string, projectId: string, moduleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules?peekModule=${moduleId}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 120_000,
+    });
+    await this.modulesXAwaitListSettled();
+    // The peek panel mounts beside the rows once its detail fetch lands.
+    await this.page
+      .locator("main h4.text-18")
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async modulesXPeekName(): Promise<string | null> {
+    const heading = this.page.locator("main h4.text-18").first();
+    if ((await heading.count()) === 0 || !(await this.isShown(heading))) return null;
+    const text = ((await heading.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  /** Leave typing targets so keys reach the page shortcut handler. */
+  private async modulesXNeutralFocus(): Promise<void> {
+    const typing = await this.page.evaluate(() => {
+      const el = document.activeElement;
+      if (!el) return false;
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return true;
+      return (el as Element).getAttribute?.("contenteditable") === "true";
+    });
+    if (!typing) return;
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    // A collapsed search field can keep focus through the Escape; force it.
+    await this.page.evaluate(() => {
+      const el = document.activeElement;
+      if (
+        el instanceof HTMLInputElement ||
+        el instanceof HTMLTextAreaElement ||
+        (el as Element | null)?.getAttribute?.("contenteditable") === "true"
+      ) {
+        (el as HTMLElement).blur();
+      }
+    });
+  }
+
+  async modulesXPressKey(key: string): Promise<void> {
+    // Neutral focus first (inputs swallow page shortcuts), except for
+    // Escape itself, which must reach the focused control (dialogs, menus,
+    // the search field) to do its job.
+    if (key !== "Escape") await this.modulesXNeutralFocus();
+    await this.page.keyboard.press(key);
+    await this.page.waitForTimeout(150);
+  }
+
+  async modulesXPressKeySequence(sequence: string): Promise<void> {
+    // One preamble, then the keys with minimal gaps: the handler resets
+    // its buffer after a second of no typing, so a settle wait between
+    // the presses would break the sequence under load.
+    await this.modulesXNeutralFocus();
+    for (const key of sequence) {
+      await this.page.keyboard.press(key);
+    }
+    await this.page.waitForTimeout(150);
+  }
+
+  /** Index of the list search input among the page's Search inputs (sidebar first). */
+  private async modulesXListSearchIndex(): Promise<number> {
+    return this.page.evaluate(() => {
+      const inputs = [...document.querySelectorAll('main input[placeholder="Search"]')];
+      // Prefer an already-expanded one (the opened list search); else the
+      // one with a collapsed trigger button beside its wrapper.
+      const expanded = inputs.findIndex((node) => (node as HTMLElement).getBoundingClientRect().width > 8);
+      if (expanded >= 0) return expanded;
+      const withTrigger = inputs.findIndex(
+        (node) => node.closest("div")?.previousElementSibling instanceof HTMLButtonElement
+      );
+      if (withTrigger >= 0) return withTrigger;
+      throw new Error("[parity] no list search input found.");
+    });
+  }
+
+  private modulesXListSearchInput(index: number): Locator {
+    return this.page.locator('main input[placeholder="Search"]').nth(index);
+  }
+
+  async modulesXOpenListSearch(): Promise<void> {
+    // Collapsed, the search is an icon-only button with no accessible name
+    // sitting just before the (zero-width) input's wrapper; click it.
+    const index = await this.modulesXListSearchIndex();
+    await this.page.evaluate((wanted: number) => {
+      const inputs = [...document.querySelectorAll('main input[placeholder="Search"]')];
+      const input = inputs[wanted];
+      if (!input) throw new Error("[parity] list search input vanished.");
+      if ((input as HTMLElement).getBoundingClientRect().width > 8) return;
+      const trigger = input.closest("div")?.previousElementSibling;
+      if (!(trigger instanceof HTMLButtonElement)) throw new Error("[parity] no collapsed search trigger found.");
+      trigger.click();
+    }, index);
+    await this.modulesXListSearchInput(index).waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async modulesXFillListSearch(text: string): Promise<void> {
+    const input = this.modulesXListSearchInput(await this.modulesXListSearchIndex());
+    await input.waitFor({ timeout: WebDriver.WAIT_MS });
+    await input.fill(text);
+  }
+
+  async modulesXListSearchState(): Promise<{ expanded: boolean; query: string }> {
+    const index = await this.modulesXListSearchIndex().catch(() => -1);
+    if (index < 0) return { expanded: false, query: "" };
+    const input = this.modulesXListSearchInput(index);
+    const box = await input.boundingBox().catch(() => null);
+    const query = await input.inputValue().catch(() => "");
+    return { expanded: box !== null && box.width > 8, query };
+  }
+
+  private async modulesXDragByNames(sourceName: string, targetName: string): Promise<void> {
+    // A real pointer drag: rows and cards carry no drag handles, so grab
+    // the row/card body itself and drop it onto its neighbor.
+    const source = this.page.getByText(sourceName, { exact: true }).first();
+    const target = this.page.getByText(targetName, { exact: true }).first();
+    await source.waitFor({ timeout: WebDriver.WAIT_MS });
+    await target.waitFor({ timeout: WebDriver.WAIT_MS });
+    await source.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await target.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    const from = (await source.boundingBox()) ?? undefined;
+    const to = (await target.boundingBox()) ?? undefined;
+    if (!from || !to) throw new Error("[parity] drag endpoints have no boxes.");
+    const mouse = this.page.mouse;
+    await mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await mouse.down();
+    for (let step = 1; step <= 8; step++) {
+      await mouse.move(
+        from.x + from.width / 2 + ((to.x + to.width / 2 - from.x - from.width / 2) * step) / 8,
+        from.y + from.height / 2 + ((to.y + to.height / 2 - from.y - from.height / 2) * step) / 8,
+        { steps: 2 }
+      );
+    }
+    await mouse.up();
+    await this.page.waitForTimeout(500);
+  }
+
+  async modulesXAttemptRowDrag(sourceName: string, targetName: string): Promise<void> {
+    await this.modulesXDragByNames(sourceName, targetName);
+  }
+
+  async modulesXSwitchModulesLayout(layout: "list" | "board" | "timeline"): Promise<void> {
+    // Icon-only switcher buttons in list/board/timeline order; tooltips
+    // name them on hover but carry no accessible name to click by.
+    const index = layout === "list" ? 0 : layout === "board" ? 1 : 2;
+    const buttons = this.page.locator("main div.bg-layer-3 button");
+    await buttons.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const count = await buttons.count();
+    if (count < 3) throw new Error(`[parity] layout switcher shows ${count} buttons, expected 3.`);
+    await buttons.nth(index).click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForFunction(
+      (want: string) => {
+        const main = document.querySelector("main");
+        if (!main) return false;
+        const text = main.innerText ?? "";
+        if (want === "board") return (main.querySelectorAll('a[href*="/modules/"]').length ?? 0) > 0;
+        if (want === "timeline") return text.length > 0;
+        return true;
+      },
+      layout,
+      { timeout: WebDriver.WAIT_MS }
+    );
+    await this.modulesXAwaitListSettled().catch(() => undefined);
+  }
+
+  async modulesXBoardNames(): Promise<string[]> {
+    return this.modulesXRowNames();
+  }
+
+  async modulesXAttemptCardDrag(sourceName: string, targetName: string): Promise<void> {
+    await this.modulesXDragByNames(sourceName, targetName);
+  }
+
+  async modulesXExportActionsPresent(scope: "list" | "detail" | "dialog"): Promise<boolean> {
+    const root = scope === "dialog" ? this.modulesXDialogScope() : this.page.locator("main");
+    for (const role of ["button", "link", "menuitem"] as const) {
+      const found = root.getByRole(role, { name: /export|import|print|download/i });
+      if ((await found.count()) === 0) continue;
+      for (let i = 0; i < (await found.count()); i++) {
+        if (
+          await found
+            .nth(i)
+            .isVisible()
+            .catch(() => false)
+        )
+          return true;
+      }
+    }
+    // Open menus could hide the entries; the row menu is the list's only
+    // menu surface, and its entries are covered by opening it on demand in
+    // the scenario (absence here means no always-visible action exists).
+    return false;
+  }
+
+  async modulesXEntryRequestPaths(workspaceSlug: string, projectId: string): Promise<string[]> {
+    // Traffic-allowlist spy (notifications precedent): collect the module
+    // API paths one list entry fetches; the scenario asserts the set.
+    const seen = new Set<string>();
+    const listener = (request: { url(): string }): void => {
+      const url = request.url();
+      if (!url.includes("/modules") && !url.includes("/module-")) return;
+      try {
+        seen.add(new URL(url).pathname);
+      } catch {
+        // Unparseable URLs cannot be endpoint calls; ignore them.
+      }
+    };
+    this.page.on("request", listener);
+    try {
+      await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules`, {
+        waitUntil: "domcontentloaded",
+        timeout: 120_000,
+      });
+      await this.modulesXAwaitListSettled();
+      await this.page.waitForTimeout(1_000);
+    } finally {
+      this.page.off("request", listener);
+    }
+    return [...seen].sort();
+  }
+
+  async modulesXRowFavoriteToggleVisible(): Promise<boolean> {
+    // The star is an icon-only button with no accessible name; find it in
+    // the first row's subtree (climbing from the row's detail anchor while
+    // the subtree holds exactly that row).
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main");
+      const anchors = [...(main?.querySelectorAll('a[href*="/modules/"]') ?? [])].filter((anchor) =>
+        /\/modules\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(anchor.getAttribute("href") ?? "")
+      );
+      const first = anchors[0];
+      if (!first) return false;
+      let node: Element | null = first;
+      while (node && node !== main) {
+        const rowAnchors = node.querySelectorAll('a[href*="/modules/"]');
+        let moduleAnchors = 0;
+        rowAnchors.forEach((anchor) => {
+          if (/\/modules\/[0-9a-fA-F-]{36}\/?(?:\?.*)?$/.test(anchor.getAttribute("href") ?? "")) moduleAnchors += 1;
+        });
+        if (moduleAnchors > 1) return false;
+        const star = [...node.querySelectorAll("button.h-4.w-4")].some((button) =>
+          Boolean(button.querySelector("svg"))
+        );
+        if (star) return true;
+        node = node.parentElement;
+      }
+      return false;
+    });
+  }
+
+  async modulesXFiltersMenuOpens(): Promise<boolean> {
+    const trigger = this.page.locator("main").getByRole("button", { name: "Filters" }).first();
+    if ((await trigger.count()) === 0) return false;
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    // The module filter panel carries the favorites toggle plus status.
+    const panel = this.page.getByText("Favorites", { exact: true }).first();
+    await panel.waitFor({ timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+    return this.isShown(panel);
+  }
+
+  async modulesXTimelineBarsPresent(): Promise<boolean> {
+    // The timeline sidebar lists one row per module; each dated module
+    // spans a bar carrying the module name.
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main");
+      if (!main) return false;
+      const names = [...main.querySelectorAll("h6")]
+        .map((h) => (h.textContent ?? "").trim())
+        .filter((text) => text !== "" && text !== "Modules" && text !== "Duration");
+      if (names.length === 0) return false;
+      const bars = [...main.querySelectorAll("div.cursor-pointer.rounded-sm")].filter((bar) =>
+        names.some((name) => (bar.textContent ?? "").includes(name))
+      );
+      return bars.length > 0;
+    });
+  }
+
+  async modulesXAnalyticsSidebarVisible(): Promise<boolean> {
+    return (await this.modulesXDetailName()) !== null;
+  }
+
+  async modulesXLinksSectionVisible(): Promise<boolean> {
+    return this.isShown(this.page.locator("main").getByText("Links", { exact: true }).first());
+  }
+
+  async modulesXRowMenuEntries(name: string): Promise<string[]> {
+    // The row context menu renders plain buttons (no menu roles); its
+    // items carry the menu's distinctive small-type styling.
+    const row = this.page.getByText(name, { exact: true }).first();
+    await row.waitFor({ timeout: WebDriver.WAIT_MS });
+    await row.click({ button: "right", timeout: WebDriver.WAIT_MS });
+    const items = this.page.locator("button.text-11.select-none:visible");
+    await items.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const entries = await items.evaluateAll((nodes) => {
+      const labels: string[] = [];
+      const seen = new Set<string>();
+      for (const node of nodes) {
+        const label = (node.textContent ?? "").trim().replace(/\s+/g, " ");
+        if (label !== "" && !seen.has(label)) {
+          seen.add(label);
+          labels.push(label);
+        }
+      }
+      return labels;
+    });
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    return entries;
+  }
+
+  async modulesXEditionGateMarkersPresent(scope: "list" | "detail"): Promise<boolean> {
+    void scope;
+    // Upgrade/paywall/desktop-shell markers: buttons, links, menu items, or
+    // headings offering an edition-gated path. Tight patterns only — the
+    // scenario fails on any hit, so generic words stay out.
+    const root = this.page.locator("main");
+    for (const role of ["button", "link", "menuitem"] as const) {
+      const found = root.getByRole(role, { name: /upgrade|premium|enterprise|contact sales|go to cloud/i });
+      if ((await found.count()) === 0) continue;
+      for (let i = 0; i < (await found.count()); i++) {
+        if (
+          await found
+            .nth(i)
+            .isVisible()
+            .catch(() => false)
+        )
+          return true;
+      }
+    }
+    for (const heading of ["Available on", "Not available in your plan", "Desktop app", "Offline mode"]) {
+      if (await this.isShown(root.getByRole("heading", { name: heading }).first())) return true;
+    }
+    return false;
   }
 }
