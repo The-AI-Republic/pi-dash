@@ -2,10 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
+import { seedFactsFromEnv } from "./api.js";
 import {
   parityApiUrl,
   parityOracleUrl,
@@ -181,6 +184,28 @@ describe("bash conformance (stack/parity-env.sh)", () => {
       PARITY_MINIO_PORT: "19006",
     },
     { PARITY_NS: "257", PARITY_SEED_FILE: "/tmp/custom.json", PARITY_API_URL: "http://api:9000" },
+    // Uppercase + padding: bash must trim and lowercase exactly like TS.
+    {
+      PARITY_NS: "  S6  ",
+      PARITY_ORACLE_PORT: "13006",
+      PARITY_LIVE_PORT: "13106",
+      PARITY_PG_PORT: "15406",
+      PARITY_REDIS_PORT: "16306",
+      PARITY_API_PORT: "18006",
+      PARITY_MINIO_PORT: "19006",
+    },
+    // Interior separators are legal; both resolvers must agree on the token.
+    {
+      PARITY_NS: "s-6_x",
+      PARITY_ORACLE_PORT: "13006",
+      PARITY_LIVE_PORT: "13106",
+      PARITY_PG_PORT: "15406",
+      PARITY_REDIS_PORT: "16306",
+      PARITY_API_PORT: "18006",
+      PARITY_MINIO_PORT: "19006",
+    },
+    // A quote in a free-form override exercises the bash single-quote escaper.
+    { PARITY_PROJECT: "o'brien" },
   ];
 
   for (const env of comparable) {
@@ -206,8 +231,11 @@ describe("bash conformance (stack/parity-env.sh)", () => {
     { PARITY_NS: "19" },
     { PARITY_NS: "100" },
     { PARITY_NS: "has space" },
+    { PARITY_NS: "-lead" },
+    { PARITY_NS: "a".repeat(33) },
     { PARITY_NS: "s6" },
     { PARITY_API_PORT: "abc" },
+    { PARITY_API_PORT: "0" },
     { PARITY_API_PORT: "65536" },
   ];
 
@@ -217,4 +245,54 @@ describe("bash conformance (stack/parity-env.sh)", () => {
       expect(runBash(env).status).not.toBe(0);
     });
   }
+});
+
+describe("seedFactsFromEnv (api.ts namespace default)", () => {
+  // seedFactsFromEnv reads the ambient process environment, so each case
+  // runs with exactly the PARITY_* variables it names (ambient ones saved
+  // and restored: a PARITY_NS leaked from an outer suite run must not
+  // change what the default stack asserts here).
+  function withParityEnv(env: Env, fn: () => void): void {
+    const saved: Record<string, string> = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (key.startsWith("PARITY_") && value !== undefined) saved[key] = value;
+    }
+    for (const key of Object.keys(saved)) delete process.env[key];
+    for (const [key, value] of Object.entries(env)) {
+      if (value !== undefined) process.env[key] = value;
+    }
+    try {
+      fn();
+    } finally {
+      for (const key of Object.keys(process.env)) {
+        if (key.startsWith("PARITY_")) delete process.env[key];
+      }
+      Object.assign(process.env, saved);
+    }
+  }
+
+  it("reads the explicit seed file, even under a namespace", () => {
+    const dir = mkdtempSync(join(realpathSync(tmpdir()), "parity-seed-"));
+    const file = join(dir, "facts.json");
+    writeFileSync(file, JSON.stringify({ workspaceSlug: "scratch" }));
+    withParityEnv({ PARITY_NS: "257", PARITY_SEED_FILE: file }, () => {
+      expect(seedFactsFromEnv()).toEqual({ workspaceSlug: "scratch" });
+    });
+  });
+
+  it("still requires an explicit seed file on the default stack", () => {
+    withParityEnv({}, () => {
+      expect(() => seedFactsFromEnv()).toThrow(/PARITY_SEED_FILE is not set/);
+    });
+  });
+
+  it("defaults to the namespaced seed file when PARITY_NS is set", () => {
+    const expected = join(dirname(fileURLToPath(import.meta.url)), "..", ".seed-257.json");
+    // A live stack run in this checkout would have seeded that file; the
+    // default branch is only observable through the miss, so say so loudly.
+    expect(existsSync(expected)).toBe(false);
+    withParityEnv({ PARITY_NS: "257" }, () => {
+      expect(() => seedFactsFromEnv()).toThrow(/\.seed-257\.json/);
+    });
+  });
 });
