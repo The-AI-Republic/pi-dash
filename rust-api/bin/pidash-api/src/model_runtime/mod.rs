@@ -21,6 +21,8 @@
 //! executors behind the same `invoke` entry point.
 
 pub mod agent;
+pub mod github;
+pub mod keys;
 pub mod provider;
 pub mod schemas;
 pub mod usage;

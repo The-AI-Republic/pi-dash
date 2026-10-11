@@ -15,6 +15,9 @@ pidash-services = { path = "../../crates/services" }
 pidash-api = { path = "../../crates/api" }
 pidash-jobs = { path = "../../crates/jobs" }
 axum = "0.8"
+# Model runtime (PIDASHCONV-866): GitHub contents payloads are base64.
+# Same locked base64 0.22.x as the workspace (no lock churn).
+base64 = "0.22"
 # D-37 ops (PIDASHCONV-807/808/809, one line):
 # batch `now` + fresh row ids (807/808) and Utc timestamps for
 # register/dry-run (809). Same locked chrono 0.4.x as pidash-db, so
@@ -25,6 +28,9 @@ clap = { version = "4", features = ["derive"] }
 # (`FuturesUnordered`, first-completed error wins). Same locked
 # futures-util 0.3.x as the workspace (no lock churn).
 futures-util = { version = "0.3", default-features = false }
+# Model runtime (PIDASHCONV-866): GitHub App JWT (RS256).
+# Same locked jsonwebtoken 9.x as the workspace (no lock churn).
+jsonwebtoken = "9"
 # Runner seam providers (PIDASHCONV-859) + D-08 issue_activity wiring
 # (PIDASHCONV-836): the shared Redis client the providers multiplex over,
 # and the sync `OriginRedis` adapter's blocking client (same locked
@@ -35,6 +41,10 @@ redis = { version = "1", default-features = false, features = ["tokio-rustls-com
 # Same locked regex 1.x as pidash-jobs/pidash-services (no lock churn).
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+# Model runtime (PIDASHCONV-866): JWT claims struct.
+# Same locked serde 1.x as the workspace (no lock churn).
+serde = "1"
+>>>>>>> e055ba0d (PIDASHCONV-866: github leg + key resolver with mock-server tests)
 serde_json = { version = "1", features = ["preserve_order"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
 tokio = { version = "1", features = ["full"] }

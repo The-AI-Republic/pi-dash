@@ -2734,9 +2734,11 @@ name = "pidash-api-bin"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "futures-util",
+ "jsonwebtoken",
  "pidash-api",
  "pidash-auth",
  "pidash-db",
@@ -2746,6 +2748,7 @@ dependencies = [
  "redis",
  "regex",
  "reqwest",
+ "serde",
  "serde_json",
  "sqlx",
  "tokio",
