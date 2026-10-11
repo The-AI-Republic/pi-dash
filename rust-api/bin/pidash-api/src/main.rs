@@ -20,6 +20,7 @@
 mod execute_seams;
 mod inventory;
 mod ops;
+mod redis_origin;
 mod runner_seams;
 
 use clap::{Parser, Subcommand};
@@ -379,6 +380,19 @@ async fn worker(concurrency: u32) -> MainResult {
     registry.register(
         pidash_jobs::dispatch::RUN_CLOUD_AGENT_TASK,
         execute_seams::forward_to_python_handler(publisher.clone()),
+    );
+    // D-08 issue_activity (PIDASHCONV-836; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`, where the
+    // `Pools`-taking register is a stub over the same name const).
+    // Ownership flips to Rust the moment this registers; the live
+    // `OriginRedis` (REDIS_URL, sync SETEX) preserves the still-Python
+    // mail task's `ri.get(issue_id)` read. Without a REDIS_URL the
+    // origin write errors per call and the task aborts, exactly like
+    // Django's `redis_instance()` RuntimeError under the broad-except.
+    pidash_jobs::tasks_webhooks::register_activity_task(
+        &mut registry,
+        pools.clone(),
+        redis_origin::OriginRedis::from_env(),
     );
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
