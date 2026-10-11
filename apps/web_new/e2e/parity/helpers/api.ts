@@ -15296,3 +15296,62 @@ export async function serverMovePageStatus(
   });
   return res.status;
 }
+
+// --- Estimates enable switch, active/archived display, row gating
+// --- (NEWFRONT-322, EST-004-007). Appended; existing helpers above are
+// --- untouched per the shared harness contract. The system list reader
+// --- is the shell child's serverEstimatesList (NEWFRONT-321, merged).
+/** The estimate system a project currently links (null when estimates are off). */
+export async function serverProjectEstimateId(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string | null> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (rec["estimate"] === null || rec["estimate"] === undefined) return null;
+  if (typeof rec["estimate"] !== "string") throw new Error("[parity] project estimate link is not a string id.");
+  return rec["estimate"];
+}
+
+/**
+ * Create a dormant (archived-side) estimate system through the API: the
+ * stock creator always marks systems in-use, while the API default leaves
+ * them dormant, which is what the archived section lists.
+ */
+export async function serverCreateArchivedEstimate(
+  workspaceSlug: string,
+  projectId: string,
+  name: string,
+  points: string[],
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; lastUsed: boolean; points: ParityServerEstimatePoint[] }> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/estimates/`,
+    sessionCookie,
+    {
+      estimate: { name, type: "points", last_used: false },
+      estimate_points: points.map((value) => ({ value })),
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] archived estimate create failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string") throw new Error("[parity] created estimate carried no string id.");
+  const rows = Array.isArray(rec["points"]) ? rec["points"] : [];
+  return {
+    id: rec["id"],
+    lastUsed: rec["last_used"] === true,
+    points: rows.map((row) => {
+      const point = row as Record<string, unknown>;
+      if (typeof point["id"] !== "string" || typeof point["value"] !== "string")
+        throw new Error("[parity] estimate point carried no string id/value.");
+      return { id: point["id"], value: point["value"] };
+    }),
+  };
+}

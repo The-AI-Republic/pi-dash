@@ -10040,4 +10040,55 @@ export class WebNewDriver implements ParityDriver {
   async pagesRowDetailNotFoundBackToList(): Promise<void> {
     return todo("pagesRowDetailNotFoundBackToList");
   }
+
+  // --- Estimates enable switch, active/archived display, row gating
+  // --- (NEWFRONT-322, EST-004-007). Stubs; the new app implements
+  // --- them when the area is built.
+  async estimatesEnableSwitchOn(): Promise<boolean> {
+    return todo("estimatesEnableSwitchOn");
+  }
+
+  async estimatesEnableSwitchDisabled(): Promise<boolean> {
+    return todo("estimatesEnableSwitchDisabled");
+  }
+
+  async estimatesEnableSwitchToggle(): Promise<void> {
+    return todo("estimatesEnableSwitchToggle");
+  }
+
+  async estimatesFailProjectUpdate(): Promise<void> {
+    return todo("estimatesFailProjectUpdate");
+  }
+
+  async estimatesActiveSystemValues(): Promise<string> {
+    return todo("estimatesActiveSystemValues");
+  }
+
+  async estimatesArchivedSectionVisible(): Promise<boolean> {
+    return todo("estimatesArchivedSectionVisible");
+  }
+
+  async estimatesArchivedNames(): Promise<string[]> {
+    return todo("estimatesArchivedNames");
+  }
+
+  async estimatesArchivedExplainerText(): Promise<string> {
+    return todo("estimatesArchivedExplainerText");
+  }
+
+  async estimatesArchivedLinkHref(): Promise<string> {
+    return todo("estimatesArchivedLinkHref");
+  }
+
+  async estimatesArchivedLinkTarget(): Promise<string> {
+    return todo("estimatesArchivedLinkTarget");
+  }
+
+  async estimatesArchivedOpenLinkNewPage(): Promise<string> {
+    return todo("estimatesArchivedOpenLinkNewPage");
+  }
+
+  async estimatesArchivedRowButtonCount(_name: string): Promise<number> {
+    return todo("estimatesArchivedRowButtonCount");
+  }
 }
