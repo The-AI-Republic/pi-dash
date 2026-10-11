@@ -8292,6 +8292,7 @@ export class WebNewDriver implements ParityDriver {
   }
   async estimatesAnalyticsTableRows(): Promise<string[][]> {
     return todo("estimatesAnalyticsTableRows");
+  }
   // --- Workspace drafts oracle (NEWFRONT-32). Throwing stubs per the
   // --- shared driver contract; the Drafts area fills these in.
 
