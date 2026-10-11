@@ -495,7 +495,8 @@ pub async fn binding_patch(
 }
 
 /// `DELETE .../scheduler-bindings/<uuid>/` (`views.py:281-291`): uninstall
-/// (soft-delete), 204 with an empty body.
+/// (soft-delete + the `soft_delete_related_objects` fan-out enqueue),
+/// 204 with an empty body.
 pub async fn binding_uninstall(
     State(state): State<AppState>,
     Path((slug, project_raw, binding_raw)): Path<(String, String, String)>,
@@ -529,13 +530,16 @@ pub async fn binding_uninstall(
     if exists.is_none() {
         return Denial::NotFound(NOT_FOUND_BINDING_BODY).into_response();
     }
-    // BR8: `binding.delete()` samples `now()` twice (ported quirk 5).
+    // BR8: `binding.delete()` samples `now()` twice (ported quirk 5),
+    // then unconditionally enqueues the related-objects sweep
+    // (`db/mixins.py:72-78`).
     let now = Utc::now();
     let now2 = Utc::now();
     if let Err(denial) = uninstall_binding(pool, &binding_id, &resolved.user_id, &now, &now2).await
     {
         return denial.into_response();
     }
+    enqueue_soft_delete(pool, &binding_id).await;
     Response::builder()
         .status(StatusCode::NO_CONTENT)
         .body(axum::body::Body::empty())
@@ -2488,8 +2492,43 @@ async fn write_next_run_at(
     Ok(())
 }
 
+/// `soft_delete_related_objects.delay("db", "schedulerbinding", pk,
+/// using=None)` (`db/mixins.py:77-78`): three positional args, `using`
+/// stays a null kwarg — exactly as Python's
+/// `.delay(label, name, pk, using=using)` call sends it with `using=None`.
+/// `SchedulerBinding` lives in the `db` app (`db/models/scheduler.py`),
+/// so the label is `"db"` and the model is `"schedulerbinding"`.
+fn soft_delete_message(binding_id: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
+        pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
+        vec![
+            Value::String("db".to_owned()),
+            Value::String("schedulerbinding".to_owned()),
+            Value::String(binding_id.to_string()),
+        ],
+        kwargs,
+    )
+}
+
+/// Best-effort publish of [`soft_delete_message`]: without the queue
+/// the response still stands.
+async fn enqueue_soft_delete(pool: &PgPool, binding_id: &Uuid) {
+    let message = soft_delete_message(binding_id);
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        Value::Array(message.args.clone()),
+        Value::Object(message.kwargs.clone()),
+    );
+    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
+        tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
+    }
+}
+
 /// BR8 uninstall (`:290`): `binding.delete()` soft-delete with two `now()`
-/// samples (ported quirk 5).
+/// samples (ported quirk 5). The caller enqueues the related-objects
+/// sweep separately ([`enqueue_soft_delete`]).
 async fn uninstall_binding(
     pool: &PgPool,
     binding_id: &Uuid,
@@ -3638,5 +3677,22 @@ mod tests {
             panic!("foreign pod must 400");
         };
         assert_eq!(body, serde_json::json!({"pod": [shape::POD_PROJECT_ERROR]}));
+    }
+
+    #[test]
+    fn soft_delete_message_shape() {
+        use pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK;
+        let pk = Uuid::nil();
+        let message = soft_delete_message(&pk);
+        assert_eq!(message.task.as_str(), SOFT_DELETE_TASK);
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("schedulerbinding".to_owned()),
+                Value::String(pk.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
     }
 }
