@@ -6,9 +6,11 @@
 // in a fixed order, keeps the active tab highlighted through nested routes
 // and work-item detail pages, and persists per-tab default and hide choices
 // per member, with hidden tabs retrievable behind the overflow menu. Bare
-// project addresses do not redirect (bug NEWFRONT-141) and narrow widths
-// never pool trailing tabs (bug NEWFRONT-142), so those two scenarios prove
-// the degenerate behaviors only and must not become parity targets. The
+// project addresses do not redirect (bug NEWFRONT-141), so that scenario
+// proves the degenerate behavior only and must not become a parity target.
+// Narrow widths pool trailing tabs behind the overflow menu on the
+// production oracle (dev-only NEWFRONT-142 clipped without pooling); the
+// pooling scenario is a parity target. The
 // strip only mounts in tabbed mode, so each width-sensitive scenario
 // enables it and every feature flag through the server first and restores
 // both after. Rows: SHELL-075, SHELL-076, SHELL-077, SHELL-078, SHELL-079.
