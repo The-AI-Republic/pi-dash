@@ -7359,6 +7359,90 @@ export interface ParityDriver {
   exportsSettingsReleaseHistory(): Promise<void>;
   /** Click the download control of `rowIndex`; resolves with the new-tab URL (new-tab proof). */
   exportsSettingsDownloadPopupUrl(rowIndex: number): Promise<string>;
+  // ---------------------------------------------------------------------------
+  // Modules list frame and header controls (NEWFRONT-306, MOD-001..007).
+  // The live modules list: breadcrumb trail, flag gate, Add action,
+  // expandable search, ordering, filters menu, applied chips, and the
+  // timeline manual-sort reorder gate. Appended; existing entries above are
+  // untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Live module row names in display order. */
+  modulesRowNames(): Promise<string[]>;
+  /** Project crumb plus trailing crumb link texts of the header trail. */
+  modulesBreadcrumb(): Promise<ModulesBreadcrumb>;
+  /** Document title of the current page. */
+  modulesPageTitle(): Promise<string>;
+  /** Add-button label (Add on small screens, Add Module on larger ones), or null when no button renders. */
+  modulesAddLabel(): Promise<string | null>;
+  /** Click the header Add button. */
+  modulesClickAdd(): Promise<void>;
+  /** Whether the create-module dialog is open. */
+  modulesCreateDialogOpen(): Promise<boolean>;
+  /** Whether the header search box is expanded. */
+  modulesSearchVisible(): Promise<boolean>;
+  /** Expand the header search box through its icon button. */
+  modulesOpenSearch(): Promise<void>;
+  /** Type into the header search box (the list filters live). */
+  modulesTypeSearch(text: string): Promise<void>;
+  /** Current header search text. */
+  modulesSearchText(): Promise<string>;
+  /** Whether the header search box holds focus. */
+  modulesSearchFocused(): Promise<boolean>;
+  /** Press Escape while the header search box holds focus. */
+  modulesEscapeSearch(): Promise<void>;
+  /** Click the trailing Modules crumb link (outside the search box). */
+  modulesClickOutsideSearch(): Promise<void>;
+  /** Visible label of the sort trigger control. */
+  modulesSortTriggerLabel(): Promise<string>;
+  /** Pick a sort or direction entry through the header sort menu and wait for the reorder. */
+  modulesSetSortViaMenu(label: string): Promise<void>;
+  /** Sort menu entries in display order (opens and closes the menu). */
+  modulesSortMenuItems(): Promise<string[]>;
+  /** Open the filters menu and wait until its groups show. */
+  modulesOpenFilters(): Promise<void>;
+  /** Dismiss the filters menu. */
+  modulesCloseFilters(): Promise<void>;
+  /** Filter group titles in display order. */
+  modulesFilterGroups(): Promise<string[]>;
+  /** Option labels of one filter group in display order (View all/less excluded). */
+  modulesFilterGroupOptions(group: string): Promise<string[]>;
+  /** Toggle one filter option by group plus label. */
+  modulesToggleFilterOption(group: string, label: string): Promise<void>;
+  /** Expand a filter group past its first five options through View all. */
+  modulesExpandFilterGroup(group: string): Promise<void>;
+  /** Whether a filter group offers the View all expander. */
+  modulesFilterGroupExpandable(group: string): Promise<boolean>;
+  /** Type into the filters menu's own search box. */
+  modulesMenuSearch(text: string): Promise<void>;
+  /** Whether the filters button shows its applied dot. */
+  modulesFiltersActive(): Promise<boolean>;
+  /** Open the custom date dialog of a date group. */
+  modulesOpenCustomDate(group: "Start date" | "Due date"): Promise<void>;
+  /** Whether the custom date dialog is open. */
+  modulesCustomDateOpen(): Promise<boolean>;
+  /** Apply the custom date dialog as configured. */
+  modulesApplyCustomDate(): Promise<void>;
+  /** Applied-filter chips in display order (key plus rendered text). */
+  modulesChips(): Promise<ModulesChip[]>;
+  /** Remove one chip value through its pill control. */
+  modulesRemoveChipValue(key: string, value: string): Promise<void>;
+  /** Remove one whole filter dimension through its chip control. */
+  modulesRemoveChipDimension(key: string): Promise<void>;
+  /** Clear every applied filter through the clear-all control. */
+  modulesClearFilters(): Promise<void>;
+  /** Whether the applied-filters strip renders. */
+  modulesChipsVisible(): Promise<boolean>;
+  /** Flag-gate facts when modules are disabled for the project. */
+  modulesGateFacts(): Promise<ModulesGateFacts>;
+  /** Follow the gate's Manage-features button to project settings. */
+  modulesGateToFeatures(): Promise<void>;
+  /** Timeline sidebar row names in display order. */
+  modulesTimelineRowNames(): Promise<string[]>;
+  /** Drag a timeline sidebar row back onto itself (a no-op gesture). */
+  modulesDragTimelineRowToSelf(name: string): Promise<void>;
+  /** Whether the manual-sort warning toast shows. */
+  modulesManualSortWarningVisible(): Promise<boolean>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */
@@ -7525,91 +7609,6 @@ export interface DeskSigninUpdateLink {
   href: string;
   /** Link target attribute, or null when absent. */
   target: string | null;
-
-  // ---------------------------------------------------------------------------
-  // Modules list frame and header controls (NEWFRONT-306, MOD-001..007).
-  // The live modules list: breadcrumb trail, flag gate, Add action,
-  // expandable search, ordering, filters menu, applied chips, and the
-  // timeline manual-sort reorder gate. Appended; existing entries above are
-  // untouched per the shared contract.
-  // ---------------------------------------------------------------------------
-
-  /** Live module row names in display order. */
-  modulesRowNames(): Promise<string[]>;
-  /** Project crumb plus trailing crumb link texts of the header trail. */
-  modulesBreadcrumb(): Promise<ModulesBreadcrumb>;
-  /** Document title of the current page. */
-  modulesPageTitle(): Promise<string>;
-  /** Add-button label (Add on small screens, Add Module on larger ones), or null when no button renders. */
-  modulesAddLabel(): Promise<string | null>;
-  /** Click the header Add button. */
-  modulesClickAdd(): Promise<void>;
-  /** Whether the create-module dialog is open. */
-  modulesCreateDialogOpen(): Promise<boolean>;
-  /** Whether the header search box is expanded. */
-  modulesSearchVisible(): Promise<boolean>;
-  /** Expand the header search box through its icon button. */
-  modulesOpenSearch(): Promise<void>;
-  /** Type into the header search box (the list filters live). */
-  modulesTypeSearch(text: string): Promise<void>;
-  /** Current header search text. */
-  modulesSearchText(): Promise<string>;
-  /** Whether the header search box holds focus. */
-  modulesSearchFocused(): Promise<boolean>;
-  /** Press Escape while the header search box holds focus. */
-  modulesEscapeSearch(): Promise<void>;
-  /** Click the trailing Modules crumb link (outside the search box). */
-  modulesClickOutsideSearch(): Promise<void>;
-  /** Visible label of the sort trigger control. */
-  modulesSortTriggerLabel(): Promise<string>;
-  /** Pick a sort or direction entry through the header sort menu and wait for the reorder. */
-  modulesSetSortViaMenu(label: string): Promise<void>;
-  /** Sort menu entries in display order (opens and closes the menu). */
-  modulesSortMenuItems(): Promise<string[]>;
-  /** Open the filters menu and wait until its groups show. */
-  modulesOpenFilters(): Promise<void>;
-  /** Dismiss the filters menu. */
-  modulesCloseFilters(): Promise<void>;
-  /** Filter group titles in display order. */
-  modulesFilterGroups(): Promise<string[]>;
-  /** Option labels of one filter group in display order (View all/less excluded). */
-  modulesFilterGroupOptions(group: string): Promise<string[]>;
-  /** Toggle one filter option by group plus label. */
-  modulesToggleFilterOption(group: string, label: string): Promise<void>;
-  /** Expand a filter group past its first five options through View all. */
-  modulesExpandFilterGroup(group: string): Promise<void>;
-  /** Whether a filter group offers the View all expander. */
-  modulesFilterGroupExpandable(group: string): Promise<boolean>;
-  /** Type into the filters menu's own search box. */
-  modulesMenuSearch(text: string): Promise<void>;
-  /** Whether the filters button shows its applied dot. */
-  modulesFiltersActive(): Promise<boolean>;
-  /** Open the custom date dialog of a date group. */
-  modulesOpenCustomDate(group: "Start date" | "Due date"): Promise<void>;
-  /** Whether the custom date dialog is open. */
-  modulesCustomDateOpen(): Promise<boolean>;
-  /** Apply the custom date dialog as configured. */
-  modulesApplyCustomDate(): Promise<void>;
-  /** Applied-filter chips in display order (key plus rendered text). */
-  modulesChips(): Promise<ModulesChip[]>;
-  /** Remove one chip value through its pill control. */
-  modulesRemoveChipValue(key: string, value: string): Promise<void>;
-  /** Remove one whole filter dimension through its chip control. */
-  modulesRemoveChipDimension(key: string): Promise<void>;
-  /** Clear every applied filter through the clear-all control. */
-  modulesClearFilters(): Promise<void>;
-  /** Whether the applied-filters strip renders. */
-  modulesChipsVisible(): Promise<boolean>;
-  /** Flag-gate facts when modules are disabled for the project. */
-  modulesGateFacts(): Promise<ModulesGateFacts>;
-  /** Follow the gate's Manage-features button to project settings. */
-  modulesGateToFeatures(): Promise<void>;
-  /** Timeline sidebar row names in display order. */
-  modulesTimelineRowNames(): Promise<string[]>;
-  /** Drag a timeline sidebar row back onto itself (a no-op gesture). */
-  modulesDragTimelineRowToSelf(name: string): Promise<void>;
-  /** Whether the manual-sort warning toast shows. */
-  modulesManualSortWarningVisible(): Promise<boolean>;
 
   // ---------------------------------------------------------------------------
   // Analytics shell, scoping, permissions (NEWFRONT-375, ANL-001..004 + ANL-018).
