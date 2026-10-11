@@ -132,6 +132,33 @@ def test_destroy(api, seed, tenant_a, project_a, auth_a):
     assert r.json() == {"error": "Module not found"}
 
 
+def test_destroy_with_two_deleted_bridges_same_pair(api, seed, tenant_a, project_a,
+                                                     auth_a, module_a, issue_a):
+    """PIDASHCONV-875: attach → detach → re-attach → detach leaves two
+    soft-deleted bridges for one (issue, module) pair; the module DELETE
+    must still 204 (Django only re-stamps live bridges, so the re-stamp
+    never collides on unique (issue_id, module_id, deleted_at))."""
+    attach_url = f"{modules_url(tenant_a, project_a)}{module_a}/issues/"
+    detach_url = f"{attach_url}{issue_a}/"
+    for _ in range(2):
+        r = api.post(attach_url, headers=auth_a, json={"issues": [issue_a]})
+        assert r.status_code == 201, r.text
+        r = api.delete(detach_url, headers=auth_a)
+        assert r.status_code == 204, r.text
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM module_issues WHERE module_id = %s AND issue_id = %s"
+            " AND deleted_at IS NOT NULL",
+            (module_a, issue_a),
+        )
+        assert cur.fetchone()[0] == 2
+    r = api.delete(module_url(tenant_a, project_a, module_a), headers=auth_a)
+    assert r.status_code == 204, r.text
+    r = api.get(module_url(tenant_a, project_a, module_a), headers=auth_a)
+    assert r.status_code == 404, r.text
+    assert r.json() == {"error": "Module not found"}
+
+
 def test_destroy_missing(api, tenant_a, project_a, auth_a):
     r = api.delete(
         module_url(tenant_a, project_a, "00000000-0000-0000-0000-000000000000"),
