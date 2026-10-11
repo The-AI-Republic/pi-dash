@@ -50,8 +50,10 @@
 //! stands): `model_activity` on create/partial_update
 //! (`bgtasks/webhook_task.py:463`), `recent_visited_task` on retrieve,
 //! `issue_activity` + `soft_delete_related_objects` on destroy. The
-//! `current_instance` before-image on partial_update is the fetched row
-//! map rendered as a JSON string (an async payload, not an API body).
+//! `current_instance` before-image on partial_update is the
+//! `CycleSerializer` field set over the fetched row
+//! (`json.dumps(CycleSerializer(cycle).data)`, `base.py:345`) rendered
+//! as a JSON string (an async payload, not an API body).
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -872,6 +874,90 @@ fn shape_retrieve_row(row: &Map<String, Value>, timezone: &Tz) -> String {
     out.push_str(&shape_tail(row, TailOrder::Retrieve));
     out.push('}');
     out
+}
+
+/// `CycleSerializer.Meta.fields` (`app/serializers/cycle.py:62-88`) in
+/// declared order: the keys DRF emits for the `partial_update`
+/// before-image (`base.py:345`). `started_issues`, `unstarted_issues`
+/// and `backlog_issues` ride along here but never render on this path:
+/// `get_queryset` does not annotate them (`base.py:113-178`), so DRF
+/// skips the missing attributes (`SkipField`) — mirrored below by
+/// emitting only fields present in the fetched map.
+const SNAPSHOT_FIELD_ORDER: &[&str] = &[
+    "id",
+    "workspace_id",
+    "project_id",
+    "name",
+    "description",
+    "start_date",
+    "end_date",
+    "owned_by_id",
+    "view_props",
+    "sort_order",
+    "external_source",
+    "external_id",
+    "progress_snapshot",
+    "logo_props",
+    "is_favorite",
+    "total_issues",
+    "cancelled_issues",
+    "completed_issues",
+    "started_issues",
+    "unstarted_issues",
+    "backlog_issues",
+    "status",
+];
+
+/// Render the `model_activity.current_instance` before-image
+/// (`base.py:345`): `json.dumps(CycleSerializer(cycle).data)` — the
+/// serializer field set over the fetched row (never the row map
+/// itself: no `archived_at`, `assignee_ids`, `created_by` or
+/// `version`), with DRF scalar rendering (float `sort_order`,
+/// actor-zone datetimes) and CPython `json.dumps` separators.
+fn snapshot_cycle_instance(before: &Map<String, Value>, timezone: &Tz) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from("{");
+    let mut first = true;
+    for field in SNAPSHOT_FIELD_ORDER {
+        if !before.contains_key(*field) {
+            continue;
+        }
+        if !first {
+            out.push_str(", ");
+        }
+        first = false;
+        let _ = write!(out, "\"{field}\": ");
+        out.push_str(&snapshot_value(before, field, timezone));
+    }
+    out.push('}');
+    out
+}
+
+/// One before-image value: DRF field rendering over the fetched value.
+/// Datetimes enforce the activated (user) zone exactly like
+/// `DateTimeField.to_representation` (djangorestframework 3.15.2
+/// `fields.py`), so the response-body [`shape_datetime`] applies; the
+/// Postgres `row_to_json` int rendering of `sort_order` goes through
+/// the float kernel. JSON props go through the domain
+/// `super::handlers_misc::python_dumps`: `json.dumps` separators apply
+/// at every nesting level, while the response-body [`raw_json`] is
+/// compact.
+fn snapshot_value(row: &Map<String, Value>, field: &str, timezone: &Tz) -> String {
+    match field {
+        "start_date" | "end_date" => shape_datetime(row.get(field), timezone),
+        "sort_order" => match row.get(field).and_then(Value::as_f64) {
+            Some(float) => crate::paginator::py_float_str(float),
+            None => "null".to_owned(),
+        },
+        "is_favorite" => raw_bool(row, field),
+        "total_issues" | "cancelled_issues" | "completed_issues" | "started_issues"
+        | "unstarted_issues" | "backlog_issues" => raw_int(row, field),
+        "view_props" | "progress_snapshot" | "logo_props" => match row.get(field) {
+            Some(value) => super::handlers_misc::python_dumps(value),
+            None => "null".to_owned(),
+        },
+        _ => raw_str(row, field),
+    }
 }
 // ---------------------------------------------------------------------------
 // CycleWriteSerializer port (`app/serializers/cycle.py:15-44`)
@@ -1936,8 +2022,7 @@ async fn cycle_partial_update(
         write.end_date,
     )
     .await?;
-    let current_instance =
-        serde_json::to_string(&Value::Object(before.clone())).unwrap_or("null".to_owned());
+    let current_instance = snapshot_cycle_instance(&before, &timezone);
     apply_cycle_update(&pool, &pk, &user_id, &now, &write, start, end).await?;
     let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &pk, false, false)
         .await?
@@ -2366,6 +2451,83 @@ mod tests {
         let body = shape_write_row(&row, &UTC);
         assert!(body.contains("\"start_date\":null"), "{body}");
         assert!(body.contains("\"created_by\":null"), "{body}");
+    }
+
+    #[test]
+    fn snapshot_matches_cycle_serializer_field_set() {
+        // `base.py:345`: `json.dumps(CycleSerializer(cycle).data)` — the
+        // 22 declared fields minus the un-annotated trio DRF skips
+        // (PIDASHCONV-871). No `archived_at`, `assignee_ids`,
+        // `created_by` or `version`, even though the fetched map has them.
+        let mut row = row_map();
+        // Postgres `row_to_json` renders float8 without `.0`.
+        row.insert("sort_order".to_owned(), json!(55535));
+        let snapshot = snapshot_cycle_instance(&row, &UTC);
+        let value: Value = serde_json::from_str(&snapshot).expect("snapshot parses");
+        let object = value.as_object().expect("object");
+        assert_eq!(object.len(), 19, "{snapshot}");
+        for key in [
+            "archived_at",
+            "assignee_ids",
+            "created_by",
+            "version",
+            "sub_issues",
+            "started_issues",
+            "unstarted_issues",
+            "backlog_issues",
+        ] {
+            assert!(!object.contains_key(key), "{snapshot}");
+        }
+        // CPython separators + serializer order + DRF scalars.
+        assert!(
+            snapshot
+                .starts_with("{\"id\": \"11111111-1111-1111-1111-111111111111\", \"workspace_id\""),
+            "{snapshot}"
+        );
+        assert!(snapshot.contains("\"sort_order\": 55535.0"), "{snapshot}");
+        assert!(
+            snapshot.contains("\"start_date\": \"2026-03-01T00:00:01Z\""),
+            "{snapshot}"
+        );
+        assert!(snapshot.contains("\"cancelled_issues\": 1"), "{snapshot}");
+    }
+
+    #[test]
+    fn snapshot_skips_only_missing_fields() {
+        // A field absent from the fetched map is skipped (DRF `SkipField`
+        // for the un-annotated trio); a present null still renders.
+        let mut row = row_map();
+        row.insert("start_date".to_owned(), Value::Null);
+        row.remove("external_id");
+        let snapshot = snapshot_cycle_instance(&row, &UTC);
+        assert!(snapshot.contains("\"start_date\": null"), "{snapshot}");
+        assert!(!snapshot.contains("external_id"), "{snapshot}");
+    }
+
+    #[test]
+    fn snapshot_renders_nested_json_with_cpython_separators() {
+        // `json.dumps` separators apply at every nesting level, not
+        // just the top object: `{"a": 1}`, never the compact
+        // response-body form.
+        let mut row = row_map();
+        row.insert("view_props".to_owned(), json!({"a": 1, "b": [true, null]}));
+        let snapshot = snapshot_cycle_instance(&row, &UTC);
+        assert!(
+            snapshot.contains(r#""view_props": {"a": 1, "b": [true, null]}"#),
+            "{snapshot}"
+        );
+    }
+
+    #[test]
+    fn snapshot_renders_datetimes_in_actor_zone() {
+        // DRF `DateTimeField` enforces the activated (user) zone
+        // (djangorestframework 3.15.2 `fields.py`), like the response body.
+        let tz: Tz = "America/New_York".parse().expect("tz");
+        let snapshot = snapshot_cycle_instance(&row_map(), &tz);
+        assert!(
+            snapshot.contains("\"start_date\": \"2026-02-28T19:00:01-05:00\""),
+            "{snapshot}"
+        );
     }
 
     #[test]
