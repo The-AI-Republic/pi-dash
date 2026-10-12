@@ -45338,4 +45338,945 @@ export class WebDriver implements ParityDriver {
       .waitFor({ state: "detached", timeout: WebDriver.WAIT_MS })
       .catch(() => undefined);
   }
+
+  // -------------------------------------------------------------------------
+  // Profile-settings assistant/upkeep/integrations (NEWFRONT-428, PROF-021..025,
+  // PROF-027, PROF-028). Reads and actions for the AI-assistant tab (BYO LLM
+  // provider, BYO STT dictation, MCP tool servers), the upkeep tab (master
+  // pause, per-job toggles), and the integrations tab (per-workspace GitHub
+  // App panel), plus cross-cutting key/socket/drag/import absence reads.
+  // The old app builds these tabs with no data-testid, so selectors target
+  // placeholders, heading text, and accessible names — all user-visible.
+  // Appended; existing methods above are untouched per the shared driver
+  // contract.
+  // -------------------------------------------------------------------------
+
+  private settingsProfileReadsSeen = 0;
+  private settingsProfileReadHandler: ((request: { url(): string; method(): string }) => void) | null = null;
+  private settingsProfileSocketsSeen = 0;
+  private settingsProfileSocketHandler: (() => void) | null = null;
+
+  private settingsProfileTabPath(tab: "ai-assistant" | "auto-project-management" | "integrations"): string {
+    return `/settings/profile/${tab}`;
+  }
+
+  private async settingsProfileAwaitTab(
+    tab: "ai-assistant" | "auto-project-management" | "integrations"
+  ): Promise<void> {
+    // Each tab settles on one of two markers (content vs its empty/denial
+    // twin); the loader shows first, so wait for either marker explicitly.
+    // Markers must be content-only: the sidebar carries "Workspace" and
+    // tab labels, which would settle while the content still loads.
+    await this.page
+      .waitForFunction(
+        (want: string) => {
+          const text = (document.body.innerText ?? "").replace(/\s+/g, " ");
+          if (want === "ai-assistant") return text.includes("Tool servers (MCP)");
+          if (want === "auto-project-management") {
+            return text.includes("Nothing is scheduled on this instance yet.") || text.includes("Pause all");
+          }
+          return (
+            text.includes("GitHub App") ||
+            text.includes("No admin workspaces") ||
+            text.includes("Connect external services")
+          );
+        },
+        tab,
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error(`[parity] profile tab ${tab} settled on neither content nor its empty twin.`);
+      });
+  }
+
+  /** Data read backing a tab's content (upkeep/integrations render from it). */
+  private settingsProfileTabRead(tab: "ai-assistant" | "auto-project-management" | "integrations"): string | null {
+    if (tab === "auto-project-management") return "/api/users/me/auto-pm/";
+    if (tab === "integrations") return "/api/users/me/integrations/github/app/";
+    return null;
+  }
+
+  private async settingsProfileAwaitContent(
+    tab: "ai-assistant" | "auto-project-management" | "integrations"
+  ): Promise<void> {
+    // Strict settle: painted, data-backed controls — never the heading,
+    // which renders while the content still loads.
+    await this.page
+      .waitForFunction(
+        (want: string) => {
+          if (want === "ai-assistant") return document.querySelectorAll("input").length > 0;
+          if (want === "auto-project-management") {
+            const text = (document.body.innerText ?? "").replace(/\s+/g, " ");
+            return (
+              text.includes("Nothing is scheduled on this instance yet.") ||
+              document.querySelectorAll('[role="switch"]').length > 0
+            );
+          }
+          const text = (document.body.innerText ?? "").replace(/\s+/g, " ");
+          return (
+            document.querySelector("select") !== null ||
+            [...document.querySelectorAll("h3")].some((h) => (h.textContent ?? "").trim() === "GitHub App") ||
+            text.includes("No admin workspaces")
+          );
+        },
+        tab,
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error(`[parity] profile tab ${tab} never painted its data-backed content.`);
+      });
+  }
+
+  private async settingsProfileOpenSettled(
+    tab: "ai-assistant" | "auto-project-management" | "integrations",
+    cookies: ParityBrowserCookie[],
+    query?: string
+  ): Promise<void> {
+    // The upkeep/integrations content renders from its data read; the
+    // marker alone can catch a mid-stream paint, so also wait for the read
+    // that backs it (attached before navigation; lenient, since an errored
+    // read still renders a twin).
+    const read = this.settingsProfileTabRead(tab);
+    const backed =
+      read === null
+        ? null
+        : this.page
+            .waitForResponse((resp) => resp.url().includes(read) && resp.request().method() === "GET", {
+              timeout: WebDriver.WAIT_MS,
+            })
+            .catch(() => null);
+    await this.openAuthenticated(
+      query === undefined ? this.settingsProfileTabPath(tab) : `${this.settingsProfileTabPath(tab)}?${query}`,
+      cookies
+    );
+    await this.settingsProfileAwaitTab(tab);
+    await backed;
+    await this.settingsProfileAwaitContent(tab);
+  }
+
+  async settingsProfileOpenTab(
+    tab: "ai-assistant" | "auto-project-management" | "integrations",
+    cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    await this.settingsProfileOpenSettled(tab, cookies);
+  }
+
+  async settingsProfileOpenTabWithQuery(
+    tab: "ai-assistant" | "auto-project-management" | "integrations",
+    query: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    await this.settingsProfileOpenSettled(tab, cookies, query);
+  }
+
+  async settingsProfileCurrentPath(): Promise<string> {
+    return new URL(this.page.url()).pathname;
+  }
+
+  async settingsProfileCurrentQuery(): Promise<string> {
+    return new URL(this.page.url()).search.replace(/^\?/, "");
+  }
+
+  async settingsProfileLastToast(): Promise<{ title: string; message: string } | null> {
+    // Same toast stack as the assistant surface (NEWFRONT-404): roots
+    // render newest-prepended, so the first non-blank root is the newest.
+    const roots = this.page.locator("div.absolute.right-3.bottom-3");
+    const total = await roots.count();
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await roots
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text === "") continue;
+      const lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
+    }
+    return null;
+  }
+
+  /**
+   * Document-order index (among exact-name buttons) of a button belonging
+   * to the LLM or STT section. The two sections share Save/Test/Remove
+   * labels in one column, so partition by the Voice/MCP headings: LLM
+   * buttons sit before Voice, STT buttons between Voice and MCP. Returns
+   * -1 when the section carries no such button (e.g. Remove pre-key).
+   */
+  private async settingsProfileSectionButtonIndex(
+    name: "Save" | "Test connection" | "Remove",
+    section: "llm" | "stt"
+  ): Promise<number> {
+    return this.page.evaluate(
+      ({ want, part }: { want: string; part: string }) => {
+        const h3s = [...document.querySelectorAll("h3")];
+        const voice = h3s.find((h) => (h.textContent ?? "").trim() === "Voice dictation");
+        const mcp = h3s.find((h) => (h.textContent ?? "").trim() === "Tool servers (MCP)");
+        const buttons = [...document.querySelectorAll("button")].filter((b) => (b.textContent ?? "").trim() === want);
+        return buttons.findIndex((b) => {
+          if (part === "llm") {
+            if (voice === undefined) return true;
+            return (b.compareDocumentPosition(voice) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+          }
+          if (voice === undefined || mcp === undefined) return false;
+          return (
+            (b.compareDocumentPosition(voice) & Node.DOCUMENT_POSITION_PRECEDING) !== 0 &&
+            (b.compareDocumentPosition(mcp) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+          );
+        });
+      },
+      { want: name, part: section }
+    );
+  }
+
+  private async settingsProfileLastVerified(section: "llm" | "stt"): Promise<string | null> {
+    // "Last verified: …" renders per configured section; partition by the
+    // same Voice/MCP headings as the section buttons.
+    return this.page.evaluate((part: string) => {
+      const h3s = [...document.querySelectorAll("h3")];
+      const voice = h3s.find((h) => (h.textContent ?? "").trim() === "Voice dictation");
+      const mcp = h3s.find((h) => (h.textContent ?? "").trim() === "Tool servers (MCP)");
+      const stamps = [...document.querySelectorAll("div")].filter((d) =>
+        /^Last verified:/.test((d.textContent ?? "").trim())
+      );
+      const hit = stamps.find((d) => {
+        if (part === "llm") {
+          if (voice === undefined) return true;
+          return (d.compareDocumentPosition(voice) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+        }
+        if (voice === undefined || mcp === undefined) return false;
+        return (
+          (d.compareDocumentPosition(voice) & Node.DOCUMENT_POSITION_PRECEDING) !== 0 &&
+          (d.compareDocumentPosition(mcp) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+        );
+      });
+      return hit === undefined ? null : (hit.textContent ?? "").replace(/\s+/g, " ").trim();
+    }, section);
+  }
+
+  private settingsProfileWriteWait(urlPart: string, method: string, notPart?: string): Promise<unknown> {
+    return this.page
+      .waitForResponse(
+        (resp) =>
+          resp.url().includes(urlPart) &&
+          resp.request().method() === method &&
+          (notPart === undefined || !resp.url().includes(notPart)),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => null);
+  }
+
+  async settingsProfileAssistantFacts(): Promise<{
+    provider: string;
+    baseUrlVisible: boolean;
+    baseUrl: string;
+    model: string;
+    keyValue: string;
+    keyPlaceholder: string;
+    saveDisabled: boolean;
+    testDisabled: boolean;
+    removeVisible: boolean;
+    lastVerified: string | null;
+  }> {
+    // Placeholders are unique per section, so the inputs need no DOM-order
+    // games; only the shared Save/Test/Remove labels partition by heading.
+    const select = this.page.locator("select").first();
+    const baseUrlInput = this.page.getByPlaceholder("https://openrouter.ai/api/v1");
+    const modelInput = this.page.getByPlaceholder("meta-llama/llama-3.3-70b-instruct");
+    const saveIndex = await this.settingsProfileSectionButtonIndex("Save", "llm");
+    const testIndex = await this.settingsProfileSectionButtonIndex("Test connection", "llm");
+    const removeIndex = await this.settingsProfileSectionButtonIndex("Remove", "llm");
+    if (saveIndex < 0 || testIndex < 0) throw new Error("[parity] LLM Save/Test buttons not found in section.");
+    // The key field is the LLM section's password input: it sits before the
+    // Voice heading while the STT and MCP password inputs sit after it.
+    const keyBeforeVoice = await this.page.evaluate(() => {
+      const h3s = [...document.querySelectorAll("h3")];
+      const voice = h3s.find((h) => (h.textContent ?? "").trim() === "Voice dictation");
+      const keys = [...document.querySelectorAll('input[type="password"]')];
+      if (voice === undefined) return 0;
+      return keys.findIndex((k) => (k.compareDocumentPosition(voice) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+    });
+    const keyField = this.page.locator('input[type="password"]').nth(Math.max(keyBeforeVoice, 0));
+    return {
+      provider: await select.inputValue({ timeout: WebDriver.itemTimeout }),
+      baseUrlVisible: (await baseUrlInput.count()) > 0,
+      baseUrl: (await baseUrlInput.count()) > 0 ? await baseUrlInput.inputValue() : "",
+      model: await modelInput.inputValue({ timeout: WebDriver.itemTimeout }),
+      keyValue: await keyField.inputValue({ timeout: WebDriver.itemTimeout }),
+      keyPlaceholder: (await keyField.getAttribute("placeholder", { timeout: WebDriver.itemTimeout })) ?? "",
+      saveDisabled: await this.page.getByRole("button", { name: "Save", exact: true }).nth(saveIndex).isDisabled(),
+      testDisabled: await this.page
+        .getByRole("button", { name: "Test connection", exact: true })
+        .nth(testIndex)
+        .isDisabled(),
+      removeVisible: removeIndex >= 0,
+      lastVerified: await this.settingsProfileLastVerified("llm"),
+    };
+  }
+
+  async settingsProfileAssistantSetProvider(provider: "openai_compatible" | "anthropic"): Promise<void> {
+    await this.page.locator("select").first().selectOption(provider, { timeout: WebDriver.actionTimeout });
+  }
+
+  async settingsProfileAssistantFill(field: "baseUrl" | "model" | "key", value: string): Promise<void> {
+    if (field === "baseUrl") {
+      await this.page
+        .getByPlaceholder("https://openrouter.ai/api/v1")
+        .fill(value, { timeout: WebDriver.actionTimeout });
+      return;
+    }
+    if (field === "model") {
+      await this.page
+        .getByPlaceholder("meta-llama/llama-3.3-70b-instruct")
+        .fill(value, { timeout: WebDriver.actionTimeout });
+      return;
+    }
+    const keyBeforeVoice = await this.page.evaluate(() => {
+      const h3s = [...document.querySelectorAll("h3")];
+      const voice = h3s.find((h) => (h.textContent ?? "").trim() === "Voice dictation");
+      const keys = [...document.querySelectorAll('input[type="password"]')];
+      if (voice === undefined) return 0;
+      return keys.findIndex((k) => (k.compareDocumentPosition(voice) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+    });
+    await this.page
+      .locator('input[type="password"]')
+      .nth(Math.max(keyBeforeVoice, 0))
+      .fill(value, { timeout: WebDriver.actionTimeout });
+  }
+
+  async settingsProfileAssistantSave(): Promise<void> {
+    const index = await this.settingsProfileSectionButtonIndex("Save", "llm");
+    const settled = this.settingsProfileWriteWait("/api/users/me/ai-assistant/config/", "PUT");
+    await this.page.getByRole("button", { name: "Save", exact: true }).nth(index).click({ timeout: 15_000 });
+    await settled;
+  }
+
+  async settingsProfileAssistantTest(): Promise<void> {
+    const index = await this.settingsProfileSectionButtonIndex("Test connection", "llm");
+    // The probe dials the provider; a dead endpoint answers in seconds,
+    // but allow the full budget before the spec's toast poll takes over.
+    const settled = this.page
+      .waitForResponse(
+        (resp) => resp.url().includes("/api/users/me/ai-assistant/config/test/") && resp.request().method() === "POST",
+        { timeout: 120_000 }
+      )
+      .catch(() => null);
+    await this.page.getByRole("button", { name: "Test connection", exact: true }).nth(index).click({ timeout: 15_000 });
+    await settled;
+  }
+
+  async settingsProfileAssistantRemove(): Promise<void> {
+    const index = await this.settingsProfileSectionButtonIndex("Remove", "llm");
+    if (index < 0) throw new Error("[parity] LLM Remove button not found in section.");
+    const settled = this.settingsProfileWriteWait("/api/users/me/ai-assistant/config/", "DELETE");
+    await this.page.getByRole("button", { name: "Remove", exact: true }).nth(index).click({ timeout: 15_000 });
+    await settled;
+  }
+
+  async settingsProfileAssistantFailWrites(): Promise<void> {
+    // Fail the config PUT saves only: reads, probes, and tool-server
+    // writes pass through so the save-failure half keeps its form state.
+    await this.page.route("**/api/users/me/ai-assistant/**", (route) => {
+      const url = route.request().url();
+      if (
+        route.request().method() === "PUT" &&
+        (url.includes("/ai-assistant/config/") || url.includes("/ai-assistant/stt-config/"))
+      ) {
+        void route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"probe_boom"}' });
+      } else {
+        void route.continue();
+      }
+    });
+  }
+
+  async settingsProfileAssistantClearRoutes(): Promise<void> {
+    await this.page.unroute("**/api/users/me/ai-assistant/**");
+  }
+
+  async settingsProfileDictationFacts(): Promise<{
+    sectionVisible: boolean;
+    baseUrl: string;
+    model: string;
+    keyValue: string;
+    keyPlaceholder: string;
+    saveDisabled: boolean;
+    testDisabled: boolean;
+    removeVisible: boolean;
+    lastVerified: string | null;
+  }> {
+    const heading = this.page.locator("h3", { hasText: "Voice dictation" });
+    if ((await heading.count()) === 0) {
+      return {
+        sectionVisible: false,
+        baseUrl: "",
+        model: "",
+        keyValue: "",
+        keyPlaceholder: "",
+        saveDisabled: true,
+        testDisabled: true,
+        removeVisible: false,
+        lastVerified: null,
+      };
+    }
+    const baseUrlInput = this.page.getByPlaceholder("https://api.openai.com/v1");
+    const modelInput = this.page.getByPlaceholder("whisper-1");
+    // The STT key field sits between the Voice and MCP headings.
+    const keyIndex = await this.page.evaluate(() => {
+      const h3s = [...document.querySelectorAll("h3")];
+      const voice = h3s.find((h) => (h.textContent ?? "").trim() === "Voice dictation");
+      const mcp = h3s.find((h) => (h.textContent ?? "").trim() === "Tool servers (MCP)");
+      const keys = [...document.querySelectorAll('input[type="password"]')];
+      if (voice === undefined || mcp === undefined) return -1;
+      return keys.findIndex(
+        (k) =>
+          (k.compareDocumentPosition(voice) & Node.DOCUMENT_POSITION_PRECEDING) !== 0 &&
+          (k.compareDocumentPosition(mcp) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+      );
+    });
+    const saveIndex = await this.settingsProfileSectionButtonIndex("Save", "stt");
+    const testIndex = await this.settingsProfileSectionButtonIndex("Test connection", "stt");
+    const removeIndex = await this.settingsProfileSectionButtonIndex("Remove", "stt");
+    if (saveIndex < 0 || testIndex < 0) throw new Error("[parity] STT Save/Test buttons not found in section.");
+    const keyField = this.page.locator('input[type="password"]').nth(Math.max(keyIndex, 0));
+    return {
+      sectionVisible: true,
+      baseUrl: await baseUrlInput.inputValue({ timeout: WebDriver.itemTimeout }),
+      model: await modelInput.inputValue({ timeout: WebDriver.itemTimeout }),
+      keyValue: keyIndex >= 0 ? await keyField.inputValue({ timeout: WebDriver.itemTimeout }) : "",
+      keyPlaceholder:
+        keyIndex >= 0 ? ((await keyField.getAttribute("placeholder", { timeout: WebDriver.itemTimeout })) ?? "") : "",
+      saveDisabled: await this.page.getByRole("button", { name: "Save", exact: true }).nth(saveIndex).isDisabled(),
+      testDisabled: await this.page
+        .getByRole("button", { name: "Test connection", exact: true })
+        .nth(testIndex)
+        .isDisabled(),
+      removeVisible: removeIndex >= 0,
+      lastVerified: await this.settingsProfileLastVerified("stt"),
+    };
+  }
+
+  async settingsProfileDictationFill(field: "baseUrl" | "model" | "key", value: string): Promise<void> {
+    if (field === "baseUrl") {
+      await this.page.getByPlaceholder("https://api.openai.com/v1").fill(value, { timeout: WebDriver.actionTimeout });
+      return;
+    }
+    if (field === "model") {
+      await this.page.getByPlaceholder("whisper-1").fill(value, { timeout: WebDriver.actionTimeout });
+      return;
+    }
+    const keyIndex = await this.page.evaluate(() => {
+      const h3s = [...document.querySelectorAll("h3")];
+      const voice = h3s.find((h) => (h.textContent ?? "").trim() === "Voice dictation");
+      const mcp = h3s.find((h) => (h.textContent ?? "").trim() === "Tool servers (MCP)");
+      const keys = [...document.querySelectorAll('input[type="password"]')];
+      if (voice === undefined || mcp === undefined) return -1;
+      return keys.findIndex(
+        (k) =>
+          (k.compareDocumentPosition(voice) & Node.DOCUMENT_POSITION_PRECEDING) !== 0 &&
+          (k.compareDocumentPosition(mcp) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+      );
+    });
+    if (keyIndex < 0) throw new Error("[parity] STT key field not found between headings.");
+    await this.page.locator('input[type="password"]').nth(keyIndex).fill(value, { timeout: WebDriver.actionTimeout });
+  }
+
+  async settingsProfileDictationSave(): Promise<void> {
+    const index = await this.settingsProfileSectionButtonIndex("Save", "stt");
+    const settled = this.settingsProfileWriteWait("/api/users/me/ai-assistant/stt-config/", "PUT");
+    await this.page.getByRole("button", { name: "Save", exact: true }).nth(index).click({ timeout: 15_000 });
+    await settled;
+  }
+
+  async settingsProfileDictationTest(): Promise<void> {
+    const index = await this.settingsProfileSectionButtonIndex("Test connection", "stt");
+    const settled = this.page
+      .waitForResponse(
+        (resp) =>
+          resp.url().includes("/api/users/me/ai-assistant/stt-config/test/") && resp.request().method() === "POST",
+        { timeout: 120_000 }
+      )
+      .catch(() => null);
+    await this.page.getByRole("button", { name: "Test connection", exact: true }).nth(index).click({ timeout: 15_000 });
+    await settled;
+  }
+
+  async settingsProfileDictationRemove(): Promise<void> {
+    const index = await this.settingsProfileSectionButtonIndex("Remove", "stt");
+    if (index < 0) throw new Error("[parity] STT Remove button not found in section.");
+    const settled = this.settingsProfileWriteWait("/api/users/me/ai-assistant/stt-config/", "DELETE");
+    await this.page.getByRole("button", { name: "Remove", exact: true }).nth(index).click({ timeout: 15_000 });
+    await settled;
+  }
+
+  async settingsProfileToolServerRows(): Promise<
+    { name: string; url: string; disabled: boolean; locked: boolean; prefix: string | null }[]
+  > {
+    // The tool-server registry is the tab's only list; rows carry the name
+    // first, the endpoint second, and the disabled/lock/prefix markers.
+    return this.page.evaluate(() => {
+      const items = [...document.querySelectorAll("ul li")];
+      return items.map((item) => {
+        const text = (item.textContent ?? "").replace(/\s+/g, " ").trim();
+        const name = (item.querySelector("span")?.textContent ?? "").replace(/\s+/g, " ").trim();
+        const url = (item.querySelector("div.truncate")?.textContent ?? "").replace(/\s+/g, " ").trim();
+        const code = item.querySelector("code");
+        return {
+          name,
+          url,
+          disabled: text.includes("(disabled)"),
+          locked: text.includes("🔒"),
+          prefix: code === null ? null : (code.textContent ?? "").replace(/\s+/g, "").trim() || null,
+        };
+      });
+    });
+  }
+
+  async settingsProfileToolServerAddDisabled(): Promise<boolean> {
+    return this.page.getByRole("button", { name: "Add server", exact: true }).isDisabled({ timeout: 15_000 });
+  }
+
+  async settingsProfileToolServerAdd(name: string, url: string, authHeader?: string): Promise<void> {
+    await this.page.getByPlaceholder("My tools").fill(name, { timeout: WebDriver.actionTimeout });
+    await this.page.getByPlaceholder("https://example.com/mcp").fill(url, { timeout: WebDriver.actionTimeout });
+    await this.page.getByPlaceholder("Bearer …").fill(authHeader ?? "", { timeout: WebDriver.actionTimeout });
+    const settled = this.settingsProfileWriteWait("/api/users/me/ai-assistant/mcp-servers/", "POST");
+    await this.page.getByRole("button", { name: "Add server", exact: true }).click({ timeout: 15_000 });
+    await settled;
+  }
+
+  private async settingsProfileToolServerRowIndex(name: string): Promise<number> {
+    const rows = await this.settingsProfileToolServerRows();
+    const index = rows.findIndex((row) => row.name === name);
+    if (index < 0) throw new Error(`[parity] tool server ${name} not found in the registry list.`);
+    return index;
+  }
+
+  async settingsProfileToolServerToggle(name: string): Promise<void> {
+    const index = await this.settingsProfileToolServerRowIndex(name);
+    const row = this.page.locator("ul li").nth(index);
+    const toggle = row
+      .getByRole("button", { name: "Disable", exact: true })
+      .or(row.getByRole("button", { name: "Enable", exact: true }));
+    const settled = this.settingsProfileWriteWait("/api/users/me/ai-assistant/mcp-servers/", "PATCH");
+    await toggle.first().click({ timeout: 15_000 });
+    await settled;
+  }
+
+  async settingsProfileToolServerRemove(name: string): Promise<void> {
+    const index = await this.settingsProfileToolServerRowIndex(name);
+    const settled = this.settingsProfileWriteWait("/api/users/me/ai-assistant/mcp-servers/", "DELETE");
+    await this.page
+      .locator("ul li")
+      .nth(index)
+      .getByRole("button", { name: "Remove", exact: true })
+      .click({ timeout: 15_000 });
+    await settled;
+  }
+
+  async settingsProfileUpkeepFacts(): Promise<{
+    emptyExplanation: string | null;
+    masterPaused: boolean | null;
+    jobs: { name: string; interval: string; description: string; enabled: boolean; toggleDisabled: boolean }[];
+  }> {
+    // The content renders from its data read; never read mid-loader.
+    await this.page
+      .waitForFunction(
+        () => {
+          const text = (document.body.innerText ?? "").replace(/\s+/g, " ");
+          return (
+            text.includes("Nothing is scheduled on this instance yet.") ||
+            document.querySelectorAll('[role="switch"]').length > 0
+          );
+        },
+        { timeout: WebDriver.itemTimeout }
+      )
+      .catch(() => null);
+    const empty = this.page.getByText("Nothing is scheduled on this instance yet.", { exact: false });
+    if ((await empty.count()) > 0) {
+      return { emptyExplanation: ((await empty.first().innerText()) ?? "").trim(), masterPaused: null, jobs: [] };
+    }
+    const switches = this.page.getByRole("switch");
+    const count = await switches.count();
+    if (count === 0) return { emptyExplanation: null, masterPaused: null, jobs: [] };
+    // The master pause switch renders first; its checked state IS the
+    // paused flag (the control is labelled Pause-all, value negated).
+    const masterPaused = (await switches.nth(0).getAttribute("aria-checked")) === "true";
+    const jobs: { name: string; interval: string; description: string; enabled: boolean; toggleDisabled: boolean }[] =
+      [];
+    for (let i = 1; i < count; i++) {
+      const card = switches.nth(i).locator("xpath=..");
+      const spans = await card.evaluate((el) =>
+        [...el.querySelectorAll("span")].map((s) => (s.textContent ?? "").replace(/\s+/g, " ").trim())
+      );
+      jobs.push({
+        name: spans[0] ?? "",
+        interval: spans[1] ?? "",
+        description: spans[2] ?? "",
+        enabled: (await switches.nth(i).getAttribute("aria-checked")) === "true",
+        toggleDisabled: await switches.nth(i).isDisabled(),
+      });
+    }
+    return { emptyExplanation: null, masterPaused, jobs };
+  }
+
+  async settingsProfileUpkeepToggleMaster(paused: boolean): Promise<void> {
+    const facts = await this.settingsProfileUpkeepFacts();
+    if (facts.masterPaused === null) throw new Error("[parity] upkeep master switch not rendered.");
+    if (facts.masterPaused === paused) return;
+    // Master writes hit the bare settings endpoint; exclude the per-job
+    // path so the settle wait cannot catch a job write instead.
+    const settled = this.settingsProfileWriteWait("/api/users/me/auto-pm/", "PATCH", "/jobs/");
+    await this.page.getByRole("switch").nth(0).click({ timeout: 15_000 });
+    await settled;
+  }
+
+  async settingsProfileUpkeepToggleJob(name: string, enabled: boolean): Promise<void> {
+    const facts = await this.settingsProfileUpkeepFacts();
+    const index = facts.jobs.findIndex((job) => job.name === name);
+    if (index < 0) throw new Error(`[parity] upkeep job ${name} not found.`);
+    if (facts.jobs[index].enabled === enabled) return;
+    const settled = this.settingsProfileWriteWait("/api/users/me/auto-pm/jobs/", "PATCH");
+    await this.page
+      .getByRole("switch")
+      .nth(index + 1)
+      .click({ timeout: 15_000 });
+    await settled;
+  }
+
+  async settingsProfileUpkeepFailWrites(): Promise<void> {
+    // Fail the PATCH writes only: GET reads keep passing so the tab still
+    // renders its switches and the rollback half stays observable.
+    await this.page.route("**/api/users/me/auto-pm/**", (route) => {
+      if (route.request().method() === "PATCH") {
+        void route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"probe_boom"}' });
+      } else {
+        void route.continue();
+      }
+    });
+  }
+
+  async settingsProfileUpkeepClearRoutes(): Promise<void> {
+    await this.page.unroute("**/api/users/me/auto-pm/**");
+  }
+
+  async settingsProfileUpkeepDelayWrites(ms: number): Promise<void> {
+    // Hold the PATCH writes before passing them through, so the optimistic
+    // flip is observable while the write is still in flight. Arm alone:
+    // clear the fail hook first, since stacked routes both match.
+    await this.page.route("**/api/users/me/auto-pm/**", (route) => {
+      if (route.request().method() === "PATCH") {
+        setTimeout(() => {
+          void route.continue();
+        }, ms);
+      } else {
+        void route.continue();
+      }
+    });
+  }
+
+  async settingsProfileIntegrationsFacts(): Promise<{
+    loading: boolean;
+    noAdmin: boolean;
+    configuredWarning: string | null;
+    workspaceOptions: { slug: string; name: string }[];
+    selectedSlug: string | null;
+    panelHeading: string | null;
+    panelLead: string | null;
+    connected: boolean | null;
+    installLabel: string | null;
+    installDisabled: boolean | null;
+    refreshVisible: boolean;
+    statusFields: { label: string; value: string }[];
+    unconnectedCopy: string | null;
+    suspendedBanner: string | null;
+    lastCheckError: string | null;
+  }> {
+    // The content renders from its data read; never read mid-loader.
+    // Markers must be painted controls, never the heading (pre-data).
+    await this.page
+      .waitForFunction(
+        () => {
+          const text = (document.body.innerText ?? "").replace(/\s+/g, " ");
+          return (
+            document.querySelector("select") !== null ||
+            [...document.querySelectorAll("h3")].some((h) => (h.textContent ?? "").trim() === "GitHub App") ||
+            text.includes("No admin workspaces")
+          );
+        },
+        { timeout: WebDriver.itemTimeout }
+      )
+      .catch(() => null);
+    const bodyText = (
+      (await this.page
+        .locator("body")
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).replace(/\s+/g, " ");
+    const noAdmin = bodyText.includes("No admin workspaces");
+    const panelHeading = (await this.page.locator("h3", { hasText: "GitHub App" }).count()) > 0 ? "GitHub App" : null;
+    const select = this.page.locator("select").first();
+    const hasSelect = (await select.count()) > 0;
+    if (!hasSelect && !noAdmin && panelHeading === null) {
+      return {
+        loading: true,
+        noAdmin: false,
+        configuredWarning: null,
+        workspaceOptions: [],
+        selectedSlug: null,
+        panelHeading: null,
+        panelLead: null,
+        connected: null,
+        installLabel: null,
+        installDisabled: null,
+        refreshVisible: false,
+        statusFields: [],
+        unconnectedCopy: null,
+        suspendedBanner: null,
+        lastCheckError: null,
+      };
+    }
+    const warning = this.page.getByText("GitHub App configuration is missing", { exact: false });
+    const install = this.page.getByRole("button", { name: "Install", exact: true });
+    const reconnect = this.page.getByRole("button", { name: "Reconnect", exact: true });
+    const refresh = this.page.getByRole("button", { name: "Refresh", exact: true });
+    const unconnected = this.page.getByText("No GitHub App installation is connected", { exact: false });
+    const suspended = this.page.getByText("suspended or removed in GitHub", { exact: false });
+    const lastFailed = this.page.getByText("Last check failed:", { exact: false });
+    const installCount = await install.count();
+    const reconnectCount = await reconnect.count();
+    const installButton = installCount > 0 ? install.first() : reconnectCount > 0 ? reconnect.first() : null;
+    const statusFields = await this.page.evaluate(() => {
+      const grid = document.querySelector("div.grid.gap-3");
+      if (grid === null) return [];
+      return [...grid.children].map((cell) => {
+        const parts = [...cell.children].map((c) => (c.textContent ?? "").replace(/\s+/g, " ").trim());
+        return { label: parts[0] ?? "", value: parts[1] ?? "" };
+      });
+    });
+    const heading = this.page.locator("h3", { hasText: "GitHub App" });
+    // The lead names the picked workspace ("Install … for X." /
+    // "Installed for … on X."): the paragraph beside the heading.
+    let panelLead: string | null = null;
+    if ((await heading.count()) > 0) {
+      const leadText = await heading
+        .locator("xpath=../..")
+        .locator("p")
+        .first()
+        .innerText()
+        .catch(() => "");
+      panelLead = (leadText ?? "").replace(/\s+/g, " ").trim() || null;
+    }
+    return {
+      loading: false,
+      noAdmin,
+      panelLead,
+      configuredWarning:
+        (await warning.count()) > 0 ? ((await warning.first().innerText()) ?? "").replace(/\s+/g, " ").trim() : null,
+      workspaceOptions: hasSelect
+        ? await select.evaluate((el) =>
+            [...(el as HTMLSelectElement).options].map((o) => ({ slug: o.value, name: (o.textContent ?? "").trim() }))
+          )
+        : [],
+      selectedSlug: hasSelect ? await select.inputValue({ timeout: WebDriver.itemTimeout }) : null,
+      panelHeading,
+      connected: panelHeading === null ? null : (await refresh.count()) > 0,
+      installLabel:
+        installButton === null ? null : ((await installButton.innerText()) ?? "").replace(/\s+/g, " ").trim() || null,
+      installDisabled: installButton === null ? null : await installButton.isDisabled(),
+      refreshVisible:
+        (await refresh.count()) > 0 &&
+        (await refresh
+          .first()
+          .isVisible()
+          .catch(() => false)),
+      statusFields,
+      unconnectedCopy:
+        (await unconnected.count()) > 0
+          ? ((await unconnected.first().innerText()) ?? "").replace(/\s+/g, " ").trim()
+          : null,
+      suspendedBanner:
+        (await suspended.count()) > 0
+          ? ((await suspended.first().innerText()) ?? "").replace(/\s+/g, " ").trim()
+          : null,
+      lastCheckError:
+        (await lastFailed.count()) > 0
+          ? ((await lastFailed.first().innerText()) ?? "").replace(/\s+/g, " ").trim()
+          : null,
+    };
+  }
+
+  async settingsProfileIntegrationsSelect(slug: string): Promise<void> {
+    // The picker swap is client-side (one status read backs every option),
+    // so settle on the panel copy naming the picked workspace.
+    const select = this.page.locator("select").first();
+    const name = await select.evaluate((el, want: string) => {
+      const hit = [...(el as HTMLSelectElement).options].find((o) => o.value === want);
+      return hit === undefined ? "" : (hit.textContent ?? "").trim();
+    }, slug);
+    if (name === "") throw new Error(`[parity] integrations picker has no option ${slug}.`);
+    await select.selectOption(slug, { timeout: WebDriver.actionTimeout });
+    await this.page
+      .waitForFunction((want: string) => (document.body.innerText ?? "").includes(want), name, {
+        timeout: WebDriver.WAIT_MS,
+      })
+      .catch(() => {
+        throw new Error(`[parity] integrations panel never named ${name} after picking ${slug}.`);
+      });
+  }
+
+  async settingsProfileIntegrationsRefresh(): Promise<void> {
+    // The check dials GitHub; on the seeded stack the unreachable host
+    // answers in seconds, but allow the full budget before the spec's
+    // toast poll takes over.
+    const settled = this.page
+      .waitForResponse(
+        (resp) =>
+          resp.url().includes("/api/users/me/integrations/github/app/refresh/") && resp.request().method() === "POST",
+        { timeout: 120_000 }
+      )
+      .catch(() => null);
+    await this.page.getByRole("button", { name: "Refresh", exact: true }).click({ timeout: 15_000 });
+    await settled;
+  }
+
+  async settingsProfileIntegrationsFailRefresh(): Promise<void> {
+    // Fail the refresh check with the exact body the seeded stack returns
+    // live (502 config-missing): the live check burns ~120s in network
+    // timeouts, so the suite pins the client contract against the observed
+    // payload instead of the wait. Reads pass through untouched.
+    await this.page.route("**/api/users/me/integrations/github/app/refresh/", (route) => {
+      if (route.request().method() === "POST") {
+        void route.fulfill({
+          status: 502,
+          contentType: "application/json",
+          body: '{"error":"GitHub App config missing: app_id, app_slug, private_key"}',
+        });
+      } else {
+        void route.continue();
+      }
+    });
+  }
+
+  async settingsProfileIntegrationsClearRoutes(): Promise<void> {
+    await this.page.unroute("**/api/users/me/integrations/github/app/refresh/");
+  }
+
+  async settingsProfilePressKeys(keys: string[]): Promise<void> {
+    // Blur first so keys land on the page body, never inside a control;
+    // no click, so the probe itself cannot flip a switch or open a menu.
+    await this.page.evaluate(() => {
+      (document.activeElement as HTMLElement | null)?.blur?.();
+    });
+    for (const key of keys) {
+      await this.page.keyboard.press(key);
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async settingsProfileDialogOpen(): Promise<boolean> {
+    // Toasts render as dialogs inside the Notifications region; only a
+    // dialog outside it counts as an open dialog for the silence checks.
+    return this.page.evaluate(() => {
+      const dialogs = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')];
+      return dialogs.some((el) => {
+        if ((el as HTMLElement).closest('[aria-label="Notifications"]') !== null) return false;
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+    });
+  }
+
+  async settingsProfileWatchReads(): Promise<void> {
+    if (this.settingsProfileReadHandler) {
+      this.settingsProfileReadsSeen = 0;
+      return;
+    }
+    this.settingsProfileReadsSeen = 0;
+    this.settingsProfileReadHandler = (request: { url(): string; method(): string }) => {
+      if (request.method() === "GET" && /\/api\/users\/me\/(ai-assistant|auto-pm|integrations)/.test(request.url())) {
+        this.settingsProfileReadsSeen += 1;
+      }
+    };
+    this.page.on("request", this.settingsProfileReadHandler as (request: never) => void);
+  }
+
+  async settingsProfileReadCount(): Promise<number> {
+    return this.settingsProfileReadsSeen;
+  }
+
+  async settingsProfileWatchSockets(): Promise<void> {
+    if (this.settingsProfileSocketHandler) {
+      this.settingsProfileSocketsSeen = 0;
+      return;
+    }
+    this.settingsProfileSocketsSeen = 0;
+    this.settingsProfileSocketHandler = () => {
+      this.settingsProfileSocketsSeen += 1;
+    };
+    this.page.on("websocket", this.settingsProfileSocketHandler);
+  }
+
+  async settingsProfileSocketCount(): Promise<number> {
+    return this.settingsProfileSocketsSeen;
+  }
+
+  async settingsProfileDraggableCount(): Promise<number> {
+    return this.page.evaluate(() => {
+      const nodes = [...document.querySelectorAll('[draggable="true"]')];
+      return nodes.filter((el) => {
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }).length;
+    });
+  }
+
+  async settingsProfileFileInputCount(): Promise<number> {
+    return this.page.locator('input[type="file"]').count();
+  }
+
+  async settingsProfileImportExportMentions(): Promise<string[]> {
+    const text = (
+      (await this.page
+        .locator("body")
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .split("\n")
+      .map((line) => line.trim().replace(/\s+/g, " "))
+      .filter((line) => /import|export/i.test(line));
+    return [...new Set(text)].slice(0, 10);
+  }
+
+  async settingsProfileMemberControlCount(): Promise<number> {
+    // Controls that pick a user or member: selects, inputs, comboboxes, and
+    // buttons whose accessible name or label mentions one. The workspace
+    // picker ("Workspace") and the provider/api-key fields never match.
+    return this.page.evaluate(() => {
+      const labelled = (el: Element): string => {
+        const aria = el.getAttribute("aria-label") ?? "";
+        const labelledBy = el.getAttribute("aria-labelledby") ?? "";
+        const labelledText =
+          labelledBy === ""
+            ? ""
+            : labelledBy
+                .split(" ")
+                .map((id) => document.getElementById(id)?.textContent ?? "")
+                .join(" ");
+        const placeholder = el.getAttribute("placeholder") ?? "";
+        const wrap = (el as HTMLElement).closest("label")?.textContent ?? "";
+        const text = (el.textContent ?? "").slice(0, 80);
+        return `${aria} ${labelledText} ${placeholder} ${wrap} ${text}`;
+      };
+      const visible = (el: Element): boolean => {
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const nodes = [...document.querySelectorAll('select, input, [role="combobox"], [role="listbox"], button')];
+      return nodes.filter((el) => visible(el) && /\b(member|user|assignee|reviewer|owner)\b/i.test(labelled(el)))
+        .length;
+    });
+  }
 }

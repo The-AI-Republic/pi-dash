@@ -13105,4 +13105,189 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsWebhookDeleteCancel(): Promise<void> {
     return todo("wsSettingsWebhookDeleteCancel");
   }
+  // --- Profile-settings assistant/upkeep/integrations stubs (NEWFRONT-428,
+  // --- PROF-021..025, PROF-027, PROF-028). The area gate implements these
+  // --- against apps/web_new; until then every method throws todo().
+  async settingsProfileOpenTab(
+    _tab: "ai-assistant" | "auto-project-management" | "integrations",
+    _cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    return todo("settingsProfileOpenTab");
+  }
+  async settingsProfileOpenTabWithQuery(
+    _tab: "ai-assistant" | "auto-project-management" | "integrations",
+    _query: string,
+    _cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    return todo("settingsProfileOpenTabWithQuery");
+  }
+  async settingsProfileCurrentPath(): Promise<string> {
+    return todo("settingsProfileCurrentPath");
+  }
+  async settingsProfileCurrentQuery(): Promise<string> {
+    return todo("settingsProfileCurrentQuery");
+  }
+  async settingsProfileLastToast(): Promise<{ title: string; message: string } | null> {
+    return todo("settingsProfileLastToast");
+  }
+  async settingsProfileAssistantFacts(): Promise<{
+    provider: string;
+    baseUrlVisible: boolean;
+    baseUrl: string;
+    model: string;
+    keyValue: string;
+    keyPlaceholder: string;
+    saveDisabled: boolean;
+    testDisabled: boolean;
+    removeVisible: boolean;
+    lastVerified: string | null;
+  }> {
+    return todo("settingsProfileAssistantFacts");
+  }
+  async settingsProfileAssistantSetProvider(_provider: "openai_compatible" | "anthropic"): Promise<void> {
+    return todo("settingsProfileAssistantSetProvider");
+  }
+  async settingsProfileAssistantFill(_field: "baseUrl" | "model" | "key", _value: string): Promise<void> {
+    return todo("settingsProfileAssistantFill");
+  }
+  async settingsProfileAssistantSave(): Promise<void> {
+    return todo("settingsProfileAssistantSave");
+  }
+  async settingsProfileAssistantTest(): Promise<void> {
+    return todo("settingsProfileAssistantTest");
+  }
+  async settingsProfileAssistantRemove(): Promise<void> {
+    return todo("settingsProfileAssistantRemove");
+  }
+  async settingsProfileAssistantFailWrites(): Promise<void> {
+    return todo("settingsProfileAssistantFailWrites");
+  }
+  async settingsProfileAssistantClearRoutes(): Promise<void> {
+    return todo("settingsProfileAssistantClearRoutes");
+  }
+  async settingsProfileDictationFacts(): Promise<{
+    sectionVisible: boolean;
+    baseUrl: string;
+    model: string;
+    keyValue: string;
+    keyPlaceholder: string;
+    saveDisabled: boolean;
+    testDisabled: boolean;
+    removeVisible: boolean;
+    lastVerified: string | null;
+  }> {
+    return todo("settingsProfileDictationFacts");
+  }
+  async settingsProfileDictationFill(_field: "baseUrl" | "model" | "key", _value: string): Promise<void> {
+    return todo("settingsProfileDictationFill");
+  }
+  async settingsProfileDictationSave(): Promise<void> {
+    return todo("settingsProfileDictationSave");
+  }
+  async settingsProfileDictationTest(): Promise<void> {
+    return todo("settingsProfileDictationTest");
+  }
+  async settingsProfileDictationRemove(): Promise<void> {
+    return todo("settingsProfileDictationRemove");
+  }
+  async settingsProfileToolServerRows(): Promise<
+    { name: string; url: string; disabled: boolean; locked: boolean; prefix: string | null }[]
+  > {
+    return todo("settingsProfileToolServerRows");
+  }
+  async settingsProfileToolServerAddDisabled(): Promise<boolean> {
+    return todo("settingsProfileToolServerAddDisabled");
+  }
+  async settingsProfileToolServerAdd(_name: string, _url: string, _authHeader?: string): Promise<void> {
+    return todo("settingsProfileToolServerAdd");
+  }
+  async settingsProfileToolServerToggle(_name: string): Promise<void> {
+    return todo("settingsProfileToolServerToggle");
+  }
+  async settingsProfileToolServerRemove(_name: string): Promise<void> {
+    return todo("settingsProfileToolServerRemove");
+  }
+  async settingsProfileUpkeepFacts(): Promise<{
+    emptyExplanation: string | null;
+    masterPaused: boolean | null;
+    jobs: { name: string; interval: string; description: string; enabled: boolean; toggleDisabled: boolean }[];
+  }> {
+    return todo("settingsProfileUpkeepFacts");
+  }
+  async settingsProfileUpkeepToggleMaster(_paused: boolean): Promise<void> {
+    return todo("settingsProfileUpkeepToggleMaster");
+  }
+  async settingsProfileUpkeepToggleJob(_name: string, _enabled: boolean): Promise<void> {
+    return todo("settingsProfileUpkeepToggleJob");
+  }
+  async settingsProfileUpkeepFailWrites(): Promise<void> {
+    return todo("settingsProfileUpkeepFailWrites");
+  }
+  async settingsProfileUpkeepClearRoutes(): Promise<void> {
+    return todo("settingsProfileUpkeepClearRoutes");
+  }
+  async settingsProfileUpkeepDelayWrites(_ms: number): Promise<void> {
+    return todo("settingsProfileUpkeepDelayWrites");
+  }
+  async settingsProfileIntegrationsFacts(): Promise<{
+    loading: boolean;
+    noAdmin: boolean;
+    configuredWarning: string | null;
+    workspaceOptions: { slug: string; name: string }[];
+    selectedSlug: string | null;
+    panelHeading: string | null;
+    panelLead: string | null;
+    connected: boolean | null;
+    installLabel: string | null;
+    installDisabled: boolean | null;
+    refreshVisible: boolean;
+    statusFields: { label: string; value: string }[];
+    unconnectedCopy: string | null;
+    suspendedBanner: string | null;
+    lastCheckError: string | null;
+  }> {
+    return todo("settingsProfileIntegrationsFacts");
+  }
+  async settingsProfileIntegrationsSelect(_slug: string): Promise<void> {
+    return todo("settingsProfileIntegrationsSelect");
+  }
+  async settingsProfileIntegrationsRefresh(): Promise<void> {
+    return todo("settingsProfileIntegrationsRefresh");
+  }
+  async settingsProfileIntegrationsFailRefresh(): Promise<void> {
+    return todo("settingsProfileIntegrationsFailRefresh");
+  }
+  async settingsProfileIntegrationsClearRoutes(): Promise<void> {
+    return todo("settingsProfileIntegrationsClearRoutes");
+  }
+  async settingsProfilePressKeys(_keys: string[]): Promise<void> {
+    return todo("settingsProfilePressKeys");
+  }
+  async settingsProfileDialogOpen(): Promise<boolean> {
+    return todo("settingsProfileDialogOpen");
+  }
+  async settingsProfileWatchReads(): Promise<void> {
+    return todo("settingsProfileWatchReads");
+  }
+  async settingsProfileReadCount(): Promise<number> {
+    return todo("settingsProfileReadCount");
+  }
+  async settingsProfileWatchSockets(): Promise<void> {
+    return todo("settingsProfileWatchSockets");
+  }
+  async settingsProfileSocketCount(): Promise<number> {
+    return todo("settingsProfileSocketCount");
+  }
+  async settingsProfileDraggableCount(): Promise<number> {
+    return todo("settingsProfileDraggableCount");
+  }
+  async settingsProfileFileInputCount(): Promise<number> {
+    return todo("settingsProfileFileInputCount");
+  }
+  async settingsProfileImportExportMentions(): Promise<string[]> {
+    return todo("settingsProfileImportExportMentions");
+  }
+  async settingsProfileMemberControlCount(): Promise<number> {
+    return todo("settingsProfileMemberControlCount");
+  }
 }
