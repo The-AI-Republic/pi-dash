@@ -7274,6 +7274,91 @@ export interface ParityDriver {
    * so the pane's shared editor handle remounts on warm client state.
    */
   pagesPaneProfileRoundtrip(): Promise<void>;
+
+  // -------------------------------------------------------------------------
+  // Workspace issue exports settings (NEWFRONT-381, rows EXP-001..013).
+  // Appended; existing methods above are untouched per the shared driver
+  // contract. Sibling children (NEWFRONT-382/383) add their own blocks.
+  // -------------------------------------------------------------------------
+
+  /** Open the workspace exports settings page as the `cookies` identity; resolves once the page settles. */
+  exportsSettingsOpen(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Which access shape the page renders: working form, not-authorized view, or the no-workspace view. */
+  exportsSettingsAccess(): Promise<"form" | "not-authorized" | "no-workspace">;
+  /** Page heading title plus the explanatory paragraph. */
+  exportsSettingsHeading(): Promise<{ title: string; description: string }>;
+  /** Breadcrumb trail texts in the settings header. */
+  exportsSettingsBreadcrumb(): Promise<string[]>;
+  /** Browser tab title. */
+  exportsSettingsPageTitle(): Promise<string>;
+  /** Current location path (what the address bar shows). */
+  exportsSettingsCurrentPath(): Promise<string>;
+  /** Open the project picker dropdown. */
+  exportsSettingsProjectPickerOpen(): Promise<void>;
+  /** Visible project options as key/name pairs in display order. */
+  exportsSettingsProjectPickerOptions(): Promise<Array<{ key: string; name: string }>>;
+  /** Type into the picker search box. */
+  exportsSettingsProjectPickerSearch(query: string): Promise<void>;
+  /** Toggle the option showing `name`. */
+  exportsSettingsProjectPickerToggle(name: string): Promise<void>;
+  /** Current picker button label (compact key list, or the all-projects label). */
+  exportsSettingsProjectPickerLabel(): Promise<string>;
+  /** Whether the project picker refuses interaction. */
+  exportsSettingsProjectPickerDisabled(): Promise<boolean>;
+  /** Open the format picker and read its option labels. */
+  exportsSettingsFormatOptions(): Promise<string[]>;
+  /** Choose a format by its visible label. */
+  exportsSettingsFormatSelect(label: string): Promise<void>;
+  /** Current format picker label. */
+  exportsSettingsFormatLabel(): Promise<string>;
+  /** Click the Export action. */
+  exportsSettingsSubmit(): Promise<void>;
+  /** Current Export button text (working state while the request runs). */
+  exportsSettingsSubmitLabel(): Promise<string>;
+  /** Whether the Export button refuses interaction right now. */
+  exportsSettingsSubmitDisabled(): Promise<boolean>;
+  /** Visible toast, if any (tone, title, message). */
+  exportsSettingsToast(): Promise<{ kind: "success" | "error"; title: string; message: string } | null>;
+  /** History rows in display order (who/when/count/format/state/download cell). */
+  exportsSettingsHistoryRows(): Promise<ExportsSettingsHistoryRow[]>;
+  /** Number of history rows currently rendered. */
+  exportsSettingsHistoryCount(): Promise<number>;
+  /** Click the manual refresh control. */
+  exportsSettingsRefresh(): Promise<void>;
+  /** Current refresh control text (working state while re-reading), or null when no control renders. */
+  exportsSettingsRefreshLabel(): Promise<string | null>;
+  /** Pagination shape: control visibility plus end states. */
+  exportsSettingsPagination(): Promise<{ visible: boolean; prevDisabled: boolean; nextDisabled: boolean }>;
+  /** Click the history back control. */
+  exportsSettingsGoPrev(): Promise<void>;
+  /** Click the history forward control. */
+  exportsSettingsGoNext(): Promise<void>;
+  /** Whether the pre-first-response skeleton placeholder shows. */
+  exportsSettingsSkeletonVisible(): Promise<boolean>;
+  /** Illustrated empty view facts, or null when history renders. */
+  exportsSettingsEmptyFacts(): Promise<ExportsSettingsEmptyFacts | null>;
+  /** Start counting export-history list requests (auto-poll observation). */
+  exportsSettingsWatchHistoryRequests(): Promise<void>;
+  /** Export-history list requests observed since the watch started. */
+  exportsSettingsHistoryRequestCount(): Promise<number>;
+  /** Capture export submit request bodies for later reading (test hook). */
+  exportsSettingsCaptureSubmit(): Promise<void>;
+  /** Bodies of captured export submit requests, in order. */
+  exportsSettingsCapturedSubmits(): Promise<Array<{ provider: string; project: string[]; multiple: boolean }>>;
+  /** Stall the export submit request so the working button state stays up (test hook). */
+  exportsSettingsStallSubmit(): Promise<void>;
+  /** Release a stalled export submit request (test hook). */
+  exportsSettingsReleaseSubmit(): Promise<void>;
+  /** Fail export submit requests with HTTP 500 (test hook). */
+  exportsSettingsFailSubmit(): Promise<void>;
+  /** Stop failing export submit requests (test hook). */
+  exportsSettingsUnfailSubmit(): Promise<void>;
+  /** Stall the history list read so the skeleton stays up (test hook). */
+  exportsSettingsStallHistory(): Promise<void>;
+  /** Release a stalled history list read (test hook). */
+  exportsSettingsReleaseHistory(): Promise<void>;
+  /** Click the download control of `rowIndex`; resolves with the new-tab URL (new-tab proof). */
+  exportsSettingsDownloadPopupUrl(rowIndex: number): Promise<string>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */
@@ -8644,4 +8729,32 @@ export interface AnalyticsApiRequest {
   path: string;
   /** Raw query string without the leading `?`. */
   query: string;
+}
+
+/** One workspace-exports history row (NEWFRONT-381, EXP-007/008/011/012). */
+export interface ExportsSettingsHistoryRow {
+  /** Display name of the user who started the export. */
+  exportedBy: string;
+  /** Avatar image URL, or null when the row shows an initial instead. */
+  avatarUrl: string | null;
+  /** Initial character shown when there is no avatar. */
+  initial: string | null;
+  /** Human-formatted start date as rendered. */
+  exportedOn: string;
+  /** Project count the row reports. */
+  projectCount: number;
+  /** Format label as rendered (CSV/Excel/JSON). */
+  format: string;
+  /** Processing state text as rendered (queued/processing/completed/failed). */
+  status: string;
+  /** Download cell shape: link (fresh + finished), dash, or expired marker. */
+  download: { kind: "link"; href: string; target: string } | { kind: "dash" } | { kind: "expired" };
+}
+
+/** Illustrated history empty view facts (NEWFRONT-381, EXP-013). */
+export interface ExportsSettingsEmptyFacts {
+  /** Empty view heading. */
+  title: string;
+  /** Empty view supporting text. */
+  description: string;
 }

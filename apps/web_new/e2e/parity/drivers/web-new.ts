@@ -141,6 +141,8 @@ import type {
   PagesBlocksAssetRow,
   PagesBlocksInfoStats,
   PagesBlocksInlineImage,
+  ExportsSettingsEmptyFacts,
+  ExportsSettingsHistoryRow,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -11390,5 +11392,164 @@ export class WebNewDriver implements ParityDriver {
   }
   async pagesBlocksInfoStats(_expectedCharacters?: number, _skipNavigate?: boolean): Promise<PagesBlocksInfoStats> {
     return todo("pagesBlocksInfoStats");
+  }
+  // Workspace issue exports settings (NEWFRONT-381, rows EXP-001..013).
+  // Appended; existing stubs above are untouched per the shared driver
+  // contract. Throw until the exports build slice lands.
+
+  async exportsSettingsOpen(_workspaceSlug: string, _cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("exportsSettingsOpen");
+  }
+
+  async exportsSettingsAccess(): Promise<"form" | "not-authorized" | "no-workspace"> {
+    return todo("exportsSettingsAccess");
+  }
+
+  async exportsSettingsHeading(): Promise<{ title: string; description: string }> {
+    return todo("exportsSettingsHeading");
+  }
+
+  async exportsSettingsBreadcrumb(): Promise<string[]> {
+    return todo("exportsSettingsBreadcrumb");
+  }
+
+  async exportsSettingsPageTitle(): Promise<string> {
+    return todo("exportsSettingsPageTitle");
+  }
+
+  async exportsSettingsCurrentPath(): Promise<string> {
+    return todo("exportsSettingsCurrentPath");
+  }
+
+  async exportsSettingsProjectPickerOpen(): Promise<void> {
+    return todo("exportsSettingsProjectPickerOpen");
+  }
+
+  async exportsSettingsProjectPickerOptions(): Promise<Array<{ key: string; name: string }>> {
+    return todo("exportsSettingsProjectPickerOptions");
+  }
+
+  async exportsSettingsProjectPickerSearch(_query: string): Promise<void> {
+    return todo("exportsSettingsProjectPickerSearch");
+  }
+
+  async exportsSettingsProjectPickerToggle(_name: string): Promise<void> {
+    return todo("exportsSettingsProjectPickerToggle");
+  }
+
+  async exportsSettingsProjectPickerLabel(): Promise<string> {
+    return todo("exportsSettingsProjectPickerLabel");
+  }
+
+  async exportsSettingsProjectPickerDisabled(): Promise<boolean> {
+    return todo("exportsSettingsProjectPickerDisabled");
+  }
+
+  async exportsSettingsFormatOptions(): Promise<string[]> {
+    return todo("exportsSettingsFormatOptions");
+  }
+
+  async exportsSettingsFormatSelect(_label: string): Promise<void> {
+    return todo("exportsSettingsFormatSelect");
+  }
+
+  async exportsSettingsFormatLabel(): Promise<string> {
+    return todo("exportsSettingsFormatLabel");
+  }
+
+  async exportsSettingsSubmit(): Promise<void> {
+    return todo("exportsSettingsSubmit");
+  }
+
+  async exportsSettingsSubmitLabel(): Promise<string> {
+    return todo("exportsSettingsSubmitLabel");
+  }
+
+  async exportsSettingsSubmitDisabled(): Promise<boolean> {
+    return todo("exportsSettingsSubmitDisabled");
+  }
+
+  async exportsSettingsToast(): Promise<{ kind: "success" | "error"; title: string; message: string } | null> {
+    return todo("exportsSettingsToast");
+  }
+
+  async exportsSettingsHistoryRows(): Promise<ExportsSettingsHistoryRow[]> {
+    return todo("exportsSettingsHistoryRows");
+  }
+
+  async exportsSettingsHistoryCount(): Promise<number> {
+    return todo("exportsSettingsHistoryCount");
+  }
+
+  async exportsSettingsRefresh(): Promise<void> {
+    return todo("exportsSettingsRefresh");
+  }
+
+  async exportsSettingsRefreshLabel(): Promise<string | null> {
+    return todo("exportsSettingsRefreshLabel");
+  }
+
+  async exportsSettingsPagination(): Promise<{ visible: boolean; prevDisabled: boolean; nextDisabled: boolean }> {
+    return todo("exportsSettingsPagination");
+  }
+
+  async exportsSettingsGoPrev(): Promise<void> {
+    return todo("exportsSettingsGoPrev");
+  }
+
+  async exportsSettingsGoNext(): Promise<void> {
+    return todo("exportsSettingsGoNext");
+  }
+
+  async exportsSettingsSkeletonVisible(): Promise<boolean> {
+    return todo("exportsSettingsSkeletonVisible");
+  }
+
+  async exportsSettingsEmptyFacts(): Promise<ExportsSettingsEmptyFacts | null> {
+    return todo("exportsSettingsEmptyFacts");
+  }
+
+  async exportsSettingsWatchHistoryRequests(): Promise<void> {
+    return todo("exportsSettingsWatchHistoryRequests");
+  }
+
+  async exportsSettingsHistoryRequestCount(): Promise<number> {
+    return todo("exportsSettingsHistoryRequestCount");
+  }
+
+  async exportsSettingsCaptureSubmit(): Promise<void> {
+    return todo("exportsSettingsCaptureSubmit");
+  }
+
+  async exportsSettingsCapturedSubmits(): Promise<Array<{ provider: string; project: string[]; multiple: boolean }>> {
+    return todo("exportsSettingsCapturedSubmits");
+  }
+
+  async exportsSettingsStallSubmit(): Promise<void> {
+    return todo("exportsSettingsStallSubmit");
+  }
+
+  async exportsSettingsReleaseSubmit(): Promise<void> {
+    return todo("exportsSettingsReleaseSubmit");
+  }
+
+  async exportsSettingsFailSubmit(): Promise<void> {
+    return todo("exportsSettingsFailSubmit");
+  }
+
+  async exportsSettingsUnfailSubmit(): Promise<void> {
+    return todo("exportsSettingsUnfailSubmit");
+  }
+
+  async exportsSettingsStallHistory(): Promise<void> {
+    return todo("exportsSettingsStallHistory");
+  }
+
+  async exportsSettingsReleaseHistory(): Promise<void> {
+    return todo("exportsSettingsReleaseHistory");
+  }
+
+  async exportsSettingsDownloadPopupUrl(_rowIndex: number): Promise<string> {
+    return todo("exportsSettingsDownloadPopupUrl");
   }
 }

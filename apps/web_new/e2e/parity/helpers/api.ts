@@ -16666,3 +16666,184 @@ export async function analyticsProjectCreateStatus(
   });
   return res.status;
 }
+
+// --- Workspace issue exports (NEWFRONT-381, EXP-001..013). ---
+// Appended; existing helpers above are untouched per the shared harness
+// contract. Server-state reads plus Django-shell manufacturing for the
+// exports-settings oracle scenarios. Real submissions still go through the
+// UI against the live endpoint; the shell helpers below exist only for
+// fixtures the UI cannot produce on demand: bulk history past one page,
+// records older than seven days, stuck in-flight records (no background
+// task behind them), and terminal states the happy path never reaches
+// (failed). Every planted fixture is labeled at the scenario call site.
+
+/** One export-history record as the list endpoint serializes it. */
+export interface ExportsHistoryRecord {
+  id: string;
+  provider: string;
+  status: string;
+  url: string | null;
+  project: string[];
+  created_at: string;
+  initiated_by_detail: {
+    id: string;
+    display_name: string;
+    email: string;
+    avatar_url: string | null;
+  };
+}
+
+function exportsRecordOf(raw: unknown): ExportsHistoryRecord {
+  const record = raw as Record<string, unknown>;
+  const detail = (record["initiated_by_detail"] ?? {}) as Record<string, unknown>;
+  const projects = Array.isArray(record["project"]) ? record["project"] : [];
+  if (typeof record["id"] !== "string") throw new Error("[parity] export record carried no id.");
+  return {
+    id: record["id"],
+    provider: typeof record["provider"] === "string" ? record["provider"] : "",
+    status: typeof record["status"] === "string" ? record["status"] : "",
+    url: typeof record["url"] === "string" ? record["url"] : null,
+    project: projects.filter((p): p is string => typeof p === "string"),
+    created_at: typeof record["created_at"] === "string" ? record["created_at"] : "",
+    initiated_by_detail: {
+      id: typeof detail["id"] === "string" ? detail["id"] : "",
+      display_name: typeof detail["display_name"] === "string" ? detail["display_name"] : "",
+      email: typeof detail["email"] === "string" ? detail["email"] : "",
+      avatar_url: typeof detail["avatar_url"] === "string" ? detail["avatar_url"] : null,
+    },
+  };
+}
+
+/**
+ * Paged history read mirroring the history section's query (the endpoint
+ * requires both cursor and per_page). Returns the page plus its cursors.
+ */
+export async function exportsListHistory(
+  session: AuthedSession,
+  slug: string,
+  cursor = "10:0:0",
+  perPage = 10
+): Promise<{
+  results: ExportsHistoryRecord[];
+  next_page_results: boolean;
+  prev_page_results: boolean;
+  next_cursor: string;
+  prev_cursor: string;
+}> {
+  const params = new URLSearchParams({ cursor, per_page: String(perPage) });
+  const res = await sessionFetch(session, "GET", `/api/workspaces/${slug}/export-issues/?${params.toString()}`);
+  if (!res.ok) throw new Error(`[parity] export history list failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as Record<string, unknown>;
+  const results = Array.isArray(payload["results"]) ? payload["results"] : [];
+  return {
+    results: results.map(exportsRecordOf),
+    next_page_results: payload["next_page_results"] === true,
+    prev_page_results: payload["prev_page_results"] === true,
+    next_cursor: typeof payload["next_cursor"] === "string" ? payload["next_cursor"] : "",
+    prev_cursor: typeof payload["prev_cursor"] === "string" ? payload["prev_cursor"] : "",
+  };
+}
+
+/**
+ * Raw submit through the live export endpoint. Never throws on refusal so
+ * negative paths can pin the status; the UI submit path is driven through
+ * the browser instead.
+ */
+export async function exportsSubmitStatus(
+  session: AuthedSession,
+  slug: string,
+  body: { provider: string; project: string[]; multiple: boolean }
+): Promise<{ status: number; payload: unknown }> {
+  const res = await sessionFetch(session, "POST", `/api/workspaces/${slug}/export-issues/`, body);
+  let payload: unknown = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+  return { status: res.status, payload };
+}
+
+/** Find one record by id, scanning the first pages of history. */
+export async function exportsFindRecord(
+  session: AuthedSession,
+  slug: string,
+  id: string
+): Promise<ExportsHistoryRecord | null> {
+  let cursor = "10:0:0";
+  for (let page = 0; page < 10; page += 1) {
+    const list = await exportsListHistory(session, slug, cursor, 10);
+    const found = list.results.find((r) => r.id === id);
+    if (found) return found;
+    if (!list.next_page_results || list.next_cursor === "") return null;
+    cursor = list.next_cursor;
+  }
+  return null;
+}
+
+/** Django-shell container for export fixtures on this run's stack. */
+function exportsApiContainer(): string {
+  return (process.env["PARITY_API_CONTAINER"] ?? "parity19-api").trim() || "parity19-api";
+}
+
+/**
+ * Plant one history record directly in the database (bulk-history,
+ * aged-record, stuck-processing, and failed-state fixtures the UI cannot
+ * produce on demand). Returns the record id. Callers label the planting.
+ */
+export async function exportsPlantRecord(input: {
+  workspaceSlug: string;
+  ownerEmail: string;
+  provider?: string;
+  projectIds?: string[];
+  status?: string;
+  createdDaysAgo?: number;
+  url?: string | null;
+}): Promise<string> {
+  const provider = input.provider ?? "csv";
+  const status = input.status ?? "completed";
+  const projectIds = input.projectIds ?? [];
+  const url = input.url ?? "https://example.invalid/parity-exports/planted.csv";
+  const daysAgo = input.createdDaysAgo ?? 0;
+  const out = await apiShellOn(
+    exportsApiContainer(),
+    `from datetime import timedelta\n` +
+      `from django.utils import timezone\n` +
+      `from pi_dash.db.models import ExporterHistory, User, Workspace\n` +
+      `user = User.objects.get(email=${JSON.stringify(input.ownerEmail)})\n` +
+      `workspace = Workspace.objects.get(slug=${JSON.stringify(input.workspaceSlug)})\n` +
+      `record = ExporterHistory.objects.create(workspace=workspace, project=${JSON.stringify(projectIds)}, initiated_by=user, provider=${JSON.stringify(provider)}, type="issue_exports", status="queued")\n` +
+      `stamp = timezone.now() - timedelta(days=${JSON.stringify(daysAgo)})\n` +
+      `ExporterHistory.objects.filter(id=record.id).update(status=${JSON.stringify(status)}, url=${JSON.stringify(url)}, created_at=stamp, updated_at=stamp)\n` +
+      `print("PARITY_EXPORT_ID:" + str(record.id))\n`
+  );
+  const id = /^PARITY_EXPORT_ID:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (id === "") throw new Error("[parity] export plant produced no record id.");
+  return id;
+}
+
+/** Flip one record's status, age, and/or file link (settle a stuck poll, age a download). */
+export async function exportsPatchRecord(
+  recordId: string,
+  patch: { status?: string; createdDaysAgo?: number; url?: string | null }
+): Promise<void> {
+  const sets: string[] = [];
+  if (patch.status !== undefined) sets.push(`status=${JSON.stringify(patch.status)}`);
+  if (patch.url !== undefined) sets.push(`url=${JSON.stringify(patch.url)}`);
+  const stamp =
+    patch.createdDaysAgo === undefined
+      ? ""
+      : `stamp = timezone.now() - timedelta(days=${JSON.stringify(patch.createdDaysAgo)})\n` +
+        `ExporterHistory.objects.filter(id=record.id).update(created_at=stamp, updated_at=stamp)\n`;
+  const out = await apiShellOn(
+    exportsApiContainer(),
+    `from datetime import timedelta\n` +
+      `from django.utils import timezone\n` +
+      `from pi_dash.db.models import ExporterHistory\n` +
+      `record = ExporterHistory.objects.get(id=${JSON.stringify(recordId)})\n` +
+      (sets.length > 0 ? `ExporterHistory.objects.filter(id=record.id).update(${sets.join(", ")})\n` : ``) +
+      stamp +
+      `print("PARITY_EXPORT_PATCHED")\n`
+  );
+  if (!/^PARITY_EXPORT_PATCHED$/m.test(out)) throw new Error("[parity] export patch produced no confirmation.");
+}

@@ -149,6 +149,8 @@ import type {
   PagesBlocksAssetRow,
   PagesBlocksInfoStats,
   PagesBlocksInlineImage,
+  ExportsSettingsEmptyFacts,
+  ExportsSettingsHistoryRow,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -40209,5 +40211,426 @@ export class WebDriver implements ParityDriver {
       await expect.poll(() => readCard("Characters"), { timeout: WebDriver.WAIT_MS }).toBe(expectedCharacters);
     }
     return { words: await readCard("Words"), characters: await readCard("Characters") };
+  }
+  // -------------------------------------------------------------------------
+  // Workspace issue exports settings (NEWFRONT-381, rows EXP-001..013).
+  // Appended; existing methods above are untouched per the shared driver
+  // contract. Written from the exports-workspace area spec against the live
+  // old app (oracle-prod): headless-ui listbox pickers, settings h3/p
+  // heading, table history with pill + download cells, toast dialogs.
+  // -------------------------------------------------------------------------
+
+  private exportsSettingsHistorySeen = 0;
+  private exportsSettingsHistoryHandler: ((request: { url(): string; method(): string }) => void) | null = null;
+  private exportsSettingsHookInstalled = false;
+  private exportsSettingsSubmitMode: "pass" | "stall" | "fail" = "pass";
+  private exportsSettingsSubmitGates: Array<() => void> = [];
+  private exportsSettingsHistoryMode: "pass" | "stall" = "pass";
+  private exportsSettingsHistoryGates: Array<() => void> = [];
+  private exportsSettingsCaptureOn = false;
+  private exportsSettingsCaptured: Array<{ provider: string; project: string[]; multiple: boolean }> = [];
+
+  /** Settle the exports page: form, not-authorized, or no-workspace content. */
+  private async exportsSettingsAwaitSettled(): Promise<void> {
+    await this.page
+      .waitForFunction(
+        () =>
+          /previous exports|no exports yet|not authorized|workspace not found|exporting project/i.test(
+            document.body.textContent ?? ""
+          ),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] exports settings settled on no known access shape.");
+      });
+  }
+
+  async exportsSettingsOpen(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(`/${workspaceSlug}/settings/exports`, cookies);
+    await this.exportsSettingsAwaitSettled();
+  }
+
+  async exportsSettingsAccess(): Promise<"form" | "not-authorized" | "no-workspace"> {
+    const shape = await this.page.evaluate(() => {
+      const text = document.body.textContent ?? "";
+      if (/not authorized to view this page/i.test(text)) return "not-authorized";
+      if (/no workspace found with the url/i.test(text)) return "no-workspace";
+      return "form";
+    });
+    return shape;
+  }
+
+  async exportsSettingsHeading(): Promise<{ title: string; description: string }> {
+    return this.page.evaluate(() => {
+      const heading = [...document.querySelectorAll("main h3")].find((h) => (h.textContent ?? "").trim() === "Exports");
+      const block = heading?.parentElement;
+      const description = block?.querySelector("p")?.textContent ?? "";
+      return { title: (heading?.textContent ?? "").trim(), description: description.trim() };
+    });
+  }
+
+  async exportsSettingsBreadcrumb(): Promise<string[]> {
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main") ?? document.body;
+      return [...main.querySelectorAll("div.relative.line-clamp-1")]
+        .map((d) => ((d.textContent ?? "") as string).trim())
+        .filter((t) => t !== "");
+    });
+  }
+
+  async exportsSettingsPageTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async exportsSettingsCurrentPath(): Promise<string> {
+    const url = new URL(this.page.url());
+    return `${url.pathname}${url.search}`;
+  }
+
+  /** Index of the listbox button living in the boxed item titled `title`. */
+  private async exportsSettingsPickerIndex(title: string): Promise<number> {
+    const index = await this.page.evaluate((t) => {
+      const heading = [...document.querySelectorAll("h4")].find((h) => ((h.textContent ?? "") as string).trim() === t);
+      const box = heading?.parentElement?.parentElement;
+      const button = box?.querySelector("button[aria-haspopup='listbox']");
+      const all = [...document.querySelectorAll("button[aria-haspopup='listbox']")];
+      return button ? all.indexOf(button) : -1;
+    }, title);
+    if (index < 0) throw new Error(`[parity] exports settings has no picker titled ${JSON.stringify(title)}.`);
+    return index;
+  }
+
+  async exportsSettingsProjectPickerOpen(): Promise<void> {
+    const index = await this.exportsSettingsPickerIndex("Exporting project");
+    await this.page.locator("button[aria-haspopup='listbox']").nth(index).click({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .waitForFunction(() => document.querySelector("[role='listbox']") !== null, { timeout: WebDriver.WAIT_MS })
+      .catch(() => {
+        throw new Error("[parity] exports project picker opened no listbox.");
+      });
+  }
+
+  async exportsSettingsProjectPickerOptions(): Promise<Array<{ key: string; name: string }>> {
+    return this.page.evaluate(() => {
+      const box = document.querySelector("[role='listbox']");
+      if (!box) return [];
+      return [...box.querySelectorAll("[role='option']")].map((li) => {
+        const key = li.querySelector("span.text-10")?.textContent?.trim() ?? "";
+        // The name span nests inside the option's wrapper span; the
+        // wrapper itself also carries the truncate class, so scope inward.
+        const name = li.querySelector("span span.truncate")?.textContent?.trim() ?? "";
+        if (key !== "" || name !== "") return { key, name };
+        const spans = [...li.querySelectorAll("span")].map((s) => (s.textContent ?? "").trim()).filter((t) => t !== "");
+        return { key: spans[0] ?? "", name: spans[spans.length - 1] ?? "" };
+      });
+    });
+  }
+
+  async exportsSettingsProjectPickerSearch(query: string): Promise<void> {
+    const input = this.page.locator("[role='listbox'] input[placeholder='Search']");
+    await input.fill(query, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async exportsSettingsProjectPickerToggle(name: string): Promise<void> {
+    const option = this.page.locator("[role='listbox'] [role='option']", { hasText: name });
+    await option.first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async exportsSettingsProjectPickerLabel(): Promise<string> {
+    const index = await this.exportsSettingsPickerIndex("Exporting project");
+    return ((await this.page.locator("button[aria-haspopup='listbox']").nth(index).innerText()) ?? "").trim();
+  }
+
+  async exportsSettingsProjectPickerDisabled(): Promise<boolean> {
+    const index = await this.exportsSettingsPickerIndex("Exporting project");
+    return this.page.locator("button[aria-haspopup='listbox']").nth(index).isDisabled();
+  }
+
+  async exportsSettingsFormatOptions(): Promise<string[]> {
+    const index = await this.exportsSettingsPickerIndex("Format");
+    await this.page.locator("button[aria-haspopup='listbox']").nth(index).click({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .waitForFunction(() => document.querySelector("[role='listbox']") !== null, { timeout: WebDriver.WAIT_MS })
+      .catch(() => {
+        throw new Error("[parity] exports format picker opened no listbox.");
+      });
+    return this.page.locator("[role='listbox'] [role='option']").allInnerTexts();
+  }
+
+  async exportsSettingsFormatSelect(label: string): Promise<void> {
+    const options = this.page.locator("[role='listbox'] [role='option']", { hasText: label });
+    const count = await options.count();
+    if (count === 0) {
+      // The dropdown is closed: open it first, then pick.
+      const index = await this.exportsSettingsPickerIndex("Format");
+      await this.page.locator("button[aria-haspopup='listbox']").nth(index).click({ timeout: WebDriver.WAIT_MS });
+    }
+    await this.page
+      .locator("[role='listbox'] [role='option']", { hasText: label })
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async exportsSettingsFormatLabel(): Promise<string> {
+    const index = await this.exportsSettingsPickerIndex("Format");
+    return ((await this.page.locator("button[aria-haspopup='listbox']").nth(index).innerText()) ?? "").trim();
+  }
+
+  private exportsSettingsSubmitButton(): Locator {
+    return this.page.locator('button[type="submit"]');
+  }
+
+  async exportsSettingsSubmit(): Promise<void> {
+    await this.page.getByRole("button", { name: "Export", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async exportsSettingsSubmitLabel(): Promise<string> {
+    return ((await this.exportsSettingsSubmitButton().innerText()) ?? "").trim();
+  }
+
+  async exportsSettingsSubmitDisabled(): Promise<boolean> {
+    return this.exportsSettingsSubmitButton().isDisabled();
+  }
+
+  async exportsSettingsToast(): Promise<{ kind: "success" | "error"; title: string; message: string } | null> {
+    const dialogs = this.page.locator('div[role="dialog"]');
+    const count = await dialogs.count();
+    // Toasts stack newest-first in DOM order, so the fresh notice is index 0.
+    for (let i = 0; i < count; i += 1) {
+      const dialog = dialogs.nth(i);
+      const title = (
+        ((await dialog
+          .locator("h2")
+          .first()
+          .innerText()
+          .catch(() => "")) as string) ?? ""
+      ).trim();
+      if (title === "") continue;
+      const message = (
+        ((await dialog
+          .locator("p")
+          .first()
+          .innerText()
+          .catch(() => "")) as string) ?? ""
+      ).trim();
+      if (/export successful/i.test(title)) return { kind: "success", title, message };
+      if (/^error$/i.test(title) && /unsuccessful/i.test(message)) return { kind: "error", title, message };
+    }
+    return null;
+  }
+
+  async exportsSettingsHistoryRows(): Promise<ExportsSettingsHistoryRow[]> {
+    return this.page.evaluate(() => {
+      const rows = [...document.querySelectorAll("tbody tr")];
+      return rows.map((tr) => {
+        const cells = [...tr.querySelectorAll("td")];
+        const byCell = cells[0];
+        const img = byCell?.querySelector("img");
+        const initial = byCell?.querySelector("span")?.textContent?.trim() ?? null;
+        const nameDivs = [...(byCell?.querySelectorAll("div") ?? [])].map((d) => (d.textContent ?? "").trim());
+        const exportedBy = nameDivs.find((t) => t !== "" && t !== initial) ?? "";
+        const exportedOn = (cells[1]?.textContent ?? "").trim();
+        const countMatch = /(\d+)\s+project\(s\)/.exec(cells[2]?.textContent ?? "");
+        const format = (cells[3]?.textContent ?? "").trim();
+        const status = (cells[4]?.textContent ?? "").trim();
+        const downloadCell = cells[cells.length - 1];
+        const anchor = downloadCell?.querySelector("a");
+        const cellText = (downloadCell?.textContent ?? "").trim();
+        const download =
+          anchor !== null && anchor !== undefined
+            ? {
+                kind: "link" as const,
+                href: anchor.getAttribute("href") ?? "",
+                target: anchor.getAttribute("target") ?? "",
+              }
+            : /expired/i.test(cellText)
+              ? { kind: "expired" as const }
+              : { kind: "dash" as const };
+        return {
+          exportedBy,
+          avatarUrl: img?.getAttribute("src") ?? null,
+          initial: img ? null : initial,
+          exportedOn,
+          projectCount: countMatch ? Number(countMatch[1]) : 0,
+          format,
+          status,
+          download,
+        };
+      });
+    });
+  }
+
+  async exportsSettingsHistoryCount(): Promise<number> {
+    return this.page.locator("tbody tr").count();
+  }
+
+  async exportsSettingsRefresh(): Promise<void> {
+    await this.page.getByRole("button", { name: /refresh/i }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async exportsSettingsRefreshLabel(): Promise<string | null> {
+    const button = this.page.getByRole("button", { name: /refresh/i });
+    if ((await button.count()) === 0) return null;
+    return (((await button.first().innerText()) as string) ?? "").trim() || null;
+  }
+
+  async exportsSettingsPagination(): Promise<{ visible: boolean; prevDisabled: boolean; nextDisabled: boolean }> {
+    const prev = this.page.getByRole("button", { name: "Prev", exact: true });
+    const next = this.page.getByRole("button", { name: "Next", exact: true });
+    if ((await prev.count()) === 0 || (await next.count()) === 0) {
+      return { visible: false, prevDisabled: true, nextDisabled: true };
+    }
+    return {
+      visible: true,
+      prevDisabled: await prev.first().isDisabled(),
+      nextDisabled: await next.first().isDisabled(),
+    };
+  }
+
+  async exportsSettingsGoPrev(): Promise<void> {
+    await this.page.getByRole("button", { name: "Prev", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async exportsSettingsGoNext(): Promise<void> {
+    await this.page.getByRole("button", { name: "Next", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async exportsSettingsSkeletonVisible(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main") ?? document.body;
+      const loader = main.querySelector("div.animate-pulse");
+      if (!loader) return false;
+      if (!loader.querySelector("span.bg-layer-1")) return false;
+      const style = window.getComputedStyle(loader);
+      return style.display !== "none" && style.visibility !== "hidden";
+    });
+  }
+
+  async exportsSettingsEmptyFacts(): Promise<ExportsSettingsEmptyFacts | null> {
+    return this.page.evaluate(() => {
+      const heading = [...document.querySelectorAll("main h3")].find(
+        (h) => ((h.textContent ?? "") as string).trim() === "No exports yet"
+      );
+      if (!heading) return null;
+      const description = heading.parentElement?.querySelector("p")?.textContent ?? "";
+      return { title: (heading.textContent ?? "").trim(), description: description.trim() };
+    });
+  }
+
+  async exportsSettingsWatchHistoryRequests(): Promise<void> {
+    if (this.exportsSettingsHistoryHandler) {
+      this.exportsSettingsHistorySeen = 0;
+      return;
+    }
+    this.exportsSettingsHistorySeen = 0;
+    this.exportsSettingsHistoryHandler = (request: { url(): string; method(): string }) => {
+      if (request.method() === "GET" && request.url().includes("/export-issues/")) {
+        this.exportsSettingsHistorySeen += 1;
+      }
+    };
+    this.page.on("request", this.exportsSettingsHistoryHandler as (request: never) => void);
+  }
+
+  async exportsSettingsHistoryRequestCount(): Promise<number> {
+    return this.exportsSettingsHistorySeen;
+  }
+
+  /** Single route hook serving submit capture/stall/fail plus history stall. */
+  private async exportsSettingsHook(): Promise<void> {
+    if (this.exportsSettingsHookInstalled) return;
+    this.exportsSettingsHookInstalled = true;
+    // Trailing `**` (not `*`, which never crosses `/`): the submit posts to
+    // `export-issues/` while history reads use both `export-issues?...`
+    // and `export-issues/?...`.
+    await this.page.route("**/api/workspaces/*/export-issues**", async (route) => {
+      const request = route.request();
+      if (request.method() === "POST") {
+        if (this.exportsSettingsCaptureOn) {
+          try {
+            const body = request.postDataJSON() as { provider?: unknown; project?: unknown; multiple?: unknown };
+            this.exportsSettingsCaptured.push({
+              provider: typeof body.provider === "string" ? body.provider : "",
+              project: Array.isArray(body.project)
+                ? body.project.filter((p): p is string => typeof p === "string")
+                : [],
+              multiple: body.multiple === true,
+            });
+          } catch {
+            // Unparseable bodies are still forwarded below.
+          }
+        }
+        if (this.exportsSettingsSubmitMode === "fail") {
+          await route.abort();
+          return;
+        }
+        if (this.exportsSettingsSubmitMode === "stall") {
+          await new Promise<void>((resolve) => {
+            this.exportsSettingsSubmitGates.push(resolve);
+          });
+        }
+        await route.fallback();
+        return;
+      }
+      if (request.method() === "GET" && this.exportsSettingsHistoryMode === "stall") {
+        await new Promise<void>((resolve) => {
+          this.exportsSettingsHistoryGates.push(resolve);
+        });
+      }
+      await route.fallback();
+    });
+  }
+
+  async exportsSettingsCaptureSubmit(): Promise<void> {
+    this.exportsSettingsCaptured = [];
+    this.exportsSettingsCaptureOn = true;
+    await this.exportsSettingsHook();
+  }
+
+  async exportsSettingsCapturedSubmits(): Promise<Array<{ provider: string; project: string[]; multiple: boolean }>> {
+    return [...this.exportsSettingsCaptured];
+  }
+
+  async exportsSettingsStallSubmit(): Promise<void> {
+    this.exportsSettingsSubmitMode = "stall";
+    await this.exportsSettingsHook();
+  }
+
+  async exportsSettingsReleaseSubmit(): Promise<void> {
+    const gates = this.exportsSettingsSubmitGates;
+    this.exportsSettingsSubmitGates = [];
+    this.exportsSettingsSubmitMode = "pass";
+    gates.forEach((release) => release());
+  }
+
+  async exportsSettingsFailSubmit(): Promise<void> {
+    this.exportsSettingsSubmitMode = "fail";
+    await this.exportsSettingsHook();
+  }
+
+  async exportsSettingsUnfailSubmit(): Promise<void> {
+    this.exportsSettingsSubmitMode = "pass";
+  }
+
+  async exportsSettingsStallHistory(): Promise<void> {
+    this.exportsSettingsHistoryMode = "stall";
+    await this.exportsSettingsHook();
+  }
+
+  async exportsSettingsReleaseHistory(): Promise<void> {
+    const gates = this.exportsSettingsHistoryGates;
+    this.exportsSettingsHistoryGates = [];
+    this.exportsSettingsHistoryMode = "pass";
+    gates.forEach((release) => release());
+  }
+
+  async exportsSettingsDownloadPopupUrl(rowIndex: number): Promise<string> {
+    const anchor = this.page.locator("tbody tr").nth(rowIndex).locator("td").last().locator("a");
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: WebDriver.WAIT_MS }),
+      anchor.click({ timeout: WebDriver.WAIT_MS }),
+    ]);
+    const url = popup.url();
+    await popup.close().catch(() => undefined);
+    return url;
   }
 }
