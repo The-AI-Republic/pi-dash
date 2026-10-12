@@ -8155,6 +8155,124 @@ export interface ParityDriver {
   wsSettingsProBadgeCount(): Promise<number>;
   /** Click the first pro pill on the current page, if any. */
   wsSettingsProBadgeClickFirst(): Promise<void>;
+
+  // --- Workspace-settings shell + general oracle (NEWFRONT-410,
+  // --- WSET-001..007). Observed on the running old app: the settings
+  // --- layout gates each section by workspace role (general, members and
+  // --- exports are admin-or-member; billing, webhooks and integrations
+  // --- are admin-only; guests see the not-authorized view everywhere and
+  // --- the tab title stays empty); the sidebar groups entries under
+  // --- Administration and Developer (empty groups hidden), highlights
+  // --- the current section, and collapses into a hamburger drawer with
+  // --- an active-path crumb on narrow screens; the general page carries
+  // --- the logo block (initial-letter fallback, upload dialog, remove),
+  // --- the name/size/URL/timezone form (admin editable, members see it
+  // --- dimmed and disabled), the copy-URL control and the admin-only
+  // --- delete danger zone; every section titles its tab "<workspace> -
+  // --- <section>". Appended; existing methods above are untouched per
+  // --- the shared driver contract.
+  /**
+   * Open one workspace-settings section; settles on the section or the
+   * denial view. `section` is "" (general) or one of "members",
+   * "billing", "exports", "webhooks", "integrations".
+   */
+  wsSettingsOpen(workspaceSlug: string, section: string): Promise<void>;
+  /** Sidebar group labels in display order (wide layout). */
+  wsSettingsGroups(): Promise<string[]>;
+  /** Sidebar entry labels in display order (wide layout). */
+  wsSettingsItems(): Promise<string[]>;
+  /** Label of the highlighted sidebar entry, or null when none is. */
+  wsSettingsActiveItem(): Promise<string | null>;
+  /** Follow the sidebar entry with this label; waits until settled. */
+  wsSettingsFollowItem(label: string): Promise<void>;
+  /** The current location's path (what the address bar shows). */
+  wsSettingsPath(): Promise<string>;
+  /** The current browser tab title. */
+  wsSettingsTitle(): Promise<string>;
+  /** Whether the not-authorized view is currently shown. */
+  wsSettingsDeniedVisible(): Promise<boolean>;
+  /** Whether the narrow-screen drawer trigger is currently visible. */
+  wsSettingsNarrowTriggerVisible(): Promise<boolean>;
+  /** Narrow the viewport and open the drawer; resolves with entries listed. */
+  wsSettingsOpenDrawer(): Promise<void>;
+  /** Drawer entry labels in display order. */
+  wsSettingsDrawerItems(): Promise<string[]>;
+  /** The active-path crumb beside the narrow-screen trigger. */
+  wsSettingsMobileCrumb(): Promise<string>;
+  /** Restore the wide viewport after narrow-screen reads. */
+  wsSettingsWideViewport(): Promise<void>;
+  /** Whether the general details form is currently rendered. */
+  wsSettingsGeneralVisible(): Promise<boolean>;
+  /** Current value of the workspace-name field. */
+  wsSettingsNameValue(): Promise<string>;
+  /** Fill the workspace-name field (replacing its content). */
+  wsSettingsFillName(name: string): Promise<void>;
+  /** Whether the workspace-name field is currently disabled. */
+  wsSettingsNameDisabled(): Promise<boolean>;
+  /** Inline name-validation error text, or null when none shows. */
+  wsSettingsNameError(): Promise<string | null>;
+  /** Label currently shown on the organization-size control. */
+  wsSettingsSizeLabel(): Promise<string>;
+  /** Organization-size preset labels offered by the control. */
+  wsSettingsSizeOptions(): Promise<string[]>;
+  /** Pick an organization-size preset by its label. */
+  wsSettingsSelectSize(label: string): Promise<void>;
+  /** Label currently shown on the timezone control. */
+  wsSettingsTimezoneLabel(): Promise<string>;
+  /** Search timezones for `query` and pick the `option` entry. */
+  wsSettingsSelectTimezone(query: string, option: string): Promise<void>;
+  /** Value of the read-only workspace-URL field. */
+  wsSettingsUrlValue(): Promise<string>;
+  /** Whether the save control is currently rendered (admin only). */
+  wsSettingsSaveVisible(): Promise<boolean>;
+  /** Label on the save control ("Update workspace" vs "Updating"), or null. */
+  wsSettingsSaveLabel(): Promise<string | null>;
+  /** Click the save control; resolves once the write settles. */
+  wsSettingsSave(): Promise<void>;
+  /** Hold workspace PATCH responses so the saving state stays observable. */
+  wsSettingsDelaySave(ms: number): Promise<void>;
+  /** Fail workspace PATCH responses with HTTP 500 until cleared. */
+  wsSettingsFailSave(): Promise<void>;
+  /** Remove the save interception installed above. */
+  wsSettingsClearSaveRoutes(): Promise<void>;
+  /** Whether the logo block shows the initial fallback or an image. */
+  wsSettingsLogoState(): Promise<"fallback" | "image">;
+  /** Resolved logo image src, or null while the fallback shows. */
+  wsSettingsLogoSrc(): Promise<string | null>;
+  /** Which logo action the page offers: upload, edit, or none (members). */
+  wsSettingsLogoAction(): Promise<"upload" | "edit" | "none">;
+  /** Open the logo upload dialog. */
+  wsSettingsOpenLogoDialog(): Promise<void>;
+  /** Whether the logo upload dialog is currently open. */
+  wsSettingsLogoDialogVisible(): Promise<boolean>;
+  /** Choose `filePath` in the dialog and save; resolves once it closes. */
+  wsSettingsUploadLogo(filePath: string): Promise<void>;
+  /** Click Remove in the open logo dialog; resolves once the write settles and the dialog closes. */
+  wsSettingsRemoveLogo(): Promise<void>;
+  /** Close the logo upload dialog via its Cancel control. */
+  wsSettingsCloseLogoDialog(): Promise<void>;
+  /** Activate the copy-URL control (clipboard permission granted first). */
+  wsSettingsCopyUrl(): Promise<void>;
+  /** Current clipboard text (grants clipboard permission first). */
+  wsSettingsReadClipboard(): Promise<string>;
+  /** Whether the delete danger section is currently rendered (admin only). */
+  wsSettingsDeleteSectionVisible(): Promise<boolean>;
+  /** Open the delete confirmation dialog. */
+  wsSettingsOpenDeleteDialog(): Promise<void>;
+  /** Whether the delete confirmation dialog is currently open. */
+  wsSettingsDeleteDialogVisible(): Promise<boolean>;
+  /** Visible text of the delete confirmation dialog. */
+  wsSettingsDeleteDialogText(): Promise<string>;
+  /** Fill the workspace-name confirmation field. */
+  wsSettingsFillDeleteName(name: string): Promise<void>;
+  /** Fill the final-phrase confirmation field. */
+  wsSettingsFillDeletePhrase(text: string): Promise<void>;
+  /** Whether the delete Confirm control is currently enabled. */
+  wsSettingsConfirmDeleteEnabled(): Promise<boolean>;
+  /** Click Confirm; resolves once the app navigates away from settings. */
+  wsSettingsConfirmDelete(): Promise<void>;
+  /** Dismiss the delete dialog via its Cancel control. */
+  wsSettingsCancelDelete(): Promise<void>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */
