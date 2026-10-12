@@ -237,6 +237,17 @@ services:
         condition: service_healthy
     environment:
       DJANGO_SETTINGS_MODULE: pi_dash.settings.local
+      # Object storage (NEWFRONT-385): same minio block as api. Without it
+      # the export task takes the non-minio boto3 path with an empty region
+      # and every real export dies with Invalid endpoint, so exports could
+      # never reach completed on scratch.
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: parity19minio
+      AWS_SECRET_ACCESS_KEY: parity19minio-scratch-secret
+      AWS_S3_BUCKET_NAME: parity19-assets
+      AWS_REGION: us-east-1
+      AWS_S3_ENDPOINT_URL: http://minio:9000
+      MINIO_ENDPOINT_URL: http://minio:9000
       SECRET_KEY: parity19-fixed-local-secret-not-used-outside-scratch
       ALLOWED_HOSTS: "*"
       DATABASE_URL: postgresql://parity19:parity19@pg:5432/pidash
