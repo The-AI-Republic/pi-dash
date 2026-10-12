@@ -12639,4 +12639,82 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsDownloadCount(): Promise<number> {
     return todo("wsSettingsDownloadCount");
   }
+
+  // --- Workspace billing oracle (NEWFRONT-414, WSET-029..032). Appended;
+  // --- existing stubs above are untouched per the shared driver contract.
+  async wsSettingsBillingOpen(_workspaceSlug: string): Promise<void> {
+    return todo("wsSettingsBillingOpen");
+  }
+  async wsSettingsBillingNotAuthorized(): Promise<boolean> {
+    return todo("wsSettingsBillingNotAuthorized");
+  }
+  async wsSettingsBillingCommunityTitle(): Promise<string | null> {
+    return todo("wsSettingsBillingCommunityTitle");
+  }
+  async wsSettingsBillingCommunityDescription(): Promise<string | null> {
+    return todo("wsSettingsBillingCommunityDescription");
+  }
+  async wsSettingsBillingPlanNames(): Promise<string[]> {
+    return todo("wsSettingsBillingPlanNames");
+  }
+  async wsSettingsBillingPopularPlan(): Promise<string | null> {
+    return todo("wsSettingsBillingPopularPlan");
+  }
+  async wsSettingsBillingPlanPrice(_planName: string): Promise<string | null> {
+    return todo("wsSettingsBillingPlanPrice");
+  }
+  async wsSettingsBillingFrequencyVisible(_planName: string): Promise<boolean> {
+    return todo("wsSettingsBillingFrequencyVisible");
+  }
+  async wsSettingsBillingSelectedFrequency(_planName: string): Promise<"month" | "year" | null> {
+    return todo("wsSettingsBillingSelectedFrequency");
+  }
+  async wsSettingsBillingSelectFrequency(_planName: string, _frequency: "month" | "year"): Promise<void> {
+    return todo("wsSettingsBillingSelectFrequency");
+  }
+  async wsSettingsBillingDiscountBadge(_planName: string): Promise<string | null> {
+    return todo("wsSettingsBillingDiscountBadge");
+  }
+  async wsSettingsBillingCompareToggleLabel(): Promise<string | null> {
+    return todo("wsSettingsBillingCompareToggleLabel");
+  }
+  async wsSettingsBillingToggleCompare(): Promise<void> {
+    return todo("wsSettingsBillingToggleCompare");
+  }
+  async wsSettingsBillingComparisonVisible(): Promise<boolean> {
+    return todo("wsSettingsBillingComparisonVisible");
+  }
+  async wsSettingsBillingComparisonSections(): Promise<string[]> {
+    return todo("wsSettingsBillingComparisonSections");
+  }
+  async wsSettingsBillingPlanButtonLabel(_planName: string): Promise<string | null> {
+    return todo("wsSettingsBillingPlanButtonLabel");
+  }
+  async wsSettingsBillingPlanButtonPopupUrl(_planName: string): Promise<string | null> {
+    return todo("wsSettingsBillingPlanButtonPopupUrl");
+  }
+  async wsSettingsBillingPageText(): Promise<string> {
+    return todo("wsSettingsBillingPageText");
+  }
+  async wsSettingsUpgradeModalVisible(): Promise<boolean> {
+    return todo("wsSettingsUpgradeModalVisible");
+  }
+  async wsSettingsUpgradeModalTitle(): Promise<string | null> {
+    return todo("wsSettingsUpgradeModalTitle");
+  }
+  async wsSettingsUserMenuOpenCommunity(_workspaceSlug: string): Promise<void> {
+    return todo("wsSettingsUserMenuOpenCommunity");
+  }
+  async wsSettingsActiveCyclesOpen(_workspaceSlug: string): Promise<void> {
+    return todo("wsSettingsActiveCyclesOpen");
+  }
+  async wsSettingsUpgradeModalClose(): Promise<void> {
+    return todo("wsSettingsUpgradeModalClose");
+  }
+  async wsSettingsProBadgeCount(): Promise<number> {
+    return todo("wsSettingsProBadgeCount");
+  }
+  async wsSettingsProBadgeClickFirst(): Promise<void> {
+    return todo("wsSettingsProBadgeClickFirst");
+  }
 }

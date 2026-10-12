@@ -8094,6 +8094,67 @@ export interface ParityDriver {
   wsSettingsWatchDownloads(): Promise<void>;
   /** Downloads observed since the watcher armed. */
   wsSettingsDownloadCount(): Promise<number>;
+
+  // --- Workspace billing oracle (NEWFRONT-414, WSET-029..032). Observed on
+  // --- the running old app: admin-only billing page with a community-plan
+  // --- summary box, a plan comparison (pro/business/enterprise cards, the
+  // --- pro card carrying a popularity marker, prices and a monthly/yearly
+  // --- switch with a discount badge), an expandable full-feature
+  // --- comparison, and plan buttons that open external pricing/sales pages
+  // --- in a new tab; the paid-plan upgrade dialog still opens from the
+  // --- sidebar user-menu community entry (bug: intended removed) while
+  // --- the pro pills elsewhere are static labels. Appended; existing
+  // --- methods above are untouched per the shared driver contract.
+  /** Open the workspace billing page; settles on the plan content or the denial view. */
+  wsSettingsBillingOpen(workspaceSlug: string): Promise<void>;
+  /** Whether the billing page shows the not-authorized view. */
+  wsSettingsBillingNotAuthorized(): Promise<boolean>;
+  /** Community summary box title, or null when the box is absent. */
+  wsSettingsBillingCommunityTitle(): Promise<string | null>;
+  /** Community summary box supporting text, or null when the box is absent. */
+  wsSettingsBillingCommunityDescription(): Promise<string | null>;
+  /** Plan names in the comparison, in display order. */
+  wsSettingsBillingPlanNames(): Promise<string[]>;
+  /** Which plan carries the popularity marker, or null when none does. */
+  wsSettingsBillingPopularPlan(): Promise<string | null>;
+  /** Displayed price line for a plan, or null when the card shows none. */
+  wsSettingsBillingPlanPrice(planName: string): Promise<string | null>;
+  /** Whether a plan card shows the monthly/yearly switch. */
+  wsSettingsBillingFrequencyVisible(planName: string): Promise<boolean>;
+  /** The currently selected billing frequency on a plan card, or null. */
+  wsSettingsBillingSelectedFrequency(planName: string): Promise<"month" | "year" | null>;
+  /** Select a billing frequency on a plan card; resolves once prices settle. */
+  wsSettingsBillingSelectFrequency(planName: string, frequency: "month" | "year"): Promise<void>;
+  /** Discount badge text on a plan card (e.g. "-25%"), or null when absent. */
+  wsSettingsBillingDiscountBadge(planName: string): Promise<string | null>;
+  /** Label of the expand/collapse full-comparison control, or null. */
+  wsSettingsBillingCompareToggleLabel(): Promise<string | null>;
+  /** Flip the full-comparison section; resolves once the section settles. */
+  wsSettingsBillingToggleCompare(): Promise<void>;
+  /** Whether the full-feature comparison section is currently expanded. */
+  wsSettingsBillingComparisonVisible(): Promise<boolean>;
+  /** Full-comparison section titles in display order (empty when collapsed). */
+  wsSettingsBillingComparisonSections(): Promise<string[]>;
+  /** Plan card action-button label, or null when the card shows none. */
+  wsSettingsBillingPlanButtonLabel(planName: string): Promise<string | null>;
+  /** Click a plan card action button and return the new-tab URL it opens (closes the tab). */
+  wsSettingsBillingPlanButtonPopupUrl(planName: string): Promise<string | null>;
+  /** Full visible text of the billing page (for pinned non-behavior assertions). */
+  wsSettingsBillingPageText(): Promise<string>;
+  /** Whether the paid-plan upgrade dialog is currently open. */
+  wsSettingsUpgradeModalVisible(): Promise<boolean>;
+  /** Upgrade dialog heading text, or null when the dialog is closed. */
+  wsSettingsUpgradeModalTitle(): Promise<string | null>;
+  /** Open the workspace home user menu and activate its community entry. */
+  wsSettingsUserMenuOpenCommunity(workspaceSlug: string): Promise<void>;
+  /** Open the workspace active-cycles page (a pro-pill host); settles on its header. */
+  wsSettingsActiveCyclesOpen(workspaceSlug: string): Promise<void>;
+  /** Close the upgrade dialog; resolves once it is gone. */
+  wsSettingsUpgradeModalClose(): Promise<void>;
+  /** Number of pro pills (upgrade badges) on the current page. */
+  wsSettingsProBadgeCount(): Promise<number>;
+  /** Click the first pro pill on the current page, if any. */
+  wsSettingsProBadgeClickFirst(): Promise<void>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */

@@ -43619,4 +43619,315 @@ export class WebDriver implements ParityDriver {
   async wsSettingsDownloadCount(): Promise<number> {
     return this.wsSettingsDownloadsSeen;
   }
+
+  // --- Workspace billing oracle (NEWFRONT-414, WSET-029..032). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+  /** One plan column of the comparison header grid, matched by plan name. */
+  private billingPlanCard(planName: string): Locator {
+    // Plain-text match: the grid holds only the plan columns, so the name
+    // is unambiguous (regex word-boundary matching misbehaves here).
+    const grid = this.page.locator("div.sticky").filter({ hasText: "Popular" }).first();
+    return grid.locator(":scope > div").filter({ hasText: planName }).first();
+  }
+
+  /** Normalized visible text of a locator, or null when it never appears. */
+  private async billingText(target: Locator): Promise<string | null> {
+    if ((await target.count()) === 0) return null;
+    const text = (
+      (await target
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text === "" ? null : text;
+  }
+
+  async wsSettingsBillingOpen(workspaceSlug: string): Promise<void> {
+    await this.openWorkspacePath(`/${workspaceSlug}/settings/billing`);
+    await Promise.race([
+      this.page.getByText("All plans", { exact: true }).first().waitFor({ timeout: 60_000 }),
+      this.page
+        .getByRole("heading", { name: "Oops! You are not authorized to view this page", exact: true })
+        .first()
+        .waitFor({ timeout: 60_000 }),
+    ]).catch(() => undefined);
+    const settled =
+      (await this.page.getByText("All plans", { exact: true }).count()) > 0 ||
+      (await this.wsSettingsBillingNotAuthorized());
+    if (!settled) throw new Error("[parity] billing page settled on neither plan content nor the denial view.");
+  }
+
+  async wsSettingsBillingNotAuthorized(): Promise<boolean> {
+    return (
+      (await this.page
+        .getByRole("heading", { name: "Oops! You are not authorized to view this page", exact: true })
+        .count()) > 0
+    );
+  }
+
+  async wsSettingsBillingCommunityTitle(): Promise<string | null> {
+    return this.billingText(this.page.getByRole("heading", { name: "Community", exact: true }));
+  }
+
+  async wsSettingsBillingCommunityDescription(): Promise<string | null> {
+    const title = this.page.getByRole("heading", { name: "Community", exact: true }).first();
+    if ((await title.count()) === 0) return null;
+    return this.billingText(title.locator("xpath=../p").first());
+  }
+
+  async wsSettingsBillingPlanNames(): Promise<string[]> {
+    const grid = this.page.locator("div.sticky").filter({ hasText: "Popular" }).first();
+    if ((await grid.count()) === 0) return [];
+    const cards = grid.locator(":scope > div");
+    const count = await cards.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      // The first column is an empty spacer; each plan column heads its
+      // first span with the plan name (the popularity marker is second).
+      const head = cards.nth(index).locator("span").first();
+      if ((await head.count()) === 0) continue;
+      const text = ((await head.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
+  async wsSettingsBillingPopularPlan(): Promise<string | null> {
+    const badge = this.page.getByText("Popular", { exact: true }).first();
+    if ((await badge.count()) === 0) return null;
+    return this.billingText(badge.locator("xpath=..").locator("span").first());
+  }
+
+  async wsSettingsBillingPlanPrice(planName: string): Promise<string | null> {
+    const card = this.billingPlanCard(planName);
+    if ((await card.count()) === 0) return null;
+    const text = ((await card.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    // Paid cards show a currency amount (a struck-through list price may
+    // precede the current one), inactive ones a quote line.
+    const amounts = text.match(/\$[\d,]+(?:\.\d+)?/g) ?? [];
+    if (amounts.length > 0) return amounts[amounts.length - 1] ?? null;
+    return text.includes("Quote on request") ? "Quote on request" : null;
+  }
+
+  async wsSettingsBillingFrequencyVisible(planName: string): Promise<boolean> {
+    const card = this.billingPlanCard(planName);
+    if ((await card.count()) === 0) return false;
+    const monthly = await card.getByRole("button", { name: "Monthly", exact: true }).count();
+    const yearly = await card.getByRole("button", { name: /Yearly/ }).count();
+    return monthly > 0 && yearly > 0;
+  }
+
+  async wsSettingsBillingSelectedFrequency(planName: string): Promise<"month" | "year" | null> {
+    const card = this.billingPlanCard(planName);
+    if ((await card.count()) === 0) return null;
+    // The selected switch half carries the raised-layer marker class.
+    const monthlyClass =
+      (await card
+        .getByRole("button", { name: "Monthly", exact: true })
+        .first()
+        .getAttribute("class")
+        .catch(() => null)) ?? "";
+    if (monthlyClass.includes("bg-layer-2")) return "month";
+    const yearlyClass =
+      (await card
+        .getByRole("button", { name: /Yearly/ })
+        .first()
+        .getAttribute("class")
+        .catch(() => null)) ?? "";
+    if (yearlyClass.includes("bg-layer-2")) return "year";
+    return null;
+  }
+
+  async wsSettingsBillingSelectFrequency(planName: string, frequency: "month" | "year"): Promise<void> {
+    const card = this.billingPlanCard(planName);
+    const target =
+      frequency === "month"
+        ? card.getByRole("button", { name: "Monthly", exact: true }).first()
+        : card.getByRole("button", { name: /Yearly/ }).first();
+    await target.click({ timeout: WebDriver.actionTimeout });
+    await this.page
+      .waitForFunction(() => document.querySelectorAll("button").length > 0, null, { timeout: 5_000 })
+      .catch(() => undefined);
+  }
+
+  async wsSettingsBillingDiscountBadge(planName: string): Promise<string | null> {
+    const card = this.billingPlanCard(planName);
+    if ((await card.count()) === 0) return null;
+    return this.billingText(card.getByText(/-\d+%/, { exact: false }));
+  }
+
+  async wsSettingsBillingCompareToggleLabel(): Promise<string | null> {
+    return this.billingText(this.page.getByRole("button", { name: /Compare all features|Collapse comparison/ }));
+  }
+
+  async wsSettingsBillingToggleCompare(): Promise<void> {
+    const before = await this.wsSettingsBillingCompareToggleLabel();
+    await this.page
+      .getByRole("button", { name: /Compare all features|Collapse comparison/ })
+      .first()
+      .click({ timeout: WebDriver.actionTimeout });
+    if (before !== null) {
+      await this.page
+        .waitForFunction(
+          (expected) =>
+            [...document.querySelectorAll("button")].some((entry) => (entry.textContent ?? "").includes(expected)),
+          before.includes("Compare") ? "Collapse comparison" : "Compare all features",
+          { timeout: 15_000 }
+        )
+        .catch(() => undefined);
+    }
+  }
+
+  async wsSettingsBillingComparisonVisible(): Promise<boolean> {
+    return (await this.wsSettingsBillingCompareToggleLabel()) === "Collapse comparison";
+  }
+
+  async wsSettingsBillingComparisonSections(): Promise<string[]> {
+    if (!(await this.wsSettingsBillingComparisonVisible())) return [];
+    const scope = this.page.locator("h4", { hasText: "All plans" }).locator("xpath=following-sibling::div[1]");
+    if ((await scope.count()) === 0) return [];
+    const heads = scope.locator("h2");
+    const count = await heads.count();
+    const sections: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const text = (
+        (await heads
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/COMING SOON/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") sections.push(text);
+    }
+    return sections;
+  }
+
+  /** The plan card action button: the one button that is not a switch half. */
+  private async billingPlanActionButton(planName: string): Promise<Locator | null> {
+    const card = this.billingPlanCard(planName);
+    if ((await card.count()) === 0) return null;
+    const buttons = card.getByRole("button");
+    const count = await buttons.count();
+    for (let index = 0; index < count; index += 1) {
+      const text = (
+        (await buttons
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text === "" || text.startsWith("Monthly") || text.startsWith("Yearly")) continue;
+      return buttons.nth(index);
+    }
+    return null;
+  }
+
+  async wsSettingsBillingPlanButtonLabel(planName: string): Promise<string | null> {
+    const action = await this.billingPlanActionButton(planName);
+    if (action === null) return null;
+    return this.billingText(action);
+  }
+
+  async wsSettingsBillingPlanButtonPopupUrl(planName: string): Promise<string | null> {
+    const action = await this.billingPlanActionButton(planName);
+    if (action === null) return null;
+    // The action opens an external page in a new tab; capture the target
+    // without ever loading it (the checkout itself is never completed).
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 15_000 }).catch(() => null),
+      action.click({ timeout: WebDriver.actionTimeout }),
+    ]);
+    if (popup === null) return null;
+    // The popup event can fire before the target URL lands; poll until
+    // the address is real (the external page itself is never awaited).
+    let url = "";
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      url = popup.url();
+      if (url !== "" && url !== "about:blank") break;
+      await this.page.waitForTimeout(250);
+    }
+    await popup.close().catch(() => undefined);
+    return url === "" || url === "about:blank" ? null : url;
+  }
+
+  async wsSettingsBillingPageText(): Promise<string> {
+    return (
+      (await this.page
+        .locator("body")
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async wsSettingsUpgradeModalVisible(): Promise<boolean> {
+    return (
+      (await this.page.getByText("Upgrade to a paid plan and unlock missing features.", { exact: false }).count()) > 0
+    );
+  }
+
+  async wsSettingsUpgradeModalTitle(): Promise<string | null> {
+    return this.billingText(
+      this.page.getByText("Upgrade to a paid plan and unlock missing features.", { exact: false })
+    );
+  }
+
+  async wsSettingsUserMenuOpenCommunity(workspaceSlug: string): Promise<void> {
+    // The account menu with the community entry lives on the workspace
+    // home sidebar; settings pages mount a different shell without it.
+    await this.openWorkspaceHome(workspaceSlug);
+    // The sidebar peek transition must finish before the user card is
+    // clickable (the SHELL-059 oracle pattern: poll for settled links).
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const links = await this.sidebarLinkTexts().catch(() => [] as string[]);
+      if (links.includes("Home")) break;
+      if (Date.now() >= deadline) throw new Error("[parity] workspace home sidebar never settled.");
+      await this.page.waitForTimeout(500);
+    }
+    await this.openUserMenu();
+    await this.activateUserMenuItem("Community");
+    await this.page
+      .getByText("Upgrade to a paid plan and unlock missing features.", { exact: false })
+      .first()
+      .waitFor({ timeout: 15_000 })
+      .catch(() => undefined);
+  }
+
+  async wsSettingsActiveCyclesOpen(workspaceSlug: string): Promise<void> {
+    await this.openWorkspacePath(`/${workspaceSlug}/active-cycles`);
+    await this.page.getByText("Active cycles", { exact: true }).first().waitFor({ timeout: 60_000 });
+  }
+
+  async wsSettingsUpgradeModalClose(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .waitForFunction(
+        () => !document.body.innerText.includes("Upgrade to a paid plan and unlock missing features."),
+        null,
+        { timeout: 15_000 }
+      )
+      .catch(() => undefined);
+  }
+
+  async wsSettingsProBadgeCount(): Promise<number> {
+    // The upgrade pill is a static marker block (never a button); the plan
+    // comparison names are spans, so pill blocks never collide with them.
+    return this.page.locator("div.rounded-2xl").filter({ hasText: /^Pro$/ }).count();
+  }
+
+  async wsSettingsProBadgeClickFirst(): Promise<void> {
+    const pill = this.page.locator("div.rounded-2xl").filter({ hasText: /^Pro$/ }).first();
+    if ((await pill.count()) === 0) return;
+    await pill.click({ timeout: WebDriver.actionTimeout }).catch(() => undefined);
+  }
 }
