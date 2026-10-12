@@ -15,12 +15,13 @@ import type { IProjectView } from "@pi-dash/types";
 // ui
 import type { TContextMenuItem } from "@pi-dash/ui";
 import { ContextMenu, CustomMenu } from "@pi-dash/ui";
-import { copyUrlToClipboard, cn } from "@pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 // helpers
 import { useViewMenuItems } from "@/components/common/quick-actions-helper";
 // hooks
 import { useUser, useUserPermissions } from "@/hooks/store/user";
 import { PublishViewModal, useViewPublish } from "@/pi-dash-web/components/views/publish";
+import { copyShareUrl } from "@/utils/share-url";
 // local imports
 import { DeleteProjectViewModal } from "./delete-view-modal";
 import { CreateUpdateProjectViewModal } from "./modal";
@@ -52,7 +53,7 @@ export const ViewQuickActions = observer(function ViewQuickActions(props: Props)
 
   const viewLink = `${workspaceSlug}/projects/${projectId}/views/${view.id}`;
   const handleCopyText = () =>
-    copyUrlToClipboard(viewLink).then(() => {
+    copyShareUrl(viewLink).then(() => {
       setToast({
         type: TOAST_TYPE.SUCCESS,
         title: "Link Copied!",

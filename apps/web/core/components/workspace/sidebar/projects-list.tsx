@@ -25,7 +25,7 @@ import { IconButton } from "@pi-dash/propel/icon-button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { Tooltip } from "@pi-dash/propel/tooltip";
 import { Loader } from "@pi-dash/ui";
-import { copyUrlToClipboard, cn, orderJoinedProjects } from "@pi-dash/utils";
+import { cn, orderJoinedProjects } from "@pi-dash/utils";
 // components
 import { CreateProjectModal } from "@/components/project/create-project-modal";
 import { SidebarNavItem } from "@/components/sidebar/sidebar-navigation";
@@ -38,6 +38,7 @@ import { usePersonalNavigationPreferences, useProjectNavigationPreferences } fro
 // pi dash web imports
 import { SidebarItem } from "@/pi-dash-web/components/workspace/sidebar/sidebar-item";
 import type { TProject } from "@/pi-dash-web/types";
+import { copyShareUrl } from "@/utils/share-url";
 // local imports
 import { SidebarProjectsListItem } from "./projects-list-item";
 
@@ -79,7 +80,7 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
 
   const handleCopyText = async (projectId: string) => {
     try {
-      await copyUrlToClipboard(`${workspaceSlug}/projects/${projectId}/issues`);
+      await copyShareUrl(`${workspaceSlug}/projects/${projectId}/issues`);
       setToast({
         type: TOAST_TYPE.SUCCESS,
         title: t("Link copied"),

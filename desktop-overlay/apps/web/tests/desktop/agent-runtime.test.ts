@@ -74,6 +74,7 @@ beforeEach(async () => {
       };
     else if (path.endsWith("desktop-enroll/"))
       data = { machine_token: "machine-test-token", dev_machine_id: "server-machine-id" };
+    else if (/workspaces\/[^/]+\/projects\/$/.test(path)) data = [{ identifier: "TEST" }];
     else if (/projects\/project-\d\/$/.test(path))
       data = {
         identifier: "TEST",
@@ -112,6 +113,7 @@ describe("desktop agent lifecycle", () => {
 
   it("enrolls once and preserves the selected executor without patching the issue", async () => {
     const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
     await Promise.all([
       runtime.connectAgentProject("workspace-a", "project-1"),
       runtime.prepareAgentRun({
@@ -126,6 +128,7 @@ describe("desktop agent lifecycle", () => {
       expect.objectContaining({ workspace: "workspace-a", devMachineId: "server-machine-id" })
     );
     expect(invoke).toHaveBeenCalledWith("managed_enroll", {
+      account: "user-a",
       workspace: "workspace-a",
       project: "TEST",
       hostLabel: "desktop-test",
@@ -136,16 +139,79 @@ describe("desktop agent lifecycle", () => {
 
   it("bootstraps separate workspaces and clears them on sign-out", async () => {
     const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
     await runtime.connectAgentProject("workspace-a", "project-1");
     await runtime.connectAgentProject("workspace-b", "project-2");
-    expect(invoke).toHaveBeenCalledWith("managed_start_daemon", { workspace: "workspace-a" });
-    expect(invoke).toHaveBeenCalledWith("managed_start_daemon", { workspace: "workspace-b" });
+    expect(invoke).toHaveBeenCalledWith("managed_start_daemon", { account: "user-a", workspace: "workspace-a" });
+    expect(invoke).toHaveBeenCalledWith("managed_start_daemon", { account: "user-a", workspace: "workspace-b" });
     await runtime.disposeAgentRuntime();
     expect(calls.some((call) => call.method === "DELETE" && call.body.host_label === "desktop-test")).toBe(true);
     const starts = invoke.mock.calls.filter(([command]) => command === "managed_start_daemon").length;
     await runtime.refreshAgentRuntime();
     expect(invoke.mock.calls.filter(([command]) => command === "managed_start_daemon")).toHaveLength(starts);
     await expect(runtime.connectAgentProject("workspace-a", "project-1")).rejects.toThrow("signed out");
+  });
+
+  it("points every engine command at the signed-in account's own engine home", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.connectAgentProject("workspace-a", "project-1");
+    runtime.resumeAgentRuntime("user-b");
+    await runtime.connectAgentProject("workspace-a", "project-1");
+    for (const command of ["managed_write_engine_config", "managed_enroll", "managed_start_daemon"]) {
+      const accounts = (invoke.mock.calls as unknown as [string, { account?: string }][])
+        .filter(([name]) => name === command)
+        .map(([, args]) => args.account);
+      expect(accounts, command).toEqual(["user-a", "user-b"]);
+    }
+  });
+
+  it("refuses to run the engine with no account to scope it to", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    await expect(runtime.connectAgentProject("workspace-a", "project-1")).rejects.toThrow("signed out");
+    expect(invoke.mock.calls.some(([command]) => command === "managed_enroll")).toBe(false);
+  });
+
+  it("deletes chat history on sign-out only when the user asked for it", async () => {
+    const signOuts = () =>
+      (invoke.mock.calls as unknown as [string, unknown][])
+        .filter(([command]) => command === "managed_sign_out")
+        .map(([, args]) => args);
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.connectAgentProject("workspace-a", "project-1");
+
+    await runtime.disposeAgentRuntime({ deleteChatHistory: true });
+    // Once, for the account that is signing out; the cleanup pass that follows
+    // only destroys credentials again.
+    expect(signOuts()).toEqual([{ clearChatHistory: { account: "user-a" } }, undefined]);
+
+    invoke.mockClear();
+    await runtime.disposeAgentRuntime({ deleteChatHistory: false });
+    await runtime.disposeAgentRuntime();
+    expect(signOuts()).toEqual([undefined, undefined, undefined, undefined]);
+  });
+
+  it("never deletes chat history when an expired session tears the runtime down", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.connectAgentProject("workspace-a", "project-1");
+    accessExpired = true;
+    await expect(runtime.connectAgentProject("workspace-a", "project-2")).rejects.toThrow();
+    const signOuts = (invoke.mock.calls as unknown as [string, unknown][]).filter(
+      ([command]) => command === "managed_sign_out"
+    );
+    expect(signOuts.length).toBeGreaterThan(0);
+    for (const [, args] of signOuts) expect(args).toBeUndefined();
+  });
+
+  it("asks through the mounted dialog, and keeps history when there is none to ask through", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    await expect(runtime.confirmSignOut()).resolves.toEqual({ deleteChatHistory: false });
+    runtime.registerSignOutPrompt((resolve) => resolve(null));
+    await expect(runtime.confirmSignOut()).resolves.toBeNull();
+    runtime.registerSignOutPrompt((resolve) => resolve({ deleteChatHistory: true }));
+    await expect(runtime.confirmSignOut()).resolves.toEqual({ deleteChatHistory: true });
   });
 
   it("explains BYOK without enrolling or pinning the issue", async () => {
@@ -208,6 +274,7 @@ describe("desktop agent lifecycle", () => {
     issueExecutor = null;
     projectExecutor = executor;
     const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
     await runtime.prepareAgentRun({
       workspaceSlug: "workspace-a",
       projectId: "project-1",
@@ -217,5 +284,94 @@ describe("desktop agent lifecycle", () => {
       executor === "managed_runner"
     );
     expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
+});
+
+describe("local chat runtime hot path", () => {
+  const cloudCalls = (suffix: string) => calls.filter((call) => call.path.endsWith(suffix));
+  const invoked = (command: string) =>
+    (invoke.mock.calls as unknown as [string, { workspace?: string }][]).filter(([name]) => name === command);
+
+  it("provisions once, then only checks the daemon on later messages", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.ensureChatRuntime("workspace-a");
+    const provisioning = calls.length;
+    await runtime.ensureChatRuntime("workspace-a");
+    await runtime.ensureChatRuntime("workspace-a");
+    expect(calls.slice(provisioning).map((call) => `${call.method} ${call.path}`)).toEqual([]);
+    expect(cloudCalls("agent-profile/")).toHaveLength(1);
+    expect(cloudCalls("workspaces/workspace-a/projects/")).toHaveLength(1);
+    expect(invoked("managed_enroll")).toHaveLength(1);
+    expect(invoked("managed_write_engine_config")).toHaveLength(1);
+    // The daemon check is the one step kept: it restarts a daemon that died.
+    expect(invoked("managed_start_daemon")).toHaveLength(3);
+    for (const [, args] of invoked("managed_start_daemon")) {
+      expect(args).toEqual({ account: "user-a", workspace: "workspace-a" });
+    }
+  });
+
+  it("coalesces a burst of messages into one provisioning pass", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await Promise.all([
+      runtime.ensureChatRuntime("workspace-a"),
+      runtime.ensureChatRuntime("workspace-a"),
+      runtime.ensureChatRuntime("workspace-a"),
+    ]);
+    expect(cloudCalls("agent-profile/")).toHaveLength(1);
+    expect(invoked("managed_enroll")).toHaveLength(1);
+  });
+
+  it("provisions each workspace separately", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.ensureChatRuntime("workspace-a");
+    await runtime.ensureChatRuntime("workspace-b");
+    expect(invoked("managed_enroll").map(([, args]) => args.workspace)).toEqual(["workspace-a", "workspace-b"]);
+  });
+
+  it("renews an expiring model credential without enrolling again", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const runtime = await import("../../core/services/agent-runtime");
+      runtime.resumeAgentRuntime("user-a");
+      await runtime.ensureChatRuntime("workspace-a");
+      // The mocked credential lasts 10 minutes; step to within its renewal window.
+      vi.setSystemTime(Date.now() + 540_000);
+      await runtime.ensureChatRuntime("workspace-a");
+      expect(cloudCalls("agent-token/")).toHaveLength(2);
+      expect(invoked("managed_enroll")).toHaveLength(1);
+      expect(cloudCalls("workspaces/workspace-a/projects/")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("provisions again after sign-out and a new sign-in", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.ensureChatRuntime("workspace-a");
+    await runtime.disposeAgentRuntime();
+    await expect(runtime.ensureChatRuntime("workspace-a")).rejects.toThrow("signed out");
+    runtime.resumeAgentRuntime("user-b");
+    await runtime.ensureChatRuntime("workspace-a");
+    expect(invoked("managed_enroll")).toHaveLength(2);
+    expect(cloudCalls("desktop-enroll/").filter((call) => call.method === "POST")).toHaveLength(2);
+  });
+
+  it("does not restart the daemon for a message once the agent became unavailable", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.ensureChatRuntime("workspace-a");
+    available = false;
+    await expect(runtime.refreshAgentRuntime()).rejects.toThrow(
+      AGENT_RUNTIME_REASON_MESSAGES.byok_not_supported_on_desktop
+    );
+    const starts = invoked("managed_start_daemon").length;
+    await expect(runtime.ensureChatRuntime("workspace-a")).rejects.toThrow(
+      AGENT_RUNTIME_REASON_MESSAGES.byok_not_supported_on_desktop
+    );
+    expect(invoked("managed_start_daemon")).toHaveLength(starts);
   });
 });
