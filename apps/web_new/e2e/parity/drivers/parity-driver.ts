@@ -7633,6 +7633,125 @@ export interface ParityDriver {
   settingsProjectsOpen(workspaceSlug: string): Promise<void>;
   /** Open project creation from the bare-path guidance view; resolves once the create form shows. */
   settingsShellOpenGuidanceCreate(): Promise<void>;
+
+  // --- Project-settings feature flags oracle (NEWFRONT-393, PSET-043..047,
+  // --- PSET-061 slice). Observed on the running old app: one admin-only
+  // --- tab per feature with a single boxed switch PATCHing its project
+  // --- flag under promise toasts; the project sidebar hides or restores
+  // --- each area's nav link with its flag. Appended; existing methods
+  // --- above are untouched per the shared driver contract.
+  /** Open a dedicated feature tab; settles on its switch or the denial view. */
+  projectFeaturesOpenTab(
+    workspaceSlug: string,
+    projectId: string,
+    tab: "views" | "cycles" | "intake" | "modules" | "pages"
+  ): Promise<void>;
+  /** Whether the dedicated tab's switch is currently on. */
+  projectFeaturesSwitchOn(): Promise<boolean>;
+  /** Whether the dedicated tab's switch is currently disabled. */
+  projectFeaturesSwitchDisabled(): Promise<boolean>;
+  /** Flip the dedicated tab's switch; resolves once the project write settles. */
+  projectFeaturesToggle(): Promise<void>;
+  /** Whether the tab shows the not-authorized view (non-admin callers). */
+  projectFeaturesNotAuthorized(): Promise<boolean>;
+  /** Whether the project sidebar still links an area (hides with its flag). */
+  projectFeaturesNavLinkVisible(
+    workspaceSlug: string,
+    projectId: string,
+    area: "cycles" | "modules" | "views" | "pages" | "intake"
+  ): Promise<boolean>;
+
+  // --- Project-settings automations oracle (NEWFRONT-393, PSET-053/054,
+  // --- PSET-061 slice). Observed on the running old app: an admin-only
+  // --- tab with auto-archive and auto-close rows, each a switch applying
+  // --- a one-month default when enabled and expanding to a delay picker
+  // --- (presets plus a whole-months custom dialog); auto-close adds a
+  // --- state picker limited to cancelled-group states. The tab shows a
+  // --- loader until the project loads. Appended; existing methods above
+  // --- are untouched per the shared driver contract.
+  /** Open the automations tab; settles on the archive row or the denial view. */
+  projectAutomationsOpenTab(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Whether the tab shows the not-authorized view (non-admin callers). */
+  projectAutomationsNotAuthorized(): Promise<boolean>;
+  /** Whether the auto-archive switch is currently on (first switch on the tab). */
+  projectAutomationsArchiveOn(): Promise<boolean>;
+  /** Whether the auto-close switch is currently on (second switch on the tab). */
+  projectAutomationsCloseOn(): Promise<boolean>;
+  /** Flip the auto-archive switch; resolves once the project write settles. */
+  projectAutomationsToggleArchive(): Promise<void>;
+  /** Flip the auto-close switch; resolves once the project write settles. */
+  projectAutomationsToggleClose(): Promise<void>;
+  /** Whether any loader is currently visible on the tab. */
+  projectAutomationsLoaderVisible(): Promise<boolean>;
+  /** Hold the single-project retrieve GETs (bug NEWFRONT-397 probe: stretches the loading window). */
+  projectAutomationsDelayDetailsFetch(ms: number): Promise<void>;
+  /** Text of the single visible delay trigger (null unless exactly one shows). */
+  projectAutomationsDelayTriggerText(): Promise<string | null>;
+  /** Open the delay picker; resolves once its options render. */
+  projectAutomationsOpenDelayOptions(): Promise<void>;
+  /** Labels of the open delay picker options. */
+  projectAutomationsDelayOptionLabels(): Promise<string[]>;
+  /** Pick a delay preset; resolves once the project write settles. */
+  projectAutomationsPickDelayOption(label: string): Promise<void>;
+  /** Open the custom-months dialog; resolves once its input renders. */
+  projectAutomationsOpenCustomize(): Promise<void>;
+  /** Whether the custom-months dialog input is currently visible. */
+  projectAutomationsMonthDialogOpen(): Promise<boolean>;
+  /** Fill the custom-months input and submit; resolves once the write or the error settles. */
+  projectAutomationsMonthDialogSubmit(months: string): Promise<void>;
+  /** The custom-months range error, or null when absent. */
+  projectAutomationsMonthDialogError(): Promise<string | null>;
+  /** Text of the auto-close state trigger, or null when its panel is hidden. */
+  projectAutomationsCloseStateText(): Promise<string | null>;
+  /** Whether the auto-close state picker is currently disabled. */
+  projectAutomationsCloseStateDisabled(): Promise<boolean>;
+
+  // --- Project-settings github tab oracle (NEWFRONT-393, PSET-050..052,
+  // --- PSET-061 slice). Observed on the running old app: a member-visible
+  // --- tab showing a skeleton while the binding fetch is unresolved, then
+  // --- a bound card (provider family, repository link, mirroring contract,
+  // --- four-hour cadence with last sync, failure line) with an admin-only
+  // --- sync switch and confirm-free Unbind, or an unbound guidance card
+  // --- pointing at General settings with no branch or direction pickers.
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+  /** Open the github tab; settles on a card or the denial view. */
+  projectGithubOpenTab(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Whether the tab shows the not-authorized view (below-member callers). */
+  projectGithubNotAuthorized(): Promise<boolean>;
+  /** Whether any loader is currently visible on the tab. */
+  projectGithubLoaderVisible(): Promise<boolean>;
+  /** Hold binding GETs so the loader stays up long enough to observe. */
+  projectGithubDelayBindingFetch(ms: number): Promise<void>;
+  /** Whether the tab shows the bound provider card. */
+  projectGithubBoundVisible(): Promise<boolean>;
+  /** The provider family label on the bound card (GitHub, GitLab, Git provider). */
+  projectGithubProviderLabel(): Promise<string | null>;
+  /** The repository full-name link text on the bound card, or null. */
+  projectGithubRepoLinkText(): Promise<string | null>;
+  /** Whether the mirroring-contract explainer is visible on the bound card. */
+  projectGithubContractVisible(): Promise<boolean>;
+  /** The sync-cadence line on the bound card, or null. */
+  projectGithubCadenceText(): Promise<string | null>;
+  /** The failure line on the bound card, or null when no failure is recorded. */
+  projectGithubLastError(): Promise<string | null>;
+  /** Whether the sync switch is currently on. */
+  projectGithubSyncOn(): Promise<boolean>;
+  /** Whether the sync switch is currently disabled. */
+  projectGithubSyncDisabled(): Promise<boolean>;
+  /** Flip the sync switch; resolves once the repository write settles. */
+  projectGithubToggleSync(): Promise<void>;
+  /** Whether the Unbind control is currently visible. */
+  projectGithubUnbindVisible(): Promise<boolean>;
+  /** Whether the Unbind control is currently disabled. */
+  projectGithubUnbindDisabled(): Promise<boolean>;
+  /** Click Unbind; resolves once the binding delete settles. */
+  projectGithubUnbind(): Promise<void>;
+  /** Whether the unbound guidance card is currently visible. */
+  projectGithubGuidanceVisible(): Promise<boolean>;
+  /** Full visible text of the tab (for pinned non-behavior assertions). */
+  projectGithubTabText(): Promise<string>;
+
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */

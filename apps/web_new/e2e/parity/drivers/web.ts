@@ -41433,4 +41433,534 @@ export class WebDriver implements ParityDriver {
       }, key)
       .catch(() => []);
   }
+
+  // --- Project-settings feature flags oracle (NEWFRONT-393, PSET-043..047,
+  // --- PSET-061 slice). Appended; existing methods above are untouched per
+  // --- the shared driver contract.
+  private static readonly projectFeaturesTabHeading = {
+    views: "Enable views",
+    cycles: "Enable cycles",
+    intake: "Enable intake",
+    modules: "Enable modules",
+    pages: "Enable pages",
+  } as const;
+
+  private projectFeaturesSwitch(): Locator {
+    return this.page.getByRole("switch").first();
+  }
+
+  async projectFeaturesOpenTab(
+    workspaceSlug: string,
+    projectId: string,
+    tab: "views" | "cycles" | "intake" | "modules" | "pages"
+  ): Promise<void> {
+    const heading = WebDriver.projectFeaturesTabHeading[tab];
+    for (let round = 0; round < 2; round++) {
+      await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/features/${tab}`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await Promise.race([
+        this.page
+          .getByRole("heading", { name: heading, exact: true })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByRole("heading", { name: /not authorized/i })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (settled) return;
+    }
+    throw new Error("[parity] project feature tab settled on neither the switch nor the denial view.");
+  }
+
+  async projectFeaturesSwitchOn(): Promise<boolean> {
+    const control = this.projectFeaturesSwitch();
+    if (!(await this.isShown(control))) return false;
+    return control.first().isChecked();
+  }
+
+  async projectFeaturesSwitchDisabled(): Promise<boolean> {
+    const control = this.projectFeaturesSwitch();
+    if ((await control.count()) === 0) return false;
+    return control.first().isDisabled();
+  }
+
+  async projectFeaturesToggle(): Promise<void> {
+    // Settle on the toggle's own round-trip: the switch PATCHes the
+    // project, so wait for that write rather than an arbitrary sleep.
+    // Waiters attach before the click so a fast round-trip cannot slip
+    // past them.
+    const wrote = this.page
+      .waitForResponse(
+        (response) =>
+          /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/$/.test(response.url()) &&
+          (response.request().method() === "PATCH" || response.request().method() === "PUT"),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.projectFeaturesSwitch().first().click();
+    await wrote;
+  }
+
+  async projectFeaturesNotAuthorized(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0;
+  }
+
+  async projectFeaturesNavLinkVisible(
+    workspaceSlug: string,
+    projectId: string,
+    area: "cycles" | "modules" | "views" | "pages" | "intake"
+  ): Promise<boolean> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // The app renders nav hrefs with a trailing slash; match the prefix so
+    // the check holds either way. Scoped to this project id, so sibling
+    // projects' links in the same sidebar cannot match.
+    const link = this.page.locator(`a[href^="/${workspaceSlug}/projects/${projectId}/${area}"]`);
+    try {
+      await link.first().waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    } catch {
+      return false;
+    }
+    return link
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  // --- Project-settings automations oracle (NEWFRONT-393, PSET-053/054,
+  // --- PSET-061 slice). Appended; existing methods above are untouched per
+  // --- the shared driver contract. The tab renders its two switches in
+  // --- row order (archive first, close second); scenarios enable one row
+  // --- at a time so the single delay trigger stays unambiguous.
+  private async waitProjectWrite(): Promise<void> {
+    await this.page
+      .waitForResponse(
+        (response) =>
+          /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/$/.test(response.url()) &&
+          (response.request().method() === "PATCH" || response.request().method() === "PUT"),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+  }
+
+  private projectAutomationsSwitch(index: 0 | 1): Locator {
+    return this.page.getByRole("switch").nth(index);
+  }
+
+  /** The single visible delay trigger button, or null unless exactly one shows. */
+  private projectAutomationsDelayTrigger(): Locator {
+    return this.page.getByRole("button", { name: /^\d+ months?$/ });
+  }
+
+  async projectAutomationsOpenTab(workspaceSlug: string, projectId: string): Promise<void> {
+    for (let round = 0; round < 2; round++) {
+      await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/automations`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await Promise.race([
+        this.page
+          .getByText("Auto-archive closed work items", { exact: true })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByRole("heading", { name: /not authorized/i })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (settled) return;
+    }
+    throw new Error("[parity] automations tab settled on neither the rows nor the denial view.");
+  }
+
+  async projectAutomationsNotAuthorized(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0;
+  }
+
+  async projectAutomationsArchiveOn(): Promise<boolean> {
+    const control = this.projectAutomationsSwitch(0);
+    if (!(await this.isShown(control))) return false;
+    return control.isChecked();
+  }
+
+  async projectAutomationsCloseOn(): Promise<boolean> {
+    const control = this.projectAutomationsSwitch(1);
+    if (!(await this.isShown(control))) return false;
+    return control.isChecked();
+  }
+
+  async projectAutomationsToggleArchive(): Promise<void> {
+    const wrote = this.waitProjectWrite();
+    await this.projectAutomationsSwitch(0).click();
+    await wrote;
+  }
+
+  async projectAutomationsToggleClose(): Promise<void> {
+    const wrote = this.waitProjectWrite();
+    await this.projectAutomationsSwitch(1).click();
+    await wrote;
+  }
+
+  async projectAutomationsLoaderVisible(): Promise<boolean> {
+    return (await this.page.locator('[role="status"]').count()) > 0;
+  }
+
+  async projectAutomationsDelayDetailsFetch(ms: number): Promise<void> {
+    // Holds the single-project retrieve (the route wrapper gates the
+    // rows on it). Used by the NEWFRONT-397 bug: probe to stretch the
+    // loading window while asserting no skeleton ever appears in it.
+    const hold = async (route: Route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    };
+    await this.page.route("**/api/workspaces/*/projects/*/", hold);
+  }
+
+  async projectAutomationsDelayTriggerText(): Promise<string | null> {
+    const trigger = this.projectAutomationsDelayTrigger();
+    if ((await trigger.count()) !== 1) return null;
+    return (
+      (await trigger
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async projectAutomationsOpenDelayOptions(): Promise<void> {
+    await this.projectAutomationsDelayTrigger().first().click();
+    await this.page
+      .getByRole("button", { name: "Customize time range", exact: true })
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async projectAutomationsDelayOptionLabels(): Promise<string[]> {
+    const options = this.page.getByRole("option");
+    const count = await options.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index++) {
+      labels.push(
+        (
+          (await options
+            .nth(index)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim()
+      );
+    }
+    return labels;
+  }
+
+  async projectAutomationsPickDelayOption(label: string): Promise<void> {
+    const wrote = this.waitProjectWrite();
+    await this.page.getByRole("option", { name: label, exact: true }).click();
+    await wrote;
+  }
+
+  async projectAutomationsOpenCustomize(): Promise<void> {
+    await this.page.getByRole("button", { name: "Customize time range", exact: true }).first().click();
+    await this.page.getByPlaceholder("Enter Months").waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async projectAutomationsMonthDialogOpen(): Promise<boolean> {
+    return (await this.page.getByPlaceholder("Enter Months").count()) > 0;
+  }
+
+  async projectAutomationsMonthDialogSubmit(months: string): Promise<void> {
+    const input = this.page.getByPlaceholder("Enter Months");
+    await input.fill(months);
+    // A rejected value keeps the dialog open with its error; a valid one
+    // closes it. Race all three outcomes so the error path does not pay
+    // for a write that never comes.
+    const wrote = this.waitProjectWrite();
+    await this.page.getByRole("button", { name: "Submit", exact: true }).click();
+    await Promise.race([
+      wrote,
+      input.waitFor({ state: "detached", timeout: WebDriver.WAIT_MS }).then(
+        () => true,
+        () => false
+      ),
+      this.page
+        .getByText("Select a month between 1 and 12.", { exact: true })
+        .first()
+        .waitFor({ timeout: WebDriver.WAIT_MS })
+        .then(
+          () => true,
+          () => false
+        ),
+    ]);
+  }
+
+  async projectAutomationsMonthDialogError(): Promise<string | null> {
+    const error = this.page.getByText("Select a month between 1 and 12.", { exact: true });
+    if ((await error.count()) === 0) return null;
+    return (
+      (await error
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  /** The close panel's state-picker row, rooted at its label. */
+  private projectAutomationsCloseRow(): Locator {
+    return this.page
+      .getByText("Auto-close status", { exact: true })
+      .locator('xpath=ancestor::div[contains(@class,"justify-between")][1]');
+  }
+
+  async projectAutomationsCloseStateText(): Promise<string | null> {
+    // The state picker trigger carries the selected cancelled state name;
+    // it only renders while the close panel is expanded.
+    const row = this.projectAutomationsCloseRow();
+    if ((await row.count()) === 0) return null;
+    const trigger = row.getByRole("button").first();
+    if ((await trigger.count()) === 0) return null;
+    const text = ((await trigger.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    return text === "" ? null : text;
+  }
+
+  async projectAutomationsCloseStateDisabled(): Promise<boolean> {
+    const row = this.projectAutomationsCloseRow();
+    if ((await row.count()) === 0) return false;
+    const trigger = row.getByRole("button").first();
+    if ((await trigger.count()) === 0) return false;
+    return trigger.isDisabled();
+  }
+
+  // --- Project-settings github tab oracle (NEWFRONT-393, PSET-050..052,
+  // --- PSET-061 slice). Appended; existing methods above are untouched per
+  // --- the shared driver contract.
+  async projectGithubOpenTab(workspaceSlug: string, projectId: string): Promise<void> {
+    for (let round = 0; round < 2; round++) {
+      await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/github`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await Promise.race([
+        this.page
+          .getByText("Mirrored issues are read-only", { exact: false })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByRole("heading", { name: "Repository sync", exact: true })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByRole("heading", { name: /not authorized/i })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (settled) return;
+    }
+    throw new Error("[parity] github tab settled on neither card nor the denial view.");
+  }
+
+  async projectGithubNotAuthorized(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0;
+  }
+
+  async projectGithubLoaderVisible(): Promise<boolean> {
+    return (await this.page.locator('[role="status"]').count()) > 0;
+  }
+
+  async projectGithubDelayBindingFetch(ms: number): Promise<void> {
+    const hold = async (route: Route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    };
+    await this.page.route("**/api/workspaces/*/projects/*/repository/", hold);
+  }
+
+  async projectGithubBoundVisible(): Promise<boolean> {
+    return (await this.page.getByText("Mirrored issues are read-only", { exact: false }).count()) > 0;
+  }
+
+  async projectGithubProviderLabel(): Promise<string | null> {
+    for (const label of ["GitHub", "GitLab", "Git provider"]) {
+      const head = this.page.getByRole("heading", { name: label, exact: true });
+      if ((await head.count()) > 0) return label;
+    }
+    return null;
+  }
+
+  async projectGithubRepoLinkText(): Promise<string | null> {
+    // The bound card links the repository by its full name; the seeded
+    // binding carries an empty web URL, so only the text is asserted. The
+    // card root is the only rounded box carrying the contract line.
+    const card = this.page.locator("div.rounded-md", { hasText: "Mirrored issues are read-only" });
+    if ((await card.count()) !== 1) return null;
+    const link = card.first().getByRole("link").first();
+    if ((await link.count()) === 0) return null;
+    return ((await link.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim() || null;
+  }
+
+  async projectGithubContractVisible(): Promise<boolean> {
+    const card = this.page.getByText("Mirrored issues are read-only", { exact: false });
+    if ((await card.count()) === 0) return false;
+    const text = (
+      (await this.page
+        .locator("body")
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).replace(/\s+/g, " ");
+    return text.includes("Workflow fields stay editable");
+  }
+
+  async projectGithubCadenceText(): Promise<string | null> {
+    const line = this.page.getByText("Sync issues every 4 hours", { exact: false });
+    if ((await line.count()) === 0) return null;
+    return (
+      (
+        (await line
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim() || null
+    );
+  }
+
+  async projectGithubLastError(): Promise<string | null> {
+    const line = this.page.getByText("Last error:", { exact: false });
+    if ((await line.count()) === 0) return null;
+    return (
+      (
+        (await line
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim() || null
+    );
+  }
+
+  private projectGithubSyncSwitch(): Locator {
+    // The tab carries a single switch (the sync toggle) when bound.
+    return this.page.getByRole("switch").first();
+  }
+
+  async projectGithubSyncOn(): Promise<boolean> {
+    const control = this.projectGithubSyncSwitch();
+    if (!(await this.isShown(control))) return false;
+    return control.first().isChecked();
+  }
+
+  async projectGithubSyncDisabled(): Promise<boolean> {
+    const control = this.projectGithubSyncSwitch();
+    if ((await control.count()) === 0) return false;
+    return control.first().isDisabled();
+  }
+
+  async projectGithubToggleSync(): Promise<void> {
+    const wrote = this.page
+      .waitForResponse(
+        (response) =>
+          /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/repository\/$/.test(response.url()) &&
+          (response.request().method() === "PATCH" || response.request().method() === "PUT"),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.projectGithubSyncSwitch().first().click();
+    await wrote;
+  }
+
+  async projectGithubUnbindVisible(): Promise<boolean> {
+    return (await this.page.getByRole("button", { name: "Unbind", exact: true }).count()) > 0;
+  }
+
+  async projectGithubUnbindDisabled(): Promise<boolean> {
+    const control = this.page.getByRole("button", { name: "Unbind", exact: true });
+    if ((await control.count()) === 0) return false;
+    return control.first().isDisabled();
+  }
+
+  async projectGithubUnbind(): Promise<void> {
+    // Confirm-free: one click DELETEs the binding; resolves once the
+    // delete response lands.
+    const gone = this.page
+      .waitForResponse(
+        (response) =>
+          /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/repository\/$/.test(response.url()) &&
+          response.request().method() === "DELETE",
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.page.getByRole("button", { name: "Unbind", exact: true }).click();
+    await gone;
+  }
+
+  async projectGithubGuidanceVisible(): Promise<boolean> {
+    return (
+      (await this.page.getByRole("heading", { name: "Repository sync", exact: true }).count()) > 0 &&
+      (await this.page.getByText("in General Settings", { exact: false }).count()) > 0
+    );
+  }
+
+  async projectGithubTabText(): Promise<string> {
+    return (
+      (await this.page
+        .locator("body")
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  }
 }
