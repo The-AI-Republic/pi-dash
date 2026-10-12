@@ -12,6 +12,7 @@ import pytest
 
 from _harness.auth import login_session
 from _harness.checks import require_keys
+from _harness.db import wait_for_condition
 from _harness.http import api_client
 from _harness.seed import GUEST, MEMBER
 from .conftest import intake_urls
@@ -74,6 +75,22 @@ VERSION_DETAIL_KEYS = VERSION_KEYS + [
 ]
 
 MISSING = "11111111-1111-4111-8111-111111111111"
+
+
+def _wait_for_versions(client, versions_url):
+    """Poll GET description-versions/ until the first version row lands.
+
+    Intake creates enqueue issue_description_version_task.delay(), so the
+    row appears only once the worker runs. Under load an immediate GET
+    returns an empty list; poll for the same end state instead.
+    """
+    def _poll():
+        response = client.get(versions_url)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        return body if body["total_results"] >= 1 else None
+
+    return wait_for_condition(_poll, what="intake description versions")
 
 
 def test_retrieve_shape(admin):
@@ -267,9 +284,7 @@ def test_versions_list_shape(admin):
     urls = intake_urls(admin)
     created = create_intake_issue(admin["client"], urls["intake_issues"])
     issue_id = created["issue"]["id"]
-    response = admin["client"].get(urls["versions"](issue_id))
-    assert response.status_code == 200, response.text
-    body = response.json()
+    body = _wait_for_versions(admin["client"], urls["versions"](issue_id))
     require_keys(body, VERSION_ENVELOPE_KEYS, "GET description-versions/")
     assert body["total_results"] >= 1
     for row in body["results"]:
@@ -280,8 +295,8 @@ def test_versions_detail_shape(admin):
     urls = intake_urls(admin)
     created = create_intake_issue(admin["client"], urls["intake_issues"])
     issue_id = created["issue"]["id"]
-    listed = admin["client"].get(urls["versions"](issue_id))
-    version_id = listed.json()["results"][0]["id"]
+    listed = _wait_for_versions(admin["client"], urls["versions"](issue_id))
+    version_id = listed["results"][0]["id"]
     response = admin["client"].get(f"{urls['versions'](issue_id)}{version_id}/")
     assert response.status_code == 200, response.text
     require_keys(response.json(), VERSION_DETAIL_KEYS, "GET description-versions/<pk>/")
