@@ -336,6 +336,40 @@ def test_profile_reports_lane_and_never_a_credential(desktop_client, openhub_lan
     assert "token" not in body
 
 
+@override_settings(**MANAGED_SETTINGS)
+def test_profile_carries_the_lanes_top_up_link(desktop_client, openhub_lane, monkeypatch):
+    """The desktop links here when the gateway answers 402. A lane that does
+    not set it — or an edition profile type without the field — reports none."""
+    from types import SimpleNamespace
+
+    from pi_dash.ee.assistant import model_provider
+
+    assert desktop_client.get(reverse("ai-assistant-agent-profile")).json()["top_up_url"] == ""
+
+    monkeypatch.setattr(
+        model_provider,
+        "agent_model_profile_for_user",
+        lambda user: model_provider.AgentModelProfile(
+            available=True,
+            lane="openhub",
+            base_url="https://gateway.example.com/v1",
+            model="test-model",
+            top_up_url="https://hub.example.com/account/credits",
+        ),
+    )
+    body = desktop_client.get(reverse("ai-assistant-agent-profile")).json()
+    assert body["top_up_url"] == "https://hub.example.com/account/credits"
+
+    monkeypatch.setattr(
+        model_provider,
+        "agent_model_profile_for_user",
+        lambda user: SimpleNamespace(
+            available=True, lane="openhub", base_url="https://gateway.example.com/v1", model="m", reason_code=""
+        ),
+    )
+    assert desktop_client.get(reverse("ai-assistant-agent-profile")).json()["top_up_url"] == ""
+
+
 @override_settings(MANAGED_RUNNER_ENABLED=False)
 def test_profile_folds_in_the_kill_switch(desktop_client, openhub_lane):
     """A disabled instance must report unavailable even with a healthy lane,

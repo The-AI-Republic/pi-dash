@@ -21,6 +21,7 @@ let projectExecutor = "managed_runner";
 let accessExpired = false;
 let refreshFailure: number | "network" | undefined;
 let deleteFailure: number | "network" | undefined;
+let topUpUrl: string | undefined;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -32,6 +33,7 @@ beforeEach(async () => {
   accessExpired = false;
   refreshFailure = undefined;
   deleteFailure = undefined;
+  topUpUrl = undefined;
   sessionStorage.clear();
   Object.assign(window, { __TAURI__: { core: { invoke } } });
   const { default: axios, AxiosError } = await import("axios");
@@ -66,6 +68,7 @@ beforeEach(async () => {
         model: "test-model",
         base_url: "https://gateway.test/v1",
         reason_code: "byok_not_supported_on_desktop",
+        top_up_url: topUpUrl,
       };
     else if (path.endsWith("agent-token/"))
       data = {
@@ -151,6 +154,32 @@ describe("desktop agent lifecycle", () => {
     await expect(runtime.connectAgentProject("workspace-a", "project-1")).rejects.toThrow("signed out");
   });
 
+  it("replaces a model credential the gateway refused, though it has not expired", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.connectAgentProject("workspace-a", "project-1");
+    const minted = () => calls.filter((call) => call.path.endsWith("agent-token/")).length;
+    const written = () => invoke.mock.calls.filter(([command]) => command === "managed_write_model_token").length;
+    expect([minted(), written()]).toEqual([1, 1]);
+    // The ordinary refresh keeps a credential that still has time on it.
+    await runtime.refreshAgentRuntime();
+    expect(minted()).toBe(1);
+    await runtime.refreshModelCredential();
+    expect([minted(), written()]).toEqual([2, 2]);
+
+    accessExpired = true;
+    refreshFailure = 401;
+    await expect(runtime.refreshModelCredential()).rejects.toThrow();
+  });
+  it("remembers where the server says model credit is added", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.connectAgentProject("workspace-a", "project-1");
+    expect(runtime.getModelTopUpUrl()).toBe("");
+    topUpUrl = "https://hub.test/account/credits";
+    await runtime.refreshAgentRuntime();
+    expect(runtime.getModelTopUpUrl()).toBe("https://hub.test/account/credits");
+  });
   it("points every engine command at the signed-in account's own engine home", async () => {
     const runtime = await import("../../core/services/agent-runtime");
     runtime.resumeAgentRuntime("user-a");
