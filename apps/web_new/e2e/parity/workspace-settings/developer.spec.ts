@@ -704,7 +704,7 @@ test(
         await driver.wsSettingsWebhookDeleteOpen();
         await driver.wsSettingsWebhookDeleteConfirm();
         await expect.poll(() => driver.lastToast(), { timeout: 20_000 }).toContain("deleted");
-        expect(await driver.wsSettingsWebhooksAddVisible()).toBe(true);
+        await expect.poll(() => driver.wsSettingsWebhooksAddVisible(), { timeout: 20_000 }).toBe(true);
         expect(await serverWebhooksList(seed.workspaceSlug, session)).toHaveLength(0);
       });
 
