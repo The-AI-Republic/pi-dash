@@ -22,6 +22,7 @@ placeholder.
 from __future__ import annotations
 
 import re
+import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 # HTTP methods that count as writes (route_inventory.TRACKED_METHODS subset).
@@ -205,6 +206,29 @@ SESSIONS_COMPARE_KEYS = ("user_id",)
 # base of any URL found in these columns so the per-backend hosts do not
 # count as a difference (path + query still compare).
 WEBHOOK_URL_COLUMNS = frozenset({("webhooks", "url")})
+
+# --- Soft-deleted workspace slugs ---
+# Workspace.delete() rewrites the slug to f"{slug}__{int(deleted_at.timestamp())}"
+# (db/models/workspace.py:156-174; the Rust port mirrors the format in
+# services/src/app_workspace/models_workspace.rs soft_delete_slug). The replay
+# sends each request to Django first, then Rust, so when a wall-clock second
+# boundary falls between the two DELETEs the suffixes differ by exactly one
+# (app_workspace_lifecycle request 48: rp-wsa__1791814527 vs rp-wsa__1791814528,
+# PIDASHCONV-1005). Comparison blanks the suffix — and only the suffix — when
+# it parses as a plausible deletion epoch: the prefix still compares (a backend
+# that deleted the wrong workspace still fails), live slugs without the suffix
+# compare exactly, and an implausible suffix (epoch 0, a far-future year, a
+# user slug that merely ends in __digits outside the window) stays raw and
+# fails loudly.
+WORKSPACE_SLUG_TABLE = "workspaces"
+WORKSPACE_SLUG_COLUMN = "slug"
+SOFT_DELETE_SLUG_RE = re.compile(r"^(?P<prefix>.+)__(?P<epoch>\d+)$")
+# The suffix must fall in this window around now: the compare runs seconds
+# after the DELETE and a session lasts minutes, so an hour back absorbs slow
+# CI while still rejecting epoch 0 / far-future garbage (mirrors the
+# plausibly-now gate job-payload timestamps get in compare._blank_time_paths).
+SOFT_DELETE_EPOCH_LOOKBACK_SECONDS = 3600
+SOFT_DELETE_EPOCH_SKEW_SECONDS = 300
 
 # --- Job comparison ---
 # Celery message ids (and Rust celery_id) are minted per publish and
@@ -471,6 +495,28 @@ def bind_captures(capture_values: dict[str, tuple], side: str) -> dict:
     return flat
 
 
+def soft_delete_slug_prefix(value):
+    """Live-slug prefix of a soft-deleted workspace slug, else None.
+
+    Returns the prefix (the slug the row carried before delete) when
+    ``value`` has the ``{slug}__{epoch}`` shape with a plausible deletion
+    epoch; None for live slugs and implausible suffixes (both compare raw).
+    """
+    if not isinstance(value, str):
+        return None
+    match = SOFT_DELETE_SLUG_RE.match(value)
+    if not match:
+        return None
+    try:
+        epoch = int(match.group("epoch"))
+    except ValueError:
+        return None
+    now = int(time.time())
+    if not (now - SOFT_DELETE_EPOCH_LOOKBACK_SECONDS <= epoch <= now + SOFT_DELETE_EPOCH_SKEW_SECONDS):
+        return None
+    return match.group("prefix")
+
+
 def normalise_db_value(table: str, column: str, value, ts_extra=frozenset(), gen_extra=frozenset()):
     """Normalise one frozen DB cell for cross-backend comparison.
 
@@ -479,7 +525,11 @@ def normalise_db_value(table: str, column: str, value, ts_extra=frozenset(), gen
     session's table-scoped additions to :data:`TIMESTAMP_COLUMNS` /
     :data:`GENERATED_ID_COLUMNS` for ``table``.
     """
-    _ = table  # scoped by the caller; kept for readability at call sites.
+    if table == WORKSPACE_SLUG_TABLE and column == WORKSPACE_SLUG_COLUMN:
+        prefix = soft_delete_slug_prefix(value)
+        if prefix is not None:
+            return prefix + "__" + VOLATILE_PLACEHOLDER
+        return value
     if column in TIMESTAMP_COLUMNS or column in ts_extra:
         if value is None or isinstance(value, bool):
             return value
