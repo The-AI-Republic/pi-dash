@@ -1489,10 +1489,11 @@ export class WebDriver implements ParityDriver {
 
   async rulesLastToast(): Promise<{ title: string; message: string } | null> {
     // Toasts stack bottom-right and auto-dismiss; only a currently
-    // visible one with text is reported, newest first.
+    // visible one with text is reported, newest first. The roots render
+    // newest-prepended (NEWFRONT-404), so first-to-last is newest first.
     const roots = this.page.locator("div.absolute.right-3.bottom-3");
     const total = await roots.count();
-    for (let i = total - 1; i >= 0; i--) {
+    for (let i = 0; i < total; i++) {
       const text = (await roots.nth(i).innerText()).trim();
       if (text === "") continue;
       const lines = text
@@ -16874,10 +16875,11 @@ export class WebDriver implements ParityDriver {
 
   async runnerChatLastToast(): Promise<{ title: string; message: string } | null> {
     // Toasts stack bottom-right and auto-dismiss; only a currently
-    // visible one with text is reported, newest first.
+    // visible one with text is reported, newest first. The roots render
+    // newest-prepended (NEWFRONT-404), so first-to-last is newest first.
     const roots = this.page.locator("div.absolute.right-3.bottom-3");
     const total = await roots.count();
-    for (let i = total - 1; i >= 0; i--) {
+    for (let i = 0; i < total; i++) {
       const text = (await roots.nth(i).innerText()).trim();
       if (text === "") continue;
       const lines = text
@@ -18932,10 +18934,11 @@ export class WebDriver implements ParityDriver {
 
   async assistantLastToast(): Promise<{ title: string; message: string } | null> {
     // Toasts stack bottom-right and auto-dismiss; only a currently
-    // visible one with text is reported, newest first.
+    // visible one with text is reported, newest first. The roots render
+    // newest-prepended (NEWFRONT-404), so first-to-last is newest first.
     const roots = this.page.locator("div.absolute.right-3.bottom-3");
     const total = await roots.count();
-    for (let i = total - 1; i >= 0; i--) {
+    for (let i = 0; i < total; i++) {
       const text = (await roots.nth(i).innerText()).trim();
       if (text === "") continue;
       const lines = text
