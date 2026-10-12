@@ -13,6 +13,9 @@ import {
   analyticsAdvanceTotalsRaw,
   analyticsProjectCreateStatus,
   analyticsWorkspaceName,
+  exportsFindRecord,
+  exportsListHistory,
+  exportsSubmitStatus,
   pagesLiveOracleBase,
   serverPageRecord,
   type AuthedSession,
@@ -235,5 +238,180 @@ describe("analyticsProjectCreateStatus", () => {
       identifier: "GT0101",
     });
     expect(status).toBe(403);
+  });
+});
+
+// Workspace issue-exports oracle reads (NEWFRONT-381): request shaping and
+// response mapping against the stub, so the live specs only prove server
+// behavior. Plant/patch helpers shell into the stack container and are
+// covered by the oracle scenarios that plant records, not here.
+function exportsSession(): AuthedSession {
+  return {
+    email: "exp@example.com",
+    password: "pw",
+    userId: "user-1",
+    cookie: "session-id=s; csrftoken=c",
+    csrfToken: "c",
+    apiBase,
+  };
+}
+
+function exportRecord(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id,
+    provider: "csv",
+    status: "completed",
+    url: "https://example.invalid/parity-exports/planted.csv",
+    project: ["p1", "p2"],
+    created_at: "2026-10-01T00:00:00Z",
+    initiated_by_detail: {
+      id: "user-1",
+      display_name: "Exp Owner",
+      email: "owner@example.com",
+      avatar_url: null,
+    },
+    ...overrides,
+  };
+}
+
+function historyPage(results: unknown, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    results,
+    next_page_results: false,
+    prev_page_results: false,
+    next_cursor: "",
+    prev_cursor: "",
+    ...overrides,
+  };
+}
+
+describe("exportsListHistory", () => {
+  it("maps a history page with its cursors", async () => {
+    payload = historyPage([exportRecord("e1")], {
+      next_page_results: true,
+      next_cursor: "10:1:1",
+    });
+    const page = await exportsListHistory(exportsSession(), "exp-ws");
+    expect(page.results).toHaveLength(1);
+    expect(page.results[0]).toEqual({
+      id: "e1",
+      provider: "csv",
+      status: "completed",
+      url: "https://example.invalid/parity-exports/planted.csv",
+      project: ["p1", "p2"],
+      created_at: "2026-10-01T00:00:00Z",
+      initiated_by_detail: {
+        id: "user-1",
+        display_name: "Exp Owner",
+        email: "owner@example.com",
+        avatar_url: null,
+      },
+    });
+    expect(page.next_page_results).toBe(true);
+    expect(page.next_cursor).toBe("10:1:1");
+    expect(stubSeen).toHaveLength(1);
+    expect(stubSeen[0]?.method).toBe("GET");
+    const url = new URL(stubSeen[0]?.url ?? "", "http://stub");
+    expect(url.pathname).toBe("/api/workspaces/exp-ws/export-issues/");
+    expect(url.searchParams.get("cursor")).toBe("10:0:0");
+    expect(url.searchParams.get("per_page")).toBe("10");
+  });
+
+  it("falls back to empty defaults for missing optional fields", async () => {
+    payload = historyPage([{ id: "e2", initiated_by_detail: {} }]);
+    const page = await exportsListHistory(exportsSession(), "exp-ws");
+    expect(page.results[0]).toEqual({
+      id: "e2",
+      provider: "",
+      status: "",
+      url: null,
+      project: [],
+      created_at: "",
+      initiated_by_detail: { id: "", display_name: "", email: "", avatar_url: null },
+    });
+  });
+
+  it("reads an empty page when results carry no list", async () => {
+    payload = historyPage(null);
+    const page = await exportsListHistory(exportsSession(), "exp-ws");
+    expect(page.results).toEqual([]);
+  });
+
+  it("throws when the history read fails", async () => {
+    stubStatus = 500;
+    await expect(exportsListHistory(exportsSession(), "exp-ws")).rejects.toThrow(
+      "[parity] export history list failed with HTTP 500."
+    );
+  });
+
+  it("rejects a record missing its id", async () => {
+    payload = historyPage([{ provider: "csv" }]);
+    await expect(exportsListHistory(exportsSession(), "exp-ws")).rejects.toThrow(
+      "[parity] export record carried no id."
+    );
+  });
+});
+
+describe("exportsSubmitStatus", () => {
+  it("posts provider, projects and the multiple flag with the status", async () => {
+    stubStatus = 201;
+    payload = { id: "e9" };
+    const read = await exportsSubmitStatus(exportsSession(), "exp-ws", {
+      provider: "csv",
+      project: ["p1", "p2"],
+      multiple: true,
+    });
+    expect(read.status).toBe(201);
+    expect(read.payload).toEqual({ id: "e9" });
+    expect(stubSeen).toHaveLength(1);
+    expect(stubSeen[0]?.method).toBe("POST");
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/exp-ws/export-issues/");
+    expect(JSON.parse(stubSeen[0]?.body ?? "{}")).toEqual({
+      provider: "csv",
+      project: ["p1", "p2"],
+      multiple: true,
+    });
+  });
+
+  it("carries the status with a null payload when the body is unparsable", async () => {
+    stubStatus = 500;
+    stubRaw = "boom";
+    const read = await exportsSubmitStatus(exportsSession(), "exp-ws", {
+      provider: "json",
+      project: [],
+      multiple: false,
+    });
+    expect(read.status).toBe(500);
+    expect(read.payload).toBeNull();
+  });
+});
+
+describe("exportsFindRecord", () => {
+  it("finds a record on the first page", async () => {
+    payload = historyPage([exportRecord("wanted-1"), exportRecord("other-2")]);
+    const found = await exportsFindRecord(exportsSession(), "exp-ws", "wanted-1");
+    expect(found?.id).toBe("wanted-1");
+    expect(found?.provider).toBe("csv");
+    expect(stubSeen).toHaveLength(1);
+  });
+
+  it("follows the cursor to a later page", async () => {
+    let calls = 0;
+    const first = historyPage([exportRecord("other-1")], {
+      next_page_results: true,
+      next_cursor: "10:1:1",
+    });
+    const second = historyPage([exportRecord("wanted-9")], { prev_page_results: true });
+    payload = { toJSON: () => (calls++ === 0 ? first : second) } as unknown as Record<string, unknown>;
+    const found = await exportsFindRecord(exportsSession(), "exp-ws", "wanted-9");
+    expect(found?.id).toBe("wanted-9");
+    expect(stubSeen).toHaveLength(2);
+    const secondUrl = new URL(stubSeen[1]?.url ?? "", "http://stub");
+    expect(secondUrl.searchParams.get("cursor")).toBe("10:1:1");
+  });
+
+  it("returns null when the record is absent and pages end", async () => {
+    payload = historyPage([exportRecord("other-1")]);
+    await expect(exportsFindRecord(exportsSession(), "exp-ws", "missing-7")).resolves.toBeNull();
   });
 });
