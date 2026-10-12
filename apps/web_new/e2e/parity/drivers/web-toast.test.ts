@@ -35,29 +35,29 @@ describe("last-toast readers", () => {
     });
   });
 
-  it("returns the single visible toast", async () => {
+  it.each(readers)("returns the single visible toast: %s", async (reader) => {
     const driver = driverWithToasts(["Success!\nState created successfully"]);
-    await expect(driver.rulesLastToast()).resolves.toEqual({
+    await expect(driver[reader]()).resolves.toEqual({
       title: "Success!",
       message: "State created successfully",
     });
   });
 
-  it("skips empty roots", async () => {
+  it.each(readers)("skips empty roots: %s", async (reader) => {
     const driver = driverWithToasts(["   ", "Success!\nState created successfully"]);
-    await expect(driver.rulesLastToast()).resolves.toEqual({
+    await expect(driver[reader]()).resolves.toEqual({
       title: "Success!",
       message: "State created successfully",
     });
   });
 
-  it("returns null when no toast is visible", async () => {
+  it.each(readers)("returns null when no toast is visible: %s", async (reader) => {
     const driver = driverWithToasts([]);
-    await expect(driver.rulesLastToast()).resolves.toBeNull();
+    await expect(driver[reader]()).resolves.toBeNull();
   });
 
-  it("returns null when every root is empty", async () => {
+  it.each(readers)("returns null when every root is empty: %s", async (reader) => {
     const driver = driverWithToasts(["", "  \n "]);
-    await expect(driver.rulesLastToast()).resolves.toBeNull();
+    await expect(driver[reader]()).resolves.toBeNull();
   });
 });
