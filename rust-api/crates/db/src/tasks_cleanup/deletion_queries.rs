@@ -324,26 +324,22 @@ pub fn soft_stamp_sql(
 }
 
 /// `save(update_fields=[fk])` on a reverse one-to-one:
-/// `UPDATE child SET fk = NULL [+ updated_at] WHERE child_pk`
-/// (`auto_now` still bumps `updated_at` on a partial save).
+/// `UPDATE child SET fk = NULL WHERE child_pk`. Django's `_save_table`
+/// filters the written columns to `update_fields` only, and `pre_save`
+/// (which fires `auto_now`) runs only for those fields — so unlike the
+/// full `save()` behind [`soft_stamp_sql`], a partial save never bumps
+/// `updated_at` (`deletion_task.py:56-57`).
 pub fn null_fk_one_to_one_sql(
     child_table: &str,
     child_pk_col: &str,
     child_pk: &RowPk,
     fk_col: &str,
-    now: &str,
-    has_updated_at: bool,
+    _now: &str,
+    _has_updated_at: bool,
 ) -> String {
     let mut stmt = Query::update();
     stmt.table(Alias::new(child_table.to_owned()));
-    if has_updated_at {
-        stmt.values([
-            (Alias::new(fk_col.to_owned()), None::<&str>.into()),
-            (Alias::new(UPDATED_AT.to_owned()), now.into()),
-        ]);
-    } else {
-        stmt.value(Alias::new(fk_col.to_owned()), None::<&str>);
-    }
+    stmt.value(Alias::new(fk_col.to_owned()), None::<&str>);
     stmt.and_where(Expr::col(Alias::new(child_pk_col.to_owned())).eq(child_pk.as_query_value()));
     stmt.to_string(PostgresQueryBuilder)
 }
@@ -1692,7 +1688,13 @@ mod tests {
         let child = uuid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         assert_eq!(
             null_fk_one_to_one_sql("pages", "id", &RowPk::Uuid(child), "workspace_id", "2026-09-28 06:00:00+00:00", true),
-            "UPDATE \"pages\" SET \"workspace_id\" = NULL, \"updated_at\" = '2026-09-28 06:00:00+00:00' WHERE \"id\" = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'"
+            "UPDATE \"pages\" SET \"workspace_id\" = NULL WHERE \"id\" = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'"
+        );
+        // `save(update_fields=[fk])` writes only the FK column: no
+        // `updated_at` bump whether or not the table has the column.
+        assert_eq!(
+            null_fk_one_to_one_sql("pages", "id", &RowPk::Uuid(child), "workspace_id", "2026-09-28 06:00:00+00:00", false),
+            "UPDATE \"pages\" SET \"workspace_id\" = NULL WHERE \"id\" = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'"
         );
         assert_eq!(
             null_fk_bulk_sql("issue_comments", "issue_id", &RowPk::Uuid(parent), true),
@@ -1893,7 +1895,7 @@ mod tests {
                 "2026-09-28 06:00:00+00:00",
                 true
             ),
-            "UPDATE \"project_identifiers\" SET \"project_id\" = NULL, \"updated_at\" = '2026-09-28 06:00:00+00:00' WHERE \"id\" = 7"
+            "UPDATE \"project_identifiers\" SET \"project_id\" = NULL WHERE \"id\" = 7"
         );
         assert_eq!(
             null_fk_bulk_sql("project_identifiers", "workspace_id", &pk, true),
