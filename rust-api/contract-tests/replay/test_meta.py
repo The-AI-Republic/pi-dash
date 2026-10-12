@@ -1174,6 +1174,14 @@ def test_soft_delete_slug_blanks_epoch_suffix_only():
     ]}
     dj_zero_norm = compare.normalise_snapshot(dj_zero, "django", ctx)
     assert compare.compare_db(dj_zero_norm, rs_norm) != []
+    # A far-future suffix (year 2100, never a real deletion either)
+    # likewise stays raw instead of blanking.
+    dj_future = {"workspaces": [
+        {"id": "w", "slug": "rp-wsa__4102444800", "name": "Acme Full"},
+        {"id": "l", "slug": "replay-ws", "name": "Replay WS"},
+    ]}
+    dj_future_norm = compare.normalise_snapshot(dj_future, "django", ctx)
+    assert compare.compare_db(dj_future_norm, rs_norm) != []
 
 
 def test_fernet_decrypt_round_trip_and_rejects_garbage():

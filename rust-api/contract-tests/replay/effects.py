@@ -218,7 +218,8 @@ WEBHOOK_URL_COLUMNS = frozenset({("webhooks", "url")})
 # it parses as a plausible deletion epoch: the prefix still compares (a backend
 # that deleted the wrong workspace still fails), live slugs without the suffix
 # compare exactly, and an implausible suffix (epoch 0, a far-future year, a
-# user slug that merely ends in __digits) stays raw and fails loudly.
+# user slug that merely ends in __digits outside the window) stays raw and
+# fails loudly.
 WORKSPACE_SLUG_TABLE = "workspaces"
 WORKSPACE_SLUG_COLUMN = "slug"
 SOFT_DELETE_SLUG_RE = re.compile(r"^(?P<prefix>.+)__(?P<epoch>\d+)$")
