@@ -152,13 +152,6 @@ SESSIONS = (
                 "DELETE", _P + "/{pv}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/views/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-923): Rust's
-                # project_destroy soft-deletes with no enqueue;
-                # Django's model delete() enqueues
-                # soft_delete_related_objects.
-                known_absent_jobs={
-                    "pi_dash.bgtasks.deletion_task.soft_delete_related_objects": "PIDASHCONV-923",
-                },
             ),
             Request(
                 "GET", _P + "/",
@@ -232,9 +225,6 @@ SESSIONS = (
                 "DELETE", _P + "/{locked}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/views/{pk}/",
                 auth="admin", expect_status=204,
-                known_absent_jobs={
-                    "pi_dash.bgtasks.deletion_task.soft_delete_related_objects": "PIDASHCONV-923",
-                },
             ),
             Request(
                 "GET", _P + "/",
