@@ -12455,4 +12455,188 @@ export class WebNewDriver implements ParityDriver {
   async settingsLabelsDeleteAttemptConfirm(): Promise<void> {
     return todo("settingsLabelsDeleteAttemptConfirm");
   }
+
+  // --- Workspace-settings cross-cutting oracle (NEWFRONT-415). Throwing
+  // --- stubs per the shared driver contract; the area fills these in when
+  // --- it lands on web_new.
+
+  async wsSettingsOpenSection(
+    _workspaceSlug: string,
+    _section: "general" | "members" | "billing" | "exports" | "webhooks" | "integrations",
+    _cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    return todo("wsSettingsOpenSection");
+  }
+
+  async wsSettingsNotAuthorized(): Promise<boolean> {
+    return todo("wsSettingsNotAuthorized");
+  }
+
+  async wsSettingsSidebarVisible(): Promise<boolean> {
+    return todo("wsSettingsSidebarVisible");
+  }
+
+  async wsSettingsOutletText(): Promise<string> {
+    return todo("wsSettingsOutletText");
+  }
+
+  async wsSettingsCurrentPath(): Promise<string> {
+    return todo("wsSettingsCurrentPath");
+  }
+
+  async wsSettingsOpenWebhookDetail(
+    _workspaceSlug: string,
+    _webhookId: string,
+    _cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    return todo("wsSettingsOpenWebhookDetail");
+  }
+
+  async wsSettingsWebhookDetailState(): Promise<"form" | "denied" | "loading"> {
+    return todo("wsSettingsWebhookDetailState");
+  }
+
+  async wsSettingsDesktopOnlyCount(): Promise<number> {
+    return todo("wsSettingsDesktopOnlyCount");
+  }
+
+  async wsSettingsFailInstanceInfo(): Promise<void> {
+    return todo("wsSettingsFailInstanceInfo");
+  }
+
+  async wsSettingsServeInstanceNotReady(): Promise<void> {
+    return todo("wsSettingsServeInstanceNotReady");
+  }
+
+  async wsSettingsResetInstanceRoutes(): Promise<void> {
+    return todo("wsSettingsResetInstanceRoutes");
+  }
+
+  async wsSettingsMaintenanceVisible(): Promise<boolean> {
+    return todo("wsSettingsMaintenanceVisible");
+  }
+
+  async wsSettingsMaintenanceIllustration(): Promise<string | null> {
+    return todo("wsSettingsMaintenanceIllustration");
+  }
+
+  async wsSettingsMaintenanceSupportHref(): Promise<string | null> {
+    return todo("wsSettingsMaintenanceSupportHref");
+  }
+
+  async wsSettingsNotReadyFacts(): Promise<{
+    heading: string | null;
+    getStartedHref: string | null;
+    workspaceContent: boolean;
+  }> {
+    return todo("wsSettingsNotReadyFacts");
+  }
+
+  async wsSettingsSetColorScheme(_scheme: "light" | "dark"): Promise<void> {
+    return todo("wsSettingsSetColorScheme");
+  }
+
+  async wsSettingsOpenInviteDialog(_workspaceSlug: string, _cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("wsSettingsOpenInviteDialog");
+  }
+
+  async wsSettingsOpenWebhookCreateDialog(_workspaceSlug: string, _cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("wsSettingsOpenWebhookCreateDialog");
+  }
+
+  async wsSettingsOpenTokenCreateDialog(_cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("wsSettingsOpenTokenCreateDialog");
+  }
+
+  async wsSettingsOpenRemoveMemberDialog(
+    _workspaceSlug: string,
+    _memberEmail: string,
+    _cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    return todo("wsSettingsOpenRemoveMemberDialog");
+  }
+
+  async wsSettingsOpenDeleteWebhookDialog(
+    _workspaceSlug: string,
+    _webhookId: string,
+    _cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    return todo("wsSettingsOpenDeleteWebhookDialog");
+  }
+
+  async wsSettingsDialogOpen(): Promise<boolean> {
+    return todo("wsSettingsDialogOpen");
+  }
+
+  async wsSettingsDialogButtons(): Promise<string[]> {
+    return todo("wsSettingsDialogButtons");
+  }
+
+  async wsSettingsPressEscape(): Promise<void> {
+    return todo("wsSettingsPressEscape");
+  }
+
+  async wsSettingsCloseDialogExplicit(): Promise<void> {
+    return todo("wsSettingsCloseDialogExplicit");
+  }
+
+  async wsSettingsDialogTabOrder(_presses: number): Promise<{ order: string[]; escaped: boolean }> {
+    return todo("wsSettingsDialogTabOrder");
+  }
+
+  async wsSettingsPressKeys(_keys: string[]): Promise<void> {
+    return todo("wsSettingsPressKeys");
+  }
+
+  async wsSettingsMembersSearchEscapeProbe(_query: string): Promise<{ value: string; visible: boolean }> {
+    return todo("wsSettingsMembersSearchEscapeProbe");
+  }
+
+  async wsSettingsWatchListRequests(): Promise<void> {
+    return todo("wsSettingsWatchListRequests");
+  }
+
+  async wsSettingsListRequestCount(): Promise<number> {
+    return todo("wsSettingsListRequestCount");
+  }
+
+  async wsSettingsWatchSockets(): Promise<void> {
+    return todo("wsSettingsWatchSockets");
+  }
+
+  async wsSettingsSocketCount(): Promise<number> {
+    return todo("wsSettingsSocketCount");
+  }
+
+  async wsSettingsMembersListText(): Promise<string[]> {
+    return todo("wsSettingsMembersListText");
+  }
+
+  async wsSettingsWebhooksListText(): Promise<string[]> {
+    return todo("wsSettingsWebhooksListText");
+  }
+
+  async wsSettingsDraggableCount(): Promise<number> {
+    return todo("wsSettingsDraggableCount");
+  }
+
+  async wsSettingsDragFirstMemberRowToSecond(): Promise<void> {
+    return todo("wsSettingsDragFirstMemberRowToSecond");
+  }
+
+  async wsSettingsFileInputCount(): Promise<number> {
+    return todo("wsSettingsFileInputCount");
+  }
+
+  async wsSettingsImportMentions(): Promise<string[]> {
+    return todo("wsSettingsImportMentions");
+  }
+
+  async wsSettingsWatchDownloads(): Promise<void> {
+    return todo("wsSettingsWatchDownloads");
+  }
+
+  async wsSettingsDownloadCount(): Promise<number> {
+    return todo("wsSettingsDownloadCount");
+  }
 }
