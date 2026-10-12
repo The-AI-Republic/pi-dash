@@ -26,11 +26,12 @@ Endpoint shorthand (backend contracts, also used by the inventory): `BASE` =
   workspace user below that level (the view-only guest tier) sees a
   not-authorized view instead of the form: an illustration with a heading
   stating the visitor is not authorized to view the page.
-- A signed-in user with no workspace membership at all still has the page
-  route resolve, but the content renders dimmed and inert rather than as a
-  working form. (Live recon during the oracle run pins the exact dimmed
-  shape; the gate code renders the same content wrapper with a dimming
-  treatment when no membership record exists.)
+- A signed-in user with no workspace membership at all stays on the
+  settings address but sees the workspace-not-found view instead of the
+  form: the workspace layout guard fires before the page renders. (Verified
+  live during the oracle run: the page's dimmed-content branch is
+  unreachable through the UI, so the inventory records the guard's view,
+  not the dim.)
 - The inventory's "viewers" wording maps to the workspace guest tier: the
   product has no workspace viewer role (admin / member / guest only), and
   guests are the read-only tier the gate refuses. "Outsiders" maps to guests
@@ -45,8 +46,10 @@ Endpoint shorthand (backend contracts, also used by the inventory): `BASE` =
   picker is searchable by name and key. Chosen projects collapse into a
   compact comma-separated key list on the picker button; with nothing chosen
   the button reads as all projects, and submitting with an empty choice
-  exports every project the user belongs to. A user who may create in no
-  project gets a disabled picker.
+  exports every project the user belongs to. A member who may create in no
+  project keeps an enabled picker with no options (verified live: the
+  picker's disabled state only applies to below-member tiers, who never
+  reach the form per EXP-002).
 - The format picker offers three file kinds: comma-separated values,
   spreadsheet (Excel), and structured JSON. The choice is part of the export
   request and also labels the resulting history row (CSV / Excel / JSON).
