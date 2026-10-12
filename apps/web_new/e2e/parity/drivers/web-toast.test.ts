@@ -106,12 +106,22 @@ describe("Notifications-region last-toast readers", () => {
  * `status`/`alert` are in-flow nodes, which sort before the portaled
  * roots in DOM order.
  */
+/** Marks a stub node whose innerText read rejects (an auto-dismiss race). */
+const REJECTING_READ = "\u0000rejecting-read";
+
 function homeDriverWithNodes(roots: string[], status: string[], alert: string[]): WebDriver {
-  const group = (texts: string[]) => ({
-    count: async () => texts.length,
-    first: () => ({ innerText: async () => texts[0] ?? "" }),
-    last: () => ({ innerText: async () => texts[texts.length - 1] ?? "" }),
-  });
+  const group = (texts: string[]) => {
+    const textAt = async (index: number): Promise<string> => {
+      const value = texts[index] ?? "";
+      if (value === REJECTING_READ) throw new Error("node detached");
+      return value;
+    };
+    return {
+      count: async () => texts.length,
+      first: () => ({ innerText: () => textAt(0) }),
+      last: () => ({ innerText: () => textAt(texts.length - 1) }),
+    };
+  };
   const page = {
     locator: (selector: string) =>
       selector.includes('[role="status"]')
@@ -178,6 +188,21 @@ describe("homeLastToast", () => {
 
   it("returns null when every node is empty", async () => {
     const driver = homeDriverWithNodes(["  "], [], [" \n "]);
+    await expect(driver.homeLastToast()).resolves.toBeNull();
+  });
+
+  it("falls through a rejecting toast root to the status fallback", async () => {
+    const driver = homeDriverWithNodes([REJECTING_READ], ["Saved"], []);
+    await expect(driver.homeLastToast()).resolves.toEqual({ title: "Saved", message: "" });
+  });
+
+  it("falls through rejecting toast and status nodes to the alert fallback", async () => {
+    const driver = homeDriverWithNodes([REJECTING_READ], [REJECTING_READ], ["Warning\nCheck this"]);
+    await expect(driver.homeLastToast()).resolves.toEqual({ title: "Warning", message: "Check this" });
+  });
+
+  it("returns null when every read rejects", async () => {
+    const driver = homeDriverWithNodes([REJECTING_READ], [REJECTING_READ], [REJECTING_READ]);
     await expect(driver.homeLastToast()).resolves.toBeNull();
   });
 });
