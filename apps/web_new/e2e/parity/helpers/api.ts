@@ -17431,3 +17431,56 @@ export async function serverListApiTokens(user: AuthedSession): Promise<Array<{ 
     return { id: row["id"], label: typeof row["label"] === "string" ? row["label"] : "" };
   });
 }
+
+// --- Workspace-settings shell + general helpers (NEWFRONT-410,
+// --- WSET-001..007). Appended; existing helpers above are untouched per
+// --- the shared harness contract. Typed reads of the workspace-detail
+// --- endpoint back the general-page and delete-zone scenarios; the
+// --- generic serverRequestStatus covers refusal-code assertions.
+
+/** Workspace-detail facts the general-page scenarios assert on. */
+export interface ParityWorkspaceFacts {
+  id: string;
+  slug: string;
+  name: string;
+  organizationSize: string | null;
+  timezone: string;
+  logoUrl: string | null;
+}
+
+/** Typed read of GET /api/workspaces/{slug}/ (throws unless HTTP 200). */
+export async function serverWorkspace(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityWorkspaceFacts> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] workspace read failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as Record<string, unknown>;
+  if (typeof row["id"] !== "string" || typeof row["slug"] !== "string" || typeof row["name"] !== "string") {
+    throw new Error("[parity] workspace row carried no id, slug and name.");
+  }
+  const size = row["organization_size"];
+  const zone = row["timezone"];
+  const logo = row["logo_url"];
+  return {
+    id: row["id"] as string,
+    slug: row["slug"] as string,
+    name: row["name"] as string,
+    organizationSize: typeof size === "string" ? size : null,
+    timezone: typeof zone === "string" ? zone : "",
+    logoUrl: typeof logo === "string" && logo !== "" ? logo : null,
+  };
+}
+
+/** Lenient workspace deletion for finally-blocks (the UI delete is the real path). */
+export async function serverDeleteWorkspace(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON("DELETE", `${apiBase}/api/workspaces/${workspaceSlug}/`, sessionCookie);
+  if (!res.ok) console.log(`[parity] workspace cleanup DELETE returned HTTP ${res.status}; leaving it.`);
+}

@@ -43930,4 +43930,526 @@ export class WebDriver implements ParityDriver {
     if ((await pill.count()) === 0) return;
     await pill.click({ timeout: WebDriver.actionTimeout }).catch(() => undefined);
   }
+
+  // --- Workspace-settings shell + general (NEWFRONT-410, WSET-001..007).
+  // --- Every selector below was observed on the running old app. The
+  // --- settings links carry /settings/ hrefs (sidebar plus drawer
+  // --- copies); visibility filtering keeps exactly one copy. The active
+  // --- entry is the link whose classes carry the selected marker; the
+  // --- denial view is the explanatory not-authorized text.
+
+  /** Links whose href points into workspace settings (sidebar plus drawer). */
+  private wsSettingsLinks() {
+    return this.page.locator('a[href*="/settings/"]');
+  }
+
+  /** Visible settings-link labels with their active marker, in DOM order. */
+  private async wsSettingsVisibleLinks(): Promise<{ label: string; active: boolean }[]> {
+    return this.wsSettingsLinks().evaluateAll((links) =>
+      links
+        .filter((node) => {
+          const rect = (node as HTMLElement).getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        })
+        .map((node) => ({
+          label: ((node as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim(),
+          active: (node as HTMLElement).className.includes("bg-layer-transparent-selected"),
+        }))
+        .filter((entry) => entry.label.length > 0)
+    );
+  }
+
+  /** Settle on a settings section, the denial view, or a loaded page. */
+  private async wsSettingsWaitSettled(timeoutMs = 60_000): Promise<void> {
+    await this.page
+      .waitForFunction(
+        () => {
+          const visible = (node: Element | null): boolean => {
+            if (node === null) return false;
+            const rect = (node as HTMLElement).getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          };
+          if ([...document.querySelectorAll("a")].some((a) => a.href.includes("/settings/") && visible(a))) return true;
+          return [...document.querySelectorAll("*")].some(
+            (node) => node.children.length === 0 && (node.textContent ?? "").includes("not authorized") && visible(node)
+          );
+        },
+        { timeout: timeoutMs }
+      )
+      .catch(() => undefined);
+  }
+
+  /** Workspace slug from the current settings path (first segment). */
+  private async wsSettingsSlugFromPath(): Promise<string> {
+    const path = await this.wsSettingsPath();
+    return path.split("/").filter(Boolean)[0] ?? "";
+  }
+
+  async wsSettingsOpen(workspaceSlug: string, section: string): Promise<void> {
+    const suffix = section === "" ? "" : `/${section}`;
+    await this.page.goto(`/${workspaceSlug}/settings${suffix}/`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.wsSettingsWaitSettled();
+    // The tab title lands with the section content, which can lag the
+    // sidebar by seconds on a loaded host; denied sections never set
+    // one, so either signal settles the open.
+    await this.page
+      .waitForFunction(
+        () =>
+          document.title !== "" ||
+          [...document.querySelectorAll("*")].some(
+            (node) =>
+              node.children.length === 0 &&
+              (node.textContent ?? "").includes("not authorized") &&
+              (node as HTMLElement).getBoundingClientRect().width > 0
+          ),
+        { timeout: 60_000 }
+      )
+      .catch(() => undefined);
+  }
+
+  async wsSettingsGroups(): Promise<string[]> {
+    const labels = await this.page.evaluate(() => {
+      const wanted = ["Administration", "Features", "Developer"];
+      const found: string[] = [];
+      for (const node of document.querySelectorAll("div")) {
+        const text = (node.textContent ?? "").trim();
+        if (!wanted.includes(text)) continue;
+        const rect = (node as HTMLElement).getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        if (!found.includes(text)) found.push(text);
+      }
+      return found;
+    });
+    return labels;
+  }
+
+  async wsSettingsItems(): Promise<string[]> {
+    return (await this.wsSettingsVisibleLinks()).map((entry) => entry.label);
+  }
+
+  async wsSettingsActiveItem(): Promise<string | null> {
+    const entries = await this.wsSettingsVisibleLinks();
+    return entries.find((entry) => entry.active)?.label ?? null;
+  }
+
+  async wsSettingsFollowItem(label: string): Promise<void> {
+    const before = await this.wsSettingsPath();
+    await this.wsSettingsLinks().filter({ hasText: label }).first().click({ timeout: 15_000 });
+    await this.page
+      .waitForFunction((prior) => window.location.pathname !== prior, before, { timeout: 30_000 })
+      .catch(() => undefined);
+    await this.wsSettingsWaitSettled();
+    // The sidebar highlight lags the address change by a beat on client
+    // navigation; settle on it so callers read the moved highlight.
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      if ((await this.wsSettingsActiveItem()) === label) return;
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async wsSettingsPath(): Promise<string> {
+    return new URL(this.page.url()).pathname;
+  }
+
+  async wsSettingsTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async wsSettingsDeniedVisible(): Promise<boolean> {
+    const marker = this.page.getByText("not authorized", { exact: false }).first();
+    if ((await marker.count()) === 0) return false;
+    return marker.isVisible().catch(() => false);
+  }
+
+  async wsSettingsNarrowTriggerVisible(): Promise<boolean> {
+    const trigger = this.page.locator('[class*="md:hidden"]').getByRole("button").first();
+    if ((await trigger.count()) === 0) return false;
+    return trigger.isVisible().catch(() => false);
+  }
+
+  async wsSettingsOpenDrawer(): Promise<void> {
+    await this.page.setViewportSize({ width: 390, height: 844 });
+    await this.page.locator('[class*="md:hidden"]').getByRole("button").first().click({ timeout: 15_000 });
+    await this.page
+      .waitForFunction(
+        () =>
+          [...document.querySelectorAll('div.absolute a[href*="/settings"]')].some((node) => {
+            const rect = (node as HTMLElement).getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          }),
+        { timeout: 15_000 }
+      )
+      .catch(() => undefined);
+  }
+
+  async wsSettingsDrawerItems(): Promise<string[]> {
+    return this.page.locator('div.absolute a[href*="/settings"]').evaluateAll((links) =>
+      links
+        .filter((node) => {
+          const rect = (node as HTMLElement).getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        })
+        .map((node) => ((node as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim())
+        .filter((text) => text.length > 0)
+    );
+  }
+
+  async wsSettingsMobileCrumb(): Promise<string> {
+    // The open drawer renders inside the narrow nav container, so the
+    // crumb reads from its own trailing label, not the container text.
+    return (
+      (await this.page
+        .locator('[class*="md:hidden"] span')
+        .last()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async wsSettingsWideViewport(): Promise<void> {
+    await this.page.setViewportSize({ width: 1280, height: 800 });
+  }
+
+  async wsSettingsGeneralVisible(): Promise<boolean> {
+    const name = this.page.locator("#name").first();
+    if ((await name.count()) === 0) return false;
+    return name.isVisible().catch(() => false);
+  }
+
+  async wsSettingsNameValue(): Promise<string> {
+    return this.page.locator("#name").first().inputValue({ timeout: 15_000 });
+  }
+
+  async wsSettingsFillName(name: string): Promise<void> {
+    await this.page.locator("#name").first().fill(name, { timeout: 15_000 });
+  }
+
+  async wsSettingsNameDisabled(): Promise<boolean> {
+    return this.page.locator("#name").first().isDisabled({ timeout: 15_000 });
+  }
+
+  async wsSettingsNameError(): Promise<string | null> {
+    const error = this.page.locator("p.text-danger-primary").first();
+    if ((await error.count()) === 0) return null;
+    if (!(await error.isVisible().catch(() => false))) return null;
+    return ((await error.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim() || null;
+  }
+
+  /** Organization-size control: the button showing the current label. */
+  private wsSettingsSizeButton() {
+    return this.page
+      .getByRole("button", { name: /select organization size|just myself|2-10|11-50|51-200|201-500|500\+/i })
+      .first();
+  }
+
+  async wsSettingsSizeLabel(): Promise<string> {
+    return (
+      (await this.wsSettingsSizeButton()
+        .innerText({ timeout: 15_000 })
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async wsSettingsSizeOptions(): Promise<string[]> {
+    await this.wsSettingsSizeButton().click({ timeout: 15_000 });
+    const options = this.page.locator("[role='option'], [role='listbox'] button, [role='menuitem']");
+    await options
+      .first()
+      .waitFor({ state: "visible", timeout: 15_000 })
+      .catch(() => undefined);
+    const total = await options.count();
+    const labels: string[] = [];
+    for (let i = 0; i < total; i++) {
+      labels.push(
+        (
+          (await options
+            .nth(i)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim()
+      );
+    }
+    // Close with an outside click on the name field: Escape-closing this
+    // dropdown wedges reopening until an outside mousedown lands (bug
+    // NEWFRONT-420), while outside-click closes keep reopening working.
+    await this.page
+      .locator("#name")
+      .first()
+      .click({ timeout: 15_000 })
+      .catch(() => undefined);
+    return labels.filter((label) => label.length > 0);
+  }
+
+  async wsSettingsSelectSize(label: string): Promise<void> {
+    await this.wsSettingsSizeButton().click({ timeout: 15_000 });
+    const options = this.page.locator("[role='option'], [role='listbox'] button, [role='menuitem']");
+    await options.filter({ hasText: label }).first().click({ timeout: 15_000 });
+  }
+
+  /**
+   * Timezone control: the first button after the "Workspace Timezone"
+   * heading. Label-anchored on purpose: the button shows UTC, the
+   * placeholder, or the picked zone's display label, and text scans
+   * across every button misfire (the copy-URL button carries a slash
+   * with no dots on dotless origins like localhost).
+   */
+  private wsSettingsTimezoneButton() {
+    return this.page.locator("h4", { hasText: "Workspace Timezone" }).locator("xpath=following::button[1]");
+  }
+
+  async wsSettingsTimezoneLabel(): Promise<string> {
+    return (
+      (await this.wsSettingsTimezoneButton()
+        .innerText({ timeout: 15_000 })
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async wsSettingsSelectTimezone(query: string, option: string): Promise<void> {
+    await this.wsSettingsTimezoneButton().click({ timeout: 15_000 });
+    // The portal search renders last in the document once open; the
+    // placeholder scope keeps the name field from matching.
+    const search = this.page.locator("input[placeholder*='earch' i]").last();
+    await search.fill(query, { timeout: 15_000 });
+    const options = this.page.locator("[role='option'], [role='listbox'] button, [role='menuitem']");
+    await options.filter({ hasText: option }).first().click({ timeout: 15_000 });
+  }
+
+  async wsSettingsUrlValue(): Promise<string> {
+    return this.page.locator("#url").first().inputValue({ timeout: 15_000 });
+  }
+
+  /** Save control in either state (idle label vs saving label). */
+  private wsSettingsSaveButton() {
+    return this.page.getByRole("button", { name: /update workspace|updating/i }).first();
+  }
+
+  async wsSettingsSaveVisible(): Promise<boolean> {
+    return (await this.wsSettingsSaveButton().count()) > 0;
+  }
+
+  async wsSettingsSaveLabel(): Promise<string | null> {
+    if ((await this.wsSettingsSaveButton().count()) === 0) return null;
+    return (
+      (
+        (await this.wsSettingsSaveButton()
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim() || null
+    );
+  }
+
+  async wsSettingsSave(): Promise<void> {
+    await this.wsSettingsSaveButton().click({ timeout: 15_000 });
+    // The control flips to its saving label while the PATCH is in
+    // flight, then back; invalid input never leaves the idle label.
+    await this.page.waitForTimeout(300);
+    await this.page
+      .waitForFunction(
+        () =>
+          [...document.querySelectorAll("button")].some((node) =>
+            ((node as HTMLElement).innerText ?? "").trim().toLowerCase().includes("update workspace")
+          ),
+        { timeout: 60_000 }
+      )
+      .catch(() => undefined);
+  }
+
+  /** Whether this route is the workspace-detail PATCH the save issues. */
+  private wsSettingsIsSavePatch(route: Route, slug: string): boolean {
+    if (route.request().method() !== "PATCH") return false;
+    try {
+      return new URL(route.request().url()).pathname === `/api/workspaces/${slug}/`;
+    } catch {
+      return false;
+    }
+  }
+
+  async wsSettingsDelaySave(ms: number): Promise<void> {
+    const slug = await this.wsSettingsSlugFromPath();
+    const hold = async (route: Route) => {
+      if (!this.wsSettingsIsSavePatch(route, slug)) {
+        await route.fallback().catch(() => undefined);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    };
+    await this.page.route("**/api/workspaces/**", hold);
+  }
+
+  async wsSettingsFailSave(): Promise<void> {
+    const slug = await this.wsSettingsSlugFromPath();
+    const fail = async (route: Route) => {
+      if (!this.wsSettingsIsSavePatch(route, slug)) {
+        await route.fallback().catch(() => undefined);
+        return;
+      }
+      await route.fulfill({ status: 500, contentType: "application/json", body: "{}" }).catch(() => undefined);
+    };
+    await this.page.route("**/api/workspaces/**", fail);
+  }
+
+  async wsSettingsClearSaveRoutes(): Promise<void> {
+    await this.page.unrouteAll({ behavior: "wait" }).catch(() => undefined);
+  }
+
+  private wsSettingsLogoImg() {
+    return this.page.locator("img[alt='Workspace Logo']").first();
+  }
+
+  async wsSettingsLogoState(): Promise<"fallback" | "image"> {
+    return (await this.wsSettingsLogoImg().count()) > 0 ? "image" : "fallback";
+  }
+
+  async wsSettingsLogoSrc(): Promise<string | null> {
+    if ((await this.wsSettingsLogoImg().count()) === 0) return null;
+    return this.wsSettingsLogoImg().getAttribute("src");
+  }
+
+  async wsSettingsLogoAction(): Promise<"upload" | "edit" | "none"> {
+    if ((await this.page.getByRole("button", { name: "Upload logo", exact: true }).count()) > 0) return "upload";
+    if ((await this.page.getByRole("button", { name: "Edit logo", exact: true }).count()) > 0) return "edit";
+    return "none";
+  }
+
+  async wsSettingsOpenLogoDialog(): Promise<void> {
+    const action = await this.wsSettingsLogoAction();
+    if (action === "none") throw new Error("[parity] no logo action is offered.");
+    await this.page
+      .getByRole("button", { name: action === "upload" ? "Upload logo" : "Edit logo", exact: true })
+      .click({ timeout: 15_000 });
+    await this.page.locator("input[type='file']").first().waitFor({ state: "visible", timeout: 15_000 });
+  }
+
+  async wsSettingsLogoDialogVisible(): Promise<boolean> {
+    const input = this.page.locator("input[type='file']").first();
+    if ((await input.count()) === 0) return false;
+    return input.isVisible().catch(() => false);
+  }
+
+  async wsSettingsUploadLogo(filePath: string): Promise<void> {
+    await this.page.locator("input[type='file']").first().setInputFiles(filePath, { timeout: 15_000 });
+    await this.page.getByRole("button", { name: /upload & save/i }).click({ timeout: 15_000 });
+    await this.page
+      .locator("input[type='file']")
+      .first()
+      .waitFor({ state: "hidden", timeout: 60_000 })
+      .catch(() => undefined);
+  }
+
+  async wsSettingsRemoveLogo(): Promise<void> {
+    const slug = await this.wsSettingsSlugFromPath();
+    const settled = this.page
+      .waitForResponse(
+        (response) => {
+          if (response.request().method() !== "PATCH") return false;
+          try {
+            return new URL(response.request().url()).pathname === `/api/workspaces/${slug}/`;
+          } catch {
+            return false;
+          }
+        },
+        { timeout: 60_000 }
+      )
+      .catch(() => undefined);
+    await this.page.getByRole("button", { name: "Remove", exact: true }).click({ timeout: 15_000 });
+    await settled;
+    // The dialog animates closed after the write; outlast the animation
+    // so callers observe the settled page, not the closing dialog.
+    await this.page
+      .locator("input[type='file']")
+      .first()
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
+
+  async wsSettingsCloseLogoDialog(): Promise<void> {
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 15_000 });
+    await this.page
+      .locator("input[type='file']")
+      .first()
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
+
+  async wsSettingsCopyUrl(): Promise<void> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const slug = await this.wsSettingsSlugFromPath();
+    const escaped = slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    await this.page
+      .getByRole("button", { name: new RegExp(escaped) })
+      .first()
+      .click({ timeout: 15_000 });
+  }
+
+  async wsSettingsReadClipboard(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async wsSettingsDeleteSectionVisible(): Promise<boolean> {
+    const marker = this.page.getByText("Delete this workspace", { exact: true }).first();
+    if ((await marker.count()) === 0) return false;
+    return marker.isVisible().catch(() => false);
+  }
+
+  async wsSettingsOpenDeleteDialog(): Promise<void> {
+    await this.page.getByRole("button", { name: "Delete", exact: true }).click({ timeout: 15_000 });
+    await this.page.locator("#workspaceName").first().waitFor({ state: "visible", timeout: 15_000 });
+  }
+
+  async wsSettingsDeleteDialogVisible(): Promise<boolean> {
+    const input = this.page.locator("#workspaceName").first();
+    if ((await input.count()) === 0) return false;
+    return input.isVisible().catch(() => false);
+  }
+
+  async wsSettingsDeleteDialogText(): Promise<string> {
+    const form = this.page
+      .locator("form")
+      .filter({ has: this.page.locator("#workspaceName") })
+      .first();
+    return ((await form.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async wsSettingsFillDeleteName(name: string): Promise<void> {
+    await this.page.locator("#workspaceName").first().fill(name, { timeout: 15_000 });
+  }
+
+  async wsSettingsFillDeletePhrase(text: string): Promise<void> {
+    await this.page.locator("#confirmDelete").first().fill(text, { timeout: 15_000 });
+  }
+
+  async wsSettingsConfirmDeleteEnabled(): Promise<boolean> {
+    return this.page.getByRole("button", { name: "Confirm", exact: true }).isEnabled({ timeout: 15_000 });
+  }
+
+  async wsSettingsConfirmDelete(): Promise<void> {
+    await this.page.getByRole("button", { name: "Confirm", exact: true }).click({ timeout: 15_000 });
+    await this.page
+      .waitForFunction(() => !window.location.pathname.includes("/settings"), { timeout: 60_000 })
+      .catch(() => undefined);
+  }
+
+  async wsSettingsCancelDelete(): Promise<void> {
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 15_000 });
+    await this.page
+      .locator("#workspaceName")
+      .first()
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
 }

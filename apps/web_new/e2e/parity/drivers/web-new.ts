@@ -12717,4 +12717,154 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsProBadgeClickFirst(): Promise<void> {
     return todo("wsSettingsProBadgeClickFirst");
   }
+
+  // --- Workspace-settings shell + general (NEWFRONT-410, WSET-001..007). ---
+
+  async wsSettingsOpen(_workspaceSlug: string, _section: string): Promise<void> {
+    return todo("wsSettingsOpen");
+  }
+  async wsSettingsGroups(): Promise<string[]> {
+    return todo("wsSettingsGroups");
+  }
+  async wsSettingsItems(): Promise<string[]> {
+    return todo("wsSettingsItems");
+  }
+  async wsSettingsActiveItem(): Promise<string | null> {
+    return todo("wsSettingsActiveItem");
+  }
+  async wsSettingsFollowItem(_label: string): Promise<void> {
+    return todo("wsSettingsFollowItem");
+  }
+  async wsSettingsPath(): Promise<string> {
+    return todo("wsSettingsPath");
+  }
+  async wsSettingsTitle(): Promise<string> {
+    return todo("wsSettingsTitle");
+  }
+  async wsSettingsDeniedVisible(): Promise<boolean> {
+    return todo("wsSettingsDeniedVisible");
+  }
+  async wsSettingsNarrowTriggerVisible(): Promise<boolean> {
+    return todo("wsSettingsNarrowTriggerVisible");
+  }
+  async wsSettingsOpenDrawer(): Promise<void> {
+    return todo("wsSettingsOpenDrawer");
+  }
+  async wsSettingsDrawerItems(): Promise<string[]> {
+    return todo("wsSettingsDrawerItems");
+  }
+  async wsSettingsMobileCrumb(): Promise<string> {
+    return todo("wsSettingsMobileCrumb");
+  }
+  async wsSettingsWideViewport(): Promise<void> {
+    return todo("wsSettingsWideViewport");
+  }
+  async wsSettingsGeneralVisible(): Promise<boolean> {
+    return todo("wsSettingsGeneralVisible");
+  }
+  async wsSettingsNameValue(): Promise<string> {
+    return todo("wsSettingsNameValue");
+  }
+  async wsSettingsFillName(_name: string): Promise<void> {
+    return todo("wsSettingsFillName");
+  }
+  async wsSettingsNameDisabled(): Promise<boolean> {
+    return todo("wsSettingsNameDisabled");
+  }
+  async wsSettingsNameError(): Promise<string | null> {
+    return todo("wsSettingsNameError");
+  }
+  async wsSettingsSizeLabel(): Promise<string> {
+    return todo("wsSettingsSizeLabel");
+  }
+  async wsSettingsSizeOptions(): Promise<string[]> {
+    return todo("wsSettingsSizeOptions");
+  }
+  async wsSettingsSelectSize(_label: string): Promise<void> {
+    return todo("wsSettingsSelectSize");
+  }
+  async wsSettingsTimezoneLabel(): Promise<string> {
+    return todo("wsSettingsTimezoneLabel");
+  }
+  async wsSettingsSelectTimezone(_query: string, _option: string): Promise<void> {
+    return todo("wsSettingsSelectTimezone");
+  }
+  async wsSettingsUrlValue(): Promise<string> {
+    return todo("wsSettingsUrlValue");
+  }
+  async wsSettingsSaveVisible(): Promise<boolean> {
+    return todo("wsSettingsSaveVisible");
+  }
+  async wsSettingsSaveLabel(): Promise<string | null> {
+    return todo("wsSettingsSaveLabel");
+  }
+  async wsSettingsSave(): Promise<void> {
+    return todo("wsSettingsSave");
+  }
+  async wsSettingsDelaySave(_ms: number): Promise<void> {
+    return todo("wsSettingsDelaySave");
+  }
+  async wsSettingsFailSave(): Promise<void> {
+    return todo("wsSettingsFailSave");
+  }
+  async wsSettingsClearSaveRoutes(): Promise<void> {
+    return todo("wsSettingsClearSaveRoutes");
+  }
+  async wsSettingsLogoState(): Promise<"fallback" | "image"> {
+    return todo("wsSettingsLogoState");
+  }
+  async wsSettingsLogoSrc(): Promise<string | null> {
+    return todo("wsSettingsLogoSrc");
+  }
+  async wsSettingsLogoAction(): Promise<"upload" | "edit" | "none"> {
+    return todo("wsSettingsLogoAction");
+  }
+  async wsSettingsOpenLogoDialog(): Promise<void> {
+    return todo("wsSettingsOpenLogoDialog");
+  }
+  async wsSettingsLogoDialogVisible(): Promise<boolean> {
+    return todo("wsSettingsLogoDialogVisible");
+  }
+  async wsSettingsUploadLogo(_filePath: string): Promise<void> {
+    return todo("wsSettingsUploadLogo");
+  }
+  async wsSettingsRemoveLogo(): Promise<void> {
+    return todo("wsSettingsRemoveLogo");
+  }
+  async wsSettingsCloseLogoDialog(): Promise<void> {
+    return todo("wsSettingsCloseLogoDialog");
+  }
+  async wsSettingsCopyUrl(): Promise<void> {
+    return todo("wsSettingsCopyUrl");
+  }
+  async wsSettingsReadClipboard(): Promise<string> {
+    return todo("wsSettingsReadClipboard");
+  }
+  async wsSettingsDeleteSectionVisible(): Promise<boolean> {
+    return todo("wsSettingsDeleteSectionVisible");
+  }
+  async wsSettingsOpenDeleteDialog(): Promise<void> {
+    return todo("wsSettingsOpenDeleteDialog");
+  }
+  async wsSettingsDeleteDialogVisible(): Promise<boolean> {
+    return todo("wsSettingsDeleteDialogVisible");
+  }
+  async wsSettingsDeleteDialogText(): Promise<string> {
+    return todo("wsSettingsDeleteDialogText");
+  }
+  async wsSettingsFillDeleteName(_name: string): Promise<void> {
+    return todo("wsSettingsFillDeleteName");
+  }
+  async wsSettingsFillDeletePhrase(_text: string): Promise<void> {
+    return todo("wsSettingsFillDeletePhrase");
+  }
+  async wsSettingsConfirmDeleteEnabled(): Promise<boolean> {
+    return todo("wsSettingsConfirmDeleteEnabled");
+  }
+  async wsSettingsConfirmDelete(): Promise<void> {
+    return todo("wsSettingsConfirmDelete");
+  }
+  async wsSettingsCancelDelete(): Promise<void> {
+    return todo("wsSettingsCancelDelete");
+  }
 }
