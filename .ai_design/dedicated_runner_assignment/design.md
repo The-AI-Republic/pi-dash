@@ -156,6 +156,7 @@ E7 is `filter_runs_usable_by_runner` reduced to the clauses that hold for _every
 
 - E1–E8 are structural: saving such a choice would create an issue that can never run, or desync a live run. The request fails with HTTP 400, `{"assigned_runner_id": [message], "code": <code>}`.
 - Offline and busy are transient: the choice is saved. The response carries the runner's status and queue depth (§14.1) and the picker shows them before the user confirms (§14.4).
+- The rules run only when the request changes the runner. Re-sending the current value is a no-op and is never rejected, as with the pod today: the web form re-PATCHes its full editable set, so a dedicated issue must stay editable after its eligibility has drifted or the rollout switch (§19) is off.
 
 Eligibility can drift after a save: the owner is removed from the assignees, or leaves the workspace. Save-time validation cannot prevent that, so §9.4 re-checks at run creation and §13 handles each event.
 
@@ -458,7 +459,7 @@ Computed, not stored. The run serializers (`AgentRunSerializer`, and `_serialize
 
 - `pidash_create_issue` / `pidash_update_issue` (private repo, `pi_dash_cloud/mcp/tools.py`): new optional inputs `assigned_runner` (UUID or name; `null` clears) and `assigned_pod` (UUID or name) — the pod input is added scope for the same reason as the CLI flag. `pidash_get_issue` returns both plus `assigned_runner_detail` and `dispatch_wait`.
 - `pidash_list_project_runners` (PDASHOSS01-246) gains `assignable_for`.
-- In-run cloud-agent tools (`apps/api/pi_dash/cloud_agent/tools.py`): `pidash_create_project_issue`, the only tool there that writes issue fields today, accepts `assigned_runner` and `assigned_pod` through the same service. The acting user is the run's creator, so E1 and E7 apply to that user. An in-run update tool, if one is added later, uses the same service.
+- In-run cloud-agent tools (`apps/api/pi_dash/cloud_agent/tools.py`): `pidash_create_project_issue`, the only tool there that creates an issue today, accepts `assigned_runner` and `assigned_pod` through the same service. The acting user is the run's creator, so E1 and E7 apply to that user. An in-run update tool, if one is added later, uses the same service.
 
 ### 14.7 Issue activity
 
@@ -520,7 +521,7 @@ Neither is on `main`; neither is changed here. Follow-up issues are filed in the
 
 The schema is additive and NULL means "today", so the migrations ship at any time. The risk is the window between HA-2 (the API accepts the field) and HA-3 (dispatch honours it): a saved choice that dispatch ignores would be a lie.
 
-- `DEDICATED_RUNNER_ASSIGNMENT_ENABLED` (settings, default `false`), in the style of `CLOUD_AGENT_ENABLED` and `MANAGED_RUNNER_ENABLED`. While false, a non-null `assigned_runner` is rejected with `dedicated_runner_disabled`, `assignable_for` reports every runner as not assignable with that code, and the web picker shows pods only. Clearing is always allowed.
+- `DEDICATED_RUNNER_ASSIGNMENT_ENABLED` (settings, default `false`), in the style of `CLOUD_AGENT_ENABLED` and `MANAGED_RUNNER_ENABLED`. While false, a request that sets or changes `assigned_runner` to a non-null value is rejected with `dedicated_runner_disabled` (re-sending the current value is a no-op, §7.2), `assignable_for` reports every runner as not assignable with that code, and the web picker shows pods only. Clearing is always allowed.
 - HA-2 adds the setting. HA-3 to HA-5 are built and tested with it on. HA-6 flips the default to `true` once the end-to-end scenarios pass, and files the issue to delete the setting one release later.
 - No other setting is added. In particular there is no offline-fallback setting in v1 (§11).
 - HA-6 runs both migrations against a copy of production data and records the lock time of the two constraint validations and the concurrent index build.
