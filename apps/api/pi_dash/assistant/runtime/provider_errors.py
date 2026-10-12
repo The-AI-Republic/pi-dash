@@ -41,6 +41,9 @@ _CREDIT_MARKERS = (
     "no_credit_account",
     "quota exceeded",
 )
+# A 429 is a rate limit unless it carries one of these: "quota exceeded" on
+# its own also describes a per-minute request quota.
+_CREDIT_CODES_ON_429 = ("insufficient_quota", "insufficient_credits", "insufficient credits", "no_credit_account")
 _AUTH_MARKERS = ("unauthorized", "api key", "authentication", "invalid_api_key")
 _RATE_LIMIT_MARKERS = ("rate limit", "rate_limit", "too many requests")
 _MODEL_MARKERS = (
@@ -133,14 +136,17 @@ def classify_provider_error(exc: BaseException, *, connection: str = BYOK, model
     # Credit exhaustion comes first: routed providers answer 402 for it, and
     # OpenAI reports an empty balance as a 429 with ``insufficient_quota``,
     # which must not read as "retry shortly".
-    if status == 402 or has(_CREDIT_MARKERS):
+    if status == 402 or has(_CREDIT_CODES_ON_429 if status == 429 else _CREDIT_MARKERS):
         if gateway:
             return ProviderOutOfCredit(
                 _with_detail("You are out of credit for the model provider. Add credit to keep going.", detail)
             )
         return ProviderOutOfCredit(_with_detail("The provider rejected the request for lack of credit.", detail))
 
-    if status == 401 or (status is None and has(_AUTH_MARKERS)):
+    # Not every provider answers 401 for a bad key: Gemini's OpenAI-compatible
+    # endpoint says 400 "API key not valid", others 403. The text decides for
+    # those, but never for a 5xx.
+    if status == 401 or (status in (None, 400, 403) and has(_AUTH_MARKERS)):
         if gateway:
             return ProviderSessionExpired(
                 "Your session with the model provider has expired. Sign out and sign back in to continue."

@@ -135,6 +135,28 @@ def test_an_exhausted_quota_reported_as_429_is_a_credit_problem_not_a_retry():
     assert _classify(exc, BYOK)[0] == "provider_out_of_credit"
 
 
+def test_a_request_quota_reported_as_429_is_a_retry_not_a_credit_problem():
+    exc = _http(429, "Rate limit quota exceeded, retry in 30s")
+    for connection in (BYOK, GATEWAY):
+        assert _classify(exc, connection)[0] == "provider_rate_limited"
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [(400, "API key not valid. Please pass a valid API key."), (403, "Invalid API key")],
+)
+def test_a_rejected_key_answered_with_400_or_403_is_still_a_key_problem(status, message):
+    assert _classify(_http(status, message), BYOK) == (
+        "provider_auth_failed",
+        "Your API key was rejected by the provider.",
+    )
+    assert _classify(_http(status, message), GATEWAY)[0] == "provider_session_expired"
+
+
+def test_a_server_error_that_mentions_authentication_is_not_a_key_problem():
+    assert classify_provider_error(_http(500, "authentication service returned an error")) is None
+
+
 def test_the_model_name_falls_back_to_the_callers_when_the_exception_has_none():
     error = classify_provider_error(Exception("model_not_found"), connection=GATEWAY, model="picked/model")
     assert error is not None
