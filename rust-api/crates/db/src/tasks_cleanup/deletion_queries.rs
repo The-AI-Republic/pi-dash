@@ -760,35 +760,58 @@ pub async fn fetch_row(
     }
 }
 
-/// Fetch one LIVE related row for a reverse one-to-one (`getattr` through
-/// the scoped default manager: soft-deleted rows read as missing).
-pub async fn fetch_live_one_to_one(
+/// Render the reverse one-to-one SELECT (split from
+/// [`fetch_one_to_one`] so the unscoped shape is unit-pinned, like
+/// [`live_to_many_select`]).
+/// The catalog form of the reverse-O2O `getattr`
+/// (`deletion_task.py:54,68`): Django's `ReverseOneToOneDescriptor`
+/// reads through the child `_base_manager`
+/// (`related_descriptors.py:427`), which is the plain unscoped
+/// `Manager` on every model here (no `Meta.base_manager_name`
+/// anywhere) — so there is deliberately NO `deleted_at IS NULL`
+/// guard. `deleted_at` is still selected when the table has it: the
+/// services CASCADE branch needs it for the `if not deleted_at` skip
+/// (`:70-71`), while the SET_NULL branch nulls whatever is found
+/// (`:54-57`, no `deleted_at` check).
+fn one_to_one_select(
+    relation: &ReverseRelation,
+    parent_pk: &RowPk,
+    select_deleted_at: bool,
+) -> String {
+    let mut stmt = Query::select();
+    stmt.expr_as(
+        Expr::col(Alias::new(relation.child_pk.clone())),
+        Alias::new("pk".to_owned()),
+    )
+    .from(Alias::new(relation.child_table.clone()))
+    .and_where(Expr::col(Alias::new(relation.fk_column.clone())).eq(parent_pk.as_query_value()));
+    if select_deleted_at {
+        stmt.expr(Expr::col(Alias::new(DELETED_AT.to_owned())));
+    }
+    stmt.limit(1);
+    stmt.to_string(PostgresQueryBuilder)
+}
+
+/// Fetch the related row behind a reverse one-to-one: the catalog form
+/// of the descriptor `getattr` — unscoped, like `_base_manager`
+/// (soft-deleted rows are found, not missing). Branching on
+/// `deleted_at` is the services walk's job (SET_NULL nulls
+/// unconditionally; CASCADE skips stamped rows), exactly like the
+/// Python branches.
+pub async fn fetch_one_to_one(
     pool: &PgPool,
     schema: &SchemaInfo,
     relation: &ReverseRelation,
     parent_pk: &RowPk,
 ) -> Result<Option<RowState>, sqlx::Error> {
-    // Built in a block: the builder owns non-`Send` `SeaRc` handles,
-    // so it must drop before the `.await` below (a builder local alive
-    // at an await point would poison the walk future's `Send` bound at
-    // the jobs handler).
-    let select = {
-        let mut stmt = Query::select();
-        stmt.expr_as(
-            Expr::col(Alias::new(relation.child_pk.clone())),
-            Alias::new("pk".to_owned()),
-        )
-        .from(Alias::new(relation.child_table.clone()))
-        .and_where(
-            Expr::col(Alias::new(relation.fk_column.clone())).eq(parent_pk.as_query_value()),
-        );
-        if schema.has_deleted_at(&relation.child_table) {
-            stmt.expr(Expr::col(Alias::new(DELETED_AT.to_owned())))
-                .and_where(Expr::col(Alias::new(DELETED_AT.to_owned())).is_null());
-        }
-        stmt.limit(1);
-        stmt.to_string(PostgresQueryBuilder)
-    };
+    // The builder lives and drops inside the pure call above (no
+    // await inside), so no non-`Send` `SeaRc` handle is alive at the
+    // `.await` below and the walk future stays `Send`.
+    let select = one_to_one_select(
+        relation,
+        parent_pk,
+        schema.has_deleted_at(&relation.child_table),
+    );
     let row = sqlx::query(&select).fetch_optional(pool).await?;
     match row {
         None => Ok(None),
@@ -1243,6 +1266,44 @@ mod tests {
         assert_eq!(
             live_to_many_select("project_identifiers", "id", "workspace_id", &pk),
             "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"project_identifiers\" WHERE \"workspace_id\" = 7 AND \"deleted_at\" IS NULL ORDER BY \"id\" ASC"
+        );
+    }
+
+    #[test]
+    fn one_to_one_select_is_unscoped_base_manager_read() {
+        // PIDASHCONV-936: the reverse-O2O `getattr`
+        // (`deletion_task.py:54,68`) reads through the child
+        // `_base_manager` (`related_descriptors.py:427`), the plain
+        // unscoped `Manager` on all 153 models — so the SELECT
+        // carries no `deleted_at IS NULL` guard: soft-deleted
+        // children are found. `deleted_at` is still selected when
+        // present: the services CASCADE branch skips on it
+        // (`:70-71`), while SET_NULL nulls unconditionally (`:54-57`).
+        let parent = uuid("12345678-1234-1234-1234-1234567890ab");
+        let relation = ReverseRelation {
+            child_table: "project_identifiers".to_owned(),
+            fk_column: "project_id".to_owned(),
+            child_pk: "id".to_owned(),
+            delete_rule: "NO ACTION".to_owned(),
+            one_to_one: true,
+        };
+        let unscoped_shape = one_to_one_select(&relation, &RowPk::Uuid(parent), true);
+        assert_eq!(
+            unscoped_shape,
+            "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"project_identifiers\" WHERE \"project_id\" = '12345678-1234-1234-1234-1234567890ab' LIMIT 1"
+        );
+        assert!(
+            !unscoped_shape.contains("IS NULL"),
+            "O2O read must be unscoped: {unscoped_shape}"
+        );
+        assert_eq!(
+            one_to_one_select(&relation, &RowPk::Uuid(parent), false),
+            "SELECT \"id\" AS \"pk\" FROM \"project_identifiers\" WHERE \"project_id\" = '12345678-1234-1234-1234-1234567890ab' LIMIT 1"
+        );
+        // Int parents render bare (O2O children decode either way).
+        assert_eq!(
+            one_to_one_select(&relation, &RowPk::Int(7), true),
+            "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"project_identifiers\" WHERE \"project_id\" = 7 LIMIT 1"
         );
     }
 
