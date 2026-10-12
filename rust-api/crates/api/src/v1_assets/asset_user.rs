@@ -294,6 +294,9 @@ pub async fn authenticate(
         }
     };
     let timezone = load_timezone_name(pool, &id).await?;
+    // The token loggers stamp this id on the `process_logs` payload
+    // (Django reads `request.user` post-view; PIDASHCONV-937).
+    crate::middleware::publish_logger_user_id(&id.to_string());
     Ok(Actor { id, timezone })
 }
 

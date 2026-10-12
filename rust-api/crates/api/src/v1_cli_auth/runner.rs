@@ -235,6 +235,9 @@ async fn authenticate_api(pool: &PgPool, presented: &str) -> Result<Caller, Resp
         .execute(pool)
         .await
         .map_err(|_| server_error())?;
+    // The token loggers stamp this id on the `process_logs` payload
+    // (Django reads `request.user` post-view; PIDASHCONV-937).
+    crate::middleware::publish_logger_user_id(&user_id.to_string());
     Ok(Caller { user_id })
 }
 
@@ -310,6 +313,9 @@ async fn authenticate_machine(
         .execute(pool)
         .await
         .map_err(|_| server_error())?;
+    // The token loggers stamp this id on the `process_logs` payload
+    // (Django reads `request.user` post-view; PIDASHCONV-937).
+    crate::middleware::publish_logger_user_id(&user_id.to_string());
     Ok(Caller { user_id })
 }
 

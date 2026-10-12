@@ -462,6 +462,9 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
             .execute(pool)
             .await;
     }
+    // The token loggers stamp this id on the `process_logs` payload
+    // (Django reads `request.user` post-view; PIDASHCONV-937).
+    crate::middleware::publish_logger_user_id(&user_id.to_string());
     Ok(Actor {
         id: user_id,
         timezone,
