@@ -8,8 +8,28 @@ use pidash_db::Pools;
 use pidash_services::extensions::{CloudAgentToolsetsSeam, NoExtraToolsets};
 use pidash_services::user_settings::{base_settings_schema, SettingsSchema};
 
+use crate::desktop_gate::CeDesktopRequestGate;
+use crate::desktop_gate::DesktopCredential;
+use crate::desktop_gate::DesktopRequestGate;
 use crate::edge::{EdgeHandle, DEFAULT_UPSTREAM};
 use crate::edge_shadow::{ShadowConfig, ShadowGate};
+
+/// The CE desktop-session gate: the `pidash_client == "desktop"`
+/// session-key check. Served when the overlay installed no gate.
+static CE_DESKTOP_GATE: CeDesktopRequestGate = CeDesktopRequestGate;
+
+/// An installed desktop-session gate (PIDASHCONV-917). The overlay binary
+/// installs its OIDC-`client`-claim gate; OSS serves with the CE default
+/// (`None` on the state). Opaque under `Debug` — a trait object has no
+/// useful rendering; `Clone` shares the gate.
+#[derive(Clone)]
+pub struct DesktopGateHandle(Arc<dyn DesktopRequestGate>);
+
+impl std::fmt::Debug for DesktopGateHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DesktopGateHandle(..)")
+    }
+}
 
 /// Data every handler can read. Extended by later issues (session keys
 /// under F-05); handlers take it by extractor, never globals.
@@ -30,6 +50,7 @@ pub struct AppState {
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn pidash_services::extensions::AssistantModelSeam>,
     user_settings_schema: Arc<SettingsSchema>,
+    desktop_gate: Option<DesktopGateHandle>,
 }
 
 impl AppState {
@@ -79,6 +100,7 @@ impl AppState {
             toolsets: Arc::new(NoExtraToolsets),
             assistant_seam,
             user_settings_schema: Arc::new(base_settings_schema()),
+            desktop_gate: None,
         }
     }
 
@@ -109,7 +131,9 @@ impl AppState {
 
     /// Clone this state with a different edge handle. The shadow state
     /// drops the gate and the config override: shadow dispatch never
-    /// spawns nested shadow work.
+    /// spawns nested shadow work. The desktop gate is request-independent
+    /// config, so unlike the shadow gate it travels with the clone: the
+    /// shadow side must answer the same desktop verdict.
     pub fn with_edge_replaced(&self, edge: EdgeHandle) -> Self {
         Self {
             version: self.version.clone(),
@@ -122,6 +146,7 @@ impl AppState {
             toolsets: self.toolsets.clone(),
             assistant_seam: self.assistant_seam.clone(),
             user_settings_schema: self.user_settings_schema.clone(),
+            desktop_gate: self.desktop_gate.clone(),
         }
     }
 
@@ -139,6 +164,37 @@ impl AppState {
     /// The assistant model-provider seam every non-turn caller consults.
     pub fn assistant_seam(&self) -> &Arc<dyn pidash_services::extensions::AssistantModelSeam> {
         &self.assistant_seam
+    }
+
+    /// Install the overlay's desktop-session gate (PIDASHCONV-917).
+    /// Installed once by the overlay binary, whose gate answers from the
+    /// verified client claim; OSS serves with the CE default (`None`).
+    pub fn with_desktop_gate(mut self, gate: impl DesktopRequestGate + 'static) -> Self {
+        self.desktop_gate = Some(DesktopGateHandle(Arc::new(gate)));
+        self
+    }
+
+    /// The installed desktop-session gate, or the CE session-key gate
+    /// when the overlay installed none. Both desktop-only endpoint
+    /// families consult this (never the CE check directly), so the
+    /// private overlay substitutes its OIDC-claim gate without touching
+    /// the callers.
+    pub fn desktop_gate(&self) -> &dyn DesktopRequestGate {
+        match &self.desktop_gate {
+            Some(handle) => &*handle.0,
+            None => &CE_DESKTOP_GATE,
+        }
+    }
+
+    /// The desktop verdict for one request, through the admission closure
+    /// form (`IsDesktopSession.has_permission`: the authentication fold,
+    /// then the EE seam verdict). `authenticated` is hard `true`:
+    /// authentication is decided by the actor resolution that follows in
+    /// each caller (DRF checks authentication before permissions, so anon
+    /// still 401s), keeping this predicate purely the desktop check.
+    pub fn is_desktop_request(&self, credential: &DesktopCredential) -> bool {
+        let gate = self.desktop_gate();
+        pidash_services::dispatch::is_desktop_session(true, || gate.is_desktop(credential))
     }
 
     /// Attach the F-04 pools. `None` until the binary connects, so unit
@@ -256,5 +312,57 @@ mod tests {
             state.user_settings_schema()["openhub"]["apps_enabled"],
             serde_json::json!(false)
         );
+    }
+
+    /// An overlay-shaped gate: answers from the presented credential
+    /// (like the cloud client-claim check) instead of the CE session
+    /// dict.
+    struct TokenDesktopGate;
+
+    impl DesktopRequestGate for TokenDesktopGate {
+        fn is_desktop(&self, credential: &DesktopCredential) -> bool {
+            matches!(
+                credential.authorization,
+                Some(header) if header == "Bearer desktop-token"
+            )
+        }
+    }
+
+    fn credential<'a>(
+        session: Option<&'a serde_json::Value>,
+        authorization: Option<&'a str>,
+    ) -> DesktopCredential<'a> {
+        DesktopCredential {
+            session,
+            authorization,
+            cookie: None,
+        }
+    }
+
+    #[test]
+    fn desktop_gate_defaults_to_the_ce_check() {
+        let state = AppState::new("test");
+        let desktop = serde_json::json!({"pidash_client": "desktop"});
+        assert!(state.is_desktop_request(&credential(Some(&desktop), None)));
+        let browser = serde_json::json!({"pidash_client": "browser"});
+        assert!(!state.is_desktop_request(&credential(Some(&browser), None)));
+        assert!(!state.is_desktop_request(&credential(None, None)));
+    }
+
+    #[test]
+    fn installed_gate_replaces_the_default() {
+        let state = AppState::new("test").with_desktop_gate(TokenDesktopGate);
+        assert!(state.is_desktop_request(&credential(None, Some("Bearer desktop-token"))));
+        let desktop = serde_json::json!({"pidash_client": "desktop"});
+        assert!(!state.is_desktop_request(&credential(Some(&desktop), None)));
+    }
+
+    #[test]
+    fn edge_replacement_keeps_the_gate() {
+        let state = AppState::new("test").with_desktop_gate(TokenDesktopGate);
+        let replaced = state.with_edge_replaced(EdgeHandle::for_tests("http://127.0.0.1:1"));
+        assert!(replaced.is_desktop_request(&credential(None, Some("Bearer desktop-token"))));
+        let desktop = serde_json::json!({"pidash_client": "desktop"});
+        assert!(!replaced.is_desktop_request(&credential(Some(&desktop), None)));
     }
 }

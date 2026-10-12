@@ -432,7 +432,10 @@ impl RequestSession {
             .cloned()
     }
 
-    fn to_json(&self) -> serde_json::Value {
+    /// The full session dict as JSON. The save path serializes this;
+    /// the desktop gate reads its marker from a snapshot's copy (marking
+    /// nothing — the snapshot is already detached from the live session).
+    pub fn to_json(&self) -> serde_json::Value {
         serde_json::Value::Object(
             self.data
                 .iter()

@@ -29,8 +29,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use serde_json::Value;
 
+use crate::desktop_gate::header_value;
+use crate::desktop_gate::DesktopCredential;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -80,18 +81,6 @@ pub const DESKTOP_CLIENT: &str = "desktop";
 /// exception handler echoes it), so the wire body is the dict itself.
 pub const DESKTOP_DENIED_BODY: &str = "{\"error\":\"desktop_session_required\",\"detail\":\"This endpoint is available to the Pi Dash desktop app.\"}";
 
-/// `request_is_desktop` (`ee/authentication/desktop.py:27-37`): the
-/// session holds the desktop marker. A missing/unreadable session is not
-/// a desktop (the `except` in Python returns `False`).
-pub fn is_desktop_session(session: Option<&Value>) -> bool {
-    matches!(
-        session
-            .and_then(|data| data.get(DESKTOP_SESSION_KEY))
-            .and_then(Value::as_str),
-        Some(DESKTOP_CLIENT)
-    )
-}
-
 /// The desktop-only denial: 403 with the exact `IsDesktopSession`
 /// message body.
 fn desktop_denied() -> Response {
@@ -127,10 +116,11 @@ pub fn classify_credential_error(name: &str) -> (&'static str, StatusCode) {
 async fn get_profile(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
-    // Borrow the session marker before `extension` moves into auth
+    // Borrow the desktop credential before `extension` moves into auth
     // (DRF runs authentication before permissions, so anon still 401s).
-    let desktop = is_desktop_from_extension(&extension);
+    let desktop = is_desktop_from_extension(&extension, &headers, &state);
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
@@ -186,8 +176,9 @@ async fn get_profile(
 async fn post_token(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
-    let desktop = is_desktop_from_extension(&extension);
+    let desktop = is_desktop_from_extension(&extension, &headers, &state);
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
@@ -247,22 +238,25 @@ async fn post_token(
     }
 }
 
-/// Whether the request's session carries the CE desktop marker. The
-/// marker lives in the Django session row
-/// (`ee/authentication/desktop.py`), which the session layer exposes
-/// through the request snapshot; a missing snapshot is not a desktop.
-pub fn is_desktop_from_extension(extension: &Option<axum::Extension<SessionHandle>>) -> bool {
-    let data = extension.as_ref().map(|handle| handle.snapshot());
-    // `RequestSession::get` takes `&mut self` (Django-session API), so
-    // work on the owned snapshot.
-    let mut data = data.unwrap_or_else(crate::middleware::RequestSession::empty);
-    // Compare the marker value itself: `is_desktop_session` takes the
-    // whole session dict, so handing it one extracted value double-indexes
-    // and is never a desktop (every desktop caller 403s).
-    matches!(
-        data.get(DESKTOP_SESSION_KEY).and_then(Value::as_str),
-        Some(DESKTOP_CLIENT)
-    )
+/// Whether the request passes the installed desktop gate: the caller
+/// extracts the session dict plus the raw auth headers into a
+/// [`DesktopCredential`] and the state's gate decides
+/// ([`AppState::is_desktop_request`]). The CE gate reads only the
+/// session marker (a missing snapshot is not a desktop); the overlay's
+/// gate reads only the headers, so it answers even without a session —
+/// exactly its Python source's shape.
+pub fn is_desktop_from_extension(
+    extension: &Option<axum::Extension<SessionHandle>>,
+    headers: &axum::http::HeaderMap,
+    state: &AppState,
+) -> bool {
+    let session = extension.as_ref().map(|handle| handle.snapshot().to_json());
+    let credential = DesktopCredential {
+        session: session.as_ref(),
+        authorization: header_value(headers, axum::http::header::AUTHORIZATION),
+        cookie: header_value(headers, axum::http::header::COOKIE),
+    };
+    state.is_desktop_request(&credential)
 }
 
 /// `get_config(user)` reduced to its key bit
@@ -303,17 +297,85 @@ impl IfEmpty for String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::desktop_gate::DesktopRequestGate;
+    use serde_json::Value;
+
+    /// An overlay-shaped gate: answers from the presented credential
+    /// (like the cloud client-claim check) instead of the CE session
+    /// dict — including with no session at all.
+    struct TokenDesktopGate;
+
+    impl DesktopRequestGate for TokenDesktopGate {
+        fn is_desktop(&self, credential: &DesktopCredential) -> bool {
+            matches!(
+                credential.authorization,
+                Some(header) if header == "Bearer desktop-token"
+            )
+        }
+    }
+
+    fn extension_with(value: &str) -> Option<axum::Extension<SessionHandle>> {
+        let mut session = crate::middleware::RequestSession::empty();
+        session.set(DESKTOP_SESSION_KEY.to_owned(), serde_json::json!(value));
+        Some(axum::Extension(crate::middleware::SessionHandle::new(
+            session,
+        )))
+    }
+
+    fn headers_with(authorization: Option<&str>) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(value) = authorization {
+            headers.insert(
+                axum::http::header::AUTHORIZATION,
+                axum::http::HeaderValue::from_str(value).expect("header value"),
+            );
+        }
+        headers
+    }
 
     #[test]
-    fn desktop_marker_matches_the_ce_seam() {
-        assert!(is_desktop_session(Some(&serde_json::json!({
-            "pidash_client": "desktop",
-        }))));
-        assert!(!is_desktop_session(Some(&serde_json::json!({
-            "pidash_client": "browser",
-        }))));
-        assert!(!is_desktop_session(Some(&serde_json::json!({}))));
-        assert!(!is_desktop_session(None));
+    fn default_state_keeps_the_ce_session_check() {
+        let state = AppState::new("test");
+        let headers = headers_with(None);
+        let desktop = extension_with("desktop");
+        assert!(is_desktop_from_extension(&desktop, &headers, &state));
+        let browser = extension_with("browser");
+        assert!(!is_desktop_from_extension(&browser, &headers, &state));
+        let empty = Some(axum::Extension(crate::middleware::SessionHandle::new(
+            crate::middleware::RequestSession::empty(),
+        )));
+        assert!(!is_desktop_from_extension(&empty, &headers, &state));
+        // A missing snapshot is not a desktop.
+        assert!(!is_desktop_from_extension(&None, &headers, &state));
+        // Auth headers never sway the CE verdict.
+        let bearer = headers_with(Some("Bearer desktop-token"));
+        assert!(!is_desktop_from_extension(&None, &bearer, &state));
+        assert!(is_desktop_from_extension(&desktop, &bearer, &state));
+    }
+
+    #[test]
+    fn installed_token_gate_flows_through_the_guard() {
+        let state = AppState::new("test").with_desktop_gate(TokenDesktopGate);
+        // The overlay shape: a credential with no session passes, and a
+        // CE desktop session without one does not.
+        let bearer = headers_with(Some("Bearer desktop-token"));
+        assert!(is_desktop_from_extension(&None, &bearer, &state));
+        let desktop = extension_with("desktop");
+        assert!(!is_desktop_from_extension(
+            &desktop,
+            &headers_with(None),
+            &state
+        ));
+        assert!(!is_desktop_from_extension(
+            &None,
+            &headers_with(Some("Bearer browser-token")),
+            &state
+        ));
+        assert!(!is_desktop_from_extension(
+            &None,
+            &headers_with(None),
+            &state
+        ));
     }
 
     #[test]
@@ -342,14 +404,24 @@ mod tests {
             }
             Some(axum::Extension(SessionHandle::new(session)))
         }
-        assert!(is_desktop_from_extension(&with_marker(Some(
-            Value::String(DESKTOP_CLIENT.to_owned())
-        ))));
-        assert!(!is_desktop_from_extension(&with_marker(Some(
-            Value::String("browser".to_owned())
-        ))));
-        assert!(!is_desktop_from_extension(&with_marker(None)));
-        assert!(!is_desktop_from_extension(&None));
+        let state = AppState::new("test");
+        let headers = headers_with(None);
+        assert!(is_desktop_from_extension(
+            &with_marker(Some(Value::String(DESKTOP_CLIENT.to_owned()))),
+            &headers,
+            &state
+        ));
+        assert!(!is_desktop_from_extension(
+            &with_marker(Some(Value::String("browser".to_owned()))),
+            &headers,
+            &state
+        ));
+        assert!(!is_desktop_from_extension(
+            &with_marker(None),
+            &headers,
+            &state
+        ));
+        assert!(!is_desktop_from_extension(&None, &headers, &state));
     }
 
     #[test]
@@ -376,6 +448,7 @@ mod live_tests {
         AgentModelProfile, AssistantModelSeam, CredentialUnavailable, SeamFuture, TitleError,
         TitleRequest,
     };
+    use serde_json::Value;
 
     /// Overlay-shaped seam: the gateway lane CE never has.
     #[derive(Debug)]
@@ -535,7 +608,10 @@ mod live_tests {
         let pool = state.pools().expect("pools").primary().clone();
         let user_id = seed_user(&pool).await;
         let extension = desktop_session(user_id, &secret);
-        let (status, body) = body_json(get_profile(State(state), Some(extension)).await).await;
+        let (status, body) = body_json(
+            get_profile(State(state), Some(extension), axum::http::HeaderMap::new()).await,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["lane"], "openhub");
         assert_eq!(body["base_url"], "https://gateway.example.com");
@@ -555,7 +631,10 @@ mod live_tests {
         let pool = state.pools().expect("pools").primary().clone();
         let user_id = seed_user(&pool).await;
         let extension = desktop_session(user_id, &secret);
-        let (status, body) = body_json(get_profile(State(state), Some(extension)).await).await;
+        let (status, body) = body_json(
+            get_profile(State(state), Some(extension), axum::http::HeaderMap::new()).await,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["lane"], "");
         assert_eq!(body["available"], false);
@@ -571,7 +650,10 @@ mod live_tests {
         let pool = state.pools().expect("pools").primary().clone();
         let user_id = seed_user(&pool).await;
         let extension = desktop_session(user_id, &secret);
-        let (status, body) = body_json(post_token(State(state), Some(extension)).await).await;
+        let (status, body) = body_json(
+            post_token(State(state), Some(extension), axum::http::HeaderMap::new()).await,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["token"], "gateway-token");
         assert_eq!(body["expires_at"], "2030-01-01T00:00:00Z");
@@ -586,7 +668,10 @@ mod live_tests {
         let pool = state.pools().expect("pools").primary().clone();
         let user_id = seed_user(&pool).await;
         let extension = desktop_session(user_id, &secret);
-        let (status, body) = body_json(post_token(State(state), Some(extension)).await).await;
+        let (status, body) = body_json(
+            post_token(State(state), Some(extension), axum::http::HeaderMap::new()).await,
+        )
+        .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["error"], "byok_not_supported_on_desktop");
         assert_eq!(
