@@ -19,6 +19,7 @@ import {
   pagesLiveOracleBase,
   profileActivityExportCsv,
   serverPageRecord,
+  serverPublishBoardFacts,
   type AuthedSession,
 } from "./api";
 
@@ -414,6 +415,72 @@ describe("exportsFindRecord", () => {
   it("returns null when the record is absent and pages end", async () => {
     payload = historyPage([exportRecord("other-1")]);
     await expect(exportsFindRecord(exportsSession(), "exp-ws", "missing-7")).resolves.toBeNull();
+  });
+});
+
+// Publish-board reads (NEWFRONT-390, PSET-016): the deploy-boards endpoint
+// reports null/404 when nothing is published, so the helper maps every
+// absent shape to null and only maps records carrying a string id.
+describe("serverPublishBoardFacts", () => {
+  it("returns null on 404 (never published or unpublished again)", async () => {
+    stubStatus = 404;
+    await expect(serverPublishBoardFacts("ws", "project-1", "session=x", apiBase)).resolves.toBeNull();
+  });
+
+  it("throws on a non-404 error response", async () => {
+    stubStatus = 500;
+    await expect(serverPublishBoardFacts("ws", "project-1", "session=x", apiBase)).rejects.toThrow(
+      "[parity] publish-board read failed with HTTP 500."
+    );
+  });
+
+  it("returns null on an empty body", async () => {
+    stubRaw = "";
+    await expect(serverPublishBoardFacts("ws", "project-1", "session=x", apiBase)).resolves.toBeNull();
+  });
+
+  it("returns null on a JSON null body", async () => {
+    stubRaw = "null";
+    await expect(serverPublishBoardFacts("ws", "project-1", "session=x", apiBase)).resolves.toBeNull();
+  });
+
+  it("returns null when the record carries no string id", async () => {
+    payload = { anchor: "abc" };
+    await expect(serverPublishBoardFacts("ws", "project-1", "session=x", apiBase)).resolves.toBeNull();
+  });
+
+  it("maps a full published record through", async () => {
+    payload = {
+      id: "board-1",
+      anchor: "live-anchor",
+      is_comments_enabled: true,
+      is_reactions_enabled: false,
+      is_votes_enabled: true,
+      view_props: { layout: "kanban" },
+    };
+    const facts = await serverPublishBoardFacts("ws", "project-1", "session=x", apiBase);
+    expect(facts?.id).toBe("board-1");
+    expect(facts?.anchor).toBe("live-anchor");
+    expect(facts?.is_comments_enabled).toBe(true);
+    expect(facts?.is_reactions_enabled).toBe(false);
+    expect(facts?.is_votes_enabled).toBe(true);
+    expect(facts?.view_props).toEqual({ layout: "kanban" });
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/ws/projects/project-1/project-deploy-boards/");
+  });
+
+  it("defaults a missing anchor, non-true flags and non-object view props", async () => {
+    payload = {
+      id: "board-2",
+      is_comments_enabled: 1,
+      is_reactions_enabled: "true",
+      view_props: "kanban",
+    };
+    const facts = await serverPublishBoardFacts("ws", "project-1", "session=x", apiBase);
+    expect(facts?.anchor).toBeNull();
+    expect(facts?.is_comments_enabled).toBe(false);
+    expect(facts?.is_reactions_enabled).toBe(false);
+    expect(facts?.is_votes_enabled).toBe(false);
+    expect(facts?.view_props).toEqual({});
   });
 });
 
