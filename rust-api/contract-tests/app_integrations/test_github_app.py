@@ -126,7 +126,7 @@ def test_install_start_member_denied(member_client, world):
     assert response.json() == {"error": "You must be a workspace admin to install the GitHub App"}
 
 
-def test_install_start_admin_creates_session(admin, world):
+def test_install_start_admin_creates_session(admin, world, db, susers):
     response = admin.post(
         "/api/users/me/integrations/github/app/install/",
         json={"workspace_slug": world["workspace"]["slug"]},
@@ -137,6 +137,15 @@ def test_install_start_admin_creates_session(admin, world):
     datetime.fromisoformat(body["expires_at"])
     assert body["install_url"].startswith(f"https://github.com/apps/{APP_SLUG}/installations/new?")
     assert f"state={body['state']}" in body["install_url"]
+    # NOTE (ported behavior, PIDASHCONV-932): the model create stamps
+    # created_by with the request actor and leaves updated_by NULL
+    # (BaseModel.save on the adding path).
+    row = db.fetchone(
+        "SELECT created_by_id, updated_by_id FROM github_app_install_sessions WHERE state = %s",
+        (body["state"],),
+    )
+    assert str(row["created_by_id"]) == susers["tadmin"]["id"]
+    assert row["updated_by_id"] is None
 
 
 def test_refresh_missing_slug(admin):

@@ -737,12 +737,16 @@ async fn install_start(
         );
     }
     let session_state = install_state();
+    // `GithubAppInstallSession.objects.create(...)` (`github.py:681`):
+    // `BaseModel.save` stamps `created_by` with the request user and
+    // leaves `updated_by` NULL on create (`db/models/base.py:36-39`).
     let row = sqlx::query(
-        r#"INSERT INTO "github_app_install_sessions" ("id", "created_at", "updated_at", "state", "workspace_id", "actor_id", "installation_id", "account_login", "status", "expires_at", "completed_at", "error") VALUES ($1, now(), now(), $2, $3, $4, NULL, '', 'started', now() + interval '15 minutes', NULL, '') RETURNING "state", "expires_at""#,
+        r#"INSERT INTO "github_app_install_sessions" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id", "state", "workspace_id", "actor_id", "installation_id", "account_login", "status", "expires_at", "completed_at", "error") VALUES ($1, now(), now(), $5, NULL, $2, $3, $4, NULL, '', 'started', now() + interval '15 minutes', NULL, '') RETURNING "state", "expires_at""#,
     )
     .bind(Uuid::new_v4())
     .bind(&session_state)
     .bind(workspace.id)
+    .bind(user.id)
     .bind(user.id)
     .fetch_one(pool)
     .await;
