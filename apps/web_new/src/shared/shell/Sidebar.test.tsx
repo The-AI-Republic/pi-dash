@@ -76,4 +76,22 @@ describe("Sidebar", () => {
     );
     expect(screen.getByText("No projects yet.")).toBeInTheDocument();
   });
+
+  it("mounts the navigation landmark under the stable sidebar id", () => {
+    const { container } = render(
+      <Sidebar
+        workspaces={WORKSPACES}
+        activeSlug="acme"
+        onSelectWorkspace={() => undefined}
+        projects={[]}
+        activeProjectId={null}
+        onSelectProject={() => undefined}
+        userLabel="ada@example.com"
+        onSignOut={() => undefined}
+      />
+    );
+    const landmark = screen.getByRole("complementary", { name: "Workspace navigation" });
+    // The parity drivers and the shell contract locate the sidebar by this id.
+    expect(container.querySelector("#main-sidebar")).toBe(landmark);
+  });
 });
