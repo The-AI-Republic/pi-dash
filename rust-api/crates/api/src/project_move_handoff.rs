@@ -13,6 +13,8 @@
 //! [`complete_project_move_handoff`] is the one callable entry.
 //! [`drain_one_publish`] is shared with teardown's revoke fire plan.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -28,11 +30,10 @@ use pidash_jobs::dispatch::{
     ProjectScope,
 };
 use pidash_services::assistant::seams as assistant_seams;
-use pidash_services::dispatch::tools as dispatch_tools;
 use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile, UserFlags as SvcUserFlags,
 };
-use pidash_services::extensions::{CloudAgentToolsetsSeam, NoExtraToolsets};
+use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::orchestration::creation::{
     self as creation_kernel, active_run_sql, latest_prior_run_sql, run_insert_returning_sql,
     run_lock_sql, run_select_sql, user_id_for_run, ASSIGNED_POD_SELECT_SQL,
@@ -203,6 +204,7 @@ pub(crate) struct HandoffStore<'t, 'p> {
     managed: ManagedRunnerSettings,
     cache: RedisAdmissionCache,
     now_unix_secs: i64,
+    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     dispatches: Vec<Uuid>,
     deferred: Vec<DeferredConsume>,
     terminal_effects: Vec<Uuid>,
@@ -217,6 +219,7 @@ impl<'t, 'p> HandoffStore<'t, 'p> {
         managed: ManagedRunnerSettings,
         cache: RedisAdmissionCache,
         now_unix_secs: i64,
+        toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     ) -> Self {
         Self {
             tx,
@@ -225,6 +228,7 @@ impl<'t, 'p> HandoffStore<'t, 'p> {
             managed,
             cache,
             now_unix_secs,
+            toolsets,
             dispatches: Vec::new(),
             deferred: Vec::new(),
             terminal_effects: Vec::new(),
@@ -594,6 +598,7 @@ impl CreationSeam for HandoffStore<'_, '_> {
             cloud,
             managed,
             now_unix_secs,
+            toolsets,
             deferred,
             ..
         } = self;
@@ -620,7 +625,7 @@ impl CreationSeam for HandoffStore<'_, '_> {
             &mut collect,
             ExecutionSeams {
                 has_usable_llm_config: move || has_llm,
-                extra_toolsets_enabled: move || dispatch_tools::extra_toolsets_enabled_for(),
+                toolsets: toolsets.clone(),
                 llm_profile: move || profile,
             },
         )
@@ -684,7 +689,7 @@ impl CreationSeam for HandoffStore<'_, '_> {
     }
 
     fn extra_toolsets_schema_tool(&self) -> String {
-        NoExtraToolsets.schema_tool_name().to_owned()
+        self.toolsets.schema_tool_name().to_owned()
     }
 }
 
@@ -1383,7 +1388,15 @@ pub(crate) async fn complete_project_move_handoff(
         client: redis_client(state),
     };
     let tx = DbTransaction::begin(pool).await.map_err(|_| ())?;
-    let mut store = HandoffStore::new(tx, pool, cloud.clone(), managed, cache, unix_now_secs());
+    let mut store = HandoffStore::new(
+        tx,
+        pool,
+        cloud.clone(),
+        managed,
+        cache,
+        unix_now_secs(),
+        state.toolsets().clone(),
+    );
     let outcome = creation_kernel::complete_project_move_handoff(&mut store, run_id, now_micros())
         .await
         .map_err(|_| ())?;
@@ -1502,5 +1515,50 @@ mod tests {
             .expect("insert orphan run");
         let outcome = complete_project_move_handoff(&pool, &state, orphan).await;
         assert_eq!(outcome, Ok(None));
+    }
+
+    /// A replacement seam naming its schema tool: the twin answers the
+    /// installed name, not the CE default.
+    #[derive(Debug)]
+    struct AcmeToolsets;
+
+    impl CloudAgentToolsetsSeam for AcmeToolsets {
+        fn schema_tool_name(&self) -> &'static str {
+            "acme_get_tool_schema"
+        }
+    }
+
+    #[tokio::test]
+    async fn live_twin_schema_tool_name_flows_from_installed_seam() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let state = AppState::with_edge("0.1.0", EdgeHandle::for_tests("http://127.0.0.1:1"))
+            .with_toolsets(Arc::new(AcmeToolsets));
+        let settings = state.settings();
+        let tx = DbTransaction::begin(&pool).await.expect("begin");
+        let store = HandoffStore::new(
+            tx,
+            &pool,
+            settings.cloud_agent.clone(),
+            settings.managed_runner.clone(),
+            RedisAdmissionCache {
+                client: redis_client(&state),
+            },
+            unix_now_secs(),
+            state.toolsets().clone(),
+        );
+        assert_eq!(
+            store.extra_toolsets_schema_tool(),
+            "acme_get_tool_schema".to_owned()
+        );
+        let (tx, _, _, _, _) = store.into_parts();
+        tx.rollback().await.expect("rollback");
     }
 }

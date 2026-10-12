@@ -17,6 +17,7 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::Value;
@@ -37,6 +38,7 @@ use crate::runner_runs::sweeps_runs::{
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings, Settings};
 use pidash_db::orchestration::workpad::get_agent_system_user;
 use pidash_db::runner_sessions::outbox::{self as session_outbox, OutboxError};
+use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::runner_sessions::live_drains::{
     drain_for_runner_by_id, drain_pod_by_id, PoolPubsubStore,
 };
@@ -53,20 +55,28 @@ pub struct RunnerSeams {
     runner: RunnerSettings,
     cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
+    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
 }
 
 impl RunnerSeams {
     /// Build the providers from the worker pool, the shared Redis
     /// client (the `LivePorts::new` shape — `None` when `REDIS_URL`
-    /// is unset or unparsable) and the resolved [`Settings`]. No
-    /// I/O: everything is stored for the per-call effects.
-    pub fn new(pool: PgPool, redis: Option<redis::Client>, settings: &Settings) -> Self {
+    /// is unset or unparsable), the resolved [`Settings`], and the
+    /// injected cloud-agent toolsets seam. No I/O: everything is
+    /// stored for the per-call effects.
+    pub fn new(
+        pool: PgPool,
+        redis: Option<redis::Client>,
+        settings: &Settings,
+        toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    ) -> Self {
         Self {
             pool,
             redis,
             runner: settings.runner.clone(),
             cloud: settings.cloud_agent.clone(),
             managed: settings.managed_runner.clone(),
+            toolsets,
         }
     }
 }
@@ -143,10 +153,16 @@ impl RunnerRunsSeams for RunnerSeams {
         run_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
         Box::pin(async move {
-            complete_project_move_handoff_live(&self.pool, &self.cloud, &self.managed, run_id)
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
+            complete_project_move_handoff_live(
+                &self.pool,
+                &self.cloud,
+                &self.managed,
+                run_id,
+                self.toolsets.clone(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
         })
     }
 
@@ -167,10 +183,16 @@ impl RunnerRunsSeams for RunnerSeams {
         run_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
         Box::pin(async move {
-            maybe_apply_deferred_pause_live(&self.pool, &self.cloud, &self.managed, run_id)
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
+            maybe_apply_deferred_pause_live(
+                &self.pool,
+                &self.cloud,
+                &self.managed,
+                run_id,
+                self.toolsets.clone(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
         })
     }
 

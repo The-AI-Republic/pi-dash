@@ -9326,19 +9326,18 @@ impl EntriesSeam for CoreSignalSeam<'_> {
 /// fire, so the `None` arm is defensive. A store failure maps to a
 /// handler-style error (logged `Failed`, save stands), exactly as a
 /// preflight raise in Python never crashes the issue save.
-struct CorePreflight<C, H, E, P> {
+struct CorePreflight<C, H, P> {
     pool: PgPool,
-    deps: Option<pidash_jobs::orchestration::StoreDeps<C, H, E, P>>,
+    deps: Option<pidash_jobs::orchestration::StoreDeps<C, H, P>>,
     matcher: LiveMatcher,
     now: DateTime<Utc>,
     jitter_secs: f64,
 }
 
-impl<C, H, E, P> PreflightSeam for CorePreflight<C, H, E, P>
+impl<C, H, P> PreflightSeam for CorePreflight<C, H, P>
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     async fn preflight_eligibility_or_bounce(

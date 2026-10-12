@@ -2772,6 +2772,47 @@ mod tests {
     }
 
     #[test]
+    fn render_names_injected_schema_tool_for_snapshotted_cloud_runs() {
+        let bundle = test_bundle(
+            issue_view(),
+            project_view(),
+            Some(state_view("In Progress", "started")),
+        );
+        let snapshotted = RunRenderRef {
+            run_id: uid(0x80),
+            parent_run_id: None,
+            trigger: AgentRunTrigger::StateTransition.value().to_owned(),
+            executor_kind: AgentExecutorKind::CloudAgent,
+            tool_plan: json!({"extra_toolsets": true}),
+            created_by_id: uid(0x40),
+        };
+        let turn = render_first_turn(&bundle, "coding-task", &snapshotted, "acme_get_tool_schema")
+            .expect("renders");
+        assert!(
+            turn.text.contains("acme_get_tool_schema"),
+            "injected name reaches the shared prompt"
+        );
+        // No snapshot, no instruction — even with a name on hand, the
+        // section stays hidden (`context.py:514-517`).
+        let unsnapshotted = RunRenderRef {
+            run_id: uid(0x80),
+            parent_run_id: None,
+            trigger: AgentRunTrigger::StateTransition.value().to_owned(),
+            executor_kind: AgentExecutorKind::CloudAgent,
+            tool_plan: json!({}),
+            created_by_id: uid(0x40),
+        };
+        let ce = render_first_turn(
+            &bundle,
+            "coding-task",
+            &unsnapshotted,
+            "acme_get_tool_schema",
+        )
+        .expect("renders");
+        assert!(!ce.text.contains("acme_get_tool_schema"));
+    }
+
+    #[test]
     fn render_review_turn_matches_c3_shape() {
         let dispatch = fixture(CREATE_DISPATCH);
         let after = &dispatch["cases"]["C3_fresh_session_drops_parent_and_pin"]["after"];

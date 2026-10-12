@@ -34,9 +34,11 @@
 //!
 //! * Seams arrive as inputs, never as reimplemented logic (the L3/L4
 //!   precedent): the admission cache as [`AdmissionCache`][pidash_services],
-//!   the `has_usable_llm_config` / `extra_toolsets_enabled_for` /
-//!   `managed_llm_profile` seams as `FnOnce` closures consulted only when the
-//!   Python short-circuit reaches them (provable in tests), and the deferred
+//!   the `has_usable_llm_config` / `managed_llm_profile` seams as `FnOnce`
+//!   closures and the `extra_toolsets_enabled_for` seam as the injected
+//!   [`CloudAgentToolsetsSeam`][pidash_services::extensions::CloudAgentToolsetsSeam],
+//!   each consulted only when the Python short-circuit reaches them
+//!   (provable in tests), and the deferred
 //!   admission consumes as an `on_commit` collector — callbacks registered so
 //!   far stay registered even when a later gate raises, exactly like Django's
 //!   ambient-transaction `on_commit`.
@@ -77,6 +79,8 @@
 //!
 //! [`AdmissionCache`][pidash_services]: pidash_services::dispatch::AdmissionCache
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
@@ -93,6 +97,7 @@ use pidash_services::dispatch::{
     ResolveExecutorError, UserFlags, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL,
     GITHUB_BINDING_EXISTS_SQL, ONLINE_MANAGED_RUNNER_SQL,
 };
+use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason, ManagedRunnerUnavailable};
 
 use crate::celery::CeleryTaskMessage;
@@ -474,13 +479,13 @@ pub struct ExecutionInputs<'a> {
 
 /// The EE-overlayable seams `execution_fields` consults, each only when the
 /// Python short-circuit reaches it.
-pub struct ExecutionSeams<F, E, P> {
+pub struct ExecutionSeams<F, P> {
     /// `has_usable_llm_config(user)` (`agent_execution.py:78-80`): consulted
     /// only for a present, active, non-bot actor on the cloud path.
     pub has_usable_llm_config: F,
-    /// `extra_toolsets_enabled_for(creator)` (`toolsets.py:23-32`): consulted
-    /// only when a creator is present.
-    pub extra_toolsets_enabled: E,
+    /// `extra_toolsets_enabled_for(creator)` (`toolsets.py:23-32`): the
+    /// injected toolsets seam, awaited only when a creator is present.
+    pub toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     /// `managed_llm_profile(user)` (`managed_runner/policy.py:27-36`):
     /// consulted only when the managed path reaches the profile gate.
     pub llm_profile: P,
@@ -627,19 +632,18 @@ async fn latest_enrolled_runner_id(
 /// registered before a later raise stay registered, as on Django's ambient
 /// transaction. This function never commits or rolls back `tx` itself.
 #[allow(clippy::too_many_arguments)]
-pub async fn execution_fields<C, F, E, P>(
+pub async fn execution_fields<C, F, P>(
     tx: &mut Transaction<'_>,
     inputs: &ExecutionInputs<'_>,
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
     cache: &C,
     on_commit: &mut (dyn FnMut(DeferredConsume) + Send),
-    seams: ExecutionSeams<F, E, P>,
+    seams: ExecutionSeams<F, P>,
 ) -> Result<ExecutionFields, ExecutionFieldsError>
 where
     C: AdmissionCache,
     F: FnOnce() -> bool,
-    E: FnOnce() -> bool,
     P: FnOnce() -> LlmProfile,
 {
     let executor = resolve_executor_kind(
@@ -663,18 +667,17 @@ where
     })
 }
 
-async fn execution_fields_cloud<C, F, E, P>(
+async fn execution_fields_cloud<C, F, P>(
     conn: &mut sqlx::PgConnection,
     inputs: &ExecutionInputs<'_>,
     cloud: &CloudAgentSettings,
     cache: &C,
     on_commit: &mut (dyn FnMut(DeferredConsume) + Send),
-    seams: ExecutionSeams<F, E, P>,
+    seams: ExecutionSeams<F, P>,
 ) -> Result<ExecutionFields, ExecutionFieldsError>
 where
     C: AdmissionCache,
     F: FnOnce() -> bool,
-    E: FnOnce() -> bool,
     P: FnOnce() -> LlmProfile,
 {
     let actor_flags = inputs.actor.map(|actor| &actor.flags);
@@ -728,10 +731,12 @@ where
     };
     // The run executes as its creator, so their preference is what the
     // snapshot records (`creation.py:78-80`); no creator, no seam consult.
-    let extra_toolsets = if inputs.actor.is_some() {
-        Some(seams.extra_toolsets_enabled)
-    } else {
-        None
+    let extra_toolsets = match inputs.actor {
+        Some(actor) => {
+            let verdict = seams.toolsets.extra_toolsets_enabled(actor.id).await;
+            Some(move || verdict)
+        }
+        None => None,
     };
     let plan = build_tool_plan(
         inputs.run_kind,
@@ -1090,9 +1095,12 @@ pub async fn append_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_services::extensions::NoExtraToolsets;
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::rc::Rc;
 
     static FIXTURE: &str =
@@ -1206,12 +1214,24 @@ mod tests {
         }
     }
 
-    fn panic_seams(
-    ) -> ExecutionSeams<impl FnOnce() -> bool, impl FnOnce() -> bool, impl FnOnce() -> LlmProfile>
-    {
+    /// A toolsets seam that must never be consulted: the non-consultation
+    /// pins that used to be `|| panic!(...)` closures.
+    #[derive(Debug)]
+    struct PanicToolsets(&'static str);
+
+    impl CloudAgentToolsetsSeam for PanicToolsets {
+        fn extra_toolsets_enabled(
+            &self,
+            _creator_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+            panic!("{message}", message = self.0)
+        }
+    }
+
+    fn panic_seams() -> ExecutionSeams<impl FnOnce() -> bool, impl FnOnce() -> LlmProfile> {
         ExecutionSeams {
             has_usable_llm_config: || panic!("llm seam must not be consulted"),
-            extra_toolsets_enabled: || panic!("toolsets seam must not be consulted"),
+            toolsets: Arc::new(PanicToolsets("toolsets seam must not be consulted")),
             llm_profile: || panic!("profile seam must not be consulted"),
         }
     }
@@ -2338,7 +2358,7 @@ mod tests {
                 &mut collect,
                 ExecutionSeams {
                     has_usable_llm_config: || true,
-                    extra_toolsets_enabled: || false,
+                    toolsets: Arc::new(NoExtraToolsets),
                     llm_profile: || panic!("managed seam unreachable on the cloud path"),
                 },
             )
@@ -2369,6 +2389,72 @@ mod tests {
                 pidash_services::dispatch::consume_admission_token(&cache, consume);
             }
             assert_eq!(cache.consumed.borrow().len(), 2);
+            cleanup(&pool, &graph, &[], &[]).await;
+        }
+
+        /// An opted-in creator behind the injected seam: the verdict (not
+        /// the CE default) is what the plan snapshots.
+        #[derive(Debug)]
+        struct OptedInToolsets;
+
+        impl CloudAgentToolsetsSeam for OptedInToolsets {
+            fn extra_toolsets_enabled(
+                &self,
+                _creator_id: Uuid,
+            ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+                Box::pin(async { true })
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_execution_fields_cloud_toolsets_seam_snapshots_verdict() {
+            let pool = pool().await;
+            let graph = seed_graph(&pool, "cloudseam").await;
+            let project = ProjectScope {
+                project_id: graph.project,
+                workspace_id: graph.ws,
+                default_agent_executor: "cloud_agent".to_owned(),
+            };
+            let actor = ActorScope {
+                id: graph.user,
+                flags: UserFlags {
+                    is_active: true,
+                    is_bot: false,
+                },
+            };
+            let inputs = ExecutionInputs {
+                project: &project,
+                run_kind: "issue",
+                has_issue: true,
+                required_capabilities: &[],
+                actor: Some(&actor),
+                automatic: false,
+                requested: None,
+                now_unix_secs: Utc::now().timestamp(),
+            };
+            let cache = FakeCache::default();
+            let mut deferred = Vec::new();
+            let mut collect = |consume: DeferredConsume| deferred.push(consume);
+            let mut tx = Transaction::begin(&pool).await.expect("begin");
+            let fields = execution_fields(
+                &mut tx,
+                &inputs,
+                &cloud_on(),
+                &django_managed_settings(),
+                &cache,
+                &mut collect,
+                ExecutionSeams {
+                    has_usable_llm_config: || true,
+                    toolsets: Arc::new(OptedInToolsets),
+                    llm_profile: || panic!("managed seam unreachable on the cloud path"),
+                },
+            )
+            .await
+            .expect("cloud fields");
+            tx.rollback().await.expect("rollback");
+            assert_eq!(fields.executor_kind, AgentExecutorKind::CloudAgent);
+            assert_eq!(fields.tool_plan["extra_toolsets"], true);
             cleanup(&pool, &graph, &[], &[]).await;
         }
 
@@ -2419,7 +2505,7 @@ mod tests {
                 &mut collect,
                 ExecutionSeams {
                     has_usable_llm_config: || panic!("cloud seam unreachable here"),
-                    extra_toolsets_enabled: || panic!("cloud seam unreachable here"),
+                    toolsets: Arc::new(PanicToolsets("cloud seam unreachable here")),
                     llm_profile: profile,
                 },
             )
@@ -2451,7 +2537,7 @@ mod tests {
                 &mut collect,
                 ExecutionSeams {
                     has_usable_llm_config: || panic!("cloud seam unreachable here"),
-                    extra_toolsets_enabled: || panic!("cloud seam unreachable here"),
+                    toolsets: Arc::new(PanicToolsets("cloud seam unreachable here")),
                     llm_profile: profile,
                 },
             )
@@ -2476,7 +2562,7 @@ mod tests {
                 &mut collect,
                 ExecutionSeams {
                     has_usable_llm_config: || panic!("cloud seam unreachable here"),
-                    extra_toolsets_enabled: || panic!("cloud seam unreachable here"),
+                    toolsets: Arc::new(PanicToolsets("cloud seam unreachable here")),
                     llm_profile: profile,
                 },
             )
@@ -2723,7 +2809,7 @@ mod tests {
                 &mut collect,
                 ExecutionSeams {
                     has_usable_llm_config: || true,
-                    extra_toolsets_enabled: || panic!("no plan is built on refuse"),
+                    toolsets: Arc::new(PanicToolsets("no plan is built on refuse")),
                     llm_profile: || panic!("managed seam unreachable here"),
                 },
             )
@@ -2827,7 +2913,7 @@ mod tests {
                 &mut collect,
                 ExecutionSeams {
                     has_usable_llm_config: || true,
-                    extra_toolsets_enabled: || false,
+                    toolsets: Arc::new(NoExtraToolsets),
                     llm_profile: || panic!("managed seam unreachable on the cloud path"),
                 },
             )

@@ -87,11 +87,14 @@ use pidash_db::tx::Transaction;
 use pidash_services::assistant::llm::ModelRef;
 use pidash_services::dispatch::{
     build_tools, cloud_agent_is_configured, github_available_for_project, github_mcp_spec,
-    github_toolset_spec, resolve_current_tool_names, resolve_extra_toolsets_for_run,
-    resolve_model_for_run, resolve_run_project, truncate_chars, user_has_llm_config, GithubMcpSpec,
-    GithubToolsetSpec, LinkedPrCtx, ProjectRef, RequiredToolUnavailable, UserFlags,
-    BINDING_REPO_SQL, CODE_REVIEW_LINK_EXISTS_SQL, GITHUB_BINDING_EXISTS_SQL, GITHUB_TOOL_NAMES,
-    PROJECT_READ_GATE_SQL, SCOPE_WORKSPACE_MEMBER_SQL,
+    github_toolset_spec, resolve_current_tool_names, resolve_model_for_run, resolve_run_project,
+    truncate_chars, user_has_llm_config, GithubMcpSpec, GithubToolsetSpec, LinkedPrCtx, ProjectRef,
+    RequiredToolUnavailable, UserFlags, BINDING_REPO_SQL, CODE_REVIEW_LINK_EXISTS_SQL,
+    GITHUB_BINDING_EXISTS_SQL, GITHUB_TOOL_NAMES, PROJECT_READ_GATE_SQL,
+    SCOPE_WORKSPACE_MEMBER_SQL,
+};
+use pidash_services::extensions::{
+    CloudAgentToolsetsSeam, ToolsetsResolution, ToolsetsRun, ToolsetsUnavailable,
 };
 use pidash_types::assistant::errors::AssistantError;
 use pidash_types::dispatch::{
@@ -724,15 +727,10 @@ pub struct ModelInvocation {
     pub prompt: String,
 }
 
-/// A deployment-provided toolset handle. CE resolves none
-/// (`resolve_extra_toolsets_for_run` returns `[]`); the shape exists so
-/// an overlay's obligation — admit only what the plan allows, degrade
-/// never fail, report drops — has a typed carrier.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtraToolset {
-    /// Overlay-defined handle; opaque to this domain.
-    pub handle: String,
-}
+/// A deployment-provided toolset, resolved through the injected
+/// [`CloudAgentToolsetsSeam`] (CE resolves none). Re-exported so the
+/// invocation shape keeps one carrier for the seam's answer.
+pub use pidash_services::extensions::ExtraToolset;
 
 /// Split granted names into internal tools and the GitHub leg
 /// (`runtime.py:24-28`): internal tools exclude the GitHub catalog;
@@ -1725,14 +1723,19 @@ async fn apply_try_done<S: ExecuteSeams>(
 }
 
 /// Build the agent invocation (`runtime.py:24-72`): tool partition,
-/// GitHub leg, snapshot-gated extra toolsets, instructions, retries,
+/// GitHub leg, pre-resolved extra toolsets, instructions, retries,
 /// timeouts, limits, settings, prompt.
+///
+/// `extra_toolsets` arrives resolved: the drive gates on the run's own
+/// snapshot flag and consults the injected seam first (`runtime.py:29-37`
+/// gates the same way), so this stays a pure assembler.
 pub fn build_invocation(
     ctx: &RunContext,
     model: ModelRef,
     current_tools: Vec<String>,
     cloud: &CloudAgentSettings,
     usage_limits: UsageLimits,
+    extra_toolsets: Vec<ExtraToolset>,
 ) -> ModelInvocation {
     let (tools, github_overlap) = partition_tools(&current_tools);
     let github = github_overlap.then(|| {
@@ -1743,13 +1746,6 @@ pub fn build_invocation(
             github_toolset_spec(&run_id, cloud.tool_timeout_secs),
         )
     });
-    // The snapshot discipline (`runtime.py:29-37`): the run's own flag
-    // gates the seam — never consulted when the flag is off.
-    let extra_toolsets: Vec<ExtraToolset> = if extra_toolsets_allowed(&ctx.tool_plan) {
-        resolve_extra_toolsets_for_run()
-    } else {
-        Vec::new()
-    };
     ModelInvocation {
         run_id: ctx.id,
         tools,
@@ -1768,10 +1764,42 @@ pub fn build_invocation(
     }
 }
 
-/// One model execution (`runtime.py:18-76`): resolve the model,
-/// append `model_started`, resolve the limits, build the invocation,
-/// invoke under the execution timeout, and normalize the usage
-/// report. Returns the structured output plus the
+/// Append an `extra_toolsets_unavailable` event (the "say what was
+/// dropped" obligation): the run was entitled to more than arrived.
+/// Best-effort — reporting must not fail the run — so a database
+/// error is logged and swallowed.
+async fn report_extra_toolsets_unavailable(
+    pool: &PgPool,
+    max_events: i64,
+    run_id: Uuid,
+    unavailable: &ToolsetsUnavailable,
+) {
+    let mut payload = Map::new();
+    payload.insert(
+        "provider".to_owned(),
+        Value::String(unavailable.provider.clone()),
+    );
+    if let Some(reason) = &unavailable.reason {
+        payload.insert("reason".to_owned(), Value::String(reason.clone()));
+    }
+    if let Err(error) = append_event(
+        pool,
+        max_events,
+        run_id,
+        "extra_toolsets_unavailable",
+        Some(Value::Object(payload)),
+        Utc::now(),
+    )
+    .await
+    {
+        tracing::warn!(run = %run_id, error = %error, "extra_toolsets_unavailable append failed");
+    }
+}
+
+/// One model execution (`runtime.py:18-76`): resolve the model, resolve
+/// the extra toolsets, append `model_started`, resolve the limits,
+/// build the invocation, invoke under the execution timeout, and
+/// normalize the usage report. Returns the structured output plus the
 /// `llm_model`/`usage` updates pair.
 pub async fn drive_execute<S: ExecuteSeams>(
     seams: &S,
@@ -1779,6 +1807,7 @@ pub async fn drive_execute<S: ExecuteSeams>(
     cloud: &CloudAgentSettings,
     ctx: &RunContext,
     current_tools: Vec<String>,
+    toolsets: &dyn CloudAgentToolsetsSeam,
 ) -> Result<(CloudAgentOutput, String, Value), TryError> {
     let facts = seams
         .creator_llm_facts(ctx.created_by_id)
@@ -1798,6 +1827,23 @@ pub async fn drive_execute<S: ExecuteSeams>(
         Err(error) => return Err(TryError::Resolve(error)),
     };
     let model_name = model_name_for(&model);
+    // Deployment-provided toolsets (`runtime.py:29-37`): the run's own
+    // snapshot gates the seam — never consulted when the flag is off —
+    // and the resolution lands before `model_started`, as in Python.
+    let extra = if extra_toolsets_allowed(&ctx.tool_plan) {
+        toolsets
+            .extra_toolsets(&ToolsetsRun {
+                run_id: ctx.id,
+                creator_id: ctx.created_by_id,
+                extra_toolsets: true,
+            })
+            .await
+    } else {
+        ToolsetsResolution::empty()
+    };
+    if let Some(unavailable) = &extra.unavailable {
+        report_extra_toolsets_unavailable(pool, cloud.max_events, ctx.id, unavailable).await;
+    }
     append_event(
         pool,
         cloud.max_events,
@@ -1811,7 +1857,14 @@ pub async fn drive_execute<S: ExecuteSeams>(
     // Limits resolve after the append (`runtime.py:55` before 56-63):
     // corrupt limits still leave the `model_started` row behind.
     let usage_limits = usage_limits_for(&ctx.tool_plan, cloud).map_err(TryError::Limits)?;
-    let invocation = build_invocation(ctx, model, current_tools, cloud, usage_limits);
+    let invocation = build_invocation(
+        ctx,
+        model,
+        current_tools,
+        cloud,
+        usage_limits,
+        extra.toolsets,
+    );
     let timeout = std::time::Duration::from_secs(cloud.execution_timeout_secs.max(0) as u64);
     let (output, raw_usage) =
         match tokio::time::timeout(timeout, seams.invoke_model(invocation)).await {
@@ -1838,6 +1891,7 @@ pub async fn drive_run_cloud_agent<S: ExecuteSeams>(
     run_id: Uuid,
     now: DateTime<Utc>,
     sample_backoff: &(dyn Fn(i64, i64) -> i64 + Send + Sync),
+    toolsets: &dyn CloudAgentToolsetsSeam,
 ) -> Result<RunOutcome, RunError> {
     if claim_run(pool, cloud, run_id, now, sample_backoff).await? != ClaimOutcome::Claimed {
         return Ok(RunOutcome::Ignored);
@@ -1920,7 +1974,7 @@ pub async fn drive_run_cloud_agent<S: ExecuteSeams>(
         cancel_run(seams, ctx.id, &ctx.cancel_reason).await?;
         return Ok(RunOutcome::Cancelled);
     }
-    match run_try_region(seams, pool, cloud, &ctx, project).await {
+    match run_try_region(seams, pool, cloud, &ctx, project, toolsets).await {
         Ok(done) => apply_try_done(seams, ctx.id, done).await,
         Err(error) => apply_try_error(seams, ctx.id, error).await,
     }
@@ -1937,6 +1991,7 @@ async fn run_try_region<S: ExecuteSeams>(
     cloud: &CloudAgentSettings,
     ctx: &RunContext,
     project: ProjectRef,
+    toolsets: &dyn CloudAgentToolsetsSeam,
 ) -> Result<TryDone, TryError> {
     // `github_available_for_project` with the async binding probe
     // spelled out: the kill switch short-circuits without touching the
@@ -1987,7 +2042,8 @@ async fn run_try_region<S: ExecuteSeams>(
     let current_tools =
         resolve_current_tool_names(&ctx.tool_plan, cloud, github_available, linked_pr)
             .map_err(TryError::Tools)?;
-    let (output, llm_model, usage) = drive_execute(seams, pool, cloud, ctx, current_tools).await?;
+    let (output, llm_model, usage) =
+        drive_execute(seams, pool, cloud, ctx, current_tools, toolsets).await?;
     if !cloud_agent_is_configured(cloud) {
         return Ok(TryDone::Disabled);
     }
@@ -2165,16 +2221,19 @@ pub fn register_execute_tasks<S: ExecuteSeams + 'static>(
     cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
     seams: Arc<S>,
+    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
 ) {
     let run_seams = seams.clone();
     let run_pool = pool.clone();
     let run_cloud = cloud.clone();
+    let run_toolsets = toolsets.clone();
     registry.register(
         RUN_CLOUD_AGENT_TASK,
         Arc::new(move |job: JobRow| {
             let seams = run_seams.clone();
             let pool = run_pool.clone();
             let cloud = run_cloud.clone();
+            let toolsets = run_toolsets.clone();
             let fut: Pin<Box<dyn Future<Output = Result<Verdict, HandlerError>> + Send>> =
                 Box::pin(async move {
                     let run_id = match parse_run_agent_arg(&job) {
@@ -2183,8 +2242,16 @@ pub fn register_execute_tasks<S: ExecuteSeams + 'static>(
                     };
                     let now = Utc::now();
                     let sample = |lo: i64, hi: i64| rand::random_range(lo..=hi);
-                    match drive_run_cloud_agent(seams.as_ref(), &pool, &cloud, run_id, now, &sample)
-                        .await
+                    match drive_run_cloud_agent(
+                        seams.as_ref(),
+                        &pool,
+                        &cloud,
+                        run_id,
+                        now,
+                        &sample,
+                        toolsets.as_ref(),
+                    )
+                    .await
                     {
                         Ok(_) => Ok(Verdict::Ack),
                         Err(error) => Ok(Verdict::Fail {
@@ -2257,6 +2324,7 @@ pub fn register_execute_tasks<S: ExecuteSeams + 'static>(
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use pidash_services::extensions::NoExtraToolsets;
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -2510,6 +2578,7 @@ mod tests {
             django_cloud_settings(),
             django_managed_settings(),
             Arc::new(FakeSeams::new()),
+            Arc::new(NoExtraToolsets),
         );
         for task in [
             RUN_CLOUD_AGENT_TASK,
@@ -2971,6 +3040,7 @@ mod tests {
             ],
             &cloud,
             limits,
+            Vec::new(),
         );
         assert_eq!(invocation.run_id, ctx.id);
         assert_eq!(
@@ -2983,7 +3053,8 @@ mod tests {
         assert_eq!(mcp.tool_timeout_secs, 20);
         assert_eq!(toolset.id, format!("github-{}", ctx.id));
         assert!(!toolset.include_instructions);
-        // CE snapshot discipline: flag off means no seam consult, empty vec.
+        // Pre-resolved extras ride the invocation untouched (the drive
+        // gates on the snapshot before resolving).
         assert!(invocation.extra_toolsets.is_empty());
         assert_eq!(invocation.instructions, AGENT_INSTRUCTIONS);
         assert_eq!(invocation.retries, 2);
@@ -3005,8 +3076,35 @@ mod tests {
             vec!["pidash_search_project_issues".to_owned()],
             &cloud,
             limits,
+            Vec::new(),
         );
         assert!(invocation.github.is_none());
+    }
+
+    #[test]
+    fn invocation_carries_resolved_extra_toolsets() {
+        let cloud = django_cloud_settings();
+        let ctx = run_ctx();
+        let model = ModelRef::Anthropic {
+            model: "claude-x".to_owned(),
+        };
+        let limits = usage_limits_for(&ctx.tool_plan, &cloud).unwrap();
+        let invocation = build_invocation(
+            &ctx,
+            model,
+            Vec::new(),
+            &cloud,
+            limits,
+            vec![ExtraToolset {
+                name: "gateway".to_owned(),
+            }],
+        );
+        assert_eq!(
+            invocation.extra_toolsets,
+            vec![ExtraToolset {
+                name: "gateway".to_owned(),
+            }]
+        );
     }
 
     #[test]
@@ -4130,7 +4228,7 @@ mod tests {
             let seams = LiveSeams::new(pool.clone());
             let cloud = cloud_on();
             let ctx = fetch_run_context(&pool, run_id).await.expect("context");
-            let error = drive_execute(&seams, &pool, &cloud, &ctx, Vec::new())
+            let error = drive_execute(&seams, &pool, &cloud, &ctx, Vec::new(), &NoExtraToolsets)
                 .await
                 .expect_err("corrupt limits fail");
             assert!(
@@ -4186,9 +4284,17 @@ mod tests {
             )));
             let cloud = cloud_on();
             let sample = |lo: i64, _hi: i64| lo;
-            let outcome = drive_run_cloud_agent(&seams, &pool, &cloud, run_id, now, &sample)
-                .await
-                .expect("drive");
+            let outcome = drive_run_cloud_agent(
+                &seams,
+                &pool,
+                &cloud,
+                run_id,
+                now,
+                &sample,
+                &NoExtraToolsets,
+            )
+            .await
+            .expect("drive");
             assert_eq!(outcome, RunOutcome::Completed);
             // Both lifecycle events landed.
             let mut kinds: Vec<String> = sqlx::query_scalar(
@@ -4238,6 +4344,234 @@ mod tests {
             teardown(&pool, &graph).await;
         }
 
+        /// A replacement seam offering one gateway toolset: the execution
+        /// flow-through proof.
+        #[derive(Debug)]
+        struct GatewayToolsets;
+
+        impl CloudAgentToolsetsSeam for GatewayToolsets {
+            fn extra_toolsets(
+                &self,
+                run: &ToolsetsRun,
+            ) -> Pin<Box<dyn Future<Output = ToolsetsResolution> + Send + '_>> {
+                let snapshot = run.extra_toolsets;
+                Box::pin(async move {
+                    if !snapshot {
+                        return ToolsetsResolution::empty();
+                    }
+                    ToolsetsResolution {
+                        toolsets: vec![ExtraToolset {
+                            name: "gateway".to_owned(),
+                        }],
+                        unavailable: None,
+                    }
+                })
+            }
+        }
+
+        /// A replacement seam whose gateway is down: entitled but
+        /// unreachable, so the drive reports instead of attaching.
+        #[derive(Debug)]
+        struct OutageToolsets;
+
+        impl CloudAgentToolsetsSeam for OutageToolsets {
+            fn extra_toolsets(
+                &self,
+                _run: &ToolsetsRun,
+            ) -> Pin<Box<dyn Future<Output = ToolsetsResolution> + Send + '_>> {
+                Box::pin(async {
+                    ToolsetsResolution {
+                        toolsets: Vec::new(),
+                        unavailable: Some(ToolsetsUnavailable {
+                            provider: "acme".to_owned(),
+                            reason: Some("outage".to_owned()),
+                        }),
+                    }
+                })
+            }
+        }
+
+        /// A toolsets seam that must never be consulted (flag-off pin).
+        #[derive(Debug)]
+        struct PanicToolsets;
+
+        impl CloudAgentToolsetsSeam for PanicToolsets {
+            fn extra_toolsets(
+                &self,
+                _run: &ToolsetsRun,
+            ) -> Pin<Box<dyn Future<Output = ToolsetsResolution> + Send + '_>> {
+                panic!("toolsets seam must not be consulted")
+            }
+        }
+
+        /// A snapshotted run resolves through the injected seam: the
+        /// gateway toolset rides the invocation the model sees.
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_run_drive_resolves_extra_toolsets_through_seam() {
+            let pool = pool().await;
+            let graph = seed_graph(&pool, "driveseam").await;
+            let now = Utc::now();
+            seed_membership(&pool, &graph, 15).await;
+            let run_id = seed_run(
+                &pool,
+                &graph,
+                "queued",
+                "cloud_agent",
+                now,
+                None,
+                None,
+                "do it",
+                json!({"tools": ["pidash_search_project_issues"], "extra_toolsets": true}),
+                None,
+            )
+            .await;
+            let seams = LiveSeams::new(pool.clone());
+            *seams.invoke.lock().unwrap() = Some(Ok((
+                sample_output(Outcome::Completed),
+                RawUsage {
+                    fields: Map::from_iter([("requests".to_owned(), json!(2))]),
+                    input_tokens: Some(10),
+                    output_tokens: Some(5),
+                    total_tokens: Some(15),
+                },
+            )));
+            let cloud = cloud_on();
+            let sample = |lo: i64, _hi: i64| lo;
+            let outcome = drive_run_cloud_agent(
+                &seams,
+                &pool,
+                &cloud,
+                run_id,
+                now,
+                &sample,
+                &GatewayToolsets,
+            )
+            .await
+            .expect("drive");
+            assert_eq!(outcome, RunOutcome::Completed);
+            let invocations = seams.invocations.lock().unwrap().clone();
+            assert_eq!(invocations.len(), 1);
+            assert_eq!(
+                invocations[0].extra_toolsets,
+                vec![ExtraToolset {
+                    name: "gateway".to_owned(),
+                }]
+            );
+            // Nothing was dropped, so no report event.
+            let kinds: Vec<String> =
+                sqlx::query_scalar("SELECT kind FROM agent_run_event WHERE agent_run_id = $1")
+                    .bind(run_id)
+                    .fetch_all(&pool)
+                    .await
+                    .expect("events");
+            assert!(!kinds
+                .iter()
+                .any(|kind| kind == "extra_toolsets_unavailable"));
+            teardown(&pool, &graph).await;
+        }
+
+        /// An entitled-but-unreachable gateway reports instead of failing:
+        /// the run completes without the toolset and the event stream
+        /// says what was dropped.
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_run_drive_reports_unavailable_toolsets() {
+            let pool = pool().await;
+            let graph = seed_graph(&pool, "driveoutage").await;
+            let now = Utc::now();
+            seed_membership(&pool, &graph, 15).await;
+            let run_id = seed_run(
+                &pool,
+                &graph,
+                "queued",
+                "cloud_agent",
+                now,
+                None,
+                None,
+                "do it",
+                json!({"tools": ["pidash_search_project_issues"], "extra_toolsets": true}),
+                None,
+            )
+            .await;
+            let seams = LiveSeams::new(pool.clone());
+            *seams.invoke.lock().unwrap() = Some(Ok((
+                sample_output(Outcome::Completed),
+                RawUsage {
+                    fields: Map::from_iter([("requests".to_owned(), json!(2))]),
+                    input_tokens: Some(10),
+                    output_tokens: Some(5),
+                    total_tokens: Some(15),
+                },
+            )));
+            let cloud = cloud_on();
+            let sample = |lo: i64, _hi: i64| lo;
+            let outcome =
+                drive_run_cloud_agent(&seams, &pool, &cloud, run_id, now, &sample, &OutageToolsets)
+                    .await
+                    .expect("drive");
+            assert_eq!(outcome, RunOutcome::Completed);
+            let invocations = seams.invocations.lock().unwrap().clone();
+            assert_eq!(invocations.len(), 1);
+            assert!(invocations[0].extra_toolsets.is_empty());
+            let payload: Value = sqlx::query_scalar(
+                "SELECT payload FROM agent_run_event WHERE agent_run_id = $1 AND kind = 'extra_toolsets_unavailable'",
+            )
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("unavailable event");
+            assert_eq!(payload["provider"], json!("acme"));
+            assert_eq!(payload["reason"], json!("outage"));
+            // The report lands before `model_started`, as in Python (the
+            // seam resolves before the agent is built).
+            let kinds: Vec<String> = sqlx::query_scalar(
+                "SELECT kind FROM agent_run_event WHERE agent_run_id = $1 ORDER BY seq",
+            )
+            .bind(run_id)
+            .fetch_all(&pool)
+            .await
+            .expect("events");
+            let position =
+                |kind: &str| kinds.iter().position(|k| k == kind).expect("event present");
+            assert!(position("extra_toolsets_unavailable") < position("model_started"));
+            teardown(&pool, &graph).await;
+        }
+
+        /// Flag off means no seam consult: the drive resolves nothing and
+        /// a panicking seam proves it was never touched.
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_execute_flag_off_never_consults_toolsets_seam() {
+            let pool = pool().await;
+            let graph = seed_graph(&pool, "execflagoff").await;
+            let now = Utc::now();
+            let run_id = seed_run(
+                &pool,
+                &graph,
+                "running",
+                "cloud_agent",
+                now,
+                Some(now),
+                None,
+                "do it",
+                json!({"tools": [], "extra_toolsets": false, "limits": {"tool_calls": [1]}}),
+                None,
+            )
+            .await;
+            let seams = LiveSeams::new(pool.clone());
+            let cloud = cloud_on();
+            let ctx = fetch_run_context(&pool, run_id).await.expect("context");
+            let error = drive_execute(&seams, &pool, &cloud, &ctx, Vec::new(), &PanicToolsets)
+                .await
+                .expect_err("corrupt limits fail");
+            assert!(
+                matches!(error, TryError::Limits(_)),
+                "generic-path limit error"
+            );
+            teardown(&pool, &graph).await;
+        }
+
         /// Guard paths end the run before the model: disabled instance and
         /// missing membership never invoke.
         #[tokio::test]
@@ -4269,6 +4603,7 @@ mod tests {
                 run_id,
                 now,
                 &sample,
+                &NoExtraToolsets,
             )
             .await
             .expect("disabled drive");
@@ -4299,9 +4634,17 @@ mod tests {
             )
             .await;
             let seams = LiveSeams::new(pool.clone());
-            let outcome = drive_run_cloud_agent(&seams, &pool, &cloud_on(), run_id, now, &sample)
-                .await
-                .expect("unauthorized drive");
+            let outcome = drive_run_cloud_agent(
+                &seams,
+                &pool,
+                &cloud_on(),
+                run_id,
+                now,
+                &sample,
+                &NoExtraToolsets,
+            )
+            .await
+            .expect("unauthorized drive");
             assert_eq!(outcome, RunOutcome::Unauthorized);
             assert_eq!(
                 seams.calls()[0].updates["error_code"],

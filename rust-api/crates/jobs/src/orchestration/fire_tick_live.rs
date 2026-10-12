@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
 use pidash_db::orchestration::runs::{active_run_sql, latest_prior_run_sql};
+use pidash_services::extensions::CloudAgentToolsetsSeam;
 
 use super::creation_jobs::StoreDeps;
 use super::fire_tick_seam::{
@@ -35,13 +36,15 @@ use super::live_inputs::{
 use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 
 /// Live [`FireTickSeam`]: pool + dispatch settings + the boot-loaded
-/// state map. One value serves every fire; per-fire inputs (presence,
-/// cache, `now`) are built inside the async methods.
+/// state map + the injected toolsets seam. One value serves every fire;
+/// per-fire inputs (presence, cache, `now`) are built inside the async
+/// methods.
 pub struct LiveFireTickSeam {
     pool: PgPool,
     cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
     states: Arc<HashMap<Uuid, StateView>>,
+    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
 }
 
 impl LiveFireTickSeam {
@@ -50,12 +53,14 @@ impl LiveFireTickSeam {
         cloud: CloudAgentSettings,
         managed: ManagedRunnerSettings,
         states: HashMap<Uuid, StateView>,
+        toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     ) -> Self {
         Self {
             pool,
             cloud,
             managed,
             states: Arc::new(states),
+            toolsets,
         }
     }
 
@@ -113,6 +118,7 @@ impl FireTickSeam for LiveFireTickSeam {
         let pool = self.pool.clone();
         let cloud = self.cloud.clone();
         let managed = self.managed.clone();
+        let toolsets = self.toolsets.clone();
         let matcher = JobsMatcher::new(pool.clone());
         let triggered_by = triggered_by.to_owned();
         Box::pin(async move {
@@ -123,7 +129,7 @@ impl FireTickSeam for LiveFireTickSeam {
                 managed,
                 cache: CallCache::default(),
                 has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
-                extra_toolsets_enabled: |_: Uuid| false,
+                toolsets,
                 llm_profile: profile_fn(presence),
                 now_unix_secs: Utc::now().timestamp(),
             };
@@ -154,6 +160,7 @@ impl FireTickSeam for LiveFireTickSeam {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_services::extensions::NoExtraToolsets;
 
     fn state(id: u128, name: &str, group: &str) -> StateView {
         StateView {
@@ -179,6 +186,7 @@ mod tests {
             cloud: settings.cloud_agent,
             managed: settings.managed_runner,
             states: Arc::new(states),
+            toolsets: Arc::new(NoExtraToolsets),
         }
     }
 

@@ -39,6 +39,7 @@ use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::dispatch::admission::AdmissionCache;
 use pidash_services::dispatch::LlmProfile;
+use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
     CreationError, PodView, RenderedTurn, RunView, BUNDLE_WORKSPACE_SQL,
@@ -92,11 +93,10 @@ type BindingRow = (
     Option<Uuid>,
 );
 
-impl<C, H, E, P> EntriesSeam for LiveCreationStore<'_, C, H, E, P>
+impl<C, H, P> EntriesSeam for LiveCreationStore<'_, C, H, P>
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     async fn prior_state_id(&mut self, issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
@@ -436,16 +436,15 @@ fn map_entries(error: EntriesError) -> DispatchJobsError {
 /// commit, then drain post-commit dispatch. The `dispatch_driver!`
 /// discipline, written out because the services call takes
 /// `(seam, req)` instead of the continuation argument shape.
-pub async fn dispatch_scheduler_run<C, H, E, P>(
+pub async fn dispatch_scheduler_run<C, H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, E, P>,
+    deps: StoreDeps<C, H, P>,
     binding_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<DispatchOutcome<SchedulerOutcome>, DispatchJobsError>
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     let cloud = deps.cloud.clone();
@@ -521,11 +520,13 @@ pub fn live_scheduler_dispatch(
     pool: PgPool,
     cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
+    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
 ) -> SchedulerDispatch {
     Arc::new(move |binding: BindingForDispatch| {
         let pool = pool.clone();
         let cloud = cloud.clone();
         let managed = managed.clone();
+        let toolsets = toolsets.clone();
         Box::pin(async move {
             let now = Utc::now();
             let (lead, default) = match binding.project_id {
@@ -545,7 +546,7 @@ pub fn live_scheduler_dispatch(
                 managed,
                 cache: CallCache::default(),
                 has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
-                extra_toolsets_enabled: |_: Uuid| false,
+                toolsets,
                 llm_profile: profile_fn(presence),
                 now_unix_secs: now.timestamp(),
             };

@@ -83,8 +83,8 @@ pub async fn invoke(
     ctx: &InvokeCtx,
     invocation: ModelInvocation,
 ) -> Result<(CloudAgentOutput, RawUsage), InvokeError> {
-    // CE resolves no deployment toolsets (`resolve_extra_toolsets_for_run`
-    // returns `[]` by construction); the loop has no leg for them.
+    // CE resolves no deployment toolsets (the injected seam answers
+    // none); the loop has no leg for them.
     debug_assert!(
         invocation.extra_toolsets.is_empty(),
         "CE resolves no extra toolsets"
