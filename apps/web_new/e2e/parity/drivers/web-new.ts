@@ -11388,7 +11388,7 @@ export class WebNewDriver implements ParityDriver {
   async pagesBlocksHeaderLockCycle(): Promise<void> {
     return todo("pagesBlocksHeaderLockCycle");
   }
-  async pagesBlocksInfoStats(): Promise<PagesBlocksInfoStats> {
+  async pagesBlocksInfoStats(_expectedCharacters?: number, _skipNavigate?: boolean): Promise<PagesBlocksInfoStats> {
     return todo("pagesBlocksInfoStats");
   }
 }

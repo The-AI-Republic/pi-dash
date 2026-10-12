@@ -40180,11 +40180,13 @@ export class WebDriver implements ParityDriver {
       .toBe(0);
   }
 
-  async pagesBlocksInfoStats(): Promise<PagesBlocksInfoStats> {
-    const url = new URL(this.page.url());
-    url.searchParams.set("paneTab", "info");
-    await this.page.goto(url.toString());
-    await this.page.waitForLoadState("domcontentloaded");
+  async pagesBlocksInfoStats(expectedCharacters?: number, skipNavigate = false): Promise<PagesBlocksInfoStats> {
+    if (!skipNavigate) {
+      const url = new URL(this.page.url());
+      url.searchParams.set("paneTab", "info");
+      await this.page.goto(url.toString());
+      await this.page.waitForLoadState("domcontentloaded");
+    }
     await this.pagesBlocksWaitLiveEditor();
     const root = this.pagesBlocksPaneRoot();
     await root.waitFor({ timeout: WebDriver.OPEN_MS });
@@ -40201,6 +40203,11 @@ export class WebDriver implements ParityDriver {
       const value = Number.parseInt(raw, 10);
       return Number.isFinite(value) ? value : null;
     };
+    if (expectedCharacters !== undefined) {
+      // The reload above can render the cards before the body arrives, so wait
+      // for the asserted count instead of reading a possibly stale zero.
+      await expect.poll(() => readCard("Characters"), { timeout: WebDriver.WAIT_MS }).toBe(expectedCharacters);
+    }
     return { words: await readCard("Words"), characters: await readCard("Characters") };
   }
 }

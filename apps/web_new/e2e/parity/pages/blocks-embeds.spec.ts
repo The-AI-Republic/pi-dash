@@ -191,6 +191,31 @@ async function waitEditorContains(driver: ParityDriver, markers: string[], timeo
     .toBe(true);
 }
 
+/**
+ * Read the info-tab stats, recovering once from the stale editor-ref race
+ * (NEWFRONT-380, same family as NEWFRONT-373): the tab can subscribe at load
+ * to a stale store ref and report zeros for the whole page lifetime. One
+ * lock cycle re-syncs the store, so the re-read skips the navigate to keep
+ * that recovery instead of racing a fresh reload. Throws loudly otherwise.
+ */
+async function readInfoStatsHealthy(
+  driver: ParityDriver,
+  expectedCharacters: number
+): Promise<{ words: number | null; characters: number | null }> {
+  try {
+    return await driver.pagesBlocksInfoStats(expectedCharacters);
+  } catch {
+    await driver.pagesBlocksHeaderLockCycle();
+    try {
+      return await driver.pagesBlocksInfoStats(expectedCharacters, true);
+    } catch {
+      throw new Error(
+        `[parity] info stats never reached ${expectedCharacters} characters after lock-cycle recovery (NEWFRONT-380).`
+      );
+    }
+  }
+}
+
 /** One-pixel PNG bytes for the upload fixtures. */
 const PIXEL_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
@@ -517,7 +542,7 @@ test(
       await driver.pagesBlocksOpenDetail(seed.workspaceSlug, projectId, pageId);
       await waitEditorContains(driver, ["abcde"]);
 
-      const before = await driver.pagesBlocksInfoStats();
+      const before = await readInfoStatsHealthy(driver, 5);
       expect(before.characters).toBe(5);
 
       await driver.pagesBlocksOpenDetail(seed.workspaceSlug, projectId, pageId);
@@ -525,7 +550,7 @@ test(
       await driver.pagesBlocksEditorType("fghij");
       await waitDescriptionContains(seed, projectId, pageId, session, "fghij");
 
-      const after = await driver.pagesBlocksInfoStats();
+      const after = await readInfoStatsHealthy(driver, 10);
       expect(after.characters).toBe(10);
     } finally {
       await cleanupProject(seed, projectId, session);

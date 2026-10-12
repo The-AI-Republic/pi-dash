@@ -6673,8 +6673,8 @@ export interface ParityDriver {
   pagesBlocksClipboardText(): Promise<string>;
   /** Lock then unlock the open page via the header control; leaves it unlocked. */
   pagesBlocksHeaderLockCycle(): Promise<void>;
-  /** Info-tab document stats (navigates to the tab first). */
-  pagesBlocksInfoStats(): Promise<PagesBlocksInfoStats>;
+  /** Info-tab document stats (navigates to the tab first unless told to skip). When given, waits for the Characters card to reach the count. */
+  pagesBlocksInfoStats(expectedCharacters?: number, skipNavigate?: boolean): Promise<PagesBlocksInfoStats>;
 
   // --- NEWFRONT-310 (module detail/analytics/links, MOD-029-035).
   // --- Appended; existing methods above are untouched per the shared
