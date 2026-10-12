@@ -7360,6 +7360,42 @@ export interface ParityDriver {
   /** Click the download control of `rowIndex`; resolves with the new-tab URL (new-tab proof). */
   exportsSettingsDownloadPopupUrl(rowIndex: number): Promise<string>;
   // ---------------------------------------------------------------------------
+  // Analytics and profile local-file downloads (NEWFRONT-382, EXP-014/015/022).
+  // The work-items analytics tab carries two data tables (the chart
+  // drill-down table first, the insight table second), each with its own
+  // search box and "Export as csv" action that saves a locally built file
+  // through the browser download event; the profile activity page carries a
+  // permission-gated download control with a working state while it fetches.
+  // Appended; existing entries above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Open the analytics tab and wait until both table export actions render. */
+  analyticsExportOpen(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Number of "Export as csv" actions on the analytics tab. */
+  analyticsExportButtonCount(): Promise<number>;
+  /** Body-row cell texts of one analytics table in display order. */
+  analyticsExportRowCells(kind: AnalyticsExportTable): Promise<string[][]>;
+  /** Filter one analytics table through its search box. */
+  analyticsExportSearch(kind: AnalyticsExportTable, query: string): Promise<void>;
+  /** Clear one analytics table's search box. */
+  analyticsExportClearSearch(kind: AnalyticsExportTable): Promise<void>;
+  /** Click one analytics table's export action; resolves with the downloaded file (download-event proof). */
+  analyticsExportDownload(kind: AnalyticsExportTable): Promise<LocalFileDownload>;
+  /** Click one analytics table's export action; resolves true when no download lands (empty-export proof). */
+  analyticsExportYieldsNoDownload(kind: AnalyticsExportTable): Promise<boolean>;
+  /** Open one user's profile activity page (settles on the activity view or the below-member guard view). */
+  profileActivityOpen(workspaceSlug: string, userId: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Whether the profile activity download control renders. */
+  profileActivityDownloadVisible(): Promise<boolean>;
+  /** Current download control text (working state while fetching), or null when no control renders. */
+  profileActivityDownloadLabel(): Promise<string | null>;
+  /** Stall the profile activity export request so the working state stays up (test hook). */
+  profileActivityStallExport(): Promise<void>;
+  /** Release a stalled profile activity export request (test hook). */
+  profileActivityReleaseExport(): Promise<void>;
+  /** Click the download control; resolves with the saved file plus the export request body. */
+  profileActivityDownload(): Promise<{ file: LocalFileDownload; requestBody: { date: string } }>;
+  // ---------------------------------------------------------------------------
   // Modules list frame and header controls (NEWFRONT-306, MOD-001..007).
   // The live modules list: breadcrumb trail, flag gate, Add action,
   // expandable search, ordering, filters menu, applied chips, and the
@@ -8756,4 +8792,19 @@ export interface ExportsSettingsEmptyFacts {
   title: string;
   /** Empty view supporting text. */
   description: string;
+}
+
+/**
+ * Which analytics data table a download/read targets (NEWFRONT-382,
+ * EXP-014/015). The chart drill-down table renders first on the work-items
+ * tab, the insight table second.
+ */
+export type AnalyticsExportTable = "chart" | "insight";
+
+/** A locally generated file captured through the Playwright download event (NEWFRONT-382). */
+export interface LocalFileDownload {
+  /** File name the app suggested for the save. */
+  fileName: string;
+  /** File bytes decoded as UTF-8 text. */
+  content: string;
 }

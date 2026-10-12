@@ -17,6 +17,7 @@ import {
   exportsListHistory,
   exportsSubmitStatus,
   pagesLiveOracleBase,
+  profileActivityExportCsv,
   serverPageRecord,
   type AuthedSession,
 } from "./api";
@@ -413,5 +414,23 @@ describe("exportsFindRecord", () => {
   it("returns null when the record is absent and pages end", async () => {
     payload = historyPage([exportRecord("other-1")]);
     await expect(exportsFindRecord(exportsSession(), "exp-ws", "missing-7")).resolves.toBeNull();
+  });
+});
+
+describe("profileActivityExportCsv", () => {
+  it("posts the date to the user activity export endpoint and returns the raw CSV text", async () => {
+    stubStatus = 200;
+    stubRaw = `"Actor name","Issue ID"\r\n"Ann","PX-1"\r\n`;
+    const csv = await profileActivityExportCsv(exportsSession(), "exp-ws", "user-7", "2026-10-12");
+    expect(csv).toBe(`"Actor name","Issue ID"\r\n"Ann","PX-1"\r\n`);
+    expect(stubSeen).toHaveLength(1);
+    expect(stubSeen[0]?.method).toBe("POST");
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/exp-ws/user-activity/user-7/export/");
+    expect(JSON.parse(stubSeen[0]?.body ?? "{}")).toEqual({ date: "2026-10-12" });
+  });
+
+  it("throws on a non-OK export response", async () => {
+    stubStatus = 400;
+    await expect(profileActivityExportCsv(exportsSession(), "exp-ws", "user-7", "")).rejects.toThrow(/HTTP 400/);
   });
 });

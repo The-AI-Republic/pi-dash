@@ -143,6 +143,8 @@ import type {
   PagesBlocksInlineImage,
   ExportsSettingsEmptyFacts,
   ExportsSettingsHistoryRow,
+  AnalyticsExportTable,
+  LocalFileDownload,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -11551,5 +11553,62 @@ export class WebNewDriver implements ParityDriver {
 
   async exportsSettingsDownloadPopupUrl(_rowIndex: number): Promise<string> {
     return todo("exportsSettingsDownloadPopupUrl");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Analytics and profile local-file downloads (NEWFRONT-382, EXP-014/015/022).
+  // Appended; existing entries above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  async analyticsExportOpen(_workspaceSlug: string, _cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("analyticsExportOpen");
+  }
+
+  async analyticsExportButtonCount(): Promise<number> {
+    return todo("analyticsExportButtonCount");
+  }
+
+  async analyticsExportRowCells(_kind: AnalyticsExportTable): Promise<string[][]> {
+    return todo("analyticsExportRowCells");
+  }
+
+  async analyticsExportSearch(_kind: AnalyticsExportTable, _query: string): Promise<void> {
+    return todo("analyticsExportSearch");
+  }
+
+  async analyticsExportClearSearch(_kind: AnalyticsExportTable): Promise<void> {
+    return todo("analyticsExportClearSearch");
+  }
+
+  async analyticsExportDownload(_kind: AnalyticsExportTable): Promise<LocalFileDownload> {
+    return todo("analyticsExportDownload");
+  }
+
+  async analyticsExportYieldsNoDownload(_kind: AnalyticsExportTable): Promise<boolean> {
+    return todo("analyticsExportYieldsNoDownload");
+  }
+
+  async profileActivityOpen(_workspaceSlug: string, _userId: string, _cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("profileActivityOpen");
+  }
+
+  async profileActivityDownloadVisible(): Promise<boolean> {
+    return todo("profileActivityDownloadVisible");
+  }
+
+  async profileActivityDownloadLabel(): Promise<string | null> {
+    return todo("profileActivityDownloadLabel");
+  }
+
+  async profileActivityStallExport(): Promise<void> {
+    return todo("profileActivityStallExport");
+  }
+
+  async profileActivityReleaseExport(): Promise<void> {
+    return todo("profileActivityReleaseExport");
+  }
+
+  async profileActivityDownload(): Promise<{ file: LocalFileDownload; requestBody: { date: string } }> {
+    return todo("profileActivityDownload");
   }
 }

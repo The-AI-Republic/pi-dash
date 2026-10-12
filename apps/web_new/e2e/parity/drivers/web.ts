@@ -151,6 +151,8 @@ import type {
   PagesBlocksInlineImage,
   ExportsSettingsEmptyFacts,
   ExportsSettingsHistoryRow,
+  AnalyticsExportTable,
+  LocalFileDownload,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -40632,5 +40634,189 @@ export class WebDriver implements ParityDriver {
     const url = popup.url();
     await popup.close().catch(() => undefined);
     return url;
+  }
+
+  // -------------------------------------------------------------------------
+  // Analytics and profile local-file downloads (NEWFRONT-382, EXP-014/015/022).
+  // Appended; existing methods above are untouched per the shared driver
+  // contract. Written from the exports-local-file area spec against the live
+  // old app (oracle-prod): the work-items analytics tab renders the chart
+  // drill-down table first and the insight table second, each pairing a
+  // collapsible search box with an "Export as csv" action that saves a
+  // locally built file through the download event; the profile activity
+  // page gates its download control to admin/member workspace tiers.
+  // -------------------------------------------------------------------------
+
+  private profileActivityExportHookInstalled = false;
+  private profileActivityExportMode: "pass" | "stall" = "pass";
+  private profileActivityExportGates: Array<() => void> = [];
+
+  /** "Export as csv" action of one analytics table (chart first, insight second). */
+  private analyticsExportAction(kind: AnalyticsExportTable): Locator {
+    return this.page.getByRole("button", { name: "Export as csv" }).nth(kind === "chart" ? 0 : 1);
+  }
+
+  /** Toolbar holding one table's search box plus its export action. */
+  private analyticsExportToolbar(kind: AnalyticsExportTable): Locator {
+    return this.analyticsExportAction(kind).locator("xpath=../..");
+  }
+
+  /** One analytics table in page order (chart first, insight second). */
+  private analyticsExportTable(kind: AnalyticsExportTable): Locator {
+    return this.page.locator("table").nth(kind === "chart" ? 0 : 1);
+  }
+
+  /**
+   * Visible search input of one table, expanding it through its icon-only
+   * button when still collapsed (the open box unmounts that button, so the
+   * click only ever runs while collapsed).
+   */
+  private async analyticsExportSearchBox(kind: AnalyticsExportTable): Promise<Locator> {
+    const toolbar = this.analyticsExportToolbar(kind);
+    const box = toolbar.getByPlaceholder("Search");
+    if (!(await box.isVisible())) {
+      await toolbar.getByRole("button").first().click({ timeout: WebDriver.WAIT_MS });
+      await box.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    }
+    return box;
+  }
+
+  async analyticsExportOpen(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(`/${workspaceSlug}/analytics/work-items`, cookies);
+    await this.analyticsExportAction("chart").waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await this.analyticsExportAction("insight").waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async analyticsExportButtonCount(): Promise<number> {
+    return this.page.getByRole("button", { name: "Export as csv" }).count();
+  }
+
+  async analyticsExportRowCells(kind: AnalyticsExportTable): Promise<string[][]> {
+    const rows = this.analyticsExportTable(kind).locator("tbody tr");
+    const count = await rows.count();
+    const out: string[][] = [];
+    for (let index = 0; index < count; index += 1) {
+      const cells = rows.nth(index).locator("td");
+      const cellCount = await cells.count();
+      const texts: string[] = [];
+      for (let cell = 0; cell < cellCount; cell += 1) {
+        texts.push((((await cells.nth(cell).textContent()) ?? "") as string).trim());
+      }
+      out.push(texts);
+    }
+    return out;
+  }
+
+  async analyticsExportSearch(kind: AnalyticsExportTable, query: string): Promise<void> {
+    await (await this.analyticsExportSearchBox(kind)).fill(query, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async analyticsExportYieldsNoDownload(kind: AnalyticsExportTable): Promise<boolean> {
+    // Empty-filter exports throw inside the file builder before any save,
+    // so the proof is the download event never landing.
+    await this.analyticsExportAction(kind).click({ timeout: WebDriver.WAIT_MS });
+    return this.page.waitForEvent("download", { timeout: 5_000 }).then(
+      () => false,
+      () => true
+    );
+  }
+
+  async analyticsExportClearSearch(kind: AnalyticsExportTable): Promise<void> {
+    await (await this.analyticsExportSearchBox(kind)).fill("", { timeout: WebDriver.WAIT_MS });
+  }
+
+  async analyticsExportDownload(kind: AnalyticsExportTable): Promise<LocalFileDownload> {
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: WebDriver.WAIT_MS }),
+      this.analyticsExportAction(kind).click({ timeout: WebDriver.WAIT_MS }),
+    ]);
+    const path = await download.path();
+    if (!path) throw new Error("[parity] analytics export download landed without a path.");
+    return { fileName: download.suggestedFilename(), content: readFileSync(path, "utf8") };
+  }
+
+  async profileActivityOpen(workspaceSlug: string, userId: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(`/${workspaceSlug}/profile/${userId}/activity`, cookies);
+    // Below-member tiers never reach the activity view: the layout guard
+    // renders its no-results view instead, which is a settled state too.
+    await this.page
+      .waitForFunction(
+        () => {
+          const body = document.body.textContent ?? "";
+          return body.includes("Recent activity") || body.includes("No matching results");
+        },
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] profile activity page settled on neither the activity nor the guard view.");
+      });
+  }
+
+  /**
+   * The download control in either of its labels ("Download today's
+   * activity" idle, "Downloading" while fetching); absent when the
+   * workspace tier gates it away.
+   */
+  private profileActivityDownloadButton(): Locator {
+    return this.page.getByRole("button", { name: /Download/ });
+  }
+
+  async profileActivityDownloadVisible(): Promise<boolean> {
+    return ((await this.profileActivityDownloadButton().count()) as number) > 0;
+  }
+
+  async profileActivityDownloadLabel(): Promise<string | null> {
+    const button = this.profileActivityDownloadButton();
+    if (((await button.count()) as number) === 0) return null;
+    const text = (((await button.first().textContent()) ?? "") as string).trim();
+    return text === "" ? null : text;
+  }
+
+  /** Single route hook stalling the profile activity export fetch (working-state proof). */
+  private async profileActivityExportHook(): Promise<void> {
+    if (this.profileActivityExportHookInstalled) return;
+    this.profileActivityExportHookInstalled = true;
+    await this.page.route("**/api/workspaces/*/user-activity/*/export/", async (route) => {
+      if (route.request().method() === "POST" && this.profileActivityExportMode === "stall") {
+        await new Promise<void>((resolve) => {
+          this.profileActivityExportGates.push(resolve);
+        });
+      }
+      await route.fallback();
+    });
+  }
+
+  async profileActivityStallExport(): Promise<void> {
+    this.profileActivityExportMode = "stall";
+    await this.profileActivityExportHook();
+  }
+
+  async profileActivityReleaseExport(): Promise<void> {
+    const gates = this.profileActivityExportGates;
+    this.profileActivityExportGates = [];
+    this.profileActivityExportMode = "pass";
+    gates.forEach((release) => release());
+  }
+
+  async profileActivityDownload(): Promise<{ file: LocalFileDownload; requestBody: { date: string } }> {
+    const [download, response] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: WebDriver.WAIT_MS }),
+      this.page.waitForResponse(
+        (resp) =>
+          resp.request().method() === "POST" &&
+          resp.url().includes("/user-activity/") &&
+          resp.url().includes("/export/"),
+        { timeout: WebDriver.WAIT_MS }
+      ),
+      this.profileActivityDownloadButton().first().click({ timeout: WebDriver.WAIT_MS }),
+    ]);
+    const body = response.request().postDataJSON() as { date?: unknown };
+    if (typeof body.date !== "string") throw new Error("[parity] activity export request carried no date.");
+    const path = await download.path();
+    if (!path) throw new Error("[parity] activity export download landed without a path.");
+    return {
+      file: { fileName: download.suggestedFilename(), content: readFileSync(path, "utf8") },
+      requestBody: { date: body.date },
+    };
   }
 }
