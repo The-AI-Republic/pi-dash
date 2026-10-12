@@ -28,7 +28,8 @@
 // message durably; a failed removal instead kills the page (NEWFRONT-406),
 // so no scenario submits one. Membership mutations below restore the
 // seeded membership through the API (in finally blocks) so later scenarios
-// see a clean stack.
+// see a clean stack. Server-state reads after a UI write poll for
+// convergence: the row text settles before the write lands under load.
 import { test, expect } from "../fixtures";
 import {
   PROJECT_ROLE_ADMIN,
@@ -312,8 +313,13 @@ test(
         await expect
           .poll(async () => (await driver.settingsMembersRows()).map((r) => r.email), { timeout: 15_000 })
           .toContain(fresh.email);
-        const added = await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, fresh.email, session);
-        expect(added?.role).toBe(PROJECT_ROLE_MEMBER);
+        await expect
+          .poll(
+            async () =>
+              (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, fresh.email, session))?.role,
+            { timeout: 15_000 }
+          )
+          .toBe(PROJECT_ROLE_MEMBER);
       });
     } finally {
       const added = await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, fresh.email, session);
@@ -399,11 +405,11 @@ test(
       await driver.settingsMembersRoleEditorOpen(mentionName);
       await driver.settingsMembersRoleEditorPick("Guest");
       await expect.poll(() => driver.settingsMembersRoleText(mentionName), { timeout: 15_000 }).toBe("Guest");
-      expect(await mentionProjectRole()).toBe(PROJECT_ROLE_GUEST);
+      await expect.poll(mentionProjectRole, { timeout: 15_000 }).toBe(PROJECT_ROLE_GUEST);
       await driver.settingsMembersRoleEditorOpen(mentionName);
       await driver.settingsMembersRoleEditorPick("Member");
       await expect.poll(() => driver.settingsMembersRoleText(mentionName), { timeout: 15_000 }).toBe("Member");
-      expect(await mentionProjectRole()).toBe(PROJECT_ROLE_MEMBER);
+      await expect.poll(mentionProjectRole, { timeout: 15_000 }).toBe(PROJECT_ROLE_MEMBER);
     });
 
     await test.step("the sole admin demotes themself: no last-admin guard", async () => {
@@ -413,16 +419,24 @@ test(
         await driver.settingsMembersRoleEditorOpen(ownerName);
         await driver.settingsMembersRoleEditorPick("Member");
         await expect.poll(() => driver.settingsMembersRoleText(ownerName), { timeout: 15_000 }).toBe("Member");
-        expect((await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, seed.email, session))?.role).toBe(
-          PROJECT_ROLE_MEMBER
-        );
+        await expect
+          .poll(
+            async () =>
+              (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, seed.email, session))?.role,
+            { timeout: 15_000 }
+          )
+          .toBe(PROJECT_ROLE_MEMBER);
         // A demoted workspace admin still edits their own cell: restore it.
         await driver.settingsMembersRoleEditorOpen(ownerName);
         await driver.settingsMembersRoleEditorPick("Admin");
         await expect.poll(() => driver.settingsMembersRoleText(ownerName), { timeout: 15_000 }).toBe("Admin");
-        expect((await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, seed.email, session))?.role).toBe(
-          PROJECT_ROLE_ADMIN
-        );
+        await expect
+          .poll(
+            async () =>
+              (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, seed.email, session))?.role,
+            { timeout: 15_000 }
+          )
+          .toBe(PROJECT_ROLE_ADMIN);
       } finally {
         await serverPatchProjectMember(seed.workspaceSlug, seed.projectId, ownerMid, session, PROJECT_ROLE_ADMIN);
       }
@@ -493,11 +507,11 @@ test(
         await driver.settingsMembersRoleEditorOpen(mentionName);
         await driver.settingsMembersRoleEditorPick("Admin");
         await expect.poll(() => driver.settingsMembersRoleText(mentionName), { timeout: 15_000 }).toBe("Admin");
-        expect(await mentionProjectRole()).toBe(PROJECT_ROLE_ADMIN);
+        await expect.poll(mentionProjectRole, { timeout: 15_000 }).toBe(PROJECT_ROLE_ADMIN);
         await driver.settingsMembersRoleEditorOpen(mentionName);
         await driver.settingsMembersRoleEditorPick("Member");
         await expect.poll(() => driver.settingsMembersRoleText(mentionName), { timeout: 15_000 }).toBe("Member");
-        expect(await mentionProjectRole()).toBe(PROJECT_ROLE_MEMBER);
+        await expect.poll(mentionProjectRole, { timeout: 15_000 }).toBe(PROJECT_ROLE_MEMBER);
       } finally {
         await convergeSeedRoles();
       }
@@ -557,7 +571,11 @@ test(
         await expect
           .poll(async () => (await driver.settingsMembersRows()).map((r) => r.email), { timeout: 15_000 })
           .not.toContain(mentionEmail);
-        expect(await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session)).toBe(null);
+        await expect
+          .poll(async () => serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session), {
+            timeout: 15_000,
+          })
+          .toBe(null);
       } finally {
         // Restore the seeded membership (re-adding an active member is a
         // harmless role no-op, so this is safe on any path).
@@ -601,7 +619,11 @@ test(
       expect(confirm).toContain("leave");
       await driver.settingsMembersConfirmSubmit();
       await expect.poll(() => driver.currentPath(), { timeout: 30_000 }).toContain("/projects");
-      expect(await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session)).toBe(null);
+      await expect
+        .poll(async () => serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session), {
+          timeout: 15_000,
+        })
+        .toBe(null);
     } finally {
       // Restore the seeded membership via the API.
       await restoreMention();
@@ -633,25 +655,49 @@ test(
       expect(await driver.settingsMembersLeadDisabled()).toBe(false);
 
       await driver.settingsMembersLeadPick(mentionName);
-      expect((await serverProjectSettings(seed.workspaceSlug, seed.projectId, session)).projectLeadId).toBe(mentionId);
+      await expect
+        .poll(async () => (await serverProjectSettings(seed.workspaceSlug, seed.projectId, session)).projectLeadId, {
+          timeout: 15_000,
+        })
+        .toBe(mentionId);
       await driver.settingsMembersAssigneePick(mentionName);
-      expect((await serverProjectSettings(seed.workspaceSlug, seed.projectId, session)).defaultAssigneeId).toBe(
-        mentionId
-      );
+      await expect
+        .poll(
+          async () => (await serverProjectSettings(seed.workspaceSlug, seed.projectId, session)).defaultAssigneeId,
+          { timeout: 15_000 }
+        )
+        .toBe(mentionId);
 
       await driver.settingsMembersLeadPick("None");
-      expect((await serverProjectSettings(seed.workspaceSlug, seed.projectId, session)).projectLeadId).toBe(null);
+      await expect
+        .poll(async () => (await serverProjectSettings(seed.workspaceSlug, seed.projectId, session)).projectLeadId, {
+          timeout: 15_000,
+        })
+        .toBe(null);
       await driver.settingsMembersAssigneePick("None");
-      expect((await serverProjectSettings(seed.workspaceSlug, seed.projectId, session)).defaultAssigneeId).toBe(null);
+      await expect
+        .poll(
+          async () => (await serverProjectSettings(seed.workspaceSlug, seed.projectId, session)).defaultAssigneeId,
+          { timeout: 15_000 }
+        )
+        .toBe(null);
     });
 
     await test.step("the guest-visibility toggle flips viewing rights", async () => {
       const before = (await serverProjectSettings(seed.workspaceSlug, seed.projectId, session)).guestViewAll;
       await driver.settingsMembersGuestToggle();
-      expect((await serverProjectSettings(seed.workspaceSlug, seed.projectId, session)).guestViewAll).toBe(!before);
+      await expect
+        .poll(async () => (await serverProjectSettings(seed.workspaceSlug, seed.projectId, session)).guestViewAll, {
+          timeout: 15_000,
+        })
+        .toBe(!before);
       // Restore the seeded flag.
       await driver.settingsMembersGuestToggle();
-      expect((await serverProjectSettings(seed.workspaceSlug, seed.projectId, session)).guestViewAll).toBe(before);
+      await expect
+        .poll(async () => (await serverProjectSettings(seed.workspaceSlug, seed.projectId, session)).guestViewAll, {
+          timeout: 15_000,
+        })
+        .toBe(before);
     });
 
     await test.step("non-admins see the controls disabled", async () => {
