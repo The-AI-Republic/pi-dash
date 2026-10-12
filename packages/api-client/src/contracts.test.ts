@@ -40,7 +40,30 @@ import {
   updateQuickLink,
 } from "./contracts/home.js";
 import { listLabels, listMembers, listStates } from "./contracts/reference.js";
-import { getIssue, listIssues } from "./contracts/issues.js";
+import {
+  getIssue,
+  getSubscriptionStatus,
+  listIssues,
+  subscribeIssue,
+  unsubscribeIssue,
+  updateIssue,
+} from "./contracts/issues.js";
+import {
+  createFavorite,
+  deleteFavorite,
+  getSidebarPreferences,
+  listFavoriteGroup,
+  listFavorites,
+  updateFavorite,
+  updateSidebarPreferences,
+} from "./contracts/sidebar.js";
+import { searchWorkspace } from "./contracts/search.js";
+import { getProfile, listTimezones, updateMyTimezone, updateProfile } from "./contracts/profile.js";
+import { createAssistantThread, getLlmConfig, listAssistantThreads } from "./contracts/assistant.js";
+import { getUnreadNotifications } from "./contracts/notifications.js";
+import { updateCycle } from "./contracts/cycles.js";
+import { updateModule } from "./contracts/modules.js";
+import { updatePage } from "./contracts/pages.js";
 import { fakeResponse, recordingTransport } from "./client.test.js";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
@@ -455,6 +478,303 @@ describe("issue contracts", () => {
     const client = createClient({ baseUrl: "https://api.test", transport });
     await getIssue(client, "acme", UUID2, UUID);
     expect(transport.calls[0]?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/`);
+  });
+
+  it("sends the issue update and answers nothing (204)", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 204, body: "" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(updateIssue(client, "acme", UUID2, UUID, { name: "Renamed" })).resolves.toBeUndefined();
+    const patchCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patchCall?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/`);
+    expect(patchCall?.init.body).toBe(JSON.stringify({ name: "Renamed" }));
+  });
+
+  it("reads and flips the subscription", async () => {
+    let subscribed = false;
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.init.method === "GET") return fakeResponse({ body: JSON.stringify({ subscribed }) });
+      if (call.init.method === "POST") {
+        subscribed = true;
+        return fakeResponse({ status: 201, body: JSON.stringify({ id: UUID, subscriber: UUID2 }) });
+      }
+      subscribed = false;
+      return fakeResponse({ status: 204, body: "" });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    expect((await getSubscriptionStatus(client, "acme", UUID2, UUID)).subscribed).toBe(false);
+    const subscription = await subscribeIssue(client, "acme", UUID2, UUID);
+    expect(subscription.subscriber).toBe(UUID2);
+    expect((await getSubscriptionStatus(client, "acme", UUID2, UUID)).subscribed).toBe(true);
+    await unsubscribeIssue(client, "acme", UUID2, UUID);
+    expect((await getSubscriptionStatus(client, "acme", UUID2, UUID)).subscribed).toBe(false);
+  });
+});
+
+describe("sidebar contracts", () => {
+  it("parses the preferences map and patches it back", async () => {
+    const prefs = { drafts: { is_pinned: true, sort_order: 65535 }, analytics: { is_pinned: false, sort_order: 1 } };
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : call.init.method === "PATCH"
+          ? fakeResponse({ body: JSON.stringify({ message: "Successfully updated" }) })
+          : fakeResponse({ body: JSON.stringify(prefs) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await getSidebarPreferences(client, "acme");
+    expect(parsed["drafts"]?.is_pinned).toBe(true);
+    const patched = await updateSidebarPreferences(client, "acme", [{ key: "analytics", is_pinned: true }]);
+    expect(patched.message).toBe("Successfully updated");
+    const patchCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patchCall?.url).toBe("https://api.test/api/workspaces/acme/sidebar-preferences/");
+    expect(patchCall?.init.body).toBe(JSON.stringify([{ key: "analytics", is_pinned: true }]));
+  });
+
+  it("rejects a preferences map with a malformed row", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ drafts: { is_pinned: "yes", sort_order: 1 } }),
+    });
+    const error = await getSidebarPreferences(client, "acme").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("round-trips favorites through create, group, move and delete", async () => {
+    const folder = {
+      id: UUID,
+      entity_type: "folder",
+      entity_identifier: null,
+      entity_data: null,
+      name: "Folder",
+      is_folder: true,
+      sequence: 65535,
+      parent: null,
+      workspace_id: UUID2,
+      project_id: null,
+    };
+    const entry = { ...folder, id: UUID2, entity_type: "issue", entity_identifier: UUID, is_folder: false };
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.init.method === "GET" && call.url.endsWith("/user-favorites/")) {
+        return fakeResponse({ body: JSON.stringify([entry]) });
+      }
+      if (call.init.method === "POST") return fakeResponse({ body: JSON.stringify(entry) });
+      if (call.init.method === "PATCH") {
+        return fakeResponse({ body: JSON.stringify({ ...entry, parent: null, sequence: 12.5 }) });
+      }
+      if (call.url.endsWith("/group/")) return fakeResponse({ body: JSON.stringify([entry]) });
+      return fakeResponse({ status: 204, body: "" });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    expect((await listFavorites(client, "acme"))[0]?.entity_type).toBe("issue");
+    const created = await createFavorite(client, "acme", { entity_type: "issue", entity_identifier: UUID });
+    expect(created.entity_data).toBeNull();
+    const children = await listFavoriteGroup(client, "acme", UUID);
+    expect(children).toHaveLength(1);
+    const moved = await updateFavorite(client, "acme", UUID2, { parent: null, sequence: 12.5 });
+    expect(moved.sequence).toBe(12.5);
+    await deleteFavorite(client, "acme", UUID2);
+    const deleteCall = transport.calls.find((call) => call.init.method === "DELETE");
+    expect(deleteCall?.url).toBe(`https://api.test/api/workspaces/acme/user-favorites/${UUID2}/`);
+  });
+});
+
+describe("search contracts", () => {
+  it("parses per-entity results and sends the query params", async () => {
+    const payload = {
+      results: {
+        issue: [
+          {
+            name: "Fix login",
+            id: UUID,
+            sequence_id: 42,
+            project__identifier: "WEB",
+            project_id: UUID2,
+            workspace__slug: "acme",
+          },
+        ],
+      },
+    };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(payload) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await searchWorkspace(client, "acme", {
+      search: "login",
+      workspaceSearch: true,
+      entities: ["issue"],
+    });
+    expect(parsed.results.issue?.[0]?.sequence_id).toBe(42);
+    const url = transport.calls[0]?.url ?? "";
+    expect(url).toContain("/api/workspaces/acme/search/");
+    expect(url).toContain("search=login");
+    expect(url).toContain("workspace_search=true");
+    expect(url).toContain("entities=issue");
+  });
+});
+
+describe("profile contracts", () => {
+  const profile = {
+    id: UUID,
+    user: UUID2,
+    theme: { mode: "dark" },
+    is_app_rail_docked: true,
+    is_tour_completed: false,
+    onboarding_step: {},
+    use_case: null,
+    role: null,
+    is_onboarded: false,
+    last_workspace_id: null,
+    billing_address_country: "INDIA",
+    billing_address: null,
+    has_billing_address: false,
+    company_name: "",
+    notification_view_mode: "full",
+    is_smooth_cursor_enabled: false,
+    is_mobile_onboarded: false,
+    mobile_onboarding_step: {},
+    mobile_timezone_auto_set: false,
+    language: "en",
+    start_of_the_week: 0,
+    goals: {},
+    background_color: "#fff",
+    is_navigation_tour_completed: false,
+    has_marketing_email_consent: false,
+    is_subscribed_to_changelog: false,
+    product_tour: {},
+    settings: {},
+    created_at: "2024-01-02T03:04:05Z",
+    updated_at: "2024-02-03T04:05:06Z",
+  };
+
+  it("parses the profile and patches theme plus language", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({
+            body: JSON.stringify(call.init.method === "PATCH" ? { ...profile, language: "fr" } : profile),
+          })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    expect((await getProfile(client)).language).toBe("en");
+    const patched = await updateProfile(client, { language: "fr", theme: { mode: "light" } });
+    expect(patched.language).toBe("fr");
+    const patchCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patchCall?.url).toBe("https://api.test/api/users/me/profile/");
+  });
+
+  it("parses the timezone patch and the zone list", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.url.endsWith("/api/timezones/")) {
+        return fakeResponse({
+          body: JSON.stringify({
+            timezones: [{ utc_offset: "UTC+01:00", gmt_offset: "GMT+01:00", value: "Europe/Paris", label: "Paris" }],
+          }),
+        });
+      }
+      return fakeResponse({
+        body: JSON.stringify({ id: UUID, email: "ada@example.com", user_timezone: "Europe/Paris" }),
+      });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateMyTimezone(client, "Europe/Paris");
+    expect(updated.user_timezone).toBe("Europe/Paris");
+    const zones = await listTimezones(client);
+    expect(zones.timezones[0]?.value).toBe("Europe/Paris");
+  });
+});
+
+describe("assistant contracts", () => {
+  it("parses threads and the model-config check", async () => {
+    const thread = {
+      id: UUID,
+      title: "Hello",
+      is_archived: false,
+      has_active_turn: false,
+      created_at: "2024-01-02T03:04:05Z",
+      updated_at: "2024-02-03T04:05:06Z",
+    };
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.init.method === "POST") return fakeResponse({ status: 201, body: JSON.stringify(thread) });
+      if (call.url.endsWith("/ai-assistant/config/")) {
+        return fakeResponse({
+          body: JSON.stringify({
+            provider_kind: "openai_compatible",
+            base_url: "",
+            model_name: "",
+            has_api_key: false,
+            last_verified_at: null,
+          }),
+        });
+      }
+      return fakeResponse({ body: JSON.stringify([thread]) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const threads = await listAssistantThreads(client, "acme");
+    expect(threads[0]?.title).toBe("Hello");
+    const created = await createAssistantThread(client, "acme", "Hello");
+    expect(created.id).toBe(UUID);
+    const config = await getLlmConfig(client);
+    expect(config.has_api_key).toBe(false);
+  });
+});
+
+describe("notification contracts", () => {
+  it("parses the unread counts", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ total_unread_notifications_count: 3, mention_unread_notifications_count: 1 }),
+    });
+    const parsed = await getUnreadNotifications(client, "acme");
+    expect(parsed.total_unread_notifications_count).toBe(3);
+    expect(parsed.mention_unread_notifications_count).toBe(1);
+  });
+});
+
+describe("thin entity update contracts", () => {
+  it("parses cycle, module and page update echoes", async () => {
+    const cycle = {
+      id: UUID,
+      name: "Cycle",
+      project_id: UUID2,
+      description: "",
+      start_date: null,
+      end_date: null,
+    };
+    const module = {
+      id: UUID,
+      name: "Module",
+      project_id: UUID2,
+      description: "",
+      start_date: null,
+      target_date: null,
+    };
+    const page = { id: UUID, name: "Page", access: 0, color: "", is_locked: false, project_ids: [UUID2] };
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.url.includes("/cycles/")) return fakeResponse({ body: JSON.stringify(cycle) });
+      if (call.url.includes("/modules/")) return fakeResponse({ body: JSON.stringify(module) });
+      return fakeResponse({ body: JSON.stringify(page) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    expect((await updateCycle(client, "acme", UUID2, UUID, { name: "Cycle" })).project_id).toBe(UUID2);
+    expect((await updateModule(client, "acme", UUID2, UUID, { name: "Module" })).name).toBe("Module");
+    expect((await updatePage(client, "acme", UUID2, UUID, { name: "Page" })).project_ids).toEqual([UUID2]);
   });
 });
 

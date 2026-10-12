@@ -107,7 +107,56 @@ export {
   IssueListItem,
   IssueListResponse,
   IssueRelationsSummary,
+  IssueSubscription,
+  SubscriptionStatus,
   getIssue,
+  getSubscriptionStatus,
   listIssues,
+  subscribeIssue,
+  unsubscribeIssue,
+  updateIssue,
 } from "./contracts/issues.js";
-export type { IssueListQuery } from "./contracts/issues.js";
+export type { IssueListQuery, IssuePatch } from "./contracts/issues.js";
+export {
+  Favorite,
+  FavoriteList,
+  SidebarPreferences,
+  SidebarPreferencesPatchResult,
+  SidebarPreferenceItem,
+  createFavorite,
+  deleteFavorite,
+  getSidebarPreferences,
+  listFavoriteGroup,
+  listFavorites,
+  updateFavorite,
+  updateSidebarPreferences,
+} from "./contracts/sidebar.js";
+export type { FavoriteCreate, FavoritePatch, SidebarPreferencePatch } from "./contracts/sidebar.js";
+export { SEARCH_ENTITIES, SearchResults, searchWorkspace } from "./contracts/search.js";
+export type { SearchEntity, WorkspaceSearchQuery } from "./contracts/search.js";
+export {
+  MeTimezone,
+  Profile,
+  TimezoneEntry,
+  TimezoneList,
+  getProfile,
+  listTimezones,
+  updateMyTimezone,
+  updateProfile,
+} from "./contracts/profile.js";
+export type { ProfilePatch } from "./contracts/profile.js";
+export {
+  AssistantThread,
+  AssistantThreadList,
+  LlmConfig,
+  createAssistantThread,
+  getLlmConfig,
+  listAssistantThreads,
+} from "./contracts/assistant.js";
+export { UnreadNotifications, getUnreadNotifications } from "./contracts/notifications.js";
+export { CycleUpdate, updateCycle } from "./contracts/cycles.js";
+export type { CyclePatch } from "./contracts/cycles.js";
+export { ModuleUpdate, updateModule } from "./contracts/modules.js";
+export type { ModulePatch } from "./contracts/modules.js";
+export { PageUpdate, updatePage } from "./contracts/pages.js";
+export type { PagePatch } from "./contracts/pages.js";

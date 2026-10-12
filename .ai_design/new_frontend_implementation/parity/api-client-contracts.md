@@ -36,6 +36,20 @@ contract suites (`src/contract/*.contract.test.ts`) skip unless
 | Favorite projects         | `listFavoriteProjects`, `addFavoriteProject`, `removeFavoriteProject`                     | `projects.contract.test.ts` — add/list/remove round trip; GET list is red live on backend bug NEWFRONT-384 (viewset lacks `serializer_class`, GET 500s; POST/DELETE 204 green) |
 | Workspace user-properties | `getWorkspaceUserProperties`, `updateWorkspaceUserProperties`                             | `projects.contract.test.ts` — limit flips and restores                                                                                                                         |
 | Project user-properties   | `getProjectUserProperties`, `updateProjectUserProperties`                                 | `projects.contract.test.ts` — sort order bumps and restores                                                                                                                    |
+| Issue update      | `updateIssue`                                                                              | `updates.contract.test.ts` — PATCH answers 204; rename proven by re-read, then restored (thin shell slice; full ownership in issues area)                                     |
+| Subscription      | `getSubscriptionStatus`, `subscribeIssue`, `unsubscribeIssue`                              | `updates.contract.test.ts` — status false → subscribe → status true → unsubscribe → status false                                                                              |
+| Sidebar prefs     | `getSidebarPreferences`, `updateSidebarPreferences`                                        | `sidebar.contract.test.ts` — every known row present with pinned/order; patch-and-restore round trip                                                                          |
+| Favorites         | `listFavorites`, `createFavorite`, `updateFavorite`, `deleteFavorite`, `listFavoriteGroup` | `sidebar.contract.test.ts` — folder + entry create, group children, move/reorder PATCH, delete                                                                                |
+| Workspace search  | `searchWorkspace`                                                                          | `search.contract.test.ts` — seeded issue found across entities; `entities` param scopes the answer                                                                            |
+| Profile           | `getProfile`, `updateProfile`                                                              | `profile.contract.test.ts` — theme + language read; patch-and-restore round trip                                                                                              |
+| User timezone     | `updateMyTimezone`                                                                         | `profile.contract.test.ts` — PATCH timezone and restore; `Me` read proves the starting value                                                                                  |
+| Timezones         | `listTimezones`                                                                            | `profile.contract.test.ts` — non-empty; Europe/Paris present                                                                                                                  |
+| Assistant threads | `listAssistantThreads`, `createAssistantThread`                                            | `assistant.contract.test.ts` — create then list-contains                                                                                                                      |
+| Model config      | `getLlmConfig`                                                                             | `assistant.contract.test.ts` — blank-until-configured shape (SHELL-007 check)                                                                                                 |
+| Unread count      | `getUnreadNotifications`                                                                   | `notifications.contract.test.ts` — total + mention counts (thin shell slice; full ownership in notifications area)                                                            |
+| Cycle update      | `updateCycle`                                                                              | `updates.contract.test.ts` — rename applies, echo parses, then restored (thin shell slice; full ownership in cycles area)                                                     |
+| Module update     | `updateModule`                                                                             | `updates.contract.test.ts` — rename applies, echo parses, then restored (thin shell slice; full ownership in modules area)                                                    |
+| Page update       | `updatePage`                                                                               | `updates.contract.test.ts` — rename applies, echo parses, then restored (thin shell slice; full ownership in pages area)                                                      |
 
 ## From a clean checkout
 
@@ -66,7 +80,7 @@ export PIDASH_CONTRACT_BASE_URL="http://127.0.0.1:8123"
 pnpm --filter @pidash/api-client test
 ```
 
-Expected: unit tests pass and the 29 contract tests run (not skip) and pass — except the favorite-list GET, which stays red until backend bug NEWFRONT-384 is fixed.
+Expected: unit tests pass and all contract tests run (not skip) and pass — except the favorite-list GET, which stays red until backend bug NEWFRONT-384 is fixed (the table above is the count).
 Unset `PIDASH_CONTRACT_BASE_URL` returns the package to unit-only mode.
 
 ## Notes

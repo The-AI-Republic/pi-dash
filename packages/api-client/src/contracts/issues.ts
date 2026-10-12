@@ -109,3 +109,72 @@ export async function getIssue(client: ApiClient, slug: string, projectId: strin
   const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/issues/${issueId}/`);
   return client.parse(Issue, body, "GET issue detail");
 }
+
+/**
+ * Thin work-item update for the shell: the command palette's contextual
+ * edits (rename, state, priority, description). The endpoint answers 204
+ * with no body, so callers re-read through getIssue above. Full issue
+ * ownership stays in the issues area.
+ */
+export interface IssuePatch {
+  name?: string;
+  description_html?: string;
+  state_id?: string | null;
+  priority?: (typeof ISSUE_PRIORITIES)[number];
+}
+
+export async function updateIssue(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  issueId: string,
+  input: IssuePatch
+): Promise<void> {
+  await client.patch(`/api/workspaces/${slug}/projects/${projectId}/issues/${issueId}/`, { json: input });
+}
+
+export const SubscriptionStatus = z.object({
+  subscribed: z.boolean(),
+});
+export type SubscriptionStatus = z.infer<typeof SubscriptionStatus>;
+
+export async function getSubscriptionStatus(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  issueId: string
+): Promise<SubscriptionStatus> {
+  const body = await client.getJson<unknown>(
+    `/api/workspaces/${slug}/projects/${projectId}/issues/${issueId}/subscribe/`
+  );
+  return client.parse(SubscriptionStatus, body, `GET issue subscribe status ${issueId}`);
+}
+
+export const IssueSubscription = z.object({
+  id: uuid(),
+  subscriber: uuid(),
+});
+export type IssueSubscription = z.infer<typeof IssueSubscription>;
+
+export async function subscribeIssue(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  issueId: string
+): Promise<IssueSubscription> {
+  const envelope = await client.sendJson<unknown>(
+    "POST",
+    `/api/workspaces/${slug}/projects/${projectId}/issues/${issueId}/subscribe/`,
+    {}
+  );
+  return client.parse(IssueSubscription, envelope.data, `POST issue subscribe ${issueId}`);
+}
+
+export async function unsubscribeIssue(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  issueId: string
+): Promise<void> {
+  await client.delete(`/api/workspaces/${slug}/projects/${projectId}/issues/${issueId}/subscribe/`);
+}
