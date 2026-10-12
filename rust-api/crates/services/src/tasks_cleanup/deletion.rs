@@ -47,8 +47,8 @@
 use std::collections::HashSet;
 
 use pidash_db::tasks_cleanup::{
-    entry_table_for, fetch_live_one_to_one, fetch_live_to_many, fetch_row, load_schema_info,
-    now_stamp, null_bulk, null_one_to_one, parse_pk, reverse_relations, run_named_hard_deletes,
+    entry_table_for, fetch_live_to_many, fetch_one_to_one, fetch_row, load_schema_info, now_stamp,
+    null_bulk, null_one_to_one, parse_pk, reverse_relations, run_named_hard_deletes,
     run_sweep_hard_deletes, stamp_row, sweep_tables, LookupError, RowState,
 };
 use pidash_db::{Pools, RequestContext};
@@ -215,10 +215,12 @@ pub async fn soft_delete_related_objects(
             if relation.is_set_null() {
                 // Outside the Python `try`: failures propagate.
                 if relation.one_to_one {
-                    if let Some(related) =
-                        fetch_live_one_to_one(reads, &schema, relation, &state.pk)
-                            .await
-                            .map_err(db_error)?
+                    // Unscoped read, like the descriptor `getattr`
+                    // (`:54`): whatever is found — live or
+                    // soft-deleted — is nulled (`:56-57`).
+                    if let Some(related) = fetch_one_to_one(reads, &schema, relation, &state.pk)
+                        .await
+                        .map_err(db_error)?
                     {
                         outcome.nulled_rows +=
                             null_one_to_one(writes, &schema, relation, &related.pk, &now_stamp())
@@ -238,7 +240,10 @@ pub async fn soft_delete_related_objects(
             // next relation (`:97-99`).
             if relation.one_to_one {
                 let step: Result<Option<(String, RowState)>, DeletionError> = async {
-                    let related = fetch_live_one_to_one(reads, &schema, relation, &state.pk)
+                    // Unscoped read, like the descriptor `getattr`
+                    // (`:68`); the `deleted_at` skip below (`:70-71`)
+                    // is what keeps stamped rows untouched.
+                    let related = fetch_one_to_one(reads, &schema, relation, &state.pk)
                         .await
                         .map_err(db_error)?;
                     let related = match related {

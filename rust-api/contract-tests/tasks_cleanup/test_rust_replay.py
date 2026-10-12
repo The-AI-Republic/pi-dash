@@ -626,6 +626,73 @@ def test_rust_soft_delete_project_stamps_identifier(db_conn, broker_url):
     )
 
 
+def test_rust_soft_delete_project_skips_soft_deleted_identifier(db_conn, broker_url):
+    """PIDASHCONV-936 (CASCADE O2O side): a soft-deleted O2O child is
+    found by the unscoped read yet left untouched — no re-stamp, no
+    null — exactly like Django's `if not deleted_at` skip
+    (`deletion_task.py:70-71`).
+
+    Scope note, read before extending: no SET_NULL reverse-O2O exists
+    in this schema (`_meta` + live-catalog censuses: all 9 O2Os take
+    the CASCADE branch), so no live-worker replay can reach the
+    SET_NULL O2O null-the-soft-deleted-row path — that half is pinned
+    by the `one_to_one_select` SQL-shape unit test (unscoped by
+    construction) plus the Django `_base_manager` probe recorded on
+    the issue. This test pins the preserved CASCADE half with the
+    real `project_identifier` O2O and guards the fetch refactor: the
+    unscoped read must not change CASCADE outcomes.
+    """
+    _owner, workspace, project = _fresh_project(db_conn, "o2ocas")
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT nextval(pg_get_serial_sequence('project_identifiers', 'id')) AS nid"
+        )
+        ident_id = cur.fetchone()["nid"]
+    ident = insert_row(
+        db_conn,
+        "project_identifiers",
+        {
+            "id": ident_id,
+            "workspace_id": str(workspace["id"]),
+            "project_id": str(project["id"]),
+            "name": uuid.uuid4().hex[:12].upper(),
+        },
+    )
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            'UPDATE "project_identifiers" SET "deleted_at" = %s WHERE "id" = %s',
+            (_old(days=1), ident["id"]),
+        )
+        cur.execute(
+            'SELECT deleted_at, project_id FROM "project_identifiers" WHERE "id" = %s',
+            (ident["id"],),
+        )
+        before = cur.fetchone()
+    assert before["deleted_at"] is not None
+    celery_id = rust_queue.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", "project", str(project["id"])],
+        kwargs={"using": None},
+    )
+    wait_for(
+        lambda: _soft_deleted(db_conn, "projects", project["id"]),
+        what="project row stamped by rust worker",
+    )
+    rust_queue.wait_for_settled(celery_id, what="project soft-delete acked")
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            'SELECT deleted_at, project_id FROM "project_identifiers" WHERE "id" = %s',
+            (ident["id"],),
+        )
+        after = cur.fetchone()
+    assert after["deleted_at"] == before["deleted_at"], (
+        "CASCADE O2O parity broken: soft-deleted child re-stamped"
+    )
+    assert str(after["project_id"]) == str(project["id"]), (
+        "CASCADE O2O parity broken: soft-deleted child FK nulled"
+    )
+
+
 def test_rust_eta_delayed_execution(db_conn, broker_url):
     """ETA parity through the Rust worker: countdown delays the delete."""
     row = insert_row(
