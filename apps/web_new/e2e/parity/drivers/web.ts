@@ -42005,7 +42005,6 @@ export class WebDriver implements ParityDriver {
       .trim();
   }
 
-
   // --- Project members tab (NEWFRONT-391, PSET-018–027). Appended; existing
   // --- methods above are untouched per the shared driver contract.
   async settingsMembersOpen(workspaceSlug: string, projectId: string): Promise<void> {
@@ -43174,5 +43173,450 @@ export class WebDriver implements ParityDriver {
     } else {
       await confirm.first().click({ timeout: 30_000 });
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Workspace-settings cross-cutting oracle (NEWFRONT-415, WSET-033..040).
+  // Appended; existing methods above are untouched per the shared driver
+  // contract. Observed on the running old app (oracle-prod): deep links
+  // render the section shell for authorized roles and the not-authorized
+  // view otherwise without redirecting; unknown webhook ids 404
+  // server-side while the detail page keeps spinning (NEWFRONT-417); the
+  // instance wrapper shows a themed maintenance screen when the
+  // instance-info read fails and a branded not-ready screen when setup is
+  // unfinished; the webhook-create, remove-member, and delete-webhook
+  // dialogs close on Escape while invite and token-create ignore it
+  // (NEWFRONT-418); settings lists read on mount only.
+  // -------------------------------------------------------------------------
+
+  private wsSettingsListSeen = 0;
+  private wsSettingsListHandler: ((request: { url(): string; method(): string }) => void) | null = null;
+  private wsSettingsSocketsSeen = 0;
+  private wsSettingsSocketHandler: (() => void) | null = null;
+  private wsSettingsDownloadsSeen = 0;
+  private wsSettingsDownloadHandler: (() => void) | null = null;
+  private wsSettingsInstanceHookInstalled = false;
+  private wsSettingsInstanceMode: "pass" | "fail" | "not-ready" = "pass";
+
+  private wsSettingsSectionPath(
+    workspaceSlug: string,
+    section: "general" | "members" | "billing" | "exports" | "webhooks" | "integrations"
+  ): string {
+    return section === "general" ? `/${workspaceSlug}/settings` : `/${workspaceSlug}/settings/${section}`;
+  }
+
+  /** Settle on content or denial: the shell renders one of the two, never blank. */
+  private async wsSettingsAwaitSettled(): Promise<void> {
+    await this.page
+      .waitForFunction(
+        () => {
+          const text = document.body.innerText ?? "";
+          if (/not authorized to view this page/i.test(text)) return true;
+          const membersLink = [...document.querySelectorAll("a")].some((a) =>
+            /\/settings\/members\/?$/.test((a as HTMLAnchorElement).href)
+          );
+          return membersLink && text.replace(/\s+/g, " ").trim().length > 200;
+        },
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] settings section settled on neither content nor denial.");
+      });
+  }
+
+  async wsSettingsOpenSection(
+    workspaceSlug: string,
+    section: "general" | "members" | "billing" | "exports" | "webhooks" | "integrations",
+    cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    await this.openAuthenticated(this.wsSettingsSectionPath(workspaceSlug, section), cookies);
+    await this.wsSettingsAwaitSettled();
+  }
+
+  async wsSettingsNotAuthorized(): Promise<boolean> {
+    return this.page.evaluate(() => /not authorized to view this page/i.test(document.body.innerText ?? ""));
+  }
+
+  async wsSettingsSidebarVisible(): Promise<boolean> {
+    // The authorized shell links every section from its sidebar; the
+    // denial view renders instead of the shell, so its links are absent.
+    return this.page.evaluate(() => {
+      const links = [...document.querySelectorAll("a")].filter((a) =>
+        /\/settings\/members\/?$/.test((a as HTMLAnchorElement).href)
+      );
+      return links.some((a) => {
+        const rect = (a as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+    });
+  }
+
+  async wsSettingsOutletText(): Promise<string> {
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main");
+      const text = (main ?? document.body).innerText ?? "";
+      return text.replace(/\s+/g, " ").trim();
+    });
+  }
+
+  async wsSettingsCurrentPath(): Promise<string> {
+    return new URL(this.page.url()).pathname;
+  }
+
+  async wsSettingsOpenWebhookDetail(
+    workspaceSlug: string,
+    webhookId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    await this.openAuthenticated(`/${workspaceSlug}/settings/webhooks/${webhookId}`, cookies);
+    // Unknown ids never resolve (NEWFRONT-417): the spinner persists, so
+    // once the authorized shell has rendered for a while with neither
+    // form nor denial, settle as "still loading" instead of waiting out
+    // the whole budget.
+    const start = Date.now();
+    for (;;) {
+      const state = await this.wsSettingsWebhookDetailState();
+      if (state !== "loading") return;
+      if (Date.now() - start > 10_000 && (await this.wsSettingsSidebarVisible())) return;
+      if (Date.now() - start > WebDriver.WAIT_MS) return;
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async wsSettingsWebhookDetailState(): Promise<"form" | "denied" | "loading"> {
+    return this.page.evaluate(() => {
+      const text = document.body.innerText ?? "";
+      if (/not authorized to/i.test(text)) return "denied";
+      const hasForm = [...document.querySelectorAll("button")].some((b) => (b.textContent ?? "").trim() === "Update");
+      return hasForm ? "form" : "loading";
+    });
+  }
+
+  async wsSettingsDesktopOnlyCount(): Promise<number> {
+    return this.page.evaluate(() => document.querySelectorAll('[data-desktop-only], [data-testid^="desktop-"]').length);
+  }
+
+  /** Single route hook serving the instance fail/not-ready test modes. */
+  private async wsSettingsInstanceHook(): Promise<void> {
+    if (this.wsSettingsInstanceHookInstalled) return;
+    this.wsSettingsInstanceHookInstalled = true;
+    await this.page.route("**/api/instances/", async (route) => {
+      if (this.wsSettingsInstanceMode === "fail") {
+        await route.abort("failed");
+        return;
+      }
+      if (this.wsSettingsInstanceMode === "not-ready" && route.request().method() === "GET") {
+        // Same envelope the backend serves, with setup unfinished: the
+        // store reads `instance.is_setup_done` off the nested object.
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ config: {}, instance: { is_activated: false, is_setup_done: false } }),
+        });
+        return;
+      }
+      await route.fallback();
+    });
+  }
+
+  async wsSettingsFailInstanceInfo(): Promise<void> {
+    this.wsSettingsInstanceMode = "fail";
+    await this.wsSettingsInstanceHook();
+  }
+
+  async wsSettingsServeInstanceNotReady(): Promise<void> {
+    this.wsSettingsInstanceMode = "not-ready";
+    await this.wsSettingsInstanceHook();
+  }
+
+  async wsSettingsResetInstanceRoutes(): Promise<void> {
+    this.wsSettingsInstanceMode = "pass";
+    await this.page.unroute("**/api/instances/").catch(() => undefined);
+    this.wsSettingsInstanceHookInstalled = false;
+  }
+
+  async wsSettingsMaintenanceVisible(): Promise<boolean> {
+    return this.page.evaluate(() => /didn't start up correctly/i.test(document.body.innerText ?? ""));
+  }
+
+  async wsSettingsMaintenanceIllustration(): Promise<string | null> {
+    return this.page.evaluate(() => {
+      const img = [...document.querySelectorAll("img")].find((el) =>
+        ((el as HTMLImageElement).src ?? "").includes("maintenance-mode-")
+      ) as HTMLImageElement | undefined;
+      return img?.src ?? null;
+    });
+  }
+
+  async wsSettingsMaintenanceSupportHref(): Promise<string | null> {
+    return this.page.evaluate(() => {
+      const anchor = document.querySelector('a[href^="mailto:"]') as HTMLAnchorElement | null;
+      return anchor?.href ?? null;
+    });
+  }
+
+  async wsSettingsNotReadyFacts(): Promise<{
+    heading: string | null;
+    getStartedHref: string | null;
+    workspaceContent: boolean;
+  }> {
+    const facts = await this.page.evaluate(() => {
+      const heading = (document.querySelector("h1")?.textContent ?? "").replace(/\s+/g, " ").trim();
+      const entry = [...document.querySelectorAll("a")].find((a) =>
+        /get started/i.test((a as HTMLAnchorElement).textContent ?? "")
+      ) as HTMLAnchorElement | undefined;
+      const settingsLinks = [...document.querySelectorAll("a")].filter((a) =>
+        /\/settings\/members\/?$/.test((a as HTMLAnchorElement).href)
+      );
+      return { heading, href: entry?.href ?? null, settingsLinks: settingsLinks.length };
+    });
+    return {
+      heading: facts.heading === "" ? null : facts.heading,
+      getStartedHref: facts.href,
+      workspaceContent: facts.settingsLinks > 0,
+    };
+  }
+
+  async wsSettingsSetColorScheme(scheme: "light" | "dark"): Promise<void> {
+    await this.page.emulateMedia({ colorScheme: scheme });
+  }
+
+  /**
+   * Settle on an open dialog. The dialog root itself never counts as
+   * visible (its fixed-position children leave it with zero height), so
+   * settle on mount plus a visible control inside instead of the root.
+   */
+  private async wsSettingsAwaitDialog(): Promise<void> {
+    const dialog = this.page.getByRole("dialog").first();
+    await dialog.waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    await dialog.getByRole("button").first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsOpenInviteDialog(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.wsSettingsOpenSection(workspaceSlug, "members", cookies);
+    await this.page.getByRole("button", { name: "Add member" }).click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsAwaitDialog();
+  }
+
+  async wsSettingsOpenWebhookCreateDialog(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.wsSettingsOpenSection(workspaceSlug, "webhooks", cookies);
+    await this.page.getByRole("button", { name: "Add webhook" }).first().click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsAwaitDialog();
+  }
+
+  async wsSettingsOpenTokenCreateDialog(cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated("/settings/profile/api-tokens", cookies);
+    await this.page
+      .getByRole("button", { name: /add (personal access|api) token/i })
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsAwaitDialog();
+  }
+
+  async wsSettingsOpenRemoveMemberDialog(
+    workspaceSlug: string,
+    memberEmail: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    await this.wsSettingsOpenSection(workspaceSlug, "members", cookies);
+    const row = this.page.locator("tr", { hasText: memberEmail }).first();
+    await row.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await row.hover({ timeout: WebDriver.WAIT_MS });
+    // The row-action popover trigger is the row's icon-only button (the
+    // role picker beside it carries the role text); it reveals on hover.
+    const trigger = row.locator("button").filter({ hasNotText: /\S/ }).first();
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .getByRole("button", { name: /remove/i })
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsAwaitDialog();
+  }
+
+  async wsSettingsOpenDeleteWebhookDialog(
+    workspaceSlug: string,
+    webhookId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    await this.wsSettingsOpenWebhookDetail(workspaceSlug, webhookId, cookies);
+    await this.page.getByRole("button", { name: /danger zone/i }).click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByRole("button", { name: /delete webhook/i }).click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsAwaitDialog();
+  }
+
+  async wsSettingsDialogOpen(): Promise<boolean> {
+    return (await this.page.getByRole("dialog").count()) > 0;
+  }
+
+  async wsSettingsDialogButtons(): Promise<string[]> {
+    const dialog = this.page.getByRole("dialog").first();
+    if ((await dialog.count()) === 0) return [];
+    return (await dialog.getByRole("button").allInnerTexts()).map((t) => t.replace(/\s+/g, " ").trim());
+  }
+
+  async wsSettingsPressEscape(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    // Fixed settle: dialogs that ignore Escape never change, so only a
+    // quiet window proves stability either way.
+    await this.page.waitForTimeout(1000);
+  }
+
+  async wsSettingsCloseDialogExplicit(): Promise<void> {
+    const dialog = this.page.getByRole("dialog").first();
+    await dialog
+      .getByRole("button", { name: /^(cancel|close)$/i })
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .getByRole("dialog")
+      .first()
+      .waitFor({ state: "detached", timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async wsSettingsDialogTabOrder(presses: number): Promise<{ order: string[]; escaped: boolean }> {
+    const order: string[] = [];
+    let escaped = false;
+    for (let i = 0; i < presses; i += 1) {
+      await this.page.keyboard.press("Tab");
+      await this.page.waitForTimeout(200);
+      const focused = await this.page.evaluate(() => {
+        const el = document.activeElement as HTMLElement | null;
+        if (!el) return { label: "<none>", inside: false };
+        const role = el.getAttribute("role") ?? el.tagName.toLowerCase();
+        const name = (el.getAttribute("aria-label") ?? el.getAttribute("placeholder") ?? el.innerText ?? "")
+          .replace(/\s+/g, " ")
+          .slice(0, 40);
+        return { label: `${role}:${name}`, inside: el.closest('[role="dialog"]') !== null };
+      });
+      order.push(focused.label);
+      if (!focused.inside) escaped = true;
+    }
+    return { order, escaped };
+  }
+
+  async wsSettingsPressKeys(keys: string[]): Promise<void> {
+    await this.page.locator("body").click({ timeout: WebDriver.WAIT_MS });
+    for (const key of keys) {
+      await this.page.keyboard.press(key);
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async wsSettingsMembersSearchEscapeProbe(query: string): Promise<{ value: string; visible: boolean }> {
+    // The members search is the list's own field ("Search..."); the top
+    // bar's command search ("Search commands...") belongs to the shell.
+    const field = this.page.getByPlaceholder("Search...", { exact: true });
+    await field.fill(query, { timeout: WebDriver.WAIT_MS });
+    await this.page.waitForTimeout(500);
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForTimeout(800);
+    return {
+      value: await field.inputValue().catch(() => "<gone>"),
+      visible: await field.isVisible().catch(() => false),
+    };
+  }
+
+  async wsSettingsWatchListRequests(): Promise<void> {
+    if (this.wsSettingsListHandler) {
+      this.wsSettingsListSeen = 0;
+      return;
+    }
+    this.wsSettingsListSeen = 0;
+    this.wsSettingsListHandler = (request: { url(): string; method(): string }) => {
+      if (request.method() === "GET" && /\/(members|webhooks|api-tokens)\/?(\?|$)/.test(request.url())) {
+        this.wsSettingsListSeen += 1;
+      }
+    };
+    this.page.on("request", this.wsSettingsListHandler as (request: never) => void);
+  }
+
+  async wsSettingsListRequestCount(): Promise<number> {
+    return this.wsSettingsListSeen;
+  }
+
+  async wsSettingsWatchSockets(): Promise<void> {
+    if (this.wsSettingsSocketHandler) {
+      this.wsSettingsSocketsSeen = 0;
+      return;
+    }
+    this.wsSettingsSocketsSeen = 0;
+    this.wsSettingsSocketHandler = () => {
+      this.wsSettingsSocketsSeen += 1;
+    };
+    this.page.on("websocket", this.wsSettingsSocketHandler);
+  }
+
+  async wsSettingsSocketCount(): Promise<number> {
+    return this.wsSettingsSocketsSeen;
+  }
+
+  async wsSettingsMembersListText(): Promise<string[]> {
+    return this.page.evaluate(() => {
+      const rows = [...document.querySelectorAll("tbody tr")];
+      return rows.map((row) => ((row as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim());
+    });
+  }
+
+  async wsSettingsWebhooksListText(): Promise<string[]> {
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main") ?? document.body;
+      return [...main.querySelectorAll("h5")].map((h) => ((h.textContent ?? "") as string).replace(/\s+/g, " ").trim());
+    });
+  }
+
+  async wsSettingsDraggableCount(): Promise<number> {
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main") ?? document.body;
+      return main.querySelectorAll('[draggable="true"]').length;
+    });
+  }
+
+  async wsSettingsDragFirstMemberRowToSecond(): Promise<void> {
+    const rows = this.page.locator("tbody tr");
+    const first = rows.nth(0).boundingBox();
+    const second = rows.nth(1).boundingBox();
+    const [a, b] = await Promise.all([first, second]);
+    if (!a || !b) throw new Error("[parity] members table has no two rows to drag between.");
+    const from = { x: a.x + a.width / 2, y: a.y + a.height / 2 };
+    const to = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+    await this.page.mouse.move(from.x, from.y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(to.x, to.y, { steps: 12 });
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(800);
+  }
+
+  async wsSettingsFileInputCount(): Promise<number> {
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main") ?? document.body;
+      return main.querySelectorAll('input[type="file"]').length;
+    });
+  }
+
+  async wsSettingsImportMentions(): Promise<string[]> {
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main") ?? document.body;
+      const hits = [...main.querySelectorAll("button, a")]
+        .map((el) => ((el.textContent ?? "") as string).replace(/\s+/g, " ").trim().slice(0, 40))
+        .filter((t) => /import/i.test(t));
+      return [...new Set(hits)].slice(0, 5);
+    });
+  }
+
+  async wsSettingsWatchDownloads(): Promise<void> {
+    if (this.wsSettingsDownloadHandler) {
+      this.wsSettingsDownloadsSeen = 0;
+      return;
+    }
+    this.wsSettingsDownloadsSeen = 0;
+    this.wsSettingsDownloadHandler = () => {
+      this.wsSettingsDownloadsSeen += 1;
+    };
+    this.page.on("download", this.wsSettingsDownloadHandler);
+  }
+
+  async wsSettingsDownloadCount(): Promise<number> {
+    return this.wsSettingsDownloadsSeen;
   }
 }

@@ -7989,6 +7989,111 @@ export interface ParityDriver {
   settingsMembersInviteCloseMemberPicker(index: number): Promise<void>;
   /** Active sort marker on a member-table column header: ascending, descending, or none. */
   settingsMembersSortMarker(column: string): Promise<"ascending" | "descending" | "none">;
+
+  // --- Workspace-settings cross-cutting oracle (NEWFRONT-415, WSET-033..040).
+  // --- Deep-link navigation plus content/denial reads per section, instance
+  // --- full-screen states (maintenance, not-ready) with request-interception
+  // --- hooks, settings-dialog open/close reads for the Escape matrix, tab
+  // --- order, shortcut silence, list-request/socket watchers for the
+  // --- no-live-updates row, and drag/import/download absence reads.
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+  /** Open a workspace settings section; settles on content or the denial view. */
+  wsSettingsOpenSection(
+    workspaceSlug: string,
+    section: "general" | "members" | "billing" | "exports" | "webhooks" | "integrations",
+    cookies: ParityBrowserCookie[]
+  ): Promise<void>;
+  /** Whether the not-authorized view is showing instead of section content. */
+  wsSettingsNotAuthorized(): Promise<boolean>;
+  /** Whether the settings sidebar is showing (authorized shell marker). */
+  wsSettingsSidebarVisible(): Promise<boolean>;
+  /** Normalized visible text of the settings content area (blank-check). */
+  wsSettingsOutletText(): Promise<string>;
+  /** Current pathname (deep links must not redirect). */
+  wsSettingsCurrentPath(): Promise<string>;
+  /** Open one webhook's detail page; settles on form, denial, or loading. */
+  wsSettingsOpenWebhookDetail(workspaceSlug: string, webhookId: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Webhook detail state: edit form, inline denial, or still loading. */
+  wsSettingsWebhookDetailState(): Promise<"form" | "denied" | "loading">;
+  /** Desktop-only hooks rendered inside settings (expected: none). */
+  wsSettingsDesktopOnlyCount(): Promise<number>;
+  /** Fail instance-info reads so the app renders the maintenance screen (test hook). */
+  wsSettingsFailInstanceInfo(): Promise<void>;
+  /** Serve instance-info as not-provisioned so the not-ready screen renders (test hook). */
+  wsSettingsServeInstanceNotReady(): Promise<void>;
+  /** Remove the instance-info hooks (test hook). */
+  wsSettingsResetInstanceRoutes(): Promise<void>;
+  /** Whether the maintenance full-screen message is showing. */
+  wsSettingsMaintenanceVisible(): Promise<boolean>;
+  /** Maintenance illustration image src, or null when absent. */
+  wsSettingsMaintenanceIllustration(): Promise<string | null>;
+  /** Maintenance support-link href, or null when absent. */
+  wsSettingsMaintenanceSupportHref(): Promise<string | null>;
+  /** Not-ready screen facts: heading, admin-entry href, workspace leak check. */
+  wsSettingsNotReadyFacts(): Promise<{
+    heading: string | null;
+    getStartedHref: string | null;
+    workspaceContent: boolean;
+  }>;
+  /** Render under a light or dark color scheme (themed illustration check). */
+  wsSettingsSetColorScheme(scheme: "light" | "dark"): Promise<void>;
+  /** Open the members invite dialog; resolves once it renders. */
+  wsSettingsOpenInviteDialog(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Open the webhook create dialog; resolves once it renders. */
+  wsSettingsOpenWebhookCreateDialog(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Open the token create dialog; resolves once it renders. */
+  wsSettingsOpenTokenCreateDialog(cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Open the remove-member confirm for one member email; resolves once it renders. */
+  wsSettingsOpenRemoveMemberDialog(
+    workspaceSlug: string,
+    memberEmail: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void>;
+  /** Open the delete-webhook confirm on a detail page; resolves once it renders. */
+  wsSettingsOpenDeleteWebhookDialog(
+    workspaceSlug: string,
+    webhookId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void>;
+  /** Whether any settings dialog is currently open. */
+  wsSettingsDialogOpen(): Promise<boolean>;
+  /** Button labels of the open dialog, in DOM order. */
+  wsSettingsDialogButtons(): Promise<string[]>;
+  /** Press Escape once. */
+  wsSettingsPressEscape(): Promise<void>;
+  /** Close the open dialog via its explicit Cancel/Close button. */
+  wsSettingsCloseDialogExplicit(): Promise<void>;
+  /** Focus labels across `presses` Tabs plus whether focus left the dialog. */
+  wsSettingsDialogTabOrder(presses: number): Promise<{ order: string[]; escaped: boolean }>;
+  /** Press keys with the page body focused (shortcut-silence check). */
+  wsSettingsPressKeys(keys: string[]): Promise<void>;
+  /** Fill the members search, press Escape, and read back value plus visibility. */
+  wsSettingsMembersSearchEscapeProbe(query: string): Promise<{ value: string; visible: boolean }>;
+  /** Start counting settings list reads (members, webhooks, tokens). */
+  wsSettingsWatchListRequests(): Promise<void>;
+  /** List reads observed since the watcher armed. */
+  wsSettingsListRequestCount(): Promise<number>;
+  /** Start counting websocket connections. */
+  wsSettingsWatchSockets(): Promise<void>;
+  /** Sockets observed since the watcher armed. */
+  wsSettingsSocketCount(): Promise<number>;
+  /** Member rows as rendered (display order snapshot). */
+  wsSettingsMembersListText(): Promise<string[]>;
+  /** Webhook rows as rendered (display order snapshot). */
+  wsSettingsWebhooksListText(): Promise<string[]>;
+  /** Draggable elements inside the settings content (expected: none). */
+  wsSettingsDraggableCount(): Promise<number>;
+  /** Drag the first member row onto the second (reorder attempt). */
+  wsSettingsDragFirstMemberRowToSecond(): Promise<void>;
+  /** File inputs inside the settings content. */
+  wsSettingsFileInputCount(): Promise<number>;
+  /** Visible "import" mentions inside the settings content (expected: none). */
+  wsSettingsImportMentions(): Promise<string[]>;
+  /** Start counting browser downloads. */
+  wsSettingsWatchDownloads(): Promise<void>;
+  /** Downloads observed since the watcher armed. */
+  wsSettingsDownloadCount(): Promise<number>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */

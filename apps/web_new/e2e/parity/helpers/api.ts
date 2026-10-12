@@ -17122,7 +17122,6 @@ export async function serverPlantRepositoryBinding(
   return id;
 }
 
-
 // --- Project members tab (NEWFRONT-391, PSET-018–027). Appended; existing
 // --- helpers above are untouched per the shared harness contract.
 
@@ -17339,3 +17338,96 @@ export async function serverPatchWorkspaceMember(
 }
 
 /** End of the NEWFRONT-391 project-members-tab block. */
+
+// --- Workspace-settings cross-cutting oracle (NEWFRONT-415, WSET-033..040).
+// --- Webhook CRUD + status reads, workspace-role reads, and API-token list
+// --- reads for the exports-entry, deep-link, and negative scenarios. Every
+// --- helper goes through the public REST API with a caller-owned session;
+// --- nothing here touches the DOM. Appended; existing helpers above are
+// --- untouched per the shared parity contract.
+
+/** A workspace webhook row as the server reports it. */
+export interface ParityWorkspaceWebhook {
+  id: string;
+  url: string;
+  isActive: boolean;
+}
+
+function parityWebhookOf(record: Record<string, unknown>): ParityWorkspaceWebhook {
+  if (typeof record["id"] !== "string" || typeof record["url"] !== "string") {
+    throw new Error("[parity] webhook row carried no id/url.");
+  }
+  return { id: record["id"], url: record["url"], isActive: record["is_active"] === true };
+}
+
+/** Create a webhook; resolves with the created row (secret is write-only). */
+export async function serverCreateWorkspaceWebhook(
+  admin: AuthedSession,
+  slug: string,
+  input: { url: string }
+): Promise<ParityWorkspaceWebhook> {
+  const res = await sessionFetch(admin, "POST", `/api/workspaces/${slug}/webhooks/`, {
+    url: input.url,
+    is_active: true,
+  });
+  if (res.status !== 200 && res.status !== 201) {
+    throw new Error(`[parity] webhook create failed with HTTP ${res.status}.`);
+  }
+  return parityWebhookOf((await res.json()) as Record<string, unknown>);
+}
+
+/** Delete a webhook (best effort: 404 means already gone). */
+export async function serverDeleteWorkspaceWebhook(
+  admin: AuthedSession,
+  slug: string,
+  webhookId: string
+): Promise<void> {
+  const res = await sessionFetch(admin, "DELETE", `/api/workspaces/${slug}/webhooks/${webhookId}/`);
+  if (!res.ok && res.status !== 204 && res.status !== 404) {
+    throw new Error(`[parity] webhook delete failed with HTTP ${res.status}.`);
+  }
+}
+
+/** Raw detail status for one webhook id (proves unknown ids 404 server-side). */
+export async function serverWorkspaceWebhookStatus(
+  admin: AuthedSession,
+  slug: string,
+  webhookId: string
+): Promise<number> {
+  const res = await sessionFetch(admin, "GET", `/api/workspaces/${slug}/webhooks/${webhookId}/`);
+  return res.status;
+}
+
+/** Every webhook on a workspace, in server order. */
+export async function serverListWorkspaceWebhooks(
+  admin: AuthedSession,
+  slug: string
+): Promise<ParityWorkspaceWebhook[]> {
+  const res = await sessionFetch(admin, "GET", `/api/workspaces/${slug}/webhooks/`);
+  if (!res.ok) throw new Error(`[parity] webhook list read failed with HTTP ${res.status}.`);
+  return ((await res.json()) as Record<string, unknown>[]).map(parityWebhookOf);
+}
+
+/** Numeric workspace role of a user (20/15/5), or null when not a member. */
+export async function serverWorkspaceMemberRole(user: AuthedSession, slug: string): Promise<number | null> {
+  const res = await sessionFetch(user, "GET", `/api/workspaces/${slug}/members/`);
+  if (!res.ok) throw new Error(`[parity] workspace members read failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Array<Record<string, unknown>>;
+  for (const row of rows) {
+    const member = row["member"] as Record<string, unknown> | undefined;
+    if (member?.["id"] === user.userId) {
+      return typeof row["role"] === "number" ? (row["role"] as number) : null;
+    }
+  }
+  return null;
+}
+
+/** Personal access tokens of the caller's account (id + label only). */
+export async function serverListApiTokens(user: AuthedSession): Promise<Array<{ id: string; label: string }>> {
+  const res = await sessionFetch(user, "GET", `/api/users/api-tokens/`);
+  if (!res.ok) throw new Error(`[parity] api-token list read failed with HTTP ${res.status}.`);
+  return ((await res.json()) as Array<Record<string, unknown>>).map((row) => {
+    if (typeof row["id"] !== "string") throw new Error("[parity] api-token row carried no id.");
+    return { id: row["id"], label: typeof row["label"] === "string" ? row["label"] : "" };
+  });
+}
