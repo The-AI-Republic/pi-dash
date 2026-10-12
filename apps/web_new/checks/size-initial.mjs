@@ -15,12 +15,14 @@ export const MANIFEST_PATH = "dist/web/.vite/manifest.json";
 export const ENTRY_KEY = "index.html";
 
 // Manifest keys of the route components on the issue-list first paint: the
-// $ws layout and the issues leaf. TanStack autoCodeSplitting emits one
-// dynamic split per key; errorComponent/notFoundComponent splits and every
-// other route stay lazy and are excluded by design.
+// $ws route, the gated layout carrying the shell, and the issues leaf.
+// TanStack autoCodeSplitting emits one dynamic split per key;
+// errorComponent/notFoundComponent splits and every other route stay lazy
+// and are excluded by design.
 export const FIRST_ROUTE_KEYS = [
   "src/routes/$ws/route.tsx?tsr-split=component",
-  "src/routes/$ws/projects/$projectId/issues/index.tsx?tsr-split=component",
+  "src/routes/$ws/_gated/route.tsx?tsr-split=component",
+  "src/routes/$ws/_gated/projects/$projectId/issues/index.tsx?tsr-split=component",
 ];
 
 function assertEntry(manifest, key, role) {
