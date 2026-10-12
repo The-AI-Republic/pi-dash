@@ -37,6 +37,7 @@ pub mod app_workspace;
 pub mod assistant;
 pub mod auth_oauth;
 pub mod auth_session;
+pub mod desktop_gate;
 pub mod edge;
 pub mod edge_shadow;
 pub mod license;

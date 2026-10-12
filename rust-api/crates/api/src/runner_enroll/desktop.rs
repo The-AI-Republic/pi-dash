@@ -19,8 +19,9 @@
 //! * Preamble: session via [`crate::license::resolve_actor`] (401 when
 //!   anonymous — DRF reports `NotAuthenticated`, and the project's
 //!   `auth_exception_handler` forces it back to 401), then the desktop
-//!   marker via the [`pidash_auth::permissions::desktop`] kernel (403 with
-//!   the exact `IsDesktopSession.message` body otherwise). The contract
+//!   verdict via the [`crate::desktop_gate`] seam (CE default in the
+//!   [`pidash_auth::permissions::desktop`] kernel; 403 with the exact
+//!   `IsDesktopSession.message` body otherwise). The contract
 //!   suite pins bothShapes byte for byte (`test_daemon_projects.py`).
 //! * SQL text comes from the merged queries builders
 //!   ([`catalog_reads`](pidash_services::runner_enroll::queries::catalog_reads)
@@ -89,6 +90,8 @@ use uuid::Uuid;
 use pidash_services::runner_enroll::queries::catalog_reads;
 use pidash_services::runner_enroll::tokens;
 
+use crate::desktop_gate::header_value;
+use crate::desktop_gate::DesktopCredential;
 use crate::middleware::SessionHandle;
 use crate::runner_runs::json_response;
 use crate::runner_runs::pool_of;
@@ -304,8 +307,9 @@ fn update_required_body(floor: &str) -> String {
 async fn desktop_actor(
     state: &AppState,
     extension: Option<Extension<SessionHandle>>,
+    headers: &axum::http::HeaderMap,
 ) -> Result<(sqlx::PgPool, Uuid, bool), Response> {
-    let desktop = is_desktop_from_extension(&extension);
+    let desktop = is_desktop_from_extension(&extension, headers, state);
     let pool = pool_of(state)?.clone();
     let secret = state.settings().secret_key.clone();
     let actor = crate::license::resolve_actor(&pool, secret.as_bytes(), extension)
@@ -320,22 +324,26 @@ async fn desktop_actor(
     Ok((pool, actor.id, desktop))
 }
 
-/// Whether the request's session carries the CE desktop marker, through
-/// the [`pidash_auth::permissions::desktop`] kernel. A missing snapshot,
-/// a missing key, or a non-string value is not a desktop (the broad
-/// `except` in `request_is_desktop` fails closed).
-fn is_desktop_from_extension(extension: &Option<Extension<SessionHandle>>) -> bool {
-    use pidash_auth::permissions::desktop::is_desktop_session;
-    let data = extension.as_ref().map(|handle| handle.snapshot());
-    let mut data = data.unwrap_or_else(crate::middleware::RequestSession::empty);
-    let value = data
-        .get(pidash_auth::permissions::desktop::DESKTOP_SESSION_KEY)
-        .and_then(serde_json::Value::as_str);
-    // `authenticated` is decided by the actor resolution that follows;
-    // pass `true` here so this predicate is purely the marker check, and
-    // let the 401 arm above own the anonymous case (DRF checks
-    // authentication before permissions, so anon still 401s).
-    is_desktop_session(true, value)
+/// Whether the request passes the installed desktop gate: the caller
+/// extracts the session dict plus the raw auth headers into a
+/// [`DesktopCredential`] and the state's gate decides
+/// ([`AppState::is_desktop_request`]). The CE gate reads only the
+/// session marker (a missing snapshot, a missing key, or a non-string
+/// value is not a desktop — the broad `except` in `request_is_desktop`
+/// fails closed); the overlay's gate reads only the headers, so it
+/// answers even without a session.
+fn is_desktop_from_extension(
+    extension: &Option<Extension<SessionHandle>>,
+    headers: &axum::http::HeaderMap,
+    state: &AppState,
+) -> bool {
+    let session = extension.as_ref().map(|handle| handle.snapshot().to_json());
+    let credential = DesktopCredential {
+        session: session.as_ref(),
+        authorization: header_value(headers, axum::http::header::AUTHORIZATION),
+        cookie: header_value(headers, axum::http::header::COOKIE),
+    };
+    state.is_desktop_request(&credential)
 }
 
 /// The desktop-only denial: 403 with the exact `IsDesktopSession`
@@ -401,7 +409,7 @@ async fn post_desktop_enroll(
     let graceful_stop_secs = state.settings().managed_runner.graceful_stop_secs;
     let secret_key = state.settings().secret_key.clone();
 
-    let (pool, user_id, desktop) = match desktop_actor(&state, extension).await {
+    let (pool, user_id, desktop) = match desktop_actor(&state, extension, req.headers()).await {
         Ok(preamble) => preamble,
         Err(denial) => return denial,
     };
@@ -646,7 +654,7 @@ async fn delete_desktop_enroll(
     Query(params): Query<crate::license::QueryMap>,
     req: Request,
 ) -> Response {
-    let (pool, user_id, desktop) = match desktop_actor(&state, extension).await {
+    let (pool, user_id, desktop) = match desktop_actor(&state, extension, req.headers()).await {
         Ok(preamble) => preamble,
         Err(denial) => return denial,
     };
@@ -746,6 +754,84 @@ mod tests {
         include_str!("../../../../fixtures/runner_enroll/services/flows.golden.json");
     const FIXTURE_ENDPOINTS: &str =
         include_str!("../../../../fixtures/runner_enroll/handlers/endpoints.golden.json");
+
+    /// An overlay-shaped gate: answers from the presented credential
+    /// (like the cloud client-claim check) instead of the CE session
+    /// dict — including with no session at all.
+    struct TokenDesktopGate;
+
+    impl crate::desktop_gate::DesktopRequestGate for TokenDesktopGate {
+        fn is_desktop(&self, credential: &crate::desktop_gate::DesktopCredential) -> bool {
+            matches!(
+                credential.authorization,
+                Some(header) if header == "Bearer desktop-token"
+            )
+        }
+    }
+
+    fn extension_with(value: &str) -> Option<Extension<SessionHandle>> {
+        let mut session = crate::middleware::RequestSession::empty();
+        session.set(
+            pidash_auth::permissions::desktop::DESKTOP_SESSION_KEY.to_owned(),
+            serde_json::json!(value),
+        );
+        Some(Extension(crate::middleware::SessionHandle::new(session)))
+    }
+
+    fn headers_with(authorization: Option<&str>) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(value) = authorization {
+            headers.insert(
+                axum::http::header::AUTHORIZATION,
+                axum::http::HeaderValue::from_str(value).expect("header value"),
+            );
+        }
+        headers
+    }
+
+    /// The enroll preamble's desktop verdict comes from the state's
+    /// gate: the default keeps the CE session-key check byte-identical.
+    #[test]
+    fn default_state_keeps_the_ce_session_check() {
+        let state = AppState::new("test");
+        let headers = headers_with(None);
+        let desktop = extension_with("desktop");
+        assert!(is_desktop_from_extension(&desktop, &headers, &state));
+        let browser = extension_with("browser");
+        assert!(!is_desktop_from_extension(&browser, &headers, &state));
+        // A missing snapshot is not a desktop, and auth headers never
+        // sway the CE verdict.
+        assert!(!is_desktop_from_extension(&None, &headers, &state));
+        let bearer = headers_with(Some("Bearer desktop-token"));
+        assert!(!is_desktop_from_extension(&None, &bearer, &state));
+        assert!(is_desktop_from_extension(&desktop, &bearer, &state));
+    }
+
+    /// An alternate gate implementation flows through to this
+    /// endpoint: the overlay shape (a credential with no session)
+    /// passes, and a CE desktop session without one does not.
+    #[test]
+    fn installed_token_gate_flows_through_enroll_guard() {
+        let state = AppState::new("test").with_desktop_gate(TokenDesktopGate);
+        let bearer = headers_with(Some("Bearer desktop-token"));
+        assert!(is_desktop_from_extension(&None, &bearer, &state));
+        let desktop = extension_with("desktop");
+        assert!(!is_desktop_from_extension(
+            &desktop,
+            &headers_with(None),
+            &state
+        ));
+        assert!(!is_desktop_from_extension(
+            &None,
+            &headers_with(Some("Bearer browser-token")),
+            &state
+        ));
+        assert!(!is_desktop_from_extension(
+            &None,
+            &headers_with(None),
+            &state
+        ));
+    }
 
     /// D13-F6 `version_is_allowed`: every golden case passes verbatim
     /// (the `reported` strings carry their `(…)` annotations inline —
