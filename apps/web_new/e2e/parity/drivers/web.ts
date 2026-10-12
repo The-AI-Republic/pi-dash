@@ -42166,6 +42166,89 @@ export class WebDriver implements ParityDriver {
     return names;
   }
 
+  // --- Project settings workflow states (NEWFRONT-392, PSET-028–035).
+  // --- Group cards key off their lowercase group-key text (rendered
+  // --- capitalized by style); rows key off the h6 state-name text. The
+  // --- per-group add button and per-row edit button carry stable
+  // --- data-ph-element marks; the inline form keys off its name input.
+  private stateGroupKeyText(group: string): Locator {
+    return this.page
+      .locator('div[class*="capitalize"]')
+      .filter({ hasText: new RegExp(`^${group}$`, "i") })
+      .first();
+  }
+
+  private stateGroupCard(group: string): Locator {
+    // Key text -> clickable header row -> header flex row -> card root.
+    return this.stateGroupKeyText(group).locator("xpath=ancestor::div[3]");
+  }
+
+  private stateHeading(name: string): Locator {
+    return this.page.getByRole("heading", { name, exact: true }).first();
+  }
+
+  private stateRow(name: string): Locator {
+    return this.stateHeading(name).locator("xpath=ancestor::div[contains(@class,'group')][1]");
+  }
+
+  private stateForm(): Locator {
+    return this.page.locator('input[name="name"]').locator("xpath=ancestor::div[contains(@class,'bg-surface-1')][1]");
+  }
+
+  async settingsStatesOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/states`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on the first group card (editors and members) or either
+    // denial view (outsiders see the project join restriction, not the
+    // not-authorized card); callers assert which one they got.
+    const settle = (target: { waitFor: (options: { timeout: number }) => Promise<void> }): Promise<boolean> =>
+      target.waitFor({ timeout: 60_000 }).then(
+        () => true,
+        () => false
+      );
+    const settled = await Promise.race([
+      settle(this.page.getByText("backlog", { exact: true }).first()),
+      settle(this.page.getByRole("heading", { name: /not authorized/i }).first()),
+      settle(this.page.getByRole("heading", { name: /don.t have access/i }).first()),
+    ]);
+    if (!settled) throw new Error("[parity] states settings settled on neither the list nor the denial view.");
+  }
+
+  async settingsStatesGroupNames(): Promise<string[]> {
+    const fixed = ["backlog", "unstarted", "started", "review", "test", "completed", "cancelled"];
+    const names: string[] = [];
+    for (const key of fixed) {
+      if ((await this.stateGroupKeyText(key).count()) > 0) names.push(key);
+    }
+    return names;
+  }
+
+  async settingsStatesGroupExpanded(group: string): Promise<boolean> {
+    return (await this.stateGroupCard(group).locator("#group-droppable-container").count()) > 0;
+  }
+
+  async settingsStatesToggleGroup(group: string): Promise<void> {
+    const before = await this.settingsStatesGroupExpanded(group);
+    await this.stateGroupKeyText(group).click({ timeout: 30_000 });
+    await expect.poll(() => this.settingsStatesGroupExpanded(group), { timeout: 15_000 }).toBe(!before);
+  }
+
+  async settingsStatesStateNames(group: string): Promise<string[]> {
+    const heads = this.stateGroupCard(group).locator("h6");
+    const total = await heads.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await heads
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
   async settingsMembersFilterChecked(label: string): Promise<boolean> {
     const button = this.membersFilterMenu().getByRole("button", { name: label, exact: true });
     const box = button.locator("div").first();
@@ -42613,6 +42696,305 @@ export class WebDriver implements ParityDriver {
       .trim();
   }
 
+  async settingsStatesAddEnabled(group: string): Promise<boolean> {
+    const button = this.stateGroupCard(group).locator('button[data-ph-element="state_group_add_button"]');
+    if ((await button.count()) === 0) return false;
+    return button.first().isEnabled();
+  }
+
+  async settingsStatesOpenCreate(group: string): Promise<void> {
+    await this.stateGroupCard(group)
+      .locator('button[data-ph-element="state_group_add_button"]')
+      .first()
+      .click({ timeout: 30_000 });
+    await this.page.locator('input[name="name"]').waitFor({ timeout: 30_000 });
+  }
+
+  async settingsStatesFormVisible(): Promise<boolean> {
+    return (await this.page.locator('input[name="name"]').count()) > 0;
+  }
+
+  async settingsStatesFillName(name: string): Promise<void> {
+    await this.page.locator('input[name="name"]').fill(name, { timeout: 30_000 });
+  }
+
+  async settingsStatesFillDescription(text: string): Promise<void> {
+    await this.page.locator('textarea[name="description"]').fill(text, { timeout: 30_000 });
+  }
+
+  async settingsStatesNameValue(): Promise<string> {
+    return (
+      (await this.page
+        .locator('input[name="name"]')
+        .inputValue()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async settingsStatesDescriptionValue(): Promise<string> {
+    return (
+      (await this.page
+        .locator('textarea[name="description"]')
+        .inputValue()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async settingsStatesFormError(): Promise<string> {
+    const err = this.stateForm().locator('p[class*="danger"], p[class*="error"]').first();
+    if ((await err.count()) === 0) return "";
+    return ((await err.innerText().catch(() => "")) ?? "").trim();
+  }
+
+  async settingsStatesSubmitCreate(): Promise<void> {
+    await this.stateForm().getByRole("button", { name: "Create", exact: true }).click({ timeout: 30_000 });
+    await this.page.locator('input[name="name"]').waitFor({ state: "detached", timeout: 30_000 });
+  }
+
+  async settingsStatesSubmitUpdate(): Promise<void> {
+    await this.stateForm().getByRole("button", { name: "Update", exact: true }).click({ timeout: 30_000 });
+    await this.page.locator('input[name="name"]').waitFor({ state: "detached", timeout: 30_000 });
+  }
+
+  async settingsStatesCancelForm(): Promise<void> {
+    await this.stateForm().getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 30_000 });
+    await this.page.locator('input[name="name"]').waitFor({ state: "detached", timeout: 15_000 });
+  }
+
+  async settingsStatesAttemptSubmit(): Promise<void> {
+    const form = this.stateForm();
+    const create = form.getByRole("button", { name: "Create", exact: true });
+    if ((await create.count()) > 0) {
+      await create.first().click({ timeout: 30_000 });
+      return;
+    }
+    await form.getByRole("button", { name: "Update", exact: true }).first().click({ timeout: 30_000 });
+  }
+
+  async settingsStatesDotColor(): Promise<string> {
+    const dot = this.stateForm().locator("div.inline-flex.h-5.w-5").first();
+    await dot.waitFor({ timeout: 30_000 });
+    return ((await dot.evaluate((el) => getComputedStyle(el).backgroundColor).catch(() => "")) ?? "").trim();
+  }
+
+  async settingsStatesOpenColorPicker(): Promise<void> {
+    await this.stateForm().locator("div.inline-flex.h-5.w-5").first().click({ timeout: 30_000 });
+    await this.page.locator(".twitter-picker").waitFor({ timeout: 30_000 });
+  }
+
+  async settingsStatesPickColor(hex: string): Promise<void> {
+    const picker = this.page.locator(".twitter-picker");
+    await picker.waitFor({ timeout: 30_000 });
+    const swatches = picker.locator("[title]");
+    const total = await swatches.count();
+    const want = hex.toLowerCase();
+    for (let i = 0; i < total; i++) {
+      const title = ((await swatches.nth(i).getAttribute("title")) ?? "").toLowerCase();
+      if (title === want) {
+        await swatches.nth(i).click({ timeout: 15_000 });
+        // Picking leaves the popover open over the submit buttons, so
+        // dismiss it before returning.
+        await this.page.keyboard.press("Escape");
+        await picker.waitFor({ state: "detached", timeout: 15_000 });
+        return;
+      }
+    }
+    throw new Error(`[parity] no state color swatch titled ${hex}.`);
+  }
+
+  async settingsStatesOpenEdit(name: string): Promise<void> {
+    const row = this.stateRow(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    await row.locator('button[data-ph-element="state_list_edit_button"]').first().click({ timeout: 30_000 });
+    await this.page.locator('input[name="name"]').waitFor({ timeout: 30_000 });
+  }
+
+  async settingsStatesGripVisible(name: string): Promise<boolean> {
+    const row = this.stateRow(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    const grip = row.locator("svg.lucide-grip-vertical").first();
+    if ((await grip.count()) === 0) return false;
+    return grip.isVisible().catch(() => false);
+  }
+
+  private async dragStateHandle(source: string, target: string, edge: "above" | "below"): Promise<void> {
+    const row = this.stateRow(source);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    // Cross-group drops miss while the target sits at the viewport edge
+    // (edge auto-scroll moves it mid-gesture), so center it before
+    // capturing boxes.
+    const targetRow = this.stateRow(target);
+    await targetRow.evaluate((el) => el.scrollIntoView({ block: "center" }));
+    const from = await row.boundingBox();
+    const targetBox = await targetRow.boundingBox();
+    if (from === null || targetBox === null) throw new Error("[parity] state drag endpoints have no boxes.");
+    const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 };
+    // Aim just inside the target's top (above) or bottom (below) edge so
+    // the closest-edge detector settles on that side.
+    const end =
+      edge === "above"
+        ? { x: targetBox.x + targetBox.width / 2, y: targetBox.y + 6 }
+        : { x: targetBox.x + targetBox.width / 2, y: targetBox.y + targetBox.height - 6 };
+    await this.page.mouse.move(start.x, start.y);
+    await this.page.mouse.down();
+    for (let i = 1; i <= 12; i++) {
+      await this.page.mouse.move(start.x + ((end.x - start.x) * i) / 12, start.y + ((end.y - start.y) * i) / 12);
+    }
+    await this.page.waitForTimeout(300);
+    await this.page.mouse.up();
+  }
+
+  async settingsStatesDragAbove(source: string, target: string): Promise<void> {
+    await this.dragStateHandle(source, target, "above");
+  }
+
+  async settingsStatesDragBelow(source: string, target: string): Promise<void> {
+    await this.dragStateHandle(source, target, "below");
+  }
+
+  private async stateDeleteButton(name: string): Promise<Locator> {
+    // Row controls render as [mark-as-default][edit][delete]; the delete
+    // trigger is the last button in the row.
+    const row = this.stateRow(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    const buttons = row.locator("button");
+    const total = await buttons.count();
+    if (total === 0) throw new Error(`[parity] state row ${name} carries no buttons.`);
+    return buttons.nth(total - 1);
+  }
+
+  async settingsStatesDeleteDisabled(name: string): Promise<boolean> {
+    return this.stateDeleteButton(name).then((button) => button.isDisabled());
+  }
+
+  async settingsStatesDelete(name: string): Promise<void> {
+    await (await this.stateDeleteButton(name)).click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Delete State" }).waitFor({ timeout: 30_000 });
+  }
+
+  async settingsStatesDeleteModalText(): Promise<string> {
+    const heading = this.page.getByRole("heading", { name: "Delete State" });
+    if ((await heading.count()) === 0) return "";
+    const body = heading.first().locator("xpath=following-sibling::div[1]");
+    return ((await body.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async settingsStatesDeleteConfirm(): Promise<void> {
+    const heading = this.page.getByRole("heading", { name: "Delete State" });
+    await heading.waitFor({ timeout: 30_000 });
+    const dialog = heading.locator("xpath=ancestor::div[@role='dialog'][1]");
+    const confirm = dialog.getByRole("button", { name: "Delete", exact: true });
+    if ((await confirm.count()) === 0) {
+      await this.page.getByRole("button", { name: "Delete", exact: true }).first().click({ timeout: 30_000 });
+    } else {
+      await confirm.first().click({ timeout: 30_000 });
+    }
+    await heading.waitFor({ state: "detached", timeout: 30_000 });
+  }
+
+  async settingsStatesDeleteCancel(): Promise<void> {
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).first().click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Delete State" }).waitFor({ state: "detached", timeout: 15_000 });
+  }
+
+  async settingsStatesAttemptDeleteConfirm(): Promise<void> {
+    const heading = this.page.getByRole("heading", { name: "Delete State" });
+    await heading.waitFor({ timeout: 30_000 });
+    const dialog = heading.locator("xpath=ancestor::div[@role='dialog'][1]");
+    const confirm = dialog.getByRole("button", { name: "Delete", exact: true });
+    if ((await confirm.count()) === 0) {
+      await this.page.getByRole("button", { name: "Delete", exact: true }).first().click({ timeout: 30_000 });
+    } else {
+      await confirm.first().click({ timeout: 30_000 });
+    }
+  }
+
+  async settingsStatesMarkDefault(name: string): Promise<void> {
+    const row = this.stateRow(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    await row.getByRole("button", { name: "Mark as default" }).first().click({ timeout: 30_000 });
+  }
+
+  async settingsStatesIsDefault(name: string): Promise<boolean> {
+    const row = this.stateRow(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    return (await row.getByRole("button", { name: "Default", exact: true }).count()) > 0;
+  }
+
+  async settingsStatesMemberToggleVisible(): Promise<boolean> {
+    return (await this.page.getByText("Let members edit states", { exact: true }).count()) > 0;
+  }
+
+  async settingsStatesMemberToggleOn(): Promise<boolean> {
+    const toggle = this.page.getByRole("switch").first();
+    await toggle.waitFor({ timeout: 30_000 });
+    return (await toggle.getAttribute("aria-checked")) === "true";
+  }
+
+  async settingsStatesSetMemberToggle(on: boolean): Promise<void> {
+    const toggle = this.page.getByRole("switch").first();
+    await toggle.waitFor({ timeout: 30_000 });
+    const current = (await toggle.getAttribute("aria-checked")) === "true";
+    if (current !== on) await toggle.click({ timeout: 30_000 });
+  }
+
+  async settingsStatesAccessDenied(): Promise<boolean> {
+    // Either the settings not-authorized card or the project-level join
+    // restriction counts as denied; outsiders land on the latter.
+    const notAuthorized = await this.page
+      .getByRole("heading", { name: /not authorized/i })
+      .first()
+      .count();
+    if (notAuthorized > 0) return true;
+    return (
+      (await this.page
+        .getByRole("heading", { name: /don.t have access/i })
+        .first()
+        .count()) > 0
+    );
+  }
+
+  async settingsStatesSkeletonVisible(): Promise<boolean> {
+    const bones = this.page.locator('[role="status"].animate-pulse > div');
+    if ((await bones.count()) < 4) return false;
+    return bones.first().isVisible();
+  }
+
+  async settingsStatesDelayLoad(ms: number): Promise<void> {
+    // Hold the states-list answers (project and workspace alike, since
+    // either one lets the store render) so the loading state stays up
+    // long enough to observe; writes pass through untouched.
+    const hold = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue();
+    };
+    await this.page.route("**/api/workspaces/*/projects/*/states/", hold);
+    await this.page.route("**/api/workspaces/*/states/", hold);
+  }
+
+  async settingsStatesEmptyNote(group: string): Promise<string> {
+    const note = this.stateGroupCard(group).getByText(/No states available/i);
+    if ((await note.count()) === 0) return "";
+    return (
+      (await note
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   async settingsMembersLeadPick(displayName: string): Promise<void> {
     await this.membersDefaultsPicker("Project Lead").click({ timeout: 30_000 });
     await this.membersOpenListbox().waitFor({ state: "attached", timeout: 15_000 });
@@ -42674,4 +43056,123 @@ export class WebDriver implements ParityDriver {
     return this.membersGuestToggle().isDisabled();
   }
 
+  // --- Project settings labels gaps (NEWFRONT-392, PSET-036–042). ---
+
+  private labelGroupDisclosure(name: string): Locator {
+    // Group header row (cursor-pointer) -> padded wrapper -> Disclosure box.
+    const header = this.labelHeading(name).locator("xpath=ancestor::div[contains(@class,'cursor-pointer')][1]");
+    return header.locator("xpath=ancestor::div[2]");
+  }
+
+  async settingsLabelsChildrenOf(parent: string): Promise<string[]> {
+    // Only visible headings count: the collapse transition unmounts
+    // the panel after the chevron flips, so freshly hidden children
+    // still sit in the DOM for a beat.
+    const body = this.labelGroupDisclosure(parent).locator("div.ml-6 h6");
+    const total = await body.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const head = body.nth(i);
+      if (!(await head.isVisible().catch(() => false))) continue;
+      const text = ((await head.innerText().catch(() => "")) ?? "").trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
+  async settingsLabelsToggleGroup(name: string): Promise<void> {
+    const before = await this.settingsLabelsGroupCollapsed(name);
+    // The Disclosure.Button is the header row's direct child button; its
+    // chevron svg carries no "chevron" class, so key off the structure.
+    const disclosure = this.labelGroupDisclosure(name);
+    await disclosure.locator("div.cursor-pointer > button").first().click({ timeout: 30_000 });
+    await expect.poll(() => this.settingsLabelsGroupCollapsed(name), { timeout: 15_000 }).toBe(!before);
+    // The chevron flips before the collapse transition unmounts the
+    // panel, so settle on the panel itself before returning.
+    const panel = disclosure.locator("div.ml-6");
+    if (!before) await panel.waitFor({ state: "detached", timeout: 15_000 });
+    else await panel.waitFor({ state: "attached", timeout: 15_000 });
+  }
+
+  async settingsLabelsGroupCollapsed(name: string): Promise<boolean> {
+    // The chevron carries a quarter-turn class only while closed.
+    const chevron = this.labelGroupDisclosure(name).locator("svg[class*='rotate-90']");
+    return (await chevron.count()) > 0;
+  }
+
+  async settingsLabelsGripVisible(name: string): Promise<boolean> {
+    const row = this.labelRow(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    const grip = row.locator("button:has(.lucide-ellipsis-vertical, .lucide-more-vertical)").first();
+    if ((await grip.count()) === 0) return false;
+    return grip.isVisible().catch(() => false);
+  }
+
+  async settingsLabelsDragFeedback(
+    source: string,
+    target: string,
+    edge: "nest" | "above"
+  ): Promise<"line" | "ring" | "none"> {
+    const row = this.labelRow(source);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    const handle = row.locator("button:has(.lucide-ellipsis-vertical, .lucide-more-vertical)").first();
+    await handle.waitFor({ timeout: 30_000 });
+    const targetRow = this.labelRow(target);
+    await targetRow.scrollIntoViewIfNeeded();
+    const from = await handle.boundingBox();
+    const targetBox = await targetRow.boundingBox();
+    if (from === null || targetBox === null) throw new Error("[parity] label drag endpoints have no boxes.");
+    const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 };
+    const end =
+      edge === "nest"
+        ? { x: targetBox.x + targetBox.width / 2, y: targetBox.y + targetBox.height / 2 }
+        : { x: targetBox.x + targetBox.width / 2, y: targetBox.y - 8 };
+    await this.page.mouse.move(start.x, start.y);
+    await this.page.mouse.down();
+    for (let i = 1; i <= 12; i++) {
+      await this.page.mouse.move(start.x + ((end.x - start.x) * i) / 12, start.y + ((end.y - start.y) * i) / 12);
+    }
+    await this.page.waitForTimeout(500);
+    const feedback = await this.page
+      .evaluate(() => {
+        const divs = Array.from(document.querySelectorAll("div"));
+        const line = divs.some((el) => el.className.includes("bg-accent-primary") && el.className.includes("h-[2px]"));
+        if (line) return "line";
+        const ring = divs.some((el) => el.className.includes("border-accent-strong"));
+        if (ring) return "ring";
+        return "none";
+      })
+      .catch(() => "none" as const);
+    await this.page.mouse.up();
+    return feedback;
+  }
+
+  async settingsLabelsListScrollable(): Promise<boolean> {
+    return this.page
+      .evaluate(() => {
+        const first = document.querySelector("h6");
+        if (first === null) return false;
+        let el: HTMLElement | null = first.parentElement;
+        while (el !== null) {
+          if (el.scrollHeight > el.clientHeight + 10) return true;
+          el = el.parentElement;
+        }
+        return false;
+      })
+      .catch(() => false);
+  }
+
+  async settingsLabelsDeleteAttemptConfirm(): Promise<void> {
+    const heading = this.page.getByRole("heading", { name: "Delete Label" });
+    await heading.waitFor({ timeout: 30_000 });
+    const dialog = heading.locator("xpath=ancestor::div[@role='dialog'][1]");
+    const confirm = dialog.getByRole("button", { name: "Delete", exact: true });
+    if ((await confirm.count()) === 0) {
+      await this.page.getByRole("button", { name: "Delete", exact: true }).first().click({ timeout: 30_000 });
+    } else {
+      await confirm.first().click({ timeout: 30_000 });
+    }
+  }
 }
