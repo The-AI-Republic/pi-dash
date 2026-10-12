@@ -1928,6 +1928,24 @@ async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::Cele
     }
 }
 
+/// `soft_delete_related_objects.delay("db", "issueview", pk, using=None)`
+/// (`db/mixins.py:78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it with `using=None`.
+fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
+        pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
+        vec![
+            Value::String("db".to_owned()),
+            Value::String("issueview".to_owned()),
+            Value::String(pk.to_string()),
+        ],
+        kwargs,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Workspace (global) views
 // ---------------------------------------------------------------------------
@@ -2246,7 +2264,9 @@ async fn workspace_put(
 
 /// `DELETE /api/workspaces/<slug>/views/<pk>/` (`:114-135`): WORKSPACE
 /// ADMIN-or-creator gate, then the admin-or-owner recheck; soft-deletes
-/// the view and its global favorites.
+/// the view (the instance `delete()` enqueues
+/// `soft_delete_related_objects("db", "issueview", pk, using=None)` per
+/// `db/mixins.py:78`) and its global favorites.
 async fn workspace_destroy(
     State(state): State<AppState>,
     Path((slug, pk)): Path<(String, String)>,
@@ -2276,6 +2296,10 @@ async fn workspace_destroy(
         .execute(&pool)
         .await
         .map_err(|_| Denial::ServerError)?;
+    // Instance `delete()` → `.delay(...)` (`db/mixins.py:78`): stamp,
+    // then enqueue — before the bulk favorites cleanup below, which
+    // is a queryset delete with no job.
+    enqueue_message(&pool, soft_delete_message(&pk)).await;
     sqlx::query(
         r#"UPDATE user_favorites SET deleted_at = $3 FROM workspaces w
            WHERE user_favorites.workspace_id = w.id AND w.slug = $1 AND w.deleted_at IS NULL
@@ -3386,5 +3410,35 @@ mod pidashconv_783_tests {
             body(&ParseDatetimeError::Overflow, &eastern),
             r#"{"archived_at":["Datetime value out of range."]}"#
         );
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_924_tests {
+    use serde_json::Value;
+
+    use super::soft_delete_message;
+
+    #[test]
+    fn soft_delete_message_matches_the_mixin_call() {
+        // `db/mixins.py:78`: `.delay(label, name, pk, using=using)`
+        // with `using=None` — three positional args, `using` stays a
+        // null kwarg (never a positional `"default"`).
+        let pk = uuid::Uuid::parse_str("66666666-0000-4000-8000-000000000002").expect("pk");
+        let message = soft_delete_message(&pk);
+        assert_eq!(
+            message.task,
+            "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("issueview".to_owned()),
+                Value::String(pk.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.len(), 1);
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
     }
 }
