@@ -20,7 +20,11 @@ export interface BrowseDetailProps {
 export function BrowseDetail({ issue, issueKey, workspaceSlug, projectId }: BrowseDetailProps): React.ReactElement {
   const archived = issue.archived_at !== null;
   return (
-    <section aria-label="Work item detail" className="flex min-h-0 flex-1 flex-col gap-(--space-2) p-(--space-8)">
+    <section
+      aria-label="Work item detail"
+      data-archived={archived ? "true" : "false"}
+      className="flex min-h-0 flex-1 flex-col gap-(--space-2) p-(--space-8)"
+    >
       <p className="text-body text-(--text-muted)">{issueKey}</p>
       <h1 className="text-h2 text-(--text)">{issue.name}</h1>
       {archived ? <p className="text-body text-(--text-muted)">This work item is archived.</p> : null}

@@ -64,6 +64,7 @@ describe("BrowseDetail", () => {
     expect(screen.getByRole("heading", { name: "Fix login" })).not.toBeNull();
     expect(screen.getByText("ACME-42")).not.toBeNull();
     expect(screen.queryByText(/archived/)).toBeNull();
+    expect(screen.getByLabelText("Work item detail")).toHaveAttribute("data-archived", "false");
     const back = screen.getByRole("link", { name: "Back to the project" });
     expect(back).toHaveAttribute("href", `/acme/projects/${PROJECT_ID}/issues`);
   });
@@ -78,6 +79,7 @@ describe("BrowseDetail", () => {
       />
     );
     expect(screen.getByText("This work item is archived.")).not.toBeNull();
+    expect(screen.getByLabelText("Work item detail")).toHaveAttribute("data-archived", "true");
   });
 });
 

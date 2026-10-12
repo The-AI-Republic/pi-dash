@@ -9,9 +9,9 @@ import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Button } from "@pidash/kit";
 
-import { BrowseDetail, BrowseUnknownKey, browseIssueQueryOptions } from "../../../features/issues/index.js";
+import { BrowseDetail, BrowseUnknownKey, browseIssueQueryOptions } from "../../../../features/issues/index.js";
 
-export const Route = createFileRoute("/$ws/browse/$issueKey")({
+export const Route = createFileRoute("/$ws/_gated/browse/$issueKey")({
   loader: async ({ context, params }) => {
     await context.queryClient.ensureQueryData(browseIssueQueryOptions(context.apiClient, params.ws, params.issueKey));
   },
