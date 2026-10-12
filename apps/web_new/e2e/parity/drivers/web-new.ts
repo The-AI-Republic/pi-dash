@@ -12134,7 +12134,6 @@ export class WebNewDriver implements ParityDriver {
     return todo("projectGithubTabText");
   }
 
-
   // --- Project members tab (NEWFRONT-391, PSET-018–027). Throwing stubs per
   // --- the shared driver contract; the new app implements them later.
   async settingsMembersOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
@@ -12307,5 +12306,153 @@ export class WebNewDriver implements ParityDriver {
   }
   async settingsMembersSortMarker(_column: string): Promise<"ascending" | "descending" | "none"> {
     return todo("settingsMembersSortMarker");
+  }
+
+  // --- Project settings workflow states (NEWFRONT-392, PSET-028–035).
+  // --- Throwing stubs per the shared driver contract; the new app
+  // --- implements them later.
+  async settingsStatesOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("settingsStatesOpen");
+  }
+  async settingsStatesGroupNames(): Promise<string[]> {
+    return todo("settingsStatesGroupNames");
+  }
+  async settingsStatesGroupExpanded(_group: string): Promise<boolean> {
+    return todo("settingsStatesGroupExpanded");
+  }
+  async settingsStatesToggleGroup(_group: string): Promise<void> {
+    return todo("settingsStatesToggleGroup");
+  }
+  async settingsStatesStateNames(_group: string): Promise<string[]> {
+    return todo("settingsStatesStateNames");
+  }
+  async settingsStatesAddEnabled(_group: string): Promise<boolean> {
+    return todo("settingsStatesAddEnabled");
+  }
+  async settingsStatesOpenCreate(_group: string): Promise<void> {
+    return todo("settingsStatesOpenCreate");
+  }
+  async settingsStatesFormVisible(): Promise<boolean> {
+    return todo("settingsStatesFormVisible");
+  }
+  async settingsStatesFillName(_name: string): Promise<void> {
+    return todo("settingsStatesFillName");
+  }
+  async settingsStatesFillDescription(_text: string): Promise<void> {
+    return todo("settingsStatesFillDescription");
+  }
+  async settingsStatesNameValue(): Promise<string> {
+    return todo("settingsStatesNameValue");
+  }
+  async settingsStatesDescriptionValue(): Promise<string> {
+    return todo("settingsStatesDescriptionValue");
+  }
+  async settingsStatesFormError(): Promise<string> {
+    return todo("settingsStatesFormError");
+  }
+  async settingsStatesSubmitCreate(): Promise<void> {
+    return todo("settingsStatesSubmitCreate");
+  }
+  async settingsStatesSubmitUpdate(): Promise<void> {
+    return todo("settingsStatesSubmitUpdate");
+  }
+  async settingsStatesCancelForm(): Promise<void> {
+    return todo("settingsStatesCancelForm");
+  }
+  async settingsStatesAttemptSubmit(): Promise<void> {
+    return todo("settingsStatesAttemptSubmit");
+  }
+  async settingsStatesDotColor(): Promise<string> {
+    return todo("settingsStatesDotColor");
+  }
+  async settingsStatesOpenColorPicker(): Promise<void> {
+    return todo("settingsStatesOpenColorPicker");
+  }
+  async settingsStatesPickColor(_hex: string): Promise<void> {
+    return todo("settingsStatesPickColor");
+  }
+  async settingsStatesOpenEdit(_name: string): Promise<void> {
+    return todo("settingsStatesOpenEdit");
+  }
+  async settingsStatesGripVisible(_name: string): Promise<boolean> {
+    return todo("settingsStatesGripVisible");
+  }
+  async settingsStatesDragAbove(_source: string, _target: string): Promise<void> {
+    return todo("settingsStatesDragAbove");
+  }
+  async settingsStatesDragBelow(_source: string, _target: string): Promise<void> {
+    return todo("settingsStatesDragBelow");
+  }
+  async settingsStatesDeleteDisabled(_name: string): Promise<boolean> {
+    return todo("settingsStatesDeleteDisabled");
+  }
+  async settingsStatesDelete(_name: string): Promise<void> {
+    return todo("settingsStatesDelete");
+  }
+  async settingsStatesDeleteModalText(): Promise<string> {
+    return todo("settingsStatesDeleteModalText");
+  }
+  async settingsStatesDeleteConfirm(): Promise<void> {
+    return todo("settingsStatesDeleteConfirm");
+  }
+  async settingsStatesDeleteCancel(): Promise<void> {
+    return todo("settingsStatesDeleteCancel");
+  }
+  async settingsStatesAttemptDeleteConfirm(): Promise<void> {
+    return todo("settingsStatesAttemptDeleteConfirm");
+  }
+  async settingsStatesMarkDefault(_name: string): Promise<void> {
+    return todo("settingsStatesMarkDefault");
+  }
+  async settingsStatesIsDefault(_name: string): Promise<boolean> {
+    return todo("settingsStatesIsDefault");
+  }
+  async settingsStatesMemberToggleVisible(): Promise<boolean> {
+    return todo("settingsStatesMemberToggleVisible");
+  }
+  async settingsStatesMemberToggleOn(): Promise<boolean> {
+    return todo("settingsStatesMemberToggleOn");
+  }
+  async settingsStatesSetMemberToggle(_on: boolean): Promise<void> {
+    return todo("settingsStatesSetMemberToggle");
+  }
+  async settingsStatesAccessDenied(): Promise<boolean> {
+    return todo("settingsStatesAccessDenied");
+  }
+  async settingsStatesSkeletonVisible(): Promise<boolean> {
+    return todo("settingsStatesSkeletonVisible");
+  }
+  async settingsStatesDelayLoad(_ms: number): Promise<void> {
+    return todo("settingsStatesDelayLoad");
+  }
+  async settingsStatesEmptyNote(_group: string): Promise<string> {
+    return todo("settingsStatesEmptyNote");
+  }
+
+  // --- Project settings labels gaps (NEWFRONT-392, PSET-036–042). ---
+  async settingsLabelsChildrenOf(_parent: string): Promise<string[]> {
+    return todo("settingsLabelsChildrenOf");
+  }
+  async settingsLabelsToggleGroup(_name: string): Promise<void> {
+    return todo("settingsLabelsToggleGroup");
+  }
+  async settingsLabelsGroupCollapsed(_name: string): Promise<boolean> {
+    return todo("settingsLabelsGroupCollapsed");
+  }
+  async settingsLabelsGripVisible(_name: string): Promise<boolean> {
+    return todo("settingsLabelsGripVisible");
+  }
+  async settingsLabelsDragFeedback(
+    _source: string,
+    _target: string,
+    _edge: "nest" | "above"
+  ): Promise<"line" | "ring" | "none"> {
+    return todo("settingsLabelsDragFeedback");
+  }
+  async settingsLabelsListScrollable(): Promise<boolean> {
+    return todo("settingsLabelsListScrollable");
+  }
+  async settingsLabelsDeleteAttemptConfirm(): Promise<void> {
+    return todo("settingsLabelsDeleteAttemptConfirm");
   }
 }

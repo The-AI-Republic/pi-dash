@@ -1417,6 +1417,118 @@ export interface ParityDriver {
   settingsLabelsAttemptSubmit(): Promise<void>;
   /** Click the delete modal's Delete button without waiting for close. */
   settingsLabelsAttemptDeleteConfirm(): Promise<void>;
+  // --- Project settings workflow states (NEWFRONT-392, PSET-028–035).
+  // --- Observed on the running old app: the States page renders seven
+  // --- fixed group cards (backlog, unstarted, started, review, test,
+  // --- completed, cancelled) with collapsible headers, an inline
+  // --- name/description/color form docked per group, pragmatic
+  // --- drag-and-drop rows with top/bottom placement, a delete
+  // --- confirmation with default/last-in-group guards, an exclusive
+  // --- default flag, and an admin-only member-editing switch.
+  /** Open a project's settings States page; resolves once it settles. */
+  settingsStatesOpen(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Group-card keys in render order (lowercase, e.g. "backlog"). */
+  settingsStatesGroupNames(): Promise<string[]>;
+  /** Whether the group card `group` is currently expanded. */
+  settingsStatesGroupExpanded(group: string): Promise<boolean>;
+  /** Toggle the group card `group` between collapsed and expanded. */
+  settingsStatesToggleGroup(group: string): Promise<void>;
+  /** State names inside the group card `group`, in display order. */
+  settingsStatesStateNames(group: string): Promise<string[]>;
+  /** Whether the group card's add button renders enabled. */
+  settingsStatesAddEnabled(group: string): Promise<boolean>;
+  /** Open the inline create form in the group card `group`. */
+  settingsStatesOpenCreate(group: string): Promise<void>;
+  /** Whether the inline state form is currently open. */
+  settingsStatesFormVisible(): Promise<boolean>;
+  /** Fill the inline form's name field. */
+  settingsStatesFillName(name: string): Promise<void>;
+  /** Fill the inline form's description field. */
+  settingsStatesFillDescription(text: string): Promise<void>;
+  /** Current value of the inline form's name field. */
+  settingsStatesNameValue(): Promise<string>;
+  /** Current value of the inline form's description field. */
+  settingsStatesDescriptionValue(): Promise<string>;
+  /** Inline form error text, or "" when the form shows none. */
+  settingsStatesFormError(): Promise<string>;
+  /** Submit the inline create form; resolves once it closes. */
+  settingsStatesSubmitCreate(): Promise<void>;
+  /** Submit the inline form in update mode; resolves once it closes. */
+  settingsStatesSubmitUpdate(): Promise<void>;
+  /** Close the inline form without saving. */
+  settingsStatesCancelForm(): Promise<void>;
+  /** Click the inline form's submit button without waiting for close. */
+  settingsStatesAttemptSubmit(): Promise<void>;
+  /** Background color of the inline form's swatch, as rendered. */
+  settingsStatesDotColor(): Promise<string>;
+  /** Open the inline form's color picker popup. */
+  settingsStatesOpenColorPicker(): Promise<void>;
+  /** Pick the swatch for `hex` in the open color picker. */
+  settingsStatesPickColor(hex: string): Promise<void>;
+  /** Swap the row `name` for the prefilled inline edit form. */
+  settingsStatesOpenEdit(name: string): Promise<void>;
+  /** Whether the row's drag grip is visible after hovering it. */
+  settingsStatesGripVisible(name: string): Promise<boolean>;
+  /** Drag the state `source` above `target` (same or another group). */
+  settingsStatesDragAbove(source: string, target: string): Promise<void>;
+  /** Drag the state `source` below `target` (same or another group). */
+  settingsStatesDragBelow(source: string, target: string): Promise<void>;
+  /** Whether the row's delete control is currently disabled. */
+  settingsStatesDeleteDisabled(name: string): Promise<boolean>;
+  /** Open the delete confirmation for the state `name`. */
+  settingsStatesDelete(name: string): Promise<void>;
+  /** Body text of the open delete-state confirmation, or "" when shut. */
+  settingsStatesDeleteModalText(): Promise<string>;
+  /** Confirm the delete-state modal; resolves once it closes. */
+  settingsStatesDeleteConfirm(): Promise<void>;
+  /** Dismiss the delete-state modal without deleting. */
+  settingsStatesDeleteCancel(): Promise<void>;
+  /** Click the delete modal's submit without waiting for close. */
+  settingsStatesAttemptDeleteConfirm(): Promise<void>;
+  /** Promote the state `name` to the project default. */
+  settingsStatesMarkDefault(name: string): Promise<void>;
+  /** Whether the row `name` currently carries the default marker. */
+  settingsStatesIsDefault(name: string): Promise<boolean>;
+  /** Whether the admin-only member-editing switch row renders. */
+  settingsStatesMemberToggleVisible(): Promise<boolean>;
+  /** Whether the member-editing switch is currently on. */
+  settingsStatesMemberToggleOn(): Promise<boolean>;
+  /** Flip the member-editing switch to `on`. */
+  settingsStatesSetMemberToggle(on: boolean): Promise<void>;
+  /** Whether the states page shows the not-authorized view. */
+  settingsStatesAccessDenied(): Promise<boolean>;
+  /** Whether the states loading skeleton currently shows. */
+  settingsStatesSkeletonVisible(): Promise<boolean>;
+  /** Delay states-list API answers by `ms` so the skeleton is observable. */
+  settingsStatesDelayLoad(ms: number): Promise<void>;
+  /** Per-group empty note text, or "" when the group lists states. */
+  settingsStatesEmptyNote(group: string): Promise<string>;
+  // --- Project settings labels gaps (NEWFRONT-392, PSET-036–042). The
+  // --- NEWFRONT-122 label methods above already cover create/edit/menus/
+  // --- delete/drag/empty basics; these fill the hierarchy reads the
+  // --- project-settings rows need.
+  /** Child label names nested under the group `parent`, in order. */
+  settingsLabelsChildrenOf(parent: string): Promise<string[]>;
+  /** Toggle the group card `name` between expanded and collapsed. */
+  settingsLabelsToggleGroup(name: string): Promise<void>;
+  /** Whether the group card `name` is currently collapsed. */
+  settingsLabelsGroupCollapsed(name: string): Promise<boolean>;
+  /** Whether the row's drag grip is visible after hovering it. */
+  settingsLabelsGripVisible(name: string): Promise<boolean>;
+  /**
+   * Drag the label `source` onto/above `target` with real mouse events,
+   * reporting the positional feedback seen mid-gesture ("line" for the
+   * reorder insertion line, "ring" for the nesting highlight ring). The
+   * drop completes, so callers also assert the persisted outcome.
+   */
+  settingsLabelsDragFeedback(source: string, target: string, edge: "nest" | "above"): Promise<"line" | "ring" | "none">;
+  /** Whether the labels list container currently scrolls vertically. */
+  settingsLabelsListScrollable(): Promise<boolean>;
+  /**
+   * Click the Delete Label modal's Delete button without waiting for
+   * the modal to close (for refused deletes, where it stays open).
+   */
+  settingsLabelsDeleteAttemptConfirm(): Promise<void>;
 
   // --- Cross-cutting: realtime-absence, permissions, URL params, cycle
   // --- transfer, optimistic rollback (NEWFRONT-122, ISS-221–225).
