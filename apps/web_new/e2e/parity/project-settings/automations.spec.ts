@@ -170,6 +170,10 @@ test(
         const current = states.find((row) => row.id === settled.defaultState)?.name ?? "";
         expect(current).not.toBe("");
         expect(await driver.projectAutomationsCloseStateText()).toContain(current);
+        // The picker disables itself when there is nothing to choose
+        // between: exactly one cancelled state means no choice.
+        const cancelledCount = states.filter((row) => row.group === "cancelled").length;
+        expect(await driver.projectAutomationsCloseStateDisabled()).toBe(cancelledCount < 2);
       });
 
       await test.step("a delay preset persists its month count", async () => {
