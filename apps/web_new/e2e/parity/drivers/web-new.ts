@@ -11987,4 +11987,150 @@ export class WebNewDriver implements ParityDriver {
   async settingsShellOpenGuidanceCreate(): Promise<void> {
     return todo("settingsShellOpenGuidanceCreate");
   }
+
+  // --- Project-settings feature flags oracle (NEWFRONT-393, PSET-043..047,
+  // --- PSET-061 slice). Throwing stubs per the shared driver contract; the
+  // --- new app implements them later.
+  async projectFeaturesOpenTab(
+    _workspaceSlug: string,
+    _projectId: string,
+    _tab: "views" | "cycles" | "intake" | "modules" | "pages"
+  ): Promise<void> {
+    return todo("projectFeaturesOpenTab");
+  }
+  async projectFeaturesSwitchOn(): Promise<boolean> {
+    return todo("projectFeaturesSwitchOn");
+  }
+  async projectFeaturesSwitchDisabled(): Promise<boolean> {
+    return todo("projectFeaturesSwitchDisabled");
+  }
+  async projectFeaturesToggle(): Promise<void> {
+    return todo("projectFeaturesToggle");
+  }
+  async projectFeaturesNotAuthorized(): Promise<boolean> {
+    return todo("projectFeaturesNotAuthorized");
+  }
+  async projectFeaturesNavLinkVisible(
+    _workspaceSlug: string,
+    _projectId: string,
+    _area: "cycles" | "modules" | "views" | "pages" | "intake"
+  ): Promise<boolean> {
+    return todo("projectFeaturesNavLinkVisible");
+  }
+
+  // --- Project-settings automations oracle (NEWFRONT-393, PSET-053/054,
+  // --- PSET-061 slice). Throwing stubs per the shared driver contract; the
+  // --- new app implements them later.
+  async projectAutomationsOpenTab(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("projectAutomationsOpenTab");
+  }
+  async projectAutomationsNotAuthorized(): Promise<boolean> {
+    return todo("projectAutomationsNotAuthorized");
+  }
+  async projectAutomationsArchiveOn(): Promise<boolean> {
+    return todo("projectAutomationsArchiveOn");
+  }
+  async projectAutomationsCloseOn(): Promise<boolean> {
+    return todo("projectAutomationsCloseOn");
+  }
+  async projectAutomationsToggleArchive(): Promise<void> {
+    return todo("projectAutomationsToggleArchive");
+  }
+  async projectAutomationsToggleClose(): Promise<void> {
+    return todo("projectAutomationsToggleClose");
+  }
+  async projectAutomationsLoaderVisible(): Promise<boolean> {
+    return todo("projectAutomationsLoaderVisible");
+  }
+  async projectAutomationsDelayDetailsFetch(_ms: number): Promise<void> {
+    return todo("projectAutomationsDelayDetailsFetch");
+  }
+  async projectAutomationsDelayTriggerText(): Promise<string | null> {
+    return todo("projectAutomationsDelayTriggerText");
+  }
+  async projectAutomationsOpenDelayOptions(): Promise<void> {
+    return todo("projectAutomationsOpenDelayOptions");
+  }
+  async projectAutomationsDelayOptionLabels(): Promise<string[]> {
+    return todo("projectAutomationsDelayOptionLabels");
+  }
+  async projectAutomationsPickDelayOption(_label: string): Promise<void> {
+    return todo("projectAutomationsPickDelayOption");
+  }
+  async projectAutomationsOpenCustomize(): Promise<void> {
+    return todo("projectAutomationsOpenCustomize");
+  }
+  async projectAutomationsMonthDialogOpen(): Promise<boolean> {
+    return todo("projectAutomationsMonthDialogOpen");
+  }
+  async projectAutomationsMonthDialogSubmit(_months: string): Promise<void> {
+    return todo("projectAutomationsMonthDialogSubmit");
+  }
+  async projectAutomationsMonthDialogError(): Promise<string | null> {
+    return todo("projectAutomationsMonthDialogError");
+  }
+  async projectAutomationsCloseStateText(): Promise<string | null> {
+    return todo("projectAutomationsCloseStateText");
+  }
+  async projectAutomationsCloseStateDisabled(): Promise<boolean> {
+    return todo("projectAutomationsCloseStateDisabled");
+  }
+
+  // --- Project-settings github tab oracle (NEWFRONT-393, PSET-050..052,
+  // --- PSET-061 slice). Throwing stubs per the shared driver contract; the
+  // --- new app implements them later.
+  async projectGithubOpenTab(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("projectGithubOpenTab");
+  }
+  async projectGithubNotAuthorized(): Promise<boolean> {
+    return todo("projectGithubNotAuthorized");
+  }
+  async projectGithubLoaderVisible(): Promise<boolean> {
+    return todo("projectGithubLoaderVisible");
+  }
+  async projectGithubDelayBindingFetch(_ms: number): Promise<void> {
+    return todo("projectGithubDelayBindingFetch");
+  }
+  async projectGithubBoundVisible(): Promise<boolean> {
+    return todo("projectGithubBoundVisible");
+  }
+  async projectGithubProviderLabel(): Promise<string | null> {
+    return todo("projectGithubProviderLabel");
+  }
+  async projectGithubRepoLinkText(): Promise<string | null> {
+    return todo("projectGithubRepoLinkText");
+  }
+  async projectGithubContractVisible(): Promise<boolean> {
+    return todo("projectGithubContractVisible");
+  }
+  async projectGithubCadenceText(): Promise<string | null> {
+    return todo("projectGithubCadenceText");
+  }
+  async projectGithubLastError(): Promise<string | null> {
+    return todo("projectGithubLastError");
+  }
+  async projectGithubSyncOn(): Promise<boolean> {
+    return todo("projectGithubSyncOn");
+  }
+  async projectGithubSyncDisabled(): Promise<boolean> {
+    return todo("projectGithubSyncDisabled");
+  }
+  async projectGithubToggleSync(): Promise<void> {
+    return todo("projectGithubToggleSync");
+  }
+  async projectGithubUnbindVisible(): Promise<boolean> {
+    return todo("projectGithubUnbindVisible");
+  }
+  async projectGithubUnbindDisabled(): Promise<boolean> {
+    return todo("projectGithubUnbindDisabled");
+  }
+  async projectGithubUnbind(): Promise<void> {
+    return todo("projectGithubUnbind");
+  }
+  async projectGithubGuidanceVisible(): Promise<boolean> {
+    return todo("projectGithubGuidanceVisible");
+  }
+  async projectGithubTabText(): Promise<string> {
+    return todo("projectGithubTabText");
+  }
 }

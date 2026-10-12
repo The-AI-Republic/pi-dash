@@ -16991,3 +16991,133 @@ export async function serverPublishBoardFacts(
         : {},
   };
 }
+
+// --- Project-settings feature flags oracle (NEWFRONT-393, PSET-043..047).
+// --- Appended; existing helpers above are untouched per the shared driver
+// --- contract.
+/** The five feature flags as the project retrieve endpoint reports them. */
+export interface ServerProjectFeatureFlags {
+  cycleView: boolean;
+  moduleView: boolean;
+  issueViewsView: boolean;
+  pageView: boolean;
+  inboxView: boolean;
+}
+
+/** Read a project's five feature flags through the retrieve endpoint. */
+export async function serverProjectFeatureFlags(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerProjectFeatureFlags> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project flags read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as Record<string, unknown>;
+  return {
+    cycleView: record["cycle_view"] === true,
+    moduleView: record["module_view"] === true,
+    issueViewsView: record["issue_views_view"] === true,
+    pageView: record["page_view"] === true,
+    inboxView: record["inbox_view"] === true,
+  };
+}
+
+// --- Project-settings automations oracle (NEWFRONT-393, PSET-053/054).
+// --- Appended; existing helpers above are untouched per the shared driver
+// --- contract.
+/** The auto-archive/auto-close fields as the project retrieve endpoint reports them. */
+export interface ServerProjectAutomationFields {
+  archiveIn: unknown;
+  closeIn: unknown;
+  defaultState: unknown;
+}
+
+/** Read a project's auto-archive/auto-close fields through the retrieve endpoint. */
+export async function serverProjectAutomationFields(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerProjectAutomationFields> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project automation read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as Record<string, unknown>;
+  return {
+    archiveIn: record["archive_in"],
+    closeIn: record["close_in"],
+    defaultState: record["default_state"],
+  };
+}
+
+// --- Project-settings github tab oracle (NEWFRONT-393, PSET-050/051).
+// --- Appended; existing helpers above are untouched per the shared driver
+// --- contract.
+/** The repository binding status as the project repository endpoint reports it. */
+export interface ServerRepositoryBinding {
+  bound: boolean;
+  provider: unknown;
+  fullName: unknown;
+  webUrl: unknown;
+  syncEnabled: boolean;
+  lastSyncedAt: unknown;
+  lastSyncError: unknown;
+}
+
+/** Read a project's repository binding through the repository endpoint. */
+export async function serverRepositoryBinding(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerRepositoryBinding> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/repository/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] repository read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as Record<string, unknown>;
+  const repository = (record["repository"] ?? {}) as Record<string, unknown>;
+  return {
+    bound: record["bound"] === true,
+    provider: record["provider"],
+    fullName: repository["full_name"],
+    webUrl: repository["web_url"],
+    syncEnabled: record["is_sync_enabled"] === true,
+    lastSyncedAt: record["last_synced_at"],
+    lastSyncError: record["last_sync_error"],
+  };
+}
+
+/**
+ * Plant a repository binding (plus one mirrored issue-sync) through the
+ * Django shell, mirroring the seeded stack's own plant. The bind endpoint
+ * needs provider OAuth the seeded stack cannot mint, so UI unbind coverage
+ * plants here instead of binding through the API. Shared seed rows (the
+ * provider account and repository) are reused via get_or_create; only the
+ * project binding and the sync row are new, and unbinding cascades both.
+ * Needs PARITY_API_CONTAINER on namespaced stacks (NEWFRONT-42).
+ */
+export async function serverPlantRepositoryBinding(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string
+): Promise<string> {
+  const python =
+    `from pi_dash.db.models import GitIssueSync, GitProviderAccount, GitRepository, GitRepositoryBinding, Issue, Project, Workspace\n` +
+    `ws = Workspace.objects.get(slug=${JSON.stringify(workspaceSlug)})\n` +
+    `proj = Project.objects.get(id=${JSON.stringify(projectId)}, workspace=ws)\n` +
+    `account, _ = GitProviderAccount.objects.get_or_create(workspace=ws, provider="github", host_url="https://github.com", defaults={"auth_type": "pat", "created_by_id": proj.created_by_id})\n` +
+    `repo, _ = GitRepository.objects.get_or_create(provider="github", host_url="https://github.com", namespace="parity", name="parity-seed", full_name="parity/parity-seed", defaults={"created_by_id": proj.created_by_id})\n` +
+    `binding, _ = GitRepositoryBinding.objects.get_or_create(repository=repo, project=proj, defaults={"workspace_id": ws.id, "provider_account": account, "actor_id": proj.created_by_id, "created_by_id": proj.created_by_id})\n` +
+    `issue = Issue.objects.get(id=${JSON.stringify(issueId)}, project=proj)\n` +
+    `GitIssueSync.objects.get_or_create(binding=binding, issue=issue, defaults={"workspace_id": ws.id, "project_id": proj.id, "provider": "github", "external_iid": "3931", "created_by_id": proj.created_by_id})\n` +
+    `print("PARITY_BINDING:" + str(binding.id))\n`;
+  const out = await apiShell(python);
+  const id = /^PARITY_BINDING:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (id === "") throw new Error("[parity] binding plant produced no id.");
+  return id;
+}
