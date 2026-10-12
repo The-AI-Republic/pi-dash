@@ -49,10 +49,9 @@
 //!   `workspace__slug` with `-created_at` ordering; `destroy` soft-deletes
 //!   (`SoftDeleteModel.delete` sets `deleted_at`), so reads after delete
 //!   404 through the default manager.
-//! - `destroy` also publishes `soft_delete_related_objects` (a Celery beat
-//!   of the shared soft-delete machinery). Like the pilot's
-//!   `recent_visited_task` call site, the publish has no observable effect
-//!   in the gate environment, so the handler performs the row write only.
+//! - `destroy` also publishes `soft_delete_related_objects` (the shared
+//!   soft-delete machinery's `.delay()` from `SoftDeleteModel.delete`,
+//!   `db/mixins.py:77-78`): best-effort, after the row write.
 //!
 //! Fixture ids: FX-A-H-01 (route pairs), FX-A-Q-01 (base analytics SQL),
 //! FX-A-Q-02 (viewset queryset), FX-A-G-01 (gates for these routes).
@@ -1982,8 +1981,47 @@ async fn patch_view(
     Ok(row)
 }
 
+/// `soft_delete_related_objects.delay("db", <model>, pk, using=None)`
+/// (`db/mixins.py:77-78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it with `using=None`. Fires on every instance `.delete()`
+/// in these views (`AnalyticView` lives in the `db` app,
+/// `db/models/analytic.py:11`).
+pub(crate) fn soft_delete_message(
+    model: &str,
+    pk: &uuid::Uuid,
+) -> pidash_jobs::celery::CeleryTaskMessage {
+    let mut kwargs = Map::new();
+    kwargs.insert("using".to_owned(), Value::Null);
+    pidash_jobs::celery::CeleryTaskMessage::new(
+        pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
+        vec![
+            Value::String("db".to_owned()),
+            Value::String(model.to_owned()),
+            Value::String(pk.to_string()),
+        ],
+        kwargs,
+    )
+}
+
+/// Best-effort publish of [`soft_delete_message`]: without the queue
+/// the response still stands.
+pub(crate) async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &uuid::Uuid) {
+    let message = soft_delete_message(model, pk);
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        Value::Array(message.args.clone()),
+        Value::Object(message.kwargs.clone()),
+    );
+    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
+        tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
+    }
+}
+
 /// `DELETE analytic-view/<pk>/`: `get_object()` then the soft `delete()`
-/// (sets `deleted_at`); 204 with an empty body.
+/// (sets `deleted_at`, then the instance `delete()` enqueues
+/// `soft_delete_related_objects("db", "analyticview", pk, using=None)`,
+/// `db/mixins.py:77-78`); 204 with an empty body.
 async fn view_destroy(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
@@ -2037,6 +2075,9 @@ async fn destroy_view(
     .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
+    // Instance `delete()` → `.delay(...)` (`db/mixins.py:77-78`): stamp,
+    // then enqueue — same order as the mixin.
+    enqueue_soft_delete(pool, "analyticview", id).await;
     Ok(())
 }
 
@@ -2434,5 +2475,28 @@ mod tests {
         let joins = scope_joins(&sql, &fragment, true);
         assert!(joins.contains("INNER JOIN \"issue_labels\" \"label_issue\""));
         assert_eq!(binds.values().len(), 1);
+    }
+
+    #[test]
+    fn soft_delete_message_matches_the_mixin_call() {
+        // `db/mixins.py:77-78`: `.delay(label, name, pk, using=using)`
+        // with `using=None` — three positional args, `using` stays a
+        // null kwarg (never a positional `"default"`).
+        let pk = Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
+        let message = soft_delete_message("analyticview", &pk);
+        assert_eq!(
+            message.task,
+            "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("analyticview".to_owned()),
+                Value::String(pk.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.len(), 1);
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
     }
 }
