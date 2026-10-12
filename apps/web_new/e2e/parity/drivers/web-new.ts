@@ -138,6 +138,9 @@ import type {
   PagesToolbarTooltip,
   AnalyticsApiRequest,
   AnalyticsEmptyFacts,
+  PagesBlocksAssetRow,
+  PagesBlocksInfoStats,
+  PagesBlocksInlineImage,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -11221,5 +11224,171 @@ export class WebNewDriver implements ParityDriver {
 
   async analyticsSpyRequests(): Promise<AnalyticsApiRequest[]> {
     return todo("analyticsSpyRequests");
+  }
+
+  // --- Pages blocks/embeds/mentions/links (NEWFRONT-316, PAGE-037-044).
+  async pagesBlocksOpenDetail(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
+    return todo("pagesBlocksOpenDetail");
+  }
+  async pagesBlocksOpenDetailQuery(
+    _workspaceSlug: string,
+    _projectId: string,
+    _pageId: string,
+    _query: string
+  ): Promise<void> {
+    return todo("pagesBlocksOpenDetailQuery");
+  }
+  async pagesBlocksReload(): Promise<void> {
+    return todo("pagesBlocksReload");
+  }
+  async pagesBlocksEditorText(): Promise<string> {
+    return todo("pagesBlocksEditorText");
+  }
+  async pagesBlocksEditorHtml(): Promise<string> {
+    return todo("pagesBlocksEditorHtml");
+  }
+  async pagesBlocksEditorClickEnd(): Promise<void> {
+    return todo("pagesBlocksEditorClickEnd");
+  }
+  async pagesBlocksEditorType(_text: string): Promise<void> {
+    return todo("pagesBlocksEditorType");
+  }
+  async pagesBlocksEditorPressKey(_chord: string): Promise<void> {
+    return todo("pagesBlocksEditorPressKey");
+  }
+  async pagesBlocksEditorPressEnter(): Promise<void> {
+    return todo("pagesBlocksEditorPressEnter");
+  }
+  async pagesBlocksEditorPressBackspace(): Promise<void> {
+    return todo("pagesBlocksEditorPressBackspace");
+  }
+  async pagesBlocksEditorPasteHtml(_html: string): Promise<void> {
+    return todo("pagesBlocksEditorPasteHtml");
+  }
+  async pagesBlocksEditorPasteText(_text: string): Promise<void> {
+    return todo("pagesBlocksEditorPasteText");
+  }
+  async pagesBlocksEditorSelectAll(): Promise<void> {
+    return todo("pagesBlocksEditorSelectAll");
+  }
+  async pagesBlocksEditorCopy(): Promise<void> {
+    return todo("pagesBlocksEditorCopy");
+  }
+  async pagesBlocksEditorPaste(): Promise<void> {
+    return todo("pagesBlocksEditorPaste");
+  }
+  async pagesBlocksParagraphSelectText(_text: string): Promise<void> {
+    return todo("pagesBlocksParagraphSelectText");
+  }
+  async pagesBlocksSlashOpen(): Promise<boolean> {
+    return todo("pagesBlocksSlashOpen");
+  }
+  async pagesBlocksSlashItems(): Promise<string[]> {
+    return todo("pagesBlocksSlashItems");
+  }
+  async pagesBlocksSlashChoose(_entry: string, _occurrence?: number): Promise<void> {
+    return todo("pagesBlocksSlashChoose");
+  }
+  async pagesBlocksSlashDismiss(): Promise<void> {
+    return todo("pagesBlocksSlashDismiss");
+  }
+  async pagesBlocksDragHandleVisible(): Promise<boolean> {
+    return todo("pagesBlocksDragHandleVisible");
+  }
+  async pagesBlocksDragOpenMenu(): Promise<void> {
+    return todo("pagesBlocksDragOpenMenu");
+  }
+  async pagesBlocksDragMenuItems(): Promise<string[]> {
+    return todo("pagesBlocksDragMenuItems");
+  }
+  async pagesBlocksDragMenuChoose(_label: string): Promise<void> {
+    return todo("pagesBlocksDragMenuChoose");
+  }
+  async pagesBlocksUploadImage(_file: { name: string; mime: string; bytes: Buffer }): Promise<void> {
+    return todo("pagesBlocksUploadImage");
+  }
+  async pagesBlocksInlineImages(): Promise<PagesBlocksInlineImage[]> {
+    return todo("pagesBlocksInlineImages");
+  }
+  async pagesBlocksAssetsTabOpen(): Promise<void> {
+    return todo("pagesBlocksAssetsTabOpen");
+  }
+  async pagesBlocksAssetsTabRows(): Promise<PagesBlocksAssetRow[]> {
+    return todo("pagesBlocksAssetsTabRows");
+  }
+  async pagesBlocksAssetsTabEmptyVisible(): Promise<boolean> {
+    return todo("pagesBlocksAssetsTabEmptyVisible");
+  }
+  async pagesBlocksEmbedUpgradeVisible(): Promise<boolean> {
+    return todo("pagesBlocksEmbedUpgradeVisible");
+  }
+  async pagesBlocksEmbedUpgradeHref(): Promise<string | null> {
+    return todo("pagesBlocksEmbedUpgradeHref");
+  }
+  async pagesBlocksMentionSuggest(_query: string): Promise<string[]> {
+    return todo("pagesBlocksMentionSuggest");
+  }
+  async pagesBlocksMentionChoose(_displayName: string): Promise<void> {
+    return todo("pagesBlocksMentionChoose");
+  }
+  async pagesBlocksMentionChips(): Promise<string[]> {
+    return todo("pagesBlocksMentionChips");
+  }
+  async pagesBlocksEmojiOpen(): Promise<void> {
+    return todo("pagesBlocksEmojiOpen");
+  }
+  async pagesBlocksEmojiItems(): Promise<string[]> {
+    return todo("pagesBlocksEmojiItems");
+  }
+  async pagesBlocksEmojiChoose(_index: number): Promise<void> {
+    return todo("pagesBlocksEmojiChoose");
+  }
+  async pagesBlocksMentionSections(): Promise<string[]> {
+    return todo("pagesBlocksMentionSections");
+  }
+  async pagesBlocksMentionChipHrefs(): Promise<string[]> {
+    return todo("pagesBlocksMentionChipHrefs");
+  }
+  async pagesBlocksLinkSelect(): Promise<void> {
+    return todo("pagesBlocksLinkSelect");
+  }
+  async pagesBlocksLinkBubbleVisible(): Promise<boolean> {
+    return todo("pagesBlocksLinkBubbleVisible");
+  }
+  async pagesBlocksLinkPrefill(): Promise<string> {
+    return todo("pagesBlocksLinkPrefill");
+  }
+  async pagesBlocksLinkEdit(_href: string): Promise<void> {
+    return todo("pagesBlocksLinkEdit");
+  }
+  async pagesBlocksLinkRemove(): Promise<void> {
+    return todo("pagesBlocksLinkRemove");
+  }
+  async pagesBlocksLinkHref(): Promise<string | null> {
+    return todo("pagesBlocksLinkHref");
+  }
+  async pagesBlocksBubbleFormat(_index: number): Promise<void> {
+    return todo("pagesBlocksBubbleFormat");
+  }
+  async pagesBlocksOptionsOpen(): Promise<void> {
+    return todo("pagesBlocksOptionsOpen");
+  }
+  async pagesBlocksOptionsItems(): Promise<string[]> {
+    return todo("pagesBlocksOptionsItems");
+  }
+  async pagesBlocksOptionsCopyMarkdown(): Promise<void> {
+    return todo("pagesBlocksOptionsCopyMarkdown");
+  }
+  async pagesBlocksToastText(): Promise<string | null> {
+    return todo("pagesBlocksToastText");
+  }
+  async pagesBlocksClipboardText(): Promise<string> {
+    return todo("pagesBlocksClipboardText");
+  }
+  async pagesBlocksHeaderLockCycle(): Promise<void> {
+    return todo("pagesBlocksHeaderLockCycle");
+  }
+  async pagesBlocksInfoStats(_expectedCharacters?: number, _skipNavigate?: boolean): Promise<PagesBlocksInfoStats> {
+    return todo("pagesBlocksInfoStats");
   }
 }
