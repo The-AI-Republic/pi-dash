@@ -17484,3 +17484,269 @@ export async function serverDeleteWorkspace(
   const res = await mutateJSON("DELETE", `${apiBase}/api/workspaces/${workspaceSlug}/`, sessionCookie);
   if (!res.ok) console.log(`[parity] workspace cleanup DELETE returned HTTP ${res.status}; leaving it.`);
 }
+
+// --- Workspace-settings developer oracle (NEWFRONT-412, WSET-016..024).
+// --- Webhook CRUD + integration reads live here; provider connects verify
+// --- tokens against the live providers, unreachable from the seeded stack,
+// --- so connected states are planted through the Django shell (mirroring
+// --- what the connect endpoints store) and removed the same way. Appended;
+// --- existing helpers above are untouched per the shared contract.
+
+/** One workspace webhook row as the list/detail endpoints return it. */
+export interface ServerWebhook {
+  id: string;
+  url: string;
+  is_active: boolean;
+  project: boolean;
+  issue: boolean;
+  cycle: boolean;
+  module: boolean;
+  issue_comment: boolean;
+}
+
+function toServerWebhook(record: Record<string, unknown>): ServerWebhook {
+  const text = (key: string): string => (typeof record[key] === "string" ? (record[key] as string) : "");
+  const flag = (key: string): boolean => record[key] === true;
+  return {
+    id: text("id"),
+    url: text("url"),
+    is_active: flag("is_active"),
+    project: flag("project"),
+    issue: flag("issue"),
+    cycle: flag("cycle"),
+    module: flag("module"),
+    issue_comment: flag("issue_comment"),
+  };
+}
+
+/** List a workspace's webhooks (admin session). */
+export async function serverWebhooksList(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerWebhook[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/webhooks/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] webhooks list failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Record<string, unknown>[];
+  return rows.map(toServerWebhook);
+}
+
+/** Read one webhook by id (admin session). */
+export async function serverWebhookDetails(
+  workspaceSlug: string,
+  webhookId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerWebhook> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/webhooks/${webhookId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] webhook read failed with HTTP ${res.status}.`);
+  return toServerWebhook((await res.json()) as Record<string, unknown>);
+}
+
+/** Create a webhook; the response carries the one-time secret key. */
+export async function serverCreateWebhook(
+  workspaceSlug: string,
+  data: { url: string; project?: boolean; issue?: boolean; cycle?: boolean; module?: boolean; issue_comment?: boolean },
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerWebhook & { secret_key: string }> {
+  const res = await mutateJSON("POST", `${apiBase}/api/workspaces/${workspaceSlug}/webhooks/`, sessionCookie, data);
+  if (!res.ok) throw new Error(`[parity] webhook create failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as Record<string, unknown>;
+  return {
+    ...toServerWebhook(record),
+    secret_key: typeof record["secret_key"] === "string" ? (record["secret_key"] as string) : "",
+  };
+}
+
+/** Best-effort webhook cleanup; logs instead of throwing. */
+export async function serverCleanupWebhook(
+  workspaceSlug: string,
+  webhookId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/webhooks/${webhookId}/`,
+    sessionCookie
+  );
+  if (!res.ok && res.status !== 404)
+    console.log(`[parity] webhook cleanup DELETE returned HTTP ${res.status}; leaving it for reseed.`);
+}
+
+/** GitHub workspace-connection status as the status endpoint returns it. */
+export interface ServerGithubStatus {
+  connected: boolean;
+  github_user_login: string;
+}
+
+/** Read the GitHub connection status (admin or member session). */
+export async function serverGithubStatus(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerGithubStatus> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/integrations/github/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] github status read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as Record<string, unknown>;
+  return {
+    connected: record["connected"] === true,
+    github_user_login: typeof record["github_user_login"] === "string" ? (record["github_user_login"] as string) : "",
+  };
+}
+
+/** One git provider account as the accounts endpoint returns it. */
+export interface ServerGitAccount {
+  id: string;
+  provider: string;
+  host_url: string;
+  external_account_login: string;
+  display_name: string;
+  status: string;
+}
+
+/** List a workspace's git provider accounts. */
+export async function serverGitAccounts(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerGitAccount[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/integrations/git/accounts/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] git accounts list failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { accounts?: Record<string, unknown>[] };
+  return (payload.accounts ?? []).map((record) => ({
+    id: typeof record["id"] === "string" ? (record["id"] as string) : "",
+    provider: typeof record["provider"] === "string" ? (record["provider"] as string) : "",
+    host_url: typeof record["host_url"] === "string" ? (record["host_url"] as string) : "",
+    external_account_login:
+      typeof record["external_account_login"] === "string" ? (record["external_account_login"] as string) : "",
+    display_name: typeof record["display_name"] === "string" ? (record["display_name"] as string) : "",
+    status: typeof record["status"] === "string" ? (record["status"] as string) : "",
+  }));
+}
+
+/**
+ * Plant a connected GitHub workspace integration through the Django shell,
+ * mirroring what the connect endpoint stores (provider row, FK-shim token,
+ * encrypted credential plus login in config). The connect endpoint verifies
+ * the PAT against live GitHub, unreachable from the seeded stack, so the UI
+ * connect/disconnect coverage plants here instead of connecting through the
+ * API. Needs PARITY_API_CONTAINER on namespaced stacks.
+ */
+export async function serverSeedGithubConnection(workspaceSlug: string, login: string): Promise<void> {
+  const python =
+    `from django.utils import timezone\n` +
+    `from pi_dash.db.models import APIToken, Integration, Workspace, WorkspaceIntegration, WorkspaceMember\n` +
+    `from pi_dash.license.utils.encryption import encrypt_data\n` +
+    `ws = Workspace.objects.get(slug=${JSON.stringify(workspaceSlug)})\n` +
+    `actor = WorkspaceMember.objects.filter(workspace=ws, role=20).first().member\n` +
+    `integration, _ = Integration.objects.get_or_create(provider="github", defaults={"title": "GitHub", "verified": True, "description": {"summary": "Mirror GitHub issues into Pi Dash projects."}})\n` +
+    `for ghost in WorkspaceIntegration.all_objects.filter(workspace=ws, integration=integration, deleted_at__isnull=False):\n` +
+    `    ghost.delete(soft=False)\n` +
+    `wi = WorkspaceIntegration.objects.filter(workspace=ws, integration=integration).first()\n` +
+    `if wi is None:\n` +
+    `    shim = APIToken.objects.create(user=actor, workspace=ws, user_type=1, is_active=False, label="github-integration-" + str(ws.id), description="GitHub integration FK shim — not for auth")\n` +
+    `    wi = WorkspaceIntegration.objects.create(workspace=ws, actor=actor, integration=integration, api_token=shim, config={})\n` +
+    `wi.config = {"auth_type": "pat", "token": encrypt_data("parity-planted-github-token"), "github_user_login": ${JSON.stringify(login)}, "verified_at": timezone.now().isoformat()}\n` +
+    `wi.save(update_fields=["config"])\n` +
+    `print("PARITY_GITHUB_SEEDED")\n`;
+  const out = await apiShell(python);
+  if (!out.includes("PARITY_GITHUB_SEEDED")) throw new Error("[parity] github plant produced no marker.");
+}
+
+/**
+ * Remove the planted GitHub workspace integration (plus its FK-shim token)
+ * through the Django shell. Best-effort: logs instead of throwing so
+ * finally-blocks stay safe.
+ */
+export async function serverUnseedGithubConnection(workspaceSlug: string): Promise<void> {
+  try {
+    // Hard deletes throughout: the workspace+integration unique counts
+    // soft-deleted rows, so a soft unseed would brick the next plant.
+    const python =
+      `from pi_dash.db.models import APIToken, Integration, Workspace, WorkspaceIntegration\n` +
+      `ws = Workspace.objects.get(slug=${JSON.stringify(workspaceSlug)})\n` +
+      `integration = Integration.objects.filter(provider="github").first()\n` +
+      `for wi in WorkspaceIntegration.all_objects.filter(workspace=ws, integration=integration):\n` +
+      `    token_id = wi.api_token_id\n` +
+      `    wi.delete(soft=False)\n` +
+      `    APIToken.all_objects.filter(id=token_id).delete()\n` +
+      `used = WorkspaceIntegration.all_objects.filter(workspace=ws).values_list("api_token_id", flat=True)\n` +
+      `APIToken.all_objects.filter(workspace=ws, label="github-integration-" + str(ws.id), is_active=False).exclude(id__in=used).delete()\n` +
+      `print("PARITY_GITHUB_UNSEEDED")\n`;
+    const out = await apiShell(python);
+    if (!out.includes("PARITY_GITHUB_UNSEEDED")) throw new Error("[parity] github unseed produced no marker.");
+  } catch (error) {
+    console.log(`[parity] github unseed skipped: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
+/**
+ * Plant a sync-enabled repository binding (plus its provider account)
+ * through the Django shell so UI disconnects have a dependent sync to
+ * disable. For provider github with linkWorkspaceIntegration, the account
+ * attaches to the planted workspace integration (plant it first via
+ * serverSeedGithubConnection); otherwise the account stands alone. The
+ * shared seed repository row is reused for github; gitlab gets its own.
+ * Returns the account and binding ids. Needs PARITY_API_CONTAINER on
+ * namespaced stacks.
+ */
+export async function serverPlantGitSyncBinding(
+  workspaceSlug: string,
+  projectId: string,
+  opts: { provider: "github" | "gitlab"; login: string; hostUrl: string; linkWorkspaceIntegration: boolean }
+): Promise<{ accountId: string; bindingId: string }> {
+  const repoFullName = opts.provider === "github" ? "parity/parity-seed" : "parity/parity-412-gitlab";
+  const python =
+    `from pi_dash.db.models import GitProviderAccount, GitRepository, GitRepositoryBinding, Integration, Project, Workspace, WorkspaceIntegration, WorkspaceMember\n` +
+    `from pi_dash.license.utils.encryption import encrypt_data\n` +
+    `ws = Workspace.objects.get(slug=${JSON.stringify(workspaceSlug)})\n` +
+    `proj = Project.objects.get(id=${JSON.stringify(projectId)}, workspace=ws)\n` +
+    `actor_id = WorkspaceMember.objects.filter(workspace=ws, role=20).first().member_id\n` +
+    `wi_id = None\n` +
+    (opts.linkWorkspaceIntegration
+      ? `integration = Integration.objects.filter(provider="github").first()\n` +
+        `wi = WorkspaceIntegration.objects.filter(workspace=ws, integration=integration).first() if integration else None\n` +
+        `wi_id = wi.id if wi else None\n`
+      : ``) +
+    `account = GitProviderAccount.objects.create(workspace=ws, provider=${JSON.stringify(opts.provider)}, host_url=${JSON.stringify(opts.hostUrl)}, auth_type="pat", external_account_id=${JSON.stringify(`parity-${opts.login}`)}, external_account_login=${JSON.stringify(opts.login)}, display_name=${JSON.stringify(opts.login)}, capabilities={}, credential_config={"auth_type": "pat", "host_url": ${JSON.stringify(opts.hostUrl)}, "token": encrypt_data("parity-planted-cascade-token")}, workspace_integration_id=wi_id, status="connected", metadata={}, created_by_id=actor_id, updated_by_id=actor_id)\n` +
+    `repo, _ = GitRepository.objects.get_or_create(provider=${JSON.stringify(opts.provider)}, host_url=${JSON.stringify(opts.hostUrl)}, full_name=${JSON.stringify(repoFullName)}, defaults={"namespace": "parity", "name": ${JSON.stringify(repoFullName.split("/")[1] ?? repoFullName)}, "created_by_id": actor_id})\n` +
+    `binding = GitRepositoryBinding.objects.create(workspace_id=ws.id, project=proj, repository=repo, provider_account=account, actor_id=actor_id, is_sync_enabled=True, created_by_id=actor_id, updated_by_id=actor_id)\n` +
+    `print("PARITY_CASCADE:" + str(account.id) + ":" + str(binding.id))\n`;
+  const out = await apiShell(python);
+  const match = /^PARITY_CASCADE:(.+):(.+)$/m.exec(out);
+  const accountId = match?.[1]?.trim() ?? "";
+  const bindingId = match?.[2]?.trim() ?? "";
+  if (accountId === "" || bindingId === "") throw new Error("[parity] cascade plant produced no ids.");
+  return { accountId, bindingId };
+}
+
+/**
+ * Hard-delete a planted GitLab provider account through the Django shell
+ * (the API delete only revokes). Best-effort: logs instead of throwing.
+ */
+export async function serverUnseedGitAccount(accountId: string): Promise<void> {
+  try {
+    // Hard delete (plain manager): soft-deleted accounts linger otherwise.
+    // Bindings go first: even a soft-deleted binding still PROTECTs its
+    // account through the base manager.
+    const python =
+      `from pi_dash.db.models import GitProviderAccount, GitRepositoryBinding\n` +
+      `GitRepositoryBinding.all_objects.filter(provider_account_id=${JSON.stringify(accountId)}).delete()\n` +
+      `GitProviderAccount.all_objects.filter(id=${JSON.stringify(accountId)}).delete()\n` +
+      `print("PARITY_GITLAB_UNSEEDED")\n`;
+    const out = await apiShell(python);
+    if (!out.includes("PARITY_GITLAB_UNSEEDED")) throw new Error("[parity] gitlab unseed produced no marker.");
+  } catch (error) {
+    console.log(`[parity] gitlab unseed skipped: ${error instanceof Error ? error.message : error}`);
+  }
+}
