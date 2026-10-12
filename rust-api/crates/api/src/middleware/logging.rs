@@ -355,18 +355,28 @@ impl Default for LoggingConfig {
 /// `''` when the wire carries none) and `Content-Type` second (the wire
 /// value verbatim, `'text/plain'` when the wire carries none — wsgiref's
 /// `Message.get_content_type()` default), then every other header in
-/// `HeaderMap` iteration order. That is Django's WSGI-environ order:
-/// wsgiref's `get_environ` assigns `CONTENT_LENGTH`/`CONTENT_TYPE` before
-/// looping the wire headers into `HTTP_*`, and `HttpHeaders` keeps environ
-/// order (`UNPREFIXED_HEADERS`, `parse_header_name`). Names go through
-/// Django's title normalization (`HTTP_X_API_KEY` -> `X-Api-Key`, i.e.
-/// Python `str.title()` on the hyphenated name); `http::HeaderName` only
-/// keeps the lowercase form, so the title-casing is reapplied here (see
-/// `django_title`). Values are single-quote-escaped like `repr`.
+/// first-seen order. That is Django's WSGI-environ order: wsgiref's
+/// `get_environ` assigns `CONTENT_LENGTH`/`CONTENT_TYPE` before looping the
+/// wire headers into `HTTP_*`, and `HttpHeaders` keeps environ order
+/// (`UNPREFIXED_HEADERS`, `parse_header_name`). Content headers keep the
+/// first wire value verbatim — duplicates take the first and the loop
+/// skips them (`if k in env: continue`), so they are never stripped or
+/// joined. Every other value is stripped (`v = v.strip()`) and repeats of
+/// one name are `,`-joined (`env[k] += ',' + v`), the first occurrence
+/// fixing the position. `_`-named headers never render: runserver drops
+/// them before building the environ (`basehttp.get_environ`). Names go
+/// through Django's title normalization (`HTTP_X_API_KEY` -> `X-Api-Key`,
+/// i.e. Python `str.title()` on the hyphenated name); `http::HeaderName`
+/// only keeps the lowercase form, so the title-casing is reapplied here
+/// (see `django_title`). Values are single-quote-escaped like `repr`.
 pub fn render_headers(headers: &header::HeaderMap) -> String {
     let mut out = String::from("{");
     let mut first = true;
-    // `HeaderMap::get` returns the first value; hyper rejects a second
+    // `HeaderMap::get` returns the first value, verbatim: wsgiref assigns
+    // the content headers before its loop and the loop skips them, so a
+    // duplicate takes the first value and no strip applies (the email
+    // parser already ate leading OWS after the colon; trailing OWS stays
+    // — oracle probe, PIDASHCONV-938). Hyper rejects a second
     // `Content-Length` outright, so there is never more than one.
     let content_length = headers
         .get(header::CONTENT_LENGTH)
@@ -378,17 +388,29 @@ pub fn render_headers(headers: &header::HeaderMap) -> String {
         .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
         .unwrap_or_else(|| "text/plain".to_string());
     push_header_pair(&mut out, &mut first, "Content-Type", &content_type);
+    // First-seen name order; each value stripped, repeats `,`-joined.
+    let mut rest: Vec<(String, String)> = Vec::new();
     for (name, value) in headers.iter() {
         if *name == header::CONTENT_LENGTH || *name == header::CONTENT_TYPE {
             continue;
         }
+        let raw = name.as_str();
+        if raw.contains('_') {
+            continue;
+        }
         // Values are latin-1 in WSGI, UTF-8-lossy here.
-        push_header_pair(
-            &mut out,
-            &mut first,
-            &django_title(name.as_str()),
-            &String::from_utf8_lossy(value.as_bytes()),
-        );
+        let value = String::from_utf8_lossy(value.as_bytes());
+        let value = value.trim();
+        match rest.iter_mut().find(|(n, _)| n == raw) {
+            Some((_, joined)) => {
+                joined.push(',');
+                joined.push_str(value);
+            }
+            None => rest.push((raw.to_string(), value.to_string())),
+        }
+    }
+    for (name, joined) in &rest {
+        push_header_pair(&mut out, &mut first, &django_title(name), joined);
     }
     out.push('}');
     out
@@ -945,6 +967,104 @@ mod tests {
             "{'Content-Length': '0', 'Content-Type': 'text/plain', \
              'Host': '127.0.0.1:1', 'Accept': '*/*', \
              'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': 'tok'}"
+        );
+    }
+
+    /// PIDASHCONV-938: wsgiref `,`-joins duplicate non-content headers
+    /// (`env[k] += ',' + v`); the first occurrence fixes the position.
+    /// Expected bytes from the oracle probe (repo Django 4.2.30 runserver,
+    /// raw socket) — cookies join with `,` too, no `'; '` special case.
+    #[test]
+    fn headers_join_duplicate_values_with_comma() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("127.0.0.1"));
+        headers.append("x-foo", HeaderValue::from_static("a"));
+        headers.append("x-foo", HeaderValue::from_static("b"));
+        headers.append("cookie", HeaderValue::from_static("a=1"));
+        headers.append("cookie", HeaderValue::from_static("b=2"));
+        assert_eq!(
+            render_headers(&headers),
+            "{'Content-Length': '', 'Content-Type': 'text/plain', \
+             'Host': '127.0.0.1', 'X-Foo': 'a,b', 'Cookie': 'a=1,b=2'}"
+        );
+    }
+
+    /// PIDASHCONV-938: wsgiref strips every non-content value
+    /// (`v = v.strip()`) before joining; oracle bytes.
+    #[test]
+    fn headers_strip_values_before_joining() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("127.0.0.1"));
+        headers.insert("x-pad", HeaderValue::from_static("  spaced  "));
+        headers.append("x-foo", HeaderValue::from_static("  a  "));
+        headers.append("x-foo", HeaderValue::from_static("b  "));
+        assert_eq!(
+            render_headers(&headers),
+            "{'Content-Length': '', 'Content-Type': 'text/plain', \
+             'Host': '127.0.0.1', 'X-Pad': 'spaced', 'X-Foo': 'a,b'}"
+        );
+    }
+
+    /// PIDASHCONV-938: runserver drops `_`-named headers before building
+    /// the environ (`basehttp.get_environ`); oracle bytes.
+    #[test]
+    fn headers_skip_underscore_names() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("127.0.0.1"));
+        headers.append("x_underscore", HeaderValue::from_static("1"));
+        headers.append("x_foo", HeaderValue::from_static("a"));
+        headers.append("x_foo", HeaderValue::from_static("b"));
+        headers.insert("x-keep", HeaderValue::from_static("yes"));
+        assert_eq!(
+            render_headers(&headers),
+            "{'Content-Length': '', 'Content-Type': 'text/plain', \
+             'Host': '127.0.0.1', 'X-Keep': 'yes'}"
+        );
+    }
+
+    /// PIDASHCONV-938 control: content headers bypass wsgiref's loop
+    /// (`if k in env: continue`), so duplicates take the first value and
+    /// the value is NOT stripped — the oracle keeps trailing spaces (the
+    /// email parser only eats leading OWS after the colon).
+    #[test]
+    fn headers_take_first_content_value_verbatim() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("127.0.0.1"));
+        headers.append("content-type", HeaderValue::from_static("text/one"));
+        headers.append("content-type", HeaderValue::from_static("text/two"));
+        headers.insert("content-length", HeaderValue::from_static("0"));
+        assert_eq!(
+            render_headers(&headers),
+            "{'Content-Length': '0', 'Content-Type': 'text/one', \
+             'Host': '127.0.0.1'}"
+        );
+        let mut padded = header::HeaderMap::new();
+        padded.insert("host", HeaderValue::from_static("127.0.0.1"));
+        padded.insert("content-type", HeaderValue::from_static("text/html  "));
+        padded.insert("content-length", HeaderValue::from_static("0"));
+        assert_eq!(
+            render_headers(&padded),
+            "{'Content-Length': '0', 'Content-Type': 'text/html  ', \
+             'Host': '127.0.0.1'}"
+        );
+    }
+
+    /// PIDASHCONV-938: all three shapes at once — byte-match against the
+    /// oracle probe on real runserver (repo Django 4.2.30, raw socket).
+    #[test]
+    fn headers_match_runserver_on_issue_shapes() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("127.0.0.1"));
+        headers.append("x-foo", HeaderValue::from_static("a"));
+        headers.append("x-foo", HeaderValue::from_static("b"));
+        headers.insert("x-pad", HeaderValue::from_static("  spaced  "));
+        headers.insert("x_underscore", HeaderValue::from_static("1"));
+        headers.insert("x-keep", HeaderValue::from_static("yes"));
+        assert_eq!(
+            render_headers(&headers),
+            "{'Content-Length': '', 'Content-Type': 'text/plain', \
+             'Host': '127.0.0.1', 'X-Foo': 'a,b', 'X-Pad': 'spaced', \
+             'X-Keep': 'yes'}"
         );
     }
 
