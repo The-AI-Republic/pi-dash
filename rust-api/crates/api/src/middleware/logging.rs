@@ -307,27 +307,61 @@ impl Default for LoggingConfig {
     }
 }
 
-/// Render headers as Python's `str(request.headers)`: a `{Name: 'value'}`
-/// dict repr in iteration order, values single-quote-escaped like `repr`.
-/// Names go through Django's `parse_header_name` normalization
-/// (`HTTP_X_API_KEY` -> `X-Api-Key`, i.e. Python `str.title()` on the
-/// hyphenated name); `http::HeaderName` only keeps the lowercase form, so
-/// the title-casing is reapplied here (see `django_title`).
+/// Render headers as Python's `str(request.headers)` under runserver: a
+/// `{Name: 'value'}` dict repr with `Content-Length` first (the wire value,
+/// `''` when the wire carries none) and `Content-Type` second (the wire
+/// value verbatim, `'text/plain'` when the wire carries none — wsgiref's
+/// `Message.get_content_type()` default), then every other header in
+/// `HeaderMap` iteration order. That is Django's WSGI-environ order:
+/// wsgiref's `get_environ` assigns `CONTENT_LENGTH`/`CONTENT_TYPE` before
+/// looping the wire headers into `HTTP_*`, and `HttpHeaders` keeps environ
+/// order (`UNPREFIXED_HEADERS`, `parse_header_name`). Names go through
+/// Django's title normalization (`HTTP_X_API_KEY` -> `X-Api-Key`, i.e.
+/// Python `str.title()` on the hyphenated name); `http::HeaderName` only
+/// keeps the lowercase form, so the title-casing is reapplied here (see
+/// `django_title`). Values are single-quote-escaped like `repr`.
 pub fn render_headers(headers: &header::HeaderMap) -> String {
     let mut out = String::from("{");
-    for (i, (name, value)) in headers.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
+    let mut first = true;
+    // `HeaderMap::get` returns the first value; hyper rejects a second
+    // `Content-Length` outright, so there is never more than one.
+    let content_length = headers
+        .get(header::CONTENT_LENGTH)
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .unwrap_or_default();
+    push_header_pair(&mut out, &mut first, "Content-Length", &content_length);
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .unwrap_or_else(|| "text/plain".to_string());
+    push_header_pair(&mut out, &mut first, "Content-Type", &content_type);
+    for (name, value) in headers.iter() {
+        if *name == header::CONTENT_LENGTH || *name == header::CONTENT_TYPE {
+            continue;
         }
         // Values are latin-1 in WSGI, UTF-8-lossy here.
-        out.push('\'');
-        out.push_str(&django_title(name.as_str()));
-        out.push_str("': '");
-        out.push_str(&python_repr(&String::from_utf8_lossy(value.as_bytes())));
-        out.push('\'');
+        push_header_pair(
+            &mut out,
+            &mut first,
+            &django_title(name.as_str()),
+            &String::from_utf8_lossy(value.as_bytes()),
+        );
     }
     out.push('}');
     out
+}
+
+/// One `'Name': 'value'` entry of the headers dict repr.
+fn push_header_pair(out: &mut String, first: &mut bool, name: &str, value: &str) {
+    if !*first {
+        out.push_str(", ");
+    }
+    *first = false;
+    out.push('\'');
+    out.push_str(name);
+    out.push_str("': '");
+    out.push_str(&python_repr(value));
+    out.push('\'');
 }
 
 /// Python `str.title()`, restricted to ASCII header names: a cased letter
@@ -769,11 +803,68 @@ mod tests {
         let mut headers = header::HeaderMap::new();
         headers.insert("x-api-key", HeaderValue::from_static("sekret"));
         headers.insert(header::USER_AGENT, HeaderValue::from_static("UA/1"));
-        // Python dict repr: insertion order, Django title-cased names
-        // (`parse_header_name`, verified against live Django), single quotes.
+        // Python dict repr: Django title-cased names (`parse_header_name`,
+        // verified against live Django), single quotes, and the runserver
+        // phantoms — no wire content headers here, so `Content-Length`
+        // renders `''` and `Content-Type` `'text/plain'`, both first.
         assert_eq!(
             render_headers(&headers),
-            "{'X-Api-Key': 'sekret', 'User-Agent': 'UA/1'}"
+            "{'Content-Length': '', 'Content-Type': 'text/plain', \
+             'X-Api-Key': 'sekret', 'User-Agent': 'UA/1'}"
+        );
+    }
+
+    /// Replay `v1_projects_lifecycle` request 0, verbatim: httpx sends the
+    /// content headers last on a JSON POST, Django renders them first.
+    #[test]
+    fn headers_render_content_headers_first_on_json_post() {
+        let mut headers = header::HeaderMap::new();
+        for (name, value) in [
+            ("host", "127.0.0.1:1"),
+            ("accept", "*/*"),
+            ("accept-encoding", "gzip, deflate"),
+            ("connection", "keep-alive"),
+            ("user-agent", "python-httpx/0.28.1"),
+            ("x-api-key", "tok"),
+            ("content-length", "40"),
+            ("content-type", "application/json"),
+        ] {
+            headers.insert(
+                header::HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+        }
+        assert_eq!(
+            render_headers(&headers),
+            "{'Content-Length': '40', 'Content-Type': 'application/json', \
+             'Host': '127.0.0.1:1', 'Accept': '*/*', \
+             'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', \
+             'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': 'tok'}"
+        );
+    }
+
+    /// httpx sends `Content-Length: 0` (and no content type) on an empty
+    /// POST: the zero renders, the type still phantoms.
+    #[test]
+    fn headers_render_zero_length_with_phantom_type_on_empty_post() {
+        let mut headers = header::HeaderMap::new();
+        for (name, value) in [
+            ("host", "127.0.0.1:1"),
+            ("content-length", "0"),
+            ("accept", "*/*"),
+            ("user-agent", "python-httpx/0.28.1"),
+            ("x-api-key", "tok"),
+        ] {
+            headers.insert(
+                header::HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+        }
+        assert_eq!(
+            render_headers(&headers),
+            "{'Content-Length': '0', 'Content-Type': 'text/plain', \
+             'Host': '127.0.0.1:1', 'Accept': '*/*', \
+             'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': 'tok'}"
         );
     }
 
@@ -904,7 +995,12 @@ mod tests {
         assert_eq!(record.path, "/api/x/");
         assert_eq!(record.method, "POST");
         assert_eq!(record.query_params, "a=1");
-        assert!(record.headers.contains("'X-Api-Key': 'sekret'"));
+        assert_eq!(
+            record.headers,
+            "{'Content-Length': '', 'Content-Type': 'text/plain', \
+             'X-Api-Key': 'sekret', 'User-Agent': 'UA/1', \
+             'X-Forwarded-For': '1.2.3.4'}"
+        );
         assert_eq!(record.body.as_deref(), Some("{\"k\": 1}"));
         assert_eq!(record.response_body.as_deref(), Some("done"));
         assert_eq!(record.response_code, 200);
