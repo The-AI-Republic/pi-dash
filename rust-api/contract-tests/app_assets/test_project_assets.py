@@ -179,11 +179,17 @@ def test_bulk_cover_links_project(org):
     assert r.status_code == 204, r.text
     for aid in (first, second):
         assert seed_a.fetch(org.conn, aid)["project_id"] == org.project["id"]
-    cover = org.conn.execute(
-        "SELECT cover_image_asset_id FROM projects WHERE id = %s",
+    # PIDASHCONV-929: save_project_cover runs a full project.save(), which
+    # stamps updated_by/updated_at (db/models/base.py:24-44) — not a bare
+    # SET cover_image_asset_id.
+    row = org.conn.execute(
+        "SELECT cover_image_asset_id, updated_by_id, updated_at"
+        " FROM projects WHERE id = %s",
         (org.project["id"],),
-    ).fetchone()[0]
-    assert str(cover) in (first, second)
+    ).fetchone()
+    assert str(row[0]) in (first, second)
+    assert str(row[1]) == org.admin["id"]
+    assert row[2] is not None
 
 
 def test_bulk_empty_400(org):

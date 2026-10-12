@@ -1347,7 +1347,8 @@ async fn post_bulk_asset(
             for row in &ordered {
                 // `save_project_cover` (`:631-634`): re-get the project
                 // per row (default manager) and stamp
-                // `cover_image_asset_id`.
+                // `cover_image_asset_id` — a full `save()`, so
+                // `updated_by`/`updated_at` too.
                 let exists: Option<(Uuid,)> = match sqlx::query_as(q::SAVE_PROJECT_COVER_GET_SQL)
                     .bind(project_id)
                     .fetch_optional(&pool)
@@ -1362,6 +1363,8 @@ async fn post_bulk_asset(
                 if sqlx::query(q::SAVE_PROJECT_COVER_SQL)
                     .bind(project_id)
                     .bind(row.id)
+                    .bind(Utc::now())
+                    .bind(actor.id)
                     .execute(&pool)
                     .await
                     .is_err()
