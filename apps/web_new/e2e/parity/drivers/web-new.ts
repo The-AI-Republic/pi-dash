@@ -136,6 +136,8 @@ import type {
   PagesToolbarColorCounts,
   PagesToolbarColorPreview,
   PagesToolbarTooltip,
+  AnalyticsApiRequest,
+  AnalyticsEmptyFacts,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -9870,11 +9872,7 @@ export class WebNewDriver implements ParityDriver {
 
   // --- Pages create, star, row actions, move (NEWFRONT-313, PAGE-007-017). ---
 
-  async pagesRowOpenList(
-    _workspaceSlug: string,
-    _projectId: string,
-    _tab?: PagesRowTab
-  ): Promise<void> {
+  async pagesRowOpenList(_workspaceSlug: string, _projectId: string, _tab?: PagesRowTab): Promise<void> {
     return todo("pagesRowOpenList");
   }
 
@@ -11133,5 +11131,95 @@ export class WebNewDriver implements ParityDriver {
 
   async runDetailLoadingObserved(_workspaceSlug: string, _runId: string): Promise<boolean> {
     return todo("runDetailLoadingObserved");
+  }
+
+  // --- Analytics shell, scoping, permissions (NEWFRONT-375, ANL-001..004 + ANL-018). ---
+
+  async analyticsOpenTab(_workspaceSlug: string, _tabId: string, _cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("analyticsOpenTab");
+  }
+
+  async analyticsOpenRoot(_workspaceSlug: string, _cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("analyticsOpenRoot");
+  }
+
+  async analyticsCurrentPath(): Promise<string> {
+    return todo("analyticsCurrentPath");
+  }
+
+  async analyticsTabIds(): Promise<string[]> {
+    return todo("analyticsTabIds");
+  }
+
+  async analyticsSelectedTab(): Promise<string | null> {
+    return todo("analyticsSelectedTab");
+  }
+
+  async analyticsSelectTab(_tabId: string): Promise<void> {
+    return todo("analyticsSelectTab");
+  }
+
+  async analyticsPanelVisible(_tabId: string): Promise<boolean> {
+    return todo("analyticsPanelVisible");
+  }
+
+  async analyticsBreadcrumb(): Promise<string[]> {
+    return todo("analyticsBreadcrumb");
+  }
+
+  async analyticsPageTitle(): Promise<string> {
+    return todo("analyticsPageTitle");
+  }
+
+  async analyticsEmptyFacts(): Promise<AnalyticsEmptyFacts | null> {
+    return todo("analyticsEmptyFacts");
+  }
+
+  async analyticsEmptyCreateProject(): Promise<void> {
+    return todo("analyticsEmptyCreateProject");
+  }
+
+  async analyticsCreateAffordances(): Promise<string[]> {
+    return todo("analyticsCreateAffordances");
+  }
+
+  async analyticsPickerLabel(): Promise<string> {
+    return todo("analyticsPickerLabel");
+  }
+
+  async analyticsPickerOpen(): Promise<void> {
+    return todo("analyticsPickerOpen");
+  }
+
+  async analyticsPickerClose(): Promise<void> {
+    return todo("analyticsPickerClose");
+  }
+
+  async analyticsPickerOptions(): Promise<string[]> {
+    return todo("analyticsPickerOptions");
+  }
+
+  async analyticsPickerSearch(_text: string): Promise<void> {
+    return todo("analyticsPickerSearch");
+  }
+
+  async analyticsPickerToggle(_name: string): Promise<void> {
+    return todo("analyticsPickerToggle");
+  }
+
+  async analyticsPickerChecked(): Promise<string[]> {
+    return todo("analyticsPickerChecked");
+  }
+
+  async analyticsStartRequestSpy(): Promise<void> {
+    return todo("analyticsStartRequestSpy");
+  }
+
+  async analyticsStopRequestSpy(): Promise<void> {
+    return todo("analyticsStopRequestSpy");
+  }
+
+  async analyticsSpyRequests(): Promise<AnalyticsApiRequest[]> {
+    return todo("analyticsSpyRequests");
   }
 }
