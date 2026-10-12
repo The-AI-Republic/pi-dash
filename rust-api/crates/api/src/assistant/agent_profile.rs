@@ -256,7 +256,13 @@ pub fn is_desktop_from_extension(extension: &Option<axum::Extension<SessionHandl
     // `RequestSession::get` takes `&mut self` (Django-session API), so
     // work on the owned snapshot.
     let mut data = data.unwrap_or_else(crate::middleware::RequestSession::empty);
-    is_desktop_session(data.get(DESKTOP_SESSION_KEY).cloned().as_ref())
+    // Compare the marker value itself: `is_desktop_session` takes the
+    // whole session dict, so handing it one extracted value double-indexes
+    // and is never a desktop (every desktop caller 403s).
+    matches!(
+        data.get(DESKTOP_SESSION_KEY).and_then(Value::as_str),
+        Some(DESKTOP_CLIENT)
+    )
 }
 
 /// `get_config(user)` reduced to its key bit
@@ -324,6 +330,26 @@ mod tests {
                 ("gateway_unavailable", StatusCode::SERVICE_UNAVAILABLE)
             );
         }
+    }
+
+    #[test]
+    fn extension_check_reads_the_marker_value() {
+        use crate::middleware::RequestSession;
+        fn with_marker(value: Option<Value>) -> Option<axum::Extension<SessionHandle>> {
+            let mut session = RequestSession::empty();
+            if let Some(value) = value {
+                session.set(DESKTOP_SESSION_KEY.to_owned(), value);
+            }
+            Some(axum::Extension(SessionHandle::new(session)))
+        }
+        assert!(is_desktop_from_extension(&with_marker(Some(
+            Value::String(DESKTOP_CLIENT.to_owned())
+        ))));
+        assert!(!is_desktop_from_extension(&with_marker(Some(
+            Value::String("browser".to_owned())
+        ))));
+        assert!(!is_desktop_from_extension(&with_marker(None)));
+        assert!(!is_desktop_from_extension(&None));
     }
 
     #[test]
