@@ -159,6 +159,7 @@ fn browser_url_for_new_window(url: &Url, bundle_root: Option<&Url>, web_base: &U
 
 /// Whether this executable runs from an installed MSIX package; Windows
 /// installs package files under `...\WindowsApps\<package>\`.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 fn is_msix_install(exe: &std::path::Path) -> bool {
     exe.components()
         .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
@@ -559,10 +560,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Deferred: navigating from inside the policy callback
                     // would re-enter the webview mid-decision.
                     tauri::async_runtime::spawn(async move {
-                        if let Some(w) = app.get_webview_window("main") {
-                            if let Err(e) = w.navigate(target) {
-                                eprintln!("nav: bounce failed: {e}");
-                            }
+                        if let Some(w) = app.get_webview_window("main")
+                            && let Err(e) = w.navigate(target)
+                        {
+                            eprintln!("nav: bounce failed: {e}");
                         }
                     });
                     false
