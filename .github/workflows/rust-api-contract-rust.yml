@@ -9,15 +9,17 @@
 # The database and Redis are reset between the two runs (drop + recreate +
 # migrate, FLUSHDB): suites must see a pristine backend on both sides, and
 # throttle counters must not leak from the Django run into the Rust run.
-# No Celery worker runs by default — same as the existing Django HTTP
+# No worker runs by default — same as the existing Django HTTP
 # workflows, a worker would consume .delay() side effects the HTTP suites do
 # not expect. The suites in WORKER_SUITES.txt are the exception: they assert
-# on rows Django creates only inside a task, so they get a solo worker for
-# the Django run (stopped at the reset; the Rust run stays workerless). The
-# task-oracle files inside mixed suites (TASK_ORACLE_IGNORES.txt) are excluded
-# from both runs with the same --ignore selection. Django is served with
-# runserver except for the suites in ASGI_SUITES.txt, whose SSE/event
-# streams are async iterators runserver can never flush (uvicorn instead).
+# on rows created only inside a task, so the Django run gets a solo Celery
+# worker (stopped at the reset) and the Rust run gets `pidash-api worker`
+# (PIDASHCONV-983; Rust handlers enqueue-only like Django, and the worker
+# drains rust_job_queue while the tests poll). The task-oracle files inside
+# mixed suites (TASK_ORACLE_IGNORES.txt) are excluded from both runs with
+# the same --ignore selection. Django is served with runserver except for
+# the suites in ASGI_SUITES.txt, whose SSE/event streams are async
+# iterators runserver can never flush (uvicorn instead).
 name: rust-api contract tests — Rust matrix
 
 on:
@@ -247,11 +249,11 @@ jobs:
             sleep 2
           done
 
-      # Suites in WORKER_SUITES.txt assert on rows Django creates only
-      # inside a task: they get a solo worker on the redis broker for the
-      # Django run. Every other suite runs workerless (consumed .delay()
-      # side effects break suites that do not expect them). The worker is
-      # stopped at the reset; the Rust run stays workerless.
+      # Suites in WORKER_SUITES.txt assert on rows created only inside
+      # a task: they get a solo worker on the redis broker for the Django
+      # run. Every other suite runs workerless (consumed .delay() side
+      # effects break suites that do not expect them). The Django worker is
+      # stopped at the reset; the Rust run gets its own Rust worker below.
       - name: Start Django worker for worker suites
         working-directory: apps/api
         run: |
@@ -380,6 +382,32 @@ jobs:
           done
           echo "Rust did not start:"; tail -n 50 /tmp/rust-serve.log; exit 1
 
+      # Suites in WORKER_SUITES.txt assert on rows created only inside
+      # a task: the Rust run gets `pidash-api worker` draining
+      # rust_job_queue (PIDASHCONV-983), mirroring the solo Celery worker
+      # of the Django run. Solo concurrency like Django; the readiness
+      # marker and nohup pattern follow the tasks-cleanup Rust workflow.
+      # AMQP_URL is the rabbitmq broker (same override as serve):
+      # Python-owned queue rows forward there with no consumer instead of
+      # requeueing in Postgres. WEB_URL stays the Django :8000 default so
+      # worker-rendered URLs match the Django run.
+      - name: Start Rust worker for worker suites
+        if: env.DJANGO_EXIT == '0'
+        working-directory: rust-api
+        env:
+          AMQP_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+        run: |
+          if grep -qx "${{ matrix.suite }}" contract-tests/WORKER_SUITES.txt; then
+            nohup ./target/debug/pidash-api worker --concurrency 1 \
+              > /tmp/rust-worker.log 2>&1 &
+            echo $! > /tmp/rust-worker.pid
+            for i in $(seq 1 30); do
+              grep -q "worker + scheduler loops started" /tmp/rust-worker.log 2>/dev/null && break
+              sleep 2
+            done
+            grep -q "worker + scheduler loops started" /tmp/rust-worker.log
+          fi
+
       - name: Run ${{ matrix.suite }} vs Rust (all flags on)
         if: env.DJANGO_EXIT == '0'
         working-directory: rust-api/contract-tests
@@ -424,5 +452,6 @@ jobs:
             /tmp/django-contract.log
             /tmp/django-worker.log
             /tmp/rust-serve.log
+            /tmp/rust-worker.log
             /tmp/pytest-django-${{ matrix.suite }}.log
             /tmp/pytest-rust-${{ matrix.suite }}.log
