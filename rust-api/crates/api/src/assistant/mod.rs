@@ -53,6 +53,7 @@ pub mod kms;
 pub mod llm_config;
 pub mod mcp_servers;
 pub mod messages;
+pub mod model_seam;
 pub mod multipart;
 pub mod perm;
 pub mod redis;

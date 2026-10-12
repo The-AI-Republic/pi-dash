@@ -925,7 +925,13 @@ pub fn validate_choice(value: &Value, choices: &[&str]) -> Result<String, String
 /// [`CryptoConfig::from_env`]; everything else comes from the resolved
 /// settings so both backends read the same effective config as Django.
 pub fn crypto_config(state: &AppState) -> CryptoConfig {
-    let assistant = &state.settings().assistant;
+    crypto_config_from_settings(state.settings())
+}
+
+/// [`crypto_config`] over bare settings, for the state-carried CE model
+/// seam (which holds the resolved settings, not the request state).
+pub fn crypto_config_from_settings(settings: &pidash_db::config::Settings) -> CryptoConfig {
+    let assistant = &settings.assistant;
     CryptoConfig {
         backend: assistant.crypto_backend.clone(),
         fernet_keys: assistant.encryption_key.clone(),

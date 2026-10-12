@@ -146,7 +146,10 @@ async fn get_profile(
         Ok(has_key) => has_key,
         Err(denial) => return denial.into_response(),
     };
-    let profile = pidash_services::assistant::seams::agent_model_profile_for_user(has_key);
+    let profile = state
+        .assistant_seam()
+        .agent_model_profile(actor.id, has_key)
+        .await;
     let enabled = state.settings().managed_runner.enabled;
     // The instance switch is part of "can I run here", so it folds in
     // here rather than making the client combine two flags and risk
@@ -204,7 +207,11 @@ async fn post_token(
     ) {
         return Denial::throttled().into_response();
     }
-    match pidash_services::assistant::seams::agent_model_credential_for_user() {
+    match state
+        .assistant_seam()
+        .agent_model_credential(actor.id)
+        .await
+    {
         Ok((token, expires_at)) => {
             // Cloud-overlay shape only; CE always takes the error branch
             // below. Audited by issuance, never the token.
@@ -221,11 +228,19 @@ async fn post_token(
         Err(unavailable) => {
             // The client should have consulted the profile first; answer
             // with the same reason code it would have seen there.
+            // `str(exc)`: the detail, or the code when empty (the
+            // `ManagedRunnerUnavailable` Display the ported seam renders).
+            let reason = unavailable.reason;
+            let detail = if unavailable.message.is_empty() {
+                reason.clone()
+            } else {
+                unavailable.message
+            };
             error_response(
                 StatusCode::CONFLICT,
                 &serde_json::json!({
-                    "error": unavailable.code,
-                    "detail": unavailable.to_string(),
+                    "error": reason,
+                    "detail": detail,
                 }),
             )
         }
@@ -241,7 +256,13 @@ pub fn is_desktop_from_extension(extension: &Option<axum::Extension<SessionHandl
     // `RequestSession::get` takes `&mut self` (Django-session API), so
     // work on the owned snapshot.
     let mut data = data.unwrap_or_else(crate::middleware::RequestSession::empty);
-    is_desktop_session(data.get(DESKTOP_SESSION_KEY).cloned().as_ref())
+    // Compare the marker value itself: `is_desktop_session` takes the
+    // whole session dict, so handing it one extracted value double-indexes
+    // and is never a desktop (every desktop caller 403s).
+    matches!(
+        data.get(DESKTOP_SESSION_KEY).and_then(Value::as_str),
+        Some(DESKTOP_CLIENT)
+    )
 }
 
 /// `get_config(user)` reduced to its key bit
@@ -312,10 +333,265 @@ mod tests {
     }
 
     #[test]
+    fn extension_check_reads_the_marker_value() {
+        use crate::middleware::RequestSession;
+        fn with_marker(value: Option<Value>) -> Option<axum::Extension<SessionHandle>> {
+            let mut session = RequestSession::empty();
+            if let Some(value) = value {
+                session.set(DESKTOP_SESSION_KEY.to_owned(), value);
+            }
+            Some(axum::Extension(SessionHandle::new(session)))
+        }
+        assert!(is_desktop_from_extension(&with_marker(Some(
+            Value::String(DESKTOP_CLIENT.to_owned())
+        ))));
+        assert!(!is_desktop_from_extension(&with_marker(Some(
+            Value::String("browser".to_owned())
+        ))));
+        assert!(!is_desktop_from_extension(&with_marker(None)));
+        assert!(!is_desktop_from_extension(&None));
+    }
+
+    #[test]
     fn denial_body_is_byte_exact() {
         assert_eq!(
             DESKTOP_DENIED_BODY,
             "{\"error\":\"desktop_session_required\",\"detail\":\"This endpoint is available to the Pi Dash desktop app.\"}"
+        );
+    }
+}
+
+/// Live scratch-DB proof that both handlers consult the state-carried seam
+/// (PIDASHCONV-914), env-gated like the `handlers_members` live tests:
+/// without `DATABASE_URL` these skip. A forged desktop session (the
+/// `_auth_*` trio plus the CE desktop marker, no middleware) drives the
+/// handlers directly; the fake seam's profile and token must reach the
+/// wire, and the CE default must answer exactly like the ported seam.
+#[cfg(test)]
+mod live_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use pidash_services::extensions::{
+        AgentModelProfile, AssistantModelSeam, CredentialUnavailable, SeamFuture, TitleError,
+        TitleRequest,
+    };
+
+    /// Overlay-shaped seam: the gateway lane CE never has.
+    #[derive(Debug)]
+    struct GatewaySeam;
+
+    impl AssistantModelSeam for GatewaySeam {
+        fn agent_model_profile(
+            &self,
+            user_id: uuid::Uuid,
+            has_api_key: bool,
+        ) -> SeamFuture<'_, AgentModelProfile> {
+            let _ = (user_id, has_api_key);
+            Box::pin(async move {
+                AgentModelProfile {
+                    available: true,
+                    lane: "openhub".to_owned(),
+                    base_url: "https://gateway.example.com".to_owned(),
+                    model: "hub-default".to_owned(),
+                    reason_code: String::new(),
+                }
+            })
+        }
+
+        fn agent_model_credential(
+            &self,
+            user_id: uuid::Uuid,
+        ) -> SeamFuture<'_, Result<(String, String), CredentialUnavailable>> {
+            let _ = user_id;
+            Box::pin(async move {
+                Ok((
+                    "gateway-token".to_owned(),
+                    "2030-01-01T00:00:00Z".to_owned(),
+                ))
+            })
+        }
+
+        fn generate_title(
+            &self,
+            request: TitleRequest,
+        ) -> SeamFuture<'_, Result<String, TitleError>> {
+            let _ = request;
+            Box::pin(async move { Ok("seam title".to_owned()) })
+        }
+    }
+
+    async fn live_state(seam: Option<Arc<dyn AssistantModelSeam>>) -> Option<(AppState, String)> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let cfg = pidash_db::config::DbConfig::new(url, 5).expect("db config");
+        let pools = pidash_db::Pools::connect(&cfg, None)
+            .await
+            .expect("connect pools");
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        // The operator switch stays in the profile verdict, so the tests
+        // run with it on and read the seam's own values through.
+        settings.managed_runner.enabled = true;
+        let mut state = AppState::with_settings("test", settings).with_pools(pools);
+        if let Some(seam) = seam {
+            state = state.with_assistant_seam(seam);
+        }
+        let secret = state.settings().secret_key.clone();
+        Some((state, secret))
+    }
+
+    /// Seed one active user; returns its id. Column list mirrors the
+    /// contract harness `create_user` (the `handlers_members` precedent).
+    async fn seed_user(pool: &sqlx::PgPool) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        let email = format!("seam-{}@example.com", id.simple());
+        sqlx::query(
+            "INSERT INTO users (id, password, username, email, first_name, last_name,
+                avatar, date_joined, created_at, updated_at, last_location,
+                created_location, is_superuser, is_managed, is_password_expired,
+                is_active, is_staff, is_email_verified, is_password_autoset, token,
+                user_timezone, last_login_ip, last_logout_ip, last_login_medium,
+                last_login_uagent, is_bot, display_name, is_email_valid,
+                is_password_reset_required)
+             VALUES ($1, '!', $2, $2, 'Seam', 'User',
+                '', now(), now(), now(), '',
+                '', false, false, false,
+                true, false, true, false, '',
+                'UTC', '', '', '',
+                '', false, 'Seam User', true,
+                false)",
+        )
+        .bind(id)
+        .bind(&email)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        id
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        out
+    }
+
+    /// `user.get_session_auth_hash()` for the seeded `'!'` password field
+    /// (the `resolve_actor` verification, recomputed, not copied).
+    fn session_hash(secret_key: &str) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::{Digest, Sha256};
+        let key = Sha256::digest(
+            [
+                crate::license::SESSION_AUTH_HASH_SALT.as_bytes(),
+                secret_key.as_bytes(),
+            ]
+            .concat(),
+        );
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
+        mac.update(b"!");
+        hex_encode(&mac.finalize().into_bytes())
+    }
+
+    fn desktop_session(user_id: uuid::Uuid, secret_key: &str) -> axum::Extension<SessionHandle> {
+        let mut session = crate::middleware::RequestSession::empty();
+        session.set(
+            "_auth_user_id".to_owned(),
+            Value::String(user_id.to_string()),
+        );
+        session.set(
+            "_auth_user_backend".to_owned(),
+            Value::String(crate::license::MODEL_BACKEND.to_owned()),
+        );
+        session.set(
+            "_auth_user_hash".to_owned(),
+            Value::String(session_hash(secret_key)),
+        );
+        session.set(
+            DESKTOP_SESSION_KEY.to_owned(),
+            Value::String(DESKTOP_CLIENT.to_owned()),
+        );
+        axum::Extension(SessionHandle::new(session))
+    }
+
+    async fn body_json(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let body: Value = serde_json::from_slice(&bytes).expect("json body");
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn profile_serves_the_installed_seam() {
+        let Some((state, secret)) = live_state(Some(Arc::new(GatewaySeam))).await else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = state.pools().expect("pools").primary().clone();
+        let user_id = seed_user(&pool).await;
+        let extension = desktop_session(user_id, &secret);
+        let (status, body) = body_json(get_profile(State(state), Some(extension)).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["lane"], "openhub");
+        assert_eq!(body["base_url"], "https://gateway.example.com");
+        assert_eq!(body["model"], "hub-default");
+        assert_eq!(body["available"], true);
+        assert_eq!(body["reason_code"], "");
+    }
+
+    #[tokio::test]
+    async fn profile_serves_the_ce_default() {
+        // No `with_assistant_seam`: the default CE seam answers a keyless
+        // user exactly like the ported `agent_model_profile_for_user`.
+        let Some((state, secret)) = live_state(None).await else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = state.pools().expect("pools").primary().clone();
+        let user_id = seed_user(&pool).await;
+        let extension = desktop_session(user_id, &secret);
+        let (status, body) = body_json(get_profile(State(state), Some(extension)).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["lane"], "");
+        assert_eq!(body["available"], false);
+        assert_eq!(body["reason_code"], "llm_config_missing");
+    }
+
+    #[tokio::test]
+    async fn token_mints_from_the_installed_seam() {
+        let Some((state, secret)) = live_state(Some(Arc::new(GatewaySeam))).await else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = state.pools().expect("pools").primary().clone();
+        let user_id = seed_user(&pool).await;
+        let extension = desktop_session(user_id, &secret);
+        let (status, body) = body_json(post_token(State(state), Some(extension)).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["token"], "gateway-token");
+        assert_eq!(body["expires_at"], "2030-01-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn token_refuses_like_ce() {
+        let Some((state, secret)) = live_state(None).await else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = state.pools().expect("pools").primary().clone();
+        let user_id = seed_user(&pool).await;
+        let extension = desktop_session(user_id, &secret);
+        let (status, body) = body_json(post_token(State(state), Some(extension)).await).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "byok_not_supported_on_desktop");
+        assert_eq!(
+            body["detail"],
+            "This build has no model lane the desktop agent can use."
         );
     }
 }

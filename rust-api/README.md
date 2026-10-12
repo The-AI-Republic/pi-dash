@@ -213,7 +213,7 @@ replaces the implementation, never the callers:
 
 | Trait | Module | CE default | Python source |
 |---|---|---|---|
-| `AssistantModelSeam` | `pidash-services::extensions` | `ByokAssistantSeam` | `ee/assistant/model_provider.py` |
+| `AssistantModelSeam` | `pidash-services::extensions` | `CeAssistantSeam` (`pidash-api::assistant::model_seam`; carried on `AppState`, install an alternate with `with_assistant_seam`) | `ee/assistant/model_provider.py` |
 | `SttSeam` | `pidash-services::extensions` | `ByoSttSeam` | `ee/assistant/stt_provider.py` |
 | `CloudAgentModelSeam` | `pidash-services::extensions` | `CreatorModelSeam` | `ee/cloud_agent/model_provider.py` |
 | `CloudAgentToolsetsSeam` | `pidash-services::extensions` | `NoExtraToolsets` | `ee/cloud_agent/toolsets.py` |

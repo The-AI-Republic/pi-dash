@@ -1630,7 +1630,6 @@ async fn executor_options(
     user_id: &uuid::Uuid,
     user: &ExecutorUser,
 ) -> Result<[pidash_services::dispatch::policy::ExecutorOption; 3], Denial> {
-    use pidash_services::assistant::seams;
     use pidash_services::dispatch::admission::{
         managed_runner_availability, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL, HEARTBEAT_GRACE_SECS,
         ONLINE_MANAGED_RUNNER_SQL,
@@ -1644,6 +1643,23 @@ async fn executor_options(
         .map_err(db_denial)?;
     let settings = state.settings();
     let llm_has_key = user.llm_has_key;
+    // The seam is async but the services closures below are sync `FnOnce`,
+    // so both verdicts resolve eagerly here and move into the closures.
+    // The values are what the lazy calls would have returned for the same
+    // inputs (the CE branch is pure; the overlay branch reads but never
+    // writes), so eagerness changes no verdict.
+    let llm_usable = state
+        .assistant_seam()
+        .has_usable_llm_config(*user_id, llm_has_key)
+        .await;
+    let seam_profile = state
+        .assistant_seam()
+        .agent_model_profile(*user_id, llm_has_key)
+        .await;
+    let llm_profile = pidash_services::dispatch::admission::LlmProfile {
+        available: seam_profile.available,
+        reason_code: seam_profile.reason_code,
+    };
     let managed =
         if pidash_services::dispatch::policy::managed_runner_is_enabled(&settings.managed_runner) {
             let enrolled: Option<(i32,)> = sqlx::query_as(ENROLLED_MANAGED_RUNNERS_EXISTS_SQL)
@@ -1667,13 +1683,7 @@ async fn executor_options(
             managed_runner_availability(
                 &settings.managed_runner,
                 Some(&user.flags),
-                || {
-                    let profile = seams::agent_model_profile_for_user(llm_has_key);
-                    pidash_services::dispatch::admission::LlmProfile {
-                        available: profile.available,
-                        reason_code: profile.reason_code,
-                    }
-                },
+                || llm_profile,
                 enrolled.is_some(),
                 online.is_some(),
             )
@@ -1681,13 +1691,7 @@ async fn executor_options(
             managed_runner_availability(
                 &settings.managed_runner,
                 Some(&user.flags),
-                || {
-                    let profile = seams::agent_model_profile_for_user(llm_has_key);
-                    pidash_services::dispatch::admission::LlmProfile {
-                        available: profile.available,
-                        reason_code: profile.reason_code,
-                    }
-                },
+                || llm_profile,
                 false,
                 false,
             )
@@ -1697,7 +1701,7 @@ async fn executor_options(
             &settings.cloud_agent,
             Some(user.flags),
             true,
-            || seams::has_usable_llm_config(llm_has_key),
+            || llm_usable,
             local.is_some(),
             managed,
         ),
@@ -6822,5 +6826,156 @@ mod tests {
         assert!(message.kwargs.contains_key("entity_identifier"));
         let message = webhook_destroy_message(&id, &id, "ws", "http://x");
         assert!(message.kwargs.contains_key("event_id"));
+    }
+}
+
+/// Live scratch-DB proof that `executor_options` consults the state-carried
+/// seam (PIDASHCONV-914), env-gated like the `handlers_members` live
+/// tests: without `DATABASE_URL` these skip. The function is called
+/// directly — no auth needed — with a keyless viewer on a project that has
+/// no runners, so the cloud leg reads only the seam's gate verdict and the
+/// managed leg reads only the seam's profile verdict. Both instance
+/// switches run on: with them off the legs short-circuit before the seam.
+#[cfg(test)]
+mod live_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use pidash_services::dispatch::policy::UserFlags;
+    use pidash_services::extensions::{
+        AgentModelProfile, AssistantModelSeam, SeamFuture, TitleError, TitleRequest,
+    };
+
+    /// Overlay-shaped seam: a keyless viewer still counts as configured,
+    /// and the desktop profile lane is available.
+    #[derive(Debug)]
+    struct GatewaySeam;
+
+    impl AssistantModelSeam for GatewaySeam {
+        fn has_usable_llm_config(
+            &self,
+            user_id: uuid::Uuid,
+            has_api_key: bool,
+        ) -> SeamFuture<'_, bool> {
+            let _ = (user_id, has_api_key);
+            Box::pin(async move { true })
+        }
+
+        fn agent_model_profile(
+            &self,
+            user_id: uuid::Uuid,
+            has_api_key: bool,
+        ) -> SeamFuture<'_, AgentModelProfile> {
+            let _ = (user_id, has_api_key);
+            Box::pin(async move {
+                AgentModelProfile {
+                    available: true,
+                    lane: "openhub".to_owned(),
+                    base_url: "https://gateway.example.com".to_owned(),
+                    model: "hub-default".to_owned(),
+                    reason_code: String::new(),
+                }
+            })
+        }
+
+        fn generate_title(
+            &self,
+            request: TitleRequest,
+        ) -> SeamFuture<'_, Result<String, TitleError>> {
+            let _ = request;
+            Box::pin(async move { Ok("seam title".to_owned()) })
+        }
+    }
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    fn live_state(seam: Option<Arc<dyn AssistantModelSeam>>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.cloud_agent.enabled = true;
+        settings.managed_runner.enabled = true;
+        let mut state = AppState::with_settings("test", settings);
+        if let Some(seam) = seam {
+            state = state.with_assistant_seam(seam);
+        }
+        state
+    }
+
+    /// A keyless, active, non-bot viewer: every LLM verdict comes from the
+    /// seam, never from a seeded row.
+    fn keyless_user() -> ExecutorUser {
+        ExecutorUser {
+            flags: UserFlags {
+                is_active: true,
+                is_bot: false,
+            },
+            llm_has_key: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_options_consults_the_installed_seam() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let state = live_state(Some(Arc::new(GatewaySeam)));
+        let user = keyless_user();
+        // Fresh ids: no runners exist for this project, so the local leg
+        // is down and the managed leg stops at runner enrollment.
+        let options = executor_options(
+            &pool,
+            &state,
+            &uuid::Uuid::new_v4(),
+            &uuid::Uuid::new_v4(),
+            &uuid::Uuid::new_v4(),
+            &user,
+        )
+        .await
+        .expect("options");
+        // Cloud leg: the gateway lane counts as configured without a key.
+        assert!(options[0].available);
+        assert!(options[0].reason_code.is_empty());
+        // Managed leg: the available profile sails past the LLM gate to
+        // the enrollment check, which finds no runner.
+        assert!(!options[2].available);
+        assert_eq!(options[2].reason_code, "no_managed_runner_for_project");
+    }
+
+    #[tokio::test]
+    async fn executor_options_keeps_the_ce_default() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        // No `with_assistant_seam`: the default CE seam gates a keyless
+        // viewer out of both legs exactly like the ported free functions.
+        let state = live_state(None);
+        let user = keyless_user();
+        let options = executor_options(
+            &pool,
+            &state,
+            &uuid::Uuid::new_v4(),
+            &uuid::Uuid::new_v4(),
+            &uuid::Uuid::new_v4(),
+            &user,
+        )
+        .await
+        .expect("options");
+        assert!(!options[0].available);
+        assert_eq!(options[0].reason_code, "llm_config_missing");
+        assert!(!options[2].available);
+        assert_eq!(options[2].reason_code, "llm_config_missing");
     }
 }
