@@ -16935,11 +16935,6 @@ export interface PublishBoardFacts {
 }
 
 /**
- * The project's published board, or null when nothing is published. The
- * read endpoint returns the single board object (or null/404 when the
- * project was never published or was unpublished again).
- */
-/**
  * Delete a scenario-created project that carries the workspace-default flag.
  * The first project of a drained workspace is the default, which the API
  * refuses to delete: hand the flag to a sacrificial project first (its
@@ -16963,6 +16958,11 @@ export async function deleteUiCreatedProject(session: AuthedSession, slug: strin
   await deleteProjectViaApi(session, slug, projectId);
 }
 
+/**
+ * The project's published board, or null when nothing is published. The
+ * read endpoint returns the single board object (or null/404 when the
+ * project was never published or was unpublished again).
+ */
 export async function serverPublishBoardFacts(
   workspaceSlug: string,
   projectId: string,
