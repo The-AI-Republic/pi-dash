@@ -67,6 +67,14 @@ export const AgentRuntime = observer(function AgentRuntime() {
     let active = true;
     let enrolled = false;
     let refreshing = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const stopPolling = () => {
+      clearInterval(timer);
+      timer = undefined;
+    };
+    const startPolling = () => {
+      if (active && timer === undefined) timer = setInterval(() => void refreshProject(), 5000);
+    };
     const refreshProject = async () => {
       if (!active || !enrolled || refreshing) return;
       refreshing = true;
@@ -74,14 +82,24 @@ export const AgentRuntime = observer(function AgentRuntime() {
         // Update the same observable project used by the executor picker.
         // Enrollment can finish before the daemon's first heartbeat.
         const project = await fetchProjectDetails(workspaceSlug, projectId);
-        if (active)
-          setMessage(
-            project.agent_executor_options?.some((option) => option.kind === "managed_runner" && option.available)
-              ? "Runs on this computer · Pi Dash uses its own working copy. Keep the app open while the agent runs."
-              : "Waiting for Pi Dash Agent to connect…"
-          );
+        if (!active) return;
+        const available = project.agent_executor_options?.some(
+          (option) => option.kind === "managed_runner" && option.available
+        );
+        // The poll only waits for that first heartbeat. Once the agent is
+        // available there is nothing left to wait for; the focus re-check
+        // below restarts it if the agent has gone away since.
+        if (available) stopPolling();
+        else startPolling();
+        setMessage(
+          available
+            ? "Runs on this computer · Pi Dash uses its own working copy. Keep the app open while the agent runs."
+            : "Waiting for Pi Dash Agent to connect…"
+        );
       } catch (error) {
         if (active) setMessage(String(error instanceof Error ? error.message : error));
+        // A failed re-check must not strand the strip on the error.
+        startPolling();
       } finally {
         refreshing = false;
       }
@@ -109,14 +127,15 @@ export const AgentRuntime = observer(function AgentRuntime() {
         },
         (error: unknown) => {
           if (active) setMessage(String(error instanceof Error ? error.message : error));
+          startPolling();
         }
       );
     };
-    const timer = setInterval(() => void refreshProject(), 5000);
+    startPolling();
     window.addEventListener("focus", reconnect);
     return () => {
       active = false;
-      clearInterval(timer);
+      stopPolling();
       window.removeEventListener("focus", reconnect);
     };
   }, [user?.id, workspaceSlug, projectId, fetchProjectDetails]);

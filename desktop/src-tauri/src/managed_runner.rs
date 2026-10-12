@@ -480,20 +480,31 @@ fn spawn_daemon_locked<R: Runtime>(
         .map_err(|e| format!("spawning managed path refresh: {e}"))?;
     finish(rebind, "rebind")?;
 
+    let child = spawn_daemon_process(paths)?;
+    guard.insert(workspace.to_string(), child);
+    Ok(DaemonStart::Spawned)
+}
+
+/// Spawn `pidash __run` with its output captured in `desktop-daemon.log`.
+///
+/// Both streams go to the file: the daemon's tracing output is written to
+/// stdout, while panics and its fatal startup error go to stderr.
+fn spawn_daemon_process(paths: &ManagedPaths) -> Result<Child, String> {
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(paths.data_dir.join("desktop-daemon.log"))
         .map_err(|e| format!("opening daemon log: {e}"))?;
-    let child = base_command(paths, &paths.runner)
+    let log_stdout = log
+        .try_clone()
+        .map_err(|e| format!("opening daemon log: {e}"))?;
+    base_command(paths, &paths.runner)
         .arg("__run")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::from(log_stdout))
         .stderr(Stdio::from(log))
         .spawn()
-        .map_err(|e| format!("spawning pidash __run: {e}"))?;
-    guard.insert(workspace.to_string(), child);
-    Ok(DaemonStart::Spawned)
+        .map_err(|e| format!("spawning pidash __run: {e}"))
 }
 
 /// Poll the daemon's control socket until it answers, or give up.
@@ -1092,5 +1103,41 @@ sandbox_mode = "danger-full-access"#
         atomic_write(&path, b"first").unwrap();
         atomic_write(&path, b"second").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+    }
+
+    /// The daemon logs through tracing, which writes to stdout; only panics
+    /// and the fatal startup error reach stderr. Both have to land in
+    /// `desktop-daemon.log`, or the file is empty exactly when a run fails
+    /// (PIDESKAPP-22).
+    #[cfg(unix)]
+    #[test]
+    fn daemon_log_captures_stdout_and_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ManagedPaths::for_test_root(dir.path().to_path_buf());
+        std::fs::create_dir_all(&paths.bin_dir).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::write(
+            &paths.runner,
+            "#!/bin/sh\necho \"stdout from $1\"\necho \"stderr from $1\" >&2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&paths.runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // A concurrently forking test can briefly inherit the script's write
+        // handle, which makes exec fail with ETXTBSY; retry past it.
+        let mut child = loop {
+            match spawn_daemon_process(&paths) {
+                Err(e) if e.contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                other => break other.unwrap(),
+            }
+        };
+        assert!(child.wait().unwrap().success());
+
+        let log = std::fs::read_to_string(paths.data_dir.join("desktop-daemon.log")).unwrap();
+        assert!(log.contains("stdout from __run"), "stdout missing: {log:?}");
+        assert!(log.contains("stderr from __run"), "stderr missing: {log:?}");
     }
 }

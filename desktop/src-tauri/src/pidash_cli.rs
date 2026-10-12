@@ -131,35 +131,25 @@ fn known_install_paths() -> Vec<PathBuf> {
 }
 
 /// Tiny inline `dirs::home_dir` so we don't add the `dirs` crate just for
-/// this. Falls back to `$HOME` (Unix) or `%USERPROFILE%` (Windows).
+/// this. Only the Unix install paths are home-relative.
+#[cfg(unix)]
 fn dirs_home() -> Option<PathBuf> {
-    #[cfg(unix)]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        None
-    }
+    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 /// On Unix, verify the executable bit is set. On Windows, file extension
 /// is what determines executability; we already only probe `.exe` paths.
 /// Returns true if the file at `path` is plausibly runnable.
-fn is_executable(path: &PathBuf) -> bool {
+fn is_executable(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return std::fs::metadata(path)
+        std::fs::metadata(path)
             .map(|m| m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
     #[cfg(not(unix))]
     {
@@ -246,6 +236,7 @@ pub(crate) fn cli_install_dir(home: &Path, local_app_data: Option<&Path>) -> Pat
 /// Guarded by its own `case` test so re-running is a no-op even if the user
 /// already has the directory on PATH by other means, and idempotent on the
 /// file because [`ensure_on_path`] refuses to append it twice.
+#[cfg(any(unix, test))]
 pub(crate) fn path_snippet(dir: &Path) -> String {
     format!(
         "\n# Added by Pi Dash Desktop — makes the bundled `pidash` CLI available.\ncase \":$PATH:\" in\n  *\":{dir}:\"*) ;;\n  *) export PATH=\"{dir}:$PATH\" ;;\nesac\n",
@@ -254,6 +245,7 @@ pub(crate) fn path_snippet(dir: &Path) -> String {
 }
 
 /// True when `dir` is already listed in `path_var`.
+#[cfg(any(unix, test))]
 pub(crate) fn already_on_path(path_var: &str, dir: &Path) -> bool {
     let target = dir.to_string_lossy();
     path_var.split(':').any(|entry| entry == target)
