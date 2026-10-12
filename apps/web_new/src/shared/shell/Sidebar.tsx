@@ -45,6 +45,7 @@ export function Sidebar({
   const active = workspaces.find((workspace) => workspace.slug === activeSlug) ?? null;
   return (
     <aside
+      id="main-sidebar"
       aria-label="Workspace navigation"
       className="flex w-60 shrink-0 flex-col gap-(--space-4) border-r border-(--border) bg-(--surface) p-(--space-4)"
     >

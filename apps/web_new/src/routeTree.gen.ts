@@ -13,6 +13,8 @@ import { Route as IndexRouteImport } from "./routes/index";
 import { Route as WsRouteRouteImport } from "./routes/$ws/route";
 import { Route as SignInRouteImport } from "./routes/sign-in";
 import { Route as WsIndexRouteImport } from "./routes/$ws/index";
+import { Route as WsSplatRouteImport } from "./routes/$ws/$";
+import { Route as WsBrowseIssueKeyRouteImport } from "./routes/$ws/browse/$issueKey";
 import { Route as WsProjectsProjectIdIssuesIndexRouteImport } from "./routes/$ws/projects/$projectId/issues/index";
 
 const IndexRoute = IndexRouteImport.update({
@@ -35,6 +37,16 @@ const WsIndexRoute = WsIndexRouteImport.update({
   path: "/",
   getParentRoute: () => WsRouteRoute,
 } as any);
+const WsSplatRoute = WsSplatRouteImport.update({
+  id: "/$",
+  path: "/$",
+  getParentRoute: () => WsRouteRoute,
+} as any);
+const WsBrowseIssueKeyRoute = WsBrowseIssueKeyRouteImport.update({
+  id: "/browse/$issueKey",
+  path: "/browse/$issueKey",
+  getParentRoute: () => WsRouteRoute,
+} as any);
 const WsProjectsProjectIdIssuesIndexRoute = WsProjectsProjectIdIssuesIndexRouteImport.update({
   id: "/projects/$projectId/issues/",
   path: "/projects/$projectId/issues/",
@@ -45,13 +57,17 @@ export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
   "/$ws": typeof WsRouteRouteWithChildren;
   "/sign-in": typeof SignInRoute;
+  "/$ws/$": typeof WsSplatRoute;
   "/$ws/": typeof WsIndexRoute;
+  "/$ws/browse/$issueKey": typeof WsBrowseIssueKeyRoute;
   "/$ws/projects/$projectId/issues/": typeof WsProjectsProjectIdIssuesIndexRoute;
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
   "/sign-in": typeof SignInRoute;
+  "/$ws/$": typeof WsSplatRoute;
   "/$ws": typeof WsIndexRoute;
+  "/$ws/browse/$issueKey": typeof WsBrowseIssueKeyRoute;
   "/$ws/projects/$projectId/issues": typeof WsProjectsProjectIdIssuesIndexRoute;
 }
 export interface FileRoutesById {
@@ -59,15 +75,32 @@ export interface FileRoutesById {
   "/": typeof IndexRoute;
   "/$ws": typeof WsRouteRouteWithChildren;
   "/sign-in": typeof SignInRoute;
+  "/$ws/$": typeof WsSplatRoute;
   "/$ws/": typeof WsIndexRoute;
+  "/$ws/browse/$issueKey": typeof WsBrowseIssueKeyRoute;
   "/$ws/projects/$projectId/issues/": typeof WsProjectsProjectIdIssuesIndexRoute;
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
-  fullPaths: "/" | "/$ws" | "/sign-in" | "/$ws/" | "/$ws/projects/$projectId/issues/";
+  fullPaths:
+    | "/"
+    | "/$ws"
+    | "/sign-in"
+    | "/$ws/$"
+    | "/$ws/"
+    | "/$ws/browse/$issueKey"
+    | "/$ws/projects/$projectId/issues/";
   fileRoutesByTo: FileRoutesByTo;
-  to: "/" | "/sign-in" | "/$ws" | "/$ws/projects/$projectId/issues";
-  id: "__root__" | "/" | "/$ws" | "/sign-in" | "/$ws/" | "/$ws/projects/$projectId/issues/";
+  to: "/" | "/sign-in" | "/$ws/$" | "/$ws" | "/$ws/browse/$issueKey" | "/$ws/projects/$projectId/issues";
+  id:
+    | "__root__"
+    | "/"
+    | "/$ws"
+    | "/sign-in"
+    | "/$ws/$"
+    | "/$ws/"
+    | "/$ws/browse/$issueKey"
+    | "/$ws/projects/$projectId/issues/";
   fileRoutesById: FileRoutesById;
 }
 export interface RootRouteChildren {
@@ -106,6 +139,20 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof WsIndexRouteImport;
       parentRoute: typeof WsRouteRoute;
     };
+    "/$ws/$": {
+      id: "/$ws/$";
+      path: "/$";
+      fullPath: "/$ws/$";
+      preLoaderRoute: typeof WsSplatRouteImport;
+      parentRoute: typeof WsRouteRoute;
+    };
+    "/$ws/browse/$issueKey": {
+      id: "/$ws/browse/$issueKey";
+      path: "/browse/$issueKey";
+      fullPath: "/$ws/browse/$issueKey";
+      preLoaderRoute: typeof WsBrowseIssueKeyRouteImport;
+      parentRoute: typeof WsRouteRoute;
+    };
     "/$ws/projects/$projectId/issues/": {
       id: "/$ws/projects/$projectId/issues/";
       path: "/projects/$projectId/issues";
@@ -117,12 +164,16 @@ declare module "@tanstack/react-router" {
 }
 
 interface WsRouteRouteChildren {
+  WsSplatRoute: typeof WsSplatRoute;
   WsIndexRoute: typeof WsIndexRoute;
+  WsBrowseIssueKeyRoute: typeof WsBrowseIssueKeyRoute;
   WsProjectsProjectIdIssuesIndexRoute: typeof WsProjectsProjectIdIssuesIndexRoute;
 }
 
 const WsRouteRouteChildren: WsRouteRouteChildren = {
+  WsSplatRoute: WsSplatRoute,
   WsIndexRoute: WsIndexRoute,
+  WsBrowseIssueKeyRoute: WsBrowseIssueKeyRoute,
   WsProjectsProjectIdIssuesIndexRoute: WsProjectsProjectIdIssuesIndexRoute,
 };
 

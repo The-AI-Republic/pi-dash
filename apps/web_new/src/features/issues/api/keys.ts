@@ -13,4 +13,5 @@ export const issueKeys = {
   list: (workspaceSlug: string, projectId: string, search: IssueSearch) =>
     [...issueKeys.all(workspaceSlug), "list", projectId, search] as const,
   detail: (workspaceSlug: string, issueId: string) => [...issueKeys.all(workspaceSlug), "detail", issueId] as const,
+  browse: (workspaceSlug: string, issueKey: string) => [...issueKeys.all(workspaceSlug), "browse", issueKey] as const,
 };
