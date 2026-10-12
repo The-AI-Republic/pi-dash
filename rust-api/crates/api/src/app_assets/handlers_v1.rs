@@ -304,25 +304,118 @@ fn dt_in(value: DateTime<Utc>, tz: &chrono_tz::Tz) -> String {
     crate::serializer::render_datetime_in(&value, tz)
 }
 
+/// Request scheme for absolute-URL rendering, mirroring Django
+/// `HttpRequest.scheme` (Django 4.2 `http/request.py`): `http` unless
+/// the proxy header `production.py` honors (`SECURE_PROXY_SSL_HEADER =
+/// `("HTTP_X_FORWARDED_PROTO", "https")`) carries `https` as its first
+/// comma token. Test topologies send no such header, so this is `http`
+/// there — exactly what Django renders under `common`/`local`/`test`
+/// settings, which define no proxy header.
+fn request_scheme(headers: &HeaderMap) -> &'static str {
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let first = proto.split(',').next().unwrap_or("").trim();
+    if first == "https" {
+        "https"
+    } else {
+        "http"
+    }
+}
+
+/// `django.utils.encoding.iri_to_uri` (`quote(iri,
+/// safe="/#%[]=:;$&()+,!?*@'~")`, Django 4.2 `utils/encoding.py:110-138`):
+/// `quote` always spares ASCII alphanumerics plus `-_.~`; the safe set
+/// spares the RFC 3986 reserved marks and `%`. Every other byte — UTF-8
+/// multibyte included — becomes uppercase `%XX`.
+fn iri_to_uri(joined: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(joined.len());
+    for byte in joined.bytes() {
+        let keep = byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'_' | b'.' | b'~')
+            || matches!(
+                byte,
+                b'/' | b'#'
+                    | b'%'
+                    | b'['
+                    | b']'
+                    | b'='
+                    | b':'
+                    | b';'
+                    | b'$'
+                    | b'&'
+                    | b'('
+                    | b')'
+                    | b'+'
+                    | b','
+                    | b'!'
+                    | b'?'
+                    | b'*'
+                    | b'@'
+                    | b'\''
+            );
+        if keep {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 15) as usize] as char);
+        }
+    }
+    out
+}
+
+/// Absolute `asset` leaf for the workspace GET, mirroring
+/// `FileAssetSerializer` over `S3Storage` (DRF `FileField` `use_url`
+/// default + `S3Storage.url` returning the bare name,
+/// `settings/storage.py:20-21`, + Django `build_absolute_uri`, Django
+/// 4.2 `http/request.py`).
+///
+/// `base` is `{scheme}://{host}` plus this leg's `request.path`
+/// (reconstructed from the route segments — the fixed literals carry
+/// no specials, so it equals Django's decoded path — always
+/// trailing-slash). The stored key is a relative ref on this leg (the
+/// rendered row always equals `{workspace-uuid}/{leaf}`: never
+/// slash-leading, and any `:` sits past the `/` so `urlsplit` finds no
+/// scheme), hence `urljoin` reduces to concatenation; `iri_to_uri` then
+/// quotes the result.
+fn absolute_asset_url(base: &str, stored: &str) -> String {
+    let mut joined = String::with_capacity(base.len() + stored.len());
+    joined.push_str(base);
+    joined.push_str(stored);
+    iri_to_uri(&joined)
+}
+
 /// Map one `SELECT *` row onto the 24-key serializer shape. Datetimes
 /// render in the request user's zone (`TimezoneMixin`,
-/// `app/views/base.py:36-43`); FKs render as raw pks or null.
+/// `app/views/base.py:36-43`); FKs render as raw pks or null. The
+/// `asset` leaf renders the DRF absolute URL off `asset_base`
+/// (`{scheme}://{host}{request.path}`, trailing slash); a missing Host
+/// keeps the stored key (Django would rebuild from `SERVER_NAME`,
+/// which Rust cannot know).
 fn file_asset_record(
     row: &sqlx::postgres::PgRow,
     tz: &chrono_tz::Tz,
+    asset_base: Option<&str>,
 ) -> Result<shape::FileAssetRecord, sqlx::Error> {
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
     let deleted_at: Option<DateTime<Utc>> = row.try_get("deleted_at")?;
     let attributes: Option<Value> = row.try_get("attributes")?;
     let storage_metadata: Option<Value> = row.try_get("storage_metadata")?;
+    let stored: String = row.try_get("asset")?;
     Ok(shape::FileAssetRecord {
         id: row.try_get::<Uuid, _>("id")?.to_string(),
         created_at: dt_in(created_at, tz),
         updated_at: dt_in(updated_at, tz),
         deleted_at: deleted_at.map(|dt| dt_in(dt, tz)),
         attributes: attributes.unwrap_or(Value::Null),
-        asset: row.try_get("asset")?,
+        asset: match asset_base {
+            Some(base) => absolute_asset_url(base, &stored),
+            None => stored,
+        },
         entity_type: row.try_get("entity_type")?,
         entity_identifier: row.try_get("entity_identifier")?,
         is_deleted: row.try_get("is_deleted")?,
@@ -380,6 +473,7 @@ async fn workspace_get(
     State(state): State<AppState>,
     Path((workspace_id_raw, asset_key)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    headers: HeaderMap,
 ) -> Response {
     // URL resolution precedes authentication in Django: a non-UUID
     // segment 404s (`<uuid:workspace_id>` converter) even anonymously.
@@ -405,9 +499,24 @@ async fn workspace_get(
     if rows.is_empty() {
         return miss_body();
     }
+    // DRF absolute-URL base for the `asset` leaf: `{scheme}://{host}`
+    // plus this leg's `request.path`, trailing slash (see
+    // `absolute_asset_url`). The raw segments echo the request exactly
+    // like Django's path does. A missing Host (hyper 400s HTTP/1.1
+    // without one; only raw HTTP/1.0 reaches here) keeps the stored
+    // key — see `file_asset_record`.
+    let asset_base = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(|host| {
+            format!(
+                "{}://{host}/api/workspaces/file-assets/{workspace_id_raw}/{asset_key}/",
+                request_scheme(&headers),
+            )
+        });
     let mut items = Vec::with_capacity(rows.len());
     for row in &rows {
-        match file_asset_record(row, &actor.timezone) {
+        match file_asset_record(row, &actor.timezone, asset_base.as_deref()) {
             Ok(record) => items.push(shape::row_to_json(&record)),
             Err(_) => return server_error(),
         }
@@ -808,6 +917,57 @@ mod tests {
     fn routes_build_without_path_collisions() {
         // Merging twice would panic on duplicate paths; one merge must hold.
         let _ = crate::routes::with_routes(AppState::new("0.1.0"), routes());
+    }
+
+    #[test]
+    fn asset_leaf_is_drf_absolute_url() {
+        // Replay shape (PIDASHCONV-930 request 0): the relative stored
+        // key joins onto `{scheme}://{host}{request.path}`.
+        let ws = "a5a5a5a5-0000-4000-8000-000000000001";
+        let leaf = "a5seed01-back.txt";
+        let base = format!("http://127.0.0.1:18223/api/workspaces/file-assets/{ws}/{leaf}/");
+        let stored = format!("{ws}/{leaf}");
+        assert_eq!(
+            absolute_asset_url(&base, &stored),
+            format!("http://127.0.0.1:18223/api/workspaces/file-assets/{ws}/{leaf}/{ws}/{leaf}")
+        );
+    }
+
+    #[test]
+    fn iri_to_uri_matches_django_vectors() {
+        // Oracle: `django.utils.encoding.iri_to_uri` on the venv Django.
+        for (raw, expected) in [
+            ("http://h/p/a b", "http://h/p/a%20b"),
+            ("http://h/p/caf\u{e9}", "http://h/p/caf%C3%A9"),
+            ("http://h/p/100%25x", "http://h/p/100%25x"),
+            ("http://h/p/a?b#c", "http://h/p/a?b#c"),
+            ("http://h/p/a+b", "http://h/p/a+b"),
+            ("http://h/p/a\"b<c>d", "http://h/p/a%22b%3Cc%3Ed"),
+            (
+                "http://h/p/\u{4e2d}\u{6587}",
+                "http://h/p/%E4%B8%AD%E6%96%87",
+            ),
+        ] {
+            assert_eq!(iri_to_uri(raw), expected, "iri_to_uri({raw:?})");
+        }
+    }
+
+    #[test]
+    fn request_scheme_mirrors_django_proxy_header() {
+        let headers = HeaderMap::new();
+        assert_eq!(request_scheme(&headers), "http");
+        for (value, expected) in [
+            ("https", "https"),
+            ("https, http", "https"),
+            ("  https  ", "https"),
+            ("http", "http"),
+            ("HTTPS", "http"),
+            ("", "http"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-proto", value.parse().expect("header"));
+            assert_eq!(request_scheme(&headers), expected, "proto {value:?}");
+        }
     }
 
     #[test]
