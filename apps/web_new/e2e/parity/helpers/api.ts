@@ -16866,3 +16866,51 @@ export async function profileActivityExportCsv(
   if (!res.ok) throw new Error(`[parity] profile activity export failed with HTTP ${res.status}.`);
   return res.text();
 }
+
+/**
+ * Raw issue-reaction POST status (NEWFRONT-116, CMT-024). The server refuses
+ * a second identical add with a client error instead of duplicating the row,
+ * so duplicate scenarios read the status directly: 201 for the first add, a
+ * 4xx refusal carrying the error body for the repeat.
+ */
+export async function serverAddIssueReactionRaw(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  reaction: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; body: string }> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/reactions/`,
+    {
+      method: "POST",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify({ reaction }),
+    }
+  );
+  return { status: res.status, body: await res.text() };
+}
+
+/**
+ * Raw comment-reaction POST status (NEWFRONT-116, CMT-024). Same contract as
+ * the issue twin: 201 for the first add, a 4xx refusal for the repeat.
+ */
+export async function serverAddCommentReactionRaw(
+  workspaceSlug: string,
+  projectId: string,
+  commentId: string,
+  sessionCookie: string,
+  reaction: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; body: string }> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/comments/${commentId}/reactions/`,
+    {
+      method: "POST",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify({ reaction }),
+    }
+  );
+  return { status: res.status, body: await res.text() };
+}
