@@ -16464,9 +16464,6 @@ export class WebNewDriver implements ParityDriver {
   async settingsGeneralSetBudget(_value: string): Promise<void> {
     return todo("settingsGeneralSetBudget");
   }
-  async settingsGeneralNoCapChecked(): Promise<boolean> {
-    return todo("settingsGeneralNoCapChecked");
-  }
   async settingsGeneralSetNoCap(_on: boolean): Promise<void> {
     return todo("settingsGeneralSetNoCap");
   }
@@ -16518,13 +16515,16 @@ export class WebNewDriver implements ParityDriver {
   async settingsGeneralConfirmModalText(): Promise<string> {
     return todo("settingsGeneralConfirmModalText");
   }
-  async settingsGeneralHoldDetails(_ms: number): Promise<void> {
-    return todo("settingsGeneralHoldDetails");
-  }
   async settingsGeneralStallDetails(): Promise<void> {
     return todo("settingsGeneralStallDetails");
   }
   async settingsGeneralReleaseStall(): Promise<void> {
     return todo("settingsGeneralReleaseStall");
+  }
+  async settingsGeneralStallCoverUpload(): Promise<void> {
+    return todo("settingsGeneralStallCoverUpload");
+  }
+  async settingsGeneralReleaseCoverUpload(): Promise<void> {
+    return todo("settingsGeneralReleaseCoverUpload");
   }
 }

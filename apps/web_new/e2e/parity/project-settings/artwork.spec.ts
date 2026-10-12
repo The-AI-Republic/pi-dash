@@ -8,12 +8,16 @@
 //
 // Observed behavior notes: the emblem opens an emoji/material picker and
 // marks the form dirty without saving on its own; the cover popover tabs
-// are Images (bundled gallery, click applies straight into the form),
-// Upload (dropzone plus Upload & Save) and Unsplash (only when the
+// are Images (static bundled gallery, click applies straight into the
+// form), Upload (dropzone plus Upload & Save) and Unsplash (only when the
 // instance has it configured — the scratch stack does not, so the oracle
-// asserts Images and Upload only). TARGET (main#523, OPEN): cover control,
-// gallery and search are removed — the cover steps below pin current
-// behavior and collapse to emblem-only once it merges.
+// asserts Images and Upload only; search exists on the Unsplash tab only).
+// A gallery pick re-uploads at save time, and a failed re-upload aborts
+// the whole save with an error notice (the creation path only warns —
+// NEWFRONT-390's dialog, not covered here). TARGET (main#523, OPEN): cover
+// control, gallery and search are removed; the emblem picker stays — the
+// cover steps below pin current behavior and collapse to emblem-only once
+// it merges.
 import { test, expect } from "../fixtures";
 import {
   parityProjectIdentifier,
@@ -120,6 +124,47 @@ test(
         );
         expect(after).not.toBe("");
       });
+    } finally {
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
+
+test(
+  specTitle(["PSET-007"], "a failed cover re-upload aborts the settings save with an error notice"),
+  { tag: specTags(["PSET-007"]) },
+  async ({ driver, seed }) => {
+    const tag = `NF389 coverfail ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N389"),
+      {},
+      session
+    );
+    try {
+      await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+      await driver.settingsGeneralOpen(seed.workspaceSlug, projectId);
+      const before = await serverProjectRecord(seed.workspaceSlug, projectId, session);
+
+      // A gallery pick re-uploads at save time; failing that upload must
+      // abort the whole save (not just the cover) with an error notice.
+      await driver.settingsGeneralCoverOpen();
+      await driver.settingsGeneralCoverPickGallery(3);
+      await driver.settingsGeneralFill("description", `${tag} touch`);
+      await driver.settingsGeneralStallCoverUpload();
+      try {
+        await driver.settingsGeneralSave();
+      } finally {
+        await driver.settingsGeneralReleaseCoverUpload();
+      }
+      const toast = await driver.rulesLastToast();
+      expect(toast?.title ?? "").toContain("Error!");
+      expect(await driver.settingsGeneralFormVisible()).toBe(true);
+      const after = await serverProjectRecord(seed.workspaceSlug, projectId, session);
+      expect(String(after["cover_image_url"] ?? "")).toBe(String(before["cover_image_url"] ?? ""));
+      expect(String(after["description"] ?? "")).toBe(String(before["description"] ?? ""));
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
     }

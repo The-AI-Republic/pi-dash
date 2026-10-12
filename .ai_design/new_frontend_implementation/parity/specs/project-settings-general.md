@@ -13,7 +13,7 @@ pins the current behavior and cites the PR at each affected assertion.
 ## Reference entry points (read-only, never imported or copied)
 
 General form and save flow; the settings page shell with the admin gate and
-skeleton; the danger-zone rows with the archive and delete modems; the
+skeleton; the danger-zone rows with the archive and delete modals; the
 project card that hosts restore mode; the image picker popover behind the
 cover control; the cover-image helper that decides save-vs-warn.
 
@@ -54,12 +54,16 @@ and no danger zone below the form.
 
 The emblem opens a picker offering emoji and material icons; picking one
 marks the form dirty and the new emblem renders after save. The cover
-control opens a gallery popover: bundled-image search plus an upload path
-backed by user assets. Uploads are processed before the save completes: a
-cover that fails to process aborts the settings save with an error notice,
-while on the creation path the same failure only warns and the project is
-still created. TARGET (main#523): cover control, gallery and search are
-gone; the emblem remains upload-backed with the same abort-vs-warn split.
+control opens a picker popover with three tabs: a static bundled gallery
+(click applies straight into the form), an upload path, and Unsplash
+search (only when the instance configures it; the seeded stack does not,
+so no search renders there). A picked gallery or Unsplash cover
+re-uploads at save time: a failed re-upload aborts the settings save with
+an error notice and no request, while on the creation path the same
+failure only warns and the project is still created (creation dialog
+belongs to NEWFRONT-390). TARGET (main#523, verified on
+chore/remove-cover-image): cover control, gallery and search are gone;
+the emoji/material emblem picker is unchanged.
 
 ## PSET-008 — repository bind control
 

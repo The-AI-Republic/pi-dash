@@ -54636,12 +54636,6 @@ export class WebDriver implements ParityDriver {
     return this.generalForm().locator("label", { hasText: "No cap" }).locator('input[type="checkbox"]');
   }
 
-  async settingsGeneralNoCapChecked(): Promise<boolean> {
-    const box = this.generalNoCapBox().first();
-    await box.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
-    return await box.isChecked();
-  }
-
   async settingsGeneralSetNoCap(on: boolean): Promise<void> {
     const box = this.generalNoCapBox().first();
     await box.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
@@ -57883,17 +57877,6 @@ export class WebDriver implements ParityDriver {
     return ((await modal.innerText()) ?? "").trim();
   }
 
-  async settingsGeneralHoldDetails(ms: number): Promise<void> {
-    // Hold every project fetch by `ms`, including the bare project list
-    // that bootstraps the store. The General tab shows its skeleton until
-    // its details land; the hold only delays, so the form still resolves on
-    // its own. Loading-state scenarios only.
-    await this.page.route(WebDriver.generalProjectsRoute, async (route) => {
-      await new Promise((resolve) => setTimeout(resolve, ms));
-      await route.continue();
-    });
-  }
-
   // The details-carrying project fetches only (single, bulk, bare list):
   // sub-resource reads such as membership stay live so the auth wrapper
   // keeps passing children through and the tab itself shows its loader.
@@ -57909,5 +57892,20 @@ export class WebDriver implements ParityDriver {
 
   async settingsGeneralReleaseStall(): Promise<void> {
     await this.page.unroute(WebDriver.generalProjectsRoute);
+  }
+
+  private static readonly generalCoverUploadRoute = /\/api\/assets\/v2\/workspaces\//;
+
+  async settingsGeneralStallCoverUpload(): Promise<void> {
+    // Fail the save-time re-upload of a picked gallery/Unsplash cover (the
+    // picker file-upload path needs no save-time upload, so stall after a
+    // gallery pick). POST-only: asset reads never ride this prefix.
+    await this.page.route(WebDriver.generalCoverUploadRoute, (route) =>
+      route.request().method() === "POST" ? route.abort() : route.continue()
+    );
+  }
+
+  async settingsGeneralReleaseCoverUpload(): Promise<void> {
+    await this.page.unroute(WebDriver.generalCoverUploadRoute);
   }
 }

@@ -87,6 +87,11 @@ test(
     });
 
     await test.step("network, timezone and execution defaults match the server record", async () => {
+      // Visibility network renders by numeric key (0 Private, 2 Public).
+      const networkLabels: Record<number, string> = { 0: "Private", 2: "Public" };
+      const networkLabel = networkLabels[Number(record["network"] ?? 0)] ?? "";
+      expect(networkLabel).not.toBe("");
+      expect(await driver.settingsGeneralNetworkText()).toContain(networkLabel);
       expect(await driver.settingsGeneralTimezoneText()).toContain(String(record["timezone"] ?? ""));
       expect(await driver.settingsGeneralExecutorValue()).toBe(
         String(record["default_agent_executor"] ?? "local_runner")
@@ -136,6 +141,12 @@ test(
 
       await test.step("the banner headline follows the rename", async () => {
         await expect.poll(() => driver.settingsGeneralHeaderText(), { timeout: 30_000 }).toContain(renamed);
+      });
+
+      await test.step("the sidebar row follows the rename", async () => {
+        await driver.openWorkspacePath(`/${seed.workspaceSlug}/projects`);
+        await expect.poll(() => driver.projectRowHref(renamed), { timeout: 30_000 }).not.toBeNull();
+        await expect.poll(() => driver.projectRowHref(`${tag} project`), { timeout: 30_000 }).toBeNull();
       });
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);

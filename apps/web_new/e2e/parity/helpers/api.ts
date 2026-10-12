@@ -21778,21 +21778,6 @@ export async function serverProjectFetchStatus(
   return { status: res.status, record: (await res.json()) as Record<string, unknown> };
 }
 
-/** Restore an archived project; throws unless the server accepts. */
-export async function serverRestoreProject(
-  workspaceSlug: string,
-  projectId: string,
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<void> {
-  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/archive/`, {
-    method: "DELETE",
-    headers: { cookie: sessionCookie },
-  });
-  if (res.status !== 200 && res.status !== 204)
-    throw new Error(`[parity] project restore failed with HTTP ${res.status}.`);
-}
-
 /** Raw project DELETE: resolves with the HTTP status (refusals carry the body). */
 export async function serverDeleteProjectRaw(
   workspaceSlug: string,
@@ -21837,23 +21822,6 @@ export async function serverRepositoryStatus(
   });
   if (!res.ok) throw new Error(`[parity] repository read failed with HTTP ${res.status}.`);
   return (await res.json()) as Record<string, unknown>;
-}
-
-/** Bind a repository URL; resolves with the status (refusals carry no record). */
-export async function serverBindRepository(
-  workspaceSlug: string,
-  projectId: string,
-  repoUrl: string,
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<{ status: number; record: Record<string, unknown> | null }> {
-  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/repository/bind/`, {
-    method: "POST",
-    headers: { cookie: sessionCookie, "content-type": "application/json" },
-    body: JSON.stringify({ repo_url: repoUrl }),
-  });
-  if (!res.ok) return { status: res.status, record: null };
-  return { status: res.status, record: (await res.json()) as Record<string, unknown> };
 }
 
 /** Bind a repository URL; resolves with the raw status and body text (refusal pins). */

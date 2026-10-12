@@ -73,6 +73,10 @@ test(
           .not.toBeNull();
         await expect.poll(() => driver.currentUrlPath(), { timeout: 30_000 }).toContain("/projects");
         await expect.poll(() => driver.visibleProjectCardNames(), { timeout: 60_000 }).not.toContain(`${tag} project`);
+        // The seeded project row proves the sidebar hydrated before the
+        // absence below is read.
+        await expect.poll(() => driver.projectRowHref(seed.projectName), { timeout: 30_000 }).not.toBeNull();
+        await expect.poll(() => driver.projectRowHref(`${tag} project`), { timeout: 30_000 }).toBeNull();
       });
 
       await test.step("the project stays directly reachable but leaves search and refuses updates", async () => {
@@ -121,13 +125,14 @@ test(
         expect(body).toContain("visible");
       });
 
-      await test.step("confirming restores: toast, back in the list, updates accepted", async () => {
+      await test.step("confirming restores: toast, back in the list and sidebar, updates accepted", async () => {
         await driver.confirmRestore();
         await expect.poll(() => driver.isToastVisible("in your projects")).toBe(true);
         await expect
           .poll(() => archivesProjectArchivedAt(seed.workspaceSlug, projectId, session), { timeout: 30_000 })
           .toBeNull();
         await expect.poll(() => driver.visibleProjectCardNames(), { timeout: 60_000 }).toContain(`${tag} project`);
+        await expect.poll(() => driver.projectRowHref(`${tag} project`), { timeout: 30_000 }).not.toBeNull();
         await serverPatchProject(seed.workspaceSlug, projectId, session, { description: `${tag} restored` });
       });
     } finally {

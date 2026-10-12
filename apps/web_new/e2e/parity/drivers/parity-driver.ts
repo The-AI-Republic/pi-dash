@@ -10298,8 +10298,6 @@ export interface WsSettingsMemberRowFacts {
   settingsGeneralBudgetValue(): Promise<string>;
   /** Fill the run-budget input. */
   settingsGeneralSetBudget(value: string): Promise<void>;
-  /** Whether the no-cap toggle is ticked. */
-  settingsGeneralNoCapChecked(): Promise<boolean>;
   /** Tick or untick the no-cap toggle. */
   settingsGeneralSetNoCap(on: boolean): Promise<void>;
   /** Cadence picker text as rendered (preset label or custom marker). */
@@ -10334,12 +10332,14 @@ export interface WsSettingsMemberRowFacts {
   settingsGeneralFillDeleteName(text: string): Promise<void>;
   /** Archive/restore confirm dialog text (heading plus body), or "" while closed. */
   settingsGeneralConfirmModalText(): Promise<string>;
-  /** Hold project-scoped fetches by `ms` so the skeleton can be observed (loading-state scenarios only). */
-  settingsGeneralHoldDetails(ms: number): Promise<void>;
   /** Abort project-scoped fetches so the tab stays on its skeleton; pair with the release below. */
   settingsGeneralStallDetails(): Promise<void>;
   /** Release a stall installed above; the tab proceeds to the form. */
   settingsGeneralReleaseStall(): Promise<void>;
+  /** Fail the save-time cover upload so the abort path can be observed; pair with the release below. */
+  settingsGeneralStallCoverUpload(): Promise<void>;
+  /** Release a cover-upload stall installed above. */
+  settingsGeneralReleaseCoverUpload(): Promise<void>;
   // Archive/restore entries, card reads, toasts and the delete phrase
   // fill reuse the sibling areas' methods (openArchiveProjectDialog,
   // clickCardRestore, confirmArchive/confirmRestore,
