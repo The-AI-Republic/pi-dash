@@ -41961,6 +41961,4 @@ export class WebDriver implements ParityDriver {
       .replace(/\s+/g, " ")
       .trim();
   }
-
-  }
 }

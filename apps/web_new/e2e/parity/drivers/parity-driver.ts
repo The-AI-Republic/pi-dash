@@ -7751,7 +7751,6 @@ export interface ParityDriver {
   projectGithubGuidanceVisible(): Promise<boolean>;
   /** Full visible text of the tab (for pinned non-behavior assertions). */
   projectGithubTabText(): Promise<string>;
-
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */

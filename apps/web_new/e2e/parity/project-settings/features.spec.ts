@@ -8,10 +8,10 @@
 // the area's sidebar link product-wide; non-admins get the
 // not-authorized view with no switch at all. The tabs read the
 // already-loaded project, so they settle on the switch directly with no
-// loaders of their own (PSET-061 slice). The combined five-switch list
-// plus post-create feature step (PSET-048) are unreachable dead
-// components in this checkout, so that row gets a bug: scenario locking
-// in the observed close-with-toast create behavior (NEWFRONT-394).
+// loaders of their own (PSET-061 slice). The post-create feature step
+// plus combined five-switch list (PSET-048) were intentionally hidden
+// upstream (bd4f157e), so that row proves the absence: creation closes
+// with a toast and no feature step ever shows.
 // Rows: PSET-043–048, PSET-061.
 import { test, expect } from "../fixtures";
 import {
@@ -166,15 +166,14 @@ test(
 );
 
 test(
-  specTitle(["PSET-048"], "bug: NEWFRONT-394 creating a project closes the modal with no feature step"),
+  specTitle(["PSET-048"], "creating a project closes the modal with no feature step"),
   { tag: specTags(["PSET-048"]) },
   async ({ driver }) => {
-    // The combined five-switch list (ProjectFeaturesList) and the
-    // post-create feature step (ProjectFeatureUpdate) exist but have no
-    // renderers and no route, and the create modal's next step just
-    // closes — so a UI create can only ever close with a toast. This
-    // scenario locks in that observed behavior; NEWFRONT-394 tracks the
-    // intended feature step.
+    // The post-create feature step was intentionally hidden upstream
+    // (bd4f157e: MVP starts work-items-only), and the combined
+    // five-switch list served only that step — so a UI create closes
+    // with a toast and no feature step ever shows. Settings offers the
+    // five dedicated tabs (PSET-043–047) instead.
     const owner = await signUpAuthedSession("nf393featlist");
     const suffix = uniqueSuffixForProjects();
     const wsName = `NF393 features ${suffix}`;
@@ -185,7 +184,7 @@ test(
 
     await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(owner));
 
-    await test.step("a UI create closes the modal with a success notice", async () => {
+    await test.step("a UI create closes the modal with a success notice and no feature step", async () => {
       await expect.poll(() => driver.emptyStateHeading()).toBe("No active projects");
       await driver.clickEmptyStateCreate();
       await expect.poll(() => driver.isCreateProjectDialogVisible()).toBe(true);
@@ -195,6 +194,7 @@ test(
       await expect.poll(() => projectByName(owner, ws.slug, "Feature Step Probe")).not.toBeUndefined();
       await expect.poll(() => driver.isCreateProjectDialogVisible()).toBe(false);
       await expect.poll(() => driver.isToastVisible("Project created successfully")).toBe(true);
+      expect(await driver.isCreateFeatureStepVisible()).toBe(false);
     });
   }
 );

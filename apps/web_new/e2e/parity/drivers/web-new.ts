@@ -12133,6 +12133,4 @@ export class WebNewDriver implements ParityDriver {
   async projectGithubTabText(): Promise<string> {
     return todo("projectGithubTabText");
   }
-
-  }
 }

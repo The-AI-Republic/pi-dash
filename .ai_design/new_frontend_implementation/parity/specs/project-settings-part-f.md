@@ -34,12 +34,13 @@ flag with the same pending/success/error feedback as the dedicated
 tabs. The same list is reused on the post-create sheet, where it always
 renders in admin mode. Non-admins see the switches disabled.
 
-Observed gap (old bug NEWFRONT-394): in this checkout the list
-component and the post-create feature step have no renderers and no
-route, and the create modal's next step just closes — so the PSET-048
-surface is unreachable and creating a project only ever closes the
-modal with a success notice. The oracle scenario locks in that observed
-behavior as bug:; the paragraph above records the intended behavior.
+Recorded absence (not a bug): the post-create feature step was
+intentionally hidden upstream (bd4f157e — MVP starts work-items-only,
+the toggle UI remains in project settings), and the combined list
+served only that step — so the PSET-048 surface does not exist in this
+checkout and creating a project only ever closes the modal with a
+success notice. The paragraph above describes the removed surface for
+context; the oracle scenario proves the absence.
 
 ## Estimates entry (PSET-049)
 
