@@ -235,6 +235,13 @@ test(
       expect(await driver.isPublishUnpublishVisible()).toBe(true);
     });
 
+    await test.step("copying the live link writes it to the clipboard", async () => {
+      const link = await driver.publishLiveLink();
+      await driver.clickPublishCopyLink();
+      await expect.poll(() => driver.isToastVisible("Published page link copied successfully."), POLL).toBe(true);
+      await expect.poll(() => driver.readClipboard(), POLL).toBe(link);
+    });
+
     await test.step("the server stored the chosen layouts and toggles", async () => {
       const board = await serverPublishBoardFacts(ws.slug, projId, owner.cookie);
       expect(board?.is_comments_enabled).toBe(true);

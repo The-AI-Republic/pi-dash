@@ -41039,6 +41039,14 @@ export class WebDriver implements ParityDriver {
     return await link.getAttribute("target");
   }
 
+  async clickPublishCopyLink(): Promise<void> {
+    // Clipboard writes need the permission up front; grant it here so
+    // the scenario stays on the driver surface (readClipboard grants
+    // again on the read side, mirroring the issue copy-link flow).
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.publishModal().getByRole("button", { name: "Copy link", exact: true }).click();
+  }
+
   async isPublishUpdateVisible(): Promise<boolean> {
     return this.isShown(this.publishModal().getByRole("button", { name: /^(Update settings|Updating)$/ }));
   }

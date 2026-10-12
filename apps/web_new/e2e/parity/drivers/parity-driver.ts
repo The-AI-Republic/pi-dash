@@ -7551,6 +7551,8 @@ export interface ParityDriver {
   publishLiveLink(): Promise<string | null>;
   /** Anchor target of the live-link open action ("_blank" proof), or null. */
   publishLiveLinkTarget(): Promise<string | null>;
+  /** Click the publish modal's "Copy link" action (grants clipboard permission first). */
+  clickPublishCopyLink(): Promise<void>;
   /** Whether the update-settings control shows (published + dirty only). */
   isPublishUpdateVisible(): Promise<boolean>;
   /** Submit the dirty-gated settings update. */

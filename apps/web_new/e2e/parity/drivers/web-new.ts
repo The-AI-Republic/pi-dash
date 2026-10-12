@@ -11881,6 +11881,9 @@ export class WebNewDriver implements ParityDriver {
   async publishLiveLinkTarget(): Promise<string | null> {
     return todo("publishLiveLinkTarget");
   }
+  async clickPublishCopyLink(): Promise<void> {
+    return todo("clickPublishCopyLink");
+  }
   async isPublishUpdateVisible(): Promise<boolean> {
     return todo("isPublishUpdateVisible");
   }
