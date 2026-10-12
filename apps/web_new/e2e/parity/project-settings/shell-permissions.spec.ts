@@ -225,6 +225,8 @@ test(
       await driver.settingsShellOpen(seed.workspaceSlug, "00000000-0000-0000-0000-000000000000", "");
       expect(await driver.settingsShellRestrictionVisible()).toBe(true);
       expect(await driver.settingsShellJoinVisible()).toBe(false);
+      const restrictionText = await driver.settingsShellRestrictionText();
+      expect(restrictionText).toContain("Project not found");
     });
 
     await test.step("a non-member joins and lands back on settings authorized", async () => {
