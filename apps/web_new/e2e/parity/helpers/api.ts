@@ -16914,3 +16914,80 @@ export async function serverAddCommentReactionRaw(
   );
   return { status: res.status, body: await res.text() };
 }
+
+// ---------------------------------------------------------------------------
+// Project lifecycle oracles (NEWFRONT-390, rows PSET-013..017).
+//
+// Added additively to the shared helpers above (never forking them). The
+// lifecycle scenarios drive the UI for what the user sees and read back
+// through these helpers for what the server stored: the published-board
+// record after publish/update/unpublish writes.
+// ---------------------------------------------------------------------------
+
+/** One published-board record as the deploy-boards read reports it. */
+export interface PublishBoardFacts {
+  id: string;
+  anchor: string | null;
+  is_comments_enabled: boolean;
+  is_reactions_enabled: boolean;
+  is_votes_enabled: boolean;
+  view_props: Record<string, unknown>;
+}
+
+/**
+ * The project's published board, or null when nothing is published. The
+ * read endpoint returns the single board object (or null/404 when the
+ * project was never published or was unpublished again).
+ */
+/**
+ * Delete a scenario-created project that carries the workspace-default flag.
+ * The first project of a drained workspace is the default, which the API
+ * refuses to delete: hand the flag to a sacrificial project first (its
+ * PATCH clears every other default atomically), then delete the
+ * scenario-created project. The spare lives on in the scenario-owned
+ * workspace, invisible to every other scenario.
+ */
+export async function deleteUiCreatedProject(session: AuthedSession, slug: string, projectId: string): Promise<void> {
+  const stamp = uniqueSuffixForProjects()
+    .replace(/[^a-z0-9]/gi, "")
+    .slice(0, 6)
+    .toUpperCase();
+  const spareId = await createProjectViaApi(session, slug, {
+    name: `Spare Default ${stamp}`,
+    identifier: `SPD${stamp}`.slice(0, 10),
+  });
+  const patched = await sessionFetch(session, "PATCH", `/api/workspaces/${slug}/projects/${spareId}/`, {
+    is_default: true,
+  });
+  if (!patched.ok) throw new Error(`[parity] default reassignment failed with HTTP ${patched.status}.`);
+  await deleteProjectViaApi(session, slug, projectId);
+}
+
+export async function serverPublishBoardFacts(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<PublishBoardFacts | null> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/project-deploy-boards/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`[parity] publish-board read failed with HTTP ${res.status}.`);
+  const text = await res.text();
+  if (text.trim() === "" || text.trim() === "null") return null;
+  const rec = JSON.parse(text) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string") return null;
+  const bool = (k: string): boolean => rec[k] === true;
+  return {
+    id: rec["id"] as string,
+    anchor: typeof rec["anchor"] === "string" ? (rec["anchor"] as string) : null,
+    is_comments_enabled: bool("is_comments_enabled"),
+    is_reactions_enabled: bool("is_reactions_enabled"),
+    is_votes_enabled: bool("is_votes_enabled"),
+    view_props:
+      typeof rec["view_props"] === "object" && rec["view_props"] !== null
+        ? (rec["view_props"] as Record<string, unknown>)
+        : {},
+  };
+}

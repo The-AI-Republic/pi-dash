@@ -7496,6 +7496,83 @@ export interface ParityDriver {
   reactionsCommentAddEmoji(cardText: string, emoji: string): Promise<void>;
   /** Whether a comment card on the archived detail shows any reaction UI. */
   reactionsArchivedCommentClusterVisible(cardText: string): Promise<boolean>;
+
+  // --- Project lifecycle oracles (NEWFRONT-390, PSET-013..017). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+  // --- PSET-013 (create): the post-create feature-selection step was
+  // --- intentionally hidden upstream (bd4f157e), so creation closes the
+  // --- modal directly; this read proves that absence.
+  /** Whether the post-create feature-selection step (Close + Open project exits) is showing. */
+  isCreateFeatureStepVisible(): Promise<boolean>;
+  // --- PSET-014 (restriction-screen join): the single-action join screen
+  // --- a non-member meets on a direct project URL.
+  /** Whether the project restriction screen with its join action is showing. */
+  isProjectRestrictionVisible(): Promise<boolean>;
+  /** Label on the restriction screen's join action ("Join project" vs "Joining project"), or null. */
+  restrictionJoinLabel(): Promise<string | null>;
+  /** Click the restriction screen's single join action. */
+  clickRestrictionJoin(): Promise<void>;
+  // --- PSET-015 (leave ordering): the leave dialog navigates to the list
+  // --- first and only then calls the leave endpoint (the navigation does
+  // --- not wait for the write).
+  /**
+   * Submit the open leave dialog while the leave-API write is held for
+   * `holdMs`. Resolves once the view has navigated back to the project
+   * list — while the write is still in flight — proving the navigation
+   * does not await the endpoint.
+   */
+  submitLeaveHoldingWrite(holdMs: number): Promise<void>;
+  // --- PSET-016 (publish modal): the public-board publish flow. Layout
+  // --- names are the visible option labels ("List", "Kanban"); toggle
+  // --- names are "comments" | "reactions" | "voting".
+  /**
+   * Open the publish modal for a project through its sidebar quick-actions
+   * entry. Takes the project name to hover its sidebar row, like the leave
+   * flow does.
+   */
+  openPublishProjectModal(workspaceSlug: string, projectId: string, projectName: string): Promise<void>;
+  /** Whether the publish modal is currently open. */
+  isPublishModalVisible(): Promise<boolean>;
+  /** Whether the publish modal is still loading its settings. */
+  isPublishModalLoading(): Promise<boolean>;
+  /** Layout option labels offered in the publish modal's Views control. */
+  publishLayoutOptions(): Promise<string[]>;
+  /** Layout labels currently selected in the publish modal. */
+  publishSelectedLayouts(): Promise<string[]>;
+  /** Toggle one layout option in the publish modal's Views control. */
+  publishToggleLayout(label: string): Promise<void>;
+  /** Whether one publish toggle ("comments" | "reactions" | "voting") is on. */
+  publishToggleState(name: "comments" | "reactions" | "voting"): Promise<boolean>;
+  /** Set one publish toggle ("comments" | "reactions" | "voting"). */
+  setPublishToggle(name: "comments" | "reactions" | "voting", on: boolean): Promise<void>;
+  /** Submit the publish form (initial publish). */
+  submitPublish(): Promise<void>;
+  /** The live board link shown once published, or null when absent. */
+  publishLiveLink(): Promise<string | null>;
+  /** Anchor target of the live-link open action ("_blank" proof), or null. */
+  publishLiveLinkTarget(): Promise<string | null>;
+  /** Whether the update-settings control shows (published + dirty only). */
+  isPublishUpdateVisible(): Promise<boolean>;
+  /** Submit the dirty-gated settings update. */
+  submitPublishUpdate(): Promise<void>;
+  /** Whether the unpublish action shows (published only). */
+  isPublishUnpublishVisible(): Promise<boolean>;
+  /** Start unpublishing (resolves once the write lands). */
+  clickPublishUnpublish(): Promise<void>;
+  /** Whether unpublishing currently shows progress. */
+  isPublishUnpublishing(): Promise<boolean>;
+  // --- PSET-017 (list search locality): the expanding search box filters
+  // --- locally with no data requests of its own.
+  /** Arm the list-search request spy (call before opening/typing). */
+  armListSearchRequestSpy(): Promise<void>;
+  /** Data-API request paths observed since arming, deduplicated. */
+  listSearchRequestPaths(): Promise<string[]>;
+  // --- PSET-016 loading states: one-shot delays so the settings loader
+  // --- and the write progress states stay observable against a fast local API.
+  /** Delay the next publish-settings read (GET) by ms. */
+  delayNextPublishRead(ms: number): Promise<void>;
+  /** Delay the next publish write (POST/PATCH/DELETE) by ms. */
+  delayNextPublishWrite(ms: number): Promise<void>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */

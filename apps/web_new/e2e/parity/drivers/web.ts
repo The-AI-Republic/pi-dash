@@ -40883,4 +40883,250 @@ export class WebDriver implements ParityDriver {
       });
     });
   }
+
+  // --- Project lifecycle oracles (NEWFRONT-390, PSET-013..017). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+
+  async isCreateFeatureStepVisible(): Promise<boolean> {
+    // The post-create feature-selection step was intentionally hidden
+    // upstream, so this stays false: the modal closes straight after a
+    // create. Both exits render as links styled like buttons, so accept
+    // either role inside the open dialog.
+    const modal = this.modalScope();
+    if (!(await this.isShown(modal))) return false;
+    const openProject = modal.getByText("Open project", { exact: true });
+    return (await openProject.count()) > 0 && (await this.isShown(openProject.first()));
+  }
+
+  private restrictionMarker() {
+    return this.page.getByText("have access to this Project", { exact: false }).first();
+  }
+
+  async isProjectRestrictionVisible(): Promise<boolean> {
+    if (!(await this.isShown(this.restrictionMarker()))) return false;
+    return this.isShown(this.page.getByRole("button", { name: /^Join(?:ing)? project$/ }));
+  }
+
+  async restrictionJoinLabel(): Promise<string | null> {
+    const btn = this.page.getByRole("button", { name: /^Join(?:ing)? project$/ });
+    if (!(await this.isShown(btn))) return null;
+    return (await btn.first().textContent())?.trim() ?? null;
+  }
+
+  async clickRestrictionJoin(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: /^Join(?:ing)? project$/ })
+      .first()
+      .click();
+  }
+
+  async submitLeaveHoldingWrite(holdMs: number): Promise<void> {
+    // Hold the leave write so the test can observe the navigation landing
+    // while the endpoint is still pending: the dialog pushes the list
+    // route first and fires the write after, never awaiting it.
+    await this.page.route("**/members/leave/", async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      await route.continue();
+    });
+    await this.page.getByRole("button", { name: "Leave Project", exact: true }).click();
+    // The list route carries a trailing slash; the glob must too, or the
+    // issues address (which merely contains "/projects/") never matches.
+    await this.page.waitForURL("**/projects/", { timeout: 30_000 });
+  }
+
+  private publishModal() {
+    return this.modalScope().filter({
+      has: this.page.getByRole("heading", { name: "Publish project", exact: true }),
+    });
+  }
+
+  async openPublishProjectModal(workspaceSlug: string, projectId: string, projectName: string): Promise<void> {
+    // The sidebar project row hosts a quick-actions menu with the publish
+    // entry (admin-only): hover the row to reveal it, then open the menu.
+    // Same reachable path the leave flow uses; the tab-strip header menu
+    // is layout-dependent and its trigger selector never settles here.
+    await this.openProjectTab(workspaceSlug, projectId, "issues");
+    const sidebar = this.page.getByRole("complementary", { name: "Main sidebar" });
+    await sidebar.getByText(projectName, { exact: true }).first().hover();
+    await sidebar.getByLabel("Toggle quick actions menu").click();
+    await this.page.getByRole("button", { name: "Publish project", exact: true }).click();
+    await this.modalScope()
+      .getByRole("heading", { name: "Publish project", exact: true })
+      .waitFor({ state: "visible", timeout: 30_000 });
+  }
+
+  async isPublishModalVisible(): Promise<boolean> {
+    return this.isShown(this.modalScope().getByRole("heading", { name: "Publish project", exact: true }));
+  }
+
+  async isPublishModalLoading(): Promise<boolean> {
+    return this.isShown(this.modalScope().getByRole("status"));
+  }
+
+  private publishViewsButton() {
+    // The Views control is the combobox button carrying the joined layout
+    // label ("List, Kanban") inside the publish dialog; no other dialog
+    // button names a layout, so the label text identifies it exactly.
+    return this.publishModal()
+      .locator("button", { hasText: /List|Kanban/ })
+      .first();
+  }
+
+  private async ensurePublishViewsOpen(): Promise<void> {
+    // The Views control toggles: a read that leaves the listbox open is
+    // followed by a blind click that would close it again, so only click
+    // when no option is showing.
+    const options = this.page.getByRole("option");
+    if ((await options.count()) > 0 && (await this.isShown(options.first()))) return;
+    await this.publishViewsButton().click();
+    await options.first().waitFor({ state: "visible", timeout: 15_000 });
+  }
+
+  async publishLayoutOptions(): Promise<string[]> {
+    await this.ensurePublishViewsOpen();
+    const options = this.page.getByRole("option");
+    return (await options.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async publishSelectedLayouts(): Promise<string[]> {
+    const label = ((await this.publishViewsButton().textContent()) ?? "").trim();
+    if (label === "") return [];
+    return label
+      .split(",")
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0);
+  }
+
+  async publishToggleLayout(label: string): Promise<void> {
+    await this.ensurePublishViewsOpen();
+    await this.page.getByRole("option", { name: label, exact: true }).click();
+  }
+
+  private publishSwitches() {
+    // Headless Switch renders role="switch" in caption order: comments,
+    // reactions, voting.
+    return this.publishModal().getByRole("switch");
+  }
+
+  private publishSwitchIndex(name: "comments" | "reactions" | "voting"): number {
+    return name === "comments" ? 0 : name === "reactions" ? 1 : 2;
+  }
+
+  async publishToggleState(name: "comments" | "reactions" | "voting"): Promise<boolean> {
+    const sw = this.publishSwitches().nth(this.publishSwitchIndex(name));
+    return (await sw.getAttribute("aria-checked")) === "true";
+  }
+
+  async setPublishToggle(name: "comments" | "reactions" | "voting", on: boolean): Promise<void> {
+    const sw = this.publishSwitches().nth(this.publishSwitchIndex(name));
+    if ((await this.publishToggleState(name)) !== on) await sw.click();
+  }
+
+  async submitPublish(): Promise<void> {
+    await this.publishModal().getByRole("button", { name: "Publish", exact: true }).click();
+  }
+
+  async publishLiveLink(): Promise<string | null> {
+    const link = this.publishModal().getByRole("link").first();
+    if (!(await this.isShown(link))) return null;
+    return ((await link.textContent()) ?? "").trim() || null;
+  }
+
+  async publishLiveLinkTarget(): Promise<string | null> {
+    const link = this.publishModal().getByRole("link").first();
+    if (!(await this.isShown(link))) return null;
+    return await link.getAttribute("target");
+  }
+
+  async isPublishUpdateVisible(): Promise<boolean> {
+    return this.isShown(this.publishModal().getByRole("button", { name: /^(Update settings|Updating)$/ }));
+  }
+
+  async submitPublishUpdate(): Promise<void> {
+    await this.publishModal().getByRole("button", { name: "Update settings", exact: true }).click();
+  }
+
+  async isPublishUnpublishVisible(): Promise<boolean> {
+    return this.isShown(this.publishModal().getByRole("button", { name: /^(Unpublish|Unpublishing)$/ }));
+  }
+
+  async clickPublishUnpublish(): Promise<void> {
+    await this.publishModal().getByRole("button", { name: "Unpublish", exact: true }).click();
+  }
+
+  async isPublishUnpublishing(): Promise<boolean> {
+    return this.isShown(this.publishModal().getByRole("button", { name: "Unpublishing", exact: true }));
+  }
+
+  private listSearchSpyKey(): string {
+    return "__parityListSearchRequests";
+  }
+
+  private static publishBoardUrl(url: string): boolean {
+    return /\/projects\/[^/]+\/project-deploy-boards\//.test(url);
+  }
+
+  async delayNextPublishRead(ms: number): Promise<void> {
+    let armed = true;
+    await this.page.route("**/project-deploy-boards/**", async (route) => {
+      const req = route.request();
+      if (armed && req.method() === "GET" && WebDriver.publishBoardUrl(req.url())) {
+        armed = false;
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      await route.continue();
+    });
+  }
+
+  async delayNextPublishWrite(ms: number): Promise<void> {
+    let armed = true;
+    await this.page.route("**/project-deploy-boards/**", async (route) => {
+      const req = route.request();
+      if (
+        armed &&
+        (req.method() === "POST" || req.method() === "PATCH" || req.method() === "DELETE") &&
+        WebDriver.publishBoardUrl(req.url())
+      ) {
+        armed = false;
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      await route.continue();
+    });
+  }
+
+  async armListSearchRequestSpy(): Promise<void> {
+    // Count data-API requests from this point on; the expanding search box
+    // filters the already-loaded list locally, so typing must add none.
+    await this.page.evaluate((key) => {
+      (window as unknown as Record<string, string[]>)[key] = [];
+    }, this.listSearchSpyKey());
+    this.page.on("request", (req) => {
+      const url = req.url();
+      if (!url.includes("/api/")) return;
+      void this.page
+        .evaluate(
+          ([k, u]) => {
+            const store = (window as unknown as Record<string, string[]>)[k as string] ?? [];
+            if (!store.includes(u as string)) store.push(u as string);
+            (window as unknown as Record<string, string[]>)[k as string] = store;
+          },
+          [this.listSearchSpyKey(), url.split("?")[0]]
+        )
+        .catch(() => undefined);
+    });
+  }
+
+  async listSearchRequestPaths(): Promise<string[]> {
+    const key = this.listSearchSpyKey();
+    return this.page
+      .evaluate((k) => {
+        try {
+          return ((window as unknown as Record<string, string[]>)[k] ?? []).slice();
+        } catch {
+          return [];
+        }
+      }, key)
+      .catch(() => []);
+  }
 }

@@ -11830,4 +11830,82 @@ export class WebNewDriver implements ParityDriver {
   async reactionsArchivedCommentClusterVisible(_cardText: string): Promise<boolean> {
     return todo("reactionsArchivedCommentClusterVisible");
   }
+
+  // --- Project lifecycle oracles (NEWFRONT-390, PSET-013..017). Throwing
+  // --- stubs per the shared driver contract; the new app implements them later.
+  async isCreateFeatureStepVisible(): Promise<boolean> {
+    return todo("isCreateFeatureStepVisible");
+  }
+  async isProjectRestrictionVisible(): Promise<boolean> {
+    return todo("isProjectRestrictionVisible");
+  }
+  async restrictionJoinLabel(): Promise<string | null> {
+    return todo("restrictionJoinLabel");
+  }
+  async clickRestrictionJoin(): Promise<void> {
+    return todo("clickRestrictionJoin");
+  }
+  async submitLeaveHoldingWrite(_holdMs: number): Promise<void> {
+    return todo("submitLeaveHoldingWrite");
+  }
+  async openPublishProjectModal(_workspaceSlug: string, _projectId: string, _projectName: string): Promise<void> {
+    return todo("openPublishProjectModal");
+  }
+  async isPublishModalVisible(): Promise<boolean> {
+    return todo("isPublishModalVisible");
+  }
+  async isPublishModalLoading(): Promise<boolean> {
+    return todo("isPublishModalLoading");
+  }
+  async publishLayoutOptions(): Promise<string[]> {
+    return todo("publishLayoutOptions");
+  }
+  async publishSelectedLayouts(): Promise<string[]> {
+    return todo("publishSelectedLayouts");
+  }
+  async publishToggleLayout(_label: string): Promise<void> {
+    return todo("publishToggleLayout");
+  }
+  async publishToggleState(_name: "comments" | "reactions" | "voting"): Promise<boolean> {
+    return todo("publishToggleState");
+  }
+  async setPublishToggle(_name: "comments" | "reactions" | "voting", _on: boolean): Promise<void> {
+    return todo("setPublishToggle");
+  }
+  async submitPublish(): Promise<void> {
+    return todo("submitPublish");
+  }
+  async publishLiveLink(): Promise<string | null> {
+    return todo("publishLiveLink");
+  }
+  async publishLiveLinkTarget(): Promise<string | null> {
+    return todo("publishLiveLinkTarget");
+  }
+  async isPublishUpdateVisible(): Promise<boolean> {
+    return todo("isPublishUpdateVisible");
+  }
+  async submitPublishUpdate(): Promise<void> {
+    return todo("submitPublishUpdate");
+  }
+  async isPublishUnpublishVisible(): Promise<boolean> {
+    return todo("isPublishUnpublishVisible");
+  }
+  async clickPublishUnpublish(): Promise<void> {
+    return todo("clickPublishUnpublish");
+  }
+  async isPublishUnpublishing(): Promise<boolean> {
+    return todo("isPublishUnpublishing");
+  }
+  async armListSearchRequestSpy(): Promise<void> {
+    return todo("armListSearchRequestSpy");
+  }
+  async listSearchRequestPaths(): Promise<string[]> {
+    return todo("listSearchRequestPaths");
+  }
+  async delayNextPublishRead(_ms: number): Promise<void> {
+    return todo("delayNextPublishRead");
+  }
+  async delayNextPublishWrite(_ms: number): Promise<void> {
+    return todo("delayNextPublishWrite");
+  }
 }
