@@ -324,8 +324,8 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
   };
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)}>
-      <div className="relative h-44 w-full">
+    <form onSubmit={handleSubmit(onSubmit)} data-testid="general-form">
+      <div className="relative h-44 w-full" data-testid="general-banner">
         <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
         <CoverImage src={coverImage} alt="Project cover image" className="h-44 w-full rounded-md" />
         <div className="absolute bottom-4 z-5 flex w-full items-end justify-between gap-3 px-4">
@@ -425,7 +425,9 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
               />
             )}
           />
-          <span className="text-11 text-danger-primary">{errors?.name?.message}</span>
+          <span className="text-11 text-danger-primary" data-testid="general-error-name">
+            {errors?.name?.message}
+          </span>
         </div>
         <div className="flex flex-col gap-1">
           <h4 className="text-13">{t("Description")}</h4>
@@ -484,7 +486,9 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 {isAlreadyBound ? t("Bound") || "Bound" : t("Bind") || "Bind"}
               </Button>
             </div>
-            <span className="text-11 text-danger-primary">{errors?.repo_url?.message}</span>
+            <span className="text-11 text-danger-primary" data-testid="general-error-repoUrl">
+              {errors?.repo_url?.message}
+            </span>
             <p className="text-11 text-tertiary">
               {t(
                 "Bind verifies the URL with the connected Git provider and links this project to that repository. GitHub and GitLab URLs are supported. The URL is saved only when you click Bind."
@@ -521,7 +525,9 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 />
               )}
             />
-            <span className="text-11 text-danger-primary">{errors?.base_branch?.message}</span>
+            <span className="text-11 text-danger-primary" data-testid="general-error-baseBranch">
+              {errors?.base_branch?.message}
+            </span>
           </div>
         </div>
         <div className="flex flex-col gap-1">
@@ -642,7 +648,9 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                   );
                 }}
               />
-              <span className="text-11 text-danger-primary">{errors?.agent_default_max_ticks?.message}</span>
+              <span className="text-11 text-danger-primary" data-testid="general-error-budget">
+                {errors?.agent_default_max_ticks?.message}
+              </span>
               <p className="text-11 text-tertiary">
                 {t(
                   "How many automatic runs a work item gets across In Progress, In Review and In Test before it pauses. Re-tick grants more. A new budget applies from the next tick — work items already paused stay paused until you Re-tick them."
@@ -732,7 +740,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 <Info className="absolute top-2.5 right-2 h-4 w-4 text-placeholder" />
               </Tooltip>
             </div>
-            <span className="text-11 text-danger-primary">
+            <span className="text-11 text-danger-primary" data-testid="general-error-identifier">
               <>{errors?.identifier?.message}</>
             </span>
           </div>

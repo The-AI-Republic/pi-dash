@@ -268,6 +268,7 @@ import type {
   CloudAssistantConnectionFacts,
   WsSettingsApiTokenBackup,
   WsSettingsApiTokenRow,
+  SettingsGeneralField,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -54439,6 +54440,376 @@ export class WebDriver implements ParityDriver {
     return names;
   }
 
+  // --- Project settings General tab (NEWFRONT-389, PSET-005–012). Observed
+  // --- on the running old app; see the area spec
+  // --- parity/specs/project-settings-general.md. Appended; existing methods
+  // --- above are untouched per the shared driver contract.
+  private generalForm() {
+    return this.page.locator('form[data-testid="general-form"]');
+  }
+
+  private generalFieldId(field: SettingsGeneralField): string {
+    switch (field) {
+      case "name":
+        return "name";
+      case "description":
+        return "description";
+      case "identifier":
+        return "identifier";
+      case "repoUrl":
+        return "repo_url";
+      case "baseBranch":
+        return "base_branch";
+      case "budget":
+        return "agent_default_max_ticks";
+    }
+  }
+
+  private generalErrorTestId(field: SettingsGeneralField): string | null {
+    switch (field) {
+      case "name":
+        return "general-error-name";
+      case "identifier":
+        return "general-error-identifier";
+      case "repoUrl":
+        return "general-error-repoUrl";
+      case "baseBranch":
+        return "general-error-baseBranch";
+      case "budget":
+        return "general-error-budget";
+      case "description":
+        return null;
+    }
+  }
+
+  /** Section text under one of the form's h4 headings (network, timezone). */
+  private async generalSectionText(heading: string): Promise<string> {
+    const section = this.generalForm()
+      .locator("div", { has: this.page.getByRole("heading", { name: heading, exact: true }) })
+      .first();
+    return ((await section.innerText({ timeout: WebDriver.OPEN_MS })) ?? "").trim();
+  }
+
+  async settingsGeneralOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on the form itself; the skeleton precedes it while the
+    // details fetch resolves, and the wait below rides that out.
+    await this.page.locator("#name").first().waitFor({ state: "visible", timeout: 60_000 });
+  }
+
+  async settingsGeneralFormVisible(): Promise<boolean> {
+    return (await this.generalForm().count()) > 0 && (await this.page.locator("#name").count()) > 0;
+  }
+
+  async settingsGeneralSkeletonVisible(): Promise<boolean> {
+    // The skeleton carries the same h4 headings as the form but no inputs.
+    // No waiting here: pollers sample this on a tight loop, and a blocking
+    // wait would stride right past the loading window.
+    if ((await this.page.locator("#name").count()) > 0) return false;
+    return (await this.page.getByRole("heading", { name: "Project name", exact: true }).count()) > 0;
+  }
+
+  async settingsGeneralDangerVisible(): Promise<boolean> {
+    return (await this.page.locator('[data-testid="general-danger"]').count()) > 0;
+  }
+
+  async settingsGeneralFormDimmed(): Promise<boolean> {
+    const shell = this.page.locator('[data-testid="general-shell"]').first();
+    if ((await shell.count()) === 0) return false;
+    const cls = await shell.getAttribute("class");
+    return (cls ?? "").includes("opacity-60");
+  }
+
+  async settingsGeneralFieldValue(field: SettingsGeneralField): Promise<string> {
+    const input = this.page.locator(`#${this.generalFieldId(field)}`).first();
+    await input.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return await input.inputValue({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async settingsGeneralFieldDisabled(field: SettingsGeneralField): Promise<boolean> {
+    const input = this.page.locator(`#${this.generalFieldId(field)}`).first();
+    await input.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    return await input.isDisabled();
+  }
+
+  async settingsGeneralFieldError(field: SettingsGeneralField): Promise<string> {
+    const testId = this.generalErrorTestId(field);
+    if (testId === null) return "";
+    const error = this.page.locator(`[data-testid="${testId}"]`).first();
+    if ((await error.count()) === 0) return "";
+    return ((await error.innerText({ timeout: WebDriver.OPEN_MS })) ?? "").trim();
+  }
+
+  async settingsGeneralFill(field: SettingsGeneralField, value: string): Promise<void> {
+    const input = this.page.locator(`#${this.generalFieldId(field)}`).first();
+    await input.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    await input.fill(value, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async settingsGeneralCoverVisible(): Promise<boolean> {
+    return (await this.page.locator('[data-testid="general-banner"] img').count()) > 0;
+  }
+
+  async settingsGeneralHeaderText(): Promise<string> {
+    const banner = this.page.locator('[data-testid="general-banner"]').first();
+    await banner.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return ((await banner.innerText({ timeout: WebDriver.OPEN_MS })) ?? "").trim();
+  }
+
+  async settingsGeneralNetworkText(): Promise<string> {
+    return this.generalSectionText("Network");
+  }
+
+  async settingsGeneralTimezoneText(): Promise<string> {
+    return this.generalSectionText("Project Timezone");
+  }
+
+  async settingsGeneralCreatedText(): Promise<string> {
+    const line = this.generalForm()
+      .getByText(/^Created on/)
+      .first();
+    await line.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return ((await line.innerText({ timeout: WebDriver.OPEN_MS })) ?? "").trim();
+  }
+
+  private generalExecutorSelect() {
+    return this.generalForm().locator('select[aria-label="Default AI execution target"]');
+  }
+
+  async settingsGeneralExecutorValue(): Promise<string> {
+    const select = this.generalExecutorSelect();
+    await select.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return await select.inputValue({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async settingsGeneralExecutorOptionDisabled(value: string): Promise<boolean> {
+    const option = this.generalExecutorSelect().locator(`option[value="${value}"]`);
+    await option.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    return await option.isDisabled();
+  }
+
+  async settingsGeneralSetExecutor(value: string): Promise<void> {
+    const select = this.generalExecutorSelect();
+    await select.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    await select.selectOption(value, { timeout: WebDriver.OPEN_MS });
+  }
+
+  private generalTickingSwitch() {
+    return this.generalForm().getByRole("switch").first();
+  }
+
+  async settingsGeneralTickingOn(): Promise<boolean> {
+    const toggle = this.generalTickingSwitch();
+    await toggle.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return (await toggle.getAttribute("aria-checked")) === "true";
+  }
+
+  async settingsGeneralSetTicking(on: boolean): Promise<void> {
+    if ((await this.settingsGeneralTickingOn()) === on) return;
+    await this.generalTickingSwitch().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.settingsGeneralTickingOn(), { timeout: WebDriver.OPEN_MS }).toBe(on);
+  }
+
+  async settingsGeneralBudgetValue(): Promise<string> {
+    const input = this.page.locator("#agent_default_max_ticks").first();
+    await input.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return await input.inputValue({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async settingsGeneralSetBudget(value: string): Promise<void> {
+    // Typed keystrokes, not fill: React number inputs can desync from a
+    // programmatic fill (the DOM shows the digits while the form holds the
+    // old value), which would silently validate and save the wrong budget.
+    const input = this.page.locator("#agent_default_max_ticks").first();
+    await input.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    await input.click({ timeout: WebDriver.OPEN_MS });
+    await input.press("ControlOrMeta+a", { timeout: WebDriver.OPEN_MS });
+    if (value === "") {
+      await input.press("Backspace", { timeout: WebDriver.OPEN_MS });
+    } else {
+      await input.pressSequentially(value, { timeout: WebDriver.OPEN_MS });
+    }
+  }
+
+  private generalNoCapBox() {
+    return this.generalForm().locator("label", { hasText: "No cap" }).locator('input[type="checkbox"]');
+  }
+
+  async settingsGeneralNoCapChecked(): Promise<boolean> {
+    const box = this.generalNoCapBox().first();
+    await box.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    return await box.isChecked();
+  }
+
+  async settingsGeneralSetNoCap(on: boolean): Promise<void> {
+    const box = this.generalNoCapBox().first();
+    await box.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    await box.setChecked(on, { timeout: WebDriver.OPEN_MS });
+  }
+
+  private generalCadenceSelect() {
+    return this.generalForm().locator('select[aria-label="Cadence"]');
+  }
+
+  async settingsGeneralCadenceText(): Promise<string> {
+    const select = this.generalCadenceSelect();
+    await select.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return await select.evaluate((node) => {
+      const el = node as HTMLSelectElement;
+      return (el.selectedOptions[0]?.text ?? "").trim();
+    });
+  }
+
+  async settingsGeneralSetCadence(label: string): Promise<void> {
+    const select = this.generalCadenceSelect();
+    await select.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    await select.selectOption({ label }, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async settingsGeneralSave(): Promise<void> {
+    const submit = this.generalForm().getByRole("button", { name: /^(Update project|Updating)$/ });
+    await submit.click({ timeout: WebDriver.OPEN_MS });
+    // A save that starts flips the button to its loading label; a save
+    // blocked by client-side validation never does. Either way this
+    // resolves once the button is back at rest (or never left it).
+    await this.generalForm()
+      .getByRole("button", { name: "Updating" })
+      .waitFor({ state: "hidden", timeout: 30_000 })
+      .catch(() => {});
+    await this.page.waitForTimeout(500);
+  }
+
+  async settingsGeneralBindState(): Promise<"bound" | "bind"> {
+    const bound = this.generalForm().getByRole("button", { name: "Bound", exact: true });
+    if ((await bound.count()) > 0 && (await bound.first().isDisabled())) return "bound";
+    return "bind";
+  }
+
+  async settingsGeneralBind(): Promise<void> {
+    // The click either fires no request (empty input toasts client-side) or
+    // exactly one bind POST. The response and the toast race: toasts
+    // auto-dismiss, so each poll iteration checks the response first and
+    // the toast second, and whichever shows first settles the click.
+    let response: { status(): number } | null = null;
+    void this.page
+      .waitForResponse((seen) => seen.url().includes("/repository/bind/") && seen.request().method() === "POST", {
+        timeout: WebDriver.OPEN_MS,
+      })
+      .then(
+        (seen) => {
+          response = seen;
+        },
+        () => {
+          response = null;
+        }
+      );
+    await this.generalForm().getByRole("button", { name: "Bind", exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    await expect
+      .poll(
+        async () => {
+          if (response !== null) return "response";
+          return (await this.rulesLastToast()) === null ? "waiting" : "toast";
+        },
+        { timeout: 30_000 }
+      )
+      .not.toBe("waiting");
+    if (response === null) {
+      // No request fired: the client-side refusal already toasted.
+      return;
+    }
+    if (response.status() === 401) {
+      // The provider-credential 401 trips the global session interceptor:
+      // full reload to / and back onto the tab via next_path (NEWFRONT-395).
+      // The load event belongs to the / hop; the form wait below rides the
+      // client-side hop back. If the backend ever answers a non-401 refusal
+      // instead, the toast branch below settles it.
+      await this.page.waitForEvent("load", { timeout: 30_000 }).catch(() => {});
+      await this.page.locator("#name").first().waitFor({ state: "visible", timeout: 60_000 });
+      return;
+    }
+    // Settles on the bound pill (success) or a toast (refusal); the spec
+    // asserts which one it got.
+    await expect
+      .poll(
+        async () => {
+          if ((await this.settingsGeneralBindState()) === "bound") return "bound";
+          return (await this.rulesLastToast()) === null ? "waiting" : "toast";
+        },
+        { timeout: 30_000 }
+      )
+      .not.toBe("waiting");
+  }
+
+  private generalBanner() {
+    return this.page.locator('[data-testid="general-banner"]');
+  }
+
+  async settingsGeneralEmblemOpen(): Promise<void> {
+    // The emblem button is the banner's first button (the second opens
+    // the cover picker).
+    await this.generalBanner().locator("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.settingsGeneralEmblemPickerVisible(), { timeout: WebDriver.OPEN_MS }).toBe(true);
+  }
+
+  async settingsGeneralEmblemPickerVisible(): Promise<boolean> {
+    // The picker opens as a popover next to the emblem button.
+    return (await this.page.getByRole("dialog").count()) > 0;
+  }
+
+  async settingsGeneralEmblemPick(char: string): Promise<void> {
+    const dialog = this.page.getByRole("dialog").first();
+    // The picker opens on the tab matching the current mark (a fresh
+    // project's initial lands on Icon); emblems need the Emoji tab. Its
+    // grid is virtualized, so the choice is searched first — search
+    // matches labels, hence the term map — then clicked by its text.
+    const emojiTab = dialog.getByRole("tab", { name: "Emoji" }).first();
+    if ((await emojiTab.count()) > 0) {
+      await emojiTab.click({ timeout: WebDriver.OPEN_MS });
+    }
+    const term = WebDriver.emojiSearchTerm(char);
+    if (term !== null) {
+      await dialog.getByRole("searchbox", { name: "Search" }).fill(term, { timeout: WebDriver.OPEN_MS });
+    }
+    // Exact-text match: substring matching would take "astronaut" for a
+    // "rocket" search.
+    const exact = new RegExp(`^${char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
+    await dialog
+      .locator('button[data-slot="emoji-picker-list-emoji"]', { hasText: exact })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  /** Search term narrowing the virtualized emoji grid onto `char` (labels only). */
+  private static emojiSearchTerm(char: string): string | null {
+    return WebDriver.EMOJI_SEARCH_TERMS[char] ?? null;
+  }
+
+  private static readonly EMOJI_SEARCH_TERMS: Record<string, string> = {
+    "🚀": "rocket",
+  };
+
+  private generalCoverPanel() {
+    // The cover picker renders as the popover panel holding the tab list.
+    return this.page.locator('[role="tablist"]').first();
+  }
+
+  async settingsGeneralCoverOpen(): Promise<void> {
+    await this.generalForm().getByRole("button", { name: "Change cover" }).click({ timeout: WebDriver.OPEN_MS });
+    await this.generalCoverPanel().waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+  }
+
+  async settingsGeneralCoverTabNames(): Promise<string[]> {
+    const tabs = this.page.locator('[role="tab"]');
+    const total = await tabs.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = ((await tabs.nth(i).innerText({ timeout: WebDriver.OPEN_MS })) ?? "").trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
   private spaceFiltersFetchUrls: string[] = [];
   private spaceFiltersFetchListener: ((request: { url(): string }) => void) | null = null;
 
@@ -57463,5 +57834,80 @@ export class WebDriver implements ParityDriver {
         timeout: WebDriver.WAIT_MS,
       })
       .toBe(0);
+  }
+
+  async settingsGeneralCoverGalleryCount(): Promise<number> {
+    return await this.page.locator('img[alt^="Cover image"]').count();
+  }
+
+  async settingsGeneralCoverPickGallery(index: number): Promise<void> {
+    await this.page.locator('img[alt^="Cover image"]').nth(index).click({ timeout: WebDriver.OPEN_MS });
+    // Picking a bundled image applies it straight into the form and shuts
+    // the picker.
+    await this.generalCoverPanel().waitFor({ state: "hidden", timeout: WebDriver.OPEN_MS });
+  }
+
+  async settingsGeneralCoverUpload(file: { name: string; mime: string; bytes: string }): Promise<void> {
+    await this.page.getByRole("tab", { name: "Upload" }).click({ timeout: WebDriver.OPEN_MS });
+    const input = this.page.locator('input[type="file"]').first();
+    await input.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    await input.setInputFiles([{ name: file.name, mimeType: file.mime, buffer: Buffer.from(file.bytes, "base64") }], {
+      timeout: WebDriver.OPEN_MS,
+    });
+    await this.page.getByRole("button", { name: "Upload & Save" }).click({ timeout: WebDriver.OPEN_MS });
+    await this.generalCoverPanel().waitFor({ state: "hidden", timeout: 60_000 });
+  }
+
+  async settingsGeneralOpenDelete(): Promise<void> {
+    await this.page.locator('[data-testid="general-delete-open"]').click({ timeout: WebDriver.OPEN_MS });
+    await this.page
+      .locator('[data-testid="general-delete-modal"]')
+      .waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+  }
+
+  async settingsGeneralFillDeleteName(text: string): Promise<void> {
+    // Scoped to the dialog: the general form behind it carries an input
+    // with the same placeholder.
+    await this.page
+      .locator('[data-testid="general-delete-modal"]')
+      .getByPlaceholder("Project name")
+      .fill(text, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async settingsGeneralConfirmModalText(): Promise<string> {
+    // Heading plus body in one read; "" while the dialog is closed so
+    // pollers can wait on its content. No waiting here: pollers sample
+    // this on a tight loop.
+    const modal = this.page.locator('[data-testid="general-confirm-modal"]').first();
+    if ((await modal.count()) === 0) return "";
+    return ((await modal.innerText()) ?? "").trim();
+  }
+
+  async settingsGeneralHoldDetails(ms: number): Promise<void> {
+    // Hold every project fetch by `ms`, including the bare project list
+    // that bootstraps the store. The General tab shows its skeleton until
+    // its details land; the hold only delays, so the form still resolves on
+    // its own. Loading-state scenarios only.
+    await this.page.route(WebDriver.generalProjectsRoute, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue();
+    });
+  }
+
+  // The details-carrying project fetches only (single, bulk, bare list):
+  // sub-resource reads such as membership stay live so the auth wrapper
+  // keeps passing children through and the tab itself shows its loader.
+  private static readonly generalProjectsRoute = /\/api\/workspaces\/[^/]+\/projects(\/[^/]*\/?)?(\?|$)/;
+
+  async settingsGeneralStallDetails(): Promise<void> {
+    // Abort the details-carrying fetches so the tab cannot leave its
+    // skeleton (membership and other sub-resources stay live, so the auth
+    // wrapper still renders the tab). Loading-state scenarios only;
+    // always pair with the release below.
+    await this.page.route(WebDriver.generalProjectsRoute, (route) => route.abort());
+  }
+
+  async settingsGeneralReleaseStall(): Promise<void> {
+    await this.page.unroute(WebDriver.generalProjectsRoute);
   }
 }

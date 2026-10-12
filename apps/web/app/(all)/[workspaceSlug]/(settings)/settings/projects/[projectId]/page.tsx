@@ -34,7 +34,7 @@ function ProjectSettingsPage({ params }: Route.ComponentProps) {
   return (
     <SettingsContentWrapper header={<GeneralProjectSettingsHeader />}>
       <PageHead title={pageTitle} />
-      <div className={`w-full ${isAdmin ? "" : "opacity-60"}`}>
+      <div className={`w-full ${isAdmin ? "" : "opacity-60"}`} data-testid="general-shell">
         {currentProjectDetails ? (
           <ProjectDetailsForm
             project={currentProjectDetails}

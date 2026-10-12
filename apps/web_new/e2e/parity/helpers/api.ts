@@ -21746,3 +21746,149 @@ export async function serverCreateApiToken(
   }
   return { id: rec["id"], token: rec["token"] };
 }
+
+// --- Project settings General tab (NEWFRONT-389, PSET-005–012). Appended;
+// --- existing helpers above are untouched per the shared harness contract.
+
+/** Raw project detail record; specs pick the fields their row needs. */
+export async function serverProjectRecord(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  return (await res.json()) as Record<string, unknown>;
+}
+
+/** Project detail fetch without throwing: HTTP status plus the record when present. */
+export async function serverProjectFetchStatus(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; record: Record<string, unknown> | null }> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) return { status: res.status, record: null };
+  return { status: res.status, record: (await res.json()) as Record<string, unknown> };
+}
+
+/** Restore an archived project; throws unless the server accepts. */
+export async function serverRestoreProject(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/archive/`, {
+    method: "DELETE",
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status !== 200 && res.status !== 204)
+    throw new Error(`[parity] project restore failed with HTTP ${res.status}.`);
+}
+
+/** Raw project DELETE: resolves with the HTTP status (refusals carry the body). */
+export async function serverDeleteProjectRaw(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; body: string }> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    method: "DELETE",
+    headers: { cookie: sessionCookie },
+  });
+  return { status: res.status, body: await res.text() };
+}
+
+/** Whether `identifier` is taken in the workspace (the live precheck behind the General tab). */
+export async function serverIdentifierTaken(
+  workspaceSlug: string,
+  identifier: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const params = new URLSearchParams({ name: identifier });
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/project-identifiers?${params.toString()}`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] identifier lookup failed with HTTP ${res.status}.`);
+  // The endpoint answers a reservation COUNT, not a boolean.
+  const payload = (await res.json()) as { exists?: unknown };
+  return Number(payload.exists ?? 0) > 0;
+}
+
+/** Raw git-repository binding status of a project. */
+export async function serverRepositoryStatus(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/repository/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] repository read failed with HTTP ${res.status}.`);
+  return (await res.json()) as Record<string, unknown>;
+}
+
+/** Bind a repository URL; resolves with the status (refusals carry no record). */
+export async function serverBindRepository(
+  workspaceSlug: string,
+  projectId: string,
+  repoUrl: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; record: Record<string, unknown> | null }> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/repository/bind/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ repo_url: repoUrl }),
+  });
+  if (!res.ok) return { status: res.status, record: null };
+  return { status: res.status, record: (await res.json()) as Record<string, unknown> };
+}
+
+/** Bind a repository URL; resolves with the raw status and body text (refusal pins). */
+export async function serverBindRepositoryRaw(
+  workspaceSlug: string,
+  projectId: string,
+  repoUrl: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; body: string }> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/repository/bind/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ repo_url: repoUrl }),
+  });
+  return { status: res.status, body: await res.text() };
+}
+
+/** Issue names the project search endpoint returns for `query`. */
+export async function serverSearchIssueNames(
+  workspaceSlug: string,
+  projectId: string,
+  query: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string[]> {
+  const params = new URLSearchParams({ search: query, workspace_search: "false" });
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/search-issues/?${params.toString()}`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] issue search failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : [];
+  return rows
+    .map((row) => (row as Record<string, unknown>)["name"])
+    .filter((name): name is string => typeof name === "string");
+}

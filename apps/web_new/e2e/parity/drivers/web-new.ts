@@ -246,6 +246,7 @@ import type {
   CloudAssistantConnectionFacts,
   WsSettingsApiTokenBackup,
   WsSettingsApiTokenRow,
+  SettingsGeneralField,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -16396,5 +16397,134 @@ export class WebNewDriver implements ParityDriver {
   }
   async wsSettingsApiTokenDeleteConfirm(_label: string): Promise<void> {
     return todo("wsSettingsApiTokenDeleteConfirm");
+  }
+
+  // --- Project settings General tab (NEWFRONT-389, PSET-005–012). Throwing
+  // --- stubs per the shared driver contract; the new app implements them later.
+  async settingsGeneralOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("settingsGeneralOpen");
+  }
+  async settingsGeneralFormVisible(): Promise<boolean> {
+    return todo("settingsGeneralFormVisible");
+  }
+  async settingsGeneralSkeletonVisible(): Promise<boolean> {
+    return todo("settingsGeneralSkeletonVisible");
+  }
+  async settingsGeneralDangerVisible(): Promise<boolean> {
+    return todo("settingsGeneralDangerVisible");
+  }
+  async settingsGeneralFormDimmed(): Promise<boolean> {
+    return todo("settingsGeneralFormDimmed");
+  }
+  async settingsGeneralFieldValue(_field: SettingsGeneralField): Promise<string> {
+    return todo("settingsGeneralFieldValue");
+  }
+  async settingsGeneralFieldDisabled(_field: SettingsGeneralField): Promise<boolean> {
+    return todo("settingsGeneralFieldDisabled");
+  }
+  async settingsGeneralFieldError(_field: SettingsGeneralField): Promise<string> {
+    return todo("settingsGeneralFieldError");
+  }
+  async settingsGeneralFill(_field: SettingsGeneralField, _value: string): Promise<void> {
+    return todo("settingsGeneralFill");
+  }
+  async settingsGeneralCoverVisible(): Promise<boolean> {
+    return todo("settingsGeneralCoverVisible");
+  }
+  async settingsGeneralHeaderText(): Promise<string> {
+    return todo("settingsGeneralHeaderText");
+  }
+  async settingsGeneralNetworkText(): Promise<string> {
+    return todo("settingsGeneralNetworkText");
+  }
+  async settingsGeneralTimezoneText(): Promise<string> {
+    return todo("settingsGeneralTimezoneText");
+  }
+  async settingsGeneralCreatedText(): Promise<string> {
+    return todo("settingsGeneralCreatedText");
+  }
+  async settingsGeneralExecutorValue(): Promise<string> {
+    return todo("settingsGeneralExecutorValue");
+  }
+  async settingsGeneralExecutorOptionDisabled(_value: string): Promise<boolean> {
+    return todo("settingsGeneralExecutorOptionDisabled");
+  }
+  async settingsGeneralSetExecutor(_value: string): Promise<void> {
+    return todo("settingsGeneralSetExecutor");
+  }
+  async settingsGeneralTickingOn(): Promise<boolean> {
+    return todo("settingsGeneralTickingOn");
+  }
+  async settingsGeneralSetTicking(_on: boolean): Promise<void> {
+    return todo("settingsGeneralSetTicking");
+  }
+  async settingsGeneralBudgetValue(): Promise<string> {
+    return todo("settingsGeneralBudgetValue");
+  }
+  async settingsGeneralSetBudget(_value: string): Promise<void> {
+    return todo("settingsGeneralSetBudget");
+  }
+  async settingsGeneralNoCapChecked(): Promise<boolean> {
+    return todo("settingsGeneralNoCapChecked");
+  }
+  async settingsGeneralSetNoCap(_on: boolean): Promise<void> {
+    return todo("settingsGeneralSetNoCap");
+  }
+  async settingsGeneralCadenceText(): Promise<string> {
+    return todo("settingsGeneralCadenceText");
+  }
+  async settingsGeneralSetCadence(_label: string): Promise<void> {
+    return todo("settingsGeneralSetCadence");
+  }
+  async settingsGeneralSave(): Promise<void> {
+    return todo("settingsGeneralSave");
+  }
+  async settingsGeneralBindState(): Promise<"bound" | "bind"> {
+    return todo("settingsGeneralBindState");
+  }
+  async settingsGeneralBind(): Promise<void> {
+    return todo("settingsGeneralBind");
+  }
+  async settingsGeneralEmblemOpen(): Promise<void> {
+    return todo("settingsGeneralEmblemOpen");
+  }
+  async settingsGeneralEmblemPickerVisible(): Promise<boolean> {
+    return todo("settingsGeneralEmblemPickerVisible");
+  }
+  async settingsGeneralEmblemPick(_char: string): Promise<void> {
+    return todo("settingsGeneralEmblemPick");
+  }
+  async settingsGeneralCoverOpen(): Promise<void> {
+    return todo("settingsGeneralCoverOpen");
+  }
+  async settingsGeneralCoverTabNames(): Promise<string[]> {
+    return todo("settingsGeneralCoverTabNames");
+  }
+  async settingsGeneralCoverGalleryCount(): Promise<number> {
+    return todo("settingsGeneralCoverGalleryCount");
+  }
+  async settingsGeneralCoverPickGallery(_index: number): Promise<void> {
+    return todo("settingsGeneralCoverPickGallery");
+  }
+  async settingsGeneralCoverUpload(_file: { name: string; mime: string; bytes: string }): Promise<void> {
+    return todo("settingsGeneralCoverUpload");
+  }
+  async settingsGeneralOpenDelete(): Promise<void> {
+    return todo("settingsGeneralOpenDelete");
+  }
+  async settingsGeneralFillDeleteName(_text: string): Promise<void> {
+    return todo("settingsGeneralFillDeleteName");
+  }
+  async settingsGeneralConfirmModalText(): Promise<string> {
+    return todo("settingsGeneralConfirmModalText");
+  }
+  async settingsGeneralHoldDetails(_ms: number): Promise<void> {
+    return todo("settingsGeneralHoldDetails");
+  }
+  async settingsGeneralStallDetails(): Promise<void> {
+    return todo("settingsGeneralStallDetails");
+  }
+  async settingsGeneralReleaseStall(): Promise<void> {
+    return todo("settingsGeneralReleaseStall");
   }
 }
