@@ -21,6 +21,7 @@ import sys
 REFUSALS = ("prod", "production", "staging", "main", "shared")
 
 SEED_EMAIL = "contract.tester@example.com"
+SEED_SECONDARY_EMAIL = "contract.probe@example.com"
 SEED_PASSWORD = os.environ.get("PIDASH_CONTRACT_PASSWORD", "Contract123!")
 SEED_WORKSPACE_SLUG = "contract-acme"
 SEED_PROJECT_IDENTIFIER = "CT"
@@ -130,6 +131,39 @@ def seed():
         defaults={"role": 20, "is_active": True},
     )
     note("project-member", f"{project.identifier}/{user.email}", project_membership_created)
+
+    # Second user: the leave/rejoin contract test signs in as this user, so
+    # the membership rows are repaired (not just created) to stay green
+    # across runs even after a leave deactivates them.
+    probe, probe_created = User.objects.get_or_create(
+        email=SEED_SECONDARY_EMAIL,
+        defaults={
+            "username": "contract.probe",
+            "first_name": "Contract",
+            "last_name": "Probe",
+            "is_active": True,
+        },
+    )
+    if probe_created or not probe.check_password(SEED_PASSWORD):
+        probe.password = make_password(SEED_PASSWORD)
+        probe.is_active = True
+        probe.save()
+    note("user", probe.email, probe_created)
+
+    _, probe_ws_created = WorkspaceMember.objects.update_or_create(
+        workspace=workspace,
+        member=probe,
+        defaults={"role": 20, "is_active": True},
+    )
+    note("workspace-member", f"{workspace.slug}/{probe.email}", probe_ws_created)
+
+    _, probe_project_created = ProjectMember.objects.update_or_create(
+        workspace=workspace,
+        project=project,
+        member=probe,
+        defaults={"role": 20, "is_active": True},
+    )
+    note("project-member", f"{project.identifier}/{probe.email}", probe_project_created)
 
     states = []
     for index, spec in enumerate(DEFAULT_STATES):

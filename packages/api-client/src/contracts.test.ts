@@ -9,7 +9,36 @@ import { createClient } from "./client.js";
 import { checkEmail, generateMagicCode, getCsrfToken, signIn, signInWithMagicCode, signOut } from "./contracts/auth.js";
 import { getMe, getMeSettings } from "./contracts/users.js";
 import { listWorkspaces } from "./contracts/workspaces.js";
-import { listProjects } from "./contracts/projects.js";
+import {
+  addFavoriteProject,
+  archiveProject,
+  createProject,
+  deleteProject,
+  getProjectUserProperties,
+  getWorkspaceUserProperties,
+  joinProjects,
+  leaveProject,
+  listFavoriteProjects,
+  listProjectDetails,
+  listProjectInvitations,
+  listProjects,
+  removeFavoriteProject,
+  unarchiveProject,
+  updateProjectUserProperties,
+  updateWorkspaceUserProperties,
+} from "./contracts/projects.js";
+import {
+  completeTour,
+  createQuickLink,
+  deleteQuickLink,
+  getQuickLink,
+  getWorkspaceDashboard,
+  listHomePreferences,
+  listQuickLinks,
+  listRecentVisits,
+  updateHomePreference,
+  updateQuickLink,
+} from "./contracts/home.js";
 import { listLabels, listMembers, listStates } from "./contracts/reference.js";
 import { getIssue, listIssues } from "./contracts/issues.js";
 import { fakeResponse, recordingTransport } from "./client.test.js";
@@ -426,5 +455,376 @@ describe("issue contracts", () => {
     const client = createClient({ baseUrl: "https://api.test", transport });
     await getIssue(client, "acme", UUID2, UUID);
     expect(transport.calls[0]?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/`);
+  });
+});
+
+describe("home contracts", () => {
+  const dashboard = {
+    issue_activities: [{ created_date: "2026-10-01", activity_count: 3 }],
+    completed_issues: [{ week_in_month: 1, completed_count: 2 }],
+    assigned_issues_count: 5,
+    pending_issues_count: 4,
+    completed_issues_count: 1,
+    issues_due_week_count: 0,
+    state_distribution: [{ state_group: "started", state_count: 4 }],
+    overdue_issues: [
+      {
+        id: UUID,
+        name: "Late",
+        workspace__slug: "acme",
+        project_id: UUID2,
+        target_date: "2026-09-01T00:00:00Z",
+      },
+    ],
+    upcoming_issues: [
+      {
+        id: UUID,
+        name: "Soon",
+        workspace__slug: "acme",
+        project_id: UUID2,
+        start_date: null,
+      },
+    ],
+  };
+
+  it("parses the workspace dashboard", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json(dashboard) });
+    const parsed = await getWorkspaceDashboard(client, "acme");
+    expect(parsed.assigned_issues_count).toBe(5);
+    expect(parsed.overdue_issues[0]?.name).toBe("Late");
+  });
+
+  it("sends the dashboard month filter as a query param", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(dashboard) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await getWorkspaceDashboard(client, "acme", 10);
+    expect(transport.calls[0]?.url).toContain("month=10");
+  });
+
+  const preferences = [
+    { key: "quick_links", is_enabled: true, config: {}, sort_order: 999 },
+    { key: "recents", is_enabled: false, config: {}, sort_order: 998 },
+  ];
+
+  it("parses home preferences and patches one key", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({
+            body: JSON.stringify(
+              call.init.method === "PATCH" ? { key: "recents", is_enabled: true, sort_order: 998 } : preferences
+            ),
+          })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const listed = await listHomePreferences(client, "acme");
+    expect(listed).toHaveLength(2);
+    const updated = await updateHomePreference(client, "acme", "recents", { is_enabled: true });
+    expect(updated).toEqual({ key: "recents", is_enabled: true, sort_order: 998 });
+    expect(transport.calls.some((call) => call.url.endsWith("/home-preferences/recents/"))).toBe(true);
+  });
+
+  const link = {
+    id: UUID,
+    workspace: UUID2,
+    owner: UUID,
+    title: "Docs",
+    url: "https://example.com/docs",
+    metadata: {},
+    created_by: null,
+    updated_by: null,
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-01T00:00:00Z",
+  };
+
+  it("runs the quick-link CRUD round trip", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.init.method === "DELETE") return fakeResponse({ status: 204, body: "" });
+      if (call.init.method === "PATCH") {
+        return fakeResponse({ body: JSON.stringify({ ...link, title: "Docs renamed" }) });
+      }
+      if (call.init.method === "POST" || call.url.endsWith("/quick-links/")) {
+        return fakeResponse({ body: JSON.stringify(call.init.method === "GET" ? [link] : link) });
+      }
+      return fakeResponse({ body: JSON.stringify(link) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const created = await createQuickLink(client, "acme", { title: "Docs", url: "https://example.com/docs" });
+    expect(created.id).toBe(UUID);
+    await expect(getQuickLink(client, "acme", UUID)).resolves.toMatchObject({ url: "https://example.com/docs" });
+    const updated = await updateQuickLink(client, "acme", UUID, { title: "Docs renamed" });
+    expect(updated.title).toBe("Docs renamed");
+    const listed = await listQuickLinks(client, "acme");
+    expect(listed).toHaveLength(1);
+    const createCall = transport.calls.find((call) => call.url.endsWith("/quick-links/"));
+    expect(JSON.parse((createCall?.init.body as string) ?? "{}")).toEqual({
+      title: "Docs",
+      url: "https://example.com/docs",
+    });
+    await expect(deleteQuickLink(client, "acme", UUID)).resolves.toBe(204);
+  });
+
+  it("lists recent visits with an optional entity filter", async () => {
+    const visits = [
+      {
+        id: UUID,
+        entity_name: "issue",
+        entity_identifier: UUID2,
+        entity_data: null,
+        visited_at: "2026-10-01T00:00:00Z",
+      },
+    ];
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(visits) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listRecentVisits(client, "acme", "issue");
+    expect(parsed).toHaveLength(1);
+    expect(transport.calls[0]?.url).toContain("entity_name=issue");
+  });
+
+  it("marks the tour complete", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ body: JSON.stringify({ message: "Updated successfully" }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(completeTour(client, { is_tour_completed: true })).resolves.toEqual({
+      message: "Updated successfully",
+    });
+  });
+});
+
+describe("project lifecycle contracts", () => {
+  const details = {
+    id: UUID2,
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-01T00:00:00Z",
+    created_by: UUID,
+    updated_by: null,
+    deleted_at: null,
+    workspace: UUID,
+    name: "Contract",
+    description: "",
+    description_text: null,
+    description_html: null,
+    network: 2,
+    identifier: "CT",
+    default_assignee: null,
+    project_lead: null,
+    emoji: null,
+    icon_prop: null,
+    module_view: false,
+    cycle_view: false,
+    issue_views_view: false,
+    page_view: true,
+    intake_view: false,
+    inbox_view: false,
+    is_time_tracking_enabled: false,
+    is_issue_type_enabled: false,
+    is_default: false,
+    guest_view_all_features: false,
+    members_can_edit_states: true,
+    cover_image: null,
+    cover_image_asset: null,
+    cover_image_url: null,
+    estimate: null,
+    archive_in: 0,
+    close_in: 0,
+    logo_props: {},
+    default_state: null,
+    archived_at: null,
+    timezone: "UTC",
+    external_source: null,
+    external_id: null,
+    repo_url: "",
+    base_branch: "",
+    is_favorite: false,
+    sort_order: null,
+    member_role: 20,
+    anchor: null,
+    members: [UUID],
+    next_work_item_sequence: 3,
+    agent_executor_options: [],
+  };
+
+  function stubbedApi(
+    handler: (call: { url: string; init: { method?: string } }) => { status: number; body: unknown }
+  ) {
+    return recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      const { status, body } = handler(call);
+      return fakeResponse({ status, body: JSON.stringify(body) });
+    });
+  }
+
+  it("parses the rich details rows", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([details]) });
+    const parsed = await listProjectDetails(client, "acme");
+    expect(parsed[0]?.identifier).toBe("CT");
+    expect(parsed[0]?.member_role).toBe(20);
+  });
+
+  it("rejects details rows without an id", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([{ ...details, id: "nope" }]) });
+    const error = await listProjectDetails(client, "acme").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("creates a project and posts the input as JSON", async () => {
+    const transport = stubbedApi(() => ({ status: 201, body: details }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const created = await createProject(client, "acme", { name: "Contract", identifier: "CT" });
+    expect(created.id).toBe(UUID2);
+    const createCall = transport.calls.find((call) => call.url.endsWith("/projects/"));
+    expect(createCall?.init.body).toBe(JSON.stringify({ name: "Contract", identifier: "CT" }));
+  });
+
+  it("deletes, unarchives and leaves by status", async () => {
+    const transport = stubbedApi(() => ({ status: 204, body: null }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteProject(client, "acme", UUID2)).resolves.toBe(204);
+    await expect(unarchiveProject(client, "acme", UUID2)).resolves.toBe(204);
+    await expect(leaveProject(client, "acme", UUID2)).resolves.toBe(204);
+    expect(transport.calls.some((call) => call.url.endsWith("/members/leave/"))).toBe(true);
+  });
+
+  it("parses the archive stamp", async () => {
+    const transport = stubbedApi(() => ({ status: 200, body: { archived_at: "2026-10-12 00:00:00+00:00" } }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await archiveProject(client, "acme", UUID2);
+    expect(parsed.archived_at).toContain("2026-10-12");
+  });
+
+  it("lists invitations and joins by project ids", async () => {
+    const invitation = {
+      id: UUID,
+      project: {
+        id: UUID2,
+        identifier: "CT",
+        name: "Contract",
+        cover_image: null,
+        cover_image_url: null,
+        logo_props: {},
+        description: "",
+        is_default: false,
+      },
+      workspace: { id: UUID, name: "Acme", slug: "acme", logo_url: null },
+      email: "ada@example.com",
+      accepted: false,
+      token: "tok",
+      message: null,
+      responded_at: null,
+      role: 15,
+      created_by: null,
+      updated_by: null,
+      created_at: "2026-10-01T00:00:00Z",
+      updated_at: "2026-10-01T00:00:00Z",
+    };
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({
+        body: JSON.stringify(call.init.method === "POST" ? { message: "Projects joined successfully" } : [invitation]),
+      });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const listed = await listProjectInvitations(client, "acme");
+    expect(listed[0]?.project.identifier).toBe("CT");
+    await expect(joinProjects(client, "acme", [UUID2])).resolves.toEqual({
+      message: "Projects joined successfully",
+    });
+    const joinCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(joinCall?.init.body).toBe(JSON.stringify({ project_ids: [UUID2] }));
+  });
+
+  it("runs favorite add, list and remove", async () => {
+    const favorite = {
+      id: UUID,
+      entity_type: "project",
+      entity_identifier: UUID2,
+      entity_data: null,
+      name: "Contract",
+      is_folder: false,
+      sequence: 0,
+      parent: null,
+      workspace_id: UUID,
+      project_id: UUID2,
+    };
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.init.method === "DELETE" || call.init.method === "POST") {
+        return fakeResponse({ status: 204, body: "" });
+      }
+      return fakeResponse({ body: JSON.stringify([favorite]) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(addFavoriteProject(client, "acme", UUID2)).resolves.toBe(204);
+    const listed = await listFavoriteProjects(client, "acme");
+    expect(listed[0]?.entity_type).toBe("project");
+    await expect(removeFavoriteProject(client, "acme", UUID2)).resolves.toBe(204);
+  });
+
+  const workspaceProps = {
+    id: UUID,
+    workspace: UUID2,
+    user: UUID,
+    filters: {},
+    display_filters: {},
+    display_properties: {},
+    rich_filters: {},
+    navigation_project_limit: 10,
+    navigation_control_preference: "ACCORDION",
+    created_by: null,
+    updated_by: null,
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-01T00:00:00Z",
+  };
+
+  it("reads and patches workspace user properties", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({
+        body: JSON.stringify(
+          call.init.method === "PATCH" ? { ...workspaceProps, navigation_project_limit: 5 } : workspaceProps
+        ),
+      });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const read = await getWorkspaceUserProperties(client, "acme");
+    expect(read.navigation_control_preference).toBe("ACCORDION");
+    const updated = await updateWorkspaceUserProperties(client, "acme", { navigation_project_limit: 5 });
+    expect(updated.navigation_project_limit).toBe(5);
+  });
+
+  it("reads and patches project user properties", async () => {
+    const projectProps = {
+      ...workspaceProps,
+      project: UUID2,
+      preferences: {},
+      sort_order: 65535,
+    };
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({
+        body: JSON.stringify(call.init.method === "PATCH" ? { ...projectProps, sort_order: 1 } : projectProps),
+      });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const read = await getProjectUserProperties(client, "acme", UUID2);
+    expect(read.sort_order).toBe(65535);
+    const updated = await updateProjectUserProperties(client, "acme", UUID2, { sort_order: 1 });
+    expect(updated.sort_order).toBe(1);
   });
 });
